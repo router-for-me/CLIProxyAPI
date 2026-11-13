@@ -119,6 +119,7 @@ func clearAccountSuspension(auth *Auth, now time.Time) bool {
 		if shadow := state.suspensionShadow; shadow != nil && isModelStateActiveCooldown(shadow, now) {
 			*state = *shadow.Clone()
 			state.suspensionShadow = nil
+			state.UpdatedAt = now
 		} else {
 			resetModelState(state, now)
 		}
@@ -134,6 +135,20 @@ func clearAccountSuspension(auth *Auth, now time.Time) bool {
 		cleared = true
 	}
 	return cleared
+}
+
+// relabelAccountSuspensionWithoutCooling drops the retry time from a recorded
+// suspension's status once cooling is switched off, since nothing waits for it.
+func relabelAccountSuspensionWithoutCooling(auth *Auth) {
+	message := accountSuspendedStatusMessage(true)
+	if accountSuspensionRecorded(auth) {
+		auth.StatusMessage = message
+	}
+	for _, state := range auth.ModelStates {
+		if state != nil && isAccountSuspendedResultError(state.LastError) {
+			state.StatusMessage = message
+		}
+	}
 }
 
 // accountSuspendedStatusMessage describes the suspension for the status

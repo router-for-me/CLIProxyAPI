@@ -34,6 +34,10 @@ type CooldownStateRecord struct {
 	// CredentialQuotaPropagated preserves wrap provenance for models that
 	// carry no independent layer (e.g. the reporting model itself).
 	CredentialQuotaPropagated bool `json:"credential_quota_propagated,omitempty"`
+	// SuspensionShadow preserves a model's own cooldown beneath an account
+	// suspension, so clearing the suspension after a restart can still
+	// reinstate a cooldown that outlives it.
+	SuspensionShadow *ModelState `json:"suspension_shadow,omitempty"`
 	// CooldownSignals persists bounded rejected quota headers captured when
 	// this cooldown was recorded without touching passive Quota.Signals watermarks.
 	CooldownSignals map[string]string `json:"cooldown_signals,omitempty"`

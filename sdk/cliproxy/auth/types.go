@@ -425,7 +425,7 @@ type ModelState struct {
 	// suspensionShadow holds the model's own cooldown layer from before an
 	// account suspension covered it, in the same shape as credentialQuotaShadow,
 	// so clearing the suspension can reinstate a cooldown that outlives it.
-	// Runtime only: nil after a restart, where clearing resets the model.
+	// Persisted via CooldownStateRecord.SuspensionShadow.
 	suspensionShadow *ModelState `json:"-"`
 }
 

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -347,5 +348,152 @@ func TestManager_MarkResult_AccountSuspensionClearKeepsLongerModelCooldown(t *te
 	}
 	if state := auth.ModelStates["model-b"]; state.LastError == nil || state.LastError.HTTPStatus != http.StatusNotFound || state.suspensionShadow != nil {
 		t.Fatalf("model-b state after clearing = %+v, want its own 404 back", state)
+	}
+}
+
+func TestManager_MarkResult_AccountSuspendedIgnoresStaleSuccessAfterSiblingFailure(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m, id := newAccountSuspensionManager(t, map[string]any{"disable_cooling": true}, "model-a", "model-b", "model-c")
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true})
+	staleSeq := m.nextExecutionSeq()
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+	// A fresh failure on another model replaces the credential's last error.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-c", ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"}})
+
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: staleSeq})
+	auth, _ := m.GetByID(id)
+	if !isAccountSuspendedResultError(auth.ModelStates["model-b"].LastError) {
+		t.Fatalf("stale success cleared the suspension: model-b %v", auth.ModelStates["model-b"].LastError)
+	}
+
+	later := suspendedResult(id, "model-a")
+	later.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), later)
+	if entries := suspensionWarnings(hook); len(entries) != 1 {
+		t.Fatalf("got %d suspension log lines, want 1", len(entries))
+	}
+}
+
+func TestManager_MarkResult_AccountSuspensionClearKeepsReportingModelCooldown(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	inFlight := m.nextExecutionSeq()
+	long := 48 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", RetryAfter: &long, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}})
+	// A request sent to model-a before its own cooldown comes back with the 403.
+	report := suspendedResult(id, "model-a")
+	report.ExecutionSeq = inFlight
+	m.MarkResult(context.Background(), report)
+
+	beforeClear := time.Now()
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: m.nextExecutionSeq()})
+	auth, _ := m.GetByID(id)
+	if IsAuthAvailableForModel(auth, "model-a", time.Now().Add(30*time.Hour)) {
+		t.Fatal("model-a lost its own 48h cooldown when the suspension cleared")
+	}
+	if state := auth.ModelStates["model-a"]; state.LastError == nil || state.LastError.HTTPStatus != http.StatusNotFound || state.UpdatedAt.Before(beforeClear) {
+		t.Fatalf("model-a state after clearing = %+v, want its own 404 back, updated now", state)
+	}
+}
+
+func TestManager_RestoreCooldownStates_KeepsModelCooldownUnderSuspension(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	long := 48 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", RetryAfter: &long,
+		Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}})
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// Save the records the way the file store does, then load them into a fresh manager.
+	raw, errMarshal := json.Marshal(m.cooldownStateRecordsSnapshot())
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	var records []CooldownStateRecord
+	if errUnmarshal := json.Unmarshal(raw, &records); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	restarted := NewManager(nil, nil, nil)
+	if _, errRegister := restarted.Register(context.Background(), &Auth{ID: id, Provider: "antigravity"}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	restarted.SetCooldownStateStore(&mockCooldownStateStore{records: records})
+	if errRestore := restarted.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatal(errRestore)
+	}
+
+	restarted.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-a", Success: true, ExecutionSeq: restarted.nextExecutionSeq()})
+	auth, _ := restarted.GetByID(id)
+	if !IsAuthAvailableForModel(auth, "model-a", time.Now().Add(time.Second)) {
+		t.Fatal("model-a still blocked after the suspension cleared")
+	}
+	if IsAuthAvailableForModel(auth, "model-b", time.Now().Add(30*time.Hour)) {
+		t.Fatal("after a restart model-b lost its own 48h cooldown when the suspension cleared")
+	}
+}
+
+func TestManager_ClearDisabledCooldownStates_KeepsAccountSuspension(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true})
+	staleSeq := m.nextExecutionSeq()
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// Cooling is switched off while the credential is suspended.
+	quotaCooldownDisabled.Store(true)
+	m.clearDisabledCooldownStates(nil)
+	auth, _ := m.GetByID(id)
+	if !IsAuthAvailableForModel(auth, "model-b", time.Now()) {
+		t.Fatal("model-b still cooling after cooling was switched off")
+	}
+	for _, message := range []string{auth.StatusMessage, auth.ModelStates["model-a"].StatusMessage, auth.ModelStates["model-b"].StatusMessage} {
+		if message != "account suspended for a Terms of Service violation" {
+			t.Fatalf("status message = %q, want no retry time once cooling is off", message)
+		}
+	}
+
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: staleSeq})
+	auth, _ = m.GetByID(id)
+	if !accountSuspensionRecorded(auth) {
+		t.Fatal("stale success cleared the suspension after cooling was switched off")
+	}
+	later := suspendedResult(id, "model-a")
+	later.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), later)
+	if entries := suspensionWarnings(hook); len(entries) != 1 {
+		t.Fatalf("got %d suspension log lines, want 1", len(entries))
+	}
+}
+
+func TestManager_Update_KeepsModelLessSuspensionWatermark(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, map[string]any{"disable_cooling": true})
+	staleSeq := m.nextExecutionSeq()
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity",
+		Error: &Error{Code: ErrorCodeAccountSuspended, HTTPStatus: http.StatusForbidden, Message: accountSuspendedBody}})
+
+	// Any update, such as a token refresh, runs the cooling-off cleanup.
+	auth, _ := m.GetByID(id)
+	if _, errUpdate := m.Update(context.Background(), auth.Clone()); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Success: true, ExecutionSeq: staleSeq})
+	auth, _ = m.GetByID(id)
+	if !accountSuspensionRecorded(auth) {
+		t.Fatal("stale success cleared a suspension recorded without a model after an update")
+	}
+}
+
+func TestManager_MarkResult_SuccessOnModelUnderSuspensionFreesIt(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	long := 48 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", RetryAfter: &long,
+		Error: &Error{HTTPStatus: http.StatusNotFound, Message: "not found"}})
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// model-b itself answers, so its old cooldown no longer applies.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: m.nextExecutionSeq()})
+	auth, _ := m.GetByID(id)
+	if !IsAuthAvailableForModel(auth, "model-b", time.Now().Add(time.Second)) || auth.ModelStates["model-b"].suspensionShadow != nil {
+		t.Fatal("a success on model-b brought back its old cooldown")
 	}
 }
