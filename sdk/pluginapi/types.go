@@ -105,7 +105,10 @@ type Capabilities struct {
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
-	// Empty defaults to ExecutorModelScopeBoth for backward compatibility.
+	// Empty defaults to ExecutorModelScopeOAuth when AuthProvider/AuthProviders is declared,
+	// and ExecutorModelScopeBoth otherwise for backward compatibility.
+	// When AuthProvider/AuthProviders is declared, only ExecutorModelScopeStatic registers an
+	// unauthenticated static model client in ModelRegistry.
 	ExecutorModelScope ExecutorModelScope
 	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
 	ExecutorInputFormats []string
@@ -169,7 +172,8 @@ type Capabilities struct {
 type ExecutorModelScope string
 
 const (
-	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models.
+	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models
+	// when no AuthProvider/AuthProviders is declared, or OAuth auth-bound models when credential-bound.
 	ExecutorModelScopeBoth ExecutorModelScope = "both"
 	// ExecutorModelScopeStatic means the executor supports only non-OAuth static models.
 	ExecutorModelScopeStatic ExecutorModelScope = "static"
