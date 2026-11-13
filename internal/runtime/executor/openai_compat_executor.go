@@ -251,7 +251,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, body, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, streamTruncated: len(body) == 0}
 	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
