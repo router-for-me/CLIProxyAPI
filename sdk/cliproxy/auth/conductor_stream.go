@@ -488,6 +488,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if errStream != nil {
+			if isRequestTerminatedError(errStream) {
+				return nil, errStream
+			}
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(ctx))
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
@@ -578,6 +581,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			if isRequestTerminatedError(bootstrapErr) {
+				return nil, bootstrapErr
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.requestScopedErrorConfig(ctx))
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)

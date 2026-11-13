@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -541,9 +542,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
+	Code      string              `json:"code,omitempty"`
+	Retryable *bool               `json:"retryable,omitempty"`
+	Type      string              `json:"type"`
+	Message   string              `json:"message"`
+	Details   *claudeErrorDetails `json:"details,omitempty"`
 }
 
 type claudeErrorDetails struct {
@@ -564,6 +567,14 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.ErrorMessage, retryAfter string) claudeErrorResponse {
+	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
+		retryable := false
+		return claudeErrorResponse{Type: "error", Error: claudeErrorDetail{
+			Type: "api_error", Code: "upstream_outcome_unknown", Retryable: &retryable,
+			Message: "Upstream disconnected after submission. The request was not replayed and its outcome is unknown.",
+		}}
+	}
+
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if msg != nil {
@@ -660,6 +671,9 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
+	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
+		c.Writer.Header().Set("x-should-retry", "false")
+	}
 	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, retryAfter))
 	if err != nil {
 		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)

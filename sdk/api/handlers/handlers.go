@@ -83,6 +83,9 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 
 	trimmed := strings.TrimSpace(errText)
 
+	if httptransport.IsOutcomeUnknown(err) {
+		return []byte((&httptransport.OutcomeUnknownError{}).Error())
+	}
 	if coreauth.IsTerminalAuthError(err) {
 		message := errText
 		if trimmed != "" && json.Valid([]byte(trimmed)) {

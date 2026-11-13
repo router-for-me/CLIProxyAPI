@@ -1,4 +1,5 @@
-// Package httptransport exposes an additive, request-scoped observation seam.
+// Package httptransport preserves selected transports while observing requests
+// and preventing replay after ambiguous provider submission.
 // A decorator wraps the transport already selected by the executor: it must not
 // replace provider fingerprints, proxy routing, pools, or HTTP protocol policy.
 package httptransport
@@ -27,9 +28,10 @@ func WithDecorator(ctx context.Context, decorator Decorator) context.Context {
 
 // WithoutDecorator suppresses intermediate helper decoration. A specialized
 // executor that further configures its helper's transport must apply Decorate
-// once, after its own protocol/pool policy is complete.
+// once, after its own protocol/pool policy is complete. Submission tracking is
+// suppressed here too so it wraps that final transport exactly once.
 func WithoutDecorator(ctx context.Context) context.Context {
-	return WithDecorator(ctx, nil)
+	return context.WithValue(WithDecorator(ctx, nil), submissionKey{}, (*submissionState)(nil))
 }
 
 // InheritDecorator copies a decorator from fallback into ctx when ctx does not
@@ -50,24 +52,32 @@ func InheritDecorator(ctx, fallback context.Context) context.Context {
 	return ctx
 }
 
-// Decorate applies a context decorator AFTER transport selection. With no
-// decorator, the exact original client is returned. Only the client value is
-// copied; the original selected transport/pool and all client policy survive.
+// Decorate applies observation and submission tracking after transport selection.
+// Without either, the exact original client is returned. The selected pool, proxy
+// and protocol policy survive; only the client value is copied.
 func Decorate(ctx context.Context, client *http.Client) *http.Client {
 	if ctx == nil || client == nil {
 		return client
 	}
 	decorator, _ := ctx.Value(decoratorKey{}).(Decorator)
-	if decorator == nil {
+	state, _ := ctx.Value(submissionKey{}).(*submissionState)
+	if decorator == nil && state == nil {
 		return client
 	}
 	next := client.Transport
 	if next == nil {
 		next = http.DefaultTransport
 	}
-	wrapped := decorator(next)
-	if wrapped == nil {
-		return client
+	wrapped := next
+	if decorator != nil {
+		if observed := decorator(next); observed != nil {
+			wrapped = observed
+		} else if state == nil {
+			return client
+		}
+	}
+	if state != nil {
+		wrapped = &submissionTransport{next: wrapped, state: state}
 	}
 	clone := *client
 	clone.Transport = wrapped

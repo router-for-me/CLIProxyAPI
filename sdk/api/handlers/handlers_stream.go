@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"net/http"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -577,6 +578,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	bootstrapEligible := func(err error) bool {
+		if httptransport.IsOutcomeUnknown(err) {
+			return false
+		}
 		status := statusFromError(err)
 		if status == 0 {
 			return true

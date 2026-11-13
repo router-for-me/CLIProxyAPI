@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"net/http"
 	"strings"
 
@@ -143,6 +144,10 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 				c.Writer.Header().Add(key, value)
 			}
 		}
+	}
+
+	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
+		c.Writer.Header().Set("x-should-retry", "false")
 	}
 
 	errText := http.StatusText(status)
