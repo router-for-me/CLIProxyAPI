@@ -142,6 +142,15 @@ func (s *SequentialSelector) Pick(ctx context.Context, provider, model string, o
 	if !hasPosition {
 		reason = "first selection"
 	}
+	if next == nil && current != nil && s.hasSpare(current, now) {
+		// Every account is at the reserve and the current one still has some
+		// left: keep spending it. A request it cannot take is served elsewhere
+		// without moving the pool, so the pool does not bounce between accounts.
+		if selected := allowed[current.ID]; selected != nil {
+			return selected, nil
+		}
+		return allowed[s.fallbackLocked(ordered, position, false, usable, now).ID], nil
+	}
 	if next == nil {
 		next = s.fallbackLocked(ordered, position, false, usable, now)
 		reason = "every account is at the reserve"

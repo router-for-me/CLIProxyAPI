@@ -851,6 +851,15 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
 				}
+				if state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota" {
+					// A copy of a credential-wide quota. The credential-wide
+					// quota is no longer active (checked above), so the copy is
+					// stale: only the model's own earlier cooldown still counts.
+					if state.credentialQuotaShadow == nil {
+						continue
+					}
+					state = state.credentialQuotaShadow
+				}
 				stateBlocked, reason, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
 				if !stateBlocked {
 					continue

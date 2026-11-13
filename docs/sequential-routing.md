@@ -8,7 +8,9 @@ at a time and only moves when that account is nearly used up:
 2. When any window reaches the mark, move to the next account in order that is
    below it, wrapping round after the last account.
 3. If every account is at the mark, spend the reserves in order: account 1 until
-   it is rejected, then account 2, and so on.
+   it is rejected, then account 2, and so on. The pool stays on the account it
+   is spending; a request that account cannot take is served elsewhere without
+   moving the pool.
 
 A reset on an account the pool has already left does not bring traffic back.
 The pool only moves when the account it is on reaches the mark, so a reset

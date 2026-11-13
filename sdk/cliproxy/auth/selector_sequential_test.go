@@ -115,6 +115,25 @@ func TestSequentialSpendsReservesInOrder(t *testing.T) {
 	expectSequential(t, pickSequential(t, selector, pool, c), "c", "b used up")
 }
 
+// Seen live on 2026-11-13: with every account at the reserve, requests the
+// current account could not take moved the pool, and the next request moved it
+// back, every few seconds.
+func TestSequentialAllAtReserveDoesNotBounce(t *testing.T) {
+	selector, _ := newSequentialTestSelector(5, "")
+	a, b := sequentialCodexAuth("a", 0), sequentialCodexAuth("b", 0)
+	pool := []*Auth{a, b}
+	setCodexUsage(a, "Primary", 96, sequentialTestNow.Add(5*time.Hour))
+	setCodexUsage(b, "Primary", 96, sequentialTestNow.Add(5*time.Hour))
+	expectSequential(t, pickSequential(t, selector, pool), "a", "all at reserve")
+	setCodexUsage(a, "Primary", 97, sequentialTestNow.Add(5*time.Hour))
+	setCodexUsage(b, "Primary", 96, sequentialTestNow.Add(5*time.Hour))
+	expectSequential(t, pickSequential(t, selector, pool, b), "b", "a cannot take this request")
+	for _, current := range selector.Current() {
+		expectSequential(t, current, "a", "pool stays on a")
+	}
+	expectSequential(t, pickSequential(t, selector, pool), "a", "a still has reserve")
+}
+
 func TestSequentialResetDuringReservesMovesOn(t *testing.T) {
 	selector, now := newSequentialTestSelector(5, "")
 	a, b := sequentialCodexAuth("a", 0), sequentialCodexAuth("b", 0)
