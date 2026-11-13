@@ -3,6 +3,7 @@ package management
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -96,10 +97,14 @@ func (s *oauthSessionStore) callbackForPending(state, provider string) (*oauthCa
 // publishCallback keeps admission and atomic publication within one receipt.
 // A failed publication leaves the receipt available for retry. Publication does
 // not end the pending OAuth exchange or claim the credential commit.
-func (s *oauthSessionStore) publishCallback(state, provider string, publish func() (string, error)) (string, error) {
+func (s *oauthSessionStore) publishCallback(state, provider string, publish func() (string, error), expected ...*oauthCallbackReceipt) (string, error) {
 	receipt, errReceipt := s.callbackForPending(state, provider)
 	if errReceipt != nil {
 		return "", errReceipt
+	}
+	// Provider normalization may depend on the selected registration's source.
+	if len(expected) > 0 && receipt != expected[0] {
+		return "", errOAuthSessionNotPending
 	}
 	receipt.mu.Lock()
 	defer receipt.mu.Unlock()
@@ -142,14 +147,19 @@ func (receipt *oauthCallbackReceipt) consume(path string) ([]byte, error) {
 	if receipt.closed.Load() || receipt.consumed {
 		return nil, errOAuthSessionNotPending
 	}
-	if !receipt.received || receipt.path != path {
+	if !receipt.received {
 		return nil, os.ErrNotExist
 	}
-	data, errRead := os.ReadFile(path)
+	requestedPath, errRequested := filepath.Abs(path)
+	ownedPath, errOwned := filepath.Abs(receipt.path)
+	if errRequested != nil || errOwned != nil || requestedPath != ownedPath {
+		return nil, os.ErrNotExist
+	}
+	data, errRead := os.ReadFile(ownedPath)
 	if errRead != nil {
 		return nil, errRead
 	}
-	if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+	if errRemove := os.Remove(ownedPath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
 		return nil, errRemove
 	}
 	receipt.path = ""

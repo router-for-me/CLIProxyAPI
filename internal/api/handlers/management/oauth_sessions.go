@@ -786,10 +786,25 @@ func WriteOAuthCallbackFile(authDir, provider, state, code, errorMessage string)
 	if err != nil {
 		return "", err
 	}
-	if _, exists := oauthSessions.Get(state); exists {
-		return oauthSessions.publishCallback(state, canonicalProvider, func() (string, error) {
+	if session, exists := oauthSessions.Get(state); exists {
+		registeredProvider := session.Provider
+		if session.Source == oauthSessionSourcePlugin {
+			canonicalProvider, err = NormalizePluginOAuthCallbackProvider(provider)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			registeredProvider, err = NormalizeOAuthCallbackProvider(session.Provider)
+			if err != nil {
+				return "", errOAuthSessionNotPending
+			}
+		}
+		if !strings.EqualFold(registeredProvider, canonicalProvider) {
+			return "", errOAuthSessionNotPending
+		}
+		return oauthSessions.publishCallback(state, session.Provider, func() (string, error) {
 			return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
-		})
+		}, session.callback)
 	}
 	return writeOAuthCallbackFile(authDir, canonicalProvider, state, code, errorMessage)
 }
