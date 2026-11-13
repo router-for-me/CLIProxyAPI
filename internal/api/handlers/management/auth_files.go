@@ -339,13 +339,33 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name is required"})
 		return
 	}
+	h.writeAuthModels(c, name, "")
+}
 
+// GetAuthFileModelsV8 is GetAuthFileModels for /v8/management/credentials/models. A credential can
+// also be looked up by the auth_index its listings publish (config API keys expose auth-index, not
+// the auth ID); name wins when both are given.
+func (h *Handler) GetAuthFileModelsV8(c *gin.Context) {
+	name := c.Query("name")
+	authIndex := strings.TrimSpace(c.Query("auth_index"))
+	if name == "" && authIndex == "" {
+		c.JSON(400, gin.H{"error": "name or auth_index is required"})
+		return
+	}
+	h.writeAuthModels(c, name, authIndex)
+}
+
+func (h *Handler) writeAuthModels(c *gin.Context, name, authIndex string) {
 	// Try to find auth ID via authManager
 	var authID string
 	if h.authManager != nil {
 		auths := h.authManager.List()
 		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
+			if name != "" && (auth.FileName == name || auth.ID == name) {
+				authID = auth.ID
+				break
+			}
+			if name == "" && lockedAuthIndex(auth) == authIndex {
 				authID = auth.ID
 				break
 			}
