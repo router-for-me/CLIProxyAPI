@@ -172,6 +172,63 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	}
 }
 
+func TestListPluginsRuntimePriority(t *testing.T) {
+	pluginsDir := t.TempDir()
+	host := pluginhost.New()
+	host.RegisterPluginForTest("registered", pluginapi.Plugin{})
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"registered":      {Priority: 99},
+				"configured-only": {Priority: 42},
+			},
+		}},
+		pluginHost: host,
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
+	h.ListPlugins(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Plugins []map[string]any `json:"plugins"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	entries := make(map[string]map[string]any)
+	for _, entry := range body.Plugins {
+		entries[entry["id"].(string)] = entry
+	}
+	if got := entries["registered"]["priority"]; got != float64(1) {
+		t.Fatalf("registered priority = %v, want runtime priority 1", got)
+	}
+	if entry, ok := entries["configured-only"]; !ok {
+		t.Fatal("configured-only plugin missing")
+	} else if _, ok := entry["priority"]; ok {
+		t.Fatalf("unregistered plugin has priority: %#v", entry)
+	}
+}
+
+func TestPluginListEntryZeroPriorityIsPresent(t *testing.T) {
+	priority := 0
+	encoded, err := json.Marshal(pluginListEntry{Registered: true, Priority: &priority})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(encoded, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := entry["priority"]; !ok || got != float64(0) {
+		t.Fatalf("priority = %v, present = %v; want 0 and present", got, ok)
+	}
+}
+
 func TestListPluginsUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {
 	t.Parallel()
 
