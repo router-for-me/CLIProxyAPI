@@ -754,3 +754,89 @@ func TestClearDisabledCooldownStateForAuth_CountsDroppedSuspensionDeadline(t *te
 		t.Fatalf("suspension record = %+v, want it kept without a deadline", auth.accountSuspension)
 	}
 }
+
+func TestManager_ClearDisabledCooldownStates_ReportsSuspensionWithModelStates(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true})
+	// Only the suspension record is cooling; the model state is not.
+	now := time.Now()
+	m.mu.Lock()
+	m.auths[id].accountSuspension = &AccountSuspensionRecord{RecordedAt: now, Until: now.Add(accountSuspendedCooldown)}
+	m.mu.Unlock()
+
+	cfg := &internalconfig.Config{DisableCooling: true}
+	m.runtimeConfig.Store(cfg)
+	if !m.clearDisabledCooldownStates(cfg) {
+		t.Fatal("switching cooling off dropped the suspension deadline without updating the scheduler")
+	}
+	auth, _ := m.GetByID(id)
+	if !hasAccountSuspension(auth) || !auth.accountSuspension.Until.IsZero() {
+		t.Fatalf("suspension record = %+v, want it kept without a deadline", auth.accountSuspension)
+	}
+}
+
+func TestManager_Update_DisabledDuringSaveDropsSuspension(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+	store := &blockingTestAuthStore{}
+	m := NewManager(store, nil, nil)
+	id := "ag-suspended-disabled-in-save"
+	registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: "model-a"}, {ID: "model-b"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	// Metadata makes the credential one the store saves.
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "antigravity", Metadata: map[string]any{"type": "antigravity"}}); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	saveStarted, releaseSave := make(chan struct{}, 1), make(chan struct{})
+	var blockSave atomic.Bool
+	store.onSave = func() {
+		if blockSave.Load() {
+			saveStarted <- struct{}{}
+			<-releaseSave
+		}
+	}
+	blockSave.Store(true)
+	current, _ := m.GetByID(id)
+	done := make(chan error, 1)
+	go func() {
+		disabled := current.Clone()
+		disabled.Disabled, disabled.Status = true, StatusDisabled
+		_, errUpdate := m.Update(context.Background(), disabled)
+		done <- errUpdate
+	}()
+	select {
+	case <-saveStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the update never reached its save")
+	}
+	// Cooling is switched off while the disabling update is saving.
+	blockSave.Store(false)
+	cfg := &internalconfig.Config{DisableCooling: true}
+	m.runtimeConfig.Store(cfg)
+	m.clearDisabledCooldownStates(cfg)
+	close(releaseSave)
+	if errUpdate := <-done; errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	auth, _ := m.GetByID(id)
+	if hasAccountSuspension(auth) {
+		t.Fatal("the disabled credential got the suspension record back from the save")
+	}
+
+	// Enabled again from a copy, the next suspension is a new one and logs.
+	enabled := auth.Clone()
+	enabled.Disabled, enabled.Status = false, StatusActive
+	if _, errUpdate := m.Update(context.Background(), enabled); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	later := suspendedResult(id, "model-a")
+	later.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), later)
+	if entries := suspensionWarnings(hook); len(entries) != 2 {
+		t.Fatalf("got %d suspension log lines, want 2", len(entries))
+	}
+}

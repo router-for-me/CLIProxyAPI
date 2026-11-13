@@ -1002,7 +1002,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		auth.Generation++
 		auth.UpdatedAt = now
 	}
-	return changed
+	return changed || suspensionDropped
 }
 
 func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {

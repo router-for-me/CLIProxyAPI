@@ -601,6 +601,13 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
+	// A change made to the live record during the save must not bring the
+	// suspension back onto a credential this update disables.
+	if auth.Disabled || auth.Status == StatusDisabled {
+		if liftAccountSuspension(auth) {
+			cooldownStateChanged = true
+		}
+	}
 	if m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) {
 		cooldownStateChanged = true
 		updateAggregatedAvailability(auth, now)
