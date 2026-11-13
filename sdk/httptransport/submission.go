@@ -6,13 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync/atomic"
 )
 
 type submissionKey struct{}
 type submissionState struct {
-	accepted atomic.Bool
-	terminal atomic.Pointer[OutcomeUnknownError]
+	accepted   atomic.Bool
+	redirected atomic.Bool
+	terminal   atomic.Pointer[OutcomeUnknownError]
 }
 
 func (s *submissionState) fail(err error) error {
@@ -52,8 +54,10 @@ func IsOutcomeUnknown(err error) bool {
 // incomplete responses. A definitive provider error can still allow failover.
 func ClassifySubmissionError(ctx context.Context, err error) error {
 	var truncated interface{ IsStreamTruncated() bool }
+	var malformed interface{ IsResponseIncomplete() bool }
 	incomplete := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-		(errors.As(err, &truncated) && truncated.IsStreamTruncated())
+		(errors.As(err, &truncated) && truncated.IsStreamTruncated()) ||
+		(errors.As(err, &malformed) && malformed.IsResponseIncomplete())
 	return classifySubmissionError(ctx, err, incomplete)
 }
 
@@ -74,7 +78,7 @@ func classifySubmissionError(ctx context.Context, err error, incomplete bool) er
 	if terminal := state.terminal.Load(); terminal != nil {
 		return terminal
 	}
-	if !incomplete || !state.accepted.Load() {
+	if !state.accepted.Load() || (!incomplete && !state.redirected.Load()) {
 		return err
 	}
 	return state.fail(err)
@@ -87,11 +91,16 @@ type submissionTransport struct {
 
 func (s *submissionTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if terminal := s.state.terminal.Load(); terminal != nil {
+		if req.Body != nil {
+			_ = req.Body.Close()
+		}
 		return nil, terminal
 	}
 	switch req.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
-		return s.next.RoundTrip(req)
+		if !s.state.accepted.Load() {
+			return s.next.RoundTrip(req)
+		}
 	}
 	var written, responseStarted atomic.Bool
 	trace := &httptrace.ClientTrace{
@@ -108,21 +117,37 @@ func (s *submissionTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	// A replayable body lets net/http repeat a POST with an Idempotency-Key inside
 	// RoundTrip, before the manager can inspect the failed attempt.
 	cloned.GetBody = nil
-	// net/http also treats nil and NoBody as replayable without GetBody. Keep an
-	// empty reader that is not its sentinel, preserving the idempotency headers.
 	if cloned.Body == nil || cloned.Body == http.NoBody {
-		cloned.Body = io.NopCloser(http.NoBody)
+		// net/http treats canonical idempotency map keys as permission to replay an
+		// empty mutation. HTTP field names are case-insensitive: recasing the cloned
+		// keys preserves their wire values and Content-Length: 0 without that opt-in.
+		for _, key := range []string{"Idempotency-Key", "X-Idempotency-Key"} {
+			if values, ok := cloned.Header[key]; ok {
+				lower := strings.ToLower(key)
+				cloned.Header[lower] = append(cloned.Header[lower], values...)
+				delete(cloned.Header, key)
+			}
+		}
 	}
 	response, err := s.next.RoundTrip(cloned)
 	if err != nil {
-		if written.Load() || responseStarted.Load() {
+		if s.state.accepted.Load() || written.Load() || responseStarted.Load() {
 			return nil, s.state.fail(err)
 		}
 		return response, err
 	}
-	if response != nil && response.StatusCode >= 200 && response.StatusCode < 300 {
-		s.state.accepted.Store(true)
-		if response.Body != nil {
+	if response != nil {
+		switch response.StatusCode {
+		case http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther:
+			if req.Method != http.MethodGet && req.Method != http.MethodHead {
+				s.state.redirected.Store(true)
+				s.state.accepted.Store(true)
+			}
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 {
+			s.state.accepted.Store(true)
+		}
+		if s.state.accepted.Load() && response.Body != nil {
 			response.Body = &submissionBody{ReadCloser: response.Body, state: s.state}
 		}
 	}
