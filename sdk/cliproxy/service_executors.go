@@ -339,6 +339,9 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			providerKey = "openai-compatibility"
 		}
 		if owned := s.ownedProviderExecutors[providerKey]; owned != nil {
+			if existing, found := s.coreManager.Executor(providerKey); found && existing == owned {
+				return
+			}
 			s.coreManager.RegisterExecutor(owned)
 			return
 		}
