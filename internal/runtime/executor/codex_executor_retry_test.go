@@ -187,6 +187,23 @@ func TestParseCodexRetryAfter(t *testing.T) {
 		}
 	})
 
+	t.Run("caps a distant reset at the recheck interval", func(t *testing.T) {
+		// A weekly limit can be lifted early (a manual reset on the account), and
+		// nothing else tells the proxy; waiting out resets_at would keep a working
+		// credential parked for days.
+		resetAt := now.Add(62 * time.Hour).Unix()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil || *retryAfter != codexUsageLimitRecheckInterval {
+			t.Fatalf("retryAfter = %v, want %v", retryAfter, codexUsageLimitRecheckInterval)
+		}
+		body = []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":223496}}`)
+		retryAfter = parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil || *retryAfter != codexUsageLimitRecheckInterval {
+			t.Fatalf("retryAfter = %v, want %v", retryAfter, codexUsageLimitRecheckInterval)
+		}
+	})
+
 	t.Run("non-429 status code", func(t *testing.T) {
 		body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}`)
 		if got := parseCodexRetryAfter(http.StatusBadRequest, body, now); got != nil {
