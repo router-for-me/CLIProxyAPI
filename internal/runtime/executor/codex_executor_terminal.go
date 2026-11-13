@@ -725,8 +725,11 @@ func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 // is shared with the unbuffered path, where the rejection is delivered in-stream and a status
 // change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
 // scoped to this path means disabling the feature restores the previous behaviour exactly.
-func newCodexBootstrapOverloadErr(body []byte) statusErr {
-	return newCodexStatusErr(http.StatusServiceUnavailable, body)
+func newCodexBootstrapOverloadErr(body []byte, source statusErr) statusErr {
+	err := newCodexStatusErr(http.StatusServiceUnavailable, body)
+	// The body may be a normalized fallback; only the original event grants replay.
+	err.providerErrorPayload = source.providerErrorPayload
+	return err
 }
 
 // isCodexOverloadBootstrapFailure reports whether a terminal failure delivered inside an HTTP 200

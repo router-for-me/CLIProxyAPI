@@ -13,6 +13,10 @@ func TestProviderErrorPayloadRequiresParsedErrorDetails(t *testing.T) {
 		{`{"response":{"error":{"code":"capacity"}}}`, true},
 		{`{"code":503,"message":"unavailable"}`, true},
 		{`{"error":"refused"}`, true},
+		{`{"type":"error","message":"provider overloaded"}`, true},
+		{`{"type":"error","code":"overloaded"}`, true},
+		{`{"type":"error","error_type":"overloaded"}`, true},
+		{`{"message":"ordinary content"}`, false},
 		{`{"error":{"message":"truncated"}`, false},
 		{`{"type":"error"}`, false},
 		{`{"error":{}}`, false},
@@ -26,5 +30,15 @@ func TestProviderErrorPayloadRequiresParsedErrorDetails(t *testing.T) {
 		if got := IsProviderErrorPayload([]byte(tc.payload)); got != tc.want {
 			t.Errorf("payload=%s providerError=%t, want %t", tc.payload, got, tc.want)
 		}
+	}
+}
+
+func TestProviderErrorEventContextIsRequiredForBareDetails(t *testing.T) {
+	payload := []byte(`{"message":"provider overloaded"}`)
+	if !IsProviderErrorEventPayload("error", payload) || IsProviderErrorEventPayload("message", payload) {
+		t.Fatal("top-level message lost its explicit provider event context")
+	}
+	if IsProviderErrorEventPayload("error", []byte(`{"message":"truncated"`)) {
+		t.Fatal("error event name granted replay to malformed JSON")
 	}
 }

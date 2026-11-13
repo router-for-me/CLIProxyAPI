@@ -2,7 +2,6 @@ package openai
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -51,8 +50,11 @@ func TestHTTPSubmissionGeminiApplyPatchTranslationDoesNotReplay(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	router := gin.New()
 	router.POST("/v1/responses", NewOpenAIResponsesAPIHandler(base).Responses)
-	body := fmt.Sprintf(`{"model":%q,"input":"make a patch","stream":false,"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}]}`, model)
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	body := ojson.NewDocString(`{"model":"","input":"make a patch","stream":false,"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}]}`)
+	if errSet := body.Set("model", model); errSet != nil {
+		t.Fatal(errSet)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body.String()))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)

@@ -1272,7 +1272,7 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
 	}
-	return statusErr{code: status, msg: string(payload), providerErrorPayload: helps.IsProviderErrorPayload(payload)}, true
+	return statusErr{code: status, msg: string(payload), providerErrorPayload: helps.IsProviderErrorEventPayload(eventName, payload)}, true
 }
 
 type statusErr struct {

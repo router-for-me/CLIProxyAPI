@@ -45,6 +45,8 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 		{"xAI malformed source", xaiErr(`{"error":{"message":"broken"}`), false},
 		{"Meta synthesized error", metaStreamEventError([]byte(`{"type":"response.failed"}`)), false},
 		{"OpenAI provider error", openaiErr, true},
+		{"Codex top-level provider message", codexErr(`{"type":"error","message":"provider overloaded"}`), true},
+		{"xAI top-level provider message", xaiErr(`{"type":"error","message":"provider overloaded"}`), true},
 		{"Claude provider error", validateClaudeStreamingResponse([]byte("data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"refused\"}}\n\n")), true},
 		{"Codex provider error", codexErr(`{"type":"response.failed","response":{"error":{"code":"server_error","message":"refused"}}}`), true},
 		{"xAI provider error", xaiErr(`{"type":"error","error":{"message":"refused"}}`), true},

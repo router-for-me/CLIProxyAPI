@@ -1348,7 +1348,7 @@ func xaiTerminalFailureErr(eventName string, eventData []byte) (statusErr, bool)
 	}
 	status := xaiTerminalFailureStatus(eventData, doc)
 	err := xaiStatusErr(status, doc.Bytes())
-	err.providerErrorPayload = helps.IsProviderErrorPayload(eventData)
+	err.providerErrorPayload = helps.IsProviderErrorEventPayload(eventName, eventData)
 	return err, true
 }
 

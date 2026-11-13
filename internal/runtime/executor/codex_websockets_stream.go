@@ -499,7 +499,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					// status the upstream refused to put on the wire.
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read, failing over", bufferedFrames)
 					if overloadFailover {
-						return nil, newCodexBootstrapOverloadErr(terminalBody)
+						return nil, newCodexBootstrapOverloadErr(terminalBody, streamErr)
 					}
 					return nil, streamErr
 				}
