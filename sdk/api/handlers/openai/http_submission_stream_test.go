@@ -140,3 +140,45 @@ func TestHTTPSubmissionExplicitStreamErrorCanFailOver(t *testing.T) {
 		t.Fatalf("attempts=%d status=%d body=%s", attempts.Load(), response.Code, response.Body.String())
 	}
 }
+
+func TestHTTPSubmissionIncompleteFrameDoesNotReplay(t *testing.T) {
+	for _, late := range []bool{false, true} {
+		for _, ending := range []string{"eof", "done"} {
+			t.Run(fmt.Sprintf("late=%t/%s", late, ending), func(t *testing.T) {
+				var accepted atomic.Int32
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = io.Copy(io.Discard, r.Body)
+					accepted.Add(1)
+					w.Header().Set("Content-Type", "text/event-stream")
+					if late {
+						_, _ = io.WriteString(w, `data: {"id":"cut","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`+"\n\n")
+						w.(http.Flusher).Flush()
+					}
+					_, _ = io.WriteString(w, `data: {"id":"cut"`)
+					if ending == "done" {
+						_, _ = io.WriteString(w, "\ndata: [DONE]\n\n")
+					}
+				}))
+				defer upstream.Close()
+				response := submissionRequest(t, upstream.URL, true, nil)
+				body := response.Body.String()
+				t.Logf("accepted=%d status=%d body=%s", accepted.Load(), response.Code, body)
+				if accepted.Load() != 1 {
+					t.Fatalf("incomplete accepted frame replayed: accepted=%d", accepted.Load())
+				}
+				for _, value := range []string{`"code":"upstream_outcome_unknown"`, `"retryable":false`} {
+					if !strings.Contains(body, value) {
+						t.Fatalf("body=%s, missing %s", body, value)
+					}
+				}
+				if late {
+					if response.Code != http.StatusOK || !strings.Contains(body, "partial") || strings.Contains(body, "[DONE]") || strings.Contains(body, `"finish_reason":"stop"`) {
+						t.Fatalf("late truncation status=%d body=%s", response.Code, body)
+					}
+				} else if response.Code != http.StatusBadGateway || response.Header().Get("x-should-retry") != "false" {
+					t.Fatalf("preheader status=%d retry=%q body=%s", response.Code, response.Header().Get("x-should-retry"), body)
+				}
+			})
+		}
+	}
+}

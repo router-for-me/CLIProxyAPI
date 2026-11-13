@@ -539,7 +539,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			if len(dataLines) > 1 {
 				for _, dataLine := range dataLines {
 					if bytes.Equal(bytes.TrimSpace(dataLine), []byte("[DONE]")) {
-						publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete data before [DONE]"}, false)
+						publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete data before [DONE]", streamTruncated: true}, false)
 						return true
 					}
 				}
@@ -551,7 +551,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				return true
 			}
 			if !isDone && !json.Valid(dataPayload) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete SSE data frame"}, false)
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete SSE data frame", streamTruncated: true}, false)
 				return true
 			}
 			if !isDone {
