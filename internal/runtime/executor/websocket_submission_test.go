@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -20,6 +21,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
 )
 
 func TestWebsocketSubmissionDisconnectAndPrewriteFailover(t *testing.T) {
@@ -59,13 +61,14 @@ func TestWebsocketSubmissionDisconnectAndPrewriteFailover(t *testing.T) {
 						t.Cleanup(func() { _ = conn.Close() })
 						<-connected
 						go func() {
-							var msg wsrelay.Message
-							if err := conn.ReadJSON(&msg); err != nil {
+							_, payload, errRead := conn.ReadMessage()
+							if errRead != nil {
 								return
 							}
+							id := ojson.GetBytesNoCopy(payload, "id").String()
 							frames.Add(1)
 							if refusal && index == 0 {
-								_ = conn.WriteJSON(wsrelay.Message{ID: msg.ID, Type: wsrelay.MessageTypeHTTPResp, Payload: map[string]any{"status": 503, "body": `{"error":{"code":503,"message":"provider refused generation"}}`}})
+								_ = writeSubmissionRelayResponse(conn, id, 503, `{"error":{"code":503,"message":"provider refused generation"}}`)
 								return
 							}
 							if !prewrite && !refusal {
@@ -73,8 +76,8 @@ func TestWebsocketSubmissionDisconnectAndPrewriteFailover(t *testing.T) {
 								return
 							}
 							body := `{"candidates":[{"content":{"role":"model","parts":[{"text":"safe-fallback"}]},"finishReason":"STOP"}]}`
-							if err := conn.WriteJSON(wsrelay.Message{ID: msg.ID, Type: wsrelay.MessageTypeHTTPResp, Payload: map[string]any{"status": 200, "body": body}}); err != nil {
-								t.Error(err)
+							if errWrite := writeSubmissionRelayResponse(conn, id, 200, body); errWrite != nil {
+								t.Error(errWrite)
 							}
 						}()
 					}
@@ -87,9 +90,13 @@ func TestWebsocketSubmissionDisconnectAndPrewriteFailover(t *testing.T) {
 							t.Error(err)
 							return
 						}
-						defer func() { _ = conn.Close() }()
-						if _, _, err := conn.ReadMessage(); err != nil {
-							t.Error(err)
+						defer func() {
+							if errClose := conn.Close(); errClose != nil {
+								log.Errorf("close synthetic websocket: %v", errClose)
+							}
+						}()
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							t.Error(errRead)
 							return
 						}
 						count := frames.Add(1)
@@ -117,8 +124,8 @@ func TestWebsocketSubmissionDisconnectAndPrewriteFailover(t *testing.T) {
 							t.Fatal(err)
 						}
 						firstURL = "http://" + listener.Addr().String()
-						if err := listener.Close(); err != nil {
-							t.Fatal(err)
+						if errClose := listener.Close(); errClose != nil {
+							t.Fatal(errClose)
 						}
 					}
 					if provider == "codex" {
@@ -177,10 +184,14 @@ func TestWebsocketSubmissionIgnoresHandshakeAndControlFrames(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		defer func() { _ = conn.Close() }()
+		defer func() {
+			if errClose := conn.Close(); errClose != nil {
+				log.Errorf("close synthetic websocket: %v", errClose)
+			}
+		}()
 		for range 2 {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				t.Error(err)
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				t.Error(errRead)
 				return
 			}
 			received <- struct{}{}
@@ -192,22 +203,35 @@ func TestWebsocketSubmissionIgnoresHandshakeAndControlFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = conn.Close() }()
-	if err := httptransport.ClassifySubmissionError(ctx, io.EOF); httptransport.IsOutcomeUnknown(err) {
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			log.Errorf("close synthetic websocket: %v", errClose)
+		}
+	}()
+	if errClassify := httptransport.ClassifySubmissionError(ctx, io.EOF); httptransport.IsOutcomeUnknown(errClassify) {
 		t.Fatal("handshake marked accepted")
 	}
-	if err := writeWebsocketPayloadMessage(ctx, "codex", nil, conn, []byte(`{"type":"session.update"}`)); err != nil {
-		t.Fatal(err)
+	if errWrite := writeWebsocketPayloadMessage(ctx, "codex", nil, conn, []byte(`{"type":"session.update"}`)); errWrite != nil {
+		t.Fatal(errWrite)
 	}
 	<-received
-	if err := httptransport.ClassifySubmissionError(ctx, io.EOF); httptransport.IsOutcomeUnknown(err) {
+	if errClassify := httptransport.ClassifySubmissionError(ctx, io.EOF); httptransport.IsOutcomeUnknown(errClassify) {
 		t.Fatal("control frame marked accepted")
 	}
-	if err := writeWebsocketPayloadMessage(ctx, "codex", nil, conn, []byte(`{"type":"response.create"}`)); err != nil {
-		t.Fatal(err)
+	if errWrite := writeWebsocketPayloadMessage(ctx, "codex", nil, conn, []byte(`{"type":"response.create"}`)); errWrite != nil {
+		t.Fatal(errWrite)
 	}
 	<-received
-	if err := httptransport.ClassifySubmissionError(ctx, io.EOF); !httptransport.IsOutcomeUnknown(err) {
-		t.Fatalf("generation frame was not marked accepted: %v", err)
+	if errClassify := httptransport.ClassifySubmissionError(ctx, io.EOF); !httptransport.IsOutcomeUnknown(errClassify) {
+		t.Fatalf("generation frame was not marked accepted: %v", errClassify)
 	}
+}
+
+func writeSubmissionRelayResponse(conn *websocket.Conn, id string, status int, body string) error {
+	doc := ojson.NewDoc([]byte(`{}`))
+	_ = doc.Set("id", id)
+	_ = doc.Set("type", wsrelay.MessageTypeHTTPResp)
+	_ = doc.Set("payload.status", status)
+	_ = doc.Set("payload.body", body)
+	return conn.WriteMessage(websocket.TextMessage, doc.Bytes())
 }
