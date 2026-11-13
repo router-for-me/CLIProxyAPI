@@ -8,15 +8,14 @@ import (
 )
 
 func TestStartModelCatalogUpdatersRespectsXAIDisableVersionCheck(t *testing.T) {
-	oldStartXAIVersionUpdater := startXAIVersionUpdater
+	oldStart, oldStop := startXAIVersionUpdater, stopXAIVersionUpdater
 	t.Cleanup(func() {
-		startXAIVersionUpdater = oldStartXAIVersionUpdater
+		startXAIVersionUpdater, stopXAIVersionUpdater = oldStart, oldStop
 	})
 
-	calls := 0
-	startXAIVersionUpdater = func(context.Context, string) {
-		calls++
-	}
+	starts, stops := 0, 0
+	startXAIVersionUpdater = func(context.Context, string) { starts++ }
+	stopXAIVersionUpdater = func() { stops++ }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -25,13 +24,13 @@ func TestStartModelCatalogUpdatersRespectsXAIDisableVersionCheck(t *testing.T) {
 	cfg.XAI.DisableVersionCheck = true
 	service := &Service{cfg: cfg}
 	service.startModelCatalogUpdaters(ctx)
-	if calls != 0 {
-		t.Fatalf("xai version updater calls = %d, want 0 when disabled", calls)
+	if starts != 0 || stops != 1 {
+		t.Fatalf("disabled: starts=%d stops=%d, want starts=0 stops=1", starts, stops)
 	}
 
 	cfg.XAI.DisableVersionCheck = false
 	service.startModelCatalogUpdaters(ctx)
-	if calls != 1 {
-		t.Fatalf("xai version updater calls = %d, want 1 when enabled", calls)
+	if starts != 1 || stops != 1 {
+		t.Fatalf("enabled: starts=%d stops=%d, want starts=1 stops=1", starts, stops)
 	}
 }
