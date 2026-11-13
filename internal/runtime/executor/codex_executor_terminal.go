@@ -535,6 +535,13 @@ func isCodexUsageLimitError(errorBody []byte) bool {
 	return false
 }
 
+// codexUsageLimitRecheckInterval caps the cooldown taken from a usage limit's
+// reset time. The limit can be lifted before resets_at (a manual reset on the
+// account) and nothing tells the proxy, so a weekly limit would otherwise park a
+// working credential for days. After the cap the next request rechecks: still
+// limited, it gets a fresh 429 and cools again.
+const codexUsageLimitRecheckInterval = time.Hour
+
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
@@ -546,16 +553,21 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 		if resetsAt := quota.Get("resets_at").Int(); resetsAt > 0 {
 			resetAtTime := time.Unix(resetsAt, 0)
 			if resetAtTime.After(now) {
-				retryAfter := resetAtTime.Sub(now)
-				return &retryAfter
+				return capCodexUsageLimitRetryAfter(resetAtTime.Sub(now))
 			}
 		}
 		if resetsInSeconds := quota.Get("resets_in_seconds").Int(); resetsInSeconds > 0 {
-			retryAfter := time.Duration(resetsInSeconds) * time.Second
-			return &retryAfter
+			return capCodexUsageLimitRetryAfter(time.Duration(resetsInSeconds) * time.Second)
 		}
 	}
 	return nil
+}
+
+func capCodexUsageLimitRetryAfter(retryAfter time.Duration) *time.Duration {
+	if retryAfter > codexUsageLimitRecheckInterval {
+		retryAfter = codexUsageLimitRecheckInterval
+	}
+	return &retryAfter
 }
 
 // codexBootstrapNowMu protects codexBootstrapNow across concurrent tests and goroutines.
