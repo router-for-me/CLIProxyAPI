@@ -108,6 +108,11 @@ func (s *submissionTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	// A replayable body lets net/http repeat a POST with an Idempotency-Key inside
 	// RoundTrip, before the manager can inspect the failed attempt.
 	cloned.GetBody = nil
+	// net/http also treats nil and NoBody as replayable without GetBody. Keep an
+	// empty reader that is not its sentinel, preserving the idempotency headers.
+	if cloned.Body == nil || cloned.Body == http.NoBody {
+		cloned.Body = io.NopCloser(http.NoBody)
+	}
 	response, err := s.next.RoundTrip(cloned)
 	if err != nil {
 		if written.Load() || responseStarted.Load() {
