@@ -2277,6 +2277,9 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if req == nil {
 		return &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
+	if m.executionPolicy() != nil {
+		return authExecutionRefusal{}
+	}
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
 	}
@@ -2331,6 +2334,9 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	}
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
+	}
+	if m.executionPolicy() != nil {
+		return nil, authExecutionRefusal{}
 	}
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {

@@ -25,7 +25,11 @@ type AuthUse struct {
 	Model          string
 }
 
-// AuthExecutionPolicy checks actual provider inputs before provider IO.
+// AuthExecutionPolicy checks actual provider inputs for Manager execution,
+// stream startup, token counting, request-auth preparation and refresh.
+// Home dispatch and the generic PrepareHttpRequest, NewHttpRequest and
+// HttpRequest helpers are unsupported while a policy is configured; they
+// return a fixed request refusal instead of invoking those provider paths.
 // Implementations must be safe for concurrent calls, must not retain credential
 // snapshots, and must not perform IO or call back into Manager. Request context
 // values are preserved. Any non-nil error becomes a fixed 503 request refusal;

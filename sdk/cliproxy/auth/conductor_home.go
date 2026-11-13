@@ -1504,6 +1504,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
+			if isAuthExecutionRefusal(errPrepare) || m.executionPolicy() != nil && isRequestStopError(errPrepare) {
+				return cliproxyexecutor.Response{}, false, errPrepare
+			}
 			continue
 		}
 		c.auth = preparedAuth
@@ -1519,6 +1522,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 			executionSeq := m.nextExecutionSeq()
+			if errPolicy := m.checkAuthExecution(creditsCtx, AuthUseExecute, c.auth, requestedModelAliasFromOptions(creditsOpts, routeModel), execReq.Model); errPolicy != nil {
+				return cliproxyexecutor.Response{}, false, errPolicy
+			}
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
@@ -1573,6 +1579,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
+			if isAuthExecutionRefusal(errPrepare) || m.executionPolicy() != nil && isRequestStopError(errPrepare) {
+				return nil, false, errPrepare
+			}
 			continue
 		}
 		c.auth = preparedAuth
@@ -1584,6 +1593,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
+			if isAuthExecutionRefusal(errStream) || m.executionPolicy() != nil && isRequestStopError(errStream) {
+				return nil, false, errStream
+			}
 			continue
 		}
 		return result, true, nil
