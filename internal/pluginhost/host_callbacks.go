@@ -28,6 +28,7 @@ type rpcHostHTTPRequest struct {
 	Body           []byte                     `json:"body,omitempty"`
 	WireProfile    *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
 	Request        *httpRequest               `json:"request,omitempty"`
+	Auxiliary      bool                       `json:"auxiliary,omitempty"`
 }
 
 type httpHeader map[string][]string
@@ -38,6 +39,7 @@ type httpRequest struct {
 	Headers     httpHeader                 `json:"headers,omitempty"`
 	Body        []byte                     `json:"body,omitempty"`
 	WireProfile *pluginapi.HTTPWireProfile `json:"wire_profile,omitempty"`
+	Auxiliary   bool                       `json:"auxiliary,omitempty"`
 }
 
 type rpcHostHTTPStreamResponse struct {
@@ -362,6 +364,7 @@ func decodeHostHTTPRequestWithOperationID(raw []byte) (pluginapi.HTTPRequest, st
 			Headers:     map[string][]string(req.Request.Headers),
 			Body:        append([]byte(nil), req.Request.Body...),
 			WireProfile: cloneWireProfile(wireProfile),
+			Auxiliary:   req.Request.Auxiliary || req.Auxiliary,
 		}, req.HostCallbackID, strings.TrimSpace(req.OperationID), nil
 	}
 	return pluginapi.HTTPRequest{
@@ -370,6 +373,7 @@ func decodeHostHTTPRequestWithOperationID(raw []byte) (pluginapi.HTTPRequest, st
 		Headers:     map[string][]string(req.Headers),
 		Body:        append([]byte(nil), req.Body...),
 		WireProfile: cloneWireProfile(req.WireProfile),
+		Auxiliary:   req.Auxiliary,
 	}, req.HostCallbackID, strings.TrimSpace(req.OperationID), nil
 }
 

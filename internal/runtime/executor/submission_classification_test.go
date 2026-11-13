@@ -64,7 +64,9 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 			}))
 			defer server.Close()
 			ctx := httptransport.WithSubmissionTracking(context.Background())
-			response, errDo := httptransport.Decorate(ctx, server.Client()).Post(server.URL, "application/json", strings.NewReader(`{}`))
+			client := *server.Client()
+			client.Transport = httptransport.GenerationTransport(ctx, client.Transport)
+			response, errDo := client.Post(server.URL, "application/json", strings.NewReader(`{}`))
 			if errDo != nil {
 				t.Fatal(errDo)
 			}

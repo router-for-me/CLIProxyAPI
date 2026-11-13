@@ -1047,6 +1047,9 @@ type HTTPRequest struct {
 	Body []byte
 	// WireProfile specifies optional outbound HTTP wire profile settings.
 	WireProfile *HTTPWireProfile `json:"wire_profile,omitempty"`
+	// Auxiliary identifies credential, token, or metadata calls within model execution.
+	// Other host operations are untracked; executor calls default to generation.
+	Auxiliary bool `json:"auxiliary,omitempty"`
 }
 
 // HTTPResponse describes a non-streaming host HTTP response.
