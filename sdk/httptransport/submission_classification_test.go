@@ -36,7 +36,7 @@ func TestSubmissionAcceptedErrorsDefaultToUnknown(t *testing.T) {
 			}))
 			defer server.Close()
 			ctx := WithSubmissionTracking(context.Background())
-			response, errDo := Decorate(ctx, server.Client()).Post(server.URL, "application/json", strings.NewReader(`{}`))
+			response, errDo := generationClient(ctx, server.Client()).Post(server.URL, "application/json", strings.NewReader(`{}`))
 			if errDo != nil {
 				t.Fatal(errDo)
 			}
@@ -58,4 +58,42 @@ func TestSubmissionAcceptedErrorsDefaultToUnknown(t *testing.T) {
 			}
 		})
 	}
+}
+
+func generationClient(ctx context.Context, client *http.Client) *http.Client {
+	clone := *Decorate(ctx, client)
+	clone.Transport = GenerationTransport(ctx, clone.Transport)
+	return &clone
+}
+
+func TestSubmissionAuxiliaryHTTPDoesNotChangeGenerationOutcome(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	ctx := WithSubmissionTracking(context.Background())
+	local := errors.New("generation has not been submitted")
+	response, errDo := Decorate(ctx, server.Client()).Post(server.URL, "application/json", strings.NewReader(`{}`))
+	if errDo != nil {
+		t.Fatal(errDo)
+	}
+	_ = response.Body.Close()
+	if ClassifySubmissionError(ctx, local) != local {
+		t.Fatal("auxiliary 200 accepted a generation")
+	}
+	response, errDo = generationClient(WithoutDecorator(ctx), server.Client()).Post(server.URL, "application/json", strings.NewReader(`{}`))
+	if errDo != nil {
+		t.Fatal(errDo)
+	}
+	_ = response.Body.Close()
+	if !IsOutcomeUnknown(ClassifySubmissionError(ctx, local)) {
+		t.Fatal("generation 200 was not tracked")
+	}
+	// Even a terminal generation cannot prevent a credential HTTP exchange.
+	response, errDo = Decorate(ctx, server.Client()).Post(server.URL, "application/json", strings.NewReader(`{}`))
+	if errDo != nil {
+		t.Fatal(errDo)
+	}
+	_ = response.Body.Close()
 }

@@ -49,7 +49,7 @@ func TestSubmissionGuardPreventsInternalPOSTReplay(t *testing.T) {
 					_ = conn.Close()
 				}))
 				defer server.Close()
-				client := Decorate(WithSubmissionTracking(context.Background()), server.Client())
+				client := generationClient(WithSubmissionTracking(context.Background()), server.Client())
 				warm, errWarm := client.Get(server.URL)
 				if errWarm != nil {
 					t.Fatal(errWarm)
@@ -95,7 +95,7 @@ func TestSubmissionGuardHTTPRefusalIsNotAcceptance(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	defer server.Close()
 	ctx := WithSubmissionTracking(context.Background())
-	client := Decorate(ctx, server.Client())
+	client := generationClient(ctx, server.Client())
 	response, errDo := client.Post(server.URL, "text/plain", strings.NewReader("request"))
 	if errDo != nil {
 		t.Fatal(errDo)
@@ -124,7 +124,7 @@ func TestSubmissionGuardPreservesSafeEmptyRequestRetry(t *testing.T) {
 		_ = conn.Close()
 	}))
 	defer server.Close()
-	client := Decorate(WithSubmissionTracking(context.Background()), server.Client())
+	client := generationClient(WithSubmissionTracking(context.Background()), server.Client())
 	for range 2 {
 		response, errGet := client.Get(server.URL)
 		if errGet != nil {

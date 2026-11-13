@@ -99,6 +99,22 @@ func classifySubmissionError(ctx context.Context, err error, incomplete bool) er
 	return state.fail(err)
 }
 
+// GenerationTransport guards a model send after credentials and payload preparation.
+// Generic HTTP client construction must not track token or auxiliary requests.
+func GenerationTransport(ctx context.Context, next http.RoundTripper) http.RoundTripper {
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	if ctx == nil {
+		return next
+	}
+	state, _ := ctx.Value(submissionKey{}).(*submissionState)
+	if state == nil {
+		return next
+	}
+	return &submissionTransport{next: next, state: state}
+}
+
 type submissionTransport struct {
 	next  http.RoundTripper
 	state *submissionState
