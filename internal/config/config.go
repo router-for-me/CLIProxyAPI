@@ -203,6 +203,11 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// VertexClaudeModels lists Anthropic Claude model IDs (e.g. "claude-sonnet-5-5") that are
+	// enabled on Vertex AI for service-account vertex auths. Matching requests are sent to the
+	// anthropic publisher via rawPredict/streamRawPredict instead of the Gemini path.
+	VertexClaudeModels []string `yaml:"vertex-claude-models" json:"vertex-claude-models"`
+
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
 
