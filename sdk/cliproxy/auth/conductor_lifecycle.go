@@ -600,7 +600,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	saveDeltaCurrent := existing
-	if mode == updateModeRefresh {
+	if mode == updateModeRefresh || credChanged {
 		saveDeltaCurrent = m.refreshOutcomeCurrentLocked(existingBeforeSave, existing)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, saveDeltaCurrent, false)
