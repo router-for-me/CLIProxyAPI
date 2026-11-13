@@ -137,3 +137,32 @@ func TestSubmissionGuardPreservesSafeEmptyRequestRetry(t *testing.T) {
 		t.Fatalf("safe request not retried: calls=%d", calls.Load())
 	}
 }
+
+func TestWriteGenerationSubmissionBoundary(t *testing.T) {
+	ctx := WithSubmissionTracking(context.Background())
+	failure := io.ErrClosedPipe
+	if err := WriteGeneration(ctx, func() error { return failure }); err != failure {
+		t.Fatal(err)
+	}
+	if err := ClassifySubmissionError(ctx, io.EOF); IsOutcomeUnknown(err) {
+		t.Fatal("failed write marked accepted")
+	}
+	if err := WriteGeneration(ctx, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	terminal := ClassifySubmissionError(ctx, io.EOF)
+	if !IsOutcomeUnknown(terminal) {
+		t.Fatalf("successful write lost submission: %v", terminal)
+	}
+	calls := 0
+	if err := WriteGeneration(ctx, func() error { calls++; return nil }); err != terminal || calls != 0 {
+		t.Fatalf("terminal attempt wrote again: err=%v calls=%d", err, calls)
+	}
+	auxiliary := WithoutSubmissionTracking(ctx)
+	if err := WriteGeneration(auxiliary, func() error { calls++; return nil }); err != nil || calls != 1 {
+		t.Fatalf("auxiliary request blocked: err=%v calls=%d", err, calls)
+	}
+	if err := ClassifySubmissionError(auxiliary, io.EOF); IsOutcomeUnknown(err) {
+		t.Fatal("auxiliary request acquired submission tracking")
+	}
+}

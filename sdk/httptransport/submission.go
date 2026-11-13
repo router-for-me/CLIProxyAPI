@@ -99,6 +99,27 @@ func classifySubmissionError(ctx context.Context, err error, incomplete bool) er
 	return state.fail(err)
 }
 
+// WriteGeneration records a complete non-HTTP generation frame as submitted.
+// Handshakes and control frames must not call it.
+func WriteGeneration(ctx context.Context, write func() error) error {
+	var state *submissionState
+	if ctx != nil {
+		state, _ = ctx.Value(submissionKey{}).(*submissionState)
+	}
+	if state != nil {
+		if terminal := state.terminal.Load(); terminal != nil {
+			return terminal
+		}
+	}
+	if err := write(); err != nil {
+		return err
+	}
+	if state != nil {
+		state.accepted.Store(true)
+	}
+	return nil
+}
+
 // GenerationTransport guards a model send after credentials and payload preparation.
 // Generic HTTP client construction must not track token or auxiliary requests.
 func GenerationTransport(ctx context.Context, next http.RoundTripper) http.RoundTripper {
