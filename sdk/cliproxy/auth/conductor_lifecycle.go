@@ -253,6 +253,10 @@ func (m *Manager) Modify(ctx context.Context, id string, expectedEpoch uint64, e
 }
 
 func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode updateAuthMode) (*Auth, error) {
+	return m.updateInternalWithTransition(ctx, base, auth, mode, nil)
+}
+
+func (m *Manager) updateInternalWithTransition(ctx context.Context, base, auth *Auth, mode updateAuthMode, capture *authTransitionCapture) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
@@ -260,7 +264,10 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if errMutation != nil {
 		return nil, errMutation
 	}
-	committedAuth, didCommit, persistCooldown, err := m.updateInternalLocked(ctx, base, auth, mode)
+	committedAuth, didCommit, persistCooldown, err := m.updateInternalLockedWithTransition(ctx, base, auth, mode, capture)
+	if err == nil && didCommit && committedAuth != nil {
+		capture.notify(ctx, committedAuth)
+	}
 	releaseMutation()
 	if err == nil && didCommit && committedAuth != nil {
 		m.finishAuthUpdate(ctx, committedAuth, persistCooldown)
@@ -298,6 +305,10 @@ func (m *Manager) finishAuthUpdate(ctx context.Context, committed *Auth, persist
 // state (versus returning the current snapshot for a discarded stale
 // update); only real commits may run post-commit side effects.
 func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mode updateAuthMode) (committedAuth *Auth, committed bool, persistCooldown bool, err error) {
+	return m.updateInternalLockedWithTransition(ctx, base, auth, mode, nil)
+}
+
+func (m *Manager) updateInternalLockedWithTransition(ctx context.Context, base, auth *Auth, mode updateAuthMode, capture *authTransitionCapture) (committedAuth *Auth, committed bool, persistCooldown bool, err error) {
 	if auth == nil || auth.ID == "" {
 		return nil, false, false, nil
 	}
@@ -349,6 +360,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		}
 	}
 	if mode == updateModeRefresh {
+		capture.commitBase(existing)
 		merged := MergeRefreshedAuth(base, existing, auth)
 		if merged != nil {
 			if merged.Disabled || merged.Status == StatusDisabled {
@@ -358,6 +370,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			NormalizeCredentialMetadata(auth.Metadata)
 		}
 	} else if mode == updateModePrepare {
+		capture.commitBase(existing)
 		merged := MergePreparedAuth(base, existing, auth)
 		if merged != nil {
 			auth = merged
@@ -585,6 +598,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+	capture.merged(auth)
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {

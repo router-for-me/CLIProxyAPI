@@ -1153,35 +1153,43 @@ func (m *Manager) RefreshAfterUnauthorized(ctx context.Context, auth *Auth, exec
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
+	auth, refreshed, _ := m.tryRefreshAfterUnauthorizedWithPolicy(ctx, auth, execErr, alreadyTried, clientHeaders...)
+	return auth, refreshed
+}
+
+func (m *Manager) tryRefreshAfterUnauthorizedWithPolicy(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool, error) {
 	if m == nil || auth == nil || execErr == nil {
-		return auth, false
+		return auth, false, nil
 	}
 	// Request-scoped failures describe this request, not stale credentials.
 	// Refreshing would turn a direct error response into an implicit retry.
 	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
-		return auth, false
+		return auth, false, nil
 	}
 	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
 	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.requestScopedErrorConfig(ctx)); ruleMatched {
-		return auth, false
+		return auth, false, nil
 	}
 	failedToken := authAccessTokenForRequest(ctx, auth, clientHeaders...)
 	if failedToken != "" {
 		m.markRejectedAccessToken(auth.ID, failedToken)
 	}
 	if alreadyTried || !authHasRefreshCredential(auth) || hasUnauthorizedAuthFailure(auth) {
-		return auth, false
+		return auth, false, nil
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, failedToken)
+	if isAuthExecutionRefusal(errRefresh) || m.executionPolicy() != nil && isRequestStopError(errRefresh) {
+		return auth, false, errRefresh
+	}
 	if errRefresh != nil || refreshed == nil {
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
-		return auth, false
+		return auth, false, nil
 	}
 	if failedToken != "" && authAccessTokenForRequest(ctx, refreshed, clientHeaders...) == failedToken && (refreshed.RejectedAccessToken == failedToken || refreshed.RejectedSIWCAccessToken == failedToken) {
-		return auth, false
+		return auth, false, nil
 	}
-	return refreshed, true
+	return refreshed, true, nil
 }
 
 func invalidGrantBackoffDuration(failures int) time.Duration {
@@ -1415,7 +1423,11 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		return nil, &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
 	}
 
+	if errPolicy := m.checkAuthExecution(ctx, AuthUseRefresh, auth, "", ""); errPolicy != nil {
+		return nil, errPolicy
+	}
 	base := auth.Clone()
+	transition := m.captureProviderTransition(base, AuthUseRefresh)
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
 	refreshCanceled := (errors.Is(err, context.Canceled) || errors.Is(err, codex.ErrSIWCRefreshDeferred)) && !codex.IsRefreshOutcomeUnknown(err)
@@ -1729,7 +1741,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	// A successful refresh may have rotated upstream tokens after cancellation.
 	// Commit its result with context values intact; keep epoch checks and save ordering.
-	saved, errUpdate := m.UpdateRefreshedAuth(context.WithoutCancel(ctx), base, updated)
+	saved, errUpdate := m.updateProviderAuth(context.WithoutCancel(ctx), base, updated, updateModeRefresh, transition)
 	if errUpdate != nil {
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
