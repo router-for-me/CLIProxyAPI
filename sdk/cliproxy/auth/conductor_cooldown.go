@@ -1558,6 +1558,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else if retainModelCooldown || retainAuthCooldown {
 				// Retain a cooldown recorded after this execution was dispatched.
 			} else if modelKey != "" {
+				clearAccountSuspendedErrors(auth)
 				state := ensureModelState(auth, modelKey)
 				modelState = state
 				resetModelState(state, now)
@@ -1568,6 +1569,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusActive
 				}
 			} else {
+				clearAccountSuspendedErrors(auth)
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
@@ -1638,7 +1640,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					statusCode := statusCodeFromResult(result.Error)
 					// A suspended account cools like a credential quota: every
 					// model, to the retry the executor attached.
-					if result.CredentialScope && isAccountSuspendedResultError(result.Error) {
+					if coolsAsCredentialQuota(result.Error, result.CredentialScope) {
 						statusCode = http.StatusTooManyRequests
 					}
 					if isModelSupportResultError(result.Error) {
@@ -2059,7 +2061,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						}
 					}
-					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					applyAuthFailureStateWithScope(auth, result.Error, result.RetryAfter, now, disableCooling, result.CredentialScope)
 					if isAccountSuspendedResultError(result.Error) {
 						auth.StatusMessage = accountSuspendedStatusMessage(result.RetryAfter, !disableCooling)
 					}
@@ -3916,6 +3918,12 @@ func isRequestInvalidError(err error) bool {
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+	applyAuthFailureStateWithScope(auth, resultErr, retryAfter, now, disableCooling, false)
+}
+
+// applyAuthFailureStateWithScope is applyAuthFailureState for a result that
+// may be credential scoped.
+func applyAuthFailureStateWithScope(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling, credentialScope bool) {
 	if auth == nil {
 		return
 	}
@@ -3949,7 +3957,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
-	if isAccountSuspendedResultError(resultErr) {
+	if coolsAsCredentialQuota(resultErr, credentialScope) {
 		statusCode = http.StatusTooManyRequests
 	}
 	if isTransientRateLimitResultError(resultErr) && statusCode == http.StatusTooManyRequests {

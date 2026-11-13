@@ -176,7 +176,7 @@ func TestManager_MarkResult_AccountSuspensionIgnoresSuccessWhileCooling(t *testi
 func TestManager_MarkResult_AccountSuspendedWithoutModel(t *testing.T) {
 	m, id := newAccountSuspensionManager(t, nil)
 	retry := 24 * time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", RetryAfter: &retry,
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", RetryAfter: &retry, CredentialScope: true,
 		Error: &Error{Code: ErrorCodeAccountSuspended, HTTPStatus: http.StatusForbidden, Message: accountSuspendedBody}})
 
 	now := time.Now()
@@ -266,5 +266,40 @@ func TestAccountSuspendedAppealURL(t *testing.T) {
 	twoDetails := `{"error":{"details":[{"metadata":{"appeal_url":"http://evil.example/appeal"}},{"metadata":{"appeal_url":"` + okURL + `"}}]}}`
 	if got := accountSuspendedAppealURL(twoDetails); got != okURL {
 		t.Fatalf("accountSuspendedAppealURL() = %q, want the valid link from the second detail", got)
+	}
+}
+
+func TestManager_MarkResult_AccountSuspendedWithoutScopeIsAnOrdinaryForbidden(t *testing.T) {
+	m, id := newAccountSuspensionManager(t, nil)
+	retry := 24 * time.Hour
+	// Without the credential scope the executor sets, a suspension code alone cools nothing extra.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", RetryAfter: &retry,
+		Error: &Error{Code: ErrorCodeAccountSuspended, HTTPStatus: http.StatusForbidden, Message: accountSuspendedBody}})
+
+	auth, _ := m.GetByID(id)
+	if !IsAuthAvailableForModel(auth, "model-a", time.Now().Add(31*time.Minute)) {
+		t.Fatal("an unscoped suspension cooled the credential past the ordinary 30 minutes")
+	}
+}
+
+func TestManager_MarkResult_AccountSuspensionWarnsAgainAfterRecovery(t *testing.T) {
+	hook := setupTestLoggerHook(t)
+	m, id := newAccountSuspensionManager(t, nil, "model-a", "model-b")
+	m.MarkResult(context.Background(), suspendedResult(id, "model-a"))
+
+	// The 24h end and a request on another model succeeds, so the account works again.
+	endCredentialCooldown(m, id)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "antigravity", Model: "model-b", Success: true, ExecutionSeq: m.nextExecutionSeq()})
+	auth, _ := m.GetByID(id)
+	if isAccountSuspendedResultError(auth.LastError) || isAccountSuspendedResultError(auth.ModelStates["model-a"].LastError) {
+		t.Fatalf("the success left the suspension showing: credential %v, model-a %v", auth.LastError, auth.ModelStates["model-a"].LastError)
+	}
+
+	// Suspended again later: a new suspension, a new warning.
+	later := suspendedResult(id, "model-b")
+	later.ExecutionSeq = m.nextExecutionSeq()
+	m.MarkResult(context.Background(), later)
+	if entries := suspensionWarnings(hook); len(entries) != 2 {
+		t.Fatalf("got %d suspension log lines, want 2", len(entries))
 	}
 }

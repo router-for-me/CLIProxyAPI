@@ -15,6 +15,31 @@ func isAccountSuspendedResultError(err *Error) bool {
 	return err != nil && err.Code == ErrorCodeAccountSuspended
 }
 
+// coolsAsCredentialQuota reports whether a failure is a credential scoped
+// suspension, which cools the whole credential like a credential quota 429.
+func coolsAsCredentialQuota(err *Error, credentialScope bool) bool {
+	return credentialScope && isAccountSuspendedResultError(err)
+}
+
+// clearAccountSuspendedErrors drops a suspension the credential and its model
+// states still show once a success proves the account works again, so the
+// next suspension warns again. Running cooldowns are left alone.
+func clearAccountSuspendedErrors(auth *Auth) {
+	if auth == nil {
+		return
+	}
+	for _, state := range auth.ModelStates {
+		if state != nil && isAccountSuspendedResultError(state.LastError) {
+			state.LastError = nil
+			state.StatusMessage = ""
+		}
+	}
+	if isAccountSuspendedResultError(auth.LastError) {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+	}
+}
+
 // accountSuspendedStatusMessage describes the suspension for the status
 // message, with the retry the executor attached when the credential cools. The
 // appeal link stays out of it: the management API redacts URLs in status
