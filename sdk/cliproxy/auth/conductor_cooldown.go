@@ -1467,6 +1467,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var authSnapshot *Auth
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
+	accountSuspensionLog := ""
 	now := time.Now()
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
 	rejectsToken := !result.Success && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error))
@@ -1518,6 +1519,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Failed++
 		}
 		wasTerminalUnauthorized := hasUnauthorizedAuthFailure(auth)
+		// One warning per suspension: later reports, until something else
+		// replaces it, find the suspension already recorded.
+		if !result.Success && isAccountSuspendedResultError(result.Error) && !isAccountSuspendedResultError(auth.LastError) &&
+			(modelState == nil || !isAccountSuspendedResultError(modelState.LastError)) {
+			accountSuspensionLog = accountSuspendedLogMessage(result.RetryAfter, !m.cooldownDisabledForAuth(auth), result.Error.Message)
+		}
 
 		// retainModelCooldown pins a still-live model cooldown against a success
 		// from an execution dispatched before that cooldown was recorded. Such a
@@ -1551,6 +1558,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			} else if retainModelCooldown || retainAuthCooldown {
 				// Retain a cooldown recorded after this execution was dispatched.
 			} else if modelKey != "" {
+				clearAccountSuspendedErrors(auth)
 				state := ensureModelState(auth, modelKey)
 				modelState = state
 				resetModelState(state, now)
@@ -1561,6 +1569,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					auth.Status = StatusActive
 				}
 			} else {
+				clearAccountSuspendedErrors(auth)
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
@@ -1629,6 +1638,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					}
 
 					statusCode := statusCodeFromResult(result.Error)
+					// A suspended account cools like a credential quota: every
+					// model, to the retry the executor attached.
+					if coolsAsCredentialQuota(result.Error, result.CredentialScope) {
+						statusCode = http.StatusTooManyRequests
+					}
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
 							state.NextRetryAfter = time.Time{}
@@ -2007,12 +2021,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						state = outerState
 						modelState = state
 					}
-					if result.CredentialScope && !disableCooling && statusCodeFromResult(result.Error) == 429 {
+					if result.CredentialScope && !disableCooling && statusCode == http.StatusTooManyRequests {
 						auth.cooldownRecordedSeq = cooldownSeq
 						for _, otherState := range auth.ModelStates {
 							if otherState != nil && otherState != state {
 								otherState.cooldownRecordedSeq = cooldownSeq
 							}
+						}
+					}
+					if isAccountSuspendedResultError(result.Error) {
+						state.StatusMessage = accountSuspendedStatusMessage(result.RetryAfter, !disableCooling)
+						if !wasTerminalUnauthorized {
+							auth.StatusMessage = state.StatusMessage
 						}
 					}
 					auth.Status = StatusError
@@ -2041,7 +2061,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						}
 					}
-					applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					applyAuthFailureStateWithScope(auth, result.Error, result.RetryAfter, now, disableCooling, result.CredentialScope)
+					if isAccountSuspendedResultError(result.Error) {
+						auth.StatusMessage = accountSuspendedStatusMessage(result.RetryAfter, !disableCooling)
+					}
 					if !disableCooling && statusCodeFromResult(result.Error) == 429 && auth.Quota.Exceeded {
 						auth.Quota.cooldownEvaluated = true
 						if keptPriorAuthQuota {
@@ -2101,6 +2124,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	m.mu.Unlock()
 	releaseMutation()
+	if accountSuspensionLog != "" && authSnapshot != nil {
+		logEntryWithRequestID(ctx).WithField("auth_id", authSnapshot.ID).WithField("provider", authSnapshot.Provider).Warn(accountSuspensionLog)
+	}
 	if m.scheduler != nil && authSnapshot != nil {
 		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh
 		var targetModels []string
@@ -3892,6 +3918,12 @@ func isRequestInvalidError(err error) bool {
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling bool) {
+	applyAuthFailureStateWithScope(auth, resultErr, retryAfter, now, disableCooling, false)
+}
+
+// applyAuthFailureStateWithScope is applyAuthFailureState for a result that
+// may be credential scoped.
+func applyAuthFailureStateWithScope(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, disableCooling, credentialScope bool) {
 	if auth == nil {
 		return
 	}
@@ -3925,6 +3957,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	if coolsAsCredentialQuota(resultErr, credentialScope) {
+		statusCode = http.StatusTooManyRequests
+	}
 	if isTransientRateLimitResultError(resultErr) && statusCode == http.StatusTooManyRequests {
 		// Without a model key the transient capacity rejection degrades to an
 		// auth-level transient cooldown (issue 7017), never quota exhaustion.

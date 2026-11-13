@@ -53,6 +53,12 @@ const ErrorCodeCredentialQuota = "credential_quota"
 
 const credentialQuotaErrorCode = ErrorCodeCredentialQuota
 
+// ErrorCodeAccountSuspended marks a refusal that repeats on every call until the
+// account owner acts, such as the Antigravity 403 for an account suspended for
+// a Terms of Service violation. The conductor cools the whole credential far
+// longer than an ordinary 403.
+const ErrorCodeAccountSuspended = "account_suspended"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
