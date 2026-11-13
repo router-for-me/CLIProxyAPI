@@ -123,6 +123,9 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			}
 		} else {
 			models = appendVertexServiceAccountModels(cfg, a, models)
+			if authKind != "apikey" && vertexAuthHasServiceAccount(a) {
+				models = appendVertexClaudeModels(cfg, models)
+			}
 		}
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
@@ -1386,6 +1389,64 @@ func applyOAuthSettingEntries(settings []config.OAuthModelSetting, models []*Mod
 		} else {
 			out = append(out, model)
 		}
+	}
+	return out
+}
+
+// vertexAuthHasServiceAccount reports whether a vertex auth carries service account
+// credentials and no API key or access token, which the Claude rawPredict path requires.
+func vertexAuthHasServiceAccount(a *coreauth.Auth) bool {
+	if a == nil || a.Metadata == nil {
+		return false
+	}
+	if a.Attributes != nil && strings.TrimSpace(a.Attributes["api_key"]) != "" {
+		return false
+	}
+	if token, _ := a.Metadata["access_token"].(string); strings.TrimSpace(token) != "" {
+		return false
+	}
+	sa, ok := a.Metadata["service_account"].(map[string]any)
+	return ok && len(sa) > 0
+}
+
+// appendVertexClaudeModels appends the Claude model IDs configured in
+// vertex-claude-models, skipping blanks, duplicates and IDs already present.
+func appendVertexClaudeModels(cfg *config.Config, baseModels []*ModelInfo) []*ModelInfo {
+	if cfg == nil || len(cfg.VertexClaudeModels) == 0 {
+		return baseModels
+	}
+	seen := make(map[string]struct{}, len(baseModels))
+	for _, model := range baseModels {
+		if model != nil {
+			seen[strings.ToLower(strings.TrimSpace(model.ID))] = struct{}{}
+		}
+	}
+	now := time.Now().Unix()
+	out := baseModels
+	for _, raw := range cfg.VertexClaudeModels {
+		id := strings.TrimSpace(raw)
+		key := strings.ToLower(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		info := &ModelInfo{
+			ID:              id,
+			MetadataModelID: id,
+			Object:          "model",
+			Created:         now,
+			OwnedBy:         "anthropic",
+			Type:            "vertex",
+			DisplayName:     id,
+			UserDefined:     true,
+		}
+		if resolved := modelconfig.ResolveModelInfo(id, "claude", nil); resolved.Thinking != nil {
+			info.Thinking = resolved.Thinking
+		}
+		out = append(out, info)
 	}
 	return out
 }
