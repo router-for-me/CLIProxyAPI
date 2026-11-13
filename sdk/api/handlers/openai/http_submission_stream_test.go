@@ -122,3 +122,21 @@ func TestHTTPSubmissionMessagesLateTruncationHasUnknownOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestHTTPSubmissionExplicitStreamErrorCanFailOver(t *testing.T) {
+	var attempts atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempts.Add(1) == 1 {
+			_, _ = io.WriteString(w, "event: error\ndata: {\"error\":{\"message\":\"not accepted\",\"code\":503}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"id\":\"synthetic\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	response := submissionRequest(t, upstream.URL, true, nil)
+	if attempts.Load() != 2 || response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "recovered") {
+		t.Fatalf("attempts=%d status=%d body=%s", attempts.Load(), response.Code, response.Body.String())
+	}
+}

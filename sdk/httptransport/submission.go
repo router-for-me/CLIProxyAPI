@@ -48,9 +48,22 @@ func IsOutcomeUnknown(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// ClassifySubmissionError stops failures detected after an accepted HTTP response.
-// Explicit HTTP refusals never set the accepted flag.
+// ClassifySubmissionError preserves observed transport failures and classifies
+// incomplete responses. A definitive provider error can still allow failover.
 func ClassifySubmissionError(ctx context.Context, err error) error {
+	var truncated interface{ IsStreamTruncated() bool }
+	incomplete := errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		(errors.As(err, &truncated) && truncated.IsStreamTruncated())
+	return classifySubmissionError(ctx, err, incomplete)
+}
+
+// ClassifyIncompleteResponse marks a protocol failure that left an accepted
+// request without a known outcome, such as a stream with no payload or terminal.
+func ClassifyIncompleteResponse(ctx context.Context, err error) error {
+	return classifySubmissionError(ctx, err, true)
+}
+
+func classifySubmissionError(ctx context.Context, err error, incomplete bool) error {
 	if err == nil || IsOutcomeUnknown(err) || ctx == nil {
 		return err
 	}
@@ -61,7 +74,7 @@ func ClassifySubmissionError(ctx context.Context, err error) error {
 	if terminal := state.terminal.Load(); terminal != nil {
 		return terminal
 	}
-	if !state.accepted.Load() {
+	if !incomplete || !state.accepted.Load() {
 		return err
 	}
 	return state.fail(err)

@@ -658,7 +658,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
-			emptyErr := markUpstreamExecutionAttemptFromContext(ctx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
+			emptyErr := httptransport.ClassifyIncompleteResponse(ctx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
+			emptyErr = markUpstreamExecutionAttemptFromContext(ctx, emptyErr)
 			currentErr := newStreamBootstrapError(emptyErr, streamResult.Headers)
 			if isRequestTerminatedError(emptyErr) {
 				return nil, currentErr
