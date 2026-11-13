@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,11 +23,17 @@ func TestHubReview_CloseAndRevokeDoNotBlockOnBlockedWriteWhenQueueNotFull(t *tes
 
 	srvStalled := dialRole(t, srv.URL, "key-revoke", RoleServer, "srv-stalled", "Stalled Server")
 	cliRevoke := dialRole(t, srv.URL, "key-revoke", RoleClient, "cli-revoke", "Revoke Client")
-	_ = readTextJSONFrame(t, cliRevoke)
+	// Drain the topology stream until srv-stalled is observable so its
+	// server_online cannot be mistaken for the barrier server_list below.
+	waitServersVisible(t, cliRevoke, "srv-stalled")
 
 	srvKeep := dialRole(t, srv.URL, "key-keep", RoleServer, "srv-keep", "Keep Server")
 	cliKeep := dialRole(t, srv.URL, "key-keep", RoleClient, "cli-keep", "Keep Client")
-	_ = readTextJSONFrame(t, cliKeep)
+	// The client handshake can complete before srvKeep's commitPeer publishes
+	// it; srvKeep's server_online may then arrive after cliKeep's initial
+	// server_list. Drain the topology stream until srv-keep is observable so a
+	// stale control frame cannot be mistaken for the data frame read below.
+	waitServersVisible(t, cliKeep, "srv-keep")
 
 	// Send two 8 MiB frames to srvStalled without reading from srvStalled:
 	// frame 1 blocks inside WriteMessage (filling OS socket buffers) while len(sendCh) == 1 << 256.
@@ -232,17 +239,27 @@ func TestHubReview_ByteBudgetBackpressureAndReclaim(t *testing.T) {
 	_ = readTextJSONFrame(t, cli)
 
 	gotFull := make(chan struct{})
-	barrierCh := make(chan struct{}, 1)
+	barrierCh := make(chan error, 1)
 	go func() {
 		var once sync.Once
 		for {
-			frame := readTextJSONFrame(t, cli)
+			// Report read failures on barrierCh instead of terminating this
+			// goroutine via t.Fatalf, which would leave the main test blocked.
+			msgType, raw, errRead := readTunnelTestMessage(cli)
+			if errRead != nil {
+				barrierCh <- errRead
+				return
+			}
+			if msgType != websocket.TextMessage || !ojson.ValidBytes(raw) {
+				continue
+			}
+			frame := ojson.ParseBytes(raw)
 			if frame.Get("type").String() == ControlTypeError && frame.Get("code").String() == ErrCodeTargetBufferFull {
 				once.Do(func() { close(gotFull) })
 				continue
 			}
 			if frame.Get("type").String() == ControlTypeServerList && frame.Get("request_id").String() == "mem-sync" {
-				barrierCh <- struct{}{}
+				barrierCh <- nil
 				return
 			}
 		}
@@ -273,7 +290,14 @@ func TestHubReview_ByteBudgetBackpressureAndReclaim(t *testing.T) {
 	if errWrite := cli.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"mem-sync"}`)); errWrite != nil {
 		t.Fatalf("WriteMessage(mem-sync) error = %v", errWrite)
 	}
-	<-barrierCh
+	select {
+	case errBarrier := <-barrierCh:
+		if errBarrier != nil {
+			t.Fatalf("mem-sync barrier read error = %v", errBarrier)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for mem-sync barrier server_list")
+	}
 
 	// Close srvSlow so all its queued/in-flight bytes are reclaimed from the hub budget, then verify srvClean works.
 	_ = srvSlow.Close()
