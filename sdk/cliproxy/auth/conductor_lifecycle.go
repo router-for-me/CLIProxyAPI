@@ -349,7 +349,8 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		}
 	}
 	if mode == updateModeRefresh {
-		merged := MergeRefreshedAuth(base, existing, auth)
+		mergeCurrent := m.refreshOutcomeCurrentLocked(base, existing)
+		merged := MergeRefreshedAuth(base, mergeCurrent, auth)
 		if merged != nil {
 			if merged.Disabled || merged.Status == StatusDisabled {
 				merged.RefreshFailures = auth.RefreshFailures
@@ -598,7 +599,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		m.mu.Unlock()
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
-	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
+	saveDeltaCurrent := existing
+	if mode == updateModeRefresh {
+		saveDeltaCurrent = m.refreshOutcomeCurrentLocked(existingBeforeSave, existing)
+	}
+	mergeAuthSaveDelta(auth, existingBeforeSave, saveDeltaCurrent, false)
 	if m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) {
 		cooldownStateChanged = true
 		updateAggregatedAvailability(auth, now)
@@ -648,6 +653,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
+	if mode == updateModeRefresh {
+		// Retire the pending marker only when the refreshed state is committed.
+		// A valid Codex partition merge may use a newer current credential.
+		m.retireRefreshJobMarkerLocked(existing)
+	}
 	m.auths[auth.ID] = authClone
 	m.notifyAuthChangeLocked(auth.ID)
 	// Snapshot before unlocking: MarkResult mutates the published auth in place.
