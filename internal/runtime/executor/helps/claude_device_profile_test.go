@@ -162,6 +162,55 @@ func TestApplyClaudeLegacyDeviceHeadersReplacesInvalidNativeSoftwareSignals(t *t
 	}
 }
 
+func TestApplyClaudeLegacyDeviceHeadersPreservesT3CodeSoftwareSignals(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	const (
+		t3UA      = "claude-cli/2.1.323 (external, t3-code, agent-sdk/0.3.321)"
+		t3Package = "0.128.0"
+		t3Runtime = "v26.12.1"
+	)
+	incoming := http.Header{
+		"User-Agent":                  {t3UA},
+		"X-Stainless-Package-Version": {t3Package},
+		"X-Stainless-Runtime-Version": {t3Runtime},
+	}
+	ApplyClaudeLegacyDeviceHeaders(request, incoming, nil, true)
+
+	if got := request.Header.Get("User-Agent"); got != t3UA {
+		t.Fatalf("User-Agent = %q, want %q", got, t3UA)
+	}
+	if got := request.Header.Get("X-Stainless-Package-Version"); got != t3Package {
+		t.Fatalf("X-Stainless-Package-Version = %q, want %q", got, t3Package)
+	}
+	if got := request.Header.Get("X-Stainless-Runtime-Version"); got != t3Runtime {
+		t.Fatalf("X-Stainless-Runtime-Version = %q, want %q", got, t3Runtime)
+	}
+}
+
+func TestResolveClaudeDeviceProfileLocalStoresT3CodeSoftwareTuple(t *testing.T) {
+	ResetClaudeDeviceProfileCache()
+	auth := &cliproxyauth.Auth{ID: "auth-t3-code-profile"}
+	const (
+		t3UA      = "claude-cli/2.1.323 (external, t3-code, agent-sdk/0.3.321)"
+		t3Package = "0.128.0"
+		t3Runtime = "v26.12.1"
+	)
+	headers := http.Header{
+		"User-Agent":                  {t3UA},
+		"X-Stainless-Package-Version": {t3Package},
+		"X-Stainless-Runtime-Version": {t3Runtime},
+		"X-Stainless-Os":              {"MacOS"},
+		"X-Stainless-Arch":            {"arm64"},
+	}
+	profile := resolveClaudeDeviceProfileLocal(auth, "api-key", headers, nil)
+	if profile.UserAgent != t3UA || profile.PackageVersion != t3Package || profile.RuntimeVersion != t3Runtime {
+		t.Fatalf("profile = %#v, want preserved t3-code software tuple", profile)
+	}
+}
+
 func TestApplyClaudeLegacyDeviceHeadersAcceptsConfiguredMeasuredBaseline(t *testing.T) {
 	request, errRequest := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
 	if errRequest != nil {

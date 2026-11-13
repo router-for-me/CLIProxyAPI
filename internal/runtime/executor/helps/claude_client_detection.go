@@ -54,6 +54,7 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 	"ssh-remote":                "claude-ssh-remote",
 	"claude-coworker":           "claude-coworker",
 	"claude-coworker-terminal":  "claude-coworker-terminal",
+	"t3-code":                   "claude-code-t3-code",
 }
 
 // Only product surfaces with verified 2.1.220+ wire behavior are eligible for
@@ -65,6 +66,8 @@ var nativeClaudeEntrypoints = map[string]bool{
 	"sdk-cli":       true,
 	"sdk-ts":        true,
 	"claude-vscode": true,
+	// T3 Code reuses Claude Code's measured strong-signal contract on api.anthropic.com.
+	"t3-code": true,
 }
 
 func isNativeClaudeEntrypoint(entrypoint string, cfg *config.Config) bool {

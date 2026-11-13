@@ -279,6 +279,41 @@ func meetsClaudeDeviceProfileBaseline(candidate, baseline ClaudeDeviceProfile) b
 		candidate.RuntimeVersion == baseline.RuntimeVersion
 }
 
+// allowsNativeAheadOfBaselineSoftwarePassthrough keeps the real software tuple for
+// verified native entrypoints that may ship ahead of CPA's pinned CLI baseline.
+// Measured first-party entrypoints (cli, sdk-cli, sdk-ts, claude-vscode) still
+// require an exact baseline match before stabilization caches their profile.
+func allowsNativeAheadOfBaselineSoftwarePassthrough(candidate, baseline ClaudeDeviceProfile, cfg *config.Config) bool {
+	if candidate.UserAgent == "" || !candidate.hasVersion {
+		return false
+	}
+	if baseline.UserAgent == "" || !baseline.hasVersion {
+		return false
+	}
+	entrypoint, _ := parseClaudeCodeUserAgentDetails(candidate.UserAgent)
+	if entrypoint == "" || !isNativeClaudeEntrypoint(entrypoint, cfg) {
+		return false
+	}
+	if nativeClaudeEntrypoints[entrypoint] && entrypoint != "t3-code" {
+		return false
+	}
+	if !plausibleClaudeCLIVersion(candidate.version, baseline.version) {
+		return false
+	}
+	if !claudePackageVersionPattern.MatchString(candidate.PackageVersion) {
+		return false
+	}
+	if !claudeRuntimeVersionPattern.MatchString(candidate.RuntimeVersion) {
+		return false
+	}
+	return true
+}
+
+func acceptsClaudeDeviceProfileCandidate(candidate, baseline ClaudeDeviceProfile, cfg *config.Config) bool {
+	return meetsClaudeDeviceProfileBaseline(candidate, baseline) ||
+		allowsNativeAheadOfBaselineSoftwarePassthrough(candidate, baseline, cfg)
+}
+
 func pinClaudeDeviceProfilePlatform(profile, baseline ClaudeDeviceProfile) ClaudeDeviceProfile {
 	profile.OS = baseline.OS
 	profile.Arch = baseline.Arch
@@ -287,9 +322,9 @@ func pinClaudeDeviceProfilePlatform(profile, baseline ClaudeDeviceProfile) Claud
 
 // normalizeClaudeDeviceProfile pins stabilized profiles to the configured platform
 // and replaces any software tuple that does not exactly match the measured baseline.
-func normalizeClaudeDeviceProfile(profile, baseline ClaudeDeviceProfile) ClaudeDeviceProfile {
+func normalizeClaudeDeviceProfile(profile, baseline ClaudeDeviceProfile, cfg *config.Config) ClaudeDeviceProfile {
 	profile = pinClaudeDeviceProfilePlatform(profile, baseline)
-	if !meetsClaudeDeviceProfileBaseline(profile, baseline) {
+	if !acceptsClaudeDeviceProfileCandidate(profile, baseline, cfg) {
 		profile.UserAgent = baseline.UserAgent
 		profile.PackageVersion = baseline.PackageVersion
 		profile.RuntimeVersion = baseline.RuntimeVersion
@@ -440,7 +475,7 @@ func resolveClaudeDeviceProfileLocal(auth *cliproxyauth.Auth, apiKey string, hea
 	if hasCandidate {
 		candidate = pinClaudeDeviceProfilePlatform(candidate, baseline)
 	}
-	if hasCandidate && !meetsClaudeDeviceProfileBaseline(candidate, baseline) {
+	if hasCandidate && !acceptsClaudeDeviceProfileCandidate(candidate, baseline, cfg) {
 		hasCandidate = false
 	}
 	cacheProfile := ClaudeDeviceProfile{}
@@ -463,7 +498,7 @@ func resolveClaudeDeviceProfileLocal(auth *cliproxyauth.Auth, apiKey string, hea
 		entry, hasCached = claudeDeviceProfileCache[cacheKey]
 		cachedValid = hasCached && entry.expire.After(now) && entry.profile.UserAgent != ""
 		if cachedValid {
-			entry.profile = normalizeClaudeDeviceProfile(entry.profile, baseline)
+			entry.profile = normalizeClaudeDeviceProfile(entry.profile, baseline, cfg)
 		}
 		if cachedValid && !shouldUpgradeClaudeDeviceProfile(candidate, entry.profile) {
 			entry.expire = now.Add(claudeDeviceProfileTTL)
@@ -484,7 +519,7 @@ func resolveClaudeDeviceProfileLocal(auth *cliproxyauth.Auth, apiKey string, hea
 		claudeDeviceProfileCacheMu.Lock()
 		entry = claudeDeviceProfileCache[cacheKey]
 		if entry.expire.After(now) && entry.profile.UserAgent != "" {
-			entry.profile = normalizeClaudeDeviceProfile(entry.profile, baseline)
+			entry.profile = normalizeClaudeDeviceProfile(entry.profile, baseline, cfg)
 			entry.expire = now.Add(claudeDeviceProfileTTL)
 			claudeDeviceProfileCache[cacheKey] = entry
 			claudeDeviceProfileCacheMu.Unlock()
@@ -502,7 +537,7 @@ func resolveClaudeDeviceProfileHome(ctx context.Context, client claudeDeviceProf
 	if hasCandidate {
 		candidate = pinClaudeDeviceProfilePlatform(candidate, baseline)
 	}
-	if hasCandidate && !meetsClaudeDeviceProfileBaseline(candidate, baseline) {
+	if hasCandidate && !acceptsClaudeDeviceProfileCandidate(candidate, baseline, cfg) {
 		hasCandidate = false
 	}
 
@@ -512,7 +547,7 @@ func resolveClaudeDeviceProfileHome(ctx context.Context, client claudeDeviceProf
 	}
 	valueKey := claudeDeviceProfileKVKey(auth, apiKey, cacheProfile, cfg)
 	if !hasCandidate {
-		return readClaudeDeviceProfileFromHome(ctx, client, valueKey, baseline)
+		return readClaudeDeviceProfileFromHome(ctx, client, valueKey, baseline, cfg)
 	}
 
 	lockKey := claudeDeviceProfileLockKVKey(auth, apiKey, cacheProfile, cfg)
@@ -524,7 +559,7 @@ func resolveClaudeDeviceProfileHome(ctx context.Context, client claudeDeviceProf
 		ClaudeDeviceProfileBeforeCandidateStore(candidate)
 	}
 
-	cached, found, errRead := readClaudeDeviceProfileValueFromHome(ctx, client, valueKey, baseline)
+	cached, found, errRead := readClaudeDeviceProfileValueFromHome(ctx, client, valueKey, baseline, cfg)
 	if errRead != nil {
 		return ClaudeDeviceProfile{}, errRead
 	}
@@ -547,8 +582,8 @@ func resolveClaudeDeviceProfileHome(ctx context.Context, client claudeDeviceProf
 	return candidate, nil
 }
 
-func readClaudeDeviceProfileFromHome(ctx context.Context, client claudeDeviceProfileKVClient, key string, baseline ClaudeDeviceProfile) (ClaudeDeviceProfile, error) {
-	profile, found, errRead := readClaudeDeviceProfileValueFromHome(ctx, client, key, baseline)
+func readClaudeDeviceProfileFromHome(ctx context.Context, client claudeDeviceProfileKVClient, key string, baseline ClaudeDeviceProfile, cfg *config.Config) (ClaudeDeviceProfile, error) {
+	profile, found, errRead := readClaudeDeviceProfileValueFromHome(ctx, client, key, baseline, cfg)
 	if errRead != nil {
 		return ClaudeDeviceProfile{}, errRead
 	}
@@ -561,7 +596,7 @@ func readClaudeDeviceProfileFromHome(ctx context.Context, client claudeDevicePro
 	return profile, nil
 }
 
-func readClaudeDeviceProfileValueFromHome(ctx context.Context, client claudeDeviceProfileKVClient, key string, baseline ClaudeDeviceProfile) (ClaudeDeviceProfile, bool, error) {
+func readClaudeDeviceProfileValueFromHome(ctx context.Context, client claudeDeviceProfileKVClient, key string, baseline ClaudeDeviceProfile, cfg *config.Config) (ClaudeDeviceProfile, bool, error) {
 	raw, found, errGet := client.KVGet(ctx, key)
 	if errGet != nil || !found {
 		return ClaudeDeviceProfile{}, false, errGet
@@ -574,7 +609,7 @@ func readClaudeDeviceProfileValueFromHome(ctx context.Context, client claudeDevi
 	if strings.TrimSpace(profile.UserAgent) == "" {
 		return ClaudeDeviceProfile{}, false, nil
 	}
-	return normalizeClaudeDeviceProfile(profile, baseline), true, nil
+	return normalizeClaudeDeviceProfile(profile, baseline, cfg), true, nil
 }
 
 func writeClaudeDeviceProfileToHome(ctx context.Context, client claudeDeviceProfileKVClient, key string, profile ClaudeDeviceProfile) error {
