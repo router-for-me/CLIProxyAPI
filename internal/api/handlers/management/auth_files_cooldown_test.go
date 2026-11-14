@@ -1237,8 +1237,15 @@ func (s *targetedRecoveryTestCodexOAuthService) CreateTokenStorage(bundle *codex
 
 func pollOAuthStatusUntilDone(t *testing.T, router http.Handler, state string) map[string]any {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// The status endpoint has no completion signal to wait on, so poll it the
+	// way a management client does. The flow under test checks for its callback
+	// file every 500ms; pacing the polls keeps this loop from starving that
+	// goroutine, and the deadline is a generous failure bound for loaded hosts.
+	deadline := time.NewTimer(15 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/status?state="+state, nil))
 		if w.Code != http.StatusOK {
@@ -1251,9 +1258,12 @@ func pollOAuthStatusUntilDone(t *testing.T, router http.Handler, state string) m
 		if out["status"] != "wait" {
 			return out
 		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for oauth session %s", state)
+		case <-ticker.C:
+		}
 	}
-	t.Fatalf("timed out waiting for oauth session %s", state)
-	return nil
 }
 
 type failingRefreshManagementExecutor struct {

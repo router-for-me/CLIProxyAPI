@@ -21,6 +21,11 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+// devinOAuthTestWait is a failure bound, not an expected latency: the flow
+// checks for its callback file every 500ms and saves the credential to disk,
+// and both stall for seconds on a loaded host.
+const devinOAuthTestWait = 15 * time.Second
+
 type fakeDevinOAuthService struct {
 	exchange func(context.Context, string, string) (string, error)
 	create   func(context.Context, string) (*coreauth.Auth, error)
@@ -122,11 +127,14 @@ func TestDevinRemoteOAuthFlow(t *testing.T) {
 		if base64.RawURLEncoding.EncodeToString(digest[:]) != query.Get("code_challenge") {
 			t.Fatal("PKCE challenge does not match verifier")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("token exchange did not start")
+	case <-time.After(devinOAuthTestWait):
+		// Report the session status: it carries the reason when the flow gave up.
+		w = httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/get-auth-status?state="+start.State, nil))
+		t.Fatalf("token exchange did not start, session status: %s", w.Body.String())
 	}
 
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(devinOAuthTestWait)
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -252,5 +260,35 @@ func TestWaitDevinOAuthCallbackExpiredContext(t *testing.T) {
 	_, errWait := waitDevinOAuthCallback(ctx, filepath.Join(t.TempDir(), "missing.oauth"), state)
 	if errWait == nil || errWait.Error() != "Timeout waiting for OAuth callback" {
 		t.Fatalf("error = %v", errWait)
+	}
+}
+
+func TestWaitDevinOAuthCallbackRetriesTransientReadError(t *testing.T) {
+	const state = "devin-transient-read-error"
+	RegisterOAuthSession(state, "devin")
+	defer CompleteOAuthSession(state)
+
+	// On Windows a read that lands while the callback handler renames the file
+	// into place fails with a sharing violation. The next read succeeds.
+	reads := 0
+	originalRead := readDevinOAuthCallbackFile
+	readDevinOAuthCallbackFile = func(string) ([]byte, error) {
+		reads++
+		if reads == 1 {
+			return nil, errors.New("the process cannot access the file because it is being used by another process")
+		}
+		return []byte(`{"state":"` + state + `","code":"code"}`), nil
+	}
+	t.Cleanup(func() { readDevinOAuthCallbackFile = originalRead })
+
+	result, errWait := waitDevinOAuthCallback(context.Background(), filepath.Join(t.TempDir(), "callback.oauth"), state)
+	if errWait != nil {
+		t.Fatalf("transient read error ended the login: %v", errWait)
+	}
+	if result.Code != "code" || result.State != state {
+		t.Fatalf("unexpected callback: %+v", result)
+	}
+	if reads != 2 {
+		t.Fatalf("reads = %d, want 2", reads)
 	}
 }
