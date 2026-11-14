@@ -81,10 +81,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			// already gone need no answer.
 			if c.Request.Context().Err() == nil {
 				if claimed := opts.localInterrupt.takeClaimed(); claimed != nil {
-					_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
-						StatusCode: http.StatusBadRequest,
-						Error:      errors.New("no active response to interrupt"),
-					})
+					_ = answerResponsesWebsocketStaleInterrupt(writer, wsTimelineLog, opts.localInterrupt, claimed)
 				}
 			}
 		}()
@@ -129,10 +126,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// the reader already told the client it was handled locally.
 				// The response is over: reject instead of fabricating an
 				// incomplete event, and keep waiting for the turn to drain.
-				if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
-					StatusCode: http.StatusBadRequest,
-					Error:      errors.New("no active response to interrupt"),
-				}); errWrite != nil {
+				if errWrite := answerResponsesWebsocketStaleInterrupt(writer, wsTimelineLog, opts.localInterrupt, interruptPayload); errWrite != nil {
 					cancel(errWrite)
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 				}
@@ -204,10 +198,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					// The response is over: reject instead of fabricating an
 					// incomplete event, then keep forwarding this chunk.
-					if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
-						StatusCode: http.StatusBadRequest,
-						Error:      errors.New("no active response to interrupt"),
-					}); errWrite != nil {
+					if errWrite := answerResponsesWebsocketStaleInterrupt(writer, wsTimelineLog, opts.localInterrupt, interruptPayload); errWrite != nil {
 						cancel(errWrite)
 						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errWrite
 					}
@@ -310,7 +301,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// The isActive guard keeps multi-payload chunks from
 					// toggling the state back off after response.created
 					// reactivated it.
-					opts.localInterrupt.deactivate()
+					opts.localInterrupt.deactivate(responseCompletedIDFromPayload(payloads[i]))
 				}
 				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
 					log.Warnf(
@@ -842,6 +833,20 @@ func buildResponsesWebsocketErrorPayload(errMsg *interfaces.ErrorMessage) ([]byt
 		}
 	}
 	return payloadDoc.Bytes(), nil
+}
+
+// answerResponsesWebsocketStaleInterrupt answers a frame claimed before its turn
+// ended. A frame for the response that just ended crossed its terminal event
+// and gets no answer; any other id is rejected.
+func answerResponsesWebsocketStaleInterrupt(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, local *responsesLocalInterrupt, payload []byte) error {
+	if local.ended(payload) {
+		return nil
+	}
+	_, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New("no active response to interrupt"),
+	})
+	return errWrite
 }
 
 func writeResponsesWebsocketError(writer *responsesWebsocketWriter, wsTimelineLog websocketTimelineAppender, errMsg *interfaces.ErrorMessage) ([]byte, error) {

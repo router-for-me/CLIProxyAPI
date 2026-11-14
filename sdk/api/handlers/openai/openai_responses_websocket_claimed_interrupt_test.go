@@ -14,7 +14,7 @@ func TestResponsesLocalInterruptRetainsClaimedFrameAfterEnd(t *testing.T) {
 	if !local.deliver([]byte(`{"type":"response.interrupt","response_id":"unknown"}`)) {
 		t.Fatal("frame was not claimed while active")
 	}
-	local.deactivate()
+	local.deactivate("")
 	local.end()
 	if local.deliver([]byte(`{"type":"response.interrupt","response_id":"unknown-2"}`)) {
 		t.Fatal("frame claimed after end")
