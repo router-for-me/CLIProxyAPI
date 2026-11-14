@@ -385,6 +385,7 @@ var sharedKeyFields = map[string]bool{
 	"priority": true, "prefix": true, "proxy-url": true, "headers": true,
 	"models": true, "excluded-models": true, "disable-cooling": true,
 	"request-retry": true, "request-scoped-errors": true,
+	"max-quota-cooldown-seconds": true,
 	// connection-pool follows proxy-url: a group-level default that each key may
 	// override, so an operator can pool one provider without touching the others.
 	"connection-pool": true,

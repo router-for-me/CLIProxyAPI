@@ -787,6 +787,16 @@ type ClaudeKey struct {
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
+	// MaxQuotaCooldownSeconds optionally caps the effective duration of a quota
+	// cooldown that this credential inherits from an upstream Retry-After 429.
+	// Set this on a static api-key entry that points at another gateway which
+	// pools several accounts behind one key: one exhausted downstream account must
+	// not lock the whole cascade for its multi-day quota window. Once the cap
+	// elapses the credential becomes selectable again (half-open probe), and a
+	// healthy downstream account clears the cooldown on the first success.
+	// Nil, zero or negative means no cap and preserves the legacy behavior.
+	MaxQuotaCooldownSeconds *int `yaml:"max-quota-cooldown-seconds,omitempty" json:"max-quota-cooldown-seconds,omitempty"`
+
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 
@@ -914,6 +924,16 @@ type CodexKey struct {
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
+	// MaxQuotaCooldownSeconds optionally caps the effective duration of a quota
+	// cooldown that this credential inherits from an upstream Retry-After 429.
+	// Set this on a static api-key entry that points at another gateway which
+	// pools several accounts behind one key: one exhausted downstream account must
+	// not lock the whole cascade for its multi-day quota window. Once the cap
+	// elapses the credential becomes selectable again (half-open probe), and a
+	// healthy downstream account clears the cooldown on the first success.
+	// Nil, zero or negative means no cap and preserves the legacy behavior.
+	MaxQuotaCooldownSeconds *int `yaml:"max-quota-cooldown-seconds,omitempty" json:"max-quota-cooldown-seconds,omitempty"`
+
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 }
@@ -1027,6 +1047,16 @@ type GeminiKey struct {
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
+	// MaxQuotaCooldownSeconds optionally caps the effective duration of a quota
+	// cooldown that this credential inherits from an upstream Retry-After 429.
+	// Set this on a static api-key entry that points at another gateway which
+	// pools several accounts behind one key: one exhausted downstream account must
+	// not lock the whole cascade for its multi-day quota window. Once the cap
+	// elapses the credential becomes selectable again (half-open probe), and a
+	// healthy downstream account clears the cooldown on the first success.
+	// Nil, zero or negative means no cap and preserves the legacy behavior.
+	MaxQuotaCooldownSeconds *int `yaml:"max-quota-cooldown-seconds,omitempty" json:"max-quota-cooldown-seconds,omitempty"`
+
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 }
@@ -1117,6 +1147,15 @@ type OpenAICompatibility struct {
 	// RequestRetry optionally overrides the global request-retry for this provider.
 	// Nil or a negative value means "use the global request-retry". 0 disables additional retry rounds.
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// MaxQuotaCooldownSeconds optionally caps the effective duration of a quota
+	// cooldown that this provider inherits from an upstream Retry-After 429.
+	// Use it when this entry points at another gateway pooling multiple accounts
+	// behind one key, so one exhausted downstream account cannot lock the whole
+	// cascade for its multi-day quota window. The capped window doubles as a
+	// half-open probe interval; a healthy downstream account clears the cooldown
+	// on the first success. Nil, zero or negative preserves the legacy behavior.
+	MaxQuotaCooldownSeconds *int `yaml:"max-quota-cooldown-seconds,omitempty" json:"max-quota-cooldown-seconds,omitempty"`
 
 	// RequestScopedErrors configures custom classification rules for upstream errors.
 	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`

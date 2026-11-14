@@ -137,6 +137,21 @@ func recoverableFailureRetryAfterWithHint(now time.Time, retryAfter *time.Durati
 	return now.Add(time.Duration(seconds) * time.Second)
 }
 
+// applyInheritedQuotaCooldownCap bounds an upstream-inherited quota cooldown by the
+// auth-scoped max-quota-cooldown cap. It only shortens a cooldown driven by an explicit
+// upstream Retry-After, so a single exhausted account behind a cascaded gateway (one
+// api-key entry fronting a multi-account pool) cannot lock the whole credential for its
+// multi-day quota window. Once the capped window elapses the credential is selectable
+// again and a healthy downstream account clears the cooldown on the first success.
+func applyInheritedQuotaCooldownCap(auth *Auth, cooldown time.Duration) time.Duration {
+	if capSeconds, ok := auth.MaxQuotaCooldownSeconds(); ok {
+		if max := time.Duration(capSeconds) * time.Second; cooldown > max {
+			return max
+		}
+	}
+	return cooldown
+}
+
 // SetConfig updates the runtime config snapshot used by request-time helpers.
 // Callers should provide the latest config on reload so per-credential alias mapping stays in sync.
 func (m *Manager) SetConfig(cfg *internalconfig.Config) {
@@ -1774,6 +1789,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									if cooldown < minQuotaCooldownFloor {
 										cooldown = minQuotaCooldownFloor
 									}
+									cooldown = applyInheritedQuotaCooldownCap(auth, cooldown)
 									next = now.Add(cooldown).Round(0)
 								} else {
 									quotaForFailure := state.Quota
@@ -4234,6 +4250,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 					if cooldown < minQuotaCooldownFloor {
 						cooldown = minQuotaCooldownFloor
 					}
+					cooldown = applyInheritedQuotaCooldownCap(auth, cooldown)
 					next = now.Add(cooldown).Round(0)
 					if isForceAuth {
 						ownAuthForceDeadline = next

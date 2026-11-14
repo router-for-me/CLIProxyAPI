@@ -821,6 +821,19 @@ func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	return false, false
 }
 
+// MaxQuotaCooldownSeconds returns the opt-in cap (in seconds) applied to quota
+// cooldowns this auth inherits from an upstream Retry-After 429. ok=false means no
+// cap is configured, in which case the upstream cooldown duration is honored as-is.
+func (a *Auth) MaxQuotaCooldownSeconds() (seconds int, ok bool) {
+	if a == nil || a.Metadata == nil {
+		return 0, false
+	}
+	if parsed, okParse := parseIntAny(a.Metadata["max_quota_cooldown_seconds"]); okParse && parsed > 0 {
+		return parsed, true
+	}
+	return 0, false
+}
+
 // ToolPrefixDisabled returns whether the proxy_ tool name prefix should be
 // skipped for this auth. When true, tool names are sent to Anthropic unchanged.
 // The value is read from metadata key "tool_prefix_disabled" (or "tool-prefix-disabled").
