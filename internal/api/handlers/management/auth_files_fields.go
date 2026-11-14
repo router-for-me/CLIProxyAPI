@@ -919,6 +919,11 @@ func cleanAuthFilePath(path string) string {
 	if path == "" {
 		return ""
 	}
+	if real, errReal := filepath.EvalSymlinks(path); errReal == nil && strings.TrimSpace(real) != "" {
+		path = real
+	} else if parent, errParent := filepath.EvalSymlinks(filepath.Dir(path)); errParent == nil && strings.TrimSpace(parent) != "" {
+		path = filepath.Join(parent, filepath.Base(path))
+	}
 	if abs, errAbs := filepath.Abs(path); errAbs == nil && strings.TrimSpace(abs) != "" {
 		path = abs
 	}
@@ -1115,7 +1120,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				AuthDir:          authDir,
 				Now:              time.Now(),
 				IDGenerator:      synthesizer.NewStableIDGenerator(),
-				PluginAuthParser: h.pluginHost,
+				PluginAuthParser: h.pluginAuthParserSnapshot(),
 			}, savedPath, data)
 			if errSynthesize != nil {
 				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)
