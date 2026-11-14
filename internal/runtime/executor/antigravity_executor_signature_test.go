@@ -388,6 +388,37 @@ func TestAntigravitySensitiveWordsReplaceFromYAML(t *testing.T) {
 	}
 }
 
+func TestAntigravitySensitivePatternsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`antigravity:
+  sensitive-words:
+    - "omp"
+    - "RFC 2119"
+  sensitive-patterns-replace:
+    - pattern: '(?m)^RFC 2119[^\n]*\n?'
+      replacement: ""
+    - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+      replacement: ""
+    - pattern: '(?m)^You are omp[^\n]*\n?'
+      replacement: ""
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	executor := NewAntigravityExecutor(cfg)
+	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"You are omp's trusted coding assistant.\nRFC 2119 keywords: MUST, REQUIRED.\n<system-conventions>\nRFC 2119 applies.\n</system-conventions>\nKeep this instruction for omp."}]},"contents":[{"role":"user","parts":[{"text":"You are omp's trusted coding assistant."}]}]}}`)
+
+	got := executor.obfuscateSensitiveWords(payload)
+	systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String()
+	wantSystem := "Keep this instruction for o\u034Fmp."
+	if systemText != wantSystem {
+		t.Fatalf("systemInstruction = %q, want %q", systemText, wantSystem)
+	}
+	contentText := ojson.GetBytes(got, "request.contents.0.parts.0.text").String()
+	if contentText != "You are omp's trusted coding assistant." {
+		t.Fatalf("contents = %q, want unchanged", contentText)
+	}
+}
+
 func TestAntigravitySensitiveWordsReplaceOnlyPreservesToolsAndCountTokens(t *testing.T) {
 	captured := make(chan []byte, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

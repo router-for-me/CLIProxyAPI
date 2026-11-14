@@ -297,6 +297,116 @@ func copyStringMapFromAny(raw any) map[string]string {
 	}
 }
 
+func copyPatternPairsFromAny(raw any) [][2]string {
+	switch typed := raw.(type) {
+	case [][2]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, len(typed))
+		copy(out, typed)
+		return out
+	case []map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, 0, len(typed))
+		for _, item := range typed {
+			if p, ok := item["pattern"]; ok {
+				out = append(out, [2]string{p, item["replacement"]})
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []map[string]any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, 0, len(typed))
+		for _, item := range typed {
+			p, ok := item["pattern"].(string)
+			if !ok {
+				continue
+			}
+			r, _ := item["replacement"].(string)
+			out = append(out, [2]string{p, r})
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, 0, len(typed))
+		for _, rawItem := range typed {
+			switch item := rawItem.(type) {
+			case map[string]string:
+				if p, ok := item["pattern"]; ok {
+					out = append(out, [2]string{p, item["replacement"]})
+				}
+			case map[string]any:
+				p, ok := item["pattern"].(string)
+				if !ok {
+					continue
+				}
+				r, _ := item["replacement"].(string)
+				out = append(out, [2]string{p, r})
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// ReadMetadataPatternPairs reads a slice of [pattern, replacement] pairs from metadata under the metadata lock.
+func ReadMetadataPatternPairs(metadata *map[string]any, key string) [][2]string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	return copyPatternPairsFromAny((*metadata)[key])
+}
+
+// ReadMetadataHomeCloakPatterns extracts credential_options.cloak.sensitive-patterns-replace
+// from metadata under the metadata lock.
+func ReadMetadataHomeCloakPatterns(metadata *map[string]any) [][2]string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	opts, ok := (*metadata)["credential_options"].(map[string]any)
+	if !ok || opts == nil {
+		return nil
+	}
+	rawCloak, exists := opts["cloak"]
+	if !exists || rawCloak == nil {
+		return nil
+	}
+	cloakMap, ok := rawCloak.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return copyPatternPairsFromAny(cloakMap["sensitive-patterns-replace"])
+}
+
 // ReadMetadataStringSlice reads a []string metadata entry under the metadata lock,
 // copying string elements from either []string or []any.
 func ReadMetadataStringSlice(metadata *map[string]any, key string) []string {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -407,12 +408,43 @@ func NormalizeSensitiveWordsReplace(in map[string]string) map[string]string {
 	return out
 }
 
+// NormalizeSensitivePatternsReplace validates Go RE2 regex rules, logs and drops
+// invalid or blank patterns, and preserves replacement values (including empty strings).
+func NormalizeSensitivePatternsReplace(in []SensitivePatternRule) []SensitivePatternRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SensitivePatternRule, 0, len(in))
+	for i, rule := range in {
+		if strings.TrimSpace(rule.Pattern) == "" {
+			continue
+		}
+		if _, errCompile := regexp.Compile(rule.Pattern); errCompile != nil {
+			log.WithFields(log.Fields{
+				"rule_index": i + 1,
+				"pattern":    rule.Pattern,
+				"error":      errCompile,
+			}).Warn("sensitive-patterns-replace rule dropped: invalid regex")
+			continue
+		}
+		out = append(out, SensitivePatternRule{
+			Pattern:     rule.Pattern,
+			Replacement: rule.Replacement,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // SanitizeAntigravity normalizes Antigravity sensitive-word settings.
 func (cfg *Config) SanitizeAntigravity() {
 	if cfg == nil {
 		return
 	}
 	cfg.Antigravity.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cfg.Antigravity.SensitiveWordsReplace)
+	cfg.Antigravity.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cfg.Antigravity.SensitivePatternsReplace)
 }
 
 // SanitizeDevin normalizes Devin sensitive-word settings.
@@ -421,6 +453,7 @@ func (cfg *Config) SanitizeDevin() {
 		return
 	}
 	cfg.Devin.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cfg.Devin.SensitiveWordsReplace)
+	cfg.Devin.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cfg.Devin.SensitivePatternsReplace)
 }
 
 // NormalizeCloakConfig trims strings and removes blank sensitive words.
@@ -445,6 +478,7 @@ func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
 		cloak.SensitiveWords = nil
 	}
 	cloak.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cloak.SensitiveWordsReplace)
+	cloak.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cloak.SensitivePatternsReplace)
 	return cloak
 }
 

@@ -2910,16 +2910,24 @@ func (e *DevinExecutor) getSensitiveWordsReplace() map[string]string {
 	return nil
 }
 
+func (e *DevinExecutor) getSensitivePatternsReplace() []config.SensitivePatternRule {
+	if e != nil && e.cfg != nil && len(e.cfg.Devin.SensitivePatternsReplace) > 0 {
+		return e.cfg.Devin.SensitivePatternsReplace
+	}
+	return nil
+}
+
 func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 	if e == nil {
 		return nil
 	}
 	words := e.getSensitiveWords()
 	replacements := e.getSensitiveWordsReplace()
-	if len(words) == 0 && len(replacements) == 0 {
+	patterns := e.getSensitivePatternsReplace()
+	if len(words) == 0 && len(replacements) == 0 && len(patterns) == 0 {
 		return nil
 	}
-	key := helps.SensitiveWordConfigCacheKey(words, replacements)
+	key := helps.SensitiveWordConfigCacheKeyWithPatterns(words, replacements, patterns)
 	e.matcherMu.RLock()
 	if e.lastWordsKey == key {
 		m := e.cachedMatcher
@@ -2934,7 +2942,7 @@ func (e *DevinExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
 		return e.cachedMatcher
 	}
 	e.lastWordsKey = key
-	e.cachedMatcher = helps.BuildSensitiveWordMatcherWithReplacements(words, replacements)
+	e.cachedMatcher = helps.BuildSensitiveWordMatcherWithPatterns(words, replacements, patterns)
 	return e.cachedMatcher
 }
 
