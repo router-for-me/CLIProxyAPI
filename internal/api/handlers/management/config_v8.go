@@ -58,6 +58,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	if c.Request.Method == http.MethodGet {
 		config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 		if !yamlRequest {
+			if IsGuestRequest(c) {
+				// The management section holds the management key hash.
+				deleteConfigV8Path(root, []string{"management"})
+			}
 			if servers := configV8Node(root, v8ICEServersPath); servers != nil && servers.Kind == yaml.SequenceNode {
 				for _, server := range servers.Content {
 					deleteConfigV8Path(server, []string{"username"})
@@ -153,6 +157,16 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	if !yamlRequest && c.Request.Method != http.MethodDelete {
 		preserveV8TURNSecrets(root, before)
+	}
+	if IsGuestRequest(c) {
+		if len(parts) == 0 && c.Request.Method == http.MethodPut {
+			// Guests never see this section, so a replacement built from their GET lacks it.
+			restoreConfigV8Section(root, before, "management")
+		}
+		if !configV8SectionUnchanged(before, root, "management") {
+			c.JSON(http.StatusForbidden, gin.H{"error": guestAccessDeniedMs})
+			return
+		}
 	}
 	// Revisions are owned by Home and must not become ordinary editable settings.
 	for _, field := range []string{"credentials/concurrency/lifecycle-config-revision", "credentials/concurrency/observation-barrier-revision", "plugins/auth-revision"} {
@@ -387,4 +401,28 @@ func mergeConfigV8Patch(dst, src *yaml.Node) {
 			dst.Content = append(dst.Content, key, value)
 		}
 	}
+}
+
+// restoreConfigV8Section copies a top-level section from before into root when root lacks it.
+func restoreConfigV8Section(root, before *yaml.Node, section string) {
+	if root.Kind != yaml.MappingNode || configV8Node(root, []string{section}) != nil {
+		return
+	}
+	old := configV8Node(before, []string{section})
+	if old == nil {
+		return
+	}
+	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: section}, cloneConfigV8Node(old))
+}
+
+// configV8SectionUnchanged reports whether a top-level section is identical in both trees.
+func configV8SectionUnchanged(before, after *yaml.Node, section string) bool {
+	var a, b any
+	if node := configV8Node(before, []string{section}); node != nil {
+		_ = node.Decode(&a)
+	}
+	if node := configV8Node(after, []string{section}); node != nil {
+		_ = node.Decode(&b)
+	}
+	return reflect.DeepEqual(a, b)
 }

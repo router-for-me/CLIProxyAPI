@@ -64,6 +64,9 @@ type Handler struct {
 	siwcOAuthFactory        func(*config.Config) siwcOAuthService
 	siwcCommitMu            sync.Mutex
 	pluginLoginSaveMu       sync.Mutex
+	guestsOnce              sync.Once
+	guestKeys               *guestStore
+	guestsErr               error
 }
 
 type configReloadSnapshot struct {
@@ -356,10 +359,17 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			provided = c.GetHeader("X-Management-Key")
 		}
 
-		allowed, statusCode, errMsg := h.AuthenticateManagementKey(clientIP, localClient, provided)
+		guest, allowed, statusCode, errMsg := h.authenticateManagement(clientIP, localClient, provided, true)
 		if !allowed {
 			c.AbortWithStatusJSON(statusCode, gin.H{"error": errMsg})
 			return
+		}
+		if guest != nil {
+			c.Set(guestPrincipalKey, guest)
+			if !authorizeGuest(c, guest) {
+				denyGuest(c)
+				return
+			}
 		}
 		c.Next()
 	}
@@ -367,12 +377,20 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 // AuthenticateManagementKey verifies the provided management key for the given client.
 // It mirrors the behaviour of Middleware() so non-HTTP callers can reuse the same logic.
+// Guest keys are not accepted here.
 func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
+	_, allowed, statusCode, errMsg := h.authenticateManagement(clientIP, localClient, provided, false)
+	return allowed, statusCode, errMsg
+}
+
+// authenticateManagement checks the management key and, when allowGuest is set,
+// guest keys. A non-nil guest means the caller used a guest key.
+func (h *Handler) authenticateManagement(clientIP string, localClient bool, provided string, allowGuest bool) (*guestRecord, bool, int, string) {
 	const maxFailures = 5
 	const banDuration = 30 * time.Minute
 
 	if h == nil {
-		return false, http.StatusForbidden, "remote management disabled"
+		return nil, false, http.StatusForbidden, "remote management disabled"
 	}
 
 	h.mu.Lock()
@@ -398,7 +416,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		if now.Before(ai.blockedUntil) {
 			remaining := ai.blockedUntil.Sub(now).Round(time.Second)
 			h.attemptsMu.Unlock()
-			return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+			return nil, false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
 		}
 		// Ban expired, reset state
 		ai.blockedUntil = time.Time{}
@@ -407,7 +425,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	h.attemptsMu.Unlock()
 
 	if !localClient && !allowRemote {
-		return false, http.StatusForbidden, "remote management disabled"
+		return nil, false, http.StatusForbidden, "remote management disabled"
 	}
 
 	fail := func() {
@@ -436,36 +454,45 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if secretHash == "" && envSecret == "" {
-		return false, http.StatusForbidden, "remote management key not set"
+		return nil, false, http.StatusForbidden, "remote management key not set"
 	}
 
 	if provided == "" {
 		fail()
-		return false, http.StatusUnauthorized, "missing management key"
+		return nil, false, http.StatusUnauthorized, "missing management key"
 	}
 
 	if localClient {
 		if lp := h.localPassword; lp != "" {
 			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
 				reset()
-				return true, 0, ""
+				return nil, true, 0, ""
 			}
 		}
 	}
 
 	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
 		reset()
-		return true, 0, ""
+		return nil, true, 0, ""
+	}
+
+	// Guest keys are random and prefixed, so check them before the slow bcrypt compare.
+	// A guest success must not clear the failure count: it would let a guest
+	// interleave valid requests with guesses at the management key.
+	if allowGuest && strings.HasPrefix(provided, guestKeyPrefix) {
+		if g := h.guests().lookup(provided); g != nil {
+			return g, true, 0, ""
+		}
 	}
 
 	if secretHash == "" || !h.authCache.verify(secretHash, provided) {
 		fail()
-		return false, http.StatusUnauthorized, "invalid management key"
+		return nil, false, http.StatusUnauthorized, "invalid management key"
 	}
 
 	reset()
 
-	return true, 0, ""
+	return nil, true, 0, ""
 }
 
 // persistLocked saves the current in-memory config to disk.

@@ -287,6 +287,50 @@ The v0 callback and credential-list contracts are unchanged. SIWC activation,
 unbinding, and standalone SIWC credential creation are not separate management
 operations in this release.
 
+## Guest keys
+
+The management key can create guest keys (`cpg_...`) that grant `none`, `view`
+or `edit` per route group. `view` allows GET; `edit` allows every method and
+implies `view`. Guest keys are stored hashed in `guest-keys.json` next to the
+config file. Permission changes apply to the next request.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/v8/management/session` | `{role, name?, permissions}` for the calling key |
+| GET | `/v8/management/guests` | Management key only |
+| GET | `/v8/management/guests/routes` | Route groups, `[{id, paths, edit-on-get?}]` |
+| POST | `/v8/management/guests` | Body `{name, permissions}`; the key is returned once |
+| PATCH | `/v8/management/guests/:id` | Body `{name?, permissions?}` |
+| POST | `/v8/management/guests/:id/rotate` | Returns a new key once |
+| DELETE | `/v8/management/guests/:id` | |
+
+`permissions` maps a route group id to a level. Route groups, with paths below
+`/v8/management` (the longest matching prefix owns a request):
+
+| Group | Paths |
+| --- | --- |
+| `config` | `/config` |
+| `config-plugins` | `/config/plugins` |
+| `config-logging` | `/config/observability/logs` |
+| `logs` | `/observability/logs` |
+| `usage` | `/observability/usage` |
+| `credentials` | `/credentials` |
+| `credentials-download` | `/credentials/download` |
+| `cooldown` | `/routing/cooldown/reset` |
+| `model-definitions` | `/routing/model-definitions`, `/models/refresh` |
+| `oauth` | `/oauth` (GET also needs `edit`: it starts a login) |
+| `oauth-status` | `/oauth/status`, `/oauth/siwc/status` |
+| `api-call` | `/requests/api-call` |
+| `plugins` | `/plugins` |
+| `plugins-store` | `/plugins/store` |
+| `plugin-routes` | plugin-owned routes under `/v0/management` |
+
+`/server/latest-version` is open to any guest. Everything else, including
+`config.yaml`, `session` management and `guests`, is management-key only.
+Guests never see or change the `management` config section. `config` view
+returns provider keys, `credentials-download` returns credential files and
+`api-call` sends requests with stored credentials, so grant those deliberately.
+
 ## v0 compatibility
 
 The `/v0/management` endpoints keep their original paths and payloads, including
