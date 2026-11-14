@@ -1981,8 +1981,12 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			return true
 		})
 		passthroughMCPTools := make([]string, 0, 4)
+		unaliasedTools := make([]string, 0, 4)
 		tools.ForEach(func(_, tool ojson.Result) bool {
 			if helps.IsClaudeServerToolType(tool.Get("type").String()) {
+				if name := tool.Get("name").String(); name != "" {
+					unaliasedTools = append(unaliasedTools, strings.Clone(name))
+				}
 				return true
 			}
 			name := strings.Clone(tool.Get("name").String())
@@ -1999,13 +2003,15 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
 			if !allocated {
 				log.Warnf("claude oauth mcp alias: no free alias left for tool %q, forwarding the original name", name)
+				unaliasedTools = append(unaliasedTools, name)
 				return true
 			}
 			forwardMap[name] = alias
 			reservedNames[alias] = true
 			return true
 		})
-		recordPassthroughMCPTools(recordRename, forwardMap, passthroughMCPTools)
+		recordUnaliasedTools(recordRename, forwardMap, passthroughMCPTools)
+		recordUnaliasedTools(recordRename, forwardMap, unaliasedTools)
 	}
 
 	rewriteName := func(name string) (string, bool) {
@@ -2191,6 +2197,7 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 							recordRename(changeToolName, newName)
 						}
 					}
+					recordInlineUnaliasedTool(part, forwardMap, recordRename)
 				}
 				return validOffsets
 			})
@@ -2267,8 +2274,12 @@ func remapOAuthToolNamesWithOptionsDoc(doc *ojson.Doc, mcpAliases claudeMCPAlias
 			return true
 		})
 		passthroughMCPTools := make([]string, 0, 4)
+		unaliasedTools := make([]string, 0, 4)
 		tools.ForEach(func(_, tool ojson.Result) bool {
 			if helps.IsClaudeServerToolType(tool.Get("type").String()) {
+				if name := tool.Get("name").String(); name != "" {
+					unaliasedTools = append(unaliasedTools, strings.Clone(name))
+				}
 				return true
 			}
 			name := strings.Clone(tool.Get("name").String())
@@ -2285,13 +2296,15 @@ func remapOAuthToolNamesWithOptionsDoc(doc *ojson.Doc, mcpAliases claudeMCPAlias
 			alias, allocated := helps.AllocateClaudeMCPToolAlias(mcpAliases.secret, name, reservedNames)
 			if !allocated {
 				log.Warnf("claude oauth mcp alias: no free alias left for tool %q, forwarding the original name", name)
+				unaliasedTools = append(unaliasedTools, name)
 				return true
 			}
 			forwardMap[name] = alias
 			reservedNames[alias] = true
 			return true
 		})
-		recordPassthroughMCPTools(recordRename, forwardMap, passthroughMCPTools)
+		recordUnaliasedTools(recordRename, forwardMap, passthroughMCPTools)
+		recordUnaliasedTools(recordRename, forwardMap, unaliasedTools)
 	}
 
 	rewriteName := func(name string) (string, bool) {
@@ -2449,6 +2462,7 @@ func remapOAuthToolNamesWithOptionsDoc(doc *ojson.Doc, mcpAliases claudeMCPAlias
 							}
 						}
 					}
+					recordInlineUnaliasedTool(part, forwardMap, recordRename)
 				}
 				return true
 			})
@@ -2532,10 +2546,13 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 	}
 	for alias, original := range reverseMap {
 		if alias == original {
-			// Caller-owned MCP tool recorded for exact passthrough and fallback hybrid
-			// recovery. It must not register a virtual server or take part in fuzzy
-			// client-tool alias recovery.
-			resolver.passthroughs = append(resolver.passthroughs, original)
+			// A declared tool forwarded under its own name. It must not register a
+			// virtual server or take part in fuzzy client-tool alias recovery. Only
+			// caller-owned MCP tools take part in fallback hybrid recovery; other
+			// names are kept so the exact lookup forwards them unchanged.
+			if helps.IsClaudeMCPToolName(original) {
+				resolver.passthroughs = append(resolver.passthroughs, original)
+			}
 			continue
 		}
 		parts, ok := parseClaudeMCPAlias(alias)
@@ -2597,17 +2614,37 @@ func claudeMCPAliasServer(name string) string {
 	return server
 }
 
-// recordPassthroughMCPTools remembers caller-owned MCP tool names that were left
-// untouched. Without this the response resolver would treat such a name as a
-// drifted alias whenever the derived two-word virtual server happens to equal a
-// real MCP server name, and would either restore the wrong tool or fail the
-// request. Recording is skipped when nothing was aliased so an untouched request
-// keeps an empty reverse map and the restore path stays a no-op.
-func recordPassthroughMCPTools(recordRename func(original, renamed string), forwardMap map[string]string, passthrough []string) {
+// recordInlineUnaliasedTool records the name of a tool_addition definition that
+// keeps its own name upstream, including server and client-executed tool types
+// that claudeToolChangeNamePath leaves alone and definitions sent without
+// tool.type, which claudeIncludeInlineTools also accepts.
+func recordInlineUnaliasedTool(part ojson.Result, forwardMap map[string]string, recordRename func(original, renamed string)) {
+	if part.Get("type").String() != "tool_addition" || !part.Get("tool.definition").IsObject() {
+		return
+	}
+	name := part.Get("tool.definition.name").String()
+	if name == "" || helps.IsClaudeMCPToolName(name) {
+		return
+	}
+	if _, aliased := forwardMap[name]; aliased {
+		return
+	}
+	recordUnaliasedTools(recordRename, forwardMap, []string{strings.Clone(name)})
+}
+
+// recordUnaliasedTools remembers declared tool names that were left
+// untouched: caller-owned MCP tools, server tools, inline tool definitions, and
+// tools that found no free alias. Without this the response resolver would treat
+// a caller-owned MCP name as a drifted alias whenever the derived two-word virtual
+// server happens to equal a real MCP server name, and an unprefixed alias could
+// shadow a declared tool whose name it happens to spell. Recording is skipped
+// when nothing was aliased so an untouched request keeps an empty reverse map
+// and the restore path stays a no-op.
+func recordUnaliasedTools(recordRename func(original, renamed string), forwardMap map[string]string, names []string) {
 	if len(forwardMap) == 0 {
 		return
 	}
-	for _, name := range passthrough {
+	for _, name := range names {
 		recordRename(name, name)
 	}
 }
@@ -2615,10 +2652,36 @@ func recordPassthroughMCPTools(recordRename func(original, renamed string), forw
 func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error) {
 	if original, ok := resolver.exact[name]; ok {
 		if original == name {
-			// Caller-owned MCP tool: forward it exactly as the client declared it.
+			// Declared tool forwarded under its own name: return it exactly as the client declared it.
 			return "", false, nil
 		}
 		return original, true, nil
+	}
+
+	// The model sometimes drops the "mcp__<server>__" prefix and calls only the
+	// tool component, such as "dog_shell_command". Restore it only when a virtual
+	// server prefix turns it into exactly one declared alias. A tool word can also
+	// start a real tool name ("shell" in "shell_command"), so a declared original
+	// name is always forwarded as itself.
+	if !strings.HasPrefix(name, "mcp__") {
+		for _, original := range resolver.exact {
+			if original == name {
+				return "", false, nil
+			}
+		}
+		matchedOriginal := ""
+		matchCount := 0
+		for server := range resolver.servers {
+			if original, ok := resolver.exact["mcp__"+server+"__"+name]; ok {
+				matchedOriginal = original
+				matchCount++
+			}
+		}
+		if matchCount == 1 {
+			log.Debugf("claude oauth mcp alias: recovered unprefixed tool name %q as %q", name, matchedOriginal)
+			return matchedOriginal, true, nil
+		}
+		return "", false, nil
 	}
 
 	server := claudeMCPAliasServer(name)
