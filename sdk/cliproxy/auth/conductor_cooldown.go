@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -2995,6 +2996,8 @@ func resultErrorFromError(err error) *Error {
 		}
 	}
 	switch {
+	case httptransport.IsOutcomeUnknown(err):
+		resultErr.Code = requestScopedErrorCode
 	case isCredentialScopedError(err):
 		// A credential-scoped failure always stays on the credential quota path;
 		// normalize conflicting model-only or cooldown-skipping codes so MarkResult

@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"golang.org/x/net/context"
 )
 
@@ -143,6 +144,10 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 				c.Writer.Header().Add(key, value)
 			}
 		}
+	}
+
+	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
+		c.Writer.Header().Set("x-should-retry", "false")
 	}
 
 	errText := http.StatusText(status)

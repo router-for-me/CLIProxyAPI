@@ -569,7 +569,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	}
 
 	if blockMsg, blocked := geminiPromptBlockErrorMessage(data); blocked {
-		err = statusErr{code: http.StatusBadGateway, msg: blockMsg}
+		err = statusErr{code: http.StatusBadGateway, msg: blockMsg, providerErrorPayload: true}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), err)
 		return cliproxyexecutor.Response{}, err
@@ -581,7 +581,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, data, false); zeroOutput {
 			gemDetail := helps.ParseGeminiUsage(data)
 			helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
-			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg, providerErrorPayload: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
 			return cliproxyexecutor.Response{}, err
@@ -744,7 +744,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	}
 	reporter.ObserveResponseModel(data)
 	if blockMsg, blocked := geminiPromptBlockErrorMessage(data); blocked {
-		err = statusErr{code: http.StatusBadGateway, msg: blockMsg}
+		err = statusErr{code: http.StatusBadGateway, msg: blockMsg, providerErrorPayload: true}
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, helps.ParseGeminiUsage(data), err)
 		return cliproxyexecutor.Response{}, err
@@ -753,7 +753,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, data, false); zeroOutput {
 			gemDetail := helps.ParseGeminiUsage(data)
 			helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
-			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg, providerErrorPayload: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
 			return cliproxyexecutor.Response{}, err
@@ -929,7 +929,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		var param any
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason), providerErrorPayload: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 			return false
@@ -1011,7 +1011,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			}
 			streamUsage.ObserveGeminiStream(line)
 			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
-				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
+				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg, providerErrorPayload: true}
 				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)
 				if !streamUsage.PublishFailure(ctx, reporter, blockErr) {
 					reporter.PublishFailure(ctx, blockErr)
@@ -1035,7 +1035,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			}
 		}
 		if pendingFilterMsg != "" && scanner.Err() == nil && !sawFinishReason {
-			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg, providerErrorPayload: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
 			if !streamUsage.PublishFailure(ctx, reporter, filterErr) {
 				reporter.PublishFailure(ctx, filterErr)
@@ -1291,7 +1291,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		var param any
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason), providerErrorPayload: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 			return false
@@ -1373,7 +1373,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			}
 			streamUsage.ObserveGeminiStream(line)
 			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
-				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
+				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg, providerErrorPayload: true}
 				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)
 				if !streamUsage.PublishFailure(ctx, reporter, blockErr) {
 					reporter.PublishFailure(ctx, blockErr)
@@ -1397,7 +1397,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			}
 		}
 		if pendingFilterMsg != "" && scanner.Err() == nil && !sawFinishReason {
-			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg, providerErrorPayload: true}
 			helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
 			if !streamUsage.PublishFailure(ctx, reporter, filterErr) {
 				reporter.PublishFailure(ctx, filterErr)

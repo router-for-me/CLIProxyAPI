@@ -475,7 +475,7 @@ func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
 }
 
 func wrapMetaUpstreamError(statusCode int, body []byte) error {
-	se := statusErr{code: statusCode, msg: string(body)}
+	se := statusErr{code: statusCode, msg: string(body), providerErrorPayload: helps.IsProviderErrorPayload(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter := parseMetaRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
 			se.retryAfter = retryAfter

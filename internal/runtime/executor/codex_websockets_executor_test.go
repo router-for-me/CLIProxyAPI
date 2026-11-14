@@ -25,6 +25,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -3349,7 +3350,7 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
 	}
 }
 
-func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *testing.T) {
+func TestCodexWebsocketWriteFailureRecordedWithoutReconnectWhenRequestLogDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
@@ -3366,7 +3367,11 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 					if errUpgrade != nil {
 						return
 					}
-					defer func() { _ = conn.Close() }()
+					defer func() {
+						if errClose := conn.Close(); errClose != nil {
+							t.Logf("close synthetic websocket: %v", errClose)
+						}
+					}()
 					for {
 						if _, _, errRead := conn.ReadMessage(); errRead != nil {
 							return
@@ -3417,8 +3422,8 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 			} else {
 				_, errExec = exec.Execute(ctx, auth, req, opts)
 			}
-			if errExec == nil {
-				t.Fatal("expected reconnect upgrade rejection to fail")
+			if !httptransport.IsOutcomeUnknown(errExec) {
+				t.Fatal("expected terminal unknown outcome after failed generation write")
 			}
 
 			value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
@@ -3434,15 +3439,15 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 				"=== API RESPONSE 1 ===",
 				"Status: 101",
 				"Error: send:",
-				"=== API RESPONSE 2 ===",
-				"Status: 403",
-				"Retry-After: 11",
-				`{"error":{"message":"codex websocket reconnect forbidden"}}`,
-				"Error: dial_retry:",
+				"upstream_outcome_unknown",
 			} {
 				if !strings.Contains(rendered, want) {
 					t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
 				}
+			}
+
+			if dials.Load() != 1 || writes.Load() != 1 {
+				t.Fatalf("ambiguous write retried: dials=%d writes=%d", dials.Load(), writes.Load())
 			}
 
 			var transportDials atomic.Int32
@@ -3452,7 +3457,11 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 					if errUpgrade != nil {
 						return
 					}
-					defer func() { _ = conn.Close() }()
+					defer func() {
+						if errClose := conn.Close(); errClose != nil {
+							t.Logf("close synthetic websocket: %v", errClose)
+						}
+					}()
 					for {
 						if _, _, errRead := conn.ReadMessage(); errRead != nil {
 							return
@@ -3486,8 +3495,8 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 			} else {
 				_, errExec = exec.Execute(subCtx, subAuth, req, subOpts)
 			}
-			if errExec == nil {
-				t.Fatal("expected transport reconnect failure")
+			if !httptransport.IsOutcomeUnknown(errExec) {
+				t.Fatal("expected terminal unknown outcome after transport write failure")
 			}
 			subVal, ok := subGinCtx.Get(logging.DeferredAPIResponseContextKey)
 			if !ok {
@@ -3496,13 +3505,17 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 			subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
 			for _, want := range []string{
 				"=== API RESPONSE 1 ===",
+				"Status: 101",
 				"Error: send:",
-				"=== API RESPONSE 2 ===",
-				"Error: dial_retry:",
+				"upstream_outcome_unknown",
 			} {
 				if !strings.Contains(subRendered, want) {
 					t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
 				}
+			}
+
+			if transportDials.Load() != 1 || writes.Load() != 1 {
+				t.Fatalf("ambiguous transport write retried: dials=%d writes=%d", transportDials.Load(), writes.Load())
 			}
 
 			initServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

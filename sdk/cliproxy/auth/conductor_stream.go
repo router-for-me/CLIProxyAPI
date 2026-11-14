@@ -9,6 +9,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
 
 func discardStreamChunks(ch <-chan cliproxyexecutor.StreamChunk) {
@@ -160,6 +161,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
+			chunk.Err = httptransport.ClassifySubmissionError(ctx, chunk.Err)
 			if chunk.Err != nil && !failed {
 				failed = true
 				entry := logEntryWithRequestID(ctx)
@@ -412,7 +414,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var upstreamErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
-		ctx = m.newUpstreamAttemptContext(ctx)
+		ctx = m.newGenerationAttemptContext(ctx)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
@@ -456,7 +458,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					ctx = m.newUpstreamAttemptContext(ctx)
+					ctx = m.newGenerationAttemptContext(ctx)
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
@@ -497,6 +499,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if isRequestTerminatedError(errStream) {
+				return nil, errStream
+			}
 			errStream = annotateTrustedRetryAfterByHint(errStream)
 			syncPreferredUpstreamError(&upstreamErr, errStream)
 			if okAction {
@@ -538,7 +543,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					ctx = m.newUpstreamAttemptContext(ctx)
+					ctx = m.newGenerationAttemptContext(ctx)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
@@ -578,6 +583,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 		}
 		if bootstrapErr != nil {
+			if isRequestTerminatedError(bootstrapErr) {
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(bootstrapErr), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				result.CredentialScope = isCredentialScopedError(bootstrapErr)
+				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				discardStreamChunks(streamResult.Chunks)
+				return nil, bootstrapErr
+			}
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.requestScopedErrorConfig(ctx))
 			if okAction {
 				rerr := resultErrorFromError(bootstrapErr)
@@ -650,14 +663,21 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
-			emptyErr := markUpstreamExecutionAttemptFromContext(ctx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
+			emptyErr := httptransport.ClassifyIncompleteResponse(ctx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
+			emptyErr = markUpstreamExecutionAttemptFromContext(ctx, emptyErr)
 			currentErr := newStreamBootstrapError(emptyErr, streamResult.Headers)
+			if isRequestTerminatedError(emptyErr) && !httptransport.IsOutcomeUnknown(emptyErr) {
+				return nil, currentErr
+			}
 			if hasUpstreamExecutionAttempt(emptyErr) {
 				upstreamErr = currentErr
 			}
 			warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), emptyErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(emptyErr), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			if httptransport.IsOutcomeUnknown(emptyErr) {
+				return nil, currentErr
+			}
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue

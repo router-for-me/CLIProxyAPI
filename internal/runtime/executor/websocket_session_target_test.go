@@ -22,6 +22,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -129,7 +130,7 @@ func TestClearRetryActiveStateClearsOriginalConnection(t *testing.T) {
 	}
 }
 
-func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
+func TestWebsocketWriteFailureClearsActiveSessionState(t *testing.T) {
 	tests := []struct {
 		name string
 		run  func(t *testing.T, baseURL string) (func(cliproxyexecutor.Options) error, *codexWebsocketSession)
@@ -242,12 +243,13 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 					t.Errorf("upgrade websocket: %v", errUpgrade)
 					return
 				}
-				defer func() { _ = conn.Close() }()
+				defer func() {
+					if errClose := conn.Close(); errClose != nil {
+						t.Logf("close synthetic websocket: %v", errClose)
+					}
+				}()
 				if connection == 1 {
 					_, _, _ = conn.ReadMessage()
-					return
-				}
-				if connection == 2 {
 					return
 				}
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
@@ -263,25 +265,25 @@ func TestWebsocketRetryBindFailureClearsActiveSessionState(t *testing.T) {
 			lifecycle := &rejectSecondBindLifecycle{}
 			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, ExecutionLifecycle: lifecycle, Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "retry-bind"}}
 			run, sess := test.run(t, server.URL)
-			if errRun := run(opts); errRun == nil {
-				t.Fatal("first request error = nil, want retry lifecycle bind rejection")
+			if errRun := run(opts); !httptransport.IsOutcomeUnknown(errRun) {
+				t.Fatal("first request must report an unknown outcome")
 			}
-			if got := lifecycle.binds.Load(); got != 2 {
-				t.Fatalf("lifecycle binds = %d, want 2", got)
+			if got := lifecycle.binds.Load(); got != 1 {
+				t.Fatalf("lifecycle binds = %d, want 1 without automatic retry", got)
 			}
 			sess.activeMu.Lock()
 			active := sess.activeConn != nil || sess.activeCh != nil || sess.activeDone != nil || sess.activeCancel != nil
 			sess.activeMu.Unlock()
 			if active {
-				t.Fatal("retry bind failure left the old active websocket state")
+				t.Fatal("ambiguous write left the old active websocket state")
 			}
 
 			opts.ExecutionLifecycle = nil
 			if errRun := run(opts); errRun != nil {
 				t.Fatalf("second request error = %v", errRun)
 			}
-			if got := connections.Load(); got != 3 {
-				t.Fatalf("websocket connections = %d, want 3 after retry bind failure", got)
+			if got := connections.Load(); got != 2 {
+				t.Fatalf("websocket connections = %d, want one per explicit request", got)
 			}
 		})
 	}

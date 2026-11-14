@@ -66,6 +66,12 @@ func (e *UpstreamWebsocketTurnError) StatusCode() int {
 }
 func (*UpstreamWebsocketTurnError) IsRequestScoped() bool { return true }
 
+// Preserve the native lost-turn error and its correlation through shared submission
+// classification. A rejected or idle operation has no ambiguous generation outcome.
+func (e *UpstreamWebsocketTurnError) IsOutcomeUnknown() bool {
+	return !e.FullContextRequired && !e.NotSent && !e.Idle
+}
+
 // IsUpstreamWebsocketTurnError reports whether err is a recoverable upstream websocket loss.
 func IsUpstreamWebsocketTurnError(err error) bool {
 	var turnErr *UpstreamWebsocketTurnError

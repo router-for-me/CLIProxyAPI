@@ -1347,7 +1347,9 @@ func xaiTerminalFailureErr(eventName string, eventData []byte) (statusErr, bool)
 		return statusErr{}, false
 	}
 	status := xaiTerminalFailureStatus(eventData, doc)
-	return xaiStatusErr(status, doc.Bytes()), true
+	err := xaiStatusErr(status, doc.Bytes())
+	err.providerErrorPayload = helps.IsProviderErrorEventPayload(eventName, eventData)
+	return err, true
 }
 
 func xaiTerminalFailureDoc(eventName string, eventData []byte) (*ojson.Doc, bool) {
@@ -1585,7 +1587,7 @@ func xaiTerminalFailureStatus(eventData []byte, doc *ojson.Doc) int {
 //
 // Generic 429s stay without an explicit retry hint so conductor backoff still applies.
 func xaiStatusErr(code int, body []byte) statusErr {
-	err := statusErr{code: code, msg: string(body)}
+	err := statusErr{code: code, msg: string(body), providerErrorPayload: helps.IsProviderErrorPayload(body)}
 	if len(body) == 0 {
 		return err
 	}

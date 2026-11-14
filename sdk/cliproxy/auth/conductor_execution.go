@@ -21,6 +21,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -30,12 +31,16 @@ func (m *Manager) newUpstreamAttemptContext(ctx context.Context) context.Context
 	if RequestScopedErrorConfigFromContext(ctx) == nil {
 		ctx = WithRequestScopedErrorConfig(ctx, m.runtimeConfigSnapshot())
 	}
-	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+	return cliproxyexecutor.WithUpstreamAttemptTracker(httptransport.WithoutSubmissionTracking(ctx))
 }
 
 func newUpstreamAttemptContext(ctx context.Context) context.Context {
 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
-	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+	return cliproxyexecutor.WithUpstreamAttemptTracker(httptransport.WithoutSubmissionTracking(ctx))
+}
+
+func (m *Manager) newGenerationAttemptContext(ctx context.Context) context.Context {
+	return httptransport.WithSubmissionTracking(m.newUpstreamAttemptContext(ctx))
 }
 
 func claudeOAuthRequestCancellation(ctx context.Context, auth *Auth, err error) error {
@@ -80,6 +85,7 @@ func markUpstreamExecutionAttempt(err error) error {
 }
 
 func markUpstreamExecutionAttemptFromContext(ctx context.Context, err error) error {
+	err = httptransport.ClassifySubmissionError(ctx, err)
 	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) {
 		return err
 	}
@@ -474,7 +480,7 @@ type requestToFormatResolver interface {
 
 func isRequestTerminatedError(err error) bool {
 	var terminated *cliproxyexecutor.RequestTerminatedError
-	return (errors.As(err, &terminated) && terminated != nil) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err)
+	return (errors.As(err, &terminated) && terminated != nil) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) || httptransport.IsOutcomeUnknown(err)
 }
 
 func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
@@ -707,7 +713,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
-		execCtx = m.newUpstreamAttemptContext(execCtx)
+		execCtx = m.newGenerationAttemptContext(execCtx)
 
 		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
 		if len(models) == 0 {
@@ -733,7 +739,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var authErr error
 		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
-			execCtx = m.newUpstreamAttemptContext(execCtx)
+			execCtx = m.newGenerationAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
@@ -784,7 +790,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
-					execCtx = m.newUpstreamAttemptContext(execCtx)
+					execCtx = m.newGenerationAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
@@ -1384,6 +1390,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if errStream != nil {
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
+			}
+			if httptransport.IsOutcomeUnknown(errStream) {
+				if selection != nil {
+					releaseAttempt()
+					selection.End("outcome_unknown")
+				}
+				return nil, errStream
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
 			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
@@ -2457,7 +2470,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		Metadata:        map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: sessionID},
 	}
 
-	execCtx := m.newUpstreamAttemptContext(ctx)
+	execCtx := m.newGenerationAttemptContext(ctx)
 	execCtx = syncMetadataSessionToContext(execCtx, opts.Metadata)
 	executionSeq := m.nextExecutionSeq()
 	accessToken := authAccessTokenForRequest(execCtx, auth, opts.Headers)

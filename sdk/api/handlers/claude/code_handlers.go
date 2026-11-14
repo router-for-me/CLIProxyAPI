@@ -29,6 +29,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -518,7 +519,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			}
 			state.ensureSSEEventBoundary(c.Writer)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+			errorBytes := claudeErrorDocument(h.toClaudeError(errMsg)).Bytes()
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 		CloseError: func() *interfaces.ErrorMessage {
@@ -541,9 +542,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
+	Code      string              `json:"code,omitempty"`
+	Retryable *bool               `json:"retryable,omitempty"`
+	Type      string              `json:"type"`
+	Message   string              `json:"message"`
+	Details   *claudeErrorDetails `json:"details,omitempty"`
 }
 
 type claudeErrorDetails struct {
@@ -564,6 +567,14 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 }
 
 func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.ErrorMessage, retryAfter string) claudeErrorResponse {
+	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
+		retryable := false
+		return claudeErrorResponse{Type: "error", Error: claudeErrorDetail{
+			Type: "api_error", Code: "upstream_outcome_unknown", Retryable: &retryable,
+			Message: "Upstream disconnected after submission. The request was not replayed and its outcome is unknown.",
+		}}
+	}
+
 	status := http.StatusInternalServerError
 	errText := http.StatusText(status)
 	if msg != nil {
@@ -620,12 +631,10 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 		body := bytes.Clone(msg.Body)
 		if clienterror.IsClaudeThreadNotFound(status, errors.New(string(body))) {
-			if markedBody, errMarshal := json.Marshal(h.toClaudeError(&interfaces.ErrorMessage{
+			body = claudeErrorDocument(h.toClaudeError(&interfaces.ErrorMessage{
 				StatusCode: status,
 				Error:      errors.New(string(body)),
-			})); errMarshal == nil {
-				body = markedBody
-			}
+			})).Bytes()
 		}
 		appendClaudeAPIResponse(c, body)
 		if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
@@ -660,10 +669,10 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 		}
 	}
 
-	body, err := json.Marshal(h.toClaudeErrorWithRetryAfter(msg, retryAfter))
-	if err != nil {
-		body = []byte(`{"type":"error","error":{"type":"api_error","message":"Internal Server Error"}}`)
+	if msg != nil && httptransport.IsOutcomeUnknown(msg.Error) {
+		c.Writer.Header().Set("x-should-retry", "false")
 	}
+	body := claudeErrorDocument(h.toClaudeErrorWithRetryAfter(msg, retryAfter)).Bytes()
 	appendClaudeAPIResponse(c, body)
 	if !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "application/json")

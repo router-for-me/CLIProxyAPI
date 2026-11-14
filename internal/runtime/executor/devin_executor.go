@@ -3084,7 +3084,7 @@ func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
 // (non-trailer) upstream failure. Daily/weekly quota exhaustion becomes
 // credential-scoped and, when auth is known, retries at the observed reset.
 func newDevinStatusErrorForAuth(code int, headers http.Header, body []byte, auth *cliproxyauth.Auth) statusErr {
-	err := statusErr{code: code, msg: string(body)}
+	err := statusErr{code: code, msg: string(body), providerErrorPayload: helps.IsProviderErrorPayload(body)}
 	if code == http.StatusTooManyRequests && headers != nil {
 		if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
 			if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds >= 0 {

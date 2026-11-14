@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
@@ -56,7 +57,7 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	return conn, closer, resp, err
 }
 
-func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+func writeWebsocketPayloadMessage(ctx context.Context, provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		provider = "codex"
@@ -69,14 +70,31 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	payloadBytes := len(payload)
 	start := time.Now()
 	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
-	var errSend error
-	if sess != nil {
-		errSend = sess.writeMessage(conn, websocket.TextMessage, payload)
-	} else if conn == nil {
-		errSend = fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
-	} else {
-		errSend = conn.WriteMessage(websocket.TextMessage, payload)
+	if conn == nil {
+		return fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
 	}
+	if sess != nil {
+		sess.connMu.Lock()
+		current := sess.conn == conn
+		sess.connMu.Unlock()
+		if !current {
+			return fmt.Errorf("%s websockets executor: connection was replaced before write: %w", provider, net.ErrClosed)
+		}
+	}
+	write := func() error {
+		if sess != nil {
+			return sess.writeMessage(conn, websocket.TextMessage, payload)
+		}
+		return conn.WriteMessage(websocket.TextMessage, payload)
+	}
+	var errSend error
+	switch ojson.GetBytesNoCopy(payload, "type").String() {
+	case "response.create", "response.append":
+		errSend = httptransport.WriteGeneration(ctx, write)
+	default:
+		errSend = write()
+	}
+
 	if errSend != nil {
 		log.Warnf("%s websockets: write payload failed session=%s session_object=%s bytes=%d duration=%v err=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start), errSend)
 	} else {
@@ -85,12 +103,12 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	return errSend
 }
 
-func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
-	return writeWebsocketPayloadMessage("codex", sess, conn, payload)
+func writeCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+	return writeWebsocketPayloadMessage(ctx, "codex", sess, conn, payload)
 }
 
 func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {
-	if err == nil || sess == nil || conn == nil {
+	if err == nil || httptransport.IsOutcomeUnknown(err) || sess == nil || conn == nil {
 		return err
 	}
 	upstreamErr := sess.upstreamDisconnectError(conn)
@@ -137,6 +155,9 @@ func mapCodexWebsocketReadError(err error) error {
 func codexWebsocketTurnTransportError(err error) error {
 	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
 		return err
+	}
+	if httptransport.IsOutcomeUnknown(err) {
+		return &cliproxyexecutor.UpstreamWebsocketTurnError{Cause: err}
 	}
 	var status interface{ StatusCode() int }
 	if errors.As(err, &status) && status.StatusCode() != 0 {

@@ -10,6 +10,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
 
 func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
@@ -178,6 +179,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		for _, upstreamModel := range models {
 			execCtx = m.newUpstreamAttemptContext(execCtx)
+			if !countTokens {
+				execCtx = httptransport.WithSubmissionTracking(execCtx)
+			}
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel

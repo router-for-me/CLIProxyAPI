@@ -9,6 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
 
 const (
@@ -341,7 +342,14 @@ func (s *session) send(ctx context.Context, msg Message) error {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
-	if err := s.conn.WriteJSON(msg); err != nil {
+	write := func() error { return s.conn.WriteJSON(msg) }
+	var err error
+	if msg.Type == MessageTypeHTTPReq {
+		err = httptransport.WriteGeneration(ctx, write)
+	} else {
+		err = write()
+	}
+	if err != nil {
 		return fmt.Errorf("write json: %w", err)
 	}
 	return nil

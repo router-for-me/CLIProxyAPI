@@ -1768,7 +1768,7 @@ func (m *Manager) shouldRetryAfterErrorWithHomeRetryLimit(ctx context.Context, o
 }
 
 func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts cliproxyexecutor.Options, err error, attempt int, providers []string, model string, maxWait time.Duration, homeRetryLimit int, defaultRequestRetry int, attempted map[string]struct{}) (time.Duration, bool) {
-	if err == nil {
+	if err == nil || isRequestTerminatedError(err) {
 		return 0, false
 	}
 	var homeBusy *HomeConcurrencyBusyError

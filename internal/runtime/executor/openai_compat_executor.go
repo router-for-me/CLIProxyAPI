@@ -251,7 +251,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, body, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, streamTruncated: len(body) == 0}
 	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -539,7 +539,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 			if len(dataLines) > 1 {
 				for _, dataLine := range dataLines {
 					if bytes.Equal(bytes.TrimSpace(dataLine), []byte("[DONE]")) {
-						publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete data before [DONE]"}, false)
+						publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete data before [DONE]", streamTruncated: true}, false)
 						return true
 					}
 				}
@@ -551,7 +551,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				return true
 			}
 			if !isDone && !json.Valid(dataPayload) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete SSE data frame"}, false)
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete SSE data frame", streamTruncated: true}, false)
 				return true
 			}
 			if !isDone {
@@ -615,7 +615,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 				continue
 			}
 			if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}, true)
+				publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmedLine), providerErrorPayload: helps.IsProviderErrorPayload(trimmedLine)}, true)
 				break
 			}
 		}
@@ -1272,19 +1272,20 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
 	}
-	return statusErr{code: status, msg: string(payload)}, true
+	return statusErr{code: status, msg: string(payload), providerErrorPayload: helps.IsProviderErrorEventPayload(eventName, payload)}, true
 }
 
 type statusErr struct {
-	code               int
-	msg                string
-	retryAfter         *time.Duration
-	credentialScoped   bool
-	streamTruncated    bool
-	transientRateLimit bool
-	tosViolation       bool
-	tosAppealURL       string
-	tosAppealURLText   string
+	code                 int
+	msg                  string
+	retryAfter           *time.Duration
+	credentialScoped     bool
+	streamTruncated      bool
+	providerErrorPayload bool
+	transientRateLimit   bool
+	tosViolation         bool
+	tosAppealURL         string
+	tosAppealURLText     string
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1305,6 +1306,9 @@ func (e statusErr) LogDiagnostic() string { return e.diagnostic }
 // IsStreamTruncated marks a locally synthesized failure for an accepted
 // upstream stream that ended without its terminal frame.
 func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
+
+// IsProviderErrorPayload distinguishes a parsed upstream refusal from local failures.
+func (e statusErr) IsProviderErrorPayload() bool { return e.providerErrorPayload }
 
 // IsTransientRateLimit marks a transient per-model capacity/admission 429
 // that must not be recorded as credential quota exhaustion.
@@ -1341,9 +1345,10 @@ const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		code:                 status,
+		msg:                  string(body),
+		providerErrorPayload: helps.IsProviderErrorPayload(body),
+		retryAfter:           openAICompatRetryAfter(status, headers, body, time.Now()),
 	}
 }
 

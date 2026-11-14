@@ -6,6 +6,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -83,6 +84,13 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 
 	trimmed := strings.TrimSpace(errText)
 
+	var turnErr *coreexecutor.UpstreamWebsocketTurnError
+	if errors.As(err, &turnErr) {
+		return []byte(turnErr.Error())
+	}
+	if httptransport.IsOutcomeUnknown(err) {
+		return []byte((&httptransport.OutcomeUnknownError{}).Error())
+	}
 	if coreauth.IsTerminalAuthError(err) {
 		message := errText
 		if trimmed != "" && json.Valid([]byte(trimmed)) {

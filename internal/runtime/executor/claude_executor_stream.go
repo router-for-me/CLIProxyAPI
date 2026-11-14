@@ -459,7 +459,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					errScan = upstreamStreamErr
 				}
 				if errScan == nil && ctx.Err() == nil {
-					errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
+					errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop", streamTruncated: true}
 				}
 				if errScan != nil {
 					errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
@@ -562,7 +562,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				errScan = upstreamStreamErr
 			}
 			if errScan == nil && ctx.Err() == nil {
-				errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop"}
+				errScan = statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before message_stop", streamTruncated: true}
 			}
 			if errScan != nil {
 				errScan = wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, errScan)
@@ -606,7 +606,7 @@ func validateClaudeStreamingResponse(data []byte) error {
 		}
 		hasData = true
 		if !ojson.ValidBytes(payload) {
-			return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned malformed stream data"}
+			return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned malformed stream data", streamTruncated: true}
 		}
 
 		root := util.ParseGJSONBytesNoCopy(payload)
@@ -619,11 +619,11 @@ func validateClaudeStreamingResponse(data []byte) error {
 			if message == "" {
 				message = "unknown upstream error"
 			}
-			return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned error event: " + message}
+			return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned error event: " + message, providerErrorPayload: helps.IsProviderErrorPayload(payload)}
 		case "message_start":
 			message := root.Get("message")
 			if strings.TrimSpace(message.Get("id").String()) == "" || strings.TrimSpace(message.Get("model").String()) == "" {
-				return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream message_start is missing id or model"}
+				return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream message_start is missing id or model", streamTruncated: true}
 			}
 			hasMessageStart = true
 		case "message_delta":
@@ -634,13 +634,13 @@ func validateClaudeStreamingResponse(data []byte) error {
 		return errScan
 	}
 	if !hasData {
-		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned empty stream response"}
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned empty stream response", streamTruncated: true}
 	}
 	if !hasMessageStart {
-		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream response is missing message_start"}
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream response is missing message_start", streamTruncated: true}
 	}
 	if !hasMessageDelta {
-		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream response ended before message completion"}
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream stream response ended before message completion", streamTruncated: true}
 	}
 	return nil
 }
