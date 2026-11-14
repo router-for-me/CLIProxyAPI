@@ -45,7 +45,7 @@ func TestSmoothWeightedStateChargeRebasesBeforeBounding(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := weightedPoolForTest("route", tc.weights, tc.current)
-			state.charge(sort.Search(len(state.members), func(i int) bool { return state.members[i].id >= tc.authID }), false)
+			state.charge(sort.Search(len(state.members), func(i int) bool { return state.members[i].id >= tc.authID }), int64(len(tc.weights)), nil, false)
 			if !maps.Equal(state.currentForTest(), tc.want) {
 				t.Fatalf("rebased credits = %v, want %v", state.currentForTest(), tc.want)
 			}

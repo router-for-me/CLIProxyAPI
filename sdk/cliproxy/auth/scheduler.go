@@ -58,6 +58,11 @@ type providerScheduler struct {
 	providerKey string
 	auths       map[string]*scheduledAuthMeta
 	modelShards map[string]*modelScheduler
+	// pendingCursorStates holds ready-view cursors and smooth weighted credits captured
+	// from a previous generation of shards during rebuild. Lazily built shards consume
+	// and clear them on first construction so config reloads do not reset large-pool
+	// weighted rotation progress.
+	pendingCursorStates map[string]map[int]readyBucketCursorState
 }
 
 // scheduledAuthMeta stores the immutable scheduling fields derived from an auth snapshot.
@@ -193,6 +198,11 @@ func (s *authScheduler) setSelector(selector Selector) {
 	s.weightedSelector = UnwrapWeightedRoundRobinSelector(selector)
 	clear(s.mixedCursors)
 	clear(s.mixedWeightedStates)
+	for _, pState := range s.providers {
+		if pState != nil {
+			pState.pendingCursorStates = nil
+		}
+	}
 }
 
 // isSchedulableAuth determines whether an auth can be scheduled by a provider scheduler,
@@ -323,6 +333,38 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	}
 	existingMixedCursors := s.mixedCursors
 
+	// Capture ready-view cursors and smooth weighted credits before dropping the shard
+	// maps, so a config reload that does not change a provider's credentials preserves
+	// large-pool weighted rotation progress instead of collapsing onto Auth.ID order.
+	pendingCursors := make(map[string]map[string]map[int]readyBucketCursorState)
+	for providerKey, pState := range s.providers {
+		if pState == nil || len(pState.modelShards) == 0 {
+			continue
+		}
+		shards := make(map[string]map[int]readyBucketCursorState, len(pState.modelShards))
+		for modelKey, shard := range pState.modelShards {
+			if shard == nil || len(shard.readyByPriority) == 0 {
+				continue
+			}
+			states := make(map[int]readyBucketCursorState, len(shard.readyByPriority))
+			for priority, bucket := range shard.readyByPriority {
+				if bucket == nil {
+					continue
+				}
+				states[priority] = readyBucketCursorState{
+					all: snapshotReadyViewCursors(bucket.all),
+					ws:  snapshotReadyViewCursors(bucket.ws),
+				}
+			}
+			if len(states) > 0 {
+				shards[modelKey] = states
+			}
+		}
+		if len(shards) > 0 {
+			pendingCursors[providerKey] = shards
+		}
+	}
+
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
 	if s.authGenerations == nil {
@@ -366,6 +408,11 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 		}
 		if allPresent {
 			s.mixedCursors[cursorKey] = cursor
+		}
+	}
+	for providerKey, shards := range pendingCursors {
+		if pState := s.providers[providerKey]; pState != nil {
+			pState.pendingCursorStates = shards
 		}
 	}
 }
@@ -1321,8 +1368,34 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 		}
 		shard.upsertEntryLocked(meta, now)
 	}
+	p.restorePendingCursorsLocked(shard)
 	p.modelShards[modelKey] = shard
 	return shard
+}
+
+// restorePendingCursorsLocked applies cursors and smooth weighted credits captured before
+// a rebuild onto a freshly built shard, then drops the pending state. Stale snapshots are
+// rejected by restoreReadyViewCursors when the configured weights changed.
+func (p *providerScheduler) restorePendingCursorsLocked(shard *modelScheduler) {
+	if p == nil || shard == nil || len(p.pendingCursorStates) == 0 {
+		return
+	}
+	states, ok := p.pendingCursorStates[shard.modelKey]
+	if ok {
+		for priority, bucket := range shard.readyByPriority {
+			if bucket == nil {
+				continue
+			}
+			if state, ok := states[priority]; ok {
+				restoreReadyViewCursors(&bucket.all, state.all)
+				restoreReadyViewCursors(&bucket.ws, state.ws)
+			}
+		}
+		delete(p.pendingCursorStates, shard.modelKey)
+	}
+	if len(p.pendingCursorStates) == 0 {
+		p.pendingCursorStates = nil
+	}
 }
 
 // supportsModel reports whether the auth metadata currently supports modelKey.
