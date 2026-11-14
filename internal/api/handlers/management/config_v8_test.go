@@ -398,7 +398,7 @@ func TestConfigV8DeleteLastField(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "config.yaml")
-			raw := tc.raw + "port: 8317\napi-keys: [client]\nplugins: {configs: {sample: {enabled: false, options: {}}}}\n"
+			raw := tc.raw + "port: 8317\napi-keys: [cpa-client]\nplugins: {configs: {sample: {enabled: false, options: {}}}}\n"
 			if err := os.WriteFile(file, []byte(raw), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -420,7 +420,7 @@ func TestConfigV8DeleteLastField(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !tc.check(cfg) || cfg.Port != 8317 || len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "client" {
+			if !tc.check(cfg) || cfg.Port != 8317 || len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "cpa-client" {
 				t.Fatal("delete did not restore defaults or changed unrelated settings")
 			}
 			if !reflect.DeepEqual(h.cfg.OAuthOnlyFields, cfg.OAuthOnlyFields) {

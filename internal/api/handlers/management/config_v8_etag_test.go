@@ -18,7 +18,7 @@ import (
 func TestConfigV8ETagIfMatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := "config-version: 8\nserver: {port: 8317}\naccess: {api-keys: [revoked-key]}\n"
+	raw := "config-version: 8\nserver: {port: 8317}\naccess: {api-keys: [cpa-revoked-key]}\n"
 	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestConfigV8ETagIfMatch(t *testing.T) {
 	}
 
 	// Another writer revokes the API key between the read above and our write.
-	revoked := do(http.MethodPut, "/v8/management/config/access/api-keys", `["other-key"]`, "")
+	revoked := do(http.MethodPut, "/v8/management/config/access/api-keys", `["cpa-other-key"]`, "")
 	wantStatus(revoked, http.StatusOK)
 	if got := revoked.Header().Get("ETag"); got != fileETag() {
 		t.Fatalf("PUT response ETag=%q want %q", got, fileETag())
@@ -112,7 +112,7 @@ func TestConfigV8ETagIfMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.APIKeys) != 1 || loaded.APIKeys[0] != "other-key" {
+	if len(loaded.APIKeys) != 1 || loaded.APIKeys[0] != "cpa-other-key" {
 		t.Fatalf("stale PUT resurrected revoked key: %v", loaded.APIKeys)
 	}
 

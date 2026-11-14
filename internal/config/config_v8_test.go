@@ -779,7 +779,7 @@ func TestV8LegacyClientKeysDoNotOverwriteUpstreamGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "client-key" || len(cfg.CodexKey) != 1 {
+	if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != "cpa-client-key" || len(cfg.CodexKey) != 1 {
 		t.Fatal("client/upstream key collision lost credentials")
 	}
 }
