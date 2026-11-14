@@ -16,10 +16,10 @@ func TestWriteAuthFileAtomicWrite(t *testing.T) {
 		h, _ := newIdentityTestHandler(t)
 		h.cfg.AuthDir = authDir
 		name := "atomic.json"
-		if err := h.writeAuthFile(context.Background(), name, []byte(`{"type":"codex","email":"a@b.c"}`)); err != nil {
+		if err := h.writeAuthFileV8(context.Background(), name, []byte(`{"type":"codex","email":"a@b.c"}`)); err != nil {
 			t.Fatalf("initial write: %v", err)
 		}
-		if err := h.writeAuthFile(context.Background(), name, []byte(`{"type":"codex","email":"d@e.f"}`)); err != nil {
+		if err := h.writeAuthFileV8(context.Background(), name, []byte(`{"type":"codex","email":"d@e.f"}`)); err != nil {
 			t.Fatalf("overwrite: %v", err)
 		}
 		data, err := os.ReadFile(filepath.Join(authDir, name))
@@ -61,7 +61,7 @@ func TestWriteAuthFileAtomicWrite(t *testing.T) {
 		h, _ := newIdentityTestHandler(t)
 		h.cfg.AuthDir = authDir
 		payload := []byte(`{"type":"codex","email":"x@y.z"}`)
-		if err := h.writeAuthFile(context.Background(), "linked.json", payload); err != nil {
+		if err := h.writeAuthFileV8(context.Background(), "linked.json", payload); err != nil {
 			t.Fatalf("symlink write: %v", err)
 		}
 		data, err := os.ReadFile(target)
@@ -85,7 +85,7 @@ func TestWriteAuthFileAtomicWrite(t *testing.T) {
 		h, _ := newIdentityTestHandler(t)
 		h.cfg.AuthDir = authDir
 		name := strings.Repeat("a", 240) + ".json"
-		if err := h.writeAuthFile(context.Background(), name, []byte(`{"type":"codex"}`)); err != nil {
+		if err := h.writeAuthFileV8(context.Background(), name, []byte(`{"type":"codex"}`)); err != nil {
 			t.Fatalf("long-name write: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(authDir, name)); err != nil {
@@ -94,7 +94,7 @@ func TestWriteAuthFileAtomicWrite(t *testing.T) {
 	})
 }
 
-func TestCleanAuthFilePathResolvesSymlinkedDir(t *testing.T) {
+func TestManagedAuthFilePathResolvesSymlinkedDir(t *testing.T) {
 	realDir := t.TempDir()
 	linkDir := t.TempDir()
 	linked := filepath.Join(linkDir, "linkeddir")
@@ -103,11 +103,8 @@ func TestCleanAuthFilePathResolvesSymlinkedDir(t *testing.T) {
 	}
 	real := filepath.Join(realDir, "file.json")
 	alias := filepath.Join(linked, "file.json")
-	if gotReal, gotAlias := cleanAuthFilePath(real), cleanAuthFilePath(alias); gotReal != gotAlias {
-		t.Fatalf("cleanAuthFilePath(%q)=%q != cleanAuthFilePath(%q)=%q", alias, gotAlias, real, gotReal)
-	}
-	if !sameAuthFilePath(real, alias) {
-		t.Fatal("sameAuthFilePath must treat symlinked-dir alias as the same file")
+	if !sameManagedAuthFilePath(real, alias) {
+		t.Fatal("v8 source matching must resolve symlinked-dir aliases")
 	}
 }
 

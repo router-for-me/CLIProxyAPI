@@ -130,7 +130,7 @@ func TestWriteAuthFile_PluginOwnedFileDoesNotDuplicate(t *testing.T) {
 
 	// The plugin reload now claims the same file with its stable plugin ID.
 	edited := []byte(`{"type":"opencode-go","api_key":"k","excluded_models":["m1"]}`)
-	if err := h.writeAuthFile(ctx, filepath.Base(path), edited); err != nil {
+	if err := h.writeAuthFileV8(ctx, filepath.Base(path), edited); err != nil {
 		t.Fatalf("write edited auth through management path: %v", err)
 	}
 
@@ -177,7 +177,7 @@ func TestWriteAuthFileKeepsAllPluginOwnedAuthsAndRemovesOldIDs(t *testing.T) {
 		},
 	}
 
-	if err := h.writeAuthFile(ctx, filepath.Base(path), []byte(`{"type":"multi-provider"}`)); err != nil {
+	if err := h.writeAuthFileV8(ctx, filepath.Base(path), []byte(`{"type":"multi-provider"}`)); err != nil {
 		t.Fatalf("write multi-auth file: %v", err)
 	}
 	for _, id := range []string{"plugin-a", "plugin-b"} {
@@ -209,7 +209,7 @@ func TestWriteAuthFileHonorsHandledEmptyPluginResult(t *testing.T) {
 	}
 	h.pluginAuthParser = &fakeMultiPluginAuthParser{handled: true}
 
-	if err := h.writeAuthFile(ctx, filepath.Base(path), []byte(`{"type":"multi-provider"}`)); err != nil {
+	if err := h.writeAuthFileV8(ctx, filepath.Base(path), []byte(`{"type":"multi-provider"}`)); err != nil {
 		t.Fatalf("write handled-empty file: %v", err)
 	}
 	if _, ok := h.authManager.GetByID("old-empty-id"); ok {
@@ -247,7 +247,7 @@ func TestWriteAuthFileRejectsPluginParserErrorWithoutMutation(t *testing.T) {
 				original := []byte(`{"type":"opencode-go","api_key":"original"}`)
 				if overwrite {
 					h.pluginAuthParser = &fakePluginAuthParser{provider: "opencode-go", id: "plugin-stable-id"}
-					if err := h.writeAuthFile(ctx, name, original); err != nil {
+					if err := h.writeAuthFileV8(ctx, name, original); err != nil {
 						t.Fatalf("seed plugin auth: %v", err)
 					}
 				}
@@ -259,7 +259,7 @@ func TestWriteAuthFileRejectsPluginParserErrorWithoutMutation(t *testing.T) {
 					return nil
 				}
 
-				err := h.writeAuthFile(ctx, name, []byte(`{"type":"opencode-go","api_key":"replacement"}`))
+				err := h.writeAuthFileV8(ctx, name, []byte(`{"type":"opencode-go","api_key":"replacement"}`))
 				if !errors.Is(err, errInvalidAuthFile) || !errors.Is(err, parserErr) {
 					t.Errorf("write error = %v, want invalid auth file wrapping parser error", err)
 				}

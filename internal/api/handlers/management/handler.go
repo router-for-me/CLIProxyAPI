@@ -224,15 +224,6 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 	h.mu.Unlock()
 }
 
-func (h *Handler) pluginHostSnapshot() *pluginhost.Host {
-	if h == nil {
-		return nil
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.pluginHost
-}
-
 func (h *Handler) pluginAuthParserSnapshot() synthesizer.PluginAuthParser {
 	if h == nil {
 		return nil
