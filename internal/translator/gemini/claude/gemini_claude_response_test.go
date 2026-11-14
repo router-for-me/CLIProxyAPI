@@ -150,8 +150,8 @@ func TestConvertGeminiResponseToClaude_VertexStreamingPartialArgs(t *testing.T) 
 		if got := block0JSON.String(); got != `{"city":"Berlin"}` {
 			t.Fatalf("block 0 JSON = %q, want %q", got, `{"city":"Berlin"}`)
 		}
-		if len(deferredSigs) != 2 || deferredSigs[0] != "sig-mid-1" || deferredSigs[1] != "sig-mid-2" {
-			t.Fatalf("expected deferred signatures [sig-mid-1 sig-mid-2], got %v", deferredSigs)
+		if len(deferredSigs) != 2 || deferredSigs[0] != "cpa-gemini-carrier-v1:previous:function:c2lnLW1pZC0x" || deferredSigs[1] != "cpa-gemini-carrier-v1:previous:function:c2lnLW1pZC0y" {
+			t.Fatalf("expected backward-bound deferred function signatures, got %v", deferredSigs)
 		}
 	})
 
@@ -355,8 +355,8 @@ func TestConvertGeminiResponseToClaudeNonStream_PartWithThoughtSignatureWithoutT
 	outputJSON := util.ParseGJSONBytesNoCopy(output)
 
 	blocks := outputJSON.Get("content").Array()
-	if len(blocks) != 2 {
-		t.Fatalf("expected 2 content blocks (thinking + text), got %d: %s", len(blocks), string(output))
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 content blocks (carrier + signed text + unsigned text), got %d: %s", len(blocks), string(output))
 	}
 
 	thinkingBlock := blocks[0]
@@ -371,8 +371,11 @@ func TestConvertGeminiResponseToClaudeNonStream_PartWithThoughtSignatureWithoutT
 	}
 
 	textBlock := blocks[1]
-	if textBlock.Get("type").String() != "text" || textBlock.Get("text").String() != "inferred reasoningfinal answer" {
+	if textBlock.Get("type").String() != "text" || textBlock.Get("text").String() != "inferred reasoning" {
 		t.Fatalf("unexpected text block: %s", textBlock.Raw)
+	}
+	if blocks[2].Get("type").String() != "text" || blocks[2].Get("text").String() != "final answer" {
+		t.Fatalf("unsigned text must remain a separate block: %s", blocks[2].Raw)
 	}
 }
 
@@ -1093,7 +1096,7 @@ func TestConvertGeminiResponseToClaudeStream_Issue6409_SplitTrailingSignature(t 
 	if !strings.Contains(outputText, `{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}`) {
 		t.Fatalf("expected block 1 trailing carrier thinking, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig-stream-trailing"}}`) {
+	if !strings.Contains(outputText, `{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"cpa-gemini-carrier-v1:previous:text:c2lnLXN0cmVhbS10cmFpbGluZw"}}`) {
 		t.Fatalf("expected block 1 signature_delta, got: %s", outputText)
 	}
 	if !strings.Contains(outputText, `{"type":"content_block_stop","index":1}`) {
@@ -1182,8 +1185,8 @@ func TestConvertGeminiResponseToClaudeStream_Issue6409_FunctionCallContinuationS
 	if !strings.Contains(outputText, `"type":"input_json_delta"`) {
 		t.Fatalf("expected input_json_delta, got: %s", outputText)
 	}
-	if !strings.Contains(outputText, `"signature":"sig-fc-cont-done"`) {
-		t.Fatalf("expected signature_delta with 'sig-fc-cont-done', got: %s", outputText)
+	if !strings.Contains(outputText, `"signature":"cpa-gemini-carrier-v1:previous:function:c2lnLWZjLWNvbnQtZG9uZQ"`) {
+		t.Fatalf("expected backward-bound signature_delta for the continued call, got: %s", outputText)
 	}
 }
 
@@ -1427,5 +1430,88 @@ func TestConvertGeminiResponseToClaude_ImplicitOpenToolContinuationOrdering(t *t
 				t.Fatalf("expected concatenated partial_json %s, got %q (stream: %s)", tc.want, got, string(streamBytes))
 			}
 		})
+	}
+}
+
+func TestConvertGeminiResponseToClaude_PartialVisibleTextWithMalformedFunctionCallPreservesText(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
+	rawNonStream := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": [{"text": "partial answer"}]},
+			"index": 0,
+			"finishReason": "MALFORMED_FUNCTION_CALL"
+		}],
+		"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 3, "totalTokenCount": 53},
+		"modelVersion": "m",
+		"responseId": "resp-partial"
+	}`)
+
+	ctx := context.Background()
+	nonStream := ConvertGeminiResponseToClaudeNonStream(ctx, "claude-opus-5-5", requestJSON, requestJSON, rawNonStream, nil)
+	nonStreamJSON := util.ParseGJSONBytesNoCopy(nonStream)
+	if got := nonStreamJSON.Get("type").String(); got != "message" {
+		t.Fatalf("non-stream type = %q, want message; output: %s", got, nonStream)
+	}
+	if got := nonStreamJSON.Get("content.0.text").String(); got != "partial answer" {
+		t.Fatalf("non-stream text = %q, want partial answer; output: %s", got, nonStream)
+	}
+	if got := nonStreamJSON.Get("stop_reason").String(); got != "end_turn" {
+		t.Fatalf("non-stream stop_reason = %q, want end_turn; output: %s", got, nonStream)
+	}
+
+	chunk1 := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": [{"text": "partial answer"}]},
+			"index": 0
+		}],
+		"modelVersion": "m",
+		"responseId": "resp-partial"
+	}`)
+	chunk2 := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": []},
+			"index": 0,
+			"finishReason": "MALFORMED_FUNCTION_CALL"
+		}],
+		"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 3, "totalTokenCount": 53},
+		"modelVersion": "m",
+		"responseId": "resp-partial"
+	}`)
+	var param any
+	streamOut := bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk1, &param), nil)
+	streamOut = append(streamOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, chunk2, &param), nil)...)
+	streamOut = append(streamOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	streamText := string(streamOut)
+	if strings.Contains(streamText, "event: error\n") {
+		t.Fatalf("unexpected error event when partial text was already emitted:\n%s", streamText)
+	}
+	if !strings.Contains(streamText, "partial answer") || !strings.Contains(streamText, `"type":"message_stop"`) {
+		t.Fatalf("expected partial text and message_stop in stream output:\n%s", streamText)
+	}
+}
+
+func TestConvertGeminiResponseToClaude_EmptyFunctionCallPlaceholderReturnsError(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
+	rawJSON := []byte(`{
+		"candidates": [{
+			"content": {"role": "model", "parts": [{"functionCall": {}}]},
+			"index": 0,
+			"finishReason": "MALFORMED_FUNCTION_CALL"
+		}],
+		"usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 1, "totalTokenCount": 51},
+		"modelVersion": "m",
+		"responseId": "resp-empty-fc"
+	}`)
+
+	ctx := context.Background()
+	nonStream := ConvertGeminiResponseToClaudeNonStream(ctx, "claude-opus-5-5", requestJSON, requestJSON, rawJSON, nil)
+	if got := util.ParseGJSONBytesNoCopy(nonStream).Get("type").String(); got != "error" {
+		t.Fatalf("non-stream type = %q, want error for empty functionCall placeholder; output: %s", got, nonStream)
+	}
+	var param any
+	streamOut := bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, rawJSON, &param), nil)
+	streamOut = append(streamOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "claude-opus-5-5", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+	if !strings.Contains(string(streamOut), "event: error\n") {
+		t.Fatalf("expected error event for empty functionCall placeholder:\n%s", streamOut)
 	}
 }

@@ -137,6 +137,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	// Process the main content part of the response.
+	hasDeltaContent := false
 	partsResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
@@ -235,6 +236,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		if hasReasoningContent {
 			_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
 		}
+		hasDeltaContent = hasTextContent || hasReasoningContent || hasToolCallsArray || imageCount > 0
 	}
 
 	// Determine finish_reason only on the final chunk, which upstream marks with
@@ -252,18 +254,40 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		params.SawFinishReason = true
 	}
 
+	if !hasDeltaContent && !isFinalChunk && !usageResult.Exists() {
+		return [][]byte{}
+	}
+
 	return [][]byte{templateDoc.Bytes()}
 }
 
 // hasAntigravityResponsePayload reports whether a chunk carries actual generated
-// content or token accounting. Presence alone is not enough: an envelope such as
-// `{}`, `{"response":{}}` or `{"response":{"candidates":[]}}` must not count as a
-// started stream, otherwise a keepalive or malformed event would be enough to
+// content or non-zero output token accounting. Presence alone is not enough: an
+// envelope such as `{}`, `{"response":{}}`, `{"response":{"candidates":[]}}`, or
+// a signature-only empty-text part with zero output tokens must not count as a
+// started stream, otherwise a keepalive or zero-output event would be enough to
 // finalize a stream that produced nothing.
 func hasAntigravityResponsePayload(rawJSON []byte) bool {
 	for _, path := range []string{"response.candidates", "candidates"} {
-		if candidates := ojson.GetBytesNoCopy(rawJSON, path); candidates.IsArray() && len(candidates.Array()) > 0 {
-			return true
+		if candidates := ojson.GetBytesNoCopy(rawJSON, path); candidates.IsArray() {
+			for _, cand := range candidates.Array() {
+				if strings.TrimSpace(cand.Get("finishReason").String()) != "" {
+					return true
+				}
+				if chunks := cand.Get("groundingMetadata.groundingChunks"); chunks.IsArray() && len(chunks.Array()) > 0 {
+					return true
+				}
+				for _, part := range cand.Get("content.parts").Array() {
+					if part.Get("text").String() != "" ||
+						part.Get("functionCall").Exists() || part.Get("function_call").Exists() ||
+						part.Get("inlineData").Exists() || part.Get("inline_data").Exists() ||
+						part.Get("fileData").Exists() || part.Get("file_data").Exists() ||
+						part.Get("executableCode").Exists() || part.Get("executable_code").Exists() ||
+						part.Get("codeExecutionResult").Exists() || part.Get("code_execution_result").Exists() {
+						return true
+					}
+				}
+			}
 		}
 	}
 	// FilterSSEUsageMetadata renames non-terminal usage to cpaUsageMetadata before
@@ -272,8 +296,10 @@ func hasAntigravityResponsePayload(rawJSON []byte) bool {
 		"response.usageMetadata", "response.cpaUsageMetadata",
 		"usageMetadata", "cpaUsageMetadata",
 	} {
-		if usage := ojson.GetBytesNoCopy(rawJSON, path); usage.IsObject() && len(usage.Map()) > 0 {
-			return true
+		if usage := ojson.GetBytesNoCopy(rawJSON, path); usage.IsObject() {
+			if usage.Get("candidatesTokenCount").Int() > 0 || usage.Get("thoughtsTokenCount").Int() > 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -287,7 +313,7 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 	case params.SawToolCall:
 		finishReason = "tool_calls"
 	case params.UpstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
+		finishReason = "length"
 	case isAntigravityContentFilterFinishReason(params.UpstreamFinishReason):
 		finishReason = "content_filter"
 	default:

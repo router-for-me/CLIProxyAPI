@@ -161,6 +161,7 @@ type ApplyPatchResponsesState struct {
 	upstream               []byte
 	eventLine              []byte
 	active, failed, closed bool
+	sawPatch               bool
 	transportDone          bool
 }
 
@@ -681,10 +682,22 @@ func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 	}
 	var out [][]byte
 	for _, e := range events {
+		if s.isCustomPatchEvent(e) {
+			s.sawPatch = true
+		}
 		converted, errTransform := s.Bridge.Transform(e)
+		if !s.sawPatch && !strings.HasPrefix(ojson.GetBytesNoCopy(e, "type").String(), "response.custom_tool_call_input.") {
+			for _, c := range converted {
+				if strings.HasPrefix(ojson.GetBytesNoCopy(c, "type").String(), "response.custom_tool_call_input.") {
+					s.sawPatch = true
+					break
+				}
+			}
+		}
 		out = append(out, converted...)
 		if errTransform != nil {
 			s.failed = true
+			s.sawPatch = true
 			s.byDispatcherKey, s.records, s.upstream = nil, nil, nil
 			return out, errTransform
 		}
@@ -694,6 +707,37 @@ func (s *ApplyPatchResponsesState) Transform(event []byte) ([][]byte, error) {
 		s.byDispatcherKey, s.records, s.upstream = nil, nil, nil
 	}
 	return out, nil
+}
+
+func (s *ApplyPatchResponsesState) isCustomPatchEvent(event []byte) bool {
+	if s == nil || !s.active {
+		return false
+	}
+	root := util.ParseGJSONBytesNoCopy(event)
+	if item := root.Get("item"); item.Exists() {
+		if item.Get("type").String() == "custom_tool_call" {
+			return false
+		}
+		d, ok := s.tools[util.QualifyResponsesNamespaceToolName(item.Get("namespace").String(), item.Get("name").String())]
+		return ok && applypatch.IsCustomTool(d.Tool)
+	}
+	if name := root.Get("name").String(); name != "" {
+		d, ok := s.tools[util.QualifyResponsesNamespaceToolName(root.Get("namespace").String(), name)]
+		return ok && applypatch.IsCustomTool(d.Tool)
+	}
+	return false
+}
+
+// HasPatchActivity reports whether upstream emitted any custom apply_patch call
+// or unfinished patch namespace dispatcher before closing the response.
+func (s *ApplyPatchResponsesState) HasPatchActivity() bool {
+	if s == nil || !s.active {
+		return false
+	}
+	if s.failed || s.sawPatch || s.unfinishedDispatcher() {
+		return true
+	}
+	return s.Bridge != nil && s.Bridge.Finish() != nil
 }
 
 // Finish validates source response closure independently of completed tool input.

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"math"
 	"sort"
+	"strconv"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -22,13 +23,17 @@ type weightedTransportProviderKey struct{}
 // weightedReservation separates speculative credit from committed, clamped credit.
 // Releasing one request must never undo accounting committed by another request.
 type weightedReservation struct {
-	selector   *WeightedRoundRobinSelector
-	state      *weightedPoolState
-	generation uint64
-	member     int
-	total      int64
-	bound      bool
-	finished   bool
+	selector        *WeightedRoundRobinSelector
+	state           *weightedPoolState
+	generation      uint64
+	member          int
+	selectedID      string
+	selectedEpoch   uint64
+	candidateIDs    []string
+	candidateEpochs []uint64
+	total           int64
+	bound           bool
+	finished        bool
 }
 
 // pickWithAffinityReservation normalizes weighted candidates and defers accounting
@@ -80,6 +85,7 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 	}
 	var available []*Auth
 	authID := ""
+	transportClass := ""
 	if bound == nil {
 		var errAvailable error
 		available, errAvailable = getSelectorAvailableAuths(ctx, positiveWeightAuths(auths), provider, model, time.Now())
@@ -87,6 +93,13 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 			return nil, nil, errAvailable
 		}
 		available = preferCodexWebsocketAuths(ctx, transportProvider, available)
+		if cliproxyexecutor.DownstreamWebsocket(ctx) && transportProvider == "codex" && len(available) > 0 {
+			if authWebsocketsEnabled(available[0]) {
+				transportClass = "ws"
+			} else {
+				transportClass = "http"
+			}
+		}
 	} else {
 		authID = bound.ID
 		// A binding may bypass priority or transport preference, but its traffic
@@ -107,12 +120,21 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 				}
 			}
 			available = nonWebsocket
+			transportClass = "http"
 		} else {
 			available = preferred
+			if cliproxyexecutor.DownstreamWebsocket(ctx) && transportProvider == "codex" && len(available) > 0 {
+				if authWebsocketsEnabled(available[0]) {
+					transportClass = "ws"
+				} else {
+					transportClass = "http"
+				}
+			}
 		}
 	}
+	priority := inferredWeightedPoolPriority(available)
 	key := provider + ":" + canonicalModelLookupKey(weightedSelectorStateModel(ctx, model))
-	picked, pending := s.reserve(key, available, authID)
+	picked, pending := s.reserveScoped(key, priority, transportClass, available, authID)
 	if picked == nil {
 		return nil, nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
 	}
@@ -122,20 +144,92 @@ func (s *WeightedRoundRobinSelector) reserveForRequest(ctx context.Context, prov
 // weightedPoolMember stores each ID once, with parallel accounting values in a
 // single allocation. Members are sorted by ID; reservations retain only an index.
 type weightedPoolMember struct {
-	id      string
-	weight  int64
-	current int64
-	pending int64
+	id       string
+	weight   int64
+	current  int64
+	pending  int64
+	epoch    uint64
+	regEpoch uint64
+	regGen   uint64
+	inFlight uint32
+}
+
+type weightedAuthVersion struct {
+	regEpoch uint64
+	regGen   uint64
+}
+
+func extractWeightedAuthVersions(available []*Auth, ids []string) []weightedAuthVersion {
+	versions := make([]weightedAuthVersion, len(ids))
+	if len(available) == len(ids) {
+		sortedMatch := true
+		for i, auth := range available {
+			if auth == nil || auth.ID != ids[i] {
+				sortedMatch = false
+				break
+			}
+			versions[i] = weightedAuthVersion{regEpoch: auth.RegistrationEpoch, regGen: auth.Generation}
+		}
+		if sortedMatch {
+			return versions
+		}
+		clear(versions)
+	}
+	for _, auth := range available {
+		if auth == nil {
+			continue
+		}
+		idx := sort.SearchStrings(ids, auth.ID)
+		if idx < len(ids) && ids[idx] == auth.ID {
+			v := weightedAuthVersion{regEpoch: auth.RegistrationEpoch, regGen: auth.Generation}
+			if v.regEpoch > versions[idx].regEpoch || (v.regEpoch == versions[idx].regEpoch && v.regGen > versions[idx].regGen) {
+				versions[idx] = v
+			}
+		}
+	}
+	return versions
+}
+
+func memberOlderOrEqual(member weightedPoolMember, maxEpoch, maxGen uint64) bool {
+	if member.regEpoch != maxEpoch {
+		return member.regEpoch < maxEpoch
+	}
+	return member.regGen <= maxGen
 }
 
 // weightedPoolState is separate from the scheduler's transient-subset accumulator:
 // each selector pool has fixed membership and shares its weights across reservations.
 type weightedPoolState struct {
-	route      string
-	members    []weightedPoolMember
-	inFlight   uint64
-	generation uint64
-	next       *weightedPoolState // Exact-identity collision chain for the digest key.
+	route           string
+	members         []weightedPoolMember
+	inFlight        uint64
+	generation      uint64
+	next            *weightedPoolState // Exact-identity collision chain for the digest key.
+	dynamic         bool               // Shared bucket-scoped accumulator for pools > maxExactWeightedPoolMembers.
+	peak            int                // Largest candidate count observed on a dynamic pool.
+	nextMemberEpoch uint64             // Monotonic member identity counter isolating removed/re-added IDs.
+	lastActiveIDs   []string           // Most recent active candidate IDs for post-drain compaction.
+}
+
+// maxExactWeightedPoolMembers is the candidate-set size above which exact-membership
+// pools switch to a shared bucket-scoped dynamic accumulator so transient retry
+// exclusions and cooldowns cannot collapse smooth WRR onto the lowest Auth.IDs.
+const maxExactWeightedPoolMembers = maxSmoothWeightedStateEntries
+
+func inferredWeightedPoolPriority(available []*Auth) int {
+	for _, auth := range available {
+		if auth != nil {
+			return authPriority(auth)
+		}
+	}
+	return 0
+}
+
+func dynamicWeightedPoolKey(route string, priority int, transportClass string) string {
+	if priority == 0 && transportClass == "" {
+		return route
+	}
+	return route + "\x00p=" + strconv.Itoa(priority) + "\x00t=" + transportClass
 }
 
 func sortedWeightedIDs(weights map[string]int64) []string {
@@ -182,17 +276,56 @@ func (s *weightedPoolState) matches(route string, ids []string) bool {
 	return true
 }
 
-func (s *weightedPoolState) prepare(weights []int64) {
+func (s *weightedPoolState) prepareWithVersions(weights []int64, versions []weightedAuthVersion) {
+	weightChanged := false
+	epochReplaced := false
 	for i, member := range s.members {
 		if member.weight != weights[i] {
-			s.generation++
-			s.inFlight = 0
-			for i := range s.members {
-				s.members[i].weight = weights[i]
+			weightChanged = true
+			break
+		}
+		if member.regEpoch > 0 && versions[i].regEpoch > member.regEpoch {
+			epochReplaced = true
+		}
+	}
+	if weightChanged {
+		s.generation++
+		s.inFlight = 0
+		for i := range s.members {
+			s.members[i].weight = weights[i]
+			s.members[i].current = 0
+			s.members[i].pending = 0
+			s.members[i].regEpoch = versions[i].regEpoch
+			s.members[i].regGen = versions[i].regGen
+		}
+		return
+	}
+	if epochReplaced {
+		s.generation++
+		s.inFlight = 0
+		var totalWeight int64
+		for i := range s.members {
+			s.members[i].pending = 0
+			if s.members[i].regEpoch > 0 && versions[i].regEpoch > s.members[i].regEpoch {
 				s.members[i].current = 0
-				s.members[i].pending = 0
 			}
-			return
+			if versions[i].regEpoch > s.members[i].regEpoch ||
+				(versions[i].regEpoch == s.members[i].regEpoch && versions[i].regGen > s.members[i].regGen) {
+				s.members[i].regEpoch = versions[i].regEpoch
+				s.members[i].regGen = versions[i].regGen
+			}
+			totalWeight = saturatingAddInt64(totalWeight, s.members[i].weight)
+		}
+		if totalWeight > 0 {
+			s.boundCredits(totalWeight)
+		}
+		return
+	}
+	for i := range s.members {
+		if versions[i].regEpoch > s.members[i].regEpoch ||
+			(versions[i].regEpoch == s.members[i].regEpoch && versions[i].regGen > s.members[i].regGen) {
+			s.members[i].regEpoch = versions[i].regEpoch
+			s.members[i].regGen = versions[i].regGen
 		}
 	}
 }
@@ -200,22 +333,35 @@ func (s *weightedPoolState) prepare(weights []int64) {
 // reserve selects and reserves credit atomically. A non-empty authID preserves a
 // sticky binding; otherwise committed and pending credits both guide selection.
 func (s *WeightedRoundRobinSelector) reserve(route string, available []*Auth, authID string) (*Auth, *weightedReservation) {
+	return s.reserveScoped(route, inferredWeightedPoolPriority(available), "", available, authID)
+}
+
+func (s *WeightedRoundRobinSelector) reserveScoped(route string, priority int, transportClass string, available []*Auth, authID string) (*Auth, *weightedReservation) {
 	weightVector := authWeightVector(available)
 	ids := sortedWeightedIDs(weightVector)
 	weights := make([]int64, len(ids))
 	for i, id := range ids {
 		weights[i] = weightVector[id]
 	}
-	return s.reservePool(route, available, weights, ids, authID)
+	return s.reservePoolScoped(route, priority, transportClass, available, weights, ids, authID)
 }
 
 // reservePool consumes a normalized pool. Scheduler ready views already supply
 // ID-sorted candidates and cached weights, avoiding sorting and cloning auths.
 // ids must be sorted, with one positive weight per ID in the parallel slice.
 func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {
-	key := weightedPoolDigest(route, ids)
+	return s.reservePoolScoped(route, inferredWeightedPoolPriority(available), "", available, weights, ids, authID)
+}
+
+func (s *WeightedRoundRobinSelector) reservePoolScoped(route string, priority int, transportClass string, available []*Auth, weights []int64, ids []string, authID string) (*Auth, *weightedReservation) {
+	dKey := dynamicWeightedPoolKey(route, priority, transportClass)
+	versions := extractWeightedAuthVersions(available, ids)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(ids) > maxExactWeightedPoolMembers || s.largeStates[dKey] != nil {
+		return s.reserveDynamicPoolLocked(dKey, route, available, weights, ids, versions, authID)
+	}
+	key := weightedPoolDigest(route, ids)
 	if s.states == nil {
 		s.states = make(map[[32]byte]*weightedPoolState)
 	}
@@ -224,22 +370,28 @@ func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth
 		state = state.next
 	}
 	if state == nil {
-		limit := s.maxKeys
-		if limit <= 0 {
-			limit = 4096
-		}
-		if s.stateCount >= limit {
-			s.states = make(map[[32]byte]*weightedPoolState)
-			s.stateCount = 0
+		limit := s.poolKeyLimit()
+		if s.stateCount+len(s.largeStates) >= limit {
+			if s.stateCount > 0 {
+				s.states = make(map[[32]byte]*weightedPoolState)
+				s.stateCount = 0
+			} else {
+				s.evictOneLargePoolLocked()
+			}
 		}
 		state = &weightedPoolState{route: route, members: make([]weightedPoolMember, len(ids)), next: s.states[key]}
 		for i, id := range ids {
-			state.members[i] = weightedPoolMember{id: id, weight: weights[i]}
+			state.members[i] = weightedPoolMember{
+				id:       id,
+				weight:   weights[i],
+				regEpoch: versions[i].regEpoch,
+				regGen:   versions[i].regGen,
+			}
 		}
 		s.states[key] = state
 		s.stateCount++
 	} else {
-		state.prepare(weights)
+		state.prepareWithVersions(weights, versions)
 	}
 	var picked *Auth
 	var pickedCurrent, total int64
@@ -279,6 +431,366 @@ func (s *WeightedRoundRobinSelector) reservePool(route string, available []*Auth
 	}
 }
 
+func (s *WeightedRoundRobinSelector) poolKeyLimit() int {
+	if s.maxKeys > 0 {
+		return s.maxKeys
+	}
+	return 4096
+}
+
+func (s *WeightedRoundRobinSelector) removeLargeOrderKeyLocked(target string) {
+	for i, key := range s.largeOrder {
+		if key == target {
+			s.largeOrder = append(s.largeOrder[:i], s.largeOrder[i+1:]...)
+			return
+		}
+	}
+}
+
+func (s *WeightedRoundRobinSelector) evictOneLargePoolLocked() {
+	if len(s.largeOrder) == 0 {
+		for k := range s.largeStates {
+			delete(s.largeStates, k)
+			return
+		}
+		return
+	}
+	for i, key := range s.largeOrder {
+		st := s.largeStates[key]
+		if st == nil || st.inFlight == 0 {
+			delete(s.largeStates, key)
+			s.largeOrder = append(s.largeOrder[:i], s.largeOrder[i+1:]...)
+			return
+		}
+	}
+	oldest := s.largeOrder[0]
+	s.largeOrder = s.largeOrder[1:]
+	delete(s.largeStates, oldest)
+}
+
+func (s *WeightedRoundRobinSelector) reserveDynamicPoolLocked(dKey, route string, available []*Auth, weights []int64, ids []string, versions []weightedAuthVersion, authID string) (*Auth, *weightedReservation) {
+	if s.largeStates == nil {
+		s.largeStates = make(map[string]*weightedPoolState)
+	}
+	state := s.largeStates[dKey]
+	if state == nil {
+		limit := s.poolKeyLimit()
+		for len(s.largeStates)+s.stateCount >= limit {
+			if s.stateCount > 0 {
+				s.states = make(map[[32]byte]*weightedPoolState)
+				s.stateCount = 0
+				if len(s.largeStates) < limit {
+					break
+				}
+			}
+			if len(s.largeStates) == 0 {
+				break
+			}
+			s.evictOneLargePoolLocked()
+		}
+		state = &weightedPoolState{route: route, dynamic: true}
+		s.largeStates[dKey] = state
+		s.largeOrder = append(s.largeOrder, dKey)
+	}
+	state.syncDynamicMembers(ids, weights, versions)
+
+	var picked *Auth
+	var pickedEpoch uint64
+	var pickedCurrent, total int64
+	for _, auth := range available {
+		if auth == nil {
+			continue
+		}
+		idIndex := sort.SearchStrings(ids, auth.ID)
+		if idIndex == len(ids) || ids[idIndex] != auth.ID || weights[idIndex] <= 0 {
+			continue
+		}
+		memberIndex, okMember := state.findMember(auth.ID)
+		if !okMember {
+			continue
+		}
+		weight := weights[idIndex]
+		total = saturatingAddInt64(total, weight)
+		if authID != "" && auth.ID != authID {
+			continue
+		}
+		member := &state.members[memberIndex]
+		current := saturatingAddInt64(member.current, member.pending)
+		current = saturatingAddInt64(current, weight)
+		if picked == nil || current > pickedCurrent {
+			picked, pickedEpoch, pickedCurrent = auth, member.epoch, current
+		}
+	}
+	if picked == nil {
+		return nil, nil
+	}
+	candidateIDs := append([]string(nil), ids...)
+	state.lastActiveIDs = candidateIDs
+	candidateEpochs := make([]uint64, len(ids))
+	for i, id := range ids {
+		if memberIndex, okMember := state.findMember(id); okMember {
+			candidateEpochs[i] = state.members[memberIndex].epoch
+		}
+	}
+	fullTotalWeight := max(total, state.totalMemberWeight())
+	if authID != "" && !state.dynamicBoundChargeFits(candidateIDs, candidateEpochs, picked.ID, pickedEpoch, total, fullTotalWeight) {
+		return picked, nil
+	}
+	state.adjustDynamicPending(candidateIDs, candidateEpochs, picked.ID, pickedEpoch, total, false)
+	state.inFlight++
+	return picked, &weightedReservation{
+		selector:        s,
+		state:           state,
+		generation:      state.generation,
+		selectedID:      picked.ID,
+		selectedEpoch:   pickedEpoch,
+		candidateIDs:    candidateIDs,
+		candidateEpochs: candidateEpochs,
+		total:           total,
+		bound:           authID != "",
+	}
+}
+
+func (s *weightedPoolState) findMember(id string) (int, bool) {
+	index := sort.Search(len(s.members), func(i int) bool { return s.members[i].id >= id })
+	if index < len(s.members) && s.members[index].id == id {
+		return index, true
+	}
+	return index, false
+}
+
+func (s *weightedPoolState) findMemberWithEpoch(id string, epoch uint64) (int, bool) {
+	index, ok := s.findMember(id)
+	if !ok || s.members[index].epoch != epoch {
+		return index, false
+	}
+	return index, true
+}
+
+func (s *weightedPoolState) totalMemberWeight() int64 {
+	var total int64
+	for _, member := range s.members {
+		total = saturatingAddInt64(total, member.weight)
+	}
+	return total
+}
+
+func (s *weightedPoolState) syncDynamicMembers(ids []string, weights []int64, versions []weightedAuthVersion) {
+	if len(ids) > s.peak {
+		s.peak = len(ids)
+	}
+	changed := false
+	for i, id := range ids {
+		if index, ok := s.findMember(id); ok && s.members[index].weight != weights[i] {
+			changed = true
+			break
+		}
+	}
+	if changed {
+		s.generation++
+		s.inFlight = 0
+		for i := range s.members {
+			s.members[i].current = 0
+			s.members[i].pending = 0
+			s.members[i].inFlight = 0
+		}
+	}
+	for i, id := range ids {
+		ver := versions[i]
+		index, ok := s.findMember(id)
+		if ok {
+			if s.members[index].regEpoch > 0 && ver.regEpoch > s.members[index].regEpoch {
+				s.nextMemberEpoch++
+				s.members[index] = weightedPoolMember{
+					id:       id,
+					weight:   weights[i],
+					epoch:    s.nextMemberEpoch,
+					regEpoch: ver.regEpoch,
+					regGen:   ver.regGen,
+				}
+				continue
+			}
+			s.members[index].weight = weights[i]
+			if ver.regEpoch > s.members[index].regEpoch ||
+				(ver.regEpoch == s.members[index].regEpoch && ver.regGen > s.members[index].regGen) {
+				s.members[index].regEpoch = ver.regEpoch
+				s.members[index].regGen = ver.regGen
+			}
+			continue
+		}
+		s.nextMemberEpoch++
+		s.members = append(s.members, weightedPoolMember{})
+		copy(s.members[index+1:], s.members[index:])
+		s.members[index] = weightedPoolMember{
+			id:       id,
+			weight:   weights[i],
+			epoch:    s.nextMemberEpoch,
+			regEpoch: ver.regEpoch,
+			regGen:   ver.regGen,
+		}
+	}
+	s.pruneDynamicMembers(ids)
+}
+
+func (s *weightedPoolState) pruneDynamicMembers(presentIDs []string) {
+	pruneBound := max(maxSmoothWeightedStateEntries, 2*s.peak)
+	if len(s.members) <= pruneBound {
+		return
+	}
+	present := make(map[string]struct{}, len(presentIDs))
+	for _, id := range presentIDs {
+		present[id] = struct{}{}
+	}
+	keepCount := 0
+	for _, member := range s.members {
+		if member.inFlight > 0 {
+			keepCount++
+			continue
+		}
+		if _, ok := present[member.id]; ok {
+			keepCount++
+		}
+	}
+	if keepCount == len(s.members) {
+		return
+	}
+	kept := make([]weightedPoolMember, 0, keepCount)
+	for _, member := range s.members {
+		if member.inFlight > 0 {
+			kept = append(kept, member)
+			continue
+		}
+		if _, ok := present[member.id]; ok {
+			kept = append(kept, member)
+		}
+	}
+	s.members = kept
+}
+
+func (s *weightedPoolState) adjustDynamicPending(ids []string, epochs []uint64, selectedID string, selectedEpoch uint64, subsetTotal int64, release bool) {
+	for i, id := range ids {
+		index, ok := s.findMemberWithEpoch(id, epochs[i])
+		if !ok {
+			continue
+		}
+		member := &s.members[index]
+		delta := member.weight
+		if id == selectedID && epochs[i] == selectedEpoch {
+			delta -= subsetTotal
+		}
+		if release {
+			delta = -delta
+			if member.inFlight > 0 {
+				member.inFlight--
+			}
+		} else {
+			member.inFlight++
+		}
+		member.pending = saturatingAddInt64(member.pending, delta)
+	}
+}
+
+func (s *weightedPoolState) dynamicBoundChargeFits(ids []string, epochs []uint64, selectedID string, selectedEpoch uint64, subsetTotal, fullTotalWeight int64) bool {
+	limit := int64(math.MaxInt64)
+	if fullTotalWeight <= math.MaxInt64/maxSmoothWeightedCreditRounds {
+		limit = fullTotalWeight * maxSmoothWeightedCreditRounds
+	}
+	for i, id := range ids {
+		index, ok := s.findMemberWithEpoch(id, epochs[i])
+		if !ok {
+			continue
+		}
+		member := &s.members[index]
+		delta := member.weight
+		if id == selectedID && epochs[i] == selectedEpoch {
+			delta -= subsetTotal
+		}
+		current := saturatingAddInt64(member.current, member.pending)
+		next := saturatingAddInt64(current, delta)
+		if next < -limit || next > limit {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *weightedPoolState) chargeDynamic(ids []string, epochs []uint64, selectedID string, selectedEpoch uint64, subsetTotal int64, bound bool) {
+	fullTotalWeight := max(subsetTotal, s.totalMemberWeight())
+	if !bound || s.dynamicBoundChargeFits(ids, epochs, selectedID, selectedEpoch, subsetTotal, fullTotalWeight) {
+		for i, id := range ids {
+			if index, ok := s.findMemberWithEpoch(id, epochs[i]); ok {
+				member := &s.members[index]
+				member.current = saturatingAddInt64(member.current, member.weight)
+			}
+		}
+		if index, ok := s.findMemberWithEpoch(selectedID, selectedEpoch); ok {
+			s.members[index].current = saturatingAddInt64(s.members[index].current, -subsetTotal)
+		}
+	}
+	if s.inFlight == 0 {
+		s.boundCredits(fullTotalWeight)
+	}
+}
+
+// ForgetAuth removes permanently deregistered credentials from weighted pool state.
+// Transient exclusions (retry tried sets and cooldowns) must never call ForgetAuth.
+func (s *WeightedRoundRobinSelector) ForgetAuth(authID string) {
+	s.ForgetAuthUpTo(authID, ^uint64(0), ^uint64(0))
+}
+
+// ForgetAuthUpTo removes weighted pool entries for authID whose observed
+// (RegistrationEpoch, Generation) is no newer than (maxEpoch, maxGen), so a delayed
+// removal or disablement cannot evict a newly re-registered or re-enabled credential.
+func (s *WeightedRoundRobinSelector) ForgetAuthUpTo(authID string, maxEpoch, maxGen uint64) {
+	if s == nil || authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for dKey, state := range s.largeStates {
+		if index, ok := state.findMember(authID); ok && memberOlderOrEqual(state.members[index], maxEpoch, maxGen) {
+			last := len(state.members) - 1
+			copy(state.members[index:], state.members[index+1:])
+			state.members[last] = weightedPoolMember{}
+			state.members = state.members[:last]
+			if state.peak > len(state.members) {
+				state.peak = len(state.members)
+			}
+			if len(state.members) > 0 && cap(state.members) > 2*max(maxSmoothWeightedStateEntries, len(state.members)) {
+				compacted := make([]weightedPoolMember, len(state.members))
+				copy(compacted, state.members)
+				state.members = compacted
+			}
+			state.lastActiveIDs = nil
+		}
+		if len(state.members) == 0 || (state.inFlight == 0 && state.peak <= maxExactWeightedPoolMembers && len(state.members) <= maxExactWeightedPoolMembers) {
+			delete(s.largeStates, dKey)
+			s.removeLargeOrderKeyLocked(dKey)
+		}
+	}
+	for key, head := range s.states {
+		var previous *weightedPoolState
+		for state := head; state != nil; {
+			next := state.next
+			if index, ok := state.findMember(authID); ok && memberOlderOrEqual(state.members[index], maxEpoch, maxGen) {
+				if previous == nil {
+					if next == nil {
+						delete(s.states, key)
+					} else {
+						s.states[key] = next
+					}
+				} else {
+					previous.next = next
+				}
+				s.stateCount--
+			} else {
+				previous = state
+			}
+			state = next
+		}
+	}
+}
+
 // finish confirms or releases a reservation exactly once under the selector lock.
 func (r *weightedReservation) finish(committed bool) {
 	if r == nil {
@@ -291,6 +803,19 @@ func (r *weightedReservation) finish(committed bool) {
 	}
 	r.finished = true
 	if r.state.generation != r.generation {
+		return
+	}
+	if r.state.dynamic {
+		r.state.adjustDynamicPending(r.candidateIDs, r.candidateEpochs, r.selectedID, r.selectedEpoch, r.total, true)
+		r.state.inFlight--
+		if committed {
+			r.state.chargeDynamic(r.candidateIDs, r.candidateEpochs, r.selectedID, r.selectedEpoch, r.total, r.bound)
+		} else if r.state.inFlight == 0 {
+			r.state.boundCredits(max(r.total, r.state.totalMemberWeight()))
+		}
+		if r.state.inFlight == 0 {
+			r.state.pruneDynamicMembers(r.state.lastActiveIDs)
+		}
 		return
 	}
 	r.state.adjustPending(r.member, r.total, true)
