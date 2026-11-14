@@ -12,6 +12,9 @@ type CatalogSources struct {
 	Catalog      string `yaml:"catalog" json:"catalog,omitempty"`
 	CodexCatalog string `yaml:"codex-catalog" json:"codex-catalog,omitempty"`
 	DevinCatalog string `yaml:"devin-catalog" json:"devin-catalog,omitempty"`
+	// LiveLists filters each Claude, Codex and Meta login's catalog models by the list its provider
+	// returns for that account, and adds models the catalog doesn't have yet (Claude and Codex).
+	LiveLists bool `yaml:"live-lists,omitempty" json:"live-lists,omitempty"`
 }
 
 // Validate rejects relative paths and unsupported URL schemes.
