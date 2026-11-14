@@ -1042,7 +1042,7 @@ func (b *StreamUsageBuffer) Observe(detail usage.Detail, ok bool) {
 		return
 	}
 	responseServiceTier := strings.TrimSpace(detail.ResponseServiceTier)
-	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) || hasStructuredUsageDetail(detail) {
+	if responseServiceTier == "" || hasNonZeroTokenUsage(detail) || hasStructuredUsageDetail(detail) || detail.TokenBreakdown.Observed != nil {
 		preservedTier := b.detail.ResponseServiceTier
 		preservedUpstreamTier := b.detail.UpstreamServiceTier
 		b.detail = detail

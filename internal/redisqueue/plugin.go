@@ -131,6 +131,9 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		RejectedPredictionTokens: coreusage.CloneInt64Ptr(usageDetail.RejectedPredictionTokens),
 		TotalTokens:              usageDetail.TotalTokens,
 	}
+	if observed := usageDetail.TokenBreakdown.Observed; observed != nil {
+		tokens.CacheReadTokensPresent = observed.CacheReadTokens
+	}
 
 	failed := record.Failed
 	if !failed {

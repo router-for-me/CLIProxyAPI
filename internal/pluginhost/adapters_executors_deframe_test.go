@@ -612,7 +612,7 @@ func TestExecutorAdapterExecuteStreamSameFormatFramedPassthrough(t *testing.T) {
 		assertStringsEqual(t, "claude", got, []string{string(payload)})
 	})
 
-	t.Run("responses frames unchanged apart from usage details", func(t *testing.T) {
+	t.Run("responses frames keep framing and measured usage", func(t *testing.T) {
 		frame := []byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}}\n\n")
 		adapter := streamAdapterForTest(t, sdktranslator.FormatOpenAIResponse, frame)
 		got, err := executeSameFormatStream(t, adapter, sdktranslator.FormatOpenAIResponse)
@@ -625,8 +625,14 @@ func TestExecutorAdapterExecuteStreamSameFormatFramedPassthrough(t *testing.T) {
 		if !strings.HasPrefix(got[0], "data: ") {
 			t.Errorf("responses frame lost its SSE prefix: %q", got[0])
 		}
-		if !strings.Contains(got[0], "\"input_tokens_details\"") || !strings.Contains(got[0], "\"output_tokens_details\"") {
-			t.Errorf("responses usage details not normalized: %q", got[0])
+		if !strings.Contains(got[0], "\"input_tokens\":3") || !strings.Contains(got[0], "\"output_tokens\":5") {
+			t.Errorf("responses usage counters lost: %q", got[0])
+		}
+		// Measured input/output imply a total. Detail objects the producer never
+		// sent stay absent, so an unobserved reasoning or cache counter is not
+		// presented as zero.
+		if strings.Contains(got[0], "\"input_tokens_details\"") || strings.Contains(got[0], "\"output_tokens_details\"") {
+			t.Errorf("responses usage invented unobserved details: %q", got[0])
 		}
 		if strings.Contains(got[0], "[DONE]") {
 			t.Errorf("responses stream gained a chat [DONE] marker: %q", got[0])
