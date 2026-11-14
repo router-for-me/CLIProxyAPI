@@ -397,6 +397,12 @@ client:
     # for replay. Genuine reasoning summaries remain thinking blocks.
     # Default false preserves existing behavior for clients such as TTS consumers.
     show-codex-commentary: false
+    # Forward requests carrying the client's own Anthropic credential (an sk-ant- OAuth
+    # token from Claude Code /login, or a Console API key) unchanged to api.anthropic.com
+    # instead of rejecting them with 401. Configured access.api-keys still route normally.
+    # Lets one global ANTHROPIC_BASE_URL serve both proxy keys and native Claude accounts.
+    # Default false.
+    anthropic-oauth-passthrough: false
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
