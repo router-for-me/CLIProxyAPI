@@ -129,6 +129,7 @@ func TestCooldownSnapshotForAuthReasons(t *testing.T) {
 		{name: "anthropic credit balance too low", err: &Error{HTTPStatus: 400, Message: `{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`}, reason: "payment_required", status: 400},
 		{name: "forbidden", err: &Error{HTTPStatus: 403}, reason: "payment_required", status: 403},
 		{name: "not found", err: &Error{HTTPStatus: 404}, reason: "not_found", status: 404},
+		{name: "insufficient storage transient error", err: &Error{HTTPStatus: 507, Message: "507 buffer limit"}, reason: "transient_error", status: 507},
 		{name: "gateway not challenge", err: &Error{HTTPStatus: 520, Message: "cloudflare challenge"}, reason: "transient_error", status: 520},
 		{name: "shorter active quota does not label longer retry", quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(20 * time.Second), BackoffLevel: 6}, err: &Error{HTTPStatus: 503}, reason: "transient_error", status: 503},
 		{name: "longer quota supplies deadline", quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: now.Add(2 * time.Minute), BackoffLevel: 6}, err: &Error{HTTPStatus: 503}, reason: "quota", backoff: true},
