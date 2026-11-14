@@ -633,6 +633,36 @@ func TestCodexTerminalStreamErrHandlesUsageLimitResponseFailed(t *testing.T) {
 	}
 }
 
+// TestCodexTerminalCyberPolicyHardwareKeyReauthIsCredentialScoped replays the
+// Daybreak hardware-key reauthentication cyber_policy terminal error from
+// issue #7036: the 400 passthrough is preserved, but the failure is scoped to
+// the credential's OAuth session instead of the request.
+func TestCodexTerminalCyberPolicyHardwareKeyReauthIsCredentialScoped(t *testing.T) {
+	hardwareKeyEvent := `{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"Your session must be reauthenticated with an approved physical hardware key to continue using Codex.","param":null}}`
+	streamErr, body, ok := codexTerminalFailureErr([]byte(hardwareKeyEvent))
+	if !ok {
+		t.Fatal("expected hardware-key cyber_policy terminal failure to be handled")
+	}
+	if got := streamErr.StatusCode(); got != http.StatusBadRequest {
+		t.Fatalf("status code = %d, want %d so the passthrough status is preserved", got, http.StatusBadRequest)
+	}
+	if !streamErr.IsCredentialScoped() {
+		t.Fatal("hardware-key cyber_policy terminal error must be credential-scoped so sibling models are not retried on the same credential")
+	}
+	if !strings.Contains(string(body), "hardware key") {
+		t.Fatalf("terminal body lost the upstream hardware-key message: %s", string(body))
+	}
+
+	moderationEvent := `{"type":"error","error":{"type":"invalid_request","code":"cyber_policy","message":"This content was flagged for possible cybersecurity risk."}}`
+	moderationErr, _, okModeration := codexTerminalFailureErr([]byte(moderationEvent))
+	if !okModeration {
+		t.Fatal("expected content-moderation cyber_policy terminal failure to be handled")
+	}
+	if moderationErr.IsCredentialScoped() {
+		t.Fatal("content-moderation cyber_policy terminal error must stay request-scoped")
+	}
+}
+
 func statusCodeFromTestError(t *testing.T, err error) int {
 	t.Helper()
 

@@ -106,6 +106,12 @@ func IsRequestFault(status int, err error) bool {
 	if IsDevinRequestPermissionDenied(status, err) {
 		return true
 	}
+	// The Daybreak hardware-key cyber_policy variant (issue #7036) is bound to the
+	// credential's OAuth session: no request rephrasing can clear it, so rotation
+	// and credential cooldown must stay enabled.
+	if IsCyberPolicyHardwareKeyReauth(err) {
+		return false
+	}
 	// Anthropic reports an exhausted API credit balance as 400 with an
 	// invalid_request_error body. Preserve credential cooldown and rotation
 	// without weakening generic 400 request-fault handling.
@@ -151,6 +157,56 @@ func IsItemNotPersisted(message string) bool {
 
 // GeminiFilterBlockMessagePrefix is the leading text of Gemini's mid-stream content filter block frame.
 const GeminiFilterBlockMessagePrefix = "This request was blocked by Gemini's filters."
+
+// IsCyberPolicyHardwareKeyReauth reports whether err carries the Codex
+// cyber_policy variant (issue #7036) that requires the current OAuth session to
+// be reauthenticated with an approved physical hardware key (OpenAI Daybreak).
+// Unlike a content-moderation cyber_policy rejection, this failure is bound to
+// the credential's session and no request change can recover it.
+func IsCyberPolicyHardwareKeyReauth(err error) bool {
+	if err == nil {
+		return false
+	}
+	if CyberPolicyHardwareKeyReauthBody([]byte(err.Error())) {
+		return true
+	}
+	type responseBodyProvider interface {
+		ResponseBody() []byte
+	}
+	var responseBody responseBodyProvider
+	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
+		return CyberPolicyHardwareKeyReauthBody(responseBody.ResponseBody())
+	}
+	return false
+}
+
+// CyberPolicyHardwareKeyReauthBody reports whether a JSON error payload is the
+// Daybreak hardware-key reauthentication variant of a cyber_policy rejection.
+// The stable signal is the cyber_policy error code combined with a message that
+// speaks of a hardware key; the content-moderation cyber_policy wording never
+// mentions one.
+func CyberPolicyHardwareKeyReauthBody(body []byte) bool {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
+		return false
+	}
+	isCyberPolicy := false
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(body, path).String()), "cyber_policy") {
+			isCyberPolicy = true
+			break
+		}
+	}
+	if !isCyberPolicy {
+		return false
+	}
+	for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
+		message := strings.ToLower(ojson.GetBytesNoCopy(body, path).String())
+		if strings.Contains(message, "hardware") && strings.Contains(message, "key") {
+			return true
+		}
+	}
+	return false
+}
 
 // GeminiFilterBlockPolicyURL is the policy URL embedded in Gemini's mid-stream content filter block frame.
 const GeminiFilterBlockPolicyURL = "https://policies.google.com/terms/generative-ai/use-policy"
