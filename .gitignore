@@ -5,6 +5,10 @@ cli-proxy-api-plus
 /server
 *.exe
 
+# Release artifacts must never be committed
+/CLIProxyAPI_*.tar.gz
+/cliproxy_*.tar.gz
+
 
 # Configuration
 config.yaml
