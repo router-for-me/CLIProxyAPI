@@ -1,8 +1,13 @@
-FROM golang:1.26-bookworm AS builder
+# Go 1.26.10 blocks compromised eMudhra intermediates (CVE-2026-111943).
+FROM golang:1.26.10-bookworm AS builder
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /var/lib/apt/lists/*
+# DLA-4845-1: reject stale mirrors that still serve the compromised CA roots.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates git \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY go.mod go.sum ./
 
@@ -18,7 +23,11 @@ RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.V
 
 FROM debian:bookworm
 
-RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
+# Enforce the same patched trust store in the runtime image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge '20250419~deb12u2' \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir /CLIProxyAPI
 
