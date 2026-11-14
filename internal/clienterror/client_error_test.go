@@ -293,6 +293,20 @@ func TestIsRequestFault(t *testing.T) {
 			want:   false,
 		},
 		{
+			name:   "insufficient credits 400 is payment failure, not request fault",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service.","type":"invalid_request_error","code":"BAD_REQUEST"}}`),
+			want:   false,
+		},
+		{
+			name: "insufficient credits in response body is payment failure",
+			err: responseBodyError{
+				status: http.StatusBadRequest,
+				body:   `{"error":{"message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service.","type":"invalid_request_error","code":"BAD_REQUEST"}}`,
+			},
+			want: false,
+		},
+		{
 			name: "anthropic credit balance too low in response body is payment failure",
 			err: responseBodyError{
 				status: http.StatusBadRequest,
@@ -384,6 +398,54 @@ func TestIsClientCancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := IsClientCancellation(tc.status, tc.err); got != tc.want {
 				t.Fatalf("IsClientCancellation(%d, %v) = %t, want %t", tc.status, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsCreditBalanceTooLow(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		err    error
+		want   bool
+	}{
+		{
+			name:   "anthropic wording",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`),
+			want:   true,
+		},
+		{
+			name:   "insufficient credits wording",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service.","type":"invalid_request_error","code":"BAD_REQUEST"}}`),
+			want:   true,
+		},
+		{
+			name: "insufficient credits wording in response body",
+			err: responseBodyError{
+				status: http.StatusBadRequest,
+				body:   `{"error":{"message":"You have insufficient credits to make this request. Please purchase more credits to continue using the service.","type":"invalid_request_error","code":"BAD_REQUEST"}}`,
+			},
+			want: true,
+		},
+		{
+			name:   "generic bad request without credit phrase",
+			status: http.StatusBadRequest,
+			err:    errors.New(`{"error":{"message":"messages: at least one message is required","type":"invalid_request_error","code":"BAD_REQUEST"}}`),
+			want:   false,
+		},
+		{
+			name:   "non-400 status is not credit exhaustion",
+			status: http.StatusPaymentRequired,
+			err:    errors.New(`{"error":{"message":"You have insufficient credits to make this request.","type":"invalid_request_error"}}`),
+			want:   false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsCreditBalanceTooLow(tc.status, tc.err); got != tc.want {
+				t.Fatalf("IsCreditBalanceTooLow(%d, %v) = %v, want %v", tc.status, tc.err, got, tc.want)
 			}
 		})
 	}

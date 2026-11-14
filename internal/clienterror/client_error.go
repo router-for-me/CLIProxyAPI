@@ -369,8 +369,14 @@ func isDevinRequestPermissionDeniedText(text string) bool {
 		strings.Contains(lower, "blocked by our content policy")
 }
 
-// IsCreditBalanceTooLow reports the Anthropic 400 response returned when a
-// credential's API credit balance is exhausted.
+// IsCreditBalanceTooLow reports the upstream 400 response returned when a
+// credential's API credit balance is exhausted. Anthropic uses a fixed
+// prefix; other providers (e.g. CommandCode) report the same billing
+// condition under an identical invalid_request_error signature with
+// different wording, so match the shared "insufficient credits" phrase as
+// well. Both callers (request-fault exemption and the conductor's credit
+// cooldown branch) delegate here, so exhausted credentials cool down and
+// rotate regardless of provider wording.
 func IsCreditBalanceTooLow(status int, err error) bool {
 	if status <= 0 && err != nil {
 		status = HTTPStatusFromError(err)
@@ -398,7 +404,8 @@ func hasCreditBalanceTooLowBody(err error) bool {
 	}
 	for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
 		msg := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
-		if strings.HasPrefix(msg, "your credit balance is too low") {
+		if strings.HasPrefix(msg, "your credit balance is too low") ||
+			strings.Contains(msg, "insufficient credits") {
 			return true
 		}
 	}
