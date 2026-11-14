@@ -78,3 +78,31 @@ func TestCodexExecutorCountTokensPreservesToolNumberSchemas(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexCountTokensIncludesClaudeImage(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg=="
+	for _, tc := range []struct {
+		model string
+		want  int64
+	}{{"gpt-6.1-sol", 1844}, {"gpt-6.1-terra", 1844}, {"gpt-6-luna", 1844}, {"gpt-6-astra", 2}, {"gpt-5", 210}, {"gpt-5-2025-08-07", 210}} {
+		t.Run(tc.model, func(t *testing.T) {
+			doc := ojson.NewDocString(`{"messages":[{"role":"user","content":[{"type":"text","text":"What color?"}]}]}`)
+			exec := NewCodexExecutor(&config.Config{})
+			count := func() int64 {
+				resp, err := exec.CountTokens(t.Context(), nil, cliproxyexecutor.Request{Model: tc.model, Payload: doc.Bytes()}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return ojson.GetBytes(resp.Payload, "input_tokens").Int()
+			}
+			before := count()
+			if err := doc.Set("messages.0.content.1", map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": png}}); err != nil {
+				t.Fatal(err)
+			}
+			after := count()
+			if after-before != tc.want {
+				t.Fatalf("image contribution = %d, want %d", after-before, tc.want)
+			}
+		})
+	}
+}
