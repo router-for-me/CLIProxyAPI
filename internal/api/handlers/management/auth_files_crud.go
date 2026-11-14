@@ -178,7 +178,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				}
 				deleted++
 				if isAuthFileManagementV8(ctx) {
-					h.removeAuthsForPath(ctx, full, "")
+					h.removeAuthsForPathV8(ctx, full)
 				} else {
 					h.removeAuth(ctx, full)
 				}
@@ -977,4 +977,20 @@ func sameManagedAuthFilePath(left, right string) bool {
 		return path
 	}
 	return sameAuthFilePath(canonical(left), canonical(right))
+}
+
+func (h *Handler) removeAuthsForPathV8(ctx context.Context, path string) {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	removed := false
+	for _, auth := range h.authManager.List() {
+		if auth != nil && (sameManagedAuthFilePath(authAttribute(auth, "path"), path) || sameManagedAuthFilePath(authAttribute(auth, coreauth.AttributeVirtualSource), path)) {
+			h.removeAuth(ctx, auth.ID)
+			removed = true
+		}
+	}
+	if !removed {
+		h.removeAuth(ctx, path)
+	}
 }

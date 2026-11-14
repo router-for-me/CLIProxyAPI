@@ -1115,7 +1115,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				AuthDir:          authDir,
 				Now:              time.Now(),
 				IDGenerator:      synthesizer.NewStableIDGenerator(),
-				PluginAuthParser: h.pluginHost,
+				PluginAuthParser: h.pluginAuthParserSnapshot(),
 			}, savedPath, data)
 			if errSynthesize != nil {
 				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)

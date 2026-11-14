@@ -38,7 +38,7 @@ func TestAuthFileUploadVersionedPluginSemantics(t *testing.T) {
 					}
 					router := gin.New()
 					router.POST("/v0/management/auth-files", h.UploadAuthFile)
-					router.POST("/v8/management/auth-files", h.UploadAuthFileV8)
+					router.POST("/v8/management/credentials", h.UploadAuthFileV8)
 					payload := []byte(`{"type":"plugin-provider"}`)
 					var body bytes.Buffer
 					contentType := "application/json"
@@ -58,7 +58,11 @@ func TestAuthFileUploadVersionedPluginSemantics(t *testing.T) {
 					} else {
 						body.Write(payload)
 					}
-					req := httptest.NewRequest(http.MethodPost, "/"+version+"/management/auth-files?name=source.json", &body)
+					route := "/v0/management/auth-files"
+					if version == "v8" {
+						route = "/v8/management/credentials"
+					}
+					req := httptest.NewRequest(http.MethodPost, route+"?name=source.json", &body)
 					req.Header.Set("Content-Type", contentType)
 					rec := httptest.NewRecorder()
 					router.ServeHTTP(rec, req)
@@ -128,5 +132,46 @@ func TestManagedPluginFileNamesMatchWatcher(t *testing.T) {
 		if !exists || got.FileName != wantName {
 			t.Fatalf("record %q: management=%v expected filename=%q", expected.ID, got, wantName)
 		}
+	}
+}
+
+func TestV8PluginIdentityReconciliationThroughSymlinkedAuthDir(t *testing.T) {
+	h, realDir := newIdentityTestHandler(t)
+	alias := filepath.Join(t.TempDir(), "auth-alias")
+	if errLink := os.Symlink(realDir, alias); errLink != nil {
+		t.Skipf("symlinks unavailable: %v", errLink)
+	}
+	h.cfg.AuthDir = alias
+	h.tokenStore = &memoryAuthStore{}
+	source := filepath.Join(realDir, "source.json")
+	old := &coreauth.Auth{ID: "old-child", Provider: "plugin-provider", FileName: "source.json", Attributes: map[string]string{
+		coreauth.AttributePath: source, coreauth.AttributeVirtualSource: source, coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+	}}
+	if _, errRegister := h.authManager.Register(context.Background(), old); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	h.pluginAuthParser = &fakeMultiPluginAuthParser{handled: true, auths: []*coreauth.Auth{{ID: "new-child", Provider: "plugin-provider", FileName: "custom-child.json"}}}
+	if errWrite := h.writeAuthFileV8(context.Background(), "source.json", []byte(`{"type":"plugin-provider"}`)); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	if _, exists := h.authManager.GetByID("old-child"); exists {
+		t.Fatal("v8 upload retained an old ID through a symlink alias")
+	}
+	// A watcher may publish the real path while the management config uses its alias.
+	auth, exists := h.authManager.GetByID("new-child")
+	if !exists {
+		t.Fatal("v8 upload did not publish plugin ID")
+	}
+	auth.Attributes[coreauth.AttributePath] = source
+	auth.Attributes[coreauth.AttributeVirtualSource] = source
+	if _, errUpdate := h.authManager.Update(context.Background(), auth); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	router := gin.New()
+	router.DELETE("/v8/management/credentials", h.DeleteAuthFileV8)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/v8/management/credentials?all=true", nil))
+	if rec.Code != http.StatusOK || len(h.authManager.List()) != 0 {
+		t.Fatalf("v8 delete-all status=%d remaining=%d", rec.Code, len(h.authManager.List()))
 	}
 }
