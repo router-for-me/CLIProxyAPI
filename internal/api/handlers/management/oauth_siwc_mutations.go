@@ -12,16 +12,23 @@ import (
 )
 
 type siwcFileMutationKey struct{}
+type authFileManagementV8Key struct{}
+
+func isAuthFileManagementV8(ctx context.Context) bool {
+	return ctx != nil && ctx.Value(authFileManagementV8Key{}) == true
+}
 
 // UploadAuthFileV8 coordinates file replacement with explicit SIWC binding.
 func (h *Handler) UploadAuthFileV8(c *gin.Context) {
 	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), siwcFileMutationKey{}, true))
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), authFileManagementV8Key{}, true))
 	h.UploadAuthFile(c)
 }
 
 // DeleteAuthFileV8 coordinates file removal with explicit SIWC binding.
 func (h *Handler) DeleteAuthFileV8(c *gin.Context) {
 	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), siwcFileMutationKey{}, true))
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), authFileManagementV8Key{}, true))
 	h.DeleteAuthFile(c)
 }
 

@@ -1938,8 +1938,9 @@ func (h *Handler) restoreOverwrittenPluginRecord(ctx context.Context, rb savedPl
 			}
 		}
 	}
-	if len(rb.prevDiskBytes) > 0 && h.pluginHost != nil {
-		if restored := h.pluginHost.AuthDataToCoreAuth(pluginapi.AuthData{
+	pluginHost := h.pluginHostSnapshot()
+	if len(rb.prevDiskBytes) > 0 && pluginHost != nil {
+		if restored := pluginHost.AuthDataToCoreAuth(pluginapi.AuthData{
 			Provider:    restoreRecord.Provider,
 			ID:          restoreRecord.ID,
 			FileName:    restoreRecord.FileName,
