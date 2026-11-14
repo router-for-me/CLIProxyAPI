@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -1692,6 +1693,87 @@ func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T
 	}
 	if apiResp, ok := ctx.Get("API_RESPONSE"); !ok || !strings.Contains(string(apiResp.([]byte)), "intercepted-model") {
 		t.Fatalf("API_RESPONSE not recorded properly: %#v", apiResp)
+	}
+}
+
+func TestWriteModelListResponse_ForwardsCallerIdentityToInterceptors(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var capturedReq pluginapi.ResponseInterceptRequest
+	var completion pluginapi.RequestCompletion
+
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			capturedReq = req
+			return pluginapi.ResponseInterceptResponse{}
+		},
+		completeRequest: func(_ context.Context, comp pluginapi.RequestCompletion) {
+			completion = comp
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models?key=query-credential", nil)
+	ctx.Set("userApiKey", "plugin-principal-123")
+	ctx.Set("accessProvider", "plugin-frontend-auth")
+	ctx.Set("accessMetadata", map[string]string{"source": "query-key", "team": "alpha"})
+
+	payload := gin.H{"models": []map[string]any{{"name": "models/gemini-3-pro"}}}
+	handler.WriteModelListResponse(ctx, "gemini", payload)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	wantScope := coresession.CallerScope("plugin-principal-123")
+	if got := capturedReq.Metadata[pluginapi.CallerScopeMetadataKey]; got != wantScope {
+		t.Fatalf("Metadata[%q] = %v, want %q", pluginapi.CallerScopeMetadataKey, got, wantScope)
+	}
+	if got := capturedReq.Metadata["access_provider"]; got != "plugin-frontend-auth" {
+		t.Fatalf("Metadata[access_provider] = %v, want plugin-frontend-auth", got)
+	}
+	rawAuthMeta, ok := capturedReq.Metadata["frontend_auth_metadata"].(map[string]string)
+	if !ok {
+		t.Fatalf("Metadata[frontend_auth_metadata] type = %T, want map[string]string", capturedReq.Metadata["frontend_auth_metadata"])
+	}
+	if rawAuthMeta["source"] != "query-key" || rawAuthMeta["team"] != "alpha" {
+		t.Fatalf("frontend_auth_metadata = %#v, want source=query-key team=alpha", rawAuthMeta)
+	}
+	if got := completion.Metadata[pluginapi.CallerScopeMetadataKey]; got != wantScope {
+		t.Fatalf("completion Metadata[%q] = %v, want %q", pluginapi.CallerScopeMetadataKey, got, wantScope)
+	}
+
+	// The forwarded auth metadata must be a clone: mutating the interceptor-visible
+	// map must not corrupt the gin context copy shared with other consumers.
+	rawAuthMeta["source"] = "mutated-by-plugin"
+	ctxMeta, _ := ctx.Get("accessMetadata")
+	if got := ctxMeta.(map[string]string)["source"]; got != "query-key" {
+		t.Fatalf("accessMetadata[source] in context = %q, want query-key (interceptor metadata must be isolated)", got)
+	}
+}
+
+func TestWriteModelListResponse_MetadataNilWithoutAuthContext(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var capturedReq pluginapi.ResponseInterceptRequest
+
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			capturedReq = req
+			return pluginapi.ResponseInterceptResponse{}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+
+	handler.WriteModelListResponse(ctx, "openai", gin.H{"object": "list", "data": []map[string]any{}})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if capturedReq.Metadata != nil {
+		t.Fatalf("Metadata = %#v, want nil for unauthenticated context", capturedReq.Metadata)
 	}
 }
 

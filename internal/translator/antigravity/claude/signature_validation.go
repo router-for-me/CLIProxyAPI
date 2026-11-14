@@ -2,7 +2,6 @@
 package claude
 
 import (
-	"github.com/MoeForge/moego/base64"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -16,62 +15,23 @@ const (
 
 	// Gemini carrier envelopes exist only on the Claude-facing wire. The request
 	// translator validates and unwraps them before writing native Gemini parts.
-	geminiClaudeCarrierPrefix     = "cpa-gemini-carrier-v1:"
-	geminiClaudeCarrierNext       = "next"
-	geminiClaudeCarrierPrevious   = "previous"
-	geminiClaudeCarrierStandalone = "standalone"
-	geminiClaudeCarrierText       = "text"
-	geminiClaudeCarrierFunction   = "function"
-	geminiClaudeCarrierAny        = "any"
+	geminiClaudeCarrierPrefix     = translatorcommon.GeminiClaudeCarrierPrefix
+	geminiClaudeCarrierNext       = translatorcommon.GeminiClaudeCarrierNext
+	geminiClaudeCarrierPrevious   = translatorcommon.GeminiClaudeCarrierPrevious
+	geminiClaudeCarrierStandalone = translatorcommon.GeminiClaudeCarrierStandalone
+	geminiClaudeCarrierText       = translatorcommon.GeminiClaudeCarrierText
+	geminiClaudeCarrierFunction   = translatorcommon.GeminiClaudeCarrierFunction
+	geminiClaudeCarrierAny        = translatorcommon.GeminiClaudeCarrierAny
 )
 
 type claudeSignatureTree = signature.ClaudeSignatureTree
 
 func encodeGeminiClaudeCarrierSignature(rawSignature, direction, targetKind string) string {
-	rawSignature = strings.TrimSpace(rawSignature)
-	if rawSignature == "" {
-		return ""
-	}
-	return geminiClaudeCarrierPrefix + direction + ":" + targetKind + ":" + base64.RawStdEncoding.EncodeToString([]byte(rawSignature))
+	return translatorcommon.EncodeGeminiClaudeCarrierSignature(rawSignature, direction, targetKind)
 }
 
 func decodeGeminiClaudeCarrierSignature(rawSignature string) (signatureValue, direction, targetKind string, marked, ok bool) {
-	rawSignature = strings.TrimSpace(rawSignature)
-	if !strings.HasPrefix(rawSignature, geminiClaudeCarrierPrefix) {
-		return rawSignature, "", "", false, true
-	}
-	marked = true
-	if len(rawSignature) > (signature.MaxGeminiThoughtSignatureLen*4/3)+1024 {
-		return "", "", "", true, false
-	}
-	fields := strings.SplitN(strings.TrimPrefix(rawSignature, geminiClaudeCarrierPrefix), ":", 3)
-	if len(fields) != 3 {
-		return "", "", "", true, false
-	}
-	direction, targetKind = fields[0], fields[1]
-	switch direction {
-	case geminiClaudeCarrierNext, geminiClaudeCarrierPrevious, geminiClaudeCarrierStandalone:
-	default:
-		return "", "", "", true, false
-	}
-	switch targetKind {
-	case geminiClaudeCarrierText, geminiClaudeCarrierFunction, geminiClaudeCarrierAny:
-	default:
-		return "", "", "", true, false
-	}
-	decoded, errDecode := base64.RawStdEncoding.DecodeString(fields[2])
-	if errDecode != nil || len(decoded) == 0 || strings.HasPrefix(string(decoded), geminiClaudeCarrierPrefix) {
-		return "", "", "", true, false
-	}
-	blockKind := signature.SignatureBlockKindGeminiModelPart
-	if targetKind == geminiClaudeCarrierFunction {
-		blockKind = signature.SignatureBlockKindGeminiFunctionCall
-	}
-	normalized, compatible := signature.CompatibleSignatureForProviderBlock(signature.SignatureProviderGemini, string(decoded), blockKind)
-	if !compatible || signature.IsGeminiThoughtSignatureBypass(signature.SignaturePayloadWithoutProviderPrefix(normalized)) {
-		return "", "", "", true, false
-	}
-	return normalized, direction, targetKind, true, true
+	return translatorcommon.DecodeGeminiClaudeCarrierSignature(rawSignature)
 }
 
 func geminiClaudeSemanticTargetKind(block ojson.Result) string {

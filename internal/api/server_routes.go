@@ -19,6 +19,7 @@ import (
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/musecode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
@@ -61,6 +62,8 @@ func (s *Server) setupRoutes() {
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
 	openaiResponsesHandlers.AccessManager = s.accessManager
 	s.codexLiveHandler = codexlive.NewHandler(s.handlers.AuthManager, s.cfg)
+	s.museCodeHandler = musecode.NewHandler(s.handlers.AuthManager, s.cfg)
+	s.museCodeHandler.SetModelListHooks(s.loadMuseCodeHomeModels, s.writeModelListResponse)
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
@@ -90,6 +93,11 @@ func (s *Server) setupRoutes() {
 		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/live", s.codexLiveHandler.Handle)
 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
+	}
+
+	s.engine.GET("/v1/tunnel", s.handleWebsocketTunnel)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodTrace, http.MethodConnect} {
+		s.engine.Handle(method, "/v1/tunnel", s.handleWebsocketTunnel)
 	}
 
 	realtimeAuth := realtimeAuthMiddleware(s.accessManager, s.codexLiveHandler)
@@ -125,6 +133,16 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
+	}
+
+	// Muse Code CLI direct endpoints (beside /v1)
+	museCode := s.engine.Group("/muse-code")
+	museCode.Use(AuthMiddleware(s.accessManager))
+	{
+		museCode.GET("/models", s.museCodeHandler.HandleModels)
+		museCode.GET("/config", s.museCodeHandler.Handle)
+		museCode.POST("/search", s.museCodeHandler.Handle)
+		museCode.POST("/browser_open", s.museCodeHandler.Handle)
 	}
 
 	// Gemini compatible API routes
@@ -608,6 +626,15 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.engine.GET(trimmed, conditionalAuth, finalHandler)
 }
 
+func (s *Server) handleWebsocketTunnel(c *gin.Context) {
+	if s == nil || s.tunnelHub == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "tunnel hub unavailable"})
+		return
+	}
+	s.tunnelHub.ServeHTTP(c.Writer, c.Request)
+	c.Abort()
+}
+
 // isAnthropicModelsRequest reports whether a /v1/models request should be served in
 // Anthropic format. Anthropic API clients send the Anthropic-Version header; Claude
 // Code additionally uses a claude-cli User-Agent.
@@ -853,29 +880,147 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 
 func formatHomeCodexModelWithSettings(entry homeModelEntry, cfg *config.Config) map[string]any {
 	model := formatHomeCodexModel(entry)
+	if maxCtx := resolveHomeModelMaxContextLength(entry, cfg); maxCtx > 0 && maxCtx != entry.maxContextLength {
+		model["max_context_length"] = maxCtx
+	}
+	return model
+}
+
+func normalizeHomeProviderChannel(provider string) string {
+	channel := strings.ToLower(strings.TrimSpace(provider))
+	switch channel {
+	case "codex", "codex-free", "codex-plus", "codex-team", "codex-pro":
+		return "codex"
+	default:
+		return channel
+	}
+}
+
+func resolveHomeRouteMaxContextLength(modelID, metadataModelID, modelName, provider string, baseMaxContextLength int, cfg *config.Config) int {
 	if cfg == nil || len(cfg.OAuthSettings) == 0 {
-		return model
+		return baseMaxContextLength
+	}
+	channel := normalizeHomeProviderChannel(provider)
+	if channel == "" {
+		return baseMaxContextLength
+	}
+	if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
+		if setting := config.ResolveOAuthModelSetting(channelSettings, modelID, metadataModelID, modelName); setting != nil && setting.MaxContextLength > 0 {
+			return setting.MaxContextLength
+		}
+	}
+	return baseMaxContextLength
+}
+
+func resolveHomeModelMaxContextLength(entry homeModelEntry, cfg *config.Config) int {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return entry.maxContextLength
+	}
+	if len(entry.routes) > 0 {
+		routes := append([]homeModelRoute(nil), entry.routes...)
+		sort.SliceStable(routes, func(i, j int) bool {
+			ci := normalizeHomeProviderChannel(routes[i].provider)
+			cj := normalizeHomeProviderChannel(routes[j].provider)
+			if ci == "codex" && cj != "codex" {
+				return true
+			}
+			if cj == "codex" && ci != "codex" {
+				return false
+			}
+			return ci < cj
+		})
+		for _, route := range routes {
+			channel := normalizeHomeProviderChannel(route.provider)
+			if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
+				if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, route.metadataModelID, route.modelName); setting != nil && setting.MaxContextLength > 0 {
+					return setting.MaxContextLength
+				}
+			}
+		}
+		return entry.maxContextLength
 	}
 	providers := append([]string(nil), entry.providers...)
 	sort.SliceStable(providers, func(i, j int) bool {
-		if strings.EqualFold(providers[i], "codex") {
+		ci := normalizeHomeProviderChannel(providers[i])
+		cj := normalizeHomeProviderChannel(providers[j])
+		if ci == "codex" && cj != "codex" {
 			return true
 		}
-		if strings.EqualFold(providers[j], "codex") {
+		if cj == "codex" && ci != "codex" {
 			return false
 		}
-		return strings.ToLower(providers[i]) < strings.ToLower(providers[j])
+		return ci < cj
 	})
 	for _, p := range providers {
-		channel := strings.ToLower(strings.TrimSpace(p))
+		channel := normalizeHomeProviderChannel(p)
 		if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
-			if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, "", ""); setting != nil && setting.MaxContextLength > 0 {
-				model["max_context_length"] = setting.MaxContextLength
-				break
+			if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, entry.metadataModelID, entry.modelName); setting != nil && setting.MaxContextLength > 0 {
+				return setting.MaxContextLength
 			}
 		}
 	}
-	return model
+	return entry.maxContextLength
+}
+
+func (s *Server) loadMuseCodeHomeModels(c *gin.Context) ([]musecode.ModelInput, bool) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return nil, false
+	}
+	cfg := s.getConfig()
+	inputs := make([]musecode.ModelInput, 0, len(entries))
+	for _, entry := range entries {
+		routes := make([]musecode.ModelRoute, 0, len(entry.routes))
+		for _, route := range entry.routes {
+			routeType := route.modelType
+			if routeType == "" && route.provider == "openai-image" {
+				routeType = "openai-image"
+			}
+			routes = append(routes, musecode.ModelRoute{
+				Provider:                  route.provider,
+				MetadataModelID:           route.metadataModelID,
+				Created:                   route.created,
+				OwnedBy:                   route.ownedBy,
+				Type:                      routeType,
+				DisplayName:               route.displayName,
+				Description:               route.description,
+				ContextLength:             route.contextLength,
+				MaxContextLength:          resolveHomeRouteMaxContextLength(entry.id, route.metadataModelID, route.modelName, route.provider, route.maxContextLength, cfg),
+				MaxCompletionTokens:       route.maxCompletionTokens,
+				Thinking:                  route.thinking,
+				ExplicitThinking:          route.hasThinking,
+				SupportedInputModalities:  append([]string(nil), route.supportedInputModalities...),
+				ExplicitInputModalities:   route.hasInputModalities,
+				SupportedOutputModalities: append([]string(nil), route.supportedOutputModalities...),
+				HasOutputModalities:       route.hasOutputModalities,
+			})
+		}
+		modelType := entry.modelType
+		if modelType == "" && len(entry.providers) == 1 && entry.providers[0] == "openai-image" {
+			modelType = "openai-image"
+		}
+		metadataID := entry.metadataModelID
+		if len(routes) > 0 {
+			metadataID = ""
+		}
+		inputs = append(inputs, musecode.ModelInput{
+			ID:                        entry.id,
+			MetadataModelID:           metadataID,
+			Created:                   entry.created,
+			OwnedBy:                   entry.ownedBy,
+			Type:                      modelType,
+			DisplayName:               entry.displayName,
+			Description:               entry.description,
+			ContextLength:             entry.contextLength,
+			MaxContextLength:          resolveHomeModelMaxContextLength(entry, cfg),
+			MaxCompletionTokens:       entry.maxCompletionTokens,
+			Thinking:                  entry.thinking,
+			SupportedInputModalities:  append([]string(nil), entry.supportedInputModalities...),
+			SupportedOutputModalities: append([]string(nil), entry.supportedOutputModalities...),
+			Routes:                    routes,
+		})
+	}
+	return inputs, true
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
@@ -900,17 +1045,44 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 	}
 }
 
+type homeModelRoute struct {
+	provider                  string
+	modelName                 string
+	metadataModelID           string
+	created                   int64
+	ownedBy                   string
+	modelType                 string
+	displayName               string
+	description               string
+	contextLength             int
+	maxContextLength          int
+	maxCompletionTokens       int
+	thinking                  *registry.ThinkingSupport
+	hasThinking               bool
+	supportedInputModalities  []string
+	hasInputModalities        bool
+	supportedOutputModalities []string
+	hasOutputModalities       bool
+}
+
 type homeModelEntry struct {
-	id                     string
-	created                int64
-	ownedBy                string
-	displayName            string
-	contextLength          int
-	maxContextLength       int
-	maxCompletionTokens    int
-	thinking               *registry.ThinkingSupport
-	providers              []string
-	nativeCapabilityRoutes []registry.NativeCapabilityRoute
+	id                        string
+	modelName                 string
+	metadataModelID           string
+	created                   int64
+	ownedBy                   string
+	modelType                 string
+	displayName               string
+	description               string
+	contextLength             int
+	maxContextLength          int
+	maxCompletionTokens       int
+	thinking                  *registry.ThinkingSupport
+	supportedInputModalities  []string
+	supportedOutputModalities []string
+	providers                 []string
+	nativeCapabilityRoutes    []registry.NativeCapabilityRoute
+	routes                    []homeModelRoute
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -1208,15 +1380,20 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		hasModelRecords = hasModelRecords || len(models) > 0
 		provider := strings.ToLower(strings.TrimSpace(section))
 		for _, model := range models {
+			rawName, _ := model["name"].(string)
+			rawName = strings.TrimSpace(rawName)
+			trimmedName := strings.TrimPrefix(rawName, "models/")
 			id, _ := model["id"].(string)
 			id = strings.TrimSpace(id)
 			if id == "" {
-				name, _ := model["name"].(string)
-				name = strings.TrimSpace(name)
-				id = strings.TrimPrefix(name, "models/")
+				id = trimmedName
 			}
 			if id == "" {
 				continue
+			}
+			metadataModelID := ""
+			if trimmedName != "" && trimmedName != id {
+				metadataModelID = trimmedName
 			}
 			nativeCapabilities := homeModelNativeCapabilities(model)
 			route := registry.NativeCapabilityRoute{
@@ -1226,28 +1403,66 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 			created := homeModelInt64Value(model, "created")
 			ownedBy, _ := model["owned_by"].(string)
 			ownedBy = strings.TrimSpace(ownedBy)
+			modelType, _ := model["type"].(string)
+			modelType = strings.TrimSpace(modelType)
 			displayName, _ := model["display_name"].(string)
 			displayName = strings.TrimSpace(displayName)
 			if displayName == "" {
 				displayName, _ = model["displayName"].(string)
 				displayName = strings.TrimSpace(displayName)
 			}
+			description, _ := model["description"].(string)
+			description = strings.TrimSpace(description)
 			contextLength := int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens"))
 			maxContextLength := int(homeModelInt64Value(model, "max_context_length", "maxContextLength"))
 			maxCompletionTokens := int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens"))
-			thinking := homeModelThinkingSupport(model)
+			thinking, hasThinking := homeModelThinkingSupport(model)
+			inputModalities, hasInputModalities := homeModelStringSlice(model, "supportedInputModalities", "supported_input_modalities")
+			outputModalities, hasOutputModalities := homeModelStringSlice(model, "supportedOutputModalities", "supported_output_modalities")
+			modelRoute := homeModelRoute{
+				provider:                  provider,
+				modelName:                 rawName,
+				metadataModelID:           metadataModelID,
+				created:                   created,
+				ownedBy:                   ownedBy,
+				modelType:                 modelType,
+				displayName:               displayName,
+				description:               description,
+				contextLength:             contextLength,
+				maxContextLength:          maxContextLength,
+				maxCompletionTokens:       maxCompletionTokens,
+				thinking:                  thinking,
+				hasThinking:               hasThinking,
+				supportedInputModalities:  inputModalities,
+				hasInputModalities:        hasInputModalities,
+				supportedOutputModalities: outputModalities,
+				hasOutputModalities:       hasOutputModalities,
+			}
 
 			if index, ok := indexByID[id]; ok {
 				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
 				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
+				out[index].routes = append(out[index].routes, modelRoute)
+				if out[index].modelName == "" && rawName != "" {
+					out[index].modelName = rawName
+				}
+				if out[index].metadataModelID == "" && metadataModelID != "" {
+					out[index].metadataModelID = metadataModelID
+				}
 				if out[index].created <= 0 && created > 0 {
 					out[index].created = created
 				}
 				if out[index].ownedBy == "" && ownedBy != "" {
 					out[index].ownedBy = ownedBy
 				}
+				if out[index].modelType == "" && modelType != "" {
+					out[index].modelType = modelType
+				}
 				if out[index].displayName == "" && displayName != "" {
 					out[index].displayName = displayName
+				}
+				if out[index].description == "" && description != "" {
+					out[index].description = description
 				}
 				if out[index].contextLength <= 0 && contextLength > 0 {
 					out[index].contextLength = contextLength
@@ -1261,21 +1476,34 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 				if out[index].thinking == nil && thinking != nil {
 					out[index].thinking = thinking
 				}
+				if len(out[index].supportedInputModalities) == 0 && len(inputModalities) > 0 {
+					out[index].supportedInputModalities = inputModalities
+				}
+				if len(out[index].supportedOutputModalities) == 0 && len(outputModalities) > 0 {
+					out[index].supportedOutputModalities = outputModalities
+				}
 				continue
 			}
 
 			indexByID[id] = len(out)
 			out = append(out, homeModelEntry{
-				id:                     id,
-				created:                created,
-				ownedBy:                ownedBy,
-				displayName:            displayName,
-				contextLength:          contextLength,
-				maxContextLength:       maxContextLength,
-				maxCompletionTokens:    maxCompletionTokens,
-				thinking:               thinking,
-				providers:              appendUniqueHomeProvider(nil, provider),
-				nativeCapabilityRoutes: []registry.NativeCapabilityRoute{route},
+				id:                        id,
+				modelName:                 rawName,
+				metadataModelID:           metadataModelID,
+				created:                   created,
+				ownedBy:                   ownedBy,
+				modelType:                 modelType,
+				displayName:               displayName,
+				description:               description,
+				contextLength:             contextLength,
+				maxContextLength:          maxContextLength,
+				maxCompletionTokens:       maxCompletionTokens,
+				thinking:                  thinking,
+				supportedInputModalities:  inputModalities,
+				supportedOutputModalities: outputModalities,
+				providers:                 appendUniqueHomeProvider(nil, provider),
+				nativeCapabilityRoutes:    []registry.NativeCapabilityRoute{route},
+				routes:                    []homeModelRoute{modelRoute},
 			})
 		}
 	}
@@ -1316,20 +1544,51 @@ func appendUniqueHomeProvider(providers []string, provider string) []string {
 	return append(providers, provider)
 }
 
-func homeModelThinkingSupport(model map[string]any) *registry.ThinkingSupport {
-	raw, ok := model["thinking"]
-	if !ok || raw == nil {
-		return nil
+func homeModelThinkingSupport(model map[string]any) (*registry.ThinkingSupport, bool) {
+	raw, exists := model["thinking"]
+	if !exists {
+		return nil, false
+	}
+	if raw == nil {
+		return nil, true
 	}
 	data, errMarshal := json.Marshal(raw)
 	if errMarshal != nil {
-		return nil
+		return nil, true
 	}
 	var thinking registry.ThinkingSupport
 	if errUnmarshal := json.Unmarshal(data, &thinking); errUnmarshal != nil {
-		return nil
+		return nil, true
 	}
-	return &thinking
+	return &thinking, true
+}
+
+func homeModelStringSlice(model map[string]any, keys ...string) ([]string, bool) {
+	for _, key := range keys {
+		raw, exists := model[key]
+		if !exists {
+			continue
+		}
+		if raw == nil {
+			continue
+		}
+		switch typed := raw.(type) {
+		case []string:
+			return append([]string(nil), typed...), true
+		case []any:
+			out := make([]string, 0, len(typed))
+			for _, item := range typed {
+				if s, ok := item.(string); ok {
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+			}
+			return out, true
+		}
+	}
+	return nil, false
 }
 
 func homeModelInt64Value(model map[string]any, keys ...string) int64 {
