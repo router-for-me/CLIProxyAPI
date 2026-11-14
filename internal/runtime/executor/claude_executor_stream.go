@@ -218,7 +218,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 	helps.NormalizeClaudeToolPropertyNamesDoc(doc)
-	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
+	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, !thinking.ParseSuffix(req.Model).HasSuffix, helps.APIKeyModelIsCompat(req))
 	if fp.ApplyCLIIdentity {
 		err = applyClaudeCLIIdentityDoc(doc, auth, apiKey, url, claudeSessionID, fp.SynthesizeIdentity)
 		if err != nil {

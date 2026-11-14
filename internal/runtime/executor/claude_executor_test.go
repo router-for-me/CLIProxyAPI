@@ -11138,6 +11138,7 @@ func TestNormalizeLeadingClaudeEffortDirectiveDoc(t *testing.T) {
 		wantFirst string
 		wantEff   string
 		wantCount int
+		suffix    bool
 	}{
 		{name: "leading directive folded", messages: directiveHigh + "," + user, wantFirst: user, wantEff: `{"effort":"high"}`, wantCount: 1},
 		{name: "directive after user untouched", messages: user + "," + directiveHigh, wantFirst: user, wantCount: 2},
@@ -11159,11 +11160,19 @@ func TestNormalizeLeadingClaudeEffortDirectiveDoc(t *testing.T) {
 		// Effective thinking is off: the turn must go and its effort must not return.
 		{name: "disabled thinking keeps effort off", prefix: `"thinking":{"type":"disabled"},`, messages: directiveHigh + "," + user, wantFirst: user, wantCount: 1},
 		{name: "forced tool choice keeps effort off", prefix: `"tool_choice":{"type":"any"},`, messages: directiveHigh + "," + user, wantFirst: user, wantCount: 1},
+		{name: "blank directive keeps folded effort", messages: directiveHigh + "," + `{"role":"system","content":[],"output_config":{"effort":" "}}` + "," + user, wantFirst: user, wantEff: `{"effort":"high"}`, wantCount: 1},
+		{name: "blank directive keeps top-level effort", prefix: `"output_config":{"effort":"low"},`, messages: `{"role":"system","content":[],"output_config":{"effort":""}}` + "," + user, wantFirst: user, wantEff: `{"effort":"low"}`, wantCount: 1},
+		{name: "blank directive adds no output_config", messages: `{"role":"system","content":[],"output_config":{"effort":""}}` + "," + user, wantFirst: user, wantCount: 1},
+		{name: "suffix effort wins", prefix: `"output_config":{"effort":"low"},`, messages: directiveHigh + "," + user, wantFirst: user, wantEff: `{"effort":"low"}`, wantCount: 1, suffix: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			doc := ojson.NewDocString(`{` + test.prefix + `"messages":[` + test.messages + `]}`)
-			normalizeLeadingClaudeEffortDirectiveDoc(doc)
+			if test.suffix {
+				sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(context.Background(), doc, "claude-opus-4-5", false)
+			} else {
+				normalizeLeadingClaudeEffortDirectiveDoc(doc, true)
+			}
 			got := doc.Bytes()
 			if want := int(ojson.GetBytes(got, "messages.#").Int()); want != test.wantCount {
 				t.Fatalf("messages count = %d, want %d: %s", want, test.wantCount, got)

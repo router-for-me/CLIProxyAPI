@@ -81,13 +81,15 @@ func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 
 func sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx context.Context, body []byte, baseModel string, preserveEmptyThinkingBlocks ...bool) []byte {
 	doc := ojson.NewDoc(body)
-	if !sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, preserveEmptyThinkingBlocks...) {
+	if !sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, true, preserveEmptyThinkingBlocks...) {
 		return body
 	}
 	return doc.Bytes()
 }
 
-func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, doc *ojson.Doc, baseModel string, preserveEmptyThinkingBlocks ...bool) bool {
+// foldEffort is false when a model suffix owns the effort; suffixes override body
+// directives, so the fold must not replace the canonical value.
+func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, doc *ojson.Doc, baseModel string, foldEffort bool, preserveEmptyThinkingBlocks ...bool) bool {
 	if doc == nil {
 		return false
 	}
@@ -103,7 +105,7 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, do
 		}
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
-	if normalizeLeadingClaudeEffortDirectiveDoc(doc) {
+	if normalizeLeadingClaudeEffortDirectiveDoc(doc, foldEffort) {
 		changed = true
 	}
 	if sanitizeClaudeWebSearchDomainsDoc(doc) {
@@ -120,7 +122,9 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, do
 // form at messages.0 ("use the top-level 'system' parameter"); it appears when
 // sanitization drops the caller's leading message and a mid-conversation effort
 // directive slides into position 0.
-func normalizeLeadingClaudeEffortDirectiveDoc(doc *ojson.Doc) bool {
+// foldEffort is false when a model suffix owns the effort: the turn still has to
+// leave messages.0, but the suffix value must survive.
+func normalizeLeadingClaudeEffortDirectiveDoc(doc *ojson.Doc, foldEffort bool) bool {
 	if doc == nil {
 		return false
 	}
@@ -137,7 +141,7 @@ func normalizeLeadingClaudeEffortDirectiveDoc(doc *ojson.Doc) bool {
 			!directive.IsObject() || !content.IsArray() || len(content.Array()) != 0 {
 			return changed
 		}
-		if claudeEffortDirectiveAppliesDoc(doc) {
+		if foldEffort && claudeEffortDirectiveAppliesDoc(doc) {
 			foldClaudeEffortDirectiveDoc(doc, directive)
 		}
 		if errDelete := doc.Delete("messages.0"); errDelete != nil {
@@ -167,13 +171,19 @@ func claudeEffortDirectiveAppliesDoc(doc *ojson.Doc) bool {
 // is how the provider defines the current turn's effort.
 func foldClaudeEffortDirectiveDoc(doc *ojson.Doc, directive ojson.Result) {
 	if !doc.Get("output_config").IsObject() {
-		_ = doc.SetRaw("output_config", directive.Raw)
-		return
+		_ = doc.SetRaw("output_config", "{}")
 	}
 	directive.ForEach(func(key, value ojson.Result) bool {
+		// A blank effort is not an update; keep the last valid one.
+		if key.String() == "effort" && strings.TrimSpace(value.String()) == "" {
+			return true
+		}
 		_ = doc.SetRaw("output_config."+key.String(), value.Raw)
 		return true
 	})
+	if output := doc.Get("output_config"); output.IsObject() && len(output.Map()) == 0 {
+		_ = doc.Delete("output_config")
+	}
 }
 
 func sanitizeClaudeMessagesForClaudeUpstreamDoc(doc *ojson.Doc, targetModel string, preserveEmpty bool) (sigcompat.SignatureSanitizeReport, bool) {

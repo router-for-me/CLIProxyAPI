@@ -71,7 +71,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		rebuildMidSystemMessagesToTopLevelDoc(doc)
 	}
 	helps.NormalizeClaudeToolPropertyNamesDoc(doc)
-	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
+	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, !thinking.ParseSuffix(req.Model).HasSuffix, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
 	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)
 	ctx = helps.WithPayloadFinalizer(ctx, finalize)
@@ -235,7 +235,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 		prepareClaudeOAuthToolNamesForUpstreamDoc(doc, mcpAliases)
 	}
 	helps.NormalizeClaudeToolPropertyNamesDoc(doc)
-	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
+	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, !thinking.ParseSuffix(req.Model).HasSuffix, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
 	stripPromptCacheOptionsDoc(doc)
 	// Two different reasons converge on the same deletions, and they must stay
