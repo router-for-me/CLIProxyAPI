@@ -33,7 +33,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	if len(payload) == 0 {
 		return nil, false
 	}
-	if strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String()) != "error" {
+	if helps.CodexResponseEventType(payload) != "error" {
 		return nil, false
 	}
 	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
@@ -84,19 +84,48 @@ func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexR
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
-	doc := ojson.NewDoc([]byte(`{}`))
+	doc := ojson.NewDocString(`{"type":"error"}`)
 	_ = doc.Set("status", status)
+	if seq := ojson.GetBytesNoCopy(payload, "sequence_number"); seq.Exists() {
+		_ = doc.Set("sequence_number", seq.Int())
+	}
+
+	fillBlankErrorMessage := func() {
+		if node := doc.Get("error"); node.Type == ojson.String && strings.TrimSpace(node.String()) != "" {
+			_ = doc.Set("error", map[string]any{"message": node.String()})
+			return
+		}
+		if strings.TrimSpace(doc.Get("error.message").String()) != "" {
+			return
+		}
+		if code := strings.TrimSpace(doc.Get("error.code").String()); code != "" {
+			_ = doc.Set("error.message", codexPolicyFallbackMessage(code))
+		} else if errType := strings.TrimSpace(doc.Get("error.type").String()); errType != "" {
+			_ = doc.Set("error.message", errType)
+		} else {
+			_ = doc.Set("error.message", http.StatusText(status))
+		}
+	}
 
 	if bodyNode := ojson.GetBytesNoCopy(payload, "body"); bodyNode.Exists() {
 		_ = doc.SetRawBytes("body", []byte(bodyNode.Raw))
-		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() {
+		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() && bodyErrorNode.Type != ojson.Null {
 			_ = doc.SetRawBytes("error", []byte(bodyErrorNode.Raw))
+			fillBlankErrorMessage()
 			return doc.Bytes()
 		}
 	}
 
-	if errNode := ojson.GetBytesNoCopy(payload, "error"); errNode.Exists() {
-		_ = doc.SetRawBytes("error", []byte(errNode.Raw))
+	for _, path := range []string{"error", "response.error"} {
+		if errNode := ojson.GetBytesNoCopy(payload, path); errNode.Exists() && errNode.Type != ojson.Null {
+			_ = doc.SetRawBytes("error", []byte(errNode.Raw))
+			fillBlankErrorMessage()
+			return doc.Bytes()
+		}
+	}
+	if topLevel := codexTerminalTopLevelErrorBody(payload); topLevel != nil {
+		_ = doc.SetRawBytes("error", []byte(topLevel.Get("error").Raw))
+		fillBlankErrorMessage()
 		return doc.Bytes()
 	}
 

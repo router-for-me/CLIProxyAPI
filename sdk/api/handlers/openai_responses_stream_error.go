@@ -153,9 +153,34 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	return []byte(`{"type":"error","error":{"type":"server_error","code":"internal_server_error","message":"internal error","param":null},"sequence_number":0}`)
 }
 
+func openAIResponsesPolicyFallbackMessage(code string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "bio_policy":
+		return "This content was flagged for possible biological risk."
+	case "cyber_policy", "cyber_policy_violation":
+		return "This request has been flagged for possible cybersecurity risk."
+	case "misalignment_policy_violation":
+		return "This request was blocked due to a misalignment policy violation."
+	case "invalid_prompt":
+		return "Invalid request."
+	default:
+		return ""
+	}
+}
+
 func applyOpenAIResponsesNestedErrorCode(errorDetail map[string]any) map[string]any {
-	if existing, ok := errorDetail["code"]; ok && existing != nil && strings.TrimSpace(fmt.Sprint(existing)) != "" {
-		return errorDetail
+	if existing, ok := errorDetail["code"]; ok && existing != nil {
+		code := strings.TrimSpace(fmt.Sprint(existing))
+		if code != "" {
+			if msg, _ := errorDetail["message"].(string); strings.TrimSpace(msg) == "" {
+				fallback := openAIResponsesPolicyFallbackMessage(code)
+				if fallback == "" {
+					fallback = code
+				}
+				errorDetail["message"] = fallback
+			}
+			return errorDetail
+		}
 	}
 	// Anthropic reports input overflow by message only; Responses clients key on this code.
 	if m, _ := errorDetail["message"].(string); errorDetail["type"] == "invalid_request_error" && strings.HasPrefix(m, "prompt is too long") {
@@ -174,6 +199,11 @@ func openAIResponsesStreamErrorDetail(status int, errText, code, message string)
 			}
 			if response, ok := payload["response"].(map[string]any); ok {
 				if errorDetail, ok := response["error"].(map[string]any); ok {
+					return applyOpenAIResponsesNestedErrorCode(errorDetail)
+				}
+			}
+			if bodyMap, ok := payload["body"].(map[string]any); ok {
+				if errorDetail, ok := bodyMap["error"].(map[string]any); ok {
 					return applyOpenAIResponsesNestedErrorCode(errorDetail)
 				}
 			}

@@ -386,18 +386,32 @@ func responsesAnnotateImageGenerationComplexityPayload(payload []byte) []byte {
 }
 
 func responsesSSEPayloadErrorStatus(payload []byte) int {
-	var fieldsBuf [4]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error.type", "response.error.type", "error.code", "response.error.code")
-	errorType := strings.ToLower(strings.TrimSpace(fields[0].String()))
-	if errorType == "" {
-		errorType = strings.ToLower(strings.TrimSpace(fields[1].String()))
+	var fieldsBuf [8]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error.type", "response.error.type", "body.error.type", "type", "error.code", "response.error.code", "body.error.code", "code")
+	errorType := ""
+	for _, f := range fields[:4] {
+		candidate := strings.ToLower(strings.TrimSpace(f.String()))
+		if candidate != "" && candidate != "error" && candidate != "response.failed" && candidate != "response.error" {
+			errorType = candidate
+			break
+		}
 	}
-	errorCode := strings.ToLower(strings.TrimSpace(fields[2].String()))
-	if errorCode == "" {
-		errorCode = strings.ToLower(strings.TrimSpace(fields[3].String()))
+	errorCode := ""
+	for _, f := range fields[4:] {
+		candidate := strings.ToLower(strings.TrimSpace(f.String()))
+		if candidate != "" {
+			errorCode = candidate
+			break
+		}
 	}
 	switch {
-	case errorCode == "cyber_policy":
+	case errorCode == "cyber_policy",
+		errorCode == "cyber_policy_violation",
+		errorCode == "bio_policy",
+		errorCode == "misalignment_policy_violation",
+		errorCode == "invalid_prompt",
+		errorCode == "content_policy_violation",
+		errorCode == "image_content_policy_violation":
 		return http.StatusBadRequest
 	case errorType == "not_found_error", errorCode == "not_found", errorCode == "model_not_found":
 		return http.StatusNotFound
@@ -407,7 +421,7 @@ func responsesSSEPayloadErrorStatus(payload []byte) int {
 		return http.StatusForbidden
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return http.StatusTooManyRequests
-	case errorType == "invalid_request_error", errorType == "bad_request_error", errorType == "image_generation_user_error", errorCode == "invalid_value", errorCode == "invalid_request_error":
+	case errorType == "invalid_request", errorType == "invalid_request_error", errorType == "bad_request_error", errorType == "image_generation_user_error", errorCode == "invalid_value", errorCode == "invalid_request_error":
 		return http.StatusBadRequest
 	default:
 		return http.StatusBadGateway
@@ -475,14 +489,14 @@ func responsesSSETerminalEvent(eventType string) bool {
 }
 
 func responsesSSEPayloadHasError(payload []byte) bool {
-	var fieldsBuf [4]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "code", "message")
-	for _, result := range fields[:2] {
+	var fieldsBuf [5]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "body.error", "code", "message")
+	for _, result := range fields[:3] {
 		if result.Exists() && result.Type != ojson.Null {
 			return true
 		}
 	}
-	return fields[2].Exists() && fields[3].Exists()
+	return fields[3].Exists() && fields[4].Exists()
 }
 
 func responsesSSEDataPayload(frame []byte) ([]byte, bool) {
@@ -1367,6 +1381,11 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 	if !hasError {
 		if resp, ok := root["response"].(map[string]any); ok {
 			errorNode, hasError = resp["error"].(map[string]any)
+		}
+	}
+	if !hasError {
+		if bodyMap, ok := root["body"].(map[string]any); ok {
+			errorNode, hasError = bodyMap["error"].(map[string]any)
 		}
 	}
 

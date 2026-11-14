@@ -408,14 +408,30 @@ func codexStreamErrorToClaudeError(rootResult ojson.Result) []byte {
 		message = strings.TrimSpace(rootResult.Get("message").String())
 	}
 	if message == "" {
-		message = code
+		switch strings.ToLower(code) {
+		case "bio_policy":
+			message = "This content was flagged for possible biological risk."
+		case "cyber_policy", "cyber_policy_violation":
+			message = "This request has been flagged for possible cybersecurity risk."
+		case "misalignment_policy_violation":
+			message = "This request was blocked due to a misalignment policy violation."
+		case "invalid_prompt":
+			message = "Invalid request."
+		default:
+			message = code
+		}
 	}
 	if message == "" {
 		message = errType
 	}
 
-	if code == "cyber_policy" || errType == "invalid_request" {
+	switch strings.ToLower(code) {
+	case "cyber_policy", "cyber_policy_violation", "bio_policy", "misalignment_policy_violation", "invalid_prompt", "content_policy_violation", "image_content_policy_violation":
 		errType = "invalid_request_error"
+	default:
+		if errType == "invalid_request" {
+			errType = "invalid_request_error"
+		}
 	}
 
 	outDoc := ojson.NewDocString(`{"type":"error","error":{"type":"api_error","message":""}}`)

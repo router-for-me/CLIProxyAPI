@@ -910,7 +910,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				continue
 			}
 			payload = bytes.TrimSpace(payload)
-			eventType := ojson.GetBytesNoCopy(payload, "type").String()
+			eventType := helps.CodexResponseEventType(payload)
+			if eventType == "error" && strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String()) == "" {
+				doc := ojson.NewDoc(payload)
+				_ = doc.Set("type", eventType)
+				payload = doc.Bytes()
+			}
 			metadataMu.Lock()
 			establishing := firstResponse && eventType == "response.created"
 			metadataMu.Unlock()
