@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -206,6 +207,9 @@ func attachResolvedExecutionModelInfo(routing *apiKeyModelRoutingSnapshot, req c
 
 func attachResolvedAPIKeyModelInfo(routing *apiKeyModelRoutingSnapshot, req cliproxyexecutor.Request, auth *Auth, routeModel, upstreamModel string) cliproxyexecutor.Request {
 	modelInfo, ok := lookupAPIKeyModelCapability(routing, auth, routeModel, upstreamModel)
+	if ok {
+		modelInfo = withOpenRouterThinking(auth, modelInfo, upstreamModel)
+	}
 	if !ok {
 		modelInfo, ok = lookupUnlistedCodexAPIKeyModelCapability(routing, auth, upstreamModel)
 	}
@@ -452,8 +456,37 @@ func compileOpenAICompatibleModelCapabilities(out map[string][]apiKeyModelCapabi
 		if support == nil && !models[i].Image {
 			support = &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}}
 		}
-		addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat)
+		info := addConfiguredModelCapability(out, models[i].Name, models[i].Alias, "openai-compatibility", support, models[i].IsCompat)
+		if info != nil && models[i].Thinking != nil {
+			info.ExplicitThinking = true
+		}
 	}
+}
+
+// lookupOpenRouterModel is registry.LookupOpenRouterModel; tests replace it to observe lookups.
+var lookupOpenRouterModel = registry.LookupOpenRouterModel
+
+// withOpenRouterThinking gives a model served through an OpenAI-compatible entry that points at OpenRouter the
+// reasoning efforts OpenRouter publishes for it, instead of the generic default levels. The catalog is read per
+// request, so the levels apply as soon as it has loaded. Configured thinking still wins.
+func withOpenRouterThinking(auth *Auth, info *registry.ModelInfo, upstreamModel string) *registry.ModelInfo {
+	if info == nil || info.Thinking == nil || !strings.EqualFold(info.Type, "openai-compatibility") ||
+		auth == nil || auth.Attributes == nil || !util.IsOpenRouterURL(auth.Attributes["base_url"]) {
+		return info
+	}
+	model := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(upstreamModel)).ModelName)
+	// The lookup also starts the catalog's refresh once it is stale, so it runs even when configured thinking wins.
+	published, ok := lookupOpenRouterModel(auth.Attributes["provider_key"], model)
+	if !ok || info.ExplicitThinking {
+		return info
+	}
+	support := modelconfig.OpenRouterThinkingSupport(published.ReasoningEfforts)
+	if support == nil {
+		return info
+	}
+	clone := *info
+	clone.Thinking = support
+	return &clone
 }
 
 func addConfiguredModelCapability(out map[string][]apiKeyModelCapabilityRoute, name, alias, modelType string, support *registry.ThinkingSupport, isCompat bool) *registry.ModelInfo {

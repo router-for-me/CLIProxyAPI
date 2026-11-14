@@ -383,8 +383,7 @@ func (s *Service) registerModelRefreshCallback() {
 			if !ok || auth == nil || auth.Disabled {
 				continue
 			}
-			provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-			if !providerSet[provider] {
+			if !authMatchesRefreshedProviders(auth, providerSet) {
 				continue
 			}
 			authForRefresh := auth
@@ -406,4 +405,21 @@ func (s *Service) registerModelRefreshCallback() {
 			log.Infof("re-registered models for %d auth(s) due to model catalog changes: %v", refreshed, changedProviders)
 		}
 	})
+}
+
+// authMatchesRefreshedProviders reports whether a catalog refresh for providerSet concerns auth.
+// Besides its provider, an OpenAI-compatible auth answers to its entry's key: legacy and embedded
+// auths keep Provider "openai-compatibility" and name the entry in compat_name or provider_key,
+// while catalogs such as OpenRouter's notify "openai-compatible-<name>".
+func authMatchesRefreshedProviders(auth *coreauth.Auth, providerSet map[string]bool) bool {
+	if auth == nil {
+		return false
+	}
+	if providerSet[strings.ToLower(strings.TrimSpace(auth.Provider))] {
+		return true
+	}
+	if key, _, ok := openAICompatInfoFromAuth(auth); ok {
+		return providerSet[strings.ToLower(key)]
+	}
+	return false
 }
