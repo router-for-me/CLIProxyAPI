@@ -24,16 +24,28 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, modelPolicies(cfg.APIKeyModelAccess)),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name     string
+	keys     map[string]struct{}
+	policies map[string]*sdkaccess.ModelPolicy
 }
 
-func newProvider(name string, keys []string) *provider {
+// modelPolicies converts per-key model access config into policies keyed by trimmed API key.
+func modelPolicies(access map[string]sdkconfig.APIKeyModelAccess) map[string]*sdkaccess.ModelPolicy {
+	policies := make(map[string]*sdkaccess.ModelPolicy, len(access))
+	for key, entry := range access {
+		if policy := sdkaccess.NewModelPolicy(entry.AllowedModels, entry.DeniedModels); policy != nil {
+			policies[strings.TrimSpace(key)] = policy
+		}
+	}
+	return policies
+}
+
+func newProvider(name string, keys []string, policies map[string]*sdkaccess.ModelPolicy) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +54,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, policies: policies}
 }
 
 func (p *provider) Identifier() string {
@@ -96,6 +108,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
+				ModelPolicy: p.policies[candidate.value],
 			}, nil
 		}
 	}

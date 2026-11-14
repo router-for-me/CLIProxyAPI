@@ -160,7 +160,7 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 	cfg := h.CurrentConfig()
 	disableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
-	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(h.Models(), disableCloaking))
+	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(handlers.FilterModelList(c, h.Models()), disableCloaking))
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.

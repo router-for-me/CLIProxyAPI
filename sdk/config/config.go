@@ -18,6 +18,7 @@ type CodexClientConfig = internalconfig.CodexClientConfig
 type CodexWebSearchResultCacheConfig = internalconfig.CodexWebSearchResultCacheConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
+type APIKeyModelAccess = internalconfig.APIKeyModelAccess
 type TLSConfig = internalconfig.TLSConfig
 type DiscoveryConfig = internalconfig.DiscoveryConfig
 type DiscoveryInterfacesConfig = internalconfig.DiscoveryInterfacesConfig

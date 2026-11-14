@@ -776,6 +776,14 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 	}
 
+	filteredBody, errFilter := FilterModelListResponseBody(c, body)
+	if errFilter != nil {
+		lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusBadGateway, errFilter)
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "Invalid model catalog", "type": "api_error"}})
+		return
+	}
+	body = filteredBody
+
 	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
 		c.Writer.Header().Del("Content-Length")
 		var catalog struct {
@@ -788,10 +796,12 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			return
 		}
 		var selected json.RawMessage
+		modelIDString, _ := modelID.(string)
 		for _, model := range append(catalog.Data, catalog.Models...) {
 			var entry struct {
 				ID   string `json:"id"`
 				Slug string `json:"slug"`
+				Name string `json:"name"`
 			}
 			if errUnmarshal := json.Unmarshal(model, &entry); errUnmarshal != nil {
 				continue
@@ -799,7 +809,11 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 			if entry.ID == "" {
 				entry.ID = entry.Slug
 			}
-			if entry.ID != "" && entry.ID == modelID {
+			if entry.ID == "" {
+				entry.ID = entry.Name
+			}
+			entry.ID = strings.TrimPrefix(entry.ID, "models/")
+			if entry.ID != "" && strings.TrimPrefix(modelIDString, "models/") == entry.ID {
 				selected = model
 				break
 			}
