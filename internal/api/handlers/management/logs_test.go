@@ -179,17 +179,21 @@ func TestGetLogsTailLimitDoesNotScanOlderFilesForLineCount(t *testing.T) {
 	}
 }
 
-func TestGetLogsNoLimitKeepsFullScanBehavior(t *testing.T) {
+func TestGetLogsNoLimitUsesBoundedDefaultPage(t *testing.T) {
 	dir := t.TempDir()
-	writeMainLog(t, dir, "complete\npartial")
+	allLines := make([]string, defaultLogPageSize+2)
+	for i := range allLines {
+		allLines[i] = "line-" + strconv.Itoa(i)
+	}
+	writeMainLog(t, dir, strings.Join(allLines, "\n")+"\n")
 
 	resp := performGetLogs(t, newLogsTestHandler(dir, true), "/v0/management/logs")
-	wantLines := []string{"complete", "partial"}
+	wantLines := allLines[len(allLines)-defaultLogPageSize:]
 	if !reflect.DeepEqual(resp.Lines, wantLines) {
 		t.Fatalf("lines = %#v, want %#v", resp.Lines, wantLines)
 	}
-	if resp.LineCount != 2 {
-		t.Fatalf("line-count = %d, want full scan count 2", resp.LineCount)
+	if resp.LineCount != defaultLogPageSize {
+		t.Fatalf("line-count = %d, want returned line count %d", resp.LineCount, defaultLogPageSize)
 	}
 	if resp.NextCursor == "" {
 		t.Fatal("next-cursor is empty")
@@ -198,8 +202,18 @@ func TestGetLogsNoLimitKeepsFullScanBehavior(t *testing.T) {
 	if errCursor != nil {
 		t.Fatalf("decode next-cursor: %v", errCursor)
 	}
-	if cursor.Offset != int64(len("complete\n")) {
-		t.Fatalf("cursor offset = %d, want complete-line boundary", cursor.Offset)
+	if cursor.Offset != int64(len(strings.Join(allLines, "\n")+"\n")) {
+		t.Fatalf("cursor offset = %d, want end-of-file boundary", cursor.Offset)
+	}
+}
+
+func TestGetLogsRejectsLimitAboveMaximum(t *testing.T) {
+	status, body := performGetLogsRaw(t, newLogsTestHandler(t.TempDir(), true), "/v0/management/logs?limit="+strconv.Itoa(maxLogPageSize+1))
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
+	}
+	if !strings.Contains(body, "must not exceed") {
+		t.Fatalf("body = %s, want max-limit error", body)
 	}
 }
 
