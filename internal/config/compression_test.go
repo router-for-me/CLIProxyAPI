@@ -7,7 +7,7 @@ requests:
   compression:
     enabled: true
     shadow: true
-    min-bytes: 2048
+    auto-trigger-tokens: 2048
     output-styles:
       - id: terse-prose
         level: ultra
@@ -49,8 +49,8 @@ func TestCompressionConfigV8Layout(t *testing.T) {
 	if !cfg.Compression.Enabled || !cfg.Compression.Shadow {
 		t.Fatalf("flags lost: %+v", cfg.Compression)
 	}
-	if cfg.Compression.MinBytes != 2048 {
-		t.Fatalf("min-bytes = %d", cfg.Compression.MinBytes)
+	if cfg.Compression.AutoTriggerTokens != 2048 {
+		t.Fatalf("auto-trigger-tokens = %d", cfg.Compression.AutoTriggerTokens)
 	}
 	if len(cfg.Compression.Combos) != 1 || cfg.Compression.Combos[0].Name != "shell" {
 		t.Fatalf("combos = %+v", cfg.Compression.Combos)
@@ -97,7 +97,7 @@ func TestCompressionConfigLegacyLayout(t *testing.T) {
 	if len(cfg.Compression.Combos) != 1 || cfg.Compression.Combos[0].Pipeline[0].Engine != "headroom" {
 		t.Fatalf("combos = %+v", cfg.Compression.Combos)
 	}
-	if cfg.Compression.MinBytes != 4096 {
-		t.Fatalf("default min-bytes = %d", cfg.Compression.MinBytes)
+	if cfg.Compression.AutoTriggerTokens != 0 {
+		t.Fatalf("default auto-trigger-tokens = %d", cfg.Compression.AutoTriggerTokens)
 	}
 }

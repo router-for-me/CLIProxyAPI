@@ -282,7 +282,7 @@ Known open items for that last section, to confirm or refute:
 
 - `headroom` emits `# columns=` with no decoder, while upstream ships
   `reconstructHeadroom()`. Is the ported format model-readable?
-- `min-bytes` crossing mid-session rewrites the whole prefix once (one cache miss).
+- `auto-trigger-tokens` crossing mid-session rewrites the whole prefix once (one cache miss).
 
 ## Fixes applied (branch DarknessKiller/argonaut)
 
@@ -337,7 +337,7 @@ Known open items for that last section, to confirm or refute:
   nothing. Names the retrieve tool exactly as the client advertised it. A byte
   scan short-circuits bodies with no marker, preserving the zero-alloc fast path.
   The note is prepended once, on the turn a marker first appears; that turn is one
-  prompt-cache miss, the same class as min-bytes crossing mid-session, and every
+  prompt-cache miss, the same class as the auto-trigger crossing mid-session, and every
   later turn stays a strict prefix-extension.
   The note covers both conversation shapes engines rewrite: chat `messages` and
   Responses `input[]` (`bodyConvItems`). Upstream gets this for free because its

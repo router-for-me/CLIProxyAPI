@@ -17,7 +17,6 @@ func testConfigWith(opts StepOptions, engines ...string) Config {
 	}
 	return Config{
 		Enabled:      true,
-		MinBytes:     1,
 		DefaultCombo: "t",
 		Combos:       []Combo{{Name: "t", Models: []string{"*"}, Pipeline: steps}},
 	}

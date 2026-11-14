@@ -25,7 +25,6 @@ func testConfig(pipeline ...string) Config {
 	}
 	return Config{
 		Enabled:      true,
-		MinBytes:     1,
 		DefaultCombo: "t",
 		Combos:       []Combo{{Name: "t", Models: []string{"*"}, Pipeline: steps}},
 	}
@@ -142,13 +141,31 @@ func TestApplyNoConversationShape(t *testing.T) {
 	}
 }
 
-func TestApplyBelowMinBytes(t *testing.T) {
+func TestApplyAutoTriggerSwitchesCombo(t *testing.T) {
 	cfg := testConfig(EngineLite)
-	cfg.MinBytes = 1 << 20
+	cfg.Combos = append(cfg.Combos, Combo{Name: EngineLite, Models: []string{"x"}})
+	cfg.AutoTriggerCombo = EngineLite
 	body := []byte(`{"messages":[{"role":"user","content":"a   b   \n\n\n\nc"}]}`)
-	out, stats := Apply(cfg, "m", body)
-	if stats.Applied || string(out) != string(body) {
-		t.Fatal("small payload must be left alone")
+	cfg.AutoTriggerTokens = 1 << 20
+	if _, stats := Apply(cfg, "m", body); stats.Combo != "t" {
+		t.Fatalf("below the trigger the default combo must run, got %q", stats.Combo)
+	}
+	cfg.AutoTriggerTokens = 1
+	if _, stats := Apply(cfg, "m", body); stats.Combo != EngineLite {
+		t.Fatalf("above the trigger the auto-trigger combo must run, got %q", stats.Combo)
+	}
+}
+
+func TestStatsStepsListsEveryStep(t *testing.T) {
+	stats := Stats{
+		EngineBytesIn:  map[string]int{"lite": 100, "rtk": 100},
+		EngineBytesOut: map[string]int{"lite": 40, "rtk": 40},
+	}
+	if got, want := stats.Steps(), "lite:100>40,rtk:100>40"; got != want {
+		t.Fatalf("steps = %q, want %q", got, want)
+	}
+	if got := (Stats{}).Steps(); got != "" {
+		t.Fatalf("empty stats rendered %q", got)
 	}
 }
 
@@ -174,7 +191,6 @@ func TestApplyShadowMode(t *testing.T) {
 func TestModelScopedCombo(t *testing.T) {
 	cfg := Config{
 		Enabled:      true,
-		MinBytes:     1,
 		DefaultCombo: "lite",
 		Combos: []Combo{
 			{Name: "lite", Models: []string{"*"}, Pipeline: []Step{{Engine: EngineLite}}},
@@ -201,7 +217,7 @@ func TestSanitizeDropsUnknownEngines(t *testing.T) {
 	if cfg.Combos[0].Pipeline[0].Engine != EngineLite {
 		t.Fatalf("engine not normalized: %+v", cfg.Combos[0].Pipeline)
 	}
-	if cfg.DefaultCombo != "mixed" || cfg.MinBytes != defaultMinBytes {
+	if cfg.DefaultCombo != "mixed" {
 		t.Fatalf("defaults not repaired: %+v", cfg)
 	}
 }
@@ -343,9 +359,9 @@ func TestRTKLeavesDocumentReadsWhole(t *testing.T) {
 	}
 }
 
-func TestApplyNoAllocsWhenTooSmall(t *testing.T) {
+func TestApplyNoAllocsWhenDisabled(t *testing.T) {
 	cfg := testConfig(EngineLite, EngineSessionDedup, EngineRTK)
-	cfg.MinBytes = 1 << 20
+	cfg.Enabled = false
 	body := []byte(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`)
 	allocs := testing.AllocsPerRun(100, func() {
 		Apply(cfg, "m", body)
@@ -536,7 +552,7 @@ func TestApplyIsAppendStable(t *testing.T) {
 		// The marker-protocol note is prepended once, on the turn a dedup/CCR
 		// marker first appears, and then persists (a replayed turn carries it and
 		// its sentinel suppresses a second). That is one cache miss on that turn,
-		// the same class as min-bytes crossing mid-session; every later turn must
+		// the same class as the auto-trigger firing mid-session; every later turn must
 		// again be a strict prefix-extension.
 		if len(cur) > 0 && strings.Contains(cur[0], ccrProtocolSentinel) {
 			cur = cur[1:]

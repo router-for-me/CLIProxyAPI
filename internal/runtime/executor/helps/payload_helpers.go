@@ -27,12 +27,14 @@ func PayloadConfigEvaluationCount() int64 {
 }
 
 // compressionFields is the one-line answer to "what did compression do": which
-// combo and engines fired, how many bytes they removed, and the style prefix.
+// combo and engines fired, every step's byte counts, how many bytes were
+// removed, and the style prefix.
 func compressionFields(model string, stats payloadcompress.Stats) log.Fields {
 	return log.Fields{
 		"model":     model,
 		"combo":     stats.Combo,
 		"engines":   stats.Engines(),
+		"steps":     stats.Steps(),
 		"segments":  stats.Segments,
 		"style":     stats.Style,
 		"style_len": stats.StyleBytes,

@@ -11,10 +11,9 @@
 // elapsed time.
 //
 // Append-stability holds from the turn compression engages. A body that starts
-// below Config.MinBytes and grows past it changes the prefix once, at that turn,
-// so keep MinBytes below the first request of a session. Output styles are a
-// separate stage chosen per request (see styleBypass) and are not covered by
-// this guarantee.
+// below the auto-trigger threshold and grows past it changes the prefix once, at
+// that turn. Output styles are a separate stage chosen per request (see
+// styleBypass) and are not covered by this guarantee.
 //
 // A config that is enabled but names no combo falls back to DefaultConfig, so
 // turning compression on is enough to get a working pipeline. prefix-freeze is
@@ -101,8 +100,13 @@ type Config struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// Shadow computes and reports compression but sends the original payload.
 	Shadow bool `yaml:"shadow" json:"shadow"`
-	// MinBytes skips payloads smaller than this many bytes.
-	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
+	// AutoTriggerTokens switches to AutoTriggerCombo once the request is
+	// estimated to reach this many tokens. 0 disables the switch, which is
+	// upstream's default.
+	AutoTriggerTokens int `yaml:"auto-trigger-tokens" json:"auto-trigger-tokens"`
+	// AutoTriggerCombo is the combo the trigger switches to. Empty means the
+	// built-in "lite" pipeline, upstream's `autoTriggerMode ?? "lite"`.
+	AutoTriggerCombo string `yaml:"auto-trigger-combo" json:"auto-trigger-combo"`
 	// PreserveSystemPrompt mirrors upstream's preserveSystemPromptMode:
 	// "always" (the default) never rewrites the system prompt, "when-no-cache"
 	// rewrites it only when nothing is cached, and "never" rewrites it even when
@@ -341,7 +345,6 @@ const (
 )
 
 const (
-	defaultMinBytes                 = 4096
 	defaultCombo                    = "standard"
 	defaultPrefixFreezeThreshold    = 3
 	defaultContextEditTriggerTokens = 100000
@@ -352,7 +355,6 @@ const (
 // transforms, so it cannot corrupt a payload that is later replayed.
 func DefaultConfig() Config {
 	return Config{
-		MinBytes:     defaultMinBytes,
 		DefaultCombo: defaultCombo,
 		Combos: []Combo{{
 			Name:   defaultCombo,
@@ -510,8 +512,9 @@ func (c *Config) Sanitize() {
 	if c == nil {
 		return
 	}
-	if c.MinBytes <= 0 {
-		c.MinBytes = defaultMinBytes
+	if c.AutoTriggerTokens < 0 {
+		log.Errorf("payloadcompress: auto-trigger-tokens must be >= 0, got %d; disabling the trigger", c.AutoTriggerTokens)
+		c.AutoTriggerTokens = 0
 	}
 	if c.HardBudgetTokens < 0 {
 		log.Errorf("payloadcompress: hard-budget-tokens must be >= 0, got %d; disabling the cap", c.HardBudgetTokens)
@@ -650,6 +653,20 @@ func (c Config) resolve(model string) *Combo {
 	}
 	if fallback != nil && comboMatchesModel(fallback, model) {
 		return fallback
+	}
+	return nil
+}
+
+// comboByName finds a combo by exact name, or the built-in "lite" pipeline when
+// name is empty. It returns nil when the config names neither.
+func (c Config) comboByName(name string) *Combo {
+	if name == "" {
+		name = EngineLite
+	}
+	for i := range c.Combos {
+		if c.Combos[i].Name == name {
+			return &c.Combos[i]
+		}
 	}
 	return nil
 }

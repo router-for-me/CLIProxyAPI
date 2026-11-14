@@ -421,6 +421,11 @@ func approxTokens(s string) int {
 	return (utf8.RuneCountInString(s) + 3) / 4
 }
 
+// approxTokensBytes is approxTokens over a raw body, without copying it.
+func approxTokensBytes(body []byte) int {
+	return (utf8.RuneCount(body) + 3) / 4
+}
+
 // isExcluded reports whether model or provider/model matches any glob pattern.
 // Matching is case-insensitive and anchored, so `openai/*` and `openai/gpt-4o`
 // both work.

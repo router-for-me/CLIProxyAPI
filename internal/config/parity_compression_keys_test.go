@@ -11,7 +11,7 @@ func TestUnsupportedCompressionConfigKeysDetectsForeignKeys(t *testing.T) {
 	doc := mustYAMLNode(t, `
 compression:
   enabled: true
-  min-bytes: 512
+  shadow: false
   defaultMode: auto
   engines:
     - rtk
@@ -28,7 +28,7 @@ func TestUnsupportedCompressionConfigKeysAcceptsKnownKeys(t *testing.T) {
 compression:
   enabled: true
   shadow: false
-  min-bytes: 10
+  shadow: false
   preserve-system-prompt: always
 `)
 	if got := unsupportedCompressionConfigKeys(&doc); len(got) != 0 {

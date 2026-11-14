@@ -304,12 +304,11 @@ requests:
   # compression:
   #   enabled: false               # Default: false.
   #   shadow: false                # Default: false. Compute and log savings, send the original payload.
-  #   min-bytes: 4096              # Payloads smaller than this are skipped.
-  #   exclusions: []               # Model ids or "provider/model" values that bypass compression.
-  #   hard-budget-tokens: 0        # 0 = off. Cap the token count after compression.
-  #   quantum-lock: false          # Mask volatile spans in the first system message (caching providers only).
-  #                               # Keep min-bytes below your session's first request: the turn
-  #                               # it is crossed is one cache miss, then the prefix is stable.
+  #   auto-trigger-tokens: 0       # Default: 0 (off). Once the request is estimated at this
+  #                               # many tokens, auto-trigger-combo runs instead of the
+  #                               # model-scoped combo. Crossing it mid-session is one cache
+  #                               # miss, then the prefix is stable again.
+  #   auto-trigger-combo: lite     # Combo used after the trigger. Empty means lite.
   #   preserve-system-prompt: always # always | when-no-cache | never. Always (the default) never
   #                               # rewrites the system prompt. when-no-cache rewrites it only when
   #                               # nothing is cached: no cache_control marker in the body, and a

@@ -16,7 +16,6 @@ func compressionConfig(pipeline ...string) payloadcompress.Config {
 	}
 	return payloadcompress.Config{
 		Enabled:      true,
-		MinBytes:     1,
 		DefaultCombo: "t",
 		Combos:       []payloadcompress.Combo{{Name: "t", Models: []string{"*"}, Pipeline: steps}},
 	}

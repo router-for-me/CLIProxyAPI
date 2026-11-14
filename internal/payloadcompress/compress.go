@@ -62,6 +62,32 @@ func (s Stats) Engines() string {
 	return b.String()
 }
 
+// Steps renders every pipeline step that ran as "lite:10240>8000" in name
+// order, so a step that ran and saved nothing stays visible instead of being
+// omitted the way Engines omits it.
+func (s Stats) Steps() string {
+	if len(s.EngineBytesIn) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(s.EngineBytesIn))
+	for name := range s.EngineBytesIn {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(name)
+		b.WriteByte(':')
+		b.WriteString(strconv.Itoa(s.EngineBytesIn[name]))
+		b.WriteByte('>')
+		b.WriteString(strconv.Itoa(s.EngineBytesOut[name]))
+	}
+	return b.String()
+}
+
 // SavedPct is the percentage of the payload removed, rounded down.
 func (s Stats) SavedPct() int {
 	if s.BytesIn <= 0 || s.BytesOut <= 0 {
@@ -162,13 +188,18 @@ func applyCore(cfg Config, model, sessionID string, body []byte, provider ...str
 
 func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) ([]byte, Stats) {
 	stats := Stats{BytesIn: len(body)}
-	if !cfg.Enabled || len(body) < cfg.MinBytes {
+	if !cfg.Enabled {
 		return body, stats
 	}
 	if isExcluded(model, cfg.Exclusions, provider) {
 		return body, stats
 	}
 	combo := cfg.resolve(model)
+	if cfg.AutoTriggerTokens > 0 && approxTokensBytes(body) >= cfg.AutoTriggerTokens {
+		if auto := cfg.comboByName(cfg.AutoTriggerCombo); auto != nil {
+			combo = auto
+		}
+	}
 	if combo == nil {
 		return body, stats
 	}
