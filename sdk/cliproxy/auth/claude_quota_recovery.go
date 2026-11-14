@@ -33,9 +33,8 @@ func claudeQuotaCandidate(a *Auth) bool {
 	if a == nil || a.Provider != "claude" || a.AuthKind() == AuthKindAPIKey || a.Disabled || a.Status == StatusDisabled || hasUnauthorizedAuthFailure(a) || authMetadataString(a, "access_token") == "" {
 		return false
 	}
-	if !a.Quota.Exceeded || a.Quota.Reason != "credential_quota" || !a.Quota.NextRecoverAt.After(time.Now()) {
-		return false
-	}
+	now := time.Now()
+	blocked := a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now)
 	if a.LastError != nil && a.LastError.HTTPStatus != http.StatusTooManyRequests {
 		return false
 	}
@@ -47,14 +46,17 @@ func claudeQuotaCandidate(a *Auth) bool {
 		if s.LastError != nil && s.LastError.HTTPStatus != http.StatusTooManyRequests {
 			return false
 		}
-		if s.credentialQuotaShadow != nil {
+		if isModelStateActiveCooldown(s.credentialQuotaShadow, now) {
 			return false
 		}
 		if (s.Unavailable || s.Status == StatusError) && (!s.Quota.Exceeded || (s.Quota.Reason != "quota" && s.Quota.Reason != "credential_quota")) {
 			return false
 		}
+		if s.Quota.Exceeded && (s.Quota.Reason == "quota" || s.Quota.Reason == "credential_quota") && isModelStateActiveCooldown(s, now) {
+			blocked = true
+		}
 	}
-	return true
+	return blocked
 }
 
 func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
@@ -68,13 +70,17 @@ func (m *Manager) reconcileClaudeQuota(ctx context.Context) {
 		if !claudeQuotaCandidate(a) {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageURL, nil)
+		probeCtx := ctx
+		if rt := m.roundTripperFor(a); rt != nil {
+			probeCtx = context.WithValue(probeCtx, "cliproxy.roundtripper", rt)
+		}
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, claudeUsageURL, nil)
 		if err != nil {
 			continue
 		}
 		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 		req.Header.Set("User-Agent", "CLIProxyAPI")
-		resp, err := m.HttpRequest(ctx, a, req)
+		resp, err := m.HttpRequest(probeCtx, a, req)
 		if err != nil {
 			continue
 		}

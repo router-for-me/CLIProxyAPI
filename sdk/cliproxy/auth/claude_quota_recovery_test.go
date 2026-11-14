@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"reflect"
 	"testing"
@@ -11,29 +12,34 @@ import (
 )
 
 func TestClaudeQuotaRecoveryAfterManualReset(t *testing.T) {
-	withQuotaCooldownEnabled(t)
-	m := NewManager(nil, nil, nil)
-	a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
-	registry.GetGlobalRegistry().RegisterClient(a.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-2"}})
-	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
-	if _, err := m.Register(context.Background(), a); err != nil {
-		t.Fatal(err)
-	}
-	delay := 5 * 24 * time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &delay, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
-	before, _ := m.GetByID(a.ID)
-	if blocked, _, _ := isAuthBlockedForModel(before, "claude-fable-5-2", time.Now()); !blocked {
-		t.Fatal("fixture is not blocked")
-	}
-	if !claudeUsageAvailable([]byte(`{"five_hour":null,"seven_day":{"utilization":78},"iguana_necktie":{"utilization":0}}`)) {
-		t.Fatal("restored usage rejected")
-	}
-	if err := m.restoreClaudeQuota(context.Background(), before); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := m.GetByID(a.ID)
-	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); blocked {
-		t.Fatal("manual reset left Fable blocked until the old weekly deadline")
+	for _, scope := range []bool{true, false} {
+		t.Run(fmt.Sprintf("credential_scope_%v", scope), func(t *testing.T) {
+
+			withQuotaCooldownEnabled(t)
+			m := NewManager(nil, nil, nil)
+			a := &Auth{ID: t.Name(), Provider: "claude", Status: StatusActive, Metadata: map[string]any{"access_token": "test-oauth"}}
+			registry.GetGlobalRegistry().RegisterClient(a.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-2"}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+			if _, err := m.Register(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			delay := 5 * 24 * time.Hour
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: scope, RetryAfter: &delay, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+			before, _ := m.GetByID(a.ID)
+			if blocked, _, _ := isAuthBlockedForModel(before, "claude-fable-5-2", time.Now()); !blocked {
+				t.Fatal("fixture is not blocked")
+			}
+			if !claudeUsageAvailable([]byte(`{"five_hour":null,"seven_day":{"utilization":78},"iguana_necktie":{"utilization":0}}`)) {
+				t.Fatal("restored usage rejected")
+			}
+			if err := m.restoreClaudeQuota(context.Background(), before); err != nil {
+				t.Fatal(err)
+			}
+			after, _ := m.GetByID(a.ID)
+			if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-2", time.Now()); blocked {
+				t.Fatal("manual reset left Fable blocked until the old weekly deadline")
+			}
+		})
 	}
 }
 
@@ -109,6 +115,21 @@ func TestClaudeQuotaRecoveryKeepsUnrelatedRestrictions(t *testing.T) {
 			post, _ := m.GetByID(a.ID)
 			if !reflect.DeepEqual(pre, post) {
 				t.Fatal("usage recovery changed an unrelated restriction or replaced credential")
+			}
+		})
+	}
+}
+
+func TestClaudeQuotaRecoveryExpiredShadow(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprint(active), func(t *testing.T) {
+			now := time.Now()
+			a := &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "test"}, Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Hour)}, ModelStates: map[string]*ModelState{"fable": {Quota: QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: now.Add(time.Hour)}, credentialQuotaShadow: &ModelState{NextRetryAfter: now.Add(-time.Hour)}}}}
+			if active {
+				a.ModelStates["fable"].credentialQuotaShadow.NextRetryAfter = now.Add(time.Hour)
+			}
+			if got := claudeQuotaCandidate(a); got == active {
+				t.Fatalf("candidate=%v for active shadow=%v", got, active)
 			}
 		})
 	}

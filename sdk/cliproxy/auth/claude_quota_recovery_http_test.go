@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+type quotaTransportProvider struct{ transport http.RoundTripper }
+
+func (p quotaTransportProvider) RoundTripperFor(*Auth) http.RoundTripper { return p.transport }
+
 type claudeQuotaExecutor struct {
 	ProviderExecutor
 	request func(*http.Request) (*http.Response, error)
@@ -41,8 +45,13 @@ func TestClaudeQuotaReconciliationHTTP(t *testing.T) {
 			}
 			delay := 5 * 24 * time.Hour
 			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "claude", Model: "claude-fable-5-2", CredentialScope: true, RetryAfter: &delay, Error: &Error{HTTPStatus: 429, Message: "weekly quota"}})
+			transport := &http.Transport{}
+			m.SetRoundTripperProvider(quotaTransportProvider{transport})
 			calls := 0
 			m.RegisterExecutor(&claudeQuotaExecutor{request: func(r *http.Request) (*http.Response, error) {
+				if r.Context().Value("cliproxy.roundtripper") != transport {
+					t.Error("quota request bypassed configured per-auth transport")
+				}
 				calls++
 				if r.Method != "GET" || r.URL.String() != claudeUsageURL || r.Header.Get("anthropic-beta") != "oauth-2025-04-20" {
 					t.Fatalf("unexpected request: %s %s", r.Method, r.URL)
