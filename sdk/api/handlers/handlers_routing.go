@@ -10,6 +10,7 @@ import (
 
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -163,13 +164,20 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 }
 
 func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel, allowSpeechModel bool) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	return h.getRequestDetailsWithResolvers(modelName, allowImageModel, allowSpeechModel, util.ResolveAutoModel, util.GetProviderName)
+}
+
+func (h *BaseAPIHandler) getRequestDetailsWithResolvers(modelName string, allowImageModel, allowSpeechModel bool, resolve func(string) string, lookup func(string) []string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+	// Both auto resolution and provider lookup read the registry. Capture
+	// readiness before either so their empty startup snapshots stay retryable.
+	catalogLoading := registry.CatalogLoading()
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 			resolvedModelName = modelName
 		} else {
-			resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)
+			resolvedBase := resolve(initialSuffix.ModelName)
 			if initialSuffix.HasSuffix {
 				resolvedModelName = fmt.Sprintf("%s(%s)", resolvedBase, initialSuffix.RawSuffix)
 			} else {
@@ -180,7 +188,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		if h != nil && h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 			resolvedModelName = modelName
 		} else {
-			resolvedModelName = util.ResolveAutoModel(modelName)
+			resolvedModelName = resolve(modelName)
 		}
 	}
 
@@ -198,17 +206,22 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
+	providers = lookup(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").
 	// Evaluated in Story 11.8: This fallback is intentionally preserved to support
 	// custom model registrations that include thinking suffixes.
 	if len(providers) == 0 && baseModel != resolvedModelName {
-		providers = util.GetProviderName(resolvedModelName)
+		providers = lookup(resolvedModelName)
 	}
 
 	if len(providers) == 0 {
+		// Before the first full client load the registry may not list the model yet.
+		// Ask the client to retry rather than reject a model that will be served.
+		if catalogLoading {
+			return nil, "", catalogLoadingRejection()
+		}
 		// The client asked for a model this proxy cannot route. Report it as a request
 		// error so streaming clients receive an actionable message instead of a
 		// gateway failure they would keep retrying. 400 is used rather than 404 to keep
@@ -230,6 +243,26 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+// catalogLoadingError is a 503 with a Retry-After hint. WriteErrorResponse reads the
+// SafeResponseHeaders method, so the header reaches the client without passthrough.
+type catalogLoadingError struct {
+	body string
+}
+
+func (e catalogLoadingError) Error() string { return e.body }
+
+func (e catalogLoadingError) SafeResponseHeaders() http.Header {
+	return http.Header{"Retry-After": []string{"5"}}
+}
+
+func catalogLoadingRejection() *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusServiceUnavailable,
+		Error: catalogLoadingError{body: `{"error":{"message":"provider catalog still loading, retry",` +
+			`"type":"service_unavailable_error","code":"catalog_loading","param":"model"}}`},
+	}
 }
 
 func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageModel bool) *interfaces.ErrorMessage {
