@@ -69,8 +69,17 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 		"tools": [{"type": "function", "name": "bash"}],
 		"tool_choice": "auto",
 		"previous_response_id": "resp-old",
+		"text": {
+			"format": {
+				"type": "json_schema",
+				"name": "strict_bool",
+				"strict": true,
+				"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"], "additionalProperties": false}
+			}
+		},
 		"input": [
 			{"type": "additional_tools", "tools": [{"type": "function", "name": "exec_command"}]},
+			{"type": "configuration_update", "instructions": "Be brief"},
 			{"type": "message", "role": "user", "content": "hi"},
 			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hello"}]},
 			{"type": "compaction_trigger"}
@@ -94,6 +103,9 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 	if ojson.GetBytes(prepared, "previous_response_id").Exists() {
 		t.Fatal("expected previous_response_id to be removed")
 	}
+	if ojson.GetBytes(prepared, "text").Exists() {
+		t.Fatal("expected text format constraints to be removed")
+	}
 
 	input := ojson.GetBytes(prepared, "input").Array()
 	if len(input) != 3 {
@@ -106,6 +118,9 @@ func TestPrepareAntigravityCompactionSummaryPayload(t *testing.T) {
 		}
 		if item.Get("type").String() == "additional_tools" {
 			t.Fatal("additional_tools must be removed from summary payload")
+		}
+		if item.Get("type").String() == "configuration_update" {
+			t.Fatal("configuration_update must be removed from summary payload")
 		}
 	}
 

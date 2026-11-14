@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="280 10 840 840">
+  <title>VisionCoder</title>
+  <g fill="#EC1C8E">
+    <path d="M 735 140 Q 760 75 812 46 Q 795 95 792 150 Z"/>
+    <path d="M 310 453 L 448 402 L 440 490 Z"/>
+    <path d="M 984 338 L 1092 385 L 986 426 Z"/>
+    <path d="M 752 168 C 868 168 958 238 988 336 L 990 428 C 984 590 868 696 718 696 C 566 696 452 602 437 488 L 442 405 C 466 372 492 346 520 320 C 560 226 642 168 752 168 Z"/>
+  </g>
+  <g fill="none" stroke="#EC1C8E" stroke-linecap="round" stroke-linejoin="round" stroke-width="24">
+    <path d="M 656 712 L 641 782"/>
+    <path d="M 758 712 L 773 782"/>
+    <path d="M 486 801 L 958 788"/>
+  </g>
+  <circle cx="897" cy="317" r="31" fill="#fff"/>
+  <g fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width="38">
+    <path d="M 610 436 L 538 499 L 610 562"/>
+    <path d="M 732 404 L 669 592"/>
+    <path d="M 792 436 L 864 499 L 792 562"/>
+  </g>
+</svg>
