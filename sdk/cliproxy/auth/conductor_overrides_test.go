@@ -1437,6 +1437,68 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 	}
 }
 
+// With cooling disabled the auth state keeps no deadline, so the upstream reset
+// hint is the only signal that retrying the same credential is pointless. A hint
+// beyond max-retry-interval must end the retry loop instead of hammering the
+// exhausted credential request-retry more times.
+func TestManager_Execute_DisableCooling_StopsWhen429RetryAfterExceedsMaxWait(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"auth-429-long-retryafter-exec": &retryAfterStatusError{
+				status:     http.StatusTooManyRequests,
+				message:    "quota exhausted",
+				retryAfter: 2 * time.Hour,
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "auth-429-long-retryafter-exec",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"disable_cooling": true,
+		},
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-429-long-retryafter-exec"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	req := cliproxyexecutor.Request{Model: model}
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+	if statusCodeFromError(errExecute) != http.StatusTooManyRequests {
+		t.Fatalf("execute status = %d, want %d", statusCodeFromError(errExecute), http.StatusTooManyRequests)
+	}
+
+	if calls := executor.ExecuteCalls(); len(calls) != 1 {
+		t.Fatalf("execute calls = %d, want 1 (no retry once Retry-After exceeds max-retry-interval)", len(calls))
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if state := updated.ModelStates[model]; state != nil && !state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to stay zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	}
+}
+
 func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(t *testing.T) {
 	incompleteErr := &requestScopedStatusError{
 		status:  http.StatusRequestTimeout,
@@ -2740,6 +2802,750 @@ func TestManager_MarkResult_RequestFaultBodyDoesNotCooldownModelOrAuth(t *testin
 	}
 }
 
+// sequencedErrorExecutor returns, per auth, the queued errors in order and then
+// succeeds.
+type sequencedErrorExecutor struct {
+	authFallbackExecutor
+	queued map[string][]error
+}
+
+func (e *sequencedErrorExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	e.executeCalls = append(e.executeCalls, auth.ID)
+	var err error
+	if queue := e.queued[auth.ID]; len(queue) > 0 {
+		err, e.queued[auth.ID] = queue[0], queue[1:]
+	}
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+}
+
+// A 429 reset hint belongs to the credential that returned it. With cooling
+// disabled, one credential's hint beyond max-retry-interval must not stop the
+// request when another attempted credential failed with no hint and can retry
+// now.
+func TestManager_Execute_DisableCooling_RetryHintStaysWithItsCredential(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const authA, authB = "auth-hint-scope-a", "auth-hint-scope-b"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			authA: {&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"}},
+			authB: {
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+				&retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-hint-scope"
+	reg := registry.GetGlobalRegistry()
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		id := id
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want a retry of %s, whose own failure carried no hint", errExecute, executor.ExecuteCalls(), authA)
+	}
+	if string(resp.Payload) != authA {
+		t.Fatalf("response from %q, want %s", resp.Payload, authA)
+	}
+}
+
+// A credential whose 429 announced a reset that has not passed is skipped in the
+// request's next retry round, even when another credential's hint-less failure
+// made that round start at once.
+func TestManager_Execute_DisableCooling_RetryRoundSkipsCredentialWithLiveReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const authA, authB = "auth-live-reset-a", "auth-live-reset-b"
+	limited := &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour}
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			authA: {limited, limited, limited, limited},
+			authB: {&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"}},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-live-reset"
+	reg := registry.GetGlobalRegistry()
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+			t.Fatalf("register %s: %v", id, errRegister)
+		}
+		reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		id := id
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v)", errExecute, executor.ExecuteCalls())
+	}
+	if string(resp.Payload) != authB {
+		t.Fatalf("response from %q, want %s", resp.Payload, authB)
+	}
+	sentToA := 0
+	for _, id := range executor.ExecuteCalls() {
+		if id == authA {
+			sentToA++
+		}
+	}
+	if sentToA != 1 {
+		t.Fatalf("calls %v sent %s %d times, want once: its 2h reset had not passed", executor.ExecuteCalls(), authA, sentToA)
+	}
+}
+
+// Out-of-order completions must not shorten or clear a newer 429's reset: a
+// failure only extends it, and a success dispatched before it was recorded
+// leaves it in place. A later success clears it.
+func TestManager_MarkResult_DisableCooling_RetryResetSurvivesStaleResults(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reset-order", "test-model-reset-order"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reset := func() time.Time {
+		t.Helper()
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	result := func(seq uint64, success bool, status int, retryAfter time.Duration) Result {
+		r := Result{AuthID: id, Provider: "claude", Model: model, Success: success, ExecutionSeq: seq}
+		if !success {
+			r.Error = &Error{HTTPStatus: status, Message: "failed"}
+			if retryAfter > 0 {
+				r.RetryAfter = &retryAfter
+			}
+		}
+		return r
+	}
+
+	m.executionSeq.Store(2)
+	m.MarkResult(context.Background(), result(2, false, http.StatusTooManyRequests, 2*time.Hour))
+	recorded := reset()
+	if !recorded.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("reset after the 2h 429 = %v, want about 2h ahead", recorded)
+	}
+	m.MarkResult(context.Background(), result(1, false, http.StatusInternalServerError, 0))
+	m.MarkResult(context.Background(), result(1, false, http.StatusTooManyRequests, time.Minute))
+	if got := reset(); !got.Equal(recorded) {
+		t.Fatalf("reset after late failures = %v, want %v kept", got, recorded)
+	}
+	m.MarkResult(context.Background(), result(1, true, 0, 0))
+	if got := reset(); !got.Equal(recorded) {
+		t.Fatalf("reset after a success dispatched before the 429 = %v, want %v kept", got, recorded)
+	}
+	m.executionSeq.Store(3)
+	m.MarkResult(context.Background(), result(3, true, 0, 0))
+	if got := reset(); !got.IsZero() {
+		t.Fatalf("reset after a later success = %v, want cleared", got)
+	}
+}
+
+// A credential with a live reset from an earlier round is excluded from every
+// later retry round, so the retry wait must count it even when the latest round
+// did not attempt it: here B (request_retry 1) runs out, and the request must
+// wait for A's reset and retry A instead of ending with no credential left.
+func TestManager_Execute_DisableCooling_WaitsForResetFromEarlierRound(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const authA, authB = "auth-earlier-reset-a", "auth-earlier-reset-b"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			authA: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 200 * time.Millisecond}},
+			authB: {
+				&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+				&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+				&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "test-model-earlier-reset"
+	reg := registry.GetGlobalRegistry()
+	for _, auth := range []*Auth{
+		{ID: authA, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}},
+		{ID: authB, Provider: "claude", Metadata: map[string]any{"disable_cooling": true, "request_retry": 1}},
+	} {
+		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register %s: %v", auth.ID, errRegister)
+		}
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+		id := auth.ID
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want a wait for %s's reset and a retry of it", errExecute, executor.ExecuteCalls(), authA)
+	}
+	if string(resp.Payload) != authA {
+		t.Fatalf("response from %q, want %s", resp.Payload, authA)
+	}
+}
+
+// Registry reconciliation resets error states with no cooldown deadline; a live
+// cooling-disabled reset has none but must survive it.
+func TestManager_ReconcileRegistryModelStates_KeepsLiveCoolingDisabledReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reconcile-reset", "test-model-reconcile-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	retryAfter := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &retryAfter})
+	reset := func() time.Time {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	if !reset().After(time.Now().Add(time.Hour)) {
+		t.Fatalf("reset before reconciliation = %v, want about 2h ahead", reset())
+	}
+	m.ReconcileRegistryModelStates(context.Background(), id)
+	if got := reset(); !got.After(time.Now().Add(time.Hour)) {
+		t.Fatalf("reset after reconciliation = %v, want it kept", got)
+	}
+}
+
+// Merging states (alias migration) keeps the later cooling-disabled reset.
+func TestMergeModelStateKeepsLaterCoolingDisabledReset(t *testing.T) {
+	later := time.Now().Add(2 * time.Hour)
+	merged := mergeModelState(&ModelState{coolingDisabledRetrySeq: 1}, &ModelState{coolingDisabledRetryAt: later, coolingDisabledRetrySeq: 5})
+	if !merged.coolingDisabledRetryAt.Equal(later) || merged.coolingDisabledRetrySeq != 5 {
+		t.Fatalf("merged reset = %v seq %d, want %v seq 5", merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, later)
+	}
+}
+
+// A long reset recorded by an earlier request must not outlive the upstream's
+// newer word: a fresh request whose 429 announces a short reset retries after
+// it, as on dev, instead of stopping on the stale 2h hint.
+func TestManager_Execute_DisableCooling_NewerShortResetReplacesStaleLongOne(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const id, model = "auth-newer-short-reset", "test-model-newer-short-reset"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			id: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 5 * time.Millisecond}},
+		},
+	}
+	m.RegisterExecutor(executor)
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	// An earlier request left a 2h reset.
+	stale := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.currentExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want a retry after the newer 5ms reset", errExecute, executor.ExecuteCalls())
+	}
+	if string(resp.Payload) != id || len(executor.ExecuteCalls()) != 2 {
+		t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
+	}
+}
+
+// A cooling-disabled reset must not schedule a retry before an ordinary block
+// on the same model that outlasts it (a forced cooldown applies one even with
+// cooling disabled): selection rejects the model until then, so the earlier
+// wait would spend a retry round on nothing.
+func TestCoolingDisabledRetryWaitHonoursLongerOrdinaryBlock(t *testing.T) {
+	model := "test-model-reset-and-block"
+	auth := &Auth{ID: "auth-reset-and-block", Provider: "codex", Metadata: map[string]any{"disable_cooling": true}}
+	manager, eligibility := issue7017WaitSetup(t, auth, model)
+
+	retryAfter := 5 * time.Second
+	manager.MarkResult(context.Background(), Result{AuthID: auth.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	now := time.Now()
+	manager.mu.Lock()
+	state := manager.auths[auth.ID].ModelStates[model]
+	if state == nil || !state.coolingDisabledRetryAt.After(now) {
+		manager.mu.Unlock()
+		t.Fatal("429 did not record a cooling-disabled reset")
+	}
+	// The ordinary block a forced cooldown leaves, longer than the reset.
+	state.Unavailable = true
+	state.NextRetryAfter = now.Add(time.Minute)
+	manager.mu.Unlock()
+
+	attempted := map[string]struct{}{auth.ID: {}}
+	wait, found := manager.closestCooldownWaitWithAttempted([]string{"codex"}, model, 0, eligibility, "", 5, http.StatusTooManyRequests, attempted)
+	if !found {
+		t.Fatal("expected a retry candidate")
+	}
+	if wait < 50*time.Second {
+		t.Fatalf("wait = %v, want the 1m ordinary block, not the 5s reset", wait)
+	}
+}
+
+// An explicit Retry-After: 0 from a newer call is the upstream saying "retry
+// now"; a stale long reset must not outlive it.
+func TestManager_Execute_DisableCooling_NewerExplicitZeroClearsStaleReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	m.SetRetryConfig(3, 10*time.Second, 0)
+	const id, model = "auth-newer-zero-reset", "test-model-newer-zero-reset"
+	executor := &sequencedErrorExecutor{
+		authFallbackExecutor: authFallbackExecutor{id: "claude"},
+		queued: map[string][]error{
+			id: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 0}},
+		},
+	}
+	m.RegisterExecutor(executor)
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	// An earlier request left a 2h reset.
+	stale := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.currentExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("Execute error = %v (calls %v), want an immediate retry after the newer Retry-After: 0", errExecute, executor.ExecuteCalls())
+	}
+	if string(resp.Payload) != id || len(executor.ExecuteCalls()) != 2 {
+		t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
+	}
+}
+
+// A 429 with an unknown execution sequence (a direct MarkResult caller) is
+// exempt from the ordering guard: it is the upstream's latest word, so its
+// explicit zero clears a recorded reset and its shorter hint replaces one.
+func TestManager_MarkResult_DisableCooling_UnknownSeqReplacesReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-unknown-seq-reset", "test-model-unknown-seq-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+	reset := func() time.Time {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	mark := func(seq uint64, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: seq,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+
+	mark(m.nextExecutionSeq(), 2*time.Hour)
+	mark(0, time.Minute)
+	if got := reset(); got.After(time.Now().Add(2 * time.Minute)) {
+		t.Fatalf("reset after an unknown-sequence 1m hint = %v, want about 1m ahead", got)
+	}
+	mark(0, 0)
+	if got := reset(); !got.IsZero() {
+		t.Fatalf("reset after an unknown-sequence Retry-After: 0 = %v, want it cleared", got)
+	}
+}
+
+// A forced-cooldown 429 (a continue-and-cooldown rule) on a cooling-disabled
+// credential is still the upstream's newer word: it replaces a recorded reset,
+// shorter or not, and an explicit zero clears it, so retry scheduling never waits
+// on the obsolete deadline instead of the forced cooldown.
+func TestManager_MarkResult_DisableCooling_ForcedCooldown429ReplacesReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-forced-429-reset", "test-model-forced-429-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reset := func() time.Time {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return coolingDisabledRetryAt(m.auths[id], model)
+	}
+	mark := func(code string, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+			Error: &Error{Code: code, HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+
+	mark("", 2*time.Hour)
+	mark(ErrorCodeForceCooldown, time.Minute)
+	if got := reset(); got.After(time.Now().Add(2 * time.Minute)) {
+		t.Fatalf("reset after a newer forced-cooldown 1m hint = %v, want about 1m ahead", got)
+	}
+	mark("", 2*time.Hour)
+	mark(ErrorCodeForceCooldown, 0)
+	if got := reset(); !got.IsZero() {
+		t.Fatalf("reset after a newer forced-cooldown Retry-After: 0 = %v, want it cleared", got)
+	}
+}
+
+// A reset cleared by a newer Retry-After: 0 must stay cleared across a
+// reconciliation: the state reset there keeps the watermark, so an older 429
+// completing afterwards cannot reinstall its stale hint.
+func TestManager_ReconcileRegistryModelStates_KeepsClearedResetWatermark(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-reconcile-cleared-reset", "test-model-reconcile-cleared-reset"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(id) })
+
+	olderSeq := m.nextExecutionSeq()
+	newerSeq := m.nextExecutionSeq()
+	zero := time.Duration(0)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: newerSeq,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &zero})
+
+	m.ReconcileRegistryModelStates(context.Background(), id)
+
+	stale := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: olderSeq,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if got := coolingDisabledRetryAt(m.auths[id], model); !got.IsZero() {
+		t.Fatalf("reset after the older 429 = %v, want it to stay cleared", got)
+	}
+}
+
+// Alias migration must also carry a state whose only content is a cleared reset
+// write: a clear written after the target's reset replaces it, and one written
+// before leaves it live.
+func TestManager_ReconcileRegistryModelStates_MigratesClearedResetWrite(t *testing.T) {
+	const (
+		provider    = "antigravity"
+		routeModel  = "[ant]gemini-3.7-flash-high"
+		targetModel = "gemini-3.7-flash-high"
+	)
+	for name, tc := range map[string]struct {
+		clearStamp uint64
+		wantLive   bool
+	}{
+		"clear written after the target's reset":  {clearStamp: 5, wantLive: false},
+		"clear written before the target's reset": {clearStamp: 2, wantLive: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			manager.RegisterExecutor(&noForkAliasTestExecutor{id: provider})
+			manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+				provider: {{Name: targetModel, Alias: routeModel, Fork: false}},
+			})
+			auth := &Auth{ID: "auth-migrate-cleared-reset", Provider: provider, Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+			live := time.Now().Add(time.Hour)
+			manager.mu.Lock()
+			manager.auths[auth.ID].ModelStates = map[string]*ModelState{
+				routeModel:  {Status: StatusActive, coolingDisabledRetrySeq: 1, coolingDisabledRetryStamp: tc.clearStamp},
+				targetModel: {Status: StatusActive, coolingDisabledRetryAt: live, coolingDisabledRetrySeq: 1, coolingDisabledRetryStamp: 3},
+			}
+			manager.mu.Unlock()
+
+			manager.ReconcileRegistryModelStates(context.Background(), auth.ID)
+
+			manager.mu.RLock()
+			defer manager.mu.RUnlock()
+			states := manager.auths[auth.ID].ModelStates
+			if _, legacy := states[routeModel]; legacy {
+				t.Fatalf("legacy ModelStates[%q] was not migrated", routeModel)
+			}
+			want := time.Time{}
+			if tc.wantLive {
+				want = live
+			}
+			if target := states[targetModel]; target == nil || !target.coolingDisabledRetryAt.Equal(want) {
+				t.Fatalf("ModelStates[%q] = %+v, want reset %v", targetModel, target, want)
+			}
+		})
+	}
+}
+
+// Alias migration in reconciliation must carry a state whose only content is a
+// live cooling-disabled reset (left by a stale success after the 429).
+func TestManager_ReconcileRegistryModelStates_MigratesCleanStateWithLiveReset(t *testing.T) {
+	const (
+		provider    = "antigravity"
+		routeModel  = "[ant]gemini-3.7-flash-high"
+		targetModel = "gemini-3.7-flash-high"
+	)
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&noForkAliasTestExecutor{id: provider})
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		provider: {{Name: targetModel, Alias: routeModel, Fork: false}},
+	})
+	auth := &Auth{ID: "auth-migrate-live-reset", Provider: provider, Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	reset := time.Now().Add(time.Hour)
+	manager.mu.Lock()
+	manager.auths[auth.ID].ModelStates = map[string]*ModelState{
+		routeModel: {Status: StatusActive, coolingDisabledRetryAt: reset, coolingDisabledRetrySeq: 1},
+	}
+	manager.mu.Unlock()
+
+	manager.ReconcileRegistryModelStates(context.Background(), auth.ID)
+
+	manager.mu.RLock()
+	defer manager.mu.RUnlock()
+	states := manager.auths[auth.ID].ModelStates
+	if _, legacy := states[routeModel]; legacy {
+		t.Fatalf("legacy ModelStates[%q] was not migrated", routeModel)
+	}
+	if target := states[targetModel]; target == nil || !target.coolingDisabledRetryAt.Equal(reset) {
+		t.Fatalf("ModelStates[%q] = %+v, want the migrated reset %v", targetModel, target, reset)
+	}
+}
+
+// A success dispatched after the 429 clears its reset even when a newer ordinary
+// cooldown (recorded before that success completed) keeps the rest of the state.
+func TestManager_MarkResult_DisableCooling_FreshSuccessClearsResetUnderRetainedCooldown(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-fresh-success-retained", "test-model-fresh-success-retained"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	retryAfter := 2 * time.Hour
+	m.executionSeq.Store(2)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 2,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.executionSeq.Store(4)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 4,
+		Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusInternalServerError, Message: "forced"}})
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 3, Success: true})
+
+	m.mu.RLock()
+	state := m.auths[id].ModelStates[model]
+	if state == nil || !isModelStateActiveCooldown(state, time.Now()) {
+		m.mu.RUnlock()
+		t.Fatalf("state = %+v, want the forced cooldown kept", state)
+	}
+	cleared := state.coolingDisabledRetryAt
+	m.mu.RUnlock()
+	if !cleared.IsZero() {
+		t.Fatalf("reset = %v, want it cleared by the success dispatched after the 429", cleared)
+	}
+
+	// A 429 dispatched before all of these, completing last, must not bring it back.
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: 1,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if revived := m.auths[id].ModelStates[model].coolingDisabledRetryAt; !revived.IsZero() {
+		t.Fatalf("reset = %v after a 429 dispatched before the success, want it to stay cleared", revived)
+	}
+}
+
+// A success with an unknown sequence (zero, direct MarkResult callers) is exempt
+// from the ordering guard, as a 429 is: it clears the reset even while a live
+// credential-wide quota keeps the rest of the state.
+func TestManager_MarkResult_DisableCooling_UnknownSeqSuccessClearsResetUnderCredentialQuota(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id, model = "auth-unknown-seq-success-quota", "test-model-unknown-seq-success-quota"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	retryAfter := 2 * time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.nextExecutionSeq(),
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	quotaUntil := time.Now().Add(time.Minute)
+	m.mu.Lock()
+	m.auths[id].Quota = QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: quotaUntil}
+	m.mu.Unlock()
+
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, Success: true})
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	auth := m.auths[id]
+	if auth.Quota.Reason != "credential_quota" || !auth.Quota.NextRecoverAt.Equal(quotaUntil) {
+		t.Fatalf("quota = %+v, want the credential quota kept", auth.Quota)
+	}
+	if got := coolingDisabledRetryAt(auth, model); !got.IsZero() {
+		t.Fatalf("reset = %v, want it cleared by the unknown-sequence success", got)
+	}
+}
+
+// Direct MarkResult callers write every reset under the same watermark. Merging
+// two such states (an alias change) keeps the reset written last, so a newer short
+// hint or explicit zero is not overridden by an older, longer one, in either merge
+// direction. A state that never held a reset does not drop a live one.
+func TestMergeModelStateKeepsResetWrittenLastWhenWatermarksTie(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id = "auth-merge-tied-watermarks"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	mark := func(model string, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+	state := func(model string) *ModelState {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return m.auths[id].ModelStates[model].Clone()
+	}
+
+	mark("old-long", 2*time.Hour)
+	mark("new-short", time.Minute)
+	mark("new-cleared", time.Hour)
+	mark("new-cleared", 0)
+	oldLong, newShort, newCleared := state("old-long"), state("new-short"), state("new-cleared")
+	if oldLong.coolingDisabledRetrySeq != newShort.coolingDisabledRetrySeq || oldLong.coolingDisabledRetrySeq != newCleared.coolingDisabledRetrySeq {
+		t.Fatalf("watermarks %d/%d/%d, want them tied", oldLong.coolingDisabledRetrySeq, newShort.coolingDisabledRetrySeq, newCleared.coolingDisabledRetrySeq)
+	}
+
+	for name, tc := range map[string]struct {
+		target, source *ModelState
+		want           time.Time
+	}{
+		"newer short into older long": {oldLong, newShort, newShort.coolingDisabledRetryAt},
+		"older long into newer short": {newShort, oldLong, newShort.coolingDisabledRetryAt},
+		"newer zero into older long":  {oldLong, newCleared, time.Time{}},
+		"older long into newer zero":  {newCleared, oldLong, time.Time{}},
+		"never-reset into live":       {oldLong, &ModelState{}, oldLong.coolingDisabledRetryAt},
+		"live into never-reset":       {&ModelState{}, oldLong, oldLong.coolingDisabledRetryAt},
+	} {
+		merged := mergeModelState(tc.target.Clone(), tc.source.Clone())
+		if !merged.coolingDisabledRetryAt.Equal(tc.want) {
+			t.Errorf("%s: merged reset = %v, want %v", name, merged.coolingDisabledRetryAt, tc.want)
+		}
+	}
+}
+
+// A state reset that clears a live reset (a refresh, or a quota or unauthorized
+// release) is a write too: merging it with a reset written before the clear keeps
+// the clear, in either direction. Dropping an already expired reset carries no new
+// hint and never wins over a live reset written after it.
+func TestMergeModelStateOrdersResetClearedByStateReset(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	const id = "auth-merge-state-reset-clear"
+	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	mark := func(model string, retryAfter time.Duration) {
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model,
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "rate limited"}, RetryAfter: &retryAfter})
+	}
+	state := func(model string) *ModelState {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+		return m.auths[id].ModelStates[model].Clone()
+	}
+	merge := func(name string, a, b *ModelState, want time.Time) {
+		t.Helper()
+		for direction, pair := range map[string][2]*ModelState{"a into b": {b, a}, "b into a": {a, b}} {
+			if merged := mergeModelState(pair[0].Clone(), pair[1].Clone()); !merged.coolingDisabledRetryAt.Equal(want) {
+				t.Errorf("%s (%s): merged reset = %v, want %v", name, direction, merged.coolingDisabledRetryAt, want)
+			}
+		}
+	}
+
+	mark("cleared-later", 2*time.Hour)
+	mark("live-earlier", time.Hour)
+	clearedLater := state("cleared-later")
+	resetModelState(clearedLater, time.Now())
+	merge("live reset cleared after the other was written", clearedLater, state("live-earlier"), time.Time{})
+
+	mark("expired", time.Hour)
+	mark("live-after", time.Hour)
+	expired := state("expired")
+	expired.coolingDisabledRetryAt = time.Now().Add(-time.Minute)
+	resetModelState(expired, time.Now())
+	liveAfter := state("live-after")
+	merge("expired reset dropped after a live one was written", expired, liveAfter, liveAfter.coolingDisabledRetryAt)
+}
+
+// Merging keeps the reset recorded last with its own deadline, not the longest
+// deadline beside the highest watermark.
+func TestMergeModelStatePairsResetWithItsWatermark(t *testing.T) {
+	now := time.Now()
+	// mergeModelState may update its target in place, so each case builds its own.
+	stale := func() *ModelState {
+		return &ModelState{coolingDisabledRetryAt: now.Add(2 * time.Hour), coolingDisabledRetrySeq: 3}
+	}
+	newer := func() *ModelState {
+		return &ModelState{coolingDisabledRetryAt: now.Add(time.Second), coolingDisabledRetrySeq: 7}
+	}
+	cleared := func() *ModelState { return &ModelState{coolingDisabledRetrySeq: 7} }
+	for _, tc := range []struct {
+		name           string
+		target, source func() *ModelState
+		want           func() *ModelState
+	}{
+		{"newer shorter source", stale, newer, newer},
+		{"newer shorter target", newer, stale, newer},
+		{"newer explicit clear", stale, cleared, cleared},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged, want := mergeModelState(tc.target(), tc.source()), tc.want()
+			if !merged.coolingDisabledRetryAt.Equal(want.coolingDisabledRetryAt) || merged.coolingDisabledRetrySeq != want.coolingDisabledRetrySeq {
+				t.Fatalf("merged reset = %v seq %d, want %v seq %d", merged.coolingDisabledRetryAt, merged.coolingDisabledRetrySeq, want.coolingDisabledRetryAt, want.coolingDisabledRetrySeq)
+			}
+		})
+	}
+}
+
 func TestManager_Execute_DevinMCPConfigurationIssue403_DoesNotRetryOrCooldown(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -2813,5 +3619,20 @@ func TestManager_Execute_DevinMCPConfigurationIssue403_DoesNotRetryOrCooldown(t 
 		if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
 			t.Fatalf("%s unexpectedly cooled down at model level: %#v", id, state)
 		}
+	}
+}
+
+func TestCoolingDisabledRetryAtMatchesModelCaseInsensitively(t *testing.T) {
+	reset := time.Now().Add(time.Minute)
+	auth := &Auth{ModelStates: map[string]*ModelState{
+		"Claude-Sonnet-X": {coolingDisabledRetryAt: reset},
+	}}
+	for _, model := range []string{"Claude-Sonnet-X", "claude-sonnet-x", "CLAUDE-SONNET-X"} {
+		if got := coolingDisabledRetryAt(auth, model); !got.Equal(reset) {
+			t.Fatalf("coolingDisabledRetryAt(%q) = %v, want %v", model, got, reset)
+		}
+	}
+	if got := coolingDisabledRetryAt(auth, "claude-sonnet-y"); !got.IsZero() {
+		t.Fatalf("coolingDisabledRetryAt(other model) = %v, want zero", got)
 	}
 }
