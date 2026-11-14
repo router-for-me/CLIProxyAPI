@@ -709,6 +709,12 @@ func (m *Manager) Wait(ctx context.Context) bool {
 	if !started {
 		return true
 	}
+	// select picks at random when both are ready, so check done first.
+	select {
+	case <-m.done:
+		return true
+	default:
+	}
 	select {
 	case <-m.done:
 		return true

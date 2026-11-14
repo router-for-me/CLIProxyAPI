@@ -54,3 +54,22 @@ func TestManagerWaitReturnsAtOnceWhenNeverStarted(t *testing.T) {
 		t.Fatal("Wait blocked on a dispatcher that never started")
 	}
 }
+
+func TestManagerWaitReportsDrainedQueueAfterDeadline(t *testing.T) {
+	mgr := NewManager(0)
+	mgr.Start(context.Background())
+	mgr.Stop()
+	if !mgr.Wait(context.Background()) {
+		t.Fatal("Wait did not report the queue as drained")
+	}
+
+	// The queue is already drained, so an expired deadline must not turn the
+	// answer into "not drained".
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range 100 {
+		if !mgr.Wait(expired) {
+			t.Fatal("Wait reported a drained queue as not drained after its deadline")
+		}
+	}
+}
