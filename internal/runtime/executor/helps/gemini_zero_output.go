@@ -13,6 +13,7 @@ import (
 // GeminiPayloadInspection summarizes output semantics of a Gemini or Antigravity response frame.
 type GeminiPayloadInspection struct {
 	FinishReason     string
+	HasCandidate     bool
 	HasVisibleOutput bool
 	HasThoughtOutput bool
 	HasUsageMetadata bool
@@ -49,8 +50,15 @@ func GeminiZeroOutputErrorMessage(responseFormat sdktranslator.Format, finishRea
 	reason := strings.ToUpper(strings.TrimSpace(finishReason))
 	if responseFormat == sdktranslator.FormatClaude {
 		doc := ojson.NewDocString(`{"type":"error","error":{"type":"api_error","message":""}}`)
-		_ = doc.Set("error.message", fmt.Sprintf("Gemini response finished with %s", reason))
+		if reason == "" {
+			_ = doc.Set("error.message", "Gemini stream closed with zero output")
+		} else {
+			_ = doc.Set("error.message", fmt.Sprintf("Gemini response finished with %s", reason))
+		}
 		return doc.String()
+	}
+	if reason == "" {
+		return "upstream stream closed with zero output"
 	}
 	return fmt.Sprintf("upstream returned zero output with finishReason %s", reason)
 }
@@ -135,7 +143,12 @@ func InspectGeminiZeroOutputPayload(payload []byte, allowResponseWrapper bool) G
 		return out
 	}
 
-	for _, cand := range candidates.Array() {
+	candList := candidates.Array()
+	if len(candList) > 0 {
+		out.HasCandidate = true
+	}
+
+	for _, cand := range candList {
 		if fr := strings.TrimSpace(cand.Get("finishReason").String()); fr != "" && out.FinishReason == "" {
 			out.FinishReason = strings.Clone(fr)
 		}
@@ -152,13 +165,9 @@ func InspectGeminiZeroOutputPayload(payload []byte, allowResponseWrapper bool) G
 				isValidGeminiFileDataPart(part.Get("fileData")) || isValidGeminiFileDataPart(part.Get("file_data")) ||
 				isValidGeminiExecutableCodePart(part.Get("executableCode")) || isValidGeminiExecutableCodePart(part.Get("executable_code")) ||
 				isValidGeminiCodeExecutionResultPart(part.Get("codeExecutionResult")) || isValidGeminiCodeExecutionResultPart(part.Get("code_execution_result"))
-			sig := part.Get("thoughtSignature").String()
-			if sig == "" {
-				sig = part.Get("thought_signature").String()
-			}
 			text := part.Get("text").String()
 			if part.Get("thought").Bool() {
-				if text != "" || sig != "" || hasMediaOrTool {
+				if text != "" || hasMediaOrTool {
 					out.HasThoughtOutput = true
 				}
 				continue
@@ -166,9 +175,6 @@ func InspectGeminiZeroOutputPayload(payload []byte, allowResponseWrapper bool) G
 			if hasMediaOrTool || strings.TrimSpace(text) != "" {
 				out.HasVisibleOutput = true
 				continue
-			}
-			if sig != "" {
-				out.HasThoughtOutput = true
 			}
 		}
 	}
@@ -193,6 +199,7 @@ type GeminiZeroOutputStreamGuard struct {
 	allowResponseWrapper bool
 	responseFormat       sdktranslator.Format
 	pendingShells        [][]byte
+	sawCandidateShell    bool
 	sawVisibleOutput     bool
 	emittedToOut         bool
 	abnormalFinishReason string
@@ -273,6 +280,9 @@ func (g *GeminiZeroOutputStreamGuard) Observe(rawPayload []byte) ([][]byte, Gemi
 	}
 
 	if !g.emittedToOut && insp.FinishReason == "" && !insp.HasVisibleOutput && !insp.HasThoughtOutput && !insp.HasPromptBlock {
+		if insp.HasCandidate || insp.HasUsageMetadata {
+			g.sawCandidateShell = true
+		}
 		g.pendingShells = append(g.pendingShells, bytes.Clone(rawPayload))
 		return nil, GeminiZeroOutputContinue, ""
 	}
@@ -294,6 +304,10 @@ func (g *GeminiZeroOutputStreamGuard) Finalize() ([][]byte, GeminiZeroOutputStre
 		return nil, g.postCommitErrorAction(), g.abnormalFinishReason
 	}
 	if len(g.pendingShells) > 0 {
+		if !g.emittedToOut && g.sawCandidateShell {
+			g.pendingShells = nil
+			return nil, GeminiZeroOutputFailNow, ""
+		}
 		flush := g.pendingShells
 		g.pendingShells = nil
 		return flush, GeminiZeroOutputEmit, ""

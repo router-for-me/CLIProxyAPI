@@ -506,3 +506,18 @@ func TestConvertAntigravityResponseToOpenAI_MultiPartThoughtAndTrailingSignature
 		}
 	})
 }
+
+func TestConvertAntigravityResponseToOpenAI_SignatureOnlyEmptyTextDoesNotStartStreamOrEmitNullDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig","text":""}]}}],"cpaUsageMetadata":{"promptTokenCount":378515,"cachedContentTokenCount":376466,"totalTokenCount":378515},"modelVersion":"gemini-4-hydrogen","responseId":"resp-7536"}}`)
+	out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-hydrogen", nil, nil, chunk, &param)
+	if len(out) != 0 {
+		t.Fatalf("signature-only empty-text chunk with filtered usage must not emit all-null delta, got %d chunk(s): %s", len(out), out[0])
+	}
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-hydrogen", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 0 {
+		t.Fatalf("signature-only empty-text stream must not synthesize stop on [DONE], got %d chunk(s): %s", len(done), done[0])
+	}
+}

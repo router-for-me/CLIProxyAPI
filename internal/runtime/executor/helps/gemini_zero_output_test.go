@@ -84,6 +84,22 @@ func TestInspectGeminiZeroOutputPayload(t *testing.T) {
 			wantVisible: false,
 			wantThought: true,
 		},
+		{
+			name:                 "antigravity non-thought thoughtSignature with empty text does not count as thought or visible output",
+			payload:              `{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig","text":""}]}}],"usageMetadata":{"promptTokenCount":378515,"cachedContentTokenCount":376466,"totalTokenCount":378515}}}`,
+			allowResponseWrapper: true,
+			wantVisible:          false,
+			wantThought:          false,
+			wantUsage:            true,
+		},
+		{
+			name:                 "antigravity thought flag with thoughtSignature and empty text does not count as thought or visible output",
+			payload:              `{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"thoughtSignature":"opaque-sig","text":""}]}}]}}`,
+			allowResponseWrapper: true,
+			wantVisible:          false,
+			wantThought:          false,
+			wantUsage:            false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -184,6 +200,34 @@ func TestGeminiZeroOutputStreamGuard_ShellBufferingAndSplitUsage(t *testing.T) {
 		finalUsage := []byte(`{"response":{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":10,"thoughtsTokenCount":313,"totalTokenCount":443}}}`)
 		if _, action, reason := guard.Observe(finalUsage); action != GeminiZeroOutputFailNow || reason != "MALFORMED_FUNCTION_CALL" {
 			t.Fatalf("final usage observe = (%v, %q), want (FailNow, MALFORMED_FUNCTION_CALL)", action, reason)
+		}
+	})
+
+	t.Run("leading thoughtSignature-only empty-text frame buffers and fails on EOF without finishReason", func(t *testing.T) {
+		guard := NewGeminiZeroOutputStreamGuard(true, sdktranslator.FormatOpenAI)
+		sigOnly := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig","text":""}]}}],"usageMetadata":{"promptTokenCount":378515,"totalTokenCount":378515},"modelVersion":"gemini-4-hydrogen","responseId":"resp-7536"}}`)
+		if flush, action, _ := guard.Observe(sigOnly); action != GeminiZeroOutputContinue || len(flush) != 0 {
+			t.Fatalf("sig-only observe = (%d, %v), want (0, Continue)", len(flush), action)
+		}
+		if finFlush, finAction, _ := guard.Finalize(); finAction != GeminiZeroOutputFailNow || len(finFlush) != 0 {
+			t.Fatalf("Finalize() = (%d, %v), want (0, FailNow)", len(finFlush), finAction)
+		}
+	})
+
+	t.Run("leading thoughtSignature-only empty-text frame flushes when real content follows", func(t *testing.T) {
+		guard := NewGeminiZeroOutputStreamGuard(true, sdktranslator.FormatOpenAI)
+		sigOnly := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig","text":""}]}}]}}`)
+		if flush, action, _ := guard.Observe(sigOnly); action != GeminiZeroOutputContinue || len(flush) != 0 {
+			t.Fatalf("sig-only observe = (%d, %v), want (0, Continue)", len(flush), action)
+		}
+		textFrame := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}]}}`)
+		flush, action, _ := guard.Observe(textFrame)
+		if action != GeminiZeroOutputEmit || len(flush) != 1 {
+			t.Fatalf("content observe = (%d, %v), want (1, Emit)", len(flush), action)
+		}
+		guard.MarkEmitted()
+		if finFlush, finAction, _ := guard.Finalize(); finAction != GeminiZeroOutputEmit || len(finFlush) != 0 {
+			t.Fatalf("Finalize() = (%d, %v), want (0, Emit)", len(finFlush), finAction)
 		}
 	})
 }
