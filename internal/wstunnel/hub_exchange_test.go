@@ -254,10 +254,9 @@ func TestHubExchange_ManyToManyFullDuplexMultiplexing(t *testing.T) {
 	clientWriteMu := make([]sync.Mutex, numPeers)
 	for c := 0; c < numPeers; c++ {
 		clients[c] = dialRole(t, srv.URL, "key-mesh", RoleClient, fmt.Sprintf("cli-%d", c), fmt.Sprintf("Client %d", c))
-		initList := readTextJSONFrame(t, clients[c])
-		if initList.Get("servers.#").Int() != numPeers {
-			t.Fatalf("client %d saw %d servers, want %d", c, initList.Get("servers.#").Int(), numPeers)
-		}
+		// A server's commitPeer may run after its dial returns, so drain the
+		// topology stream until every pre-connected server is visible.
+		waitServersVisible(t, clients[c], "srv-0", "srv-1", "srv-2")
 	}
 
 	// Each server reads 2*numPeers packets (one binary + one empty/text from each client) and replies back to the sender client.
