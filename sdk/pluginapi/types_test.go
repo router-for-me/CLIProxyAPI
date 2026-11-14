@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -423,6 +424,7 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 		wantReject   bool
 		wantCode     string
 		wantReason   string
+		wantExclude  []string
 	}{
 		{
 			name:         "legacy pascal case auth id",
@@ -472,6 +474,19 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 			wantCode:    "policy_violation",
 			wantReason:  "blocked by policy",
 		},
+		{
+			name:        "pascal case exclude candidates unhandled",
+			payload:     `{"Handled":false,"ExcludeCandidates":["ag-1","ag-2"]}`,
+			wantHandled: false,
+			wantExclude: []string{"ag-1", "ag-2"},
+		},
+		{
+			name:         "snake case exclude candidates with delegate",
+			payload:      `{"handled":true,"delegate_builtin":"round-robin","exclude_candidates":["ag-1","ag-3"]}`,
+			wantHandled:  true,
+			wantDelegate: "round-robin",
+			wantExclude:  []string{"ag-1", "ag-3"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -498,22 +513,26 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 			if resp.RejectReason != tc.wantReason {
 				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
 			}
+			if !slices.Equal(resp.ExcludeCandidates, tc.wantExclude) {
+				t.Fatalf("ExcludeCandidates = %v, want %v", resp.ExcludeCandidates, tc.wantExclude)
+			}
 		})
 	}
 }
 
 func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T) {
-	// Verify that explicit false or empty string in incoming JSON correctly overwrites pre-existing true/non-empty values.
+	// Verify that explicit false, empty string, or empty slice in incoming JSON correctly overwrites pre-existing values.
 	resp := SchedulerPickResponse{
-		AuthID:          "old-auth",
-		DelegateBuiltin: "old-delegate",
-		Handled:         true,
-		Reject:          true,
-		RejectCode:      "old-code",
-		RejectReason:    "old-reason",
+		AuthID:            "old-auth",
+		DelegateBuiltin:   "old-delegate",
+		Handled:           true,
+		Reject:            true,
+		RejectCode:        "old-code",
+		RejectReason:      "old-reason",
+		ExcludeCandidates: []string{"old-excluded"},
 	}
 
-	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`
+	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":"","exclude_candidates":[]}`
 	if errUnmarshal := json.Unmarshal([]byte(payload), &resp); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
 	}
@@ -536,11 +555,26 @@ func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T
 	if resp.RejectReason != "" {
 		t.Fatalf("RejectReason = %q, want empty", resp.RejectReason)
 	}
+	if len(resp.ExcludeCandidates) != 0 {
+		t.Fatalf("ExcludeCandidates = %v, want empty", resp.ExcludeCandidates)
+	}
+
+	// Verify that explicit null in incoming JSON clears existing ExcludeCandidates.
+	respNull := SchedulerPickResponse{
+		ExcludeCandidates: []string{"old-excluded"},
+	}
+	if errUnmarshal := json.Unmarshal([]byte(`{"exclude_candidates":null}`), &respNull); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal(null) error = %v", errUnmarshal)
+	}
+	if len(respNull.ExcludeCandidates) != 0 {
+		t.Fatalf("ExcludeCandidates after null = %v, want empty", respNull.ExcludeCandidates)
+	}
 
 	// Verify that omitting fields in incoming JSON leaves existing fields intact.
 	resp2 := SchedulerPickResponse{
-		AuthID:  "keep-auth",
-		Handled: true,
+		AuthID:            "keep-auth",
+		Handled:           true,
+		ExcludeCandidates: []string{"keep-excluded"},
 	}
 	if errUnmarshal := json.Unmarshal([]byte(`{"reject":true}`), &resp2); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
@@ -553,6 +587,17 @@ func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T
 	}
 	if !resp2.Reject {
 		t.Fatalf("Reject = %v, want true", resp2.Reject)
+	}
+	if !slices.Equal(resp2.ExcludeCandidates, []string{"keep-excluded"}) {
+		t.Fatalf("ExcludeCandidates = %v, want [keep-excluded]", resp2.ExcludeCandidates)
+	}
+
+	// Verify that non-array or non-string exclude_candidates payloads fail cleanly.
+	for _, badPayload := range []string{`{"exclude_candidates":"not-array"}`, `{"exclude_candidates":["ok",123]}`} {
+		var badResp SchedulerPickResponse
+		if errBad := json.Unmarshal([]byte(badPayload), &badResp); errBad == nil {
+			t.Fatalf("json.Unmarshal(%s) error = nil, want error", badPayload)
+		}
 	}
 }
 
