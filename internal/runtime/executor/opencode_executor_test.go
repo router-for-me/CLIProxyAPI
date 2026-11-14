@@ -65,9 +65,11 @@ func TestOpenCodeExecutor_RoutesByProtocol(t *testing.T) {
 }
 
 func TestOpenCodeExecutor_ExecuteDispatchesResponses(t *testing.T) {
-	var capturedPath string
+	var capturedPath, bearer, anthropicKey string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
+		bearer = r.Header.Get("Authorization")
+		anthropicKey = r.Header.Get("X-Api-Key")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte(`{"id":"resp-1","object":"chat.completion","choices":[{"index":0,"message":{"content":"hi","role":"assistant"}}]}`))
@@ -93,6 +95,9 @@ func TestOpenCodeExecutor_ExecuteDispatchesResponses(t *testing.T) {
 	}
 	if capturedPath != "/v1/responses" {
 		t.Errorf("upstream path = %q, want /v1/responses", capturedPath)
+	}
+	if bearer != "Bearer test-key" || anthropicKey != "" {
+		t.Fatal("Responses transport did not use exclusive Bearer authentication")
 	}
 	if len(resp.Payload) == 0 {
 		t.Error("expected non-empty response payload")

@@ -103,9 +103,6 @@ func (e *OpenCodeExecutor) requestAuth(auth *clipoauth.Auth, opts cliproxyexecut
 	if apiKey, ok := openCodeCreds(auth); ok {
 		cloned.Attributes["api_key"] = apiKey
 	}
-	// OpenCode serves its messages protocol with Anthropic authentication:
-	// the gateway reads x-api-key and rejects a Bearer key as missing.
-	cloned.Attributes["anthropic_auth_scheme"] = "x-api-key"
 	sessionID := helps.AffinitySessionUUID(e.id, clipoauth.ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata))
 	if sessionID != "" {
 		cloned.Attributes["header:"+openCodeSessionHeader] = sessionID
@@ -113,15 +110,9 @@ func (e *OpenCodeExecutor) requestAuth(auth *clipoauth.Auth, opts cliproxyexecut
 	return cloned
 }
 
-// openCodeSetAuthHeader applies the configured authentication scheme. OpenCode's
-// messages gateway reads x-api-key; other gateways read a Bearer token.
-func openCodeSetAuthHeader(req *http.Request, auth *clipoauth.Auth, apiKey string) {
+// openCodeSetBearer authenticates requests on the OpenAI-compatible transport.
+func openCodeSetBearer(req *http.Request, apiKey string) {
 	if req == nil || apiKey == "" {
-		return
-	}
-	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key") {
-		req.Header.Del("Authorization")
-		req.Header.Set("x-api-key", apiKey)
 		return
 	}
 	req.Header.Del("x-api-key")
@@ -150,6 +141,8 @@ func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *clipoauth.Auth, re
 
 	switch protocol {
 	case "messages":
+		// The legacy native Messages endpoint accepts the Anthropic API key header.
+		clonedAuth.Attributes["anthropic_auth_scheme"] = "x-api-key"
 		ce := NewClaudeExecutor(e.cfg)
 		return ce.Execute(ctx, clonedAuth, req, opts)
 	case "responses":
@@ -178,6 +171,8 @@ func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *clipoauth.Au
 
 	switch protocol {
 	case "messages":
+		// The legacy native Messages endpoint accepts the Anthropic API key header.
+		clonedAuth.Attributes["anthropic_auth_scheme"] = "x-api-key"
 		ce := NewClaudeExecutor(e.cfg)
 		return ce.ExecuteStream(ctx, clonedAuth, req, opts)
 	case "responses":
@@ -224,7 +219,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpoint(ctx context.Context, auth *clip
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	openCodeSetAuthHeader(httpReq, auth, apiKey)
+	openCodeSetBearer(httpReq, apiKey)
 	httpReq.Header.Set("User-Agent", "cli-proxy-opencode")
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes, opts.Headers)
 
@@ -302,7 +297,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	openCodeSetAuthHeader(httpReq, auth, apiKey)
+	openCodeSetBearer(httpReq, apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	httpReq.Header.Set("User-Agent", "cli-proxy-opencode")
@@ -396,7 +391,7 @@ func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *clipoauth.Aut
 		return nil
 	}
 	token, _ := openCodeCreds(auth)
-	openCodeSetAuthHeader(req, auth, token)
+	openCodeSetBearer(req, token)
 	return nil
 }
 
