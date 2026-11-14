@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -936,12 +937,53 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 		if resolved := modelconfig.ResolveModelInfo(name, modelType, model.GetThinking()); resolved.Thinking != nil {
 			info.Thinking = resolved.Thinking
 		}
-		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil && staticInfo.NativeCapabilities != nil {
-			info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+		// Look up limits by the upstream name without a thinking suffix, as
+		// ResolveModelInfo does: claude-opus-5-5[1m](high) is claude-opus-5-5[1m].
+		baseName := strings.TrimSpace(thinking.ParseSuffix(name).ModelName)
+		if staticInfo := registry.LookupStaticModelInfoByChannel(baseName, metadataChannel); staticInfo != nil {
+			if staticInfo.NativeCapabilities != nil {
+				info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+			}
+			inheritStaticModelLimits(info, staticInfo, baseName)
 		}
 		out = append(out, info)
 	}
 	return out
+}
+
+const (
+	oneMillionContextSuffix = "[1m]"
+	oneMillionContextTokens = 1_000_000
+)
+
+// inheritStaticModelLimits fills the context window and output limit a configured
+// model leaves unset from the catalog entry of its upstream model. Without them,
+// clients such as the Codex model list fall back to template defaults. Values
+// set in the configuration (max-context-length) win. Gemini catalog entries keep
+// their limits in InputTokenLimit and OutputTokenLimit instead. A "[1m]" variant
+// (claude-sonnet-4-5-20250929[1m]) resolves to its base entry but has a
+// one-million-token window, so only its output limit comes from that entry.
+func inheritStaticModelLimits(info, staticInfo *ModelInfo, upstreamName string) {
+	if info == nil || staticInfo == nil {
+		return
+	}
+	contextLength := staticInfo.ContextLength
+	if contextLength <= 0 {
+		contextLength = staticInfo.InputTokenLimit
+	}
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(upstreamName)), oneMillionContextSuffix) && contextLength < oneMillionContextTokens {
+		contextLength = oneMillionContextTokens
+	}
+	maxCompletionTokens := staticInfo.MaxCompletionTokens
+	if maxCompletionTokens <= 0 {
+		maxCompletionTokens = staticInfo.OutputTokenLimit
+	}
+	if info.ContextLength <= 0 && contextLength > 0 {
+		info.ContextLength = contextLength
+	}
+	if info.MaxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+		info.MaxCompletionTokens = maxCompletionTokens
+	}
 }
 
 func buildVertexCompatConfigModels(entry *config.VertexCompatKey) []*ModelInfo {

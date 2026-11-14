@@ -76,6 +76,11 @@ type ModelInfo struct {
 	MaxContextLength int `json:"-"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
+	// ContextLengthUnknown / MaxCompletionTokensUnknown mark a window or output limit the registry
+	// leaves out because routes sharing the model disagree and one declares none, so clients
+	// must not substitute a default that could exceed a route.
+	ContextLengthUnknown       bool `json:"-"`
+	MaxCompletionTokensUnknown bool `json:"-"`
 	// SupportedParameters lists supported parameters
 	SupportedParameters []string `json:"supported_parameters,omitempty"`
 	// SupportedInputModalities lists supported input modalities (e.g., TEXT, IMAGE, VIDEO, AUDIO)
@@ -213,6 +218,13 @@ type ModelRegistry struct {
 	// webSearchProviderCounts maps model ID to provider -> client count for
 	// clients advertising web search, mirroring webSearchClientCounts.
 	webSearchProviderCounts map[string]map[string]int
+	// modelRouteLimits counts, per model ID, the clients declaring each distinct
+	// set of token limits; providerRouteLimits does the same per provider and
+	// clientRouteLimits records each client's contribution. They let shared model
+	// IDs publish limits that hold for every route (model_registry_limits.go).
+	modelRouteLimits    map[string]limitSet
+	providerRouteLimits map[string]map[string]limitSet
+	clientRouteLimits   map[string]map[string]countedRouteLimits
 	// generation tracks changes to model registrations and availability.
 	generation uint64
 	// registrationEpoch tracks monotonic client registration and deregistration structural changes.
@@ -514,6 +526,7 @@ func (r *ModelRegistry) ReplaceClientModels(clientID, clientProvider string, exp
 
 // registerClientLocked reconciles a client's models while the registry mutex is held.
 func (r *ModelRegistry) registerClientLocked(clientID, clientProvider string, models []*ModelInfo, preserveState bool) {
+	defer r.reconcileClientRouteLimitsLocked(clientID)
 	r.ensureAvailableModelsCacheLocked()
 
 	if r.clientGenerations == nil {
@@ -928,6 +941,7 @@ func (r *ModelRegistry) UnregisterClient(clientID string) {
 
 // unregisterClientInternal performs the actual client unregistration (internal, no locking)
 func (r *ModelRegistry) unregisterClientInternal(clientID string) {
+	defer r.reconcileClientRouteLimitsLocked(clientID)
 	if r.clientGenerations == nil {
 		r.clientGenerations = make(map[string]uint64)
 	}
@@ -2019,13 +2033,18 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		} else {
 			result["display_name"] = model.ID
 		}
-		maxInput := model.ContextLength
-		if maxInput <= 0 {
-			maxInput = DefaultClaudeMaxInputTokens
+		// A limit left out because routes sharing the model disagree stays unknown (null): a default
+		// could exceed one of the routes.
+		var maxInput, maxOutput any
+		if !model.ContextLengthUnknown {
+			if maxInput = model.ContextLength; model.ContextLength <= 0 {
+				maxInput = DefaultClaudeMaxInputTokens
+			}
 		}
-		maxOutput := model.MaxCompletionTokens
-		if maxOutput <= 0 {
-			maxOutput = DefaultClaudeMaxOutputTokens
+		if !model.MaxCompletionTokensUnknown {
+			if maxOutput = model.MaxCompletionTokens; model.MaxCompletionTokens <= 0 {
+				maxOutput = DefaultClaudeMaxOutputTokens
+			}
 		}
 		result["max_input_tokens"] = maxInput
 		result["max_tokens"] = maxOutput
