@@ -52,7 +52,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts))
 	helps.FinalizePayloadDoc(ctx, doc)
 	body = doc.Bytes()
-	enc, err := tokenizerForCodexModel(baseModel)
+	enc, err := helps.CodexInputTokenizer(doc.Get("model").String())
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
 	}
@@ -65,26 +65,6 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 	usageJSON := fmt.Sprintf(`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, []byte(usageJSON))
 	return cliproxyexecutor.Response{Payload: translated}, nil
-}
-
-func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {
-	sanitized := strings.ToLower(strings.TrimSpace(model))
-	switch {
-	case sanitized == "":
-		return tokenizer.Get(tokenizer.Cl100kBase)
-	case strings.HasPrefix(sanitized, "gpt-5"):
-		return tokenizer.ForModel(tokenizer.GPT5)
-	case strings.HasPrefix(sanitized, "gpt-4.1"):
-		return tokenizer.ForModel(tokenizer.GPT41)
-	case strings.HasPrefix(sanitized, "gpt-4o"):
-		return tokenizer.ForModel(tokenizer.GPT4o)
-	case strings.HasPrefix(sanitized, "gpt-4"):
-		return tokenizer.ForModel(tokenizer.GPT4)
-	case strings.HasPrefix(sanitized, "gpt-3.5"), strings.HasPrefix(sanitized, "gpt-3"):
-		return tokenizer.ForModel(tokenizer.GPT35Turbo)
-	default:
-		return tokenizer.Get(tokenizer.Cl100kBase)
-	}
 }
 
 func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
