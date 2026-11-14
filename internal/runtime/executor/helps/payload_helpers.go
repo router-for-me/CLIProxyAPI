@@ -31,16 +31,17 @@ func PayloadConfigEvaluationCount() int64 {
 // removed, and the style prefix.
 func compressionFields(model string, stats payloadcompress.Stats) log.Fields {
 	return log.Fields{
-		"model":     model,
-		"combo":     stats.Combo,
-		"engines":   stats.Engines(),
-		"steps":     stats.Steps(),
-		"segments":  stats.Segments,
-		"style":     stats.Style,
-		"style_len": stats.StyleBytes,
-		"bytes_in":  stats.BytesIn,
-		"bytes_out": stats.BytesOut,
-		"saved_pct": stats.SavedPct(),
+		"model":       model,
+		"combo":       stats.Combo,
+		"engines":     stats.Engines(),
+		"steps":       stats.Steps(),
+		"lite_passes": stats.PassesString(),
+		"segments":    stats.Segments,
+		"style":       stats.Style,
+		"style_len":   stats.StyleBytes,
+		"bytes_in":    stats.BytesIn,
+		"bytes_out":   stats.BytesOut,
+		"saved_pct":   stats.SavedPct(),
 	}
 }
 

@@ -31,6 +31,8 @@ type Stats struct {
 	// pipeline step saw and produced, including steps that saved nothing.
 	EngineBytesIn  map[string]int
 	EngineBytesOut map[string]int
+	// Passes counts the lite sub-passes that fired, by name.
+	Passes map[string]int
 }
 
 // EngineSaved reports the byte delta of one engine, whether or not it saved.
@@ -84,6 +86,30 @@ func (s Stats) Steps() string {
 		b.WriteString(strconv.Itoa(s.EngineBytesIn[name]))
 		b.WriteByte('>')
 		b.WriteString(strconv.Itoa(s.EngineBytesOut[name]))
+	}
+	return b.String()
+}
+
+// PassesString renders the lite sub-passes that fired as
+// "whitespace=12,tool-cap=3" in name order. A pass that ran and changed
+// nothing is omitted, so the string answers "what did lite actually do".
+func (s Stats) PassesString() string {
+	if len(s.Passes) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(s.Passes))
+	for name := range s.Passes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(name)
+		b.WriteByte('=')
+		b.WriteString(strconv.Itoa(s.Passes[name]))
 	}
 	return b.String()
 }
@@ -233,9 +259,10 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	preserveSystem := cfg.shouldPreserveSystemPrompt(model, body)
 	liteBody := comboHasEngine(combo, EngineLite) && liteBodyHasArray(body)
 	liteOpts := StepOptions{}
+	var beforeChanged bool
 	if liteBody {
 		liteOpts = liteStepOptions(combo)
-		body = applyLiteBodyBeforePreserve(preserveSystem, body)
+		body, beforeChanged = applyLiteBodyBeforePreserve(preserveSystem, body)
 	}
 
 	s := &scanner{
@@ -246,7 +273,11 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 		return finishPrepass(cfg, combo, inBody, restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats)
 	}
 
-	steps := buildEngines(combo.Pipeline)
+	steps, passes := buildEngines(combo.Pipeline)
+	stats.Passes = passes
+	if beforeChanged && passes != nil {
+		passes["dedup-system"]++
+	}
 	if len(steps) == 0 {
 		return finishPrepass(cfg, combo, inBody, restoreLiteBody(preserveSystem, liteOpts, model, provider, liteBody, body), stats)
 	}
@@ -364,7 +395,7 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 		out = []byte(applyHardBudget(string(out), cfg.HardBudgetTokens, !s.includeSystem))
 	}
 	if liteBody {
-		out = applyLiteBodyAfterPreserve(preserveSystem, liteOpts, model, provider, out)
+		out = applyLiteBodyAfterPreserve(preserveSystem, liteOpts, model, provider, out, passes)
 	}
 	// Whole-pipeline guard: never ship growth or a body that is no longer JSON.
 	if len(out) >= inBodyLen || !json.Valid(out) {
@@ -517,7 +548,7 @@ func restoreLiteBody(preserveSystem bool, opts StepOptions, model, provider stri
 	if !enabled {
 		return body
 	}
-	return applyLiteBodyAfterPreserve(preserveSystem, opts, model, provider, body)
+	return applyLiteBodyAfterPreserve(preserveSystem, opts, model, provider, body, nil)
 }
 
 // liteStepOptions returns the options of the combo's lite step.
@@ -568,7 +599,16 @@ func ApplyAllSession(cfg Config, model, sessionID string, body []byte, provider 
 // testEngineHook injects a synthetic engine role for tests; production leaves it nil.
 var testEngineHook func(Step) engine
 
-func buildEngines(steps []Step) []engineStep {
+func buildEngines(steps []Step) ([]engineStep, map[string]int) {
+	// The lite pass counter exists only when a lite step can fire, so a combo
+	// without lite stays allocation-free.
+	var passes map[string]int
+	for _, step := range steps {
+		if step.Engine == EngineLite {
+			passes = map[string]int{}
+			break
+		}
+	}
 	engines := make([]engineStep, 0, len(steps))
 	for _, step := range steps {
 		var eng engine
@@ -577,7 +617,7 @@ func buildEngines(steps []Step) []engineStep {
 		}
 		switch step.Engine {
 		case EngineLite:
-			eng = liteEngine{opts: step.Options}
+			eng = liteEngine{opts: step.Options, passes: passes}
 		case EngineRTK:
 			eng = rtkEngine{opts: step.Options}
 		case EngineHeadroom:
@@ -595,7 +635,7 @@ func buildEngines(steps []Step) []engineStep {
 			engines = append(engines, engineStep{eng: eng, opts: step.Options})
 		}
 	}
-	return engines
+	return engines, passes
 }
 
 // bodyString aliases body as a string without copying. The alias never outlives

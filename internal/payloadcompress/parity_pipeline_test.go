@@ -9,7 +9,7 @@ import (
 // TestRegistryCompilesNewEngines checks the two parity engines resolve to real
 // pipeline steps instead of being dropped by the registry.
 func TestRegistryCompilesNewEngines(t *testing.T) {
-	steps := buildEngines([]Step{
+	steps, _ := buildEngines([]Step{
 		{Engine: EngineMCPAccessibility},
 		{Engine: EngineRelevance},
 	})

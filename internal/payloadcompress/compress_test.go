@@ -167,6 +167,22 @@ func TestStatsStepsListsEveryStep(t *testing.T) {
 	if got := (Stats{}).Steps(); got != "" {
 		t.Fatalf("empty stats rendered %q", got)
 	}
+	passes := Stats{Passes: map[string]int{"whitespace": 3, "tool-cap": 1}}
+	if got, want := passes.PassesString(), "tool-cap=1,whitespace=3"; got != want {
+		t.Fatalf("passes = %q, want %q", got, want)
+	}
+}
+
+func TestApplyRecordsLitePasses(t *testing.T) {
+	cfg := testConfig(EngineLite)
+	cfg.Combos[0].Pipeline[0].Options.MaxToolLength = 256
+	long := strings.Repeat("x", 400)
+	body := []byte(`{"messages":[{"role":"assistant","content":"a   b\n\n\n\nc"},` +
+		`{"role":"tool","content":` + quote(long) + `}]}`)
+	_, stats := Apply(cfg, "m", body)
+	if stats.Passes["whitespace"] == 0 || stats.Passes["tool-cap"] == 0 {
+		t.Fatalf("lite passes not recorded: %v", stats.Passes)
+	}
 }
 
 func TestApplyShadowMode(t *testing.T) {

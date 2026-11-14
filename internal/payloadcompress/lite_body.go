@@ -20,16 +20,19 @@ func liteBodyHasArray(body []byte) bool {
 // duplicate system messages, first wins. It is a no-op when the system prompt
 // is part of a cached prefix.
 func applyLiteBodyBefore(cfg Config, model, provider string, body []byte) []byte {
-	return applyLiteBodyBeforePreserve(cfg.shouldPreserveSystemPrompt(model, body), body)
+	body, _ = applyLiteBodyBeforePreserve(cfg.shouldPreserveSystemPrompt(model, body), body)
+	return body
 }
 
-func applyLiteBodyBeforePreserve(preserveSystem bool, body []byte) []byte {
+// applyLiteBodyBeforePreserve reports whether it dropped a duplicate system
+// message, so the caller can count the pass once a counter exists.
+func applyLiteBodyBeforePreserve(preserveSystem bool, body []byte) ([]byte, bool) {
 	if preserveSystem {
-		return body
+		return body, false
 	}
 	doc, path, items, ok := liteBodyArray(body)
 	if !ok {
-		return body
+		return body, false
 	}
 	seen := make(map[string]struct{}, len(items))
 	kept := make([]string, 0, len(items))
@@ -48,29 +51,37 @@ func applyLiteBodyBeforePreserve(preserveSystem bool, body []byte) []byte {
 		}
 		kept = append(kept, item.Raw)
 	}
-	return liteSetArray(doc, path, kept, changed, body)
+	return liteSetArray(doc, path, kept, changed, body), changed
 }
 
 // applyLiteBodyAfter runs upstream lite passes 4 and 5 when enabled: opt-in
 // removeRedundantContent then replaceImageUrls (non-vision models only).
 func applyLiteBodyAfter(cfg Config, opts StepOptions, model, provider string, body []byte) []byte {
-	return applyLiteBodyAfterPreserve(cfg.shouldPreserveSystemPrompt(model, body), opts, model, provider, body)
+	return applyLiteBodyAfterPreserve(cfg.shouldPreserveSystemPrompt(model, body), opts, model, provider, body, nil)
 }
 
-func applyLiteBodyAfterPreserve(preserveSystem bool, opts StepOptions, model, provider string, body []byte) []byte {
+func applyLiteBodyAfterPreserve(preserveSystem bool, opts StepOptions, model, provider string, body []byte, passes map[string]int) []byte {
 	if opts.LiteRemoveRedundant != nil && *opts.LiteRemoveRedundant {
-		body = liteRemoveRedundant(preserveSystem, body)
+		var changed bool
+		body, changed = liteRemoveRedundant(preserveSystem, body)
+		if changed && passes != nil {
+			passes["redundant"]++
+		}
 	}
 	if opts.LiteReplaceImages != nil && *opts.LiteReplaceImages {
-		body = liteReplaceImageUrls(model, provider, body)
+		var changed bool
+		body, changed = liteReplaceImageUrls(model, provider, body)
+		if changed && passes != nil {
+			passes["image"]++
+		}
 	}
 	return body
 }
 
-func liteRemoveRedundant(preserveSystem bool, body []byte) []byte {
+func liteRemoveRedundant(preserveSystem bool, body []byte) ([]byte, bool) {
 	doc, path, items, ok := liteBodyArray(body)
 	if !ok {
-		return body
+		return body, false
 	}
 	kept := make([]string, 0, len(items))
 	changed := false
@@ -95,16 +106,16 @@ func liteRemoveRedundant(preserveSystem bool, body []byte) []byte {
 		}
 		kept = append(kept, item.Raw)
 	}
-	return liteSetArray(doc, path, kept, changed, body)
+	return liteSetArray(doc, path, kept, changed, body), changed
 }
 
-func liteReplaceImageUrls(model, provider string, body []byte) []byte {
+func liteReplaceImageUrls(model, provider string, body []byte) ([]byte, bool) {
 	if liteModelSupportsVision(model) && !liteTextOnlyProvider(provider) {
-		return body
+		return body, false
 	}
 	doc, path, items, ok := liteBodyArray(body)
 	if !ok {
-		return body
+		return body, false
 	}
 	contentPath := "content"
 	if path == "contents" {
@@ -121,7 +132,7 @@ func liteReplaceImageUrls(model, provider string, body []byte) []byte {
 			kept = append(kept, item.Raw)
 		}
 	}
-	return liteSetArray(doc, path, kept, changed, body)
+	return liteSetArray(doc, path, kept, changed, body), changed
 }
 
 // liteRewriteImageItem replaces data:image parts inside one message, preserving

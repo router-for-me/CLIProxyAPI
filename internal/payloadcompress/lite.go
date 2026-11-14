@@ -12,6 +12,22 @@ import (
 // Fenced code blocks are copied through byte for byte.
 type liteEngine struct {
 	opts StepOptions
+	// passes counts the sub-passes that fired, for the compression log. Nil
+	// when the engine is built outside a request (tests, defaults).
+	passes map[string]int
+}
+
+// note records one firing of a sub-pass.
+func (e liteEngine) note(pass string) {
+	notePass(e.passes, pass)
+}
+
+// notePass records a body-level sub-pass firing, tolerating a nil sink.
+func notePass(passes map[string]int, pass string) {
+	if passes == nil {
+		return
+	}
+	passes[pass]++
 }
 
 func (liteEngine) name() string { return EngineLite }
@@ -54,6 +70,7 @@ func (e liteEngine) truncateTool(kind segmentKind, text string, changed bool) (s
 		limit = liteDefaultMaxToolLength
 	}
 	if kind == kindToolOutput && e.keepToolResults() && len(text) > limit && charLen(text) > limit {
+		e.note("tool-cap")
 		return truncateToolText(text, limit), true
 	}
 	return text, changed
@@ -77,7 +94,7 @@ func (e liteEngine) preserveToolWhitespace() bool {
 	return e.opts.PreserveToolWhitespace == nil || *e.opts.PreserveToolWhitespace
 }
 
-func (liteEngine) compress(text string) (string, bool) {
+func (e liteEngine) compress(text string) (string, bool) {
 	if !liteNeedsWork(text) {
 		return text, false
 	}
@@ -138,6 +155,7 @@ func (liteEngine) compress(text string) (string, bool) {
 	if !changed {
 		return text, false
 	}
+	e.note("whitespace")
 	return b.String(), true
 }
 
