@@ -241,6 +241,9 @@ func (e *GeminiVertexExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if projectID, location, saJSON, ok := e.vertexClaudeRoute(auth, req.Model); ok {
+		return e.executeVertexClaude(ctx, auth, req, opts, projectID, location, saJSON)
+	}
 	if helps.ShouldExecuteVertexOpenAPIForRequest(e.cfg, auth, req.Model, opts) {
 		return e.executeOpenAPI(ctx, auth, req, opts)
 	}
@@ -269,6 +272,9 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	if projectID, location, saJSON, ok := e.vertexClaudeRoute(auth, req.Model); ok {
+		return e.executeVertexClaudeStream(ctx, auth, req, opts, projectID, location, saJSON)
+	}
 	if helps.ShouldExecuteVertexOpenAPIForRequest(e.cfg, auth, req.Model, opts) {
 		return e.executeOpenAPIStream(ctx, auth, req, opts)
 	}
@@ -293,6 +299,9 @@ func (e *GeminiVertexExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 // CountTokens counts tokens for the given request using the Vertex AI API.
 func (e *GeminiVertexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if _, _, _, ok := e.vertexClaudeRoute(auth, req.Model); ok {
+		return cliproxyexecutor.Response{}, vertexClaudeCountTokensError()
+	}
 	if helps.ShouldExecuteVertexOpenAPIForRequest(e.cfg, auth, req.Model, opts) {
 		normalizedReq, normalizedOpts := normalizeVertexOpenAPIRequest(req, opts)
 		return NewOpenAICompatExecutor(e.Identifier(), e.cfg).CountTokens(ctx, auth, normalizedReq, normalizedOpts)

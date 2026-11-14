@@ -1254,6 +1254,11 @@ oauth:
     #   sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement") in system prompts
     #     "Claude Code": "Claude"
 
+    # Vertex provider behavior for service-account credentials (imported service account JSON).
+    # vertex:
+    #   claude-models:               # optional: exact Claude model IDs enabled on Vertex AI (anthropic publisher)
+    #     - "claude-sonnet-5-5"      # routed to publishers/anthropic/...:rawPredict / :streamRawPredict; count_tokens is not supported
+
 # Image and video behavior.
 multimedia:
   # disable-image-generation supports: false (default), true, "chat", or "passthrough".
