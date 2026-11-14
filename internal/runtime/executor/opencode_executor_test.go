@@ -332,3 +332,38 @@ func TestOpenCodeExecutor_DelegatedMessagesSendMetadataKey(t *testing.T) {
 		t.Fatal("request key leaked into the shared auth attributes")
 	}
 }
+
+func TestOpenCodeExecutor_PreservesNativeResponsesSSEFrames(t *testing.T) {
+	const events = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"PONG\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(events))
+	}))
+	defer server.Close()
+	exec := NewOpenCodeExecutor(constant.OpenCodeGo)
+	exec.cfg = &config.Config{}
+	auth := &clipoauth.Auth{
+		Provider:   constant.OpenCodeGo,
+		Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.6-luna", Payload: []byte(`{"model":"gpt-5.6-luna","input":"Reply with PONG.","stream":true}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+		received.Write(chunk.Payload)
+	}
+	if received.String() != events {
+		t.Fatalf("native Responses SSE framing changed: %q", received.String())
+	}
+}

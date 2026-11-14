@@ -355,6 +355,12 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
+			// Native Responses carries event and data lines in the same SSE
+			// frame. Preserve their separators across the line scanner.
+			frameLine := bytes.Clone(line)
+			if sourceFormatEqual(from, toFormat) && toFormat == sdktranslator.FormatOpenAIResponse {
+				frameLine = append(frameLine, '\n')
+			}
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				from,
@@ -362,7 +368,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 				req.Model,
 				opts.OriginalRequest,
 				translated,
-				bytes.Clone(line),
+				frameLine,
 				&param,
 			)
 			for i := range chunks {
