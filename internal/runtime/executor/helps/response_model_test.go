@@ -478,3 +478,25 @@ func TestExtractResponseModelClonesFromReusableBuffer(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractClaudeResponseModelMidStreamFallback(t *testing.T) {
+	lines := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":8,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"fallback","from":{"model":"claude-opus-5-5"},"to":{"model":"claude-opus-4-8"},"trigger":{"type":"refusal","category":"cyber"}}}`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5,"iterations":[{"type":"message","model":"claude-opus-5-5","output_tokens":0},{"type":"fallback_message","model":"claude-opus-4-8","output_tokens":5}]}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	reporter := NewUsageReporter(context.Background(), "claude", "claude-opus-5-5", nil)
+	var buffer StreamUsageBuffer
+	for _, line := range lines {
+		reporter.ObserveResponseModel(line)
+		buffer.ObserveClaudeStream(line)
+	}
+	if got := reporter.ResponseModel(); got != "claude-opus-4-8" {
+		t.Fatalf("reporter.ResponseModel() = %q, want claude-opus-4-8", got)
+	}
+	if got := buffer.ResponseModel(); got != "claude-opus-4-8" {
+		t.Fatalf("buffer.ResponseModel() = %q, want claude-opus-4-8", got)
+	}
+}

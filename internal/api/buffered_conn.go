@@ -11,6 +11,10 @@ type bufferedConn struct {
 	reader *bufio.Reader
 }
 
+func (c *bufferedConn) NetConn() net.Conn {
+	return c.Conn
+}
+
 func (c *bufferedConn) Read(p []byte) (int, error) {
 	if c == nil {
 		return 0, net.ErrClosed
