@@ -36,3 +36,8 @@ the per-model `api` declaration. The gateway may label a Responses route
 `type: chat`; that label does not select the wire format. Catalog membership
 allows discovery only: AI Hub must still qualify the actual route and
 credential through inference before publication.
+
+The routing inventory reports time-bound non-quota blocks as a suspension with
+reason `cooldown` and a resume instant. It keeps the credential unselectable
+during that interval without copying provider error text into the inventory.
+Quota cooldown remains a quota fact.

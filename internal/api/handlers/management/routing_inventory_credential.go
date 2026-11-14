@@ -37,12 +37,17 @@ func routingInventoryCredential(route registry.RegisteredRouteSnapshot, auth *co
 		report.Health.Status = "healthy"
 	}
 	report.Suspension.Active = suspended || (availability.Blocked && !availability.QuotaCooldown)
-	if suspended {
+	if report.Suspension.Active {
 		// Only expose local classes, never provider-supplied failure text.
-		reason := "suspended"
-		switch route.SuspensionReason {
-		case "manual", "disabled", "unauthorized":
-			reason = route.SuspensionReason
+		reason := "blocked"
+		if suspended {
+			reason = "suspended"
+			switch route.SuspensionReason {
+			case "manual", "disabled", "unauthorized":
+				reason = route.SuspensionReason
+			}
+		} else if !availability.RecoverAt.IsZero() {
+			reason = "cooldown"
 		}
 		report.Suspension.Reason = &reason
 	}

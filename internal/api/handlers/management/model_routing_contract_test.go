@@ -188,7 +188,7 @@ func TestInventoryCredentialReportsTimeBoundSuspensionResume(t *testing.T) {
 
 	blocked := inventoryCredential(route, auth, now)
 	wantResumesAt := resumeAt.Format(time.RFC3339Nano)
-	if blocked.Health.Selectable || !blocked.Suspension.Active || blocked.Suspension.ResumesAt == nil || *blocked.Suspension.ResumesAt != wantResumesAt || blocked.Quota.Status != "available" {
+	if blocked.Health.Selectable || !blocked.Suspension.Active || blocked.Suspension.Reason == nil || *blocked.Suspension.Reason != "cooldown" || blocked.Suspension.ResumesAt == nil || *blocked.Suspension.ResumesAt != wantResumesAt || blocked.Quota.Status != "available" {
 		t.Fatalf("credential before resume = %+v, want suspension resuming at %s", blocked, wantResumesAt)
 	}
 	resumed := inventoryCredential(route, auth, resumeAt)
