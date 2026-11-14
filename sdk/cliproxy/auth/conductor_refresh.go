@@ -48,9 +48,18 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	if interval <= 0 {
 		interval = refreshCheckInterval
 	}
+	// Held to the end: between the two critical sections below no loop is
+	// installed, and a concurrent start or stop there would lose track of one.
+	m.refreshStartMu.Lock()
+	defer m.refreshStartMu.Unlock()
 
 	m.mu.Lock()
 	cancelPrev := m.refreshCancel
+	if m.refreshLoop != nil {
+		// Its workers may still be saving; a later stop must wait for them. A loop
+		// whose parent context already ended has finished and pruned itself.
+		m.retiredRefreshLoops = unfinishedRefreshLoops(append(m.retiredRefreshLoops, m.refreshLoop))
+	}
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
@@ -68,17 +77,92 @@ func (m *Manager) StartAutoRefresh(parent context.Context, interval time.Duratio
 	m.mu.Unlock()
 
 	loop.rebuild(time.Now())
+	refreshLoopStarted(loop)
 	go loop.run(ctx)
 }
 
-// StopAutoRefresh cancels the background refresh loop, if running.
+// refreshLoopStarted runs for every loop StartAutoRefresh launches; tests use it
+// to check that each one is stopped.
+var refreshLoopStarted = func(*authAutoRefreshLoop) {}
+
+// StopAutoRefresh cancels the background refresh loop, if running, and returns
+// without waiting for its workers; it is safe to call from a refresh callback
+// (such as Hook.OnAuthUpdated), which runs on a refresh worker. Use
+// StopAutoRefreshContext to wait until no refresh is still saving.
 // It also stops the selector if it implements StoppableSelector.
 func (m *Manager) StopAutoRefresh() {
+	m.stopAutoRefresh()
+}
+
+// StopAutoRefreshContext cancels the background refresh loop like StopAutoRefresh,
+// then waits until its workers, and those of loops it replaced, have returned, so
+// no refresh any of them started is still saving afterwards. If ctx ends first it
+// returns ctx.Err() and the loops keep winding down in the background.
+// Do not call it from a refresh callback: the worker running the callback cannot
+// return until the call does, so it waits until ctx ends.
+// Like StopAutoRefresh, every call stops the selector. To wait again after ctx
+// ended, call WaitAutoRefresh, which stops nothing.
+func (m *Manager) StopAutoRefreshContext(ctx context.Context) error {
+	return m.waitRefreshLoops(ctx, m.stopAutoRefresh())
+}
+
+// WaitAutoRefresh waits, like StopAutoRefreshContext, for the workers of loops
+// that earlier stops cancelled, without stopping anything again: a stop already
+// stopped the selector, and StoppableSelector.Stop need not be safe to call
+// twice. It does not wait for a loop that is still running. The same ctx rule
+// and callback restriction as StopAutoRefreshContext apply.
+func (m *Manager) WaitAutoRefresh(ctx context.Context) error {
+	m.mu.Lock()
+	loops := unfinishedRefreshLoops(m.retiredRefreshLoops)
+	m.retiredRefreshLoops = loops
+	m.mu.Unlock()
+	return m.waitRefreshLoops(ctx, loops)
+}
+
+// waitRefreshLoops waits for the workers of loops, then drops every finished
+// loop from retiredRefreshLoops, so a stopped manager an embedder keeps alive
+// does not retain the loops it has already joined. It prunes on an early ctx
+// return too, dropping the loops that finished before it.
+func (m *Manager) waitRefreshLoops(ctx context.Context, loops []*authAutoRefreshLoop) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if len(loops) == 0 {
+		return nil
+	}
+	defer m.pruneRetiredRefreshLoops()
+	beforeAutoRefreshStopWait(loops)
+	for _, loop := range loops {
+		select {
+		case <-loop.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// stopAutoRefresh cancels the running loop and stops the selector. It returns
+// the loops whose workers may still be running: the stopped loop, loops it
+// replaced, and loops an earlier stop did not wait for.
+func (m *Manager) stopAutoRefresh() []*authAutoRefreshLoop {
+	// StartAutoRefresh does not wait for workers, so this is safe from a refresh
+	// callback too.
+	m.refreshStartMu.Lock()
 	m.mu.Lock()
 	cancel := m.refreshCancel
+	loops := m.retiredRefreshLoops
+	if m.refreshLoop != nil {
+		loops = append(loops, m.refreshLoop)
+	}
+	// Skip finished loops, including the current one if its parent context ended:
+	// it already ran its self-prune, and nothing would prune it again.
+	loops = unfinishedRefreshLoops(loops)
+	m.retiredRefreshLoops = loops
 	m.refreshCancel = nil
 	m.refreshLoop = nil
 	m.mu.Unlock()
+	m.refreshStartMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -87,7 +171,32 @@ func (m *Manager) StopAutoRefresh() {
 	if stoppable, ok := sel.(StoppableSelector); ok && stoppable != nil {
 		stoppable.Stop()
 	}
+	return loops
 }
+
+// pruneRetiredRefreshLoops drops the retired loops whose workers have all returned.
+func (m *Manager) pruneRetiredRefreshLoops() {
+	m.mu.Lock()
+	m.retiredRefreshLoops = unfinishedRefreshLoops(m.retiredRefreshLoops)
+	m.mu.Unlock()
+}
+
+// unfinishedRefreshLoops returns the loops whose workers have not all returned.
+func unfinishedRefreshLoops(loops []*authAutoRefreshLoop) []*authAutoRefreshLoop {
+	var unfinished []*authAutoRefreshLoop
+	for _, loop := range loops {
+		select {
+		case <-loop.done:
+		default:
+			unfinished = append(unfinished, loop)
+		}
+	}
+	return unfinished
+}
+
+// beforeAutoRefreshStopWait runs when StopAutoRefreshContext starts waiting for
+// the workers of loops; tests use it to know a stop is waiting, and for what.
+var beforeAutoRefreshStopWait = func([]*authAutoRefreshLoop) {}
 
 func (m *Manager) queueRefreshReschedule(authID string) {
 	if m == nil || authID == "" {
