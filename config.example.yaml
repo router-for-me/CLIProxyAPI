@@ -57,6 +57,14 @@ server:
   #   - 127.0.0.1
   #   - 192.0.2.0/24
 
+  # Graceful shutdown drain budget, in seconds. When the process receives SIGINT/SIGTERM,
+  # in-flight HTTP requests are allowed to finish for up to this many seconds before
+  # remaining connections are forcibly closed. Shutdown never hangs longer than this budget.
+  # Default 0 keeps the legacy behavior: close immediately without draining.
+  # Note: hijacked connections (WebSocket sessions) are not drained; they are
+  # released by their own connection managers after the drain window.
+  shutdown-timeout: 0
+
   # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
   tls:
     enable: false
@@ -842,6 +850,9 @@ upstream:
 #               - "proxy"
 #             sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement")
 #               "Claude Code": "Claude"
+#             sensitive-patterns-replace:  # optional: ordered Go RE2 regex replacements ("replacement": "" deletes matches)
+#               - pattern: '(?m)^You are omp[^\n]*\n?'
+#                 replacement: ""
 #             cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #             # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
 #
@@ -1219,10 +1230,17 @@ oauth:
       #   - "proxy"
       # sensitive-words-replace:      # optional: literal sensitive-word replacements ("target": "replacement") in system instructions
       #   "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+      # sensitive-patterns-replace:   # optional: ordered Go RE2 regex replacements in system instructions (deleting flagged text with "" is recommended over obfuscation for Antigravity)
+      #   - pattern: '(?m)^RFC 2119[^\n]*\n?'
+      #     replacement: ""
+      #   - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+      #     replacement: ""
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
       #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2)
+      # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
+                                    # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
       # Use credits as a last resort after free-tier Claude quota is exhausted.
       antigravity-credits: true
 
@@ -1243,6 +1261,9 @@ oauth:
     #     - "proxy"
     #   sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement") in system prompts
     #     "Claude Code": "Claude"
+    #   sensitive-patterns-replace:  # optional: ordered Go RE2 regex replacements in system prompts ("replacement": "" deletes matches)
+    #     - pattern: '(?m)^You are omp[^\n]*\n?'
+    #       replacement: ""
 
 # Image and video behavior.
 multimedia:

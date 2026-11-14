@@ -698,6 +698,17 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 			entry["quota_plugin_id"] = pluginID
 		}
 	}
+	// Surface a TOS appeal link for operator action when the credential was
+	// deactivated by an Antigravity TOS_VIOLATION (issue #7515). Only exposed on
+	// the maintained v8 surface; the deprecated v0 shape stays frozen.
+	if quota.v8 && auth.Metadata != nil {
+		if appeal, ok := auth.Metadata["tos_appeal_url"].(string); ok && strings.TrimSpace(appeal) != "" {
+			entry["tos_appeal_url"] = strings.TrimSpace(appeal)
+		}
+		if appealText, ok := auth.Metadata["tos_appeal_url_text"].(string); ok && strings.TrimSpace(appealText) != "" {
+			entry["tos_appeal_url_text"] = strings.TrimSpace(appealText)
+		}
+	}
 	// Declarative quota_probe is only executed by the v0 quota/fetch route.
 	if !quota.v8 && auth.Metadata != nil {
 		if probe, okProbe := auth.Metadata["quota_probe"]; okProbe && probe != nil {

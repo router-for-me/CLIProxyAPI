@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -134,7 +135,7 @@ func assertResultRuntimeState(t *testing.T, got, want *coreauth.Auth) {
 		t.Fatalf("auth state = %q %q unavailable=%v retry=%v, want %q %q unavailable=%v retry=%v",
 			got.Status, got.StatusMessage, got.Unavailable, got.NextRetryAfter, want.Status, want.StatusMessage, want.Unavailable, want.NextRetryAfter)
 	}
-	if got.LastError == nil || *got.LastError != *want.LastError {
+	if got.LastError == nil || !errorsEqual(got.LastError, want.LastError) {
 		t.Fatalf("last error = %v, want %v", got.LastError, want.LastError)
 	}
 	if got.Quota.Exceeded != want.Quota.Exceeded || got.Quota.Reason != want.Quota.Reason || !got.Quota.NextRecoverAt.Equal(want.Quota.NextRecoverAt) || got.Quota.BackoffLevel != want.Quota.BackoffLevel {
@@ -146,7 +147,7 @@ func assertResultRuntimeState(t *testing.T, got, want *coreauth.Auth) {
 	for model, wantState := range want.ModelStates {
 		gotState := got.ModelStates[model]
 		if gotState == nil || gotState.Status != wantState.Status || gotState.Unavailable != wantState.Unavailable ||
-			!gotState.NextRetryAfter.Equal(wantState.NextRetryAfter) || gotState.LastError == nil || *gotState.LastError != *wantState.LastError ||
+			!gotState.NextRetryAfter.Equal(wantState.NextRetryAfter) || gotState.LastError == nil || !errorsEqual(gotState.LastError, wantState.LastError) ||
 			gotState.Quota.Exceeded != wantState.Quota.Exceeded || !gotState.Quota.NextRecoverAt.Equal(wantState.Quota.NextRecoverAt) {
 			t.Fatalf("model state %s = %+v, want %+v", model, gotState, wantState)
 		}
@@ -326,4 +327,12 @@ func TestFileSnapshotFencedByWriteOutsideManager(t *testing.T) {
 	if got, _ := manager.GetByID(trafficAuthID); got.Prefix != "pfx-login" || diskField(t, path, "prefix") != "pfx-login" {
 		t.Fatalf("runtime prefix = %q, disk %v, want pfx-login", got.Prefix, diskField(t, path, "prefix"))
 	}
+}
+
+func errorsEqual(a, b *coreauth.Error) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Code == b.Code && a.Message == b.Message && a.Retryable == b.Retryable &&
+		a.HTTPStatus == b.HTTPStatus && maps.Equal(a.Metadata, b.Metadata)
 }

@@ -254,7 +254,9 @@ func (s *Service) Run(ctx context.Context) error {
 // The shutdown is idempotent and can be called multiple times safely.
 //
 // Parameters:
-//   - ctx: The context for controlling the shutdown timeout
+//   - ctx: The context for controlling the shutdown timeout. Draining queued
+//     usage records has its own budget of up to 5s, so Shutdown can return up
+//     to that long after ctx ends.
 //
 // Returns:
 //   - error: An error if shutdown fails
@@ -403,13 +405,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		helps.RetireProxyPoolPublisher(s.proxyPoolPublisher)
 		usage.StopDefault()
-		// Requests that just finished are still queued; let them reach the
-		// store before it closes, without letting a stuck plugin hold up exit.
-		drainCtx, cancelDrain := context.WithTimeout(ctx, usageDrainTimeout)
-		if !usage.WaitDefault(drainCtx) {
+		if !drainUsageRecords(usage.DefaultManager()) {
 			log.Warn("usage dispatcher did not drain before shutdown; recent usage records may be lost")
 		}
-		cancelDrain()
 		if errShutdownUsage := usagestats.Shutdown(); errShutdownUsage != nil {
 			log.Errorf("failed to stop usage statistics store: %v", errShutdownUsage)
 		}
