@@ -54,9 +54,9 @@ func ApplyRequestThinkingWithModelInfo(body []byte, req cliproxyexecutor.Request
 	if err != nil {
 		return out, err
 	}
-	if shouldReconcileClaudeOpenAICompatToolCallReasoning(req, fromFormat, toFormat) && len(out) > 0 {
+	if shouldReconcileOpenAICompatToolCallReasoning(req, fromFormat, toFormat) && len(out) > 0 {
 		doc := ojson.NewDoc(out)
-		if reconcileClaudeOpenAICompatToolCallReasoningDoc(doc) {
+		if reconcileOpenAICompatToolCallReasoningDoc(doc, openAICompatReasoningDefaultsActive(req, fromFormat), fromFormat) {
 			out = doc.Bytes()
 		}
 	}
@@ -88,19 +88,40 @@ func ApplyRequestThinkingWithModelInfoDoc(doc *ojson.Doc, req cliproxyexecutor.R
 	if err != nil {
 		return err
 	}
-	if shouldReconcileClaudeOpenAICompatToolCallReasoning(req, fromFormat, toFormat) {
-		reconcileClaudeOpenAICompatToolCallReasoningDoc(doc)
+	if shouldReconcileOpenAICompatToolCallReasoning(req, fromFormat, toFormat) {
+		reconcileOpenAICompatToolCallReasoningDoc(doc, openAICompatReasoningDefaultsActive(req, fromFormat), fromFormat)
 	}
 	return nil
 }
 
-func shouldReconcileClaudeOpenAICompatToolCallReasoning(req cliproxyexecutor.Request, fromFormat, toFormat string) bool {
-	return APIKeyModelIsCompat(req) &&
-		strings.EqualFold(strings.TrimSpace(fromFormat), "claude") &&
-		strings.EqualFold(strings.TrimSpace(toFormat), "openai")
+func shouldReconcileOpenAICompatToolCallReasoning(req cliproxyexecutor.Request, fromFormat, toFormat string) bool {
+	if !APIKeyModelIsCompat(req) || !strings.EqualFold(strings.TrimSpace(toFormat), "openai") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(fromFormat)) {
+	case "claude", "openai":
+		return true
+	}
+	return false
 }
 
-func reconcileClaudeOpenAICompatToolCallReasoningDoc(doc *ojson.Doc) bool {
+// openAICompatReasoningDefaultsActive reports whether a request that carries no
+// explicit reasoning_effort should be treated as reasoning-active. Claude clients
+// always state their thinking configuration, so they keep the previous default.
+// OpenAI-format clients rely on the upstream default instead, which is thinking
+// mode for the compat models that declare thinking support.
+func openAICompatReasoningDefaultsActive(req cliproxyexecutor.Request, fromFormat string) bool {
+	if !strings.EqualFold(strings.TrimSpace(fromFormat), "openai") {
+		return false
+	}
+	info, ok := cliproxyauth.ResolvedModelInfo(req)
+	if !ok || info == nil {
+		return false
+	}
+	return info.Thinking != nil
+}
+
+func reconcileOpenAICompatToolCallReasoningDoc(doc *ojson.Doc, defaultActive bool, fromFormat string) bool {
 	if doc == nil || doc.Len() == 0 {
 		return false
 	}
@@ -108,11 +129,14 @@ func reconcileClaudeOpenAICompatToolCallReasoningDoc(doc *ojson.Doc) bool {
 	if !messages.Exists() || !messages.IsArray() {
 		return false
 	}
-	reasoningActive := false
+	// OpenAI ingress is a pass-through path: only fill genuinely absent values and
+	// never rewrite what the client already sent. Claude ingress keeps the strict
+	// whitespace fill the upstream reconcile introduced.
+	openAIFormat := strings.EqualFold(strings.TrimSpace(fromFormat), "openai")
+	reasoningActive := defaultActive
 	if effortRes := doc.Get("reasoning_effort"); effortRes.Exists() {
-		resolvedEffort := strings.ToLower(strings.TrimSpace(effortRes.String()))
-		if resolvedEffort != "" && resolvedEffort != string(thinking.LevelNone) && resolvedEffort != "0" && resolvedEffort != "false" {
-			reasoningActive = true
+		if resolvedEffort := strings.ToLower(strings.TrimSpace(effortRes.String())); resolvedEffort != "" {
+			reasoningActive = resolvedEffort != string(thinking.LevelNone) && resolvedEffort != "0" && resolvedEffort != "false"
 		}
 	}
 
@@ -127,11 +151,22 @@ func reconcileClaudeOpenAICompatToolCallReasoningDoc(doc *ojson.Doc) bool {
 		}
 		reasoning := msg.Get("reasoning_content")
 		if reasoningActive {
-			if !reasoning.Exists() || (strings.TrimSpace(reasoning.String()) == "" && reasoning.String() != " ") {
+			// Absent values are always filled. Blank-but-present values are also
+			// filled on the Claude path, matching the upstream reconcile; on the
+			// OpenAI pass-through path they are left as the client sent them.
+			fill := !reasoning.Exists() || reasoning.Type == ojson.Null
+			if !openAIFormat && reasoning.Exists() && strings.TrimSpace(reasoning.String()) == "" && reasoning.String() != " " {
+				fill = true
+			}
+			if fill {
 				if doc.Set(fmt.Sprintf("messages.%d.reasoning_content", idx), " ") == nil {
 					modified = true
 				}
 			}
+			continue
+		}
+		if openAIFormat {
+			// Pass-through ingress: do not strip what the client already sent.
 			continue
 		}
 		if reasoning.Exists() && strings.TrimSpace(reasoning.String()) == "" {
