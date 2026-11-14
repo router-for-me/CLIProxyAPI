@@ -63,7 +63,11 @@ func (*OutcomeUnknownError) IsRequestScoped() bool { return true }
 // configured error rule would otherwise select another model or credential.
 func IsOutcomeUnknown(err error) bool {
 	var unknown *OutcomeUnknownError
-	return errors.As(err, &unknown)
+	if errors.As(err, &unknown) {
+		return true
+	}
+	var native interface{ IsOutcomeUnknown() bool }
+	return errors.As(err, &native) && native.IsOutcomeUnknown()
 }
 
 // ClassifySubmissionError treats every failure after acceptance as ambiguous

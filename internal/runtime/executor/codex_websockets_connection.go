@@ -73,6 +73,14 @@ func writeWebsocketPayloadMessage(ctx context.Context, provider string, sess *co
 	if conn == nil {
 		return fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
 	}
+	if sess != nil {
+		sess.connMu.Lock()
+		current := sess.conn == conn
+		sess.connMu.Unlock()
+		if !current {
+			return fmt.Errorf("%s websockets executor: connection was replaced before write: %w", provider, net.ErrClosed)
+		}
+	}
 	write := func() error {
 		if sess != nil {
 			return sess.writeMessage(conn, websocket.TextMessage, payload)
