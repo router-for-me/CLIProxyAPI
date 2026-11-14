@@ -11126,3 +11126,36 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 		t.Fatalf("payload filter must remove injected block_binding: %s", seenBody)
 	}
 }
+
+func TestNormalizeLeadingClaudeEffortDirectiveDoc(t *testing.T) {
+	directive := `{"role":"system","content":[],"output_config":{"effort":"high"}}`
+	user := `{"role":"user","content":[{"type":"text","text":"hi"}]}`
+	tests := []struct {
+		name      string
+		messages  string
+		wantFirst string
+		wantEff   string
+		wantCount int
+	}{
+		{name: "leading directive folded", messages: directive + "," + user, wantFirst: user, wantEff: `{"effort":"high"}`, wantCount: 1},
+		{name: "directive after user untouched", messages: user + "," + directive, wantFirst: user, wantCount: 2},
+		{name: "only message", messages: directive, wantFirst: directive, wantCount: 1},
+		{name: "content-bearing system kept", messages: `{"role":"system","content":[{"type":"text","text":"rule"}]},` + user, wantFirst: `{"role":"system","content":[{"type":"text","text":"rule"}]}`, wantCount: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			doc := ojson.NewDocString(`{"messages":[` + test.messages + `]}`)
+			normalizeLeadingClaudeEffortDirectiveDoc(doc)
+			got := doc.Bytes()
+			if want := int(ojson.GetBytes(got, "messages.#").Int()); want != test.wantCount {
+				t.Fatalf("messages count = %d, want %d: %s", want, test.wantCount, got)
+			}
+			if first := ojson.GetBytes(got, "messages.0").Raw; first != test.wantFirst {
+				t.Fatalf("messages.0 = %s, want %s", first, test.wantFirst)
+			}
+			if eff := ojson.GetBytes(got, "output_config").Raw; eff != test.wantEff {
+				t.Fatalf("output_config = %q, want %q: %s", eff, test.wantEff, got)
+			}
+		})
+	}
+}

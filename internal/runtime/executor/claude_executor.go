@@ -103,6 +103,9 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, do
 		}
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
+	if normalizeLeadingClaudeEffortDirectiveDoc(doc) {
+		changed = true
+	}
 	if sanitizeClaudeWebSearchDomainsDoc(doc) {
 		changed = true
 	}
@@ -110,6 +113,38 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, do
 		changed = true
 	}
 	return changed
+}
+
+// normalizeLeadingClaudeEffortDirectiveDoc folds a directive-only system turn that
+// leads the conversation into the top-level output_config. Anthropic rejects that
+// form at messages.0 ("use the top-level 'system' parameter"); it appears when
+// sanitization drops the caller's leading message and a mid-conversation effort
+// directive slides into position 0.
+func normalizeLeadingClaudeEffortDirectiveDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	changed := false
+	for {
+		messages := doc.Get("messages")
+		if !messages.IsArray() || len(messages.Array()) < 2 {
+			return changed
+		}
+		first := messages.Array()[0]
+		content := first.Get("content")
+		directive := first.Get("output_config")
+		if !strings.EqualFold(strings.TrimSpace(first.Get("role").String()), "system") ||
+			!directive.IsObject() || !content.IsArray() || len(content.Array()) != 0 {
+			return changed
+		}
+		if !doc.Get("output_config").Exists() {
+			_ = doc.SetRaw("output_config", directive.Raw)
+		}
+		if errDelete := doc.Delete("messages.0"); errDelete != nil {
+			return changed
+		}
+		changed = true
+	}
 }
 
 func sanitizeClaudeMessagesForClaudeUpstreamDoc(doc *ojson.Doc, targetModel string, preserveEmpty bool) (sigcompat.SignatureSanitizeReport, bool) {
