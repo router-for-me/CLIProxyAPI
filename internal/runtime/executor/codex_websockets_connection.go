@@ -70,12 +70,12 @@ func writeWebsocketPayloadMessage(ctx context.Context, provider string, sess *co
 	payloadBytes := len(payload)
 	start := time.Now()
 	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
+	if conn == nil {
+		return fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
+	}
 	write := func() error {
 		if sess != nil {
 			return sess.writeMessage(conn, websocket.TextMessage, payload)
-		}
-		if conn == nil {
-			return fmt.Errorf("%s websockets executor: websocket conn is nil", provider)
 		}
 		return conn.WriteMessage(websocket.TextMessage, payload)
 	}
@@ -100,7 +100,7 @@ func writeCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession
 }
 
 func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {
-	if err == nil || sess == nil || conn == nil {
+	if err == nil || httptransport.IsOutcomeUnknown(err) || sess == nil || conn == nil {
 		return err
 	}
 	upstreamErr := sess.upstreamDisconnectError(conn)
@@ -147,6 +147,9 @@ func mapCodexWebsocketReadError(err error) error {
 func codexWebsocketTurnTransportError(err error) error {
 	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
 		return err
+	}
+	if httptransport.IsOutcomeUnknown(err) {
+		return &cliproxyexecutor.UpstreamWebsocketTurnError{Cause: err}
 	}
 	var status interface{ StatusCode() int }
 	if errors.As(err, &status) && status.StatusCode() != 0 {

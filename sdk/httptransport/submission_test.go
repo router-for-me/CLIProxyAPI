@@ -2,6 +2,7 @@ package httptransport
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -140,13 +141,6 @@ func TestSubmissionGuardPreservesSafeEmptyRequestRetry(t *testing.T) {
 
 func TestWriteGenerationSubmissionBoundary(t *testing.T) {
 	ctx := WithSubmissionTracking(context.Background())
-	failure := io.ErrClosedPipe
-	if err := WriteGeneration(ctx, func() error { return failure }); err != failure {
-		t.Fatal(err)
-	}
-	if err := ClassifySubmissionError(ctx, io.EOF); IsOutcomeUnknown(err) {
-		t.Fatal("failed write marked accepted")
-	}
 	if err := WriteGeneration(ctx, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -164,5 +158,28 @@ func TestWriteGenerationSubmissionBoundary(t *testing.T) {
 	}
 	if err := ClassifySubmissionError(auxiliary, io.EOF); IsOutcomeUnknown(err) {
 		t.Fatal("auxiliary request acquired submission tracking")
+	}
+}
+
+func TestWriteGenerationFailedFrameIsTerminal(t *testing.T) {
+	for _, ctx := range []context.Context{WithSubmissionTracking(context.Background()), context.Background(), nil} {
+		failure := io.ErrClosedPipe
+		errWrite := WriteGeneration(ctx, func() error { return failure })
+		if !IsOutcomeUnknown(errWrite) || !errors.Is(errWrite, failure) {
+			t.Fatalf("write failure lost ambiguity or cause: %v", errWrite)
+		}
+	}
+	ctx := WithSubmissionTracking(context.Background())
+	terminal := WriteGeneration(ctx, func() error { return io.ErrClosedPipe })
+	if errClassify := ClassifySubmissionError(ctx, parsedProviderFailure{errors.New("refusal")}); errClassify != terminal {
+		t.Fatalf("provider marker overrode terminal write error: %v", errClassify)
+	}
+	writes := 0
+	if errWrite := WriteGeneration(ctx, func() error { writes++; return nil }); errWrite != terminal || writes != 0 {
+		t.Fatalf("terminal attempt wrote again: %v writes=%d", errWrite, writes)
+	}
+	auxiliary := WithoutSubmissionTracking(ctx)
+	if errWrite := WriteGeneration(auxiliary, func() error { return io.ErrClosedPipe }); errWrite != io.ErrClosedPipe {
+		t.Fatalf("auxiliary write acquired tracking: %v", errWrite)
 	}
 }

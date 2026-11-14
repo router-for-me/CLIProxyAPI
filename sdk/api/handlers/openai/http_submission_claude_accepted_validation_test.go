@@ -2,16 +2,14 @@ package openai
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -51,10 +49,7 @@ func TestHTTPSubmissionClaudeAcceptedValidationDoesNotReplay(t *testing.T) {
 				}
 				// Count fully received requests, not executor invocations or TCP dials.
 				submissions.Add(1)
-				var request struct {
-					Stream bool `json:"stream"`
-				}
-				if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" || json.Unmarshal(body, &request) != nil || !request.Stream {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" || !ojson.ValidBytes(body) || ojson.GetBytesNoCopy(body, "stream").Type != ojson.True {
 					invalidRequests.Add(1)
 					t.Errorf("wrong upstream path: method=%s path=%s body=%s", r.Method, r.URL.Path, body)
 				}
@@ -84,14 +79,14 @@ func TestHTTPSubmissionClaudeAcceptedValidationDoesNotReplay(t *testing.T) {
 			router.POST("/v1/chat/completions", NewOpenAIAPIHandler(base).ChatCompletions)
 			public := httptest.NewServer(router)
 			defer public.Close()
-			requestBody := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"max_tokens":64,"stream":false}`, model)
-			request, errRequest := http.NewRequest(http.MethodPost, public.URL+"/v1/chat/completions", strings.NewReader(requestBody))
+			requestDoc := ojson.NewDoc([]byte(`{"messages":[{"role":"user","content":"hello"}],"max_tokens":64,"stream":false}`))
+			_ = requestDoc.Set("model", model)
+			request, errRequest := http.NewRequest(http.MethodPost, public.URL+"/v1/chat/completions", strings.NewReader(requestDoc.String()))
 			if errRequest != nil {
 				t.Fatal(errRequest)
 			}
 			request.Header.Set("Content-Type", "application/json")
 			client := public.Client()
-			client.Timeout = 10 * time.Second
 			response, errResponse := client.Do(request)
 			if errResponse != nil {
 				t.Fatal(errResponse)
@@ -113,16 +108,9 @@ func TestHTTPSubmissionClaudeAcceptedValidationDoesNotReplay(t *testing.T) {
 				t.Fatal("probe did not reach the expected Claude upstream stream path")
 			}
 			if tc.valid {
-				var completion struct {
-					Object  string `json:"object"`
-					Choices []struct {
-						Message struct {
-							Content string `json:"content"`
-						} `json:"message"`
-						FinishReason string `json:"finish_reason"`
-					} `json:"choices"`
-				}
-				if response.StatusCode != http.StatusOK || json.Unmarshal(body, &completion) != nil || completion.Object != "chat.completion" || len(completion.Choices) != 1 || completion.Choices[0].Message.Content != "done" || completion.Choices[0].FinishReason != "stop" {
+				completion := ojson.ParseBytes(body)
+				choices := completion.Get("choices")
+				if response.StatusCode != http.StatusOK || !ojson.ValidBytes(body) || completion.Get("object").String() != "chat.completion" || !choices.IsArray() || len(choices.Array()) != 1 || choices.Get("0.message.content").String() != "done" || choices.Get("0.finish_reason").String() != "stop" {
 					t.Fatalf("valid terminal response changed: status=%d body=%s", response.StatusCode, body)
 				}
 				return
@@ -130,13 +118,8 @@ func TestHTTPSubmissionClaudeAcceptedValidationDoesNotReplay(t *testing.T) {
 			if response.StatusCode != http.StatusBadGateway {
 				t.Errorf("status=%d, want 502", response.StatusCode)
 			}
-			var failure struct {
-				Error struct {
-					Code      string `json:"code"`
-					Retryable *bool  `json:"retryable"`
-				} `json:"error"`
-			}
-			if json.Unmarshal(body, &failure) != nil || failure.Error.Code != "upstream_outcome_unknown" || failure.Error.Retryable == nil || *failure.Error.Retryable {
+			failure := ojson.ParseBytes(body)
+			if !ojson.ValidBytes(body) || failure.Get("error.code").String() != "upstream_outcome_unknown" || failure.Get("error.retryable").Type != ojson.False {
 				t.Errorf("missing nonretryable unknown outcome: %s", body)
 			}
 			if got := response.Header.Get("x-should-retry"); got != "false" {

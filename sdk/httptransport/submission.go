@@ -99,20 +99,30 @@ func classifySubmissionError(ctx context.Context, err error, incomplete bool) er
 	return state.fail(err)
 }
 
-// WriteGeneration records a complete non-HTTP generation frame as submitted.
-// Handshakes and control frames must not call it.
+// WriteGeneration guards a non-HTTP generation frame. Once the writer runs,
+// an error cannot prove that no bytes left. Check pre-write failures before
+// calling it; handshakes and control frames must not call it.
 func WriteGeneration(ctx context.Context, write func() error) error {
 	var state *submissionState
+	var disabled bool
 	if ctx != nil {
-		state, _ = ctx.Value(submissionKey{}).(*submissionState)
+		var present bool
+		state, present = ctx.Value(submissionKey{}).(*submissionState)
+		disabled = present && state == nil
 	}
 	if state != nil {
 		if terminal := state.terminal.Load(); terminal != nil {
 			return terminal
 		}
 	}
-	if err := write(); err != nil {
-		return err
+	if errWrite := write(); errWrite != nil {
+		if disabled {
+			return errWrite
+		}
+		if state != nil {
+			return state.fail(errWrite)
+		}
+		return &OutcomeUnknownError{Cause: errWrite}
 	}
 	if state != nil {
 		state.accepted.Store(true)
