@@ -193,3 +193,46 @@ func TestSelectDeviceIDUsesOneDeviceAcrossSessions(t *testing.T) {
 		t.Fatalf("single device selection = %q then %q, want %q", first, second, deviceIDs[0])
 	}
 }
+
+func TestReadMetadataBool(t *testing.T) {
+	metadata := map[string]any{
+		"enabled":  true,
+		"disabled": false,
+		"string":   "true",
+	}
+
+	if value, ok := ReadMetadataBool(&metadata, "enabled"); !ok || !value {
+		t.Fatalf("enabled = (%v, %v), want (true, true)", value, ok)
+	}
+	if value, ok := ReadMetadataBool(&metadata, "disabled"); !ok || value {
+		t.Fatalf("disabled = (%v, %v), want (false, true)", value, ok)
+	}
+	for _, key := range []string{"string", "missing"} {
+		if value, ok := ReadMetadataBool(&metadata, key); ok || value {
+			t.Fatalf("%s = (%v, %v), want (false, false)", key, value, ok)
+		}
+	}
+}
+
+func TestReadMetadataHomeCloakRelaxedSystemPromptPresence(t *testing.T) {
+	for _, setting := range []struct {
+		name  string
+		value *bool
+	}{
+		{name: "omitted"},
+		{name: "disabled", value: new(false)},
+		{name: "enabled", value: new(true)},
+	} {
+		t.Run(setting.name, func(t *testing.T) {
+			cloak := map[string]any{}
+			if setting.value != nil {
+				cloak["relaxed-system-prompt"] = *setting.value
+			}
+			metadata := map[string]any{"credential_options": map[string]any{"cloak": cloak}}
+			_, _, got, _, _, _, present := ReadMetadataHomeCloak(&metadata)
+			if !present || (got == nil) != (setting.value == nil) || (got != nil && *got != *setting.value) {
+				t.Fatalf("relaxed-system-prompt = %v, present=%t, want %v", got, present, setting.value)
+			}
+		})
+	}
+}

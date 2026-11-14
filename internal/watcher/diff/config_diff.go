@@ -339,6 +339,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(changes, fmt.Sprintf("claude[%d].fingerprint-profile: %s -> %s", i, strings.TrimSpace(o.FingerprintProfile), strings.TrimSpace(n.FingerprintProfile)))
 			}
 			changes = appendOptionalIntChange(changes, fmt.Sprintf("claude[%d].request-retry", i), o.RequestRetry, n.RequestRetry)
+			oldRelaxedSystemPrompt := relaxedSystemPromptValue(o.Cloak)
+			newRelaxedSystemPrompt := relaxedSystemPromptValue(n.Cloak)
+			changes = appendOptionalBoolChange(changes, fmt.Sprintf("claude[%d].cloak.relaxed-system-prompt", i), oldRelaxedSystemPrompt, newRelaxedSystemPrompt)
 			switch {
 			case o.Cloak == nil && n.Cloak != nil:
 				changes = append(changes, fmt.Sprintf("claude[%d].cloak: added", i))
@@ -587,6 +590,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 
 	return changes
+}
+
+func relaxedSystemPromptValue(cloak *config.CloakConfig) *bool {
+	if cloak == nil {
+		return nil
+	}
+	return cloak.RelaxedSystemPrompt
 }
 
 func trimStrings(in []string) []string {

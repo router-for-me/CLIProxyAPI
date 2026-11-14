@@ -6079,7 +6079,7 @@ func TestHomeV8ClaudeCloakCredentialOptions(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 50; i++ {
-		_, _, words, repls, _, ok := claudeauth.ReadMetadataHomeCloak(&optionsOnlyAuth.Metadata)
+		_, _, _, words, repls, _, ok := claudeauth.ReadMetadataHomeCloak(&optionsOnlyAuth.Metadata)
 		if !ok || len(words) != 1 || len(repls) != 1 {
 			t.Fatalf("ReadMetadataHomeCloak concurrent read failed: ok=%v words=%v repls=%v", ok, words, repls)
 		}
