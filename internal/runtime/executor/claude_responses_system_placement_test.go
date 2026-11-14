@@ -241,3 +241,29 @@ func TestResponsesMidSessionSystemItemLateLegacyOverrideRejected(t *testing.T) {
 	err := responsesPlacementCalls["execute"](t, ex, upstream.context(t, nil), midSystemAuth(), "claude-sonnet-5", responsesMidSessionPayload("claude-sonnet-5"))
 	assertMidSystemRejected(t, err, upstream)
 }
+
+// drop_mid_system_message discards role=system turns, so a Responses developer
+// item must keep the top-level path instead of being placed in place and then
+// dropped.
+func TestResponsesMidSessionSystemItemKeptWithDropMidSystemMessage(t *testing.T) {
+	const model = "claude-sonnet-5"
+	for name, call := range responsesPlacementCalls {
+		t.Run(name, func(t *testing.T) {
+			upstream := &midSystemUpstream{}
+			ex := NewClaudeExecutor(midSystemConfig())
+			auth := responsesPlacementAuth(map[string]string{"drop_mid_system_message": "true"})
+			if err := call(t, ex, upstream.context(t, nil), auth, model, responsesMidSessionPayload(model)); err != nil {
+				t.Fatalf("call error = %v", err)
+			}
+			if !upstream.called {
+				t.Fatal("expected the request to reach the upstream")
+			}
+			if texts := claudeSystemTurnTexts(upstream.body); len(texts) != 0 {
+				t.Fatalf("drop body carries system turns %q; body=%s", texts, upstream.body)
+			}
+			if !strings.Contains(string(upstream.body), "Mid rule") {
+				t.Fatalf("developer item lost under drop_mid_system_message; body=%s", upstream.body)
+			}
+		})
+	}
+}

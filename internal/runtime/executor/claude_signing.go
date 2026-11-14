@@ -14,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -633,6 +634,8 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		return nil
 	}
 
+	authPrefix := strings.TrimSpace(auth.Prefix)
+	var fallback *config.ClaudeKey
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		cfgKey := strings.TrimSpace(entry.APIKey)
@@ -643,10 +646,19 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {
 			continue
 		}
-		return entry
+		// Entries may share a key and base URL and differ only by prefix, so an
+		// exact prefix match wins. Otherwise keep the earlier behaviour of using
+		// the first key and base URL match, so an auth whose prefix has no entry
+		// of its own still gets the key-level options (cloak and the rest).
+		if strings.TrimSpace(entry.Prefix) == authPrefix {
+			return entry
+		}
+		if fallback == nil {
+			fallback = entry
+		}
 	}
 
-	return nil
+	return fallback
 }
 
 // resolveClaudeKeyCloakConfig finds the matching ClaudeKey config and returns its CloakConfig.
@@ -669,9 +681,51 @@ func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *c
 	return entry.Cloak
 }
 
+func dropMidSystemMessageEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["drop_mid_system_message"]), "true") {
+		return true
+	}
+	if auth != nil && auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig {
+		// A config-synthesized auth carries the attribute whenever its own entry
+		// enables the option, so its absence is authoritative. Matching by key and
+		// base URL could pick another entry that differs only by prefix.
+		return false
+	}
+	entry := resolveClaudeKeyConfig(cfg, auth)
+	return entry != nil && entry.DropMidSystemMessage
+}
+
+// applyMidSystemMessagePolicyDoc handles {"role":"system"} turns inside
+// messages as the key asks: drop removes them, rebuild moves them into the
+// top-level system field, and with neither set the payload is left as the
+// client sent it. Drop wins when both are set.
+func applyMidSystemMessagePolicyDoc(cfg *config.Config, auth *cliproxyauth.Auth, doc *ojson.Doc) {
+	if dropMidSystemMessageEnabled(cfg, auth) {
+		if claudeDocHasMidSystemMessage(doc) && !dropMidSystemMessagesDoc(doc) {
+			log.Debug("drop-mid-system-message: system turns were not dropped")
+		}
+		return
+	}
+	if rebuildMidSystemMessageEnabled(cfg, auth) {
+		rebuildMidSystemMessagesToTopLevelDoc(doc)
+	}
+}
+
+// applyMidSystemMessagePolicy is the []byte form of applyMidSystemMessagePolicyDoc.
+func applyMidSystemMessagePolicy(cfg *config.Config, auth *cliproxyauth.Auth, payload []byte) []byte {
+	doc := ojson.NewDoc(payload)
+	applyMidSystemMessagePolicyDoc(cfg, auth, doc)
+	return doc.Bytes()
+}
+
 func rebuildMidSystemMessageEnabled(cfg *config.Config, auth *cliproxyauth.Auth) bool {
 	if auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["rebuild_mid_system_message"]), "true") {
 		return true
+	}
+	if auth != nil && auth.AuthSourceKind() == cliproxyauth.AuthSourceConfig {
+		// Same as dropMidSystemMessageEnabled: the synthesized attribute is
+		// authoritative for config entries.
+		return false
 	}
 	entry := resolveClaudeKeyConfig(cfg, auth)
 	return entry != nil && entry.RebuildMidSystemMessage
