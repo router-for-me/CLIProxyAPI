@@ -131,18 +131,20 @@ func cloneModelRouteRequest(req pluginapi.ModelRouteRequest) pluginapi.ModelRout
 // HasBuiltinProvider reports whether a built-in provider currently has at least one
 // registered auth record.
 func (h *Host) HasBuiltinProvider(provider string) bool {
-	if h == nil || h.authManager == nil {
+	manager := h.currentAuthManager()
+	if manager == nil {
 		return false
 	}
-	return h.authManager.HasProviderAuth(provider)
+	return manager.HasProviderAuth(provider)
 }
 
 // BuiltinProviders returns built-in provider keys that currently have auth registered.
 func (h *Host) BuiltinProviders() []string {
-	if h == nil || h.authManager == nil {
+	manager := h.currentAuthManager()
+	if manager == nil {
 		return nil
 	}
-	return h.authManager.AvailableProviders()
+	return manager.AvailableProviders()
 }
 
 // availableProvidersSnapshot returns a defensive copy of BuiltinProviders for routing input.
