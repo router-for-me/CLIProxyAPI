@@ -106,6 +106,9 @@ const (
 type modelCooldownError struct {
 	model          string
 	resetIn        time.Duration
+	retryAt        time.Time
+	nextAuthIndex  string
+	nextAuthHint   string
 	provider       string
 	cause          error
 	claudeCooldown bool
@@ -129,14 +132,51 @@ func newModelCooldownErrorForCandidates(model, provider string, resetIn time.Dur
 	if resetIn < 0 {
 		resetIn = 0
 	}
+	var retryAt time.Time
+	if resetIn > 0 {
+		retryAt = time.Now().Add(resetIn)
+	}
 	return &modelCooldownError{
 		model:          model,
 		provider:       provider,
 		resetIn:        resetIn,
+		retryAt:        retryAt,
 		cause:          cause,
 		claudeCooldown: claudeCooldown,
 		claudeSignals:  maps.Clone(claudeSignals),
 	}
+}
+
+// withNextRetry preserves the scheduler's exact retry instant. Its client-facing
+// identity is a short credential prefix, never the account name or email.
+func (e *modelCooldownError) withNextRetry(retryAt time.Time, auth *Auth) *modelCooldownError {
+	if e == nil {
+		return nil
+	}
+	if !retryAt.IsZero() {
+		e.retryAt = retryAt
+	}
+	if auth == nil {
+		return e
+	}
+	e.nextAuthHint = safeCooldownCredentialHint(auth.ID)
+	authIndex := auth.Index
+	if len(authIndex) == 16 {
+		for _, char := range authIndex {
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+				return e
+			}
+		}
+		e.nextAuthIndex = authIndex
+	}
+	return e
+}
+
+func safeCooldownCredentialHint(id string) string {
+	if match := cooldownCredentialPrefixPattern.FindString(id); match != "" {
+		return strings.TrimSuffix(match, "-")
+	}
+	return ""
 }
 
 func isClaudeCooldownProvider(provider string) bool {
@@ -163,6 +203,16 @@ func (e *modelCooldownError) Error() string {
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
+	if !e.retryAt.IsZero() {
+		message += fmt.Sprintf("; next retry at %s", e.retryAt.In(time.Local).Format(time.RFC3339))
+		hint := e.nextAuthHint
+		if hint == "" {
+			hint = e.nextAuthIndex
+		}
+		if hint != "" {
+			message += fmt.Sprintf(" (credential %s)", hint)
+		}
+	}
 	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
 	if resetSeconds < 0 {
 		resetSeconds = 0
@@ -183,6 +233,15 @@ func (e *modelCooldownError) Error() string {
 	if e.provider != "" {
 		errorBody["provider"] = e.provider
 	}
+	if !e.retryAt.IsZero() {
+		errorBody["next_retry_at"] = e.retryAt.UTC().Format(time.RFC3339)
+	}
+	if e.nextAuthIndex != "" {
+		errorBody["next_auth_index"] = e.nextAuthIndex
+	}
+	if e.nextAuthHint != "" {
+		errorBody["next_credential_hint"] = e.nextAuthHint
+	}
 	if e.cause != nil {
 		if causeText := ExtractUpstreamErrorSummary(e.cause.Error()); causeText != "" {
 			errorBody["last_upstream_error"] = causeText
@@ -199,6 +258,7 @@ func (e *modelCooldownError) Error() string {
 }
 
 var (
+	cooldownCredentialPrefixPattern        = regexp.MustCompile(`^[a-z][a-z0-9]*-[0-9a-f]{8}-`)
 	sanitizerSchemeAuthPattern             = regexp.MustCompile(`(?i)((?:[A-Za-z0-9.+_\-]+:)?//)(?:[^:\s/@]+:[^@\s]+|[^@\s/]+)@`)
 	sanitizerQueryParamPattern             = regexp.MustCompile(`(?i)([?&][A-Za-z0-9_.-]*(?:key|token|secret|password|auth|sig|signature)=)[^&\s,\r\n;]+`)
 	sanitizerCookiePattern                 = regexp.MustCompile(`(?i)\b(?:set-)?cookie\s*:[^\r\n]+`)
@@ -996,12 +1056,28 @@ func getAvailableAuthsWithPriorityModeForRequest(ctx context.Context, auths []*A
 			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(*Auth) string {
 				return model
 			}, now, clientHeaders...)
-			return nil, newModelCooldownErrorForCandidates(model, providerForError, resetIn, nil, claudeCooldown, claudeSignals)
+			return nil, newModelCooldownErrorForCandidates(model, providerForError, resetIn, nil, claudeCooldown, claudeSignals).
+				withNextRetry(earliest, authForEarliestRetry(auths, model, now, earliest))
 		}
 		return nil, newAuthUnavailableError(earliest, now)
 	}
 
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil
+}
+
+func authForEarliestRetry(auths []*Auth, model string, now, earliest time.Time) *Auth {
+	var best *Auth
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		_, reason, next := isAuthBlockedForModel(auth, model, now)
+		if reason == blockReasonCooldown && next.Equal(earliest) &&
+			(best == nil || auth.ID < best.ID) {
+			best = auth
+		}
+	}
+	return best
 }
 
 // availableAuthsFromPriorityBuckets flattens availability buckets into a stable, ID-sorted slice.
