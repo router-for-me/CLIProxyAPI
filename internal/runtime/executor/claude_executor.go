@@ -137,14 +137,43 @@ func normalizeLeadingClaudeEffortDirectiveDoc(doc *ojson.Doc) bool {
 			!directive.IsObject() || !content.IsArray() || len(content.Array()) != 0 {
 			return changed
 		}
-		if !doc.Get("output_config").Exists() {
-			_ = doc.SetRaw("output_config", directive.Raw)
+		if claudeEffortDirectiveAppliesDoc(doc) {
+			foldClaudeEffortDirectiveDoc(doc, directive)
 		}
 		if errDelete := doc.Delete("messages.0"); errDelete != nil {
 			return changed
 		}
 		changed = true
 	}
+}
+
+// claudeEffortDirectiveAppliesDoc reports whether the request may still carry an
+// effort. Provider cleanup runs before this pass and removes output_config.effort
+// when the effective thinking mode is off or tool_choice forces tool use; folding
+// a body directive back in would silently undo that decision.
+func claudeEffortDirectiveAppliesDoc(doc *ojson.Doc) bool {
+	if claudeToolChoiceForcesToolUseDoc(doc) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(doc.Get("thinking.type").String())) {
+	case "disabled", "between_tools":
+		return false
+	}
+	return true
+}
+
+// foldClaudeEffortDirectiveDoc merges a directive's output_config into the
+// top-level one while preserving unrelated fields. The last directive wins, which
+// is how the provider defines the current turn's effort.
+func foldClaudeEffortDirectiveDoc(doc *ojson.Doc, directive ojson.Result) {
+	if !doc.Get("output_config").IsObject() {
+		_ = doc.SetRaw("output_config", directive.Raw)
+		return
+	}
+	directive.ForEach(func(key, value ojson.Result) bool {
+		_ = doc.SetRaw("output_config."+key.String(), value.Raw)
+		return true
+	})
 }
 
 func sanitizeClaudeMessagesForClaudeUpstreamDoc(doc *ojson.Doc, targetModel string, preserveEmpty bool) (sigcompat.SignatureSanitizeReport, bool) {

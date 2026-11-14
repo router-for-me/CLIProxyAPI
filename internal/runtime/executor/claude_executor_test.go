@@ -11128,23 +11128,41 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 }
 
 func TestNormalizeLeadingClaudeEffortDirectiveDoc(t *testing.T) {
-	directive := `{"role":"system","content":[],"output_config":{"effort":"high"}}`
+	directiveHigh := `{"role":"system","content":[],"output_config":{"effort":"high"}}`
+	directiveLow := `{"role":"system","content":[],"output_config":{"effort":"low"}}`
 	user := `{"role":"user","content":[{"type":"text","text":"hi"}]}`
 	tests := []struct {
 		name      string
+		prefix    string
 		messages  string
 		wantFirst string
 		wantEff   string
 		wantCount int
 	}{
-		{name: "leading directive folded", messages: directive + "," + user, wantFirst: user, wantEff: `{"effort":"high"}`, wantCount: 1},
-		{name: "directive after user untouched", messages: user + "," + directive, wantFirst: user, wantCount: 2},
-		{name: "only message", messages: directive, wantFirst: directive, wantCount: 1},
+		{name: "leading directive folded", messages: directiveHigh + "," + user, wantFirst: user, wantEff: `{"effort":"high"}`, wantCount: 1},
+		{name: "directive after user untouched", messages: user + "," + directiveHigh, wantFirst: user, wantCount: 2},
+		{name: "only message", messages: directiveHigh, wantFirst: directiveHigh, wantCount: 1},
 		{name: "content-bearing system kept", messages: `{"role":"system","content":[{"type":"text","text":"rule"}]},` + user, wantFirst: `{"role":"system","content":[{"type":"text","text":"rule"}]}`, wantCount: 2},
+		// Clients pin a cache-stable top-level output_config; the leading directive is
+		// the requested effort and must win over that placeholder without dropping
+		// the unrelated fields the caller set.
+		{
+			name:      "existing output_config merged",
+			prefix:    `"output_config":{"effort":"low","format":{"type":"json_schema"}},`,
+			messages:  directiveHigh + "," + user,
+			wantFirst: user,
+			wantEff:   `{"effort":"high","format":{"type":"json_schema"}}`,
+			wantCount: 1,
+		},
+		// The last directive defines the current turn's effort.
+		{name: "last leading directive wins", messages: directiveLow + "," + directiveHigh + "," + user, wantFirst: user, wantEff: `{"effort":"high"}`, wantCount: 1},
+		// Effective thinking is off: the turn must go and its effort must not return.
+		{name: "disabled thinking keeps effort off", prefix: `"thinking":{"type":"disabled"},`, messages: directiveHigh + "," + user, wantFirst: user, wantCount: 1},
+		{name: "forced tool choice keeps effort off", prefix: `"tool_choice":{"type":"any"},`, messages: directiveHigh + "," + user, wantFirst: user, wantCount: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			doc := ojson.NewDocString(`{"messages":[` + test.messages + `]}`)
+			doc := ojson.NewDocString(`{` + test.prefix + `"messages":[` + test.messages + `]}`)
 			normalizeLeadingClaudeEffortDirectiveDoc(doc)
 			got := doc.Bytes()
 			if want := int(ojson.GetBytes(got, "messages.#").Int()); want != test.wantCount {
