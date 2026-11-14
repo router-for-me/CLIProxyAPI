@@ -54,6 +54,19 @@ func ResolveKimiClaudeBaseURL(auth *cliproxyauth.Auth) string {
 	return strings.TrimSuffix(baseURL, "/v1")
 }
 
+func NormalizeKimiResponsesIncludesDoc(doc *ojson.Doc) error {
+	includes := doc.Get("include").Array()
+	for i := len(includes) - 1; i >= 0; i-- {
+		if includes[i].String() != "output.encrypted_content" {
+			continue
+		}
+		if errDelete := doc.Delete(fmt.Sprintf("include.%d", i)); errDelete != nil {
+			return errDelete
+		}
+	}
+	return nil
+}
+
 func isResponsesToolCall(item ojson.Result) bool {
 	t := strings.TrimSpace(item.Get("type").String())
 	return t == "function_call" || t == "custom_tool_call"
