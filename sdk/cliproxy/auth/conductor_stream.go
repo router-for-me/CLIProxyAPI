@@ -438,6 +438,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
+		if errPolicy := m.checkAuthExecution(ctx, AuthUseStream, auth, requestedModelAliasFromOptions(execOpts, routeModel), execReq.Model); errPolicy != nil {
+			return nil, errPolicy
+		}
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
@@ -451,7 +454,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if allowRetry && !ephemeralResult {
 				alreadyTried := didRefreshOnUnauthorized
-				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, errStream, alreadyTried, execOpts.Headers)
+				refreshed, okRefresh, errRefreshPolicy := m.tryRefreshAfterUnauthorizedWithPolicy(newUpstreamAttemptContext(ctx), auth, errStream, alreadyTried, execOpts.Headers)
+				if errRefreshPolicy != nil {
+					return nil, errRefreshPolicy
+				}
 				if okRefresh {
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
@@ -460,6 +466,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
+					if errPolicy := m.checkAuthExecution(ctx, AuthUseStream, auth, requestedModelAliasFromOptions(execOpts, routeModel), execReq.Model); errPolicy != nil {
+						return nil, errPolicy
+					}
 					streamResult, errStream = executor.ExecuteStream(ctx, auth, execReq, execOpts)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
@@ -532,7 +541,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			if allowRetry && !ephemeralResult {
 				alreadyTried := didRefreshOnUnauthorized
-				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, bootstrapErr, alreadyTried, execOpts.Headers)
+				refreshed, okRefresh, errRefreshPolicy := m.tryRefreshAfterUnauthorizedWithPolicy(newUpstreamAttemptContext(ctx), auth, bootstrapErr, alreadyTried, execOpts.Headers)
+				if errRefreshPolicy != nil {
+					discardStreamChunks(streamResult.Chunks)
+					return nil, errRefreshPolicy
+				}
 				if okRefresh {
 					discardStreamChunks(streamResult.Chunks)
 					auth = refreshed
@@ -541,6 +554,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = m.newUpstreamAttemptContext(ctx)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
+					if errPolicy := m.checkAuthExecution(ctx, AuthUseStream, auth, requestedModelAliasFromOptions(execOpts, routeModel), execReq.Model); errPolicy != nil {
+						return nil, errPolicy
+					}
 					retryStream, retryErr := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
