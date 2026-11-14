@@ -198,6 +198,10 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	if httpReq.Header.Get("Accept") == "" {
+		// Some upstreams (Snowflake Cortex) reject a request without Accept: "Unsupported Accept header null".
+		httpReq.Header.Set("Accept", "application/json")
+	}
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
