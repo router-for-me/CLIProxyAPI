@@ -11,6 +11,35 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func lockShadowCoordFile(f *os.File, exclusive bool, nonBlocking bool) error {
+	var flags uint32
+	if exclusive {
+		flags |= windows.LOCKFILE_EXCLUSIVE_LOCK
+	}
+	if nonBlocking {
+		flags |= windows.LOCKFILE_FAIL_IMMEDIATELY
+	}
+	var overlapped windows.Overlapped
+	return windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, &overlapped)
+}
+
+func unlockShadowCoordFile(f *os.File) {
+	var overlapped windows.Overlapped
+	_ = windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, &overlapped)
+}
+
+func publishShadowPlugin(tmpPath, targetPath string) error {
+	fromPtr, errFrom := windows.UTF16PtrFromString(tmpPath)
+	if errFrom != nil {
+		return errFrom
+	}
+	toPtr, errTo := windows.UTF16PtrFromString(targetPath)
+	if errTo != nil {
+		return errTo
+	}
+	return windows.MoveFileEx(fromPtr, toPtr, 0)
+}
+
 func removeShadowPlugin(path string) {
 	if path == "" {
 		return

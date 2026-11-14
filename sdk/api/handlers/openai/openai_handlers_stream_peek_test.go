@@ -67,7 +67,11 @@ func sendPeekRequest(t *testing.T, route, body string, executor *peekStreamExecu
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: "peek-stream-model", SupportedEndpoints: endpoints}})
+	protocols := make([]string, len(endpoints))
+	for i, endpoint := range endpoints {
+		protocols[i] = endpointProtocol(endpoint)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: "peek-stream-model", Protocols: protocols}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
@@ -378,7 +382,7 @@ func sendResponsesPeekRequest(t *testing.T, body string, executor *peekStreamExe
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: "peek-resp-model", SupportedEndpoints: []string{openAIResponsesEndpoint}}})
+	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: "peek-resp-model", Protocols: []string{endpointProtocol(openAIResponsesEndpoint)}}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
@@ -429,7 +433,7 @@ func sendResponsesViaChatPeekRequest(t *testing.T, body string, executor *peekSt
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: "peek-resp-model", SupportedEndpoints: []string{openAIChatEndpoint}}})
+	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: "peek-resp-model", Protocols: []string{endpointProtocol(openAIChatEndpoint)}}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
@@ -482,7 +486,7 @@ func newOpenAIImageHandlerWithExecutor(t *testing.T, executor *peekStreamExecuto
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
-	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model, SupportedEndpoints: []string{openAIResponsesEndpoint}}})
+	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model, Protocols: []string{endpointProtocol(openAIResponsesEndpoint)}}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	return NewOpenAIAPIHandler(base)

@@ -8,13 +8,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type serverOptionConfig struct {
+	routingPublisher      RoutingPublisher
+	pluginInterceptorHost handlers.PluginInterceptorHost
 	extraMiddleware       []gin.HandlerFunc
 	engineConfigurator    func(*gin.Engine)
 	routerConfigurator    func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
@@ -27,8 +28,6 @@ type serverOptionConfig struct {
 	postAuthPersistHook   auth.PostAuthHook
 	pluginHost            *pluginhost.Host
 	configReloadHook      func(context.Context, *config.Config) error
-	configPublishHook     func(context.Context, []byte, *modelrouting.ActiveIdentityV2, bool) (*config.Config, *modelrouting.ActivationReceiptV2, error)
-	modelRoutingStateHook func() modelrouting.ActiveStateV2
 	exampleAPIKeySafeMode bool
 }
 
@@ -117,6 +116,17 @@ func WithPostAuthPersistHook(hook auth.PostAuthHook) ServerOption {
 	}
 }
 
+// WithPluginInterceptorHost installs a caller-provided plugin interceptor host
+// on request handlers. When set, the server forwards interceptor calls to this
+// host while keeping model routing, lifecycle callbacks, and websocket observer
+// dispatch delegated to the internal plugin host so plugin features stay
+// functional across startup and config reloads.
+func WithPluginInterceptorHost(host handlers.PluginInterceptorHost) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.pluginInterceptorHost = host
+	}
+}
+
 // WithPluginHost registers dynamic plugin HTTP adapters with the server.
 func WithPluginHost(host *pluginhost.Host) ServerOption {
 	return func(cfg *serverOptionConfig) {
@@ -128,20 +138,6 @@ func WithPluginHost(host *pluginhost.Host) ServerOption {
 func WithConfigReloadHook(hook func(context.Context, *config.Config) error) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.configReloadHook = hook
-	}
-}
-
-// WithConfigPublishHook installs the Service-owned atomic config publisher.
-func WithConfigPublishHook(hook func(context.Context, []byte, *modelrouting.ActiveIdentityV2, bool) (*config.Config, *modelrouting.ActivationReceiptV2, error)) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.configPublishHook = hook
-	}
-}
-
-// WithModelRoutingStateHook provides the active CAS identity to management reads.
-func WithModelRoutingStateHook(hook func() modelrouting.ActiveStateV2) ServerOption {
-	return func(cfg *serverOptionConfig) {
-		cfg.modelRoutingStateHook = hook
 	}
 }
 

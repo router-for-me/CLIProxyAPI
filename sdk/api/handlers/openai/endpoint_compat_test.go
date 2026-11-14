@@ -11,8 +11,8 @@ func TestResolveEndpointOverride_StripsThinkingSuffix(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{
 		{
-			ID:                 "test-gemini-chat-only",
-			SupportedEndpoints: []string{openAIChatEndpoint},
+			ID:        "test-gemini-chat-only",
+			Protocols: []string{endpointProtocol(openAIChatEndpoint)},
 		},
 	})
 	t.Cleanup(func() {

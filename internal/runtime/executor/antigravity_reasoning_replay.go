@@ -19,9 +19,11 @@ import (
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -39,14 +41,22 @@ func antigravityReplayLogKey(value string) string {
 // antigravityCountClaudeToolProvenanceIDs reports how many reserved
 // Claude-facing provenance IDs are still present in a Gemini-shaped payload.
 func antigravityCountClaudeToolProvenanceIDs(payload []byte) int {
-	return antigravityCountClaudeToolProvenanceIDsResult(util.GetGJSONBytesNoCopy(payload, "request.contents"))
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
+	if !contents.IsArray() {
+		contents = util.GetGJSONBytesNoCopy(payload, "contents")
+	}
+	return antigravityCountClaudeToolProvenanceIDsResult(contents)
 }
 
 func antigravityCountClaudeToolProvenanceIDsDoc(doc *ojson.Doc) int {
 	if doc == nil {
 		return 0
 	}
-	return antigravityCountClaudeToolProvenanceIDsResult(doc.Get("request.contents"))
+	contents := doc.Get("request.contents")
+	if !contents.IsArray() {
+		contents = doc.Get("contents")
+	}
+	return antigravityCountClaudeToolProvenanceIDsResult(contents)
 }
 
 func antigravityCountClaudeToolProvenanceIDsResult(contents ojson.Result) int {
@@ -88,6 +98,27 @@ func (s antigravityReasoningReplayScope) valid() bool {
 	return strings.TrimSpace(s.modelName) != "" && strings.TrimSpace(s.sessionKey) != ""
 }
 
+func antigravityFormatCarriesNativeThoughtSignatures(format sdktranslator.Format) bool {
+	switch strings.ToLower(strings.TrimSpace(format.String())) {
+	case sdktranslator.FormatGemini.String(),
+		sdktranslator.FormatInteractions.String():
+		return true
+	default:
+		return false
+	}
+}
+
+func antigravityRequestIsSymmetricForReasoningReplay(opts cliproxyexecutor.Options) bool {
+	source := strings.TrimSpace(opts.SourceFormat.String())
+	if source == "" {
+		return false
+	}
+	if !antigravityFormatCarriesNativeThoughtSignatures(opts.SourceFormat) {
+		return false
+	}
+	return antigravityFormatCarriesNativeThoughtSignatures(cliproxyexecutor.ResponseFormatOrSource(opts))
+}
+
 func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromPayload(payload)
 	if sessionID == "" {
@@ -127,6 +158,9 @@ func antigravityReasoningReplayScopeFromDoc(modelName string, doc *ojson.Doc) an
 }
 
 func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) antigravityReasoningReplayScope {
+	if antigravityRequestIsSymmetricForReasoningReplay(opts) && !antigravityPayloadHasClaudeToolProvenanceID(payload) {
+		return antigravityReasoningReplayScope{}
+	}
 	// Prefer an explicit downstream session over a provider sessionId synthesized
 	// from request text. This keeps identical prompts in separate client sessions
 	// from sharing an opaque Gemini reasoning chain.
@@ -157,6 +191,9 @@ func antigravityReasoningReplayScopeFromRequest(ctx context.Context, modelName s
 }
 
 func antigravityReasoningReplayScopeFromRequestDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) antigravityReasoningReplayScope {
+	if antigravityRequestIsSymmetricForReasoningReplay(opts) && !antigravityDocHasClaudeToolProvenanceID(doc) {
+		return antigravityReasoningReplayScope{}
+	}
 	scope := antigravityReasoningReplayScope{modelName: modelName}
 	if sessionKey := antigravityReasoningReplayClientSessionKey(ctx, req, opts); sessionKey != "" {
 		scope.sessionKey = sessionKey
@@ -351,12 +388,117 @@ func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelNa
 	return doc.Bytes(), scope, nil
 }
 
+// antigravityStreamChunksHaveTerminalCommitEvent reports whether translated SSE
+// chunks carry a client-visible terminal completion/truncation event before
+// which accumulated reasoning replay items must be committed to KV.
+func antigravityStreamChunksHaveTerminalCommitEvent(chunks [][]byte) bool {
+	for _, chunk := range chunks {
+		for _, line := range bytes.Split(chunk, []byte("\n")) {
+			payload := helps.JSONPayload(line)
+			if len(payload) == 0 {
+				continue
+			}
+			switch ojson.GetBytesNoCopy(payload, "type").String() {
+			case "response.completed", "response.incomplete", "response.done", "message_stop":
+				return true
+			}
+			if ojson.GetBytesNoCopy(payload, "event_type").String() == "interaction.completed" {
+				return true
+			}
+			for _, path := range []string{
+				"choices.0.finish_reason",
+				"response.choices.0.finish_reason",
+				"candidates.0.finishReason",
+				"response.candidates.0.finishReason",
+			} {
+				if finishReason := ojson.GetBytesNoCopy(payload, path); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isGeminiCountTokensAction(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) bool {
+	if req.Metadata != nil {
+		if action, _ := req.Metadata["action"].(string); strings.EqualFold(strings.TrimSpace(action), "countTokens") {
+			return true
+		}
+	}
+	if opts.Metadata != nil {
+		if action, _ := opts.Metadata["action"].(string); strings.EqualFold(strings.TrimSpace(action), "countTokens") {
+			return true
+		}
+	}
+	return false
+}
+
+func prepareGeminiTopLevelReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (antigravityReasoningReplayScope, []byte, bool, error) {
+	return prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx, modelName, req, opts, doc, !isGeminiCountTokensAction(req, opts))
+}
+
+func prepareGeminiTopLevelCountTokensReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (bool, error) {
+	_, _, changed, err := prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx, modelName, req, opts, doc, false)
+	return changed, err
+}
+
+func prepareGeminiTopLevelReasoningReplayPayloadDocWithMode(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, reserveOnMiss bool) (antigravityReasoningReplayScope, []byte, bool, error) {
+	if doc == nil || !antigravityUsesReasoningReplayCache(modelName) {
+		return antigravityReasoningReplayScope{}, nil, false, nil
+	}
+	if doc.Get("request.contents").Exists() {
+		scope, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, reserveOnMiss)
+		var replayRequestPayload []byte
+		if reserveOnMiss && scope.valid() {
+			replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
+		}
+		return scope, replayRequestPayload, changed, err
+	}
+	if !doc.Get("contents").Exists() {
+		return antigravityReasoningReplayScope{}, nil, false, nil
+	}
+	wrappedBytes, ok := antigravityReplayRequestEnvelopeFromDoc(doc)
+	if !ok {
+		return antigravityReasoningReplayScope{}, nil, false, nil
+	}
+	wrappedDoc := ojson.NewDoc(wrappedBytes)
+	for _, key := range []string{"sessionId", "session_id"} {
+		if val := doc.Get(key); val.Exists() {
+			_ = wrappedDoc.SetRawBytes(key, []byte(val.Raw))
+		}
+	}
+	scope, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, wrappedDoc, false, reserveOnMiss)
+	if err != nil {
+		return scope, nil, false, err
+	}
+	if changed {
+		if updatedContents := wrappedDoc.Get("request.contents"); updatedContents.Exists() {
+			_ = doc.SetRawBytes("contents", []byte(updatedContents.Raw))
+		}
+	}
+	var replayRequestPayload []byte
+	if reserveOnMiss && scope.valid() {
+		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
+	}
+	return scope, replayRequestPayload, changed, nil
+}
+
 func prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (antigravityReasoningReplayScope, bool, error) {
+	return prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, !isGeminiCountTokensAction(req, opts))
+}
+
+func prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (bool, error) {
+	_, changed, err := prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx, modelName, req, opts, doc, true, false)
+	return changed, err
+}
+
+func prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, normalizeFunctionResponseRoles, reserveOnMiss bool) (antigravityReasoningReplayScope, bool, error) {
 	if doc == nil || !antigravityUsesReasoningReplayCache(modelName) {
 		return antigravityReasoningReplayScope{}, false, nil
 	}
 	originalContentsRaw := doc.Get("request.contents").Raw
-	scope, replayApplied, errReplay := applyAntigravityReasoningReplayCacheDoc(ctx, modelName, req, opts, doc)
+	scope, replayApplied, errReplay := applyAntigravityReasoningReplayCacheDocWithMode(ctx, modelName, req, opts, doc, reserveOnMiss)
 	changed := replayApplied
 	if errReplay != nil {
 		logAntigravityReasoningReplayDegraded(scope, "read", errReplay)
@@ -366,7 +508,7 @@ func prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx context.Context, mode
 		changed = false
 		replayApplied = false
 	}
-	if normalizeAntigravityGeminiFunctionResponseRolesDoc(doc) {
+	if normalizeFunctionResponseRoles && normalizeAntigravityGeminiFunctionResponseRolesDoc(doc) {
 		changed = true
 	}
 	if antigravityDocHasClaudeToolProvenanceID(doc) {
@@ -381,7 +523,7 @@ func prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx context.Context, mode
 					changed = true
 				}
 			}
-			if normalizeAntigravityGeminiFunctionResponseRolesDoc(doc) {
+			if normalizeFunctionResponseRoles && normalizeAntigravityGeminiFunctionResponseRolesDoc(doc) {
 				changed = true
 			}
 		}
@@ -400,7 +542,7 @@ func prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx context.Context, mode
 			origWrapped = []byte(`{"request":{"contents":` + originalContentsRaw + `}}`)
 		}
 		originalPairingValid := internalsignature.ValidateGeminiFunctionCallPairing(origWrapped) == nil
-		if replayApplied && originalPairingValid && scope.valid() {
+		if replayApplied && originalPairingValid && scope.valid() && reserveOnMiss {
 			if _, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
 				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
 			}
@@ -443,6 +585,10 @@ func applyAntigravityReasoningReplayCache(ctx context.Context, modelName string,
 }
 
 func applyAntigravityReasoningReplayCacheDoc(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (antigravityReasoningReplayScope, bool, error) {
+	return applyAntigravityReasoningReplayCacheDocWithMode(ctx, modelName, req, opts, doc, true)
+}
+
+func applyAntigravityReasoningReplayCacheDocWithMode(ctx context.Context, modelName string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc, reserveOnMiss bool) (antigravityReasoningReplayScope, bool, error) {
 	if doc == nil {
 		return antigravityReasoningReplayScope{}, false, nil
 	}
@@ -450,7 +596,17 @@ func applyAntigravityReasoningReplayCacheDoc(ctx context.Context, modelName stri
 	if !scope.valid() {
 		return scope, false, nil
 	}
-	items, snapshot, ok, err := internalcache.GetAntigravityReasoningReplayItemsWithSnapshotRequired(ctx, scope.modelName, scope.sessionKey)
+	var (
+		items    [][]byte
+		snapshot internalcache.AntigravityReasoningReplaySnapshot
+		ok       bool
+		err      error
+	)
+	if reserveOnMiss {
+		items, snapshot, ok, err = internalcache.GetAntigravityReasoningReplayItemsWithSnapshotRequired(ctx, scope.modelName, scope.sessionKey)
+	} else {
+		items, snapshot, ok, err = internalcache.PeekAntigravityReasoningReplayItemsWithSnapshotRequired(ctx, scope.modelName, scope.sessionKey)
+	}
 	scope.cacheSnapshot = snapshot
 	reservedBefore := antigravityCountClaudeToolProvenanceIDsDoc(doc)
 	if err != nil || !ok || len(items) == 0 {
@@ -490,9 +646,14 @@ func antigravityReplayRequestEnvelopeFromDoc(doc *ojson.Doc) ([]byte, bool) {
 	if requestNode := doc.Get("request"); requestNode.IsObject() {
 		return []byte(`{"request":` + requestNode.Raw + `}`), true
 	}
+	prefix := "request."
 	contents := doc.Get("request.contents")
 	if !contents.Exists() {
-		return nil, false
+		prefix = ""
+		contents = doc.Get("contents")
+		if !contents.Exists() {
+			return nil, false
+		}
 	}
 	var buf bytes.Buffer
 	buf.WriteString(`{"request":{`)
@@ -501,10 +662,10 @@ func antigravityReplayRequestEnvelopeFromDoc(doc *ojson.Doc) ([]byte, bool) {
 		key  string
 		path string
 	}{
-		{key: "systemInstruction", path: "request.systemInstruction"},
-		{key: "tools", path: "request.tools"},
-		{key: "toolConfig", path: "request.toolConfig"},
-		{key: "contents", path: "request.contents"},
+		{key: "systemInstruction", path: prefix + "systemInstruction"},
+		{key: "tools", path: prefix + "tools"},
+		{key: "toolConfig", path: prefix + "toolConfig"},
+		{key: "contents", path: prefix + "contents"},
 	} {
 		val := doc.Get(field.path)
 		if !val.Exists() {
@@ -1972,14 +2133,22 @@ func antigravityFunctionCallMatchesReplayItem(functionCall, itemResult ojson.Res
 }
 
 func antigravityPayloadHasClaudeToolProvenanceID(payload []byte) bool {
-	return antigravityContentsHasClaudeToolProvenanceID(util.GetGJSONBytesNoCopy(payload, "request.contents"))
+	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
+	if !contents.IsArray() {
+		contents = util.GetGJSONBytesNoCopy(payload, "contents")
+	}
+	return antigravityContentsHasClaudeToolProvenanceID(contents)
 }
 
 func antigravityDocHasClaudeToolProvenanceID(doc *ojson.Doc) bool {
 	if doc == nil {
 		return false
 	}
-	return antigravityContentsHasClaudeToolProvenanceID(doc.Get("request.contents"))
+	contents := doc.Get("request.contents")
+	if !contents.IsArray() {
+		contents = doc.Get("contents")
+	}
+	return antigravityContentsHasClaudeToolProvenanceID(contents)
 }
 
 func antigravityContentsHasClaudeToolProvenanceID(contents ojson.Result) bool {
@@ -2528,6 +2697,12 @@ type antigravityPendingThoughtSignature struct {
 	targetKind string
 }
 
+type antigravityStreamingReplayToolCall struct {
+	call      *translatorcommon.VertexStreamingToolCall
+	partIndex int
+	signature string
+}
+
 type antigravityReasoningReplayAccumulator struct {
 	scope                   antigravityReasoningReplayScope
 	responseContextHash     string
@@ -2544,6 +2719,8 @@ type antigravityReasoningReplayAccumulator struct {
 	thoughtPartIndex        int
 	lastResponseKind        string
 	pendingSignatures       []antigravityPendingThoughtSignature
+	activeStreamingFC       *antigravityStreamingReplayToolCall
+	hasIncompleteFC         bool
 	itemBytes               int
 	overflow                bool
 	terminal                bool
@@ -2674,9 +2851,20 @@ func (a *antigravityReasoningReplayAccumulator) appendItem(item []byte) {
 	a.itemBytes += len(item)
 }
 
-func (a *antigravityReasoningReplayAccumulator) attachDetachedSignatureToLastFunctionCall(signature string) {
+func (a *antigravityReasoningReplayAccumulator) attachDetachedSignatureToLastFunctionCall(signature string) bool {
 	if a == nil || signature == "" {
-		return
+		return false
+	}
+	if a.activeStreamingFC != nil {
+		if a.activeStreamingFC.signature != "" {
+			return false
+		}
+		if a.itemBytes+len(signature) > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry {
+			a.overflow = true
+			return false
+		}
+		a.activeStreamingFC.signature = signature
+		return true
 	}
 	for itemIndex := len(a.items) - 1; itemIndex >= 0; itemIndex-- {
 		item := util.ParseGJSONBytesNoCopy(a.items[itemIndex])
@@ -2684,21 +2872,22 @@ func (a *antigravityReasoningReplayAccumulator) attachDetachedSignatureToLastFun
 			continue
 		}
 		if strings.TrimSpace(item.Get("thoughtSignature").String()) != "" {
-			return
+			return false
 		}
 		updated, errSet := ojson.SetBytes(a.items[itemIndex], "thoughtSignature", signature)
 		if errSet != nil {
-			return
+			return false
 		}
 		delta := len(updated) - len(a.items[itemIndex])
 		if a.itemBytes+delta > internalcache.AntigravityReasoningReplayCacheMaxBytesPerEntry {
 			a.overflow = true
-			return
+			return false
 		}
 		a.items[itemIndex] = updated
 		a.itemBytes += delta
-		return
+		return true
 	}
+	return false
 }
 
 func (a *antigravityReasoningReplayAccumulator) ObserveSSELine(line []byte) {
@@ -2759,55 +2948,16 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 			signature = ""
 		}
 		if fc := part.Get("functionCall"); fc.Exists() {
-			if a.lastResponseKind == "text" || a.lastResponseKind == "thought" {
-				a.flushPendingThoughtSignaturesForKind(a.lastResponseKind)
-			}
-			if signature != "" {
-				remainingPending := a.pendingSignatures[:0]
-				for _, pending := range a.pendingSignatures {
-					if pending.targetKind != "" {
-						remainingPending = append(remainingPending, pending)
-					}
-				}
-				a.pendingSignatures = remainingPending
-			}
-			if signature == "" {
-				for pendingIndex := len(a.pendingSignatures) - 1; pendingIndex >= 0; pendingIndex-- {
-					if a.pendingSignatures[pendingIndex].targetKind == "" {
-						signature = a.pendingSignatures[pendingIndex].signature
-						a.pendingSignatures = append(a.pendingSignatures[:pendingIndex], a.pendingSignatures[pendingIndex+1:]...)
-						break
-					}
-				}
-			}
-			if signature == "" {
-				signature = a.claimPrecedingTurnThoughtSignature()
-			}
-			keys := antigravityReplayToolCallKeysFromPart(fc)
-			for _, key := range keys {
-				dedupeKey := key + "\x00" + signature
-				if signature == "" {
-					dedupeKey = fmt.Sprintf("%s\x00part:%d", key, pi)
-				}
-				if a.seenFC[dedupeKey] {
-					return true
-				}
-				a.seenFC[dedupeKey] = true
-			}
-			occurrenceKey := antigravityFunctionCallKey(fc.Get("name").String(), fc.Get("args").Raw, "")
-			occurrence := a.functionCallOccurrences[occurrenceKey]
-			if occurrenceKey != "" {
-				a.functionCallOccurrences[occurrenceKey] = occurrence + 1
-			}
-			item := buildAntigravityFunctionCallPartItem(a.contentIndex, pi, occurrence, fc, signature)
-			if len(item) > 0 {
-				a.appendItem(antigravitySetReplayItemContextHashValue(item, a.responseContextHash))
-				if signature != "" {
-					a.seenSignatures[signature] = true
-				}
-			}
-			a.lastResponseKind = "function_call"
+			a.observeFunctionCallPart(pi, fc, signature)
 			return true
+		}
+		if a.activeStreamingFC != nil {
+			text := part.Get("text")
+			hasSemanticText := text.Exists() && text.String() != ""
+			if hasSemanticText {
+				a.hasIncompleteFC = true
+				a.activeStreamingFC = nil
+			}
 		}
 
 		targetKind := ""
@@ -2818,8 +2968,7 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 		hasSemanticText := text.Exists() && text.String() != ""
 		signatureOnly := signature != "" && !hasSemanticText
 		if signatureOnly && a.lastResponseKind == "function_call" {
-			if !a.seenSignatures[signature] {
-				a.attachDetachedSignatureToLastFunctionCall(signature)
+			if !a.seenSignatures[signature] && a.attachDetachedSignatureToLastFunctionCall(signature) {
 				a.seenSignatures[signature] = true
 			}
 			return true
@@ -3007,15 +3156,163 @@ func (a *antigravityReasoningReplayAccumulator) appendPendingThoughtSignatures()
 	a.pendingSignatures = nil
 }
 
+func (a *antigravityReasoningReplayAccumulator) resolveFunctionCallSignature(signature string) string {
+	if a.lastResponseKind == "text" || a.lastResponseKind == "thought" {
+		a.flushPendingThoughtSignaturesForKind(a.lastResponseKind)
+	}
+	if signature != "" {
+		remainingPending := a.pendingSignatures[:0]
+		for _, pending := range a.pendingSignatures {
+			if pending.targetKind != "" {
+				remainingPending = append(remainingPending, pending)
+			}
+		}
+		a.pendingSignatures = remainingPending
+	}
+	if signature == "" {
+		for pendingIndex := len(a.pendingSignatures) - 1; pendingIndex >= 0; pendingIndex-- {
+			if a.pendingSignatures[pendingIndex].targetKind == "" {
+				signature = a.pendingSignatures[pendingIndex].signature
+				a.pendingSignatures = append(a.pendingSignatures[:pendingIndex], a.pendingSignatures[pendingIndex+1:]...)
+				break
+			}
+		}
+	}
+	if signature == "" {
+		signature = a.claimPrecedingTurnThoughtSignature()
+	}
+	return signature
+}
+
+func (a *antigravityReasoningReplayAccumulator) recordCompletedFunctionCall(pi int, fc ojson.Result, signature string) {
+	keys := antigravityReplayToolCallKeysFromPart(fc)
+	for _, key := range keys {
+		dedupeKey := key + "\x00" + signature
+		if signature == "" {
+			dedupeKey = fmt.Sprintf("%s\x00part:%d", key, pi)
+		}
+		if a.seenFC[dedupeKey] {
+			return
+		}
+		a.seenFC[dedupeKey] = true
+	}
+	occurrenceKey := antigravityFunctionCallKey(fc.Get("name").String(), fc.Get("args").Raw, "")
+	occurrence := a.functionCallOccurrences[occurrenceKey]
+	if occurrenceKey != "" {
+		a.functionCallOccurrences[occurrenceKey] = occurrence + 1
+	}
+	item := buildAntigravityFunctionCallPartItem(a.contentIndex, pi, occurrence, fc, signature)
+	if len(item) > 0 {
+		a.appendItem(antigravitySetReplayItemContextHashValue(item, a.responseContextHash))
+		if signature != "" {
+			a.seenSignatures[signature] = true
+		}
+	}
+	a.lastResponseKind = "function_call"
+}
+
+func (a *antigravityReasoningReplayAccumulator) flushCompletedStreamingFunctionCall(active *antigravityStreamingReplayToolCall) {
+	if a == nil || active == nil || active.call == nil || active.call.Assembler == nil {
+		return
+	}
+	if active.call.Assembler.Err() != nil {
+		a.hasIncompleteFC = true
+		return
+	}
+	argsRaw := strings.TrimSpace(active.call.Assembler.FullArguments())
+	if argsRaw == "" {
+		argsRaw = "{}"
+	}
+	if !ojson.Valid(argsRaw) {
+		a.hasIncompleteFC = true
+		return
+	}
+	fcDoc := ojson.NewDocString(`{"name":""}`)
+	_ = fcDoc.Set("name", active.call.RawName)
+	if active.call.UpstreamID != "" {
+		_ = fcDoc.Set("id", active.call.UpstreamID)
+	}
+	_ = fcDoc.SetRaw("args", argsRaw)
+	a.recordCompletedFunctionCall(active.partIndex, ojson.ParseBytes(fcDoc.Bytes()), active.signature)
+}
+
+func (a *antigravityReasoningReplayAccumulator) observeFunctionCallPart(pi int, fc ojson.Result, signature string) {
+	if a == nil {
+		return
+	}
+	if active := a.activeStreamingFC; active != nil && active.call != nil && active.call.CanContinueWith(fc) {
+		if signature != "" && active.signature == "" {
+			active.signature = signature
+		}
+		if upstreamID := strings.TrimSpace(fc.Get("id").String()); upstreamID != "" && active.call.UpstreamID == "" {
+			active.call.UpstreamID = strings.Clone(upstreamID)
+		}
+		_, done := active.call.Assembler.PushFunctionCall(fc)
+		if active.call.Assembler.Err() != nil {
+			a.hasIncompleteFC = true
+			a.activeStreamingFC = nil
+			return
+		}
+		if done {
+			a.activeStreamingFC = nil
+			a.flushCompletedStreamingFunctionCall(active)
+		}
+		a.lastResponseKind = "function_call"
+		return
+	}
+	if translatorcommon.IsVertexStreamingFunctionCall(fc) {
+		if a.activeStreamingFC != nil {
+			a.hasIncompleteFC = true
+			a.activeStreamingFC = nil
+		}
+		rawName := strings.Clone(strings.TrimSpace(fc.Get("name").String()))
+		if rawName == "" {
+			a.hasIncompleteFC = true
+			return
+		}
+		upstreamID := strings.Clone(strings.TrimSpace(fc.Get("id").String()))
+		resolvedSig := a.resolveFunctionCallSignature(signature)
+		call := translatorcommon.NewVertexStreamingToolCall(rawName, rawName, upstreamID, upstreamID, 0)
+		_, done := call.Assembler.PushFunctionCall(fc)
+		if call.Assembler.Err() != nil {
+			a.hasIncompleteFC = true
+			return
+		}
+		active := &antigravityStreamingReplayToolCall{
+			call:      call,
+			partIndex: pi,
+			signature: resolvedSig,
+		}
+		if done {
+			a.flushCompletedStreamingFunctionCall(active)
+		} else {
+			a.activeStreamingFC = active
+		}
+		a.lastResponseKind = "function_call"
+		return
+	}
+	if a.activeStreamingFC != nil {
+		a.hasIncompleteFC = true
+		a.activeStreamingFC = nil
+	}
+	rawName := strings.TrimSpace(fc.Get("name").String())
+	if rawName == "" && !fc.Get("args").Exists() {
+		return
+	}
+	resolvedSig := a.resolveFunctionCallSignature(signature)
+	a.recordCompletedFunctionCall(pi, fc, resolvedSig)
+}
+
 func (a *antigravityReasoningReplayAccumulator) Commit(ctx context.Context) {
 	if a == nil || !a.scope.valid() {
 		return
 	}
 	log.Debugf("antigravity replay: accumulator commit terminal=%t overflow=%t items=%d (session=%s)",
 		a.terminal, a.overflow, len(a.items), antigravityReplayLogKey(a.scope.sessionKey))
-	if !a.terminal {
-		// No terminal finishReason means the stream never completed, so this turn
-		// contributes nothing to the ledger and its tool IDs become unresolvable.
+	if !a.terminal || a.activeStreamingFC != nil || a.hasIncompleteFC {
+		// No terminal finishReason (or an unclosed/corrupted streaming tool call)
+		// means the stream never completed cleanly, so this turn contributes
+		// nothing to the ledger and its tool IDs become unresolvable.
 		return
 	}
 	if a.overflow {

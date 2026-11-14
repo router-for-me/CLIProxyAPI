@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -877,6 +878,17 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	}
 	if compatModel, okCompat := any(model).(modelCompatEntry); okCompat {
 		info.IsCompat = compatModel.GetIsCompat()
+	}
+	switch declared := model.(type) {
+	case internalconfig.ClaudeModel:
+		info.CatalogProviderID, info.CatalogModelID = declared.CatalogProviderID, declared.CatalogModelID
+		info.CatalogRouteProviderID, info.CatalogRouteModelID = declared.CatalogRouteProviderID, declared.CatalogRouteModelID
+		info.Protocols = append([]string(nil), declared.Protocols...)
+	case config.OpenAICompatibilityModel:
+		info.CatalogProviderID, info.CatalogModelID = declared.CatalogProviderID, declared.CatalogModelID
+		info.CatalogRouteProviderID, info.CatalogRouteModelID = declared.CatalogRouteProviderID, declared.CatalogRouteModelID
+		info.Protocols = append([]string(nil), declared.Protocols...)
+		info.VariantID = declared.VariantID
 	}
 	return info
 }

@@ -210,7 +210,7 @@ func cloneKiroModelInfo(model *ModelInfo) *ModelInfo {
 	cloned := *model
 	cloned.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
 	cloned.SupportedParameters = append([]string(nil), model.SupportedParameters...)
-	cloned.SupportedEndpoints = append([]string(nil), model.SupportedEndpoints...)
+	cloned.Protocols = append([]string(nil), model.Protocols...)
 	cloned.SupportedInputModalities = append([]string(nil), model.SupportedInputModalities...)
 	cloned.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
 	if model.Thinking != nil {

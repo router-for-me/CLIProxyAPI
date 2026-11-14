@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 )
 
 var (
-	digestPattern        = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	decimalPattern       = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?$`)
-	signedDecimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+	credentialRevisionPattern = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
+	digestPattern             = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	decimalPattern            = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+	signedDecimalPattern      = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
 )
 
 // UnmarshalYAML rejects unknown projection fields recursively. The rest of the
@@ -386,13 +388,15 @@ func validateCandidate(path string, parent ModelKey, candidate Candidate, model 
 	if err := validateCredentialRefs(path+".credential-refs", candidate.CredentialRefs); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(candidate.CredentialRefs, route.CredentialRefs) {
-		return fmt.Errorf("%s.credential-refs: differ from the referenced direct route", path)
+	for _, ref := range candidate.CredentialRefs {
+		if !slices.Contains(route.CredentialRefs, ref) {
+			return fmt.Errorf("%s.credential-refs: outside the referenced direct route", path)
+		}
 	}
 	if err := validateSortedStrings(path+".protocols", candidate.Protocols, false); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(candidate.QuotaDomains, route.QuotaDomains) || !reflect.DeepEqual(candidate.Protocols, route.Protocols) {
+	if !stringsSubset(candidate.QuotaDomains, route.QuotaDomains) || !stringsSubset(candidate.Protocols, route.Protocols) {
 		return fmt.Errorf("%s: candidate quota/protocol facts differ from its direct route", path)
 	}
 	if err := validateHealth(path+".health", candidate.Health); err != nil {
@@ -601,6 +605,9 @@ func validateCredentialRefs(path string, refs []CredentialRef) error {
 		}
 		if err := requireCanonical(itemPath+".kind", ref.Kind); err != nil {
 			return err
+		}
+		if ref.Revision != "" && !credentialRevisionPattern.MatchString(ref.Revision) {
+			return fmt.Errorf("%s.revision: invalid registration and credential revision", itemPath)
 		}
 		identity := ref.ID + "\x00" + ref.Kind
 		if _, duplicate := seen[identity]; duplicate {

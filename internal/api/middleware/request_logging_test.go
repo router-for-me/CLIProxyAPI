@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
 func TestShouldSkipMethodForRequestLogging(t *testing.T) {
@@ -994,4 +996,627 @@ func TestResponseWriterLogOnErrorOnlyZeroBufferUntilActionableError(t *testing.T
 	if got := wrapper.body.String(); got != errFrame {
 		t.Fatalf("wrapper.body.String() = %q, want %q", got, errFrame)
 	}
+}
+
+func TestRequestLoggingMiddleware_Unrouted404DoesNotEvictErrorDumpRing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("unrouted 404 does not create error log or evict existing error dumps when request-log is false", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 5)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/messages", func(c *gin.Context) {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream failure"})
+		})
+		router.NoRoute(func(c *gin.Context) {
+			c.AbortWithStatus(http.StatusNotFound)
+		})
+
+		realFailReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-5"}`))
+		realFailReq.Header.Set("Content-Type", "application/json")
+		realFailResp := httptest.NewRecorder()
+		router.ServeHTTP(realFailResp, realFailReq)
+		if realFailResp.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want %d", realFailResp.Code, http.StatusBadGateway)
+		}
+
+		for i := 0; i < 10; i++ {
+			probeReq := httptest.NewRequest(http.MethodPost, "/v1/files", strings.NewReader(`{"purpose":"user_data"}`))
+			probeReq.Header.Set("Content-Type", "application/json")
+			probeResp := httptest.NewRecorder()
+			router.ServeHTTP(probeResp, probeReq)
+			if probeResp.Code != http.StatusNotFound {
+				t.Fatalf("probe %d status = %d, want %d", i, probeResp.Code, http.StatusNotFound)
+			}
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		var names []string
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if len(names) != 1 || !strings.HasPrefix(names[0], "error-v1-messages-") {
+			t.Fatalf("expected only the original error-v1-messages-*.log dump to survive, got: %v", names)
+		}
+	})
+
+	t.Run("unrouted 404 does not create error log when request-log is true", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(true, logsDir, "", 5)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/messages", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+		router.NoRoute(func(c *gin.Context) {
+			c.AbortWithStatus(http.StatusNotFound)
+		})
+
+		probeReq := httptest.NewRequest(http.MethodPost, "/v1/files", strings.NewReader(`{"purpose":"user_data"}`))
+		probeReq.Header.Set("Content-Type", "application/json")
+		probeResp := httptest.NewRecorder()
+		router.ServeHTTP(probeResp, probeReq)
+		if probeResp.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", probeResp.Code, http.StatusNotFound)
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil && !os.IsNotExist(errRead) {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		if len(entries) != 0 {
+			var names []string
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			t.Fatalf("expected 0 files for unrouted 404 when request-log=true, got: %v", names)
+		}
+	})
+
+	t.Run("routed 404 still creates error log when request-log is false", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 5)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/messages", func(c *gin.Context) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "model not found"})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"missing-model"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+		if resp.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", resp.Code, http.StatusNotFound)
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "error-v1-messages-") {
+			t.Fatalf("expected 1 error-v1-messages-*.log for routed 404, got: %+v", entries)
+		}
+	})
+
+	t.Run("unrouted streaming 404 does not initialize stream writer or leak temp files when request-log is true", func(t *testing.T) {
+		logsDir := t.TempDir()
+		fileLogger := logging.NewFileRequestLogger(true, logsDir, "", 5)
+		spy := &spyRequestLogger{underlying: fileLogger}
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(spy))
+		router.NoRoute(func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			c.Writer.WriteHeader(http.StatusNotFound)
+			_, _ = c.Writer.Write([]byte("event: error\ndata: not found\n\n"))
+		})
+
+		probeReq := httptest.NewRequest(http.MethodPost, "/v1/files", strings.NewReader(`{"stream":true}`))
+		probeReq.Header.Set("Content-Type", "application/json")
+		probeResp := httptest.NewRecorder()
+		router.ServeHTTP(probeResp, probeReq)
+		if probeResp.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", probeResp.Code, http.StatusNotFound)
+		}
+		if spy.lastStreamingRequestID != "" || spy.lastStreamWriter != nil {
+			t.Fatalf("expected LogStreamingRequest not to be called for unrouted 404, got requestID=%q writer=%v", spy.lastStreamingRequestID, spy.lastStreamWriter)
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil && !os.IsNotExist(errRead) {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		if len(entries) != 0 {
+			var names []string
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			t.Fatalf("expected 0 files/temp dirs for unrouted streaming 404, got: %v", names)
+		}
+	})
+
+	t.Run("unrouted streaming 200 to uncommitted 404 transition discards stream writer without creating error log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		fileLogger := logging.NewFileRequestLogger(true, logsDir, "", 5)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(fileLogger))
+		router.NoRoute(func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			c.Writer.WriteHeader(http.StatusOK)
+			c.Writer.WriteHeader(http.StatusNotFound)
+			_, _ = c.Writer.Write([]byte("data: not found\n\n"))
+		})
+
+		probeReq := httptest.NewRequest(http.MethodPost, "/v1/files", strings.NewReader(`{"stream":true}`))
+		probeReq.Header.Set("Content-Type", "application/json")
+		probeResp := httptest.NewRecorder()
+		router.ServeHTTP(probeResp, probeReq)
+		if probeResp.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", probeResp.Code, http.StatusNotFound)
+		}
+
+		entries, errRead := os.ReadDir(logsDir)
+		if errRead != nil && !os.IsNotExist(errRead) {
+			t.Fatalf("read logs dir: %v", errRead)
+		}
+		if len(entries) != 0 {
+			var names []string
+			for _, entry := range entries {
+				names = append(names, entry.Name())
+			}
+			t.Fatalf("expected 0 files/temp dirs after discarded streaming 404, got: %v", names)
+		}
+	})
+}
+
+func TestRequestLoggingMiddlewareErrorLogKeepsUpstreamResponseWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	readSingleErrorLog := func(t *testing.T, logsDir string) string {
+		t.Helper()
+		entries, errReadDir := os.ReadDir(logsDir)
+		if errReadDir != nil {
+			t.Fatalf("read logs dir: %v", errReadDir)
+		}
+		var errorLogPaths []string
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+				errorLogPaths = append(errorLogPaths, filepath.Join(logsDir, entry.Name()))
+			}
+		}
+		if len(errorLogPaths) != 1 {
+			t.Fatalf("error log count = %d, want 1 (entries=%v)", len(errorLogPaths), entries)
+		}
+		content, errReadFile := os.ReadFile(errorLogPaths[0])
+		if errReadFile != nil {
+			t.Fatalf("read error log: %v", errReadFile)
+		}
+		return string(content)
+	}
+
+	t.Run("non-stream WriteErrorResponse keeps per-attempt upstream status masked headers body and error", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		cfg := &config.Config{}
+		baseHandler := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, nil)
+		largeAttemptTwoBody := "data: {\"type\":\"response.created\",\"id\":\"resp_2\"}\n\n" + strings.Repeat("x", 70*1024)
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			executorCtx := context.WithValue(context.Background(), "gin", c)
+
+			helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+				URL:     "https://cli-chat-proxy.grok.com/v1/responses",
+				Method:  http.MethodPost,
+				Headers: http.Header{"Authorization": []string{"Bearer super-secret-request-token"}},
+				Body:    []byte(`{"model":"grok-4.7","stream":true}`),
+			})
+			helps.RecordAPIResponseMetadata(executorCtx, cfg, http.StatusBadGateway, http.Header{
+				"Content-Type":  []string{"text/event-stream"},
+				"Authorization": []string{"Bearer super-secret-response-token"},
+				"X-Request-Id":  []string{"xai-req-1"},
+			})
+			helps.AppendAPIResponseChunk(executorCtx, cfg, []byte("event: response.created"))
+			helps.AppendAPIResponseChunk(executorCtx, cfg, []byte(`data: {"type":"response.created","id":"resp_1"}`))
+			helps.RecordAPIResponseError(executorCtx, cfg, errors.New("unexpected EOF"))
+
+			helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://cli-chat-proxy.grok.com/v1/responses",
+				Method: http.MethodPost,
+				Body:   []byte(`{"model":"grok-4.7","stream":true,"attempt":2}`),
+			})
+			helps.RecordAPIResponseMetadata(executorCtx, cfg, http.StatusOK, http.Header{
+				"Content-Type": []string{"text/event-stream"},
+				"Set-Cookie":   []string{"session=super-secret-cookie-value"},
+			})
+			helps.AppendAPIResponseChunk(executorCtx, cfg, []byte(largeAttemptTwoBody))
+
+			baseHandler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+				StatusCode: http.StatusRequestTimeout,
+				Error:      errors.New("xai stream error: stream disconnected before response.completed or response.incomplete"),
+			})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"grok-4.7","stream":false}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusRequestTimeout {
+			t.Fatalf("response status = %d, want %d", resp.Code, http.StatusRequestTimeout)
+		}
+
+		logText := readSingleErrorLog(t, logsDir)
+		apiRequestIdx := strings.Index(logText, "=== API REQUEST 1 ===")
+		apiResponseIdx := strings.Index(logText, "=== API RESPONSE 1 ===")
+		downstreamResponseIdx := strings.Index(logText, "=== RESPONSE ===")
+		if apiRequestIdx == -1 || apiResponseIdx == -1 || downstreamResponseIdx == -1 {
+			t.Fatalf("missing expected log sections (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+		}
+		if apiRequestIdx >= apiResponseIdx || apiResponseIdx >= downstreamResponseIdx {
+			t.Fatalf("unexpected section order (req=%d, apiResp=%d, resp=%d):\n%s", apiRequestIdx, apiResponseIdx, downstreamResponseIdx, logText)
+		}
+
+		apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
+		downstreamSection := logText[downstreamResponseIdx:]
+		for _, want := range []string{
+			"=== API RESPONSE 1 ===",
+			"Status: 502",
+			"Authorization: Bearer supe...oken",
+			"X-Request-Id: xai-req-1",
+			"event: response.created\ndata: {\"type\":\"response.created\",\"id\":\"resp_1\"}",
+			"Error: unexpected EOF",
+			"=== API RESPONSE 2 ===",
+			"Status: 200",
+			"data: {\"type\":\"response.created\",\"id\":\"resp_2\"}",
+			"[API RESPONSE BODY TRUNCATED: captured first ",
+		} {
+			if !strings.Contains(apiResponseSection, want) {
+				t.Fatalf("API RESPONSE section missing %q:\n%s", want, apiResponseSection)
+			}
+		}
+		for _, secret := range []string{"super-secret-response-token", "super-secret-cookie-value"} {
+			if strings.Contains(logText, secret) {
+				t.Fatalf("error log leaked sensitive header value %q:\n%s", secret, logText)
+			}
+		}
+		if strings.Contains(apiResponseSection, `"code":"request_timeout"`) {
+			t.Fatalf("API RESPONSE section should contain upstream attempts rather than proxy synthesized error JSON:\n%s", apiResponseSection)
+		}
+		if !strings.Contains(downstreamSection, "Status: 408") || !strings.Contains(downstreamSection, "xai stream error: stream disconnected before response.completed or response.incomplete") {
+			t.Fatalf("downstream RESPONSE section missing final proxy error:\n%s", downstreamSection)
+		}
+	})
+
+	t.Run("mid-stream SSE error keeps upstream response in error log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		cfg := &config.Config{}
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			executorCtx := context.WithValue(context.Background(), "gin", c)
+			helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://cli-chat-proxy.grok.com/v1/responses",
+				Method: http.MethodPost,
+				Body:   []byte(`{"model":"grok-4.7","stream":true}`),
+			})
+			helps.RecordAPIResponseMetadata(executorCtx, cfg, http.StatusOK, http.Header{
+				"Content-Type": []string{"text/event-stream"},
+				"X-Request-Id": []string{"xai-stream-1"},
+			})
+			helps.AppendAPIResponseChunk(executorCtx, cfg, []byte(`data: {"type":"response.failed","response":{"error":{"message":"upstream quota exceeded"}}}`))
+			helps.RecordAPIResponseError(executorCtx, cfg, errors.New("upstream quota exceeded"))
+
+			c.Writer.WriteHeader(http.StatusOK)
+			_, _ = c.Writer.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+			c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+				{
+					StatusCode: http.StatusTooManyRequests,
+					Error:      errors.New("upstream quota exceeded"),
+				},
+			})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"grok-4.7","stream":true}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		logText := readSingleErrorLog(t, logsDir)
+		for _, want := range []string{
+			"=== API REQUEST 1 ===",
+			"=== API RESPONSE 1 ===",
+			"Status: 200",
+			"X-Request-Id: xai-stream-1",
+			`data: {"type":"response.failed","response":{"error":{"message":"upstream quota exceeded"}}}`,
+			"Error: upstream quota exceeded",
+		} {
+			if !strings.Contains(logText, want) {
+				t.Fatalf("mid-stream error log missing %q:\n%s", want, logText)
+			}
+		}
+	})
+
+	t.Run("rejected upstream websocket upgrade keeps handshake request and response in error log", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		cfg := &config.Config{}
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			executorCtx := context.WithValue(context.Background(), "gin", c)
+			helps.RecordAPIWebsocketUpgradeRejection(
+				executorCtx,
+				cfg,
+				helps.UpstreamRequestLog{
+					URL:     "https://chatgpt.com/backend-api/codex/responses",
+					Method:  http.MethodGet,
+					Headers: http.Header{"Authorization": []string{"Bearer super-secret-ws-token"}},
+				},
+				http.StatusForbidden,
+				http.Header{
+					"Content-Type": []string{"application/json"},
+					"Set-Cookie":   []string{"cf_clearance=super-secret-cf-cookie"},
+				},
+				[]byte(`{"error":{"message":"websocket handshake rejected"}}`),
+			)
+			c.JSON(http.StatusForbidden, gin.H{"error": "websocket handshake rejected"})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5-codex","input":"hi"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		logText := readSingleErrorLog(t, logsDir)
+		for _, want := range []string{
+			"=== API REQUEST 1 ===",
+			"Upstream URL: https://chatgpt.com/backend-api/codex/responses",
+			"=== API RESPONSE 1 ===",
+			"Status: 403",
+			`{"error":{"message":"websocket handshake rejected"}}`,
+		} {
+			if !strings.Contains(logText, want) {
+				t.Fatalf("websocket rejection error log missing %q:\n%s", want, logText)
+			}
+		}
+		for _, secret := range []string{"super-secret-ws-token", "super-secret-cf-cookie"} {
+			if strings.Contains(logText, secret) {
+				t.Fatalf("websocket rejection error log leaked secret %q:\n%s", secret, logText)
+			}
+		}
+	})
+
+	t.Run("successful request with request-log off writes no log file", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		cfg := &config.Config{}
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			executorCtx := context.WithValue(context.Background(), "gin", c)
+			helps.RecordAPIRequest(executorCtx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://cli-chat-proxy.grok.com/v1/responses",
+				Method: http.MethodPost,
+				Body:   []byte(`{"model":"grok-4.7"}`),
+			})
+			helps.RecordAPIResponseMetadata(executorCtx, cfg, http.StatusOK, http.Header{
+				"Content-Type": []string{"text/event-stream"},
+			})
+			helps.AppendAPIResponseChunk(executorCtx, cfg, []byte(`data: {"type":"response.completed"}`))
+			c.JSON(http.StatusOK, gin.H{"id": "chatcmpl_1"})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"grok-4.7"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+
+		if resp.Code != http.StatusOK {
+			t.Fatalf("response status = %d, want %d", resp.Code, http.StatusOK)
+		}
+		entries, errReadDir := os.ReadDir(logsDir)
+		if errReadDir != nil && !os.IsNotExist(errReadDir) {
+			t.Fatalf("read logs dir: %v", errReadDir)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("expected 0 log files for successful request with request-log=false, got: %v", entries)
+		}
+	})
+}
+
+func TestRequestLoggingMiddlewareIsolatesDeferredResponseAcrossStreamCancelAndGinContextReuse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	readSingleErrorLog := func(t *testing.T, logsDir string) string {
+		t.Helper()
+		entries, errReadDir := os.ReadDir(logsDir)
+		if errReadDir != nil {
+			t.Fatalf("read logs dir: %v", errReadDir)
+		}
+		var errorLogPaths []string
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
+				errorLogPaths = append(errorLogPaths, filepath.Join(logsDir, entry.Name()))
+			}
+		}
+		if len(errorLogPaths) != 1 {
+			t.Fatalf("error log count = %d, want 1 (entries=%v)", len(errorLogPaths), entries)
+		}
+		content, errReadFile := os.ReadFile(errorLogPaths[0])
+		if errReadFile != nil {
+			t.Fatalf("read error log: %v", errReadFile)
+		}
+		return string(content)
+	}
+
+	t.Run("late stream producer after cancel does not pollute reused Gin context", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		cfg := &config.Config{}
+		baseHandler := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, nil)
+
+		const cancelledTurns = 8
+		turn2Active := make(chan struct{})
+		var producers sync.WaitGroup
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			if c.GetHeader("X-Turn") == "2" {
+				cliCtx, cliCancel := baseHandler.GetContextWithCancel(nil, c, context.Background())
+				defer cliCancel()
+				helps.RecordAPIRequest(cliCtx, cfg, helps.UpstreamRequestLog{
+					URL:    "https://api.example.com/turn2",
+					Method: http.MethodPost,
+					Body:   []byte(`{"turn":2}`),
+				})
+				helps.RecordAPIResponseMetadata(cliCtx, cfg, http.StatusBadGateway, http.Header{
+					"Content-Type": []string{"application/json"},
+				})
+				helps.AppendAPIResponseChunk(cliCtx, cfg, []byte(`{"error":"turn2-upstream-failure"}`))
+				close(turn2Active)
+				producers.Wait()
+				baseHandler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+					StatusCode: http.StatusBadGateway,
+					Error:      errors.New("turn2 failed"),
+				})
+				return
+			}
+
+			cliCtx, cliCancel := baseHandler.GetContextWithCancel(nil, c, context.Background())
+			helps.RecordAPIRequest(cliCtx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://api.example.com/turn1",
+				Method: http.MethodPost,
+				Body:   []byte(`{"turn":1}`),
+			})
+			helps.RecordAPIResponseMetadata(cliCtx, cfg, http.StatusOK, http.Header{
+				"Content-Type": []string{"text/event-stream"},
+			})
+			helps.AppendAPIResponseChunk(cliCtx, cfg, []byte(`data: {"turn":1,"early":true}`))
+			producerStarted := make(chan struct{})
+			producers.Add(1)
+			go func(streamCtx context.Context) {
+				defer producers.Done()
+				close(producerStarted)
+				<-turn2Active
+				helps.RecordAPIRequest(streamCtx, cfg, helps.UpstreamRequestLog{
+					URL:    "https://api.example.com/turn1-late-req",
+					Method: http.MethodPost,
+					Body:   []byte(`{"turn":1,"late":true}`),
+				})
+				helps.RecordAPIResponseMetadata(streamCtx, cfg, http.StatusInternalServerError, http.Header{
+					"X-Turn1-Late": []string{"leaked"},
+				})
+				helps.AppendAPIResponseChunk(streamCtx, cfg, []byte("turn1-late-stream-chunk"))
+				helps.RecordAPIResponseError(streamCtx, cfg, errors.New("turn1-late-stream-error"))
+			}(cliCtx)
+			<-producerStarted
+			cliCancel()
+			c.Status(clienterror.StatusClientClosedRequest)
+		})
+
+		for range cancelledTurns {
+			req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+			req1.Header.Set("Content-Type", "application/json")
+			req1.Header.Set("X-Turn", "1")
+			router.ServeHTTP(httptest.NewRecorder(), req1)
+		}
+
+		req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+		req2.Header.Set("Content-Type", "application/json")
+		req2.Header.Set("X-Turn", "2")
+		resp2 := httptest.NewRecorder()
+		router.ServeHTTP(resp2, req2)
+		if resp2.Code != http.StatusBadGateway {
+			t.Fatalf("turn 2 status = %d, want %d", resp2.Code, http.StatusBadGateway)
+		}
+
+		logText := readSingleErrorLog(t, logsDir)
+		for _, want := range []string{
+			"https://api.example.com/turn2",
+			`{"error":"turn2-upstream-failure"}`,
+		} {
+			if !strings.Contains(logText, want) {
+				t.Fatalf("turn 2 error log missing %q:\n%s", want, logText)
+			}
+		}
+		for _, leaked := range []string{
+			"turn1-late-req",
+			"X-Turn1-Late",
+			"turn1-late-stream-chunk",
+			"turn1-late-stream-error",
+		} {
+			if strings.Contains(logText, leaked) {
+				t.Fatalf("turn 2 error log leaked stale turn 1 data %q:\n%s", leaked, logText)
+			}
+		}
+	})
+
+	t.Run("concurrent stream producer during Finalize is race-free", func(t *testing.T) {
+		logsDir := t.TempDir()
+		logger := logging.NewFileRequestLogger(false, logsDir, "", 10)
+		cfg := &config.Config{}
+		baseHandler := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, nil)
+
+		producerStarted := make(chan struct{})
+		producerDone := make(chan struct{})
+
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/chat/completions", func(c *gin.Context) {
+			cliCtx, cliCancel := baseHandler.GetContextWithCancel(nil, c, context.Background())
+			defer cliCancel()
+			helps.RecordAPIRequest(cliCtx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://api.example.com/v1/responses",
+				Method: http.MethodPost,
+				Body:   []byte(`{"stream":true}`),
+			})
+			helps.RecordAPIResponseMetadata(cliCtx, cfg, http.StatusOK, http.Header{
+				"Content-Type": []string{"text/event-stream"},
+			})
+			go func(streamCtx context.Context) {
+				defer close(producerDone)
+				close(producerStarted)
+				for range 32 {
+					helps.AppendAPIResponseChunk(streamCtx, cfg, []byte(`data: {"delta":"chunk"}`))
+				}
+				helps.RecordAPIResponseError(streamCtx, cfg, errors.New("stream aborted"))
+			}(cliCtx)
+			<-producerStarted
+			c.Header("Content-Type", "text/event-stream")
+			c.Writer.WriteHeader(http.StatusOK)
+			c.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{
+				{
+					StatusCode: http.StatusBadGateway,
+					Error:      errors.New("mid-stream abort"),
+				},
+			})
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"stream":true}`))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(httptest.NewRecorder(), req)
+		<-producerDone
+
+		logText := readSingleErrorLog(t, logsDir)
+		if !strings.Contains(logText, "=== API RESPONSE 1 ===") {
+			t.Fatalf("concurrent error log missing API RESPONSE 1:\n%s", logText)
+		}
+	})
 }

@@ -1,6 +1,17 @@
 package modelrouting
 
-import "time"
+import (
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// RoutingYAML renders the versioned routing resource independently of the host configuration.
+func RoutingYAML(projection *Config) ([]byte, error) {
+	return yaml.Marshal(struct {
+		ModelRouting *Config `yaml:"model-routing"`
+	}{ModelRouting: projection})
+}
 
 // ActiveIdentityV2 is the complete compare-and-swap identity of the active
 // runtime configuration. ConfigDigest never appears inside Config itself.
@@ -42,8 +53,7 @@ type RoutingSchemaInfo struct {
 	Digest  string `json:"digest"`
 }
 
-// ActivationReceiptV2 is the CLIProxy-owned portion of the publication receipt.
-// CCS composes it with snapshot-schema and CCS binary provenance.
+// ActivationReceiptV2 attests to runtime adoption of a routing publication.
 type ActivationReceiptV2 struct {
 	PreviousActive   *ActiveIdentityV2 `json:"previous_active"`
 	Active           ActiveIdentityV2  `json:"active"`
@@ -166,6 +176,7 @@ type InventoryCredentialRef struct {
 }
 
 type InventoryCredential struct {
+	Revision      string                 `json:"revision,omitempty"`
 	CredentialRef InventoryCredentialRef `json:"credential_ref"`
 	QuotaDomain   string                 `json:"quota_domain"`
 	Health        InventoryHealth        `json:"health"`

@@ -153,6 +153,7 @@ type reviewedInPlaceByteWrite struct {
 }
 
 var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
+	"internal/kvstore/bolt_store.go":                                {1, "copies into a freshly allocated envelope before publication; no no-copy JSON result can alias the destination"},
 	"internal/translator/common/apply_patch_responses.go":           {1, "shifts [][]byte item references in a private output slice; no byte of any JSON payload is rewritten"},
 	"internal/translator/common/vertex_partial_args.go":             {1, "shifts []string object keys to insert a key; no byte of any payload is rewritten"},
 	"internal/runtime/executor/claude_signing.go":                   {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
@@ -166,7 +167,7 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 	"internal/pluginstore/auth.go":                                  {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},
 	"internal/runtime/executor/devin_protobuf.go":                   {1, "copies a protobuf payload into a freshly allocated Connect frame"},
 	"internal/auth/cursor/proto/connect.go":                         {1, "copies a protobuf payload into a freshly allocated Connect frame"},
-	"internal/kvstore/bolt_store.go":                                {1, "copies payload into a freshly allocated envelope buffer"},
+	"sdk/cliproxy/auth/selector_weighted.go":                        {2, "shifts weightedPoolMember bookkeeping structs when inserting or removing members; no byte of any JSON payload is rewritten"},
 }
 
 // TestInPlaceByteWritesAreReviewed keeps the set of in-place byte writes small

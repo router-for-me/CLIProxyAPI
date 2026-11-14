@@ -24,27 +24,33 @@ type modelRoutingCandidateAttempt struct {
 	selection *modelRoutingSelectionEvidence
 }
 
+type modelRoutingCredentialEvidence struct {
+	ref         modelrouting.CredentialRef
+	revision    string
+	quotaDomain string
+}
+
 type modelRoutingSelectionEvidence struct {
-	mu     sync.RWMutex
-	authID string
+	mu         sync.RWMutex
+	credential modelRoutingCredentialEvidence
 }
 
-func (e *modelRoutingSelectionEvidence) record(authID string) {
-	if e == nil {
-		return
-	}
+func (e *modelRoutingSelectionEvidence) record(auth *Auth) {
 	e.mu.Lock()
-	e.authID = strings.TrimSpace(authID)
-	e.mu.Unlock()
+	defer e.mu.Unlock()
+	e.credential = modelRoutingCredentialEvidence{
+		ref: credentialReference(auth), revision: auth.RoutingCredentialRevision(),
+		quotaDomain: credentialQuotaDomain(auth),
+	}
 }
 
-func (e *modelRoutingSelectionEvidence) selectedAuthID() string {
+func (e *modelRoutingSelectionEvidence) executedCredential() modelRoutingCredentialEvidence {
 	if e == nil {
-		return ""
+		return modelRoutingCredentialEvidence{}
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.authID
+	return e.credential
 }
 
 type modelRoutingRuleMatch struct {
@@ -189,7 +195,7 @@ func (m *Manager) initialRoutingCandidates(
 			return nil, errPrepare
 		}
 		selection := &modelRoutingSelectionEvidence{}
-		candidateOpts := m.candidateOptions(opts, index, candidate, selection.record)
+		candidateOpts := m.candidateOptions(opts, index, candidate, selection)
 		if !m.routingCandidateKnownSelectable(ctx, candidate, candidateOpts) {
 			continue
 		}
@@ -526,9 +532,9 @@ func (m *Manager) addModelRoutingStreamExecutionHeaders(response *cliproxyexecut
 func (m *Manager) modelRoutingExecutionHeaders(attempt modelRoutingCandidateAttempt, trace *modelRoutingTrace) (http.Header, error) {
 	headers := make(http.Header)
 	if attempt.candidate.RouteSelector != "" {
-		headers = m.modelRoutingResponseHeaders(
+		headers = modelRoutingResponseHeaders(
 			attempt.candidate,
-			attempt.selection.selectedAuthID(),
+			attempt.selection.executedCredential(),
 		)
 	}
 	headers.Set(failureModeHeader, "classified_candidate_failover")
@@ -640,7 +646,7 @@ func modelRoutingFailureFactsFromError(err error) modelRoutingFailureFacts {
 	if errors.As(err, &authErr) && authErr != nil {
 		facts.errorCode = strings.TrimSpace(authErr.Code)
 	}
-	if isCredentialScopedError(err) {
+	if isCredentialScopedError(err) || facts.errorCode == "credential_revision_changed" {
 		facts.failureKinds = append(facts.failureKinds, modelrouting.FailureKindCredential)
 	}
 	if isEmptyPreResponseError(err) {

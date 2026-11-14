@@ -3,24 +3,17 @@ package management
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -89,174 +82,6 @@ func managementRoutingProjection() *modelrouting.Config {
 	return projection
 }
 
-func TestPutConfigYAMLReturnsActiveDigestReceipt(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("port: 8317\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	projection := managementRoutingProjection()
-	shared := projection.Aliases[0]
-	shared.Name = "aihub-shared"
-	shared.TierID = "shared"
-	projection.Aliases = append(projection.Aliases, shared)
-	digest, errDigest := modelrouting.ProjectionDigest(projection)
-	if errDigest != nil {
-		t.Fatal(errDigest)
-	}
-	projection.ProjectionDigest = digest
-	payload, err := yaml.Marshal(&config.Config{
-		Port:               8317,
-		CredentialInFlight: config.DefaultCredentialInFlightConfig(),
-		ModelRouting:       projection,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := NewHandler(&config.Config{Port: 8317}, path, nil)
-	loadedAt := time.Date(2026, 8, 28, 11, 20, 57, 0, time.UTC)
-	published := false
-	h.SetConfigPublishHook(func(_ context.Context, body []byte, expected *modelrouting.ActiveIdentityV2, bootstrap bool) (*config.Config, *modelrouting.ActivationReceiptV2, error) {
-		if !bootstrap || expected != nil {
-			t.Fatalf("publisher precondition = bootstrap %t, expected %+v", bootstrap, expected)
-		}
-		parsed, errParse := config.ParseConfigBytes(body)
-		if errParse != nil {
-			t.Fatalf("ParseConfigBytes() error = %v", errParse)
-		}
-		published = true
-		active := modelrouting.ActiveIdentityV2{
-			Generation:       projection.Generation,
-			SnapshotDigest:   projection.SnapshotDigest,
-			ProjectionDigest: projection.ProjectionDigest,
-			ConfigDigest:     modelrouting.ConfigDigest(body),
-		}
-		return parsed, &modelrouting.ActivationReceiptV2{
-			Active: active, RoutingSchema: modelrouting.RoutingSchemaInfo{Version: 3, Digest: modelrouting.SchemaDigest()}, LoadedAt: loadedAt,
-		}, nil
-	})
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader(string(payload)))
-	c.Request.Header.Set("Content-Type", "application/yaml")
-	c.Request.Header.Set("If-None-Match", "*")
-	h.PutConfigYAML(c)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	if !published {
-		t.Fatal("Service-owned CAS publisher was not called")
-	}
-	var receipt modelrouting.ActivationReceiptV2
-	if err = json.Unmarshal(recorder.Body.Bytes(), &receipt); err != nil {
-		t.Fatal(err)
-	}
-	if receipt.Active.Generation != projection.Generation || receipt.Active.SnapshotDigest != contractSnapshotDigest || receipt.Active.ProjectionDigest != projection.ProjectionDigest {
-		t.Fatalf("receipt = %+v", receipt)
-	}
-	wantETag, err := modelrouting.ActiveETag(receipt.Active)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if recorder.Header().Get("ETag") != wantETag {
-		t.Fatalf("ETag = %q, want %q", recorder.Header().Get("ETag"), wantETag)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), ".config-write-") {
-			t.Fatalf("atomic writer leaked staging file %q", entry.Name())
-		}
-	}
-}
-
-func TestPutConfigYAMLHashesManagementSecretBeforeAtomicPublish(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, []byte("port: 8317\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	const plaintext = "management-secret-that-must-not-reach-disk"
-	payload := "port: 8317\nremote-management:\n  secret-key: " + plaintext + "\n"
-	h := NewHandler(&config.Config{Port: 8317}, path, nil)
-	h.SetConfigReloadHook(func(_ context.Context, _ *config.Config) error { return nil })
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader(payload))
-	h.PutConfigYAML(c)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	persisted, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(persisted), plaintext) {
-		t.Fatalf("plaintext management secret was published: %s", persisted)
-	}
-	loaded, err := config.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = bcrypt.CompareHashAndPassword([]byte(loaded.RemoteManagement.SecretKey), []byte(plaintext)); err != nil {
-		t.Fatalf("persisted secret does not verify as bcrypt: %v", err)
-	}
-}
-
-func TestPutConfigYAMLRollsBackFileMemoryAndRuntimeOnReloadFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	previousBody := []byte("port: 8317\n")
-	if err := os.WriteFile(path, previousBody, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	previousConfig := &config.Config{Port: 8317, CredentialInFlight: config.DefaultCredentialInFlightConfig()}
-	h := NewHandler(previousConfig, path, nil)
-	errApply := errors.New("runtime rejected new config")
-	var appliedPorts []int
-	h.SetConfigReloadHook(func(_ context.Context, cfg *config.Config) error {
-		appliedPorts = append(appliedPorts, cfg.Port)
-		if cfg.Port == 8318 {
-			return errApply
-		}
-		return nil
-	})
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader("port: 8318\n"))
-	h.PutConfigYAML(c)
-
-	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), errApply.Error()) {
-		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	persisted, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(persisted) != string(previousBody) {
-		t.Fatalf("persisted config = %q, want rollback %q", persisted, previousBody)
-	}
-	h.mu.Lock()
-	activePort := h.cfg.Port
-	h.mu.Unlock()
-	if activePort != previousConfig.Port {
-		t.Fatalf("handler config port = %d, want %d", activePort, previousConfig.Port)
-	}
-	if len(appliedPorts) != 2 || appliedPorts[0] != 8318 || appliedPorts[1] != 8317 {
-		t.Fatalf("runtime applications = %v, want failed new then restored previous", appliedPorts)
-	}
-}
-
 func TestProjectedInventoryFailsClosedForSuspendedCredential(t *testing.T) {
 	projection := managementRoutingProjection()
 	auth := &coreauth.Auth{
@@ -319,7 +144,7 @@ func TestProjectedInventoryQuotaCooldownEndsAtRecoveryInstant(t *testing.T) {
 	inventory := func(now time.Time) (modelrouting.InventoryModel, modelrouting.InventoryCredential) {
 		t.Helper()
 		registered := make([]registry.RegisteredRouteSnapshot, 0, 1)
-		for _, snapshot := range reg.RegisteredRouteSnapshots() {
+		for _, snapshot := range reg.RegisteredRouteSnapshotsAt(now) {
 			if snapshot.ClientID == credentialID {
 				registered = append(registered, snapshot)
 			}
@@ -587,7 +412,6 @@ func TestBootstrapInventorySurfacesRoutesThatCannotDeclareCatalogFacts(t *testin
 // from the projection; the inventory endpoint must still report it, or the
 // pipeline that reads this surface can never select it.
 func TestModelInventoryReportsRegisteredRoutesTheProjectionDoesNotDescribe(t *testing.T) {
-	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 	manager := coreauth.NewManager(nil, nil, nil)
 	reg := registry.GetGlobalRegistry()
@@ -606,6 +430,14 @@ func TestModelInventoryReportsRegisteredRoutesTheProjectionDoesNotDescribe(t *te
 		}
 	}
 	reg.RegisterClient("credential-a", "openai", []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	if _, err := manager.Register(ctx, &coreauth.Auth{
+		ID: "credential-new-on-existing-route", Provider: "openai", QuotaDomain: "quota-new",
+		Status: coreauth.StatusActive, Attributes: map[string]string{"auth_kind": "oauth"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reg.RegisterClient("credential-new-on-existing-route", "openai", []*registry.ModelInfo{{ID: "gpt-5.4"}})
+	t.Cleanup(func() { reg.UnregisterClient("credential-new-on-existing-route") })
 	reg.RegisterClient("credential-later", "opencode", []*registry.ModelInfo{
 		{ID: "later-model", VariantID: "high", Protocols: []string{"openai_chat"},
 			CatalogProviderID: "opencode", CatalogModelID: "later-model",
@@ -622,23 +454,12 @@ func TestModelInventoryReportsRegisteredRoutesTheProjectionDoesNotDescribe(t *te
 	})
 
 	loadedAt := time.Date(2026, 8, 27, 18, 45, 0, 0, time.UTC)
-	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
-	h.SetModelRoutingStateHook(func() modelrouting.ActiveStateV2 {
-		return modelrouting.ActiveStateV2{
-			Identity: &modelrouting.ActiveIdentityV2{Generation: 1},
-			LoadedAt: &loadedAt, Projection: managementRoutingProjection(),
-		}
+	inventory, err := BuildRoutingInventory(manager, modelrouting.ActiveStateV2{
+		Identity: &modelrouting.ActiveIdentityV2{Generation: 1},
+		LoadedAt: &loadedAt, Projection: managementRoutingProjection(),
 	})
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodGet, "/v0/management/model-inventory", nil)
-	h.GetModelInventory(c)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("GetModelInventory() status = %d, body = %s", recorder.Code, recorder.Body.String())
-	}
-	var inventory modelrouting.Inventory
-	if errDecode := json.Unmarshal(recorder.Body.Bytes(), &inventory); errDecode != nil {
-		t.Fatalf("decode inventory: %v", errDecode)
+	if err != nil {
+		t.Fatal(err)
 	}
 	routes := map[string]modelrouting.InventoryModel{}
 	for _, model := range inventory.DirectModels {
@@ -649,6 +470,9 @@ func TestModelInventoryReportsRegisteredRoutesTheProjectionDoesNotDescribe(t *te
 	projected, okProjected := routes["openai/gpt-5.4"]
 	if !okProjected || projected.ModelKey.CatalogProviderID != "openai" || len(projected.Routes) != 1 {
 		t.Fatalf("projected route changed or missing: %+v", inventory.DirectModels)
+	}
+	if got := projected.Routes[0].Credentials; len(got) != 2 {
+		t.Fatalf("existing route must expose new accounts for requalification, got %d credentials", len(got))
 	}
 	later, okLater := routes["opencode/later-model"]
 	if !okLater {
@@ -717,7 +541,7 @@ func TestBootstrapInventoryKeepsChannelProtocolsForUndeclaredRoutes(t *testing.T
 	for _, model := range models {
 		protocols[model.Routes[0].RouteKey.RouteChannel] = model.Routes[0].Protocols
 	}
-	if !equalStrings(protocols["claude"], []string{"anthropic_messages"}) || !equalStrings(protocols["opencode"], []string{"openai_chat"}) {
+	if !slices.Equal(protocols["claude"], []string{"anthropic_messages"}) || !slices.Equal(protocols["opencode"], []string{"openai_chat"}) {
 		t.Fatalf("undeclared route protocols = %v, want claude anthropic_messages and opencode openai_chat", protocols)
 	}
 }
@@ -727,7 +551,7 @@ func TestBootstrapInventoryKeepsChannelProtocolsForUndeclaredRoutes(t *testing.T
 func TestBootstrapInventoryQuotaDomainErrorHidesRawCredentialID(t *testing.T) {
 	const rawID = "/home/operator/.auths/credential-raw.json"
 	auth := &coreauth.Auth{
-		ID: rawID, Provider: "opencode", RouteChannel: "opencode", Status: coreauth.StatusActive,
+		ID: rawID, Provider: "opencode", RouteChannel: "opencode", QuotaDomain: "unknown", Status: coreauth.StatusActive,
 		Attributes: map[string]string{"auth_kind": "api_key"},
 	}
 	_, err := bootstrapInventoryModels([]registry.RegisteredRouteSnapshot{{

@@ -281,8 +281,16 @@ func isHomeRequestRetryExceededError(err error) bool {
 	return strings.EqualFold(strings.TrimSpace(authErr.Code), homeRequestRetryExceededErrorCode)
 }
 
+func isSessionAffinityRetryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == "session_auth_retry"
+}
+
 func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick error) bool {
-	if lastErr == nil || isRequestStopError(errPick) {
+	if lastErr == nil || isRequestStopError(errPick) || isSessionAffinityRetryError(errPick) {
 		return false
 	}
 	if !homeMode {
@@ -1080,11 +1088,17 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
 	if opts.Metadata != nil {
-		if nodeKind, ok := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string); ok && strings.TrimSpace(nodeKind) != "" {
+		nodeKind, _ := opts.Metadata[cliproxyexecutor.NodeKindMetadataKey].(string)
+		if isFork, _ := opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool); isFork {
+			nodeKind = "fork"
+		}
+		if nodeKind = strings.TrimSpace(nodeKind); nodeKind != "" {
+			// Keep the caller headers unchanged when adding Home-only lineage metadata.
+			dispatchHeaders = dispatchHeaders.Clone()
 			if dispatchHeaders == nil {
 				dispatchHeaders = make(http.Header)
 			}
-			dispatchHeaders.Set("X-Node-Kind", strings.TrimSpace(nodeKind))
+			dispatchHeaders.Set("X-Node-Kind", nodeKind)
 		}
 	}
 	credentialPolicy := credentialPolicyFromContext(ctx)
@@ -1344,8 +1358,18 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		return nil, nil
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	selectionModel := authSelectionModelFromOptions(opts, routeModel)
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
+	if affinity, ok := m.selector.(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever {
+		if boundAuthID, okBound := affinity.boundAuthForRequest([]string{"antigravity"}, selectionModel, opts); okBound {
+			if pinnedAuthID != "" && pinnedAuthID != boundAuthID {
+				m.mu.RUnlock()
+				return nil, nil
+			}
+			pinnedAuthID = boundAuthID
+		}
+	}
 	for _, auth := range m.auths {
 		if auth == nil || auth.Disabled || auth.Status == StatusDisabled {
 			continue
@@ -1418,7 +1442,7 @@ func hasAntigravityProvider(providers []string) bool {
 }
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
-	if isRequestTerminatedError(lastErr) || isRequestStopError(lastErr) {
+	if isRequestTerminatedError(lastErr) || isRequestStopError(lastErr) || isSchedulerRejectError(lastErr) || hasRoundEndedBySchedulerReject(lastErr) {
 		return false
 	}
 	status := statusCodeFromError(lastErr)
@@ -1453,6 +1477,7 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 }
 
 func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, bool, error) {
+	updateInFlightScopeProvider(ctx, "antigravity")
 	if m != nil && m.HomeEnabled() {
 		return cliproxyexecutor.Response{}, false, &Error{Code: "home_fallback_unsupported", Message: "Home does not support Antigravity credits fallback", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -1477,6 +1502,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
+		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue
@@ -1488,13 +1514,14 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			continue
 		}
 		for _, upstreamModel := range models {
+			creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 			executionSeq := m.nextExecutionSeq()
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, creditsOpts)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, Options: creditsOpts, AccessToken: authAccessTokenForRequest(creditsCtx, c.auth, creditsOpts.Headers), RefreshToken: authRefreshToken(c.auth), CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
@@ -1525,6 +1552,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 }
 
 func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, bool, error) {
+	updateInFlightScopeProvider(ctx, "antigravity")
 	if m != nil && m.HomeEnabled() {
 		return nil, false, &Error{Code: "home_fallback_unsupported", Message: "Home does not support Antigravity credits fallback", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -1549,6 +1577,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
+		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
 			continue

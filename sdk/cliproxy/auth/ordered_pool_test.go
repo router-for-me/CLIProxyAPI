@@ -125,11 +125,8 @@ func TestResolveOrderedCandidates_ManagerBacked(t *testing.T) {
 	}
 }
 
-// newTestManager builds a minimal Manager suitable for ordered-pool unit tests.
-// It avoids loading real auths/executors and only wires the alias table.
+// newTestManager uses the production constructor without registering credentials.
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
-	m := &Manager{}
-	m.oauthModelAlias.Store(&oauthModelAliasTable{})
-	return m
+	return NewManager(nil, nil, nil)
 }

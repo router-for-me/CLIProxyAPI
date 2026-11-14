@@ -158,7 +158,7 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		}
 	}
 	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
-	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
+	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput, pluginStoreForceRefresh(c))
 
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
 	for index, item := range plugins {
@@ -218,6 +218,14 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		SourceErrors:   sanitizePluginStoreSourceErrors(sourceErrors),
 		Plugins:        entries,
 	})
+}
+
+func pluginStoreForceRefresh(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	refresh := strings.TrimSpace(c.Query("refresh"))
+	return strings.EqualFold(refresh, "true") || refresh == "1"
 }
 
 func (h *Handler) InstallPluginFromStore(c *gin.Context) {

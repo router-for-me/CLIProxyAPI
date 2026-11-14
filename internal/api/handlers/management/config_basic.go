@@ -2,7 +2,6 @@ package management
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
@@ -21,8 +19,8 @@ import (
 )
 
 const (
-	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPIPlus/releases/latest"
-	latestReleaseUserAgent = "CLIProxyAPIPlus"
+	latestReleaseURL       = "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest"
+	latestReleaseUserAgent = "CLIProxyAPI"
 )
 
 func (h *Handler) GetConfig(c *gin.Context) {
@@ -128,144 +126,75 @@ func WriteConfig(path string, data []byte) error {
 	return f.Close()
 }
 
-func restoreConfigFile(path string, previous []byte, existed bool) error {
-	if existed {
-		return WriteConfig(path, previous)
-	}
-	if errRemove := os.Remove(path); errRemove != nil && !os.IsNotExist(errRemove) {
-		return fmt.Errorf("remove newly created config after failure: %w", errRemove)
-	}
-	directory, errOpen := os.Open(filepath.Dir(path))
-	if errOpen != nil {
-		return fmt.Errorf("open config directory after rollback: %w", errOpen)
-	}
-	errSync := directory.Sync()
-	errClose := directory.Close()
-	if errSync != nil {
-		errSync = fmt.Errorf("sync config rollback: %w", errSync)
-	}
-	if errClose != nil {
-		errClose = fmt.Errorf("close config directory after rollback: %w", errClose)
-	}
-	return errors.Join(errSync, errClose)
-}
-
 func (h *Handler) PutConfigYAML(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": "cannot read request body"})
 		return
 	}
-	h.mu.Lock()
-	publish := h.configPublishHook
-	h.mu.Unlock()
-	if publish != nil {
-		ifMatch := strings.TrimSpace(c.GetHeader("If-Match"))
-		ifNoneMatch := strings.TrimSpace(c.GetHeader("If-None-Match"))
-		var expected *modelrouting.ActiveIdentityV2
-		bootstrap := false
-		switch {
-		case ifNoneMatch == "*" && ifMatch == "":
-			bootstrap = true
-		case ifNoneMatch == "" && ifMatch != "":
-			expected, err = modelrouting.ParseActiveETag(ifMatch)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_precondition", "message": err.Error()})
-				return
-			}
-		default:
-			c.JSON(http.StatusPreconditionRequired, gin.H{"error": "precondition_required", "message": "use exactly one of If-None-Match: * or If-Match: <active identity>"})
-			return
-		}
-		published, receipt, errPublish := publish(c.Request.Context(), body, expected, bootstrap)
-		if errPublish != nil {
-			status := http.StatusInternalServerError
-			code := "publication_failed"
-			switch {
-			case errors.Is(errPublish, modelrouting.ErrCASConflict):
-				status, code = http.StatusPreconditionFailed, "cas_conflict"
-			case errors.Is(errPublish, modelrouting.ErrInvalidPublication):
-				status, code = http.StatusUnprocessableEntity, "invalid_publication"
-			}
-			c.JSON(status, gin.H{"error": code, "message": errPublish.Error()})
-			return
-		}
-		if published == nil || receipt == nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "publication_failed", "message": "publisher returned an incomplete result"})
-			return
-		}
-		etag, errETag := modelrouting.ActiveETag(receipt.Active)
-		if errETag != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "receipt_failed", "message": errETag.Error()})
-			return
-		}
-		h.mu.Lock()
-		h.cfg = published
-		h.mu.Unlock()
-		c.Header("ETag", etag)
-		c.JSON(http.StatusOK, receipt)
+	var cfg struct {
+		ModelRouting *yaml.Node `yaml:"model-routing"`
+	}
+	if err = yaml.Unmarshal(body, &cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
-	parsed, err := config.ParseConfigBytes(body)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Whole-file v0 replacement cannot own the routing generation.
+	current, err := os.ReadFile(h.configFilePath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
+		return
+	}
+	var previous = cfg
+	previous.ModelRouting = nil
+	if err := yaml.Unmarshal(current, &previous); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config"})
+		return
+	}
+	if previous.ModelRouting != nil || cfg.ModelRouting != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "active_model_routing", "message": "use v8 configuration to preserve the routing generation"})
+		return
+	}
+	// Validate config using LoadConfigOptional with optional=false to enforce parsing
+	tmpDir := filepath.Dir(h.configFilePath)
+	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
+		return
+	}
+	tempFile := tmpFile.Name()
+	if _, errWrite := tmpFile.Write(body); errWrite != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tempFile)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errWrite.Error()})
+		return
+	}
+	if errClose := tmpFile.Close(); errClose != nil {
+		_ = os.Remove(tempFile)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errClose.Error()})
+		return
+	}
+	defer func() {
+		_ = os.Remove(tempFile)
+	}()
+	_, err = config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
-	if parsed.ModelRouting != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "publisher_unavailable", "message": "model-routing publication requires the Service-owned CAS publisher"})
+	if WriteConfig(h.configFilePath, body) != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
-	persistedBody := body
-	if parsed.RemoteManagement.SecretKey != "" {
-		persistedBody, err = config.UpdateNestedScalarBytes(
-			body,
-			[]string{"remote-management", "secret-key"},
-			parsed.RemoteManagement.SecretKey,
-		)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "secret_normalization_failed", "message": err.Error()})
-			return
-		}
-	}
-	h.mu.Lock()
-	previousBody, previousReadErr := os.ReadFile(h.configFilePath)
-	if previousReadErr != nil && !os.IsNotExist(previousReadErr) {
-		h.mu.Unlock()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed", "message": previousReadErr.Error()})
-		return
-	}
-	previousCfg := h.cfg
-	previousExisted := previousReadErr == nil
-	if err = WriteConfig(h.configFilePath, persistedBody); err != nil {
-		errRollback := restoreConfigFile(h.configFilePath, previousBody, previousExisted)
-		h.mu.Unlock()
-		if errRollback != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "rollback_failed", "message": errors.Join(err, errRollback).Error()})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
-		return
-	}
-	h.cfg = parsed
-	snapshot := h.reloadSnapshotConfigLocked()
-	h.mu.Unlock()
-	if err = h.reloadConfigAfterManagementSave(c.Request.Context(), snapshot); err != nil {
-		errRollback := restoreConfigFile(h.configFilePath, previousBody, previousExisted)
-		h.mu.Lock()
-		h.cfg = previousCfg
-		recoverySnapshot := h.reloadSnapshotConfigLocked()
-		h.mu.Unlock()
-		errRecoveryReload := h.reloadConfigAfterManagementSave(c.Request.Context(), recoverySnapshot)
-		if errRollback != nil || errRecoveryReload != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "rollback_failed",
-				"message": errors.Join(err, errRollback, errRecoveryReload).Error(),
-			})
-			return
-		}
+	// Reload into handler to keep memory in sync
+	newCfg, err := config.LoadConfig(h.configFilePath)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
+	h.cfg = newCfg
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 

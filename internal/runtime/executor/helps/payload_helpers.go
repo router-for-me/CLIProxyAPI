@@ -6,13 +6,23 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+var payloadConfigEvaluations atomic.Int64
+
+// PayloadConfigEvaluationCount returns the cumulative number of payload rule
+// engine evaluations across the process.
+func PayloadConfigEvaluationCount() int64 {
+	return payloadConfigEvaluations.Load()
+}
 
 // ApplyPayloadConfigWithRoot behaves like applyPayloadConfig but treats all parameter
 // paths as relative to the provided root path and restricts matches to the given
@@ -91,6 +101,11 @@ func ApplyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 }
 
 func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel, requestPath string, headers http.Header, trackedPaths ...string) (map[string]bool, bool) {
+	return applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg, targetExecutor, model, protocol, fromProtocol, root, doc, original, requestedModel, requestPath, headers, nil, trackedPaths...)
+}
+
+func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config, targetExecutor, model, protocol, fromProtocol, root string, doc *ojson.Doc, original []byte, requestedModel, requestPath string, headers http.Header, auth *cliproxyauth.Auth, trackedPaths ...string) (map[string]bool, bool) {
+	payloadConfigEvaluations.Add(1)
 	touched := make(map[string]bool)
 	if doc == nil || doc.Len() == 0 {
 		return touched, false
@@ -133,6 +148,59 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 		model = strings.TrimSpace(model)
 		requestedModel = strings.TrimSpace(requestedModel)
 		if model != "" || requestedModel != "" {
+			toolsPath := buildPayloadPath(root, "tools")
+			toolChoicePath := buildPayloadPath(root, "tool_choice")
+			autoInjectedToolIdx := -1
+			if isCodexTargetExecutor(targetExecutor) &&
+				cfg.DisableImageGeneration == config.DisableImageGenerationOff &&
+				len(original) > 0 &&
+				!rawToolsContainImageGeneration(original, toolsPath) {
+				autoInjectedToolIdx = findLastImageGenerationToolIndexDoc(doc, toolsPath)
+			}
+			origTools := ojson.GetBytesNoCopy(original, toolsPath)
+			originalHadEmptyTools := len(original) > 0 && origTools.Exists() && origTools.IsArray() && len(origTools.Array()) == 0
+			userWroteToolChoice := false
+			noteRuleWrite := func(resolvedPath string) {
+				markTouched(resolvedPath)
+				if toolChoicePath != "" && payloadRuleTargetsPath(resolvedPath, toolChoicePath) {
+					userWroteToolChoice = true
+					return
+				}
+				if autoInjectedToolIdx < 0 || toolsPath == "" || !payloadRuleTargetsPath(resolvedPath, toolsPath) {
+					return
+				}
+				if resolvedPath == toolsPath {
+					autoInjectedToolIdx = -1
+					return
+				}
+				rest := strings.TrimPrefix(resolvedPath, toolsPath+".")
+				if idx := strings.IndexByte(rest, '.'); idx >= 0 {
+					rest = rest[:idx]
+				}
+				if elemIdx, errIdx := strconv.Atoi(rest); errIdx == nil && elemIdx == autoInjectedToolIdx {
+					autoInjectedToolIdx = -1
+				}
+			}
+			noteRuleDelete := func(resolvedPath string) {
+				if autoInjectedToolIdx < 0 || toolsPath == "" || !payloadRuleTargetsPath(resolvedPath, toolsPath) {
+					return
+				}
+				if resolvedPath == toolsPath {
+					autoInjectedToolIdx = -1
+					return
+				}
+				rest := strings.TrimPrefix(resolvedPath, toolsPath+".")
+				if strings.Contains(rest, ".") {
+					return
+				}
+				if delIdx, errIdx := strconv.Atoi(rest); errIdx == nil {
+					if delIdx == autoInjectedToolIdx {
+						autoInjectedToolIdx = -1
+					} else if delIdx >= 0 && delIdx < autoInjectedToolIdx {
+						autoInjectedToolIdx--
+					}
+				}
+			}
 			candidates := payloadModelCandidates(model, requestedModel)
 			appliedDefaults := make(map[string]struct{})
 			var createdByDefault map[string]struct{}
@@ -223,7 +291,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 						}
 						mutated = true
 						appliedDefaults[resolvedPath] = struct{}{}
-						markTouched(resolvedPath)
+						noteRuleWrite(resolvedPath)
 					}
 				}
 			}
@@ -255,7 +323,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 						}
 						mutated = true
 						appliedDefaults[resolvedPath] = struct{}{}
-						markTouched(resolvedPath)
+						noteRuleWrite(resolvedPath)
 					}
 				}
 			}
@@ -276,7 +344,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 							mutated = true
 						}
 						if applied {
-							markTouched(resolvedPath)
+							noteRuleWrite(resolvedPath)
 						}
 					}
 				}
@@ -302,7 +370,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 							mutated = true
 						}
 						if applied {
-							markTouched(resolvedPath)
+							noteRuleWrite(resolvedPath)
 						}
 					}
 				}
@@ -327,14 +395,124 @@ func applyPayloadConfigWithTrackedPathsForExecutorDoc(cfg *config.Config, target
 						}
 						if existed {
 							mutated = true
+							noteRuleDelete(resolvedPath)
 						}
 						markTouched(resolvedPath)
+					}
+				}
+			}
+			if autoInjectedToolIdx >= 0 && !(userWroteToolChoice && docToolChoiceSelectsImageGeneration(doc, toolChoicePath)) {
+				if codexConfiguredPayloadIncompatibleWithAutoImageGenDoc(doc, root, model, auth, headers) {
+					if retractAutoInjectedImageGenerationToolAtIndexDoc(doc, toolsPath, autoInjectedToolIdx, originalHadEmptyTools) {
+						mutated = true
 					}
 				}
 			}
 		}
 	}
 	return touched, mutated
+}
+
+func findLastImageGenerationToolIndexDoc(doc *ojson.Doc, toolsPath string) int {
+	if doc == nil {
+		return -1
+	}
+	tools := doc.Get(toolsPath)
+	if !tools.Exists() || !tools.IsArray() {
+		return -1
+	}
+	items := tools.Array()
+	for idx := len(items) - 1; idx >= 0; idx-- {
+		if strings.TrimSpace(items[idx].Get("type").String()) == "image_generation" {
+			return idx
+		}
+	}
+	return -1
+}
+
+func rawToolsContainImageGeneration(raw []byte, toolsPath string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	tools := ojson.GetBytesNoCopy(raw, toolsPath)
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) == "image_generation" {
+			return true
+		}
+	}
+	return false
+}
+
+func docToolChoiceSelectsImageGeneration(doc *ojson.Doc, toolChoicePath string) bool {
+	if doc == nil || toolChoicePath == "" {
+		return false
+	}
+	choice := doc.Get(toolChoicePath)
+	if !choice.Exists() {
+		return false
+	}
+	if choice.Type == ojson.String {
+		return strings.EqualFold(strings.TrimSpace(choice.String()), "image_generation")
+	}
+	if !choice.IsObject() {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(choice.Get("type").String())) {
+	case "image_generation":
+		return true
+	case "tool":
+		return strings.EqualFold(strings.TrimSpace(choice.Get("name").String()), "image_generation")
+	case "allowed_tools":
+		allowed := choice.Get("tools")
+		if !allowed.IsArray() {
+			return false
+		}
+		for _, tool := range allowed.Array() {
+			if strings.EqualFold(strings.TrimSpace(tool.Get("type").String()), "image_generation") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func codexConfiguredPayloadIncompatibleWithAutoImageGenDoc(doc *ojson.Doc, root, fallbackModel string, auth *cliproxyauth.Auth, headers http.Header) bool {
+	if doc == nil {
+		return false
+	}
+	configuredModel := strings.TrimSpace(doc.Get(buildPayloadPath(root, "model")).String())
+	if configuredModel == "" {
+		configuredModel = strings.TrimSpace(fallbackModel)
+	}
+	modelName := strings.TrimSpace(thinking.ParseSuffix(configuredModel).ModelName)
+	if CodexResponsesLiteRequestForAuthDoc(doc, modelName, auth, headers) {
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(modelName), "spark") {
+		return true
+	}
+	return CodexModelUsesResponsesLite(modelName) && CodexRequestHasReasoningForHostedImageDoc(doc, configuredModel)
+}
+
+func retractAutoInjectedImageGenerationToolAtIndexDoc(doc *ojson.Doc, toolsPath string, targetIdx int, originalHadEmptyTools bool) bool {
+	tools := doc.Get(toolsPath)
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	toolItems := tools.Array()
+	if targetIdx < 0 || targetIdx >= len(toolItems) {
+		return false
+	}
+	if strings.TrimSpace(toolItems[targetIdx].Get("type").String()) != "image_generation" {
+		return false
+	}
+	if len(toolItems) == 1 && !originalHadEmptyTools {
+		return doc.Delete(toolsPath) == nil
+	}
+	return doc.Delete(toolsPath+"."+strconv.Itoa(targetIdx)) == nil
 }
 
 // ApplyPayloadConfigWithRequestTracked applies payload config and reports whether

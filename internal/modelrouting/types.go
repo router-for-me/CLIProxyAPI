@@ -1,6 +1,6 @@
 // Package modelrouting owns the versioned routing projection consumed by CLIProxy.
 //
-// The projection is produced by CCS from an AI Hub snapshot. CLIProxy validates and
+// The projection is produced by AI Hub. CLIProxy validates and
 // executes it, but never re-ranks candidates or invents catalog facts.
 package modelrouting
 
@@ -79,8 +79,9 @@ type Candidate struct {
 
 // CredentialRef is an opaque, secret-free reference to a runtime credential.
 type CredentialRef struct {
-	ID   string `yaml:"id" json:"id"`
-	Kind string `yaml:"kind" json:"kind"`
+	Revision string `yaml:"revision,omitempty" json:"revision,omitempty"`
+	ID       string `yaml:"id" json:"id"`
+	Kind     string `yaml:"kind" json:"kind"`
 }
 
 // DirectModel describes one published canonical model and all its nested variants

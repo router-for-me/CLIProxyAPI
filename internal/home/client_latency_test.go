@@ -21,11 +21,15 @@ func TestSubscriptionTelemetryPreservesHeartbeatDeadline(t *testing.T) {
 		interval   time.Duration
 		stale      bool
 		heartbeats bool
+		traffic    string
 	}{
 		{name: "default timeout", timeout: homeSubscriptionReceiveTimeout, interval: 30 * time.Second},
 		{name: "timeout longer than sampling interval", timeout: 75 * time.Second, interval: 30 * time.Second},
 		{name: "stale telemetry", timeout: homeSubscriptionReceiveTimeout, interval: time.Second, stale: true},
 		{name: "normal heartbeats renew deadline", timeout: homeSubscriptionReceiveTimeout, interval: time.Second, heartbeats: true},
+		{name: "config traffic cannot renew deadline", timeout: 75 * time.Second, interval: 30 * time.Second, traffic: redisChannelConfig},
+		{name: "cluster traffic cannot renew deadline", timeout: 75 * time.Second, interval: 30 * time.Second, traffic: redisChannelCluster},
+		{name: "unrelated pong cannot renew deadline", timeout: 75 * time.Second, interval: 30 * time.Second, traffic: "unrelated-pong"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -83,13 +87,19 @@ func TestSubscriptionTelemetryPreservesHeartbeatDeadline(t *testing.T) {
 							return
 						}
 						token := ""
-						if !test.heartbeats || (elapsed != 2*time.Second && elapsed != 4*time.Second) {
+						if test.traffic == "" && (!test.heartbeats || (elapsed != 2*time.Second && elapsed != 4*time.Second)) {
 							token = sampler.begin(time.Now())
 							if test.stale {
 								sampler.expire(time.Now(), true)
 							}
 						}
-						if _, errWrite := io.WriteString(peer, fmt.Sprintf("*2\r\n$4\r\npong\r\n$%d\r\n%s\r\n", len(token), token)); errWrite != nil {
+						frame := fmt.Sprintf("*2\r\n$4\r\npong\r\n$%d\r\n%s\r\n", len(token), token)
+						if test.traffic == "unrelated-pong" {
+							frame = "*2\r\n$4\r\npong\r\n$5\r\nother\r\n"
+						} else if test.traffic != "" {
+							frame = fmt.Sprintf("*3\r\n$7\r\nmessage\r\n$%d\r\n%s\r\n$2\r\n{}\r\n", len(test.traffic), test.traffic)
+						}
+						if _, errWrite := io.WriteString(peer, frame); errWrite != nil {
 							// The receiver closes the pipe when its heartbeat deadline expires.
 							if !errors.Is(errWrite, io.ErrClosedPipe) && !errors.Is(errWrite, net.ErrClosed) {
 								t.Errorf("write telemetry PONG: %v", errWrite)
@@ -100,24 +110,29 @@ func TestSubscriptionTelemetryPreservesHeartbeatDeadline(t *testing.T) {
 					}
 				}()
 				heartbeats := 0
+				deadline := started.Add(test.timeout)
 				for {
-					event, errReceive := receiveSubscriptionEvent(ctx, pubsub, sampler, test.timeout)
+					event, errReceive := receiveSubscriptionEvent(ctx, pubsub, sampler, deadline)
 					if errReceive != nil {
 						if !isTimeoutError(errReceive) {
 							t.Fatalf("receive error = %v, want heartbeat timeout", errReceive)
 						}
 						break
 					}
+					if test.traffic != "" {
+						continue
+					}
 					pong, ok := event.(*redis.Pong)
 					if !ok || pong.Payload != "" {
 						t.Fatalf("telemetry escaped to the heartbeat consumer: %#v", event)
 					}
 					heartbeats++
+					deadline = time.Now().Add(test.timeout)
 				}
 				if elapsed := time.Since(started); elapsed != wantElapsed || heartbeats != wantHeartbeats {
 					t.Fatalf("elapsed=%v heartbeats=%d, want %v and %d", elapsed, heartbeats, wantElapsed, wantHeartbeats)
 				}
-				if samples := sampler.history.report(time.Now()); len(samples) != 1 || samples[0].Valid == test.stale {
+				if samples := sampler.history.report(time.Now()); test.traffic == "" && (len(samples) != 1 || samples[0].Valid == test.stale) {
 					t.Fatalf("telemetry was not sampled independently of liveness: %+v", samples)
 				}
 			})

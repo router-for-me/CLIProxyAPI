@@ -124,16 +124,6 @@ func wrapRouteExhaustion(cause error, tracker *routeAttemptTracker) error {
 	if cause == nil {
 		return nil
 	}
-	summaryDebug := ""
-	if tracker != nil {
-		summaryDebug = tracker.Summary()
-	}
-	fmt.Printf("DEBUGWRAP trackerNil=%v attempts=%d summary=%q cause=%T %v\n", tracker == nil, func() int {
-		if tracker == nil {
-			return -1
-		}
-		return len(tracker.attempts)
-	}(), summaryDebug, cause, cause)
 	if tracker == nil {
 		return cause
 	}
@@ -218,6 +208,15 @@ func (e *routeExhaustionClonedError) Headers() http.Header {
 		return cloneHTTPHeader(carrier.Headers())
 	}
 	return nil
+}
+
+// IsModelCooldown preserves the trusted cooldown classification of the cause.
+func (e *routeExhaustionClonedError) IsModelCooldown() bool {
+	if e == nil {
+		return false
+	}
+	var marker interface{ IsModelCooldown() bool }
+	return errors.As(e.cause, &marker) && marker.IsModelCooldown()
 }
 
 // SafeResponseHeaders forwards trusted response headers from the wrapped cause

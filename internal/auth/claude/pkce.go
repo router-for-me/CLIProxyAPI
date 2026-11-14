@@ -11,6 +11,15 @@ import (
 	"github.com/MoeForge/moego/base64"
 )
 
+// GenerateState returns a 43-character OAuth state matching native Claude Code.
+func GenerateState() (string, error) {
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return "", fmt.Errorf("failed to generate Claude OAuth state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(stateBytes), nil
+}
+
 // GeneratePKCECodes generates a PKCE code verifier and challenge pair
 // following RFC 7636 specifications for OAuth 2.0 PKCE extension.
 // This provides additional security for the OAuth flow by ensuring that

@@ -1495,3 +1495,30 @@ func TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn(t *testing.T) {
 		t.Fatalf("keyless OpenAI-compatible entry lost its group connection-pool block: %+v", keylessAuths)
 	}
 }
+
+func TestV8CompatibilityKeysPreserveDeclaredQuotaDomains(t *testing.T) {
+	cfg, err := config.ParseConfigBytes([]byte(`config-version: 8
+api-keys:
+  openai-compatibility:
+    - name: gateway
+      base-url: https://example.invalid
+      keys:
+        - api-key: fixture-a
+          quota-domain: shared-pool
+        - api-key: fixture-b
+          quota-domain: separate-pool
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(auths) != 2 || auths[0].RoutingQuotaDomain() != "shared-pool" ||
+		auths[1].RoutingQuotaDomain() != "separate-pool" {
+		t.Fatal("declared quota domains were not preserved")
+	}
+}

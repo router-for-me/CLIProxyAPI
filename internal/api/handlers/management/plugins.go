@@ -29,6 +29,7 @@ type pluginListEntry struct {
 	Path                 string                         `json:"path"`
 	Configured           bool                           `json:"configured"`
 	Registered           bool                           `json:"registered"`
+	Priority             *int                           `json:"priority,omitempty"`
 	Enabled              bool                           `json:"enabled"`
 	EffectiveEnabled     bool                           `json:"effective_enabled"`
 	SupportsOAuth        bool                           `json:"supports_oauth"`
@@ -126,11 +127,17 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		}
 		entries[id] = entry
 	}
+	v8Request := isManagementV8PluginsRequest(c)
 	if host != nil {
 		for _, info := range host.RegisteredPlugins() {
 			entry := entries[info.ID]
 			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
+			if v8Request {
+				// Expose runtime snapshot priority on v8; the deprecated v0 route keeps its frozen response shape.
+				priority := info.Priority
+				entry.Priority = &priority
+			}
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
 			entry.OAuthProviders = pluginOAuthProviders(info.OAuthProviders)
@@ -168,6 +175,17 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		PluginsDir:     htmlsanitize.String(pluginsDir),
 		Plugins:        out,
 	})
+}
+
+func isManagementV8PluginsRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	if c.GetBool(ConfigV8ContextKey) {
+		return true
+	}
+	return c.Request != nil && c.Request.URL != nil &&
+		(c.Request.URL.Path == "/v8/management/plugins" || c.Request.URL.Path == "/v8/management/plugins/")
 }
 
 // GetPluginConfig returns the preserved plugins.configs.<id> object as JSON.

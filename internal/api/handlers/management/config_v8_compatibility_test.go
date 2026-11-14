@@ -383,3 +383,31 @@ func TestConfigV8FieldUpdatesKeepComments(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyConfigYAMLCannotReplaceRouting(t *testing.T) {
+	const host = "server: {port: 8317}\n"
+	const routing = "model-routing: {generation: 1}\n"
+	for _, tc := range []struct{ name, persisted, uploaded string }{
+		{"remove generation", host + routing, host},
+		{"introduce generation", host, host + routing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.persisted), 0600); err != nil {
+				t.Fatal(err)
+			}
+			h := &Handler{configFilePath: path}
+			router := gin.New()
+			router.PUT("/v0/management/config.yaml", h.PutConfigYAML)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v0/management/config.yaml", strings.NewReader(tc.uploaded)))
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "active_model_routing") {
+				t.Fatalf("write status %d: %s", rec.Code, rec.Body.String())
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != tc.persisted {
+				t.Fatalf("rejected write changed configuration: %v", err)
+			}
+		})
+	}
+}

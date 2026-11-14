@@ -177,6 +177,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		AccessProvider:        accessProvider,
 		RequestID:             requestID,
 		ExecutionID:           executionID,
+		HomeSelection:         record.HomeSelection,
 		TraceID:               traceID,
 		SessionID:             sessionID,
 		ParentSessionID:       parentSessionID,
@@ -222,6 +223,7 @@ type queuedUsageDetail struct {
 	AccessProvider        string                      `json:"access_provider,omitempty"`
 	RequestID             string                      `json:"request_id"`
 	ExecutionID           string                      `json:"execution_id,omitempty"`
+	HomeSelection         *coreusage.HomeSelection    `json:"home_selection,omitempty"`
 	TraceID               string                      `json:"trace_id,omitempty"`
 	SessionID             string                      `json:"session_id,omitempty"`
 	ParentSessionID       string                      `json:"parent_session_id,omitempty"`

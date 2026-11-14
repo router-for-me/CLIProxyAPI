@@ -176,6 +176,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		applyStreamHeaders(intercepted.Headers)
 	}
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
+	upstreamHeaders = withRoutingEvidence(upstreamHeaders, streamResult.DownstreamHeaders)
 	if upstreamHeaders == nil && (passthroughHeadersEnabled || streamInterceptorsActive) {
 		upstreamHeaders = make(http.Header)
 	}
@@ -904,18 +905,24 @@ func validateSSEDataJSON(chunk []byte) error {
 // streamDeliveryCompletion reconciles execution cleanup with the HTTP outcome.
 // Call only after closing output channels: the consumer may need EOF to finish.
 func streamDeliveryCompletion(ctx context.Context, outcome pluginapi.RequestCompletionOutcome, status int, err error) (pluginapi.RequestCompletionOutcome, int, error) {
-	if ctx == nil {
+	if outcome == pluginapi.RequestCompletionRejected {
 		return outcome, status, err
 	}
-	deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
-	if !tracked || (err != nil && !errors.Is(err, context.Canceled)) || outcome == pluginapi.RequestCompletionRejected {
-		return outcome, status, err
+	if ctx != nil {
+		deliveryErr, tracked := coreusage.WaitStreamDelivery(ctx)
+		if tracked && (err == nil || errors.Is(err, context.Canceled)) {
+			switch {
+			case deliveryErr == nil:
+				return pluginapi.RequestCompletionSucceeded, http.StatusOK, nil
+			case errors.Is(deliveryErr, context.Canceled), errors.Is(deliveryErr, context.DeadlineExceeded):
+				return pluginapi.RequestCompletionCanceled, 0, deliveryErr
+			default:
+				return pluginapi.RequestCompletionFailed, executionErrorMessage(deliveryErr).StatusCode, deliveryErr
+			}
+		}
 	}
-	if deliveryErr == nil {
-		return pluginapi.RequestCompletionSucceeded, http.StatusOK, nil
+	if errors.Is(err, context.Canceled) {
+		return pluginapi.RequestCompletionCanceled, 0, err
 	}
-	if errors.Is(deliveryErr, context.Canceled) || errors.Is(deliveryErr, context.DeadlineExceeded) {
-		return pluginapi.RequestCompletionCanceled, 0, deliveryErr
-	}
-	return pluginapi.RequestCompletionFailed, executionErrorMessage(deliveryErr).StatusCode, deliveryErr
+	return outcome, status, err
 }

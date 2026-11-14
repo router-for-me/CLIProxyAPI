@@ -1513,11 +1513,11 @@ func TestGeminiExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *testi
 		t.Fatalf("ExecuteStream() chunk.Err = %T %v, want status 502", streamErr, streamErr)
 	}
 	streamText := combined.String()
-	if strings.Contains(streamText, `"stop_reason":"refusal"`) {
-		t.Fatalf("stream unexpectedly emitted stop_reason refusal:\n%s", streamText)
+	if strings.TrimSpace(streamText) != "" {
+		t.Fatalf("stream unexpectedly emitted payload before bootstrap retryable error:\n%s", streamText)
 	}
-	if !strings.Contains(streamText, "event: error\n") || !strings.Contains(streamText, `"type":"api_error"`) {
-		t.Fatalf("stream missing retryable api_error event:\n%s", streamText)
+	if got := ojson.Get(streamErr.Error(), "error.type").String(); got != "api_error" {
+		t.Fatalf("ExecuteStream() chunk.Err error.type = %q, want api_error; err=%s", got, streamErr.Error())
 	}
 	assertMalformedFunctionCallFailedUsage(t, capture.records)
 }
@@ -1934,5 +1934,83 @@ func TestGeminiAndVertexOpenAIStreamTruncationReturnsError(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestGeminiExecutorNativeInteractionsFromGeminiIssue7544(t *testing.T) {
+	var upstreamBody []byte
+	var gotRevision string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRevision = r.Header.Get("Api-Revision")
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"interaction_7544","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	exec := NewGeminiInteractionsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "gemini-interactions",
+		Attributes: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model: "gemini-nano-banana-2.1",
+		Payload: []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"Minimalist editorial weather card"}]}],
+			"generationConfig":{
+				"responseModalities":["IMAGE"],
+				"imageConfig":{"aspectRatio":"16:9","imageSize":"1K"},
+				"thinkingConfig":{"thinkingLevel":"high"}
+			},
+			"tools":[{"googleSearch":{"searchTypes":{"webSearch":{},"imageSearch":{}}}}]
+		}`),
+	}
+	if _, errExecute := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+	}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+
+	if gotRevision != "2026-05-20" {
+		t.Fatalf("Api-Revision = %q, want 2026-05-20", gotRevision)
+	}
+	if ojson.GetBytesNoCopy(upstreamBody, "generation_config.response_modalities").Exists() {
+		t.Fatalf("generation_config.response_modalities must be omitted, body=%s", string(upstreamBody))
+	}
+	if ojson.GetBytesNoCopy(upstreamBody, "generation_config.image_config").Exists() {
+		t.Fatalf("generation_config.image_config must be omitted, body=%s", string(upstreamBody))
+	}
+	if ojson.GetBytesNoCopy(upstreamBody, "generation_config.thinking_config").Exists() {
+		t.Fatalf("generation_config.thinking_config must be omitted, body=%s", string(upstreamBody))
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "generation_config.thinking_level").String(); got != "high" {
+		t.Fatalf("generation_config.thinking_level = %q, want high; body=%s", got, string(upstreamBody))
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "response_format.type").String(); got != "image" {
+		t.Fatalf("response_format.type = %q, want image; body=%s", got, string(upstreamBody))
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "response_format.aspect_ratio").String(); got != "16:9" {
+		t.Fatalf("response_format.aspect_ratio = %q, want 16:9; body=%s", got, string(upstreamBody))
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "response_format.image_size").String(); got != "1K" {
+		t.Fatalf("response_format.image_size = %q, want 1K; body=%s", got, string(upstreamBody))
+	}
+	if ojson.GetBytesNoCopy(upstreamBody, "tools.0.google_search").Exists() {
+		t.Fatalf("tools.0.google_search must be omitted, body=%s", string(upstreamBody))
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "tools.0.type").String(); got != "google_search" {
+		t.Fatalf("tools.0.type = %q, want google_search; body=%s", got, string(upstreamBody))
+	}
+	searchTypes := ojson.GetBytesNoCopy(upstreamBody, "tools.0.search_types").Array()
+	if len(searchTypes) != 2 || searchTypes[0].String() != "web_search" || searchTypes[1].String() != "image_search" {
+		t.Fatalf("tools.0.search_types = %s, want [web_search, image_search]; body=%s", ojson.GetBytesNoCopy(upstreamBody, "tools.0.search_types").Raw, string(upstreamBody))
 	}
 }

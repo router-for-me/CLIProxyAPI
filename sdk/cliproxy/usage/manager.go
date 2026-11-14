@@ -30,7 +30,9 @@ type Record struct {
 	TraceID string
 	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
 	SelectionID string
-	Provider    string
+	// HomeSelection carries deferred accounting for reused Home dispatches.
+	HomeSelection *HomeSelection
+	Provider      string
 	// BaseURL stores the configured upstream base URL when available.
 	BaseURL string
 	// ExecutorType stores the concrete executor type that handled the request.
@@ -83,6 +85,14 @@ type Record struct {
 // FailureStreamTruncatedCode marks a locally synthesized failure for an
 // accepted upstream stream that ended without its terminal frame.
 const FailureStreamTruncatedCode = "stream_truncated"
+
+// FailureRequestScopedCode marks failures belonging to the request rather than
+// the selected credential, including local capability validation failures.
+const FailureRequestScopedCode = "request_scoped"
+
+// FailureForceCooldownCode marks failures matched by a request-scoped error rule
+// configured with a cooldown action (stop-and-cooldown or continue-and-cooldown).
+const FailureForceCooldownCode = "force_cooldown"
 
 // Failure holds HTTP failure metadata for an upstream request attempt.
 type Failure struct {
@@ -734,6 +744,9 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 			record.TraceID = trID
 		}
 	}
+	if record.HomeSelection == nil {
+		record.HomeSelection = HomeSelectionFromContext(ctx)
+	}
 	if strings.TrimSpace(record.SelectionID) == "" {
 		if selID := SelectionIDFromContext(ctx); selID != "" {
 			record.SelectionID = selID
@@ -780,6 +793,7 @@ func (m *Manager) run(ctx context.Context) {
 			return
 		}
 		item := m.queue[0]
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
 		m.mu.Unlock()
 		m.dispatch(item)

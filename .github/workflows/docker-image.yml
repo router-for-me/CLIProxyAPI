@@ -3,44 +3,22 @@ run-name: >-
   docker-image tag=${{ inputs.tag || github.ref_name }}
   commit=${{ inputs.commit || github.sha }}
 
-# Builds and publishes the multi-arch Docker image for CLIProxyAPIPlus.
-#
-# Triggers:
-#   - push of any v* tag (works when a PAT pushes the tag; sync-release-tag.yml
-#     pushes via GITHUB_TOKEN and explicitly dispatches this workflow because
-#     GITHUB_TOKEN events do not cascade)
-#   - workflow_dispatch with optional `tag` input
-#
-# Runner: ubuntu-latest (GitHub-hosted). QEMU + buildx produce both
-# linux/amd64 and linux/arm64 from the x64 host.
-#
-# Registries:
-#   - GHCR: ghcr.io/<owner>/cli-proxy-api-plus using built-in GITHUB_TOKEN
-#   - Docker Hub: kaitranntt/cli-proxy-api-plus when DOCKERHUB_TOKEN is
-#     configured (DOCKERHUB_USERNAME is optional; defaults to kaitranntt)
-
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build, e.g. v6.9.45-0'
-        required: false
+        description: 'Existing tag to build, e.g. v8.0.71-dc1'
+        required: true
         type: string
       commit:
         description: 'Exact commit the supplied tag must resolve to'
-        required: false
+        required: true
         type: string
-  push:
-    tags:
-      - 'v*'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  APP_NAME: CLIProxyAPI
   GHCR_REGISTRY: ghcr.io
-  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api-plus
-  DOCKERHUB_IMAGE_NAME: kaitranntt/cli-proxy-api-plus
-  MODELS_REPOSITORY_REF: fb13a81071567e9d772e8abc5541a6558075e5f2
+  GHCR_IMAGE_NAME: ${{ github.repository_owner }}/cli-proxy-api
 
 permissions:
   contents: read
@@ -52,6 +30,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'marlon-costa-dc/cliproxy' && github.ref == 'refs/heads/dc-use'
     # GitHub-hosted runner: the workflow already uses QEMU for linux/arm64, so a
     # standard ubuntu runner builds both platforms. The previous self-hosted
     # 'cliproxy' runner is offline, which left every docker-image run queued
@@ -61,8 +40,10 @@ jobs:
     steps:
       - name: Resolve build ref
         id: ref
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          REF="${{ inputs.tag }}"
+          REF="$RELEASE_TAG"
           if [ -z "${REF}" ]; then REF="${GITHUB_REF_NAME}"; fi
           echo "ref=${REF}" >> "$GITHUB_OUTPUT"
 
@@ -78,15 +59,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
-
-      - name: Verify requested image commit
-        if: inputs.commit != ''
+      - name: Verify the release identity
         env:
-          EXPECTED_COMMIT: ${{ inputs.commit }}
-        run: test "$(git rev-parse HEAD)" = "${EXPECTED_COMMIT}"
-
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: bash .github/scripts/verify-fork-release.sh "$RELEASE_TAG" "$RELEASE_COMMIT"
       - name: Set up QEMU (for arm64 emulation)
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
         with:
@@ -102,40 +79,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Detect Docker Hub credentials
-        id: dockerhub
-        env:
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          if [ -n "${DOCKERHUB_TOKEN}" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Login to Docker Hub
-        if: steps.dockerhub.outputs.enabled == 'true'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || 'kaitranntt' }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Lowercase image names
         id: img
         run: |
           GHCR_IMG="${GHCR_REGISTRY}/${GHCR_IMAGE_NAME}"
           GHCR_IMG_LC="$(echo "${GHCR_IMG}" | tr '[:upper:]' '[:lower:]')"
-          DOCKERHUB_IMG_LC="$(echo "${DOCKERHUB_IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
           {
             echo "ghcr_ref=${GHCR_IMG_LC}"
-            echo "dockerhub_ref=${DOCKERHUB_IMG_LC}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Build metadata
         id: meta
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          VERSION="${{ steps.ref.outputs.ref }}"
-          COMMIT="$(git rev-parse --short HEAD)"
+          VERSION="$RELEASE_TAG"
+          COMMIT="$(git rev-parse HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           {
             echo "version=${VERSION}"
@@ -147,18 +106,12 @@ jobs:
         id: tags
         env:
           GHCR_REF: ${{ steps.img.outputs.ghcr_ref }}
-          DOCKERHUB_REF: ${{ steps.img.outputs.dockerhub_ref }}
           VERSION: ${{ steps.meta.outputs.version }}
-          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
         run: |
           {
             echo "tags<<EOF"
             echo "${GHCR_REF}:${VERSION}"
-            echo "${GHCR_REF}:latest"
-            if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
-              echo "${DOCKERHUB_REF}:${VERSION}"
-              echo "${DOCKERHUB_REF}:latest"
-            fi
+
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -173,27 +126,15 @@ jobs:
             COMMIT=${{ steps.meta.outputs.commit }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
           tags: ${{ steps.tags.outputs.tags }}
+          labels: org.opencontainers.image.revision=${{ steps.meta.outputs.commit }}
 
       - name: Summary
         env:
           GHCR_REF: ${{ steps.img.outputs.ghcr_ref }}
-          DOCKERHUB_REF: ${{ steps.img.outputs.dockerhub_ref }}
           VERSION: ${{ steps.meta.outputs.version }}
-          DOCKERHUB_ENABLED: ${{ steps.dockerhub.outputs.enabled }}
         run: |
           {
             echo "## Published"
             echo "- \`${GHCR_REF}:${VERSION}\`"
-            echo "- \`${GHCR_REF}:latest\`"
-            if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
-              echo "- \`${DOCKERHUB_REF}:${VERSION}\`"
-              echo "- \`${DOCKERHUB_REF}:latest\`"
-              echo
-              echo "Pull: \`docker pull ${DOCKERHUB_REF}:${VERSION}\`"
-            else
-              echo
-              echo "Docker Hub skipped: configure \`DOCKERHUB_TOKEN\` to publish \`${DOCKERHUB_REF}\`. Set \`DOCKERHUB_USERNAME\` only if the login account is not \`kaitranntt\`."
-              echo
-              echo "Pull: \`docker pull ${GHCR_REF}:${VERSION}\`"
-            fi
+
           } >> "$GITHUB_STEP_SUMMARY"

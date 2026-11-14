@@ -436,6 +436,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			a := &coreauth.Auth{
 				ID:                  id,
 				Provider:            internalProviderKey,
+				QuotaDomain:         strings.TrimSpace(entry.QuotaDomain),
 				Label:               compat.Name,
 				Prefix:              prefix,
 				Status:              coreauth.StatusActive,

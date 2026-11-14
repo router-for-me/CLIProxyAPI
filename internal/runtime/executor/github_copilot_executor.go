@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"io"
 	"net/http"
 	"slices"
@@ -824,10 +825,10 @@ func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model 
 	}
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
 	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, githubCopilotAuthType); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+		return len(info.Protocols) > 0 && !containsEndpoint(info.Protocols, modelrouting.ProtocolOpenAIChat) && containsEndpoint(info.Protocols, modelrouting.ProtocolOpenAIResponses)
 	}
 	if info := lookupGitHubCopilotStaticModelInfo(baseModel); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+		return len(info.Protocols) > 0 && !containsEndpoint(info.Protocols, modelrouting.ProtocolOpenAIChat) && containsEndpoint(info.Protocols, modelrouting.ProtocolOpenAIResponses)
 	}
 	return strings.Contains(baseModel, "codex")
 }
@@ -1646,7 +1647,7 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 			m.Description = static.Description
 			m.ContextLength = static.ContextLength
 			m.MaxCompletionTokens = static.MaxCompletionTokens
-			m.SupportedEndpoints = static.SupportedEndpoints
+			m.Protocols = static.Protocols
 			m.Thinking = static.Thinking
 		} else {
 			m.Description = entry.ID + " via GitHub Copilot"

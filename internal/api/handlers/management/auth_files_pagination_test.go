@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -34,7 +35,7 @@ func TestListAuthFilesPaginationFromManager(t *testing.T) {
 	if payload.Total != 5 || payload.Page != 2 || payload.PageSize != 2 || !payload.HasMore {
 		t.Fatalf("pagination metadata = %#v", payload)
 	}
-	if got := authFileNames(payload.Files); !equalStrings(got, []string{"Charlie.json", "delta.json"}) {
+	if got := authFileNames(payload.Files); !slices.Equal(got, []string{"Charlie.json", "delta.json"}) {
 		t.Fatalf("page names = %#v, want Charlie.json and delta.json", got)
 	}
 
@@ -55,7 +56,7 @@ func TestListAuthFilesPaginationFromDisk(t *testing.T) {
 	if payload.Total != 5 || payload.Page != 1 || payload.PageSize != 2 || !payload.HasMore {
 		t.Fatalf("pagination metadata = %#v", payload)
 	}
-	if got := authFileNames(payload.Files); !equalStrings(got, []string{"Alpha.json", "Charlie.json"}) {
+	if got := authFileNames(payload.Files); !slices.Equal(got, []string{"Alpha.json", "Charlie.json"}) {
 		t.Fatalf("page names = %#v, want Alpha.json and Charlie.json", got)
 	}
 }

@@ -308,20 +308,83 @@ func TestModelRoutingBootstrapSelectorExecutesRegistryRouteBeforeProjection(t *t
 	}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credentialID) })
 
+	otherID := credentialID + "-other"
+	if _, err := manager.Register(context.Background(), &Auth{
+		ID: otherID, Provider: routeChannel, QuotaDomain: routeChannel + "-other-quota", Status: StatusActive,
+		Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(otherID, routeChannel, []*registry.ModelInfo{{
+		ID: runtimeModelID, CatalogProviderID: modelKey.CatalogProviderID, CatalogModelID: modelKey.CanonicalModelID,
+		CatalogRouteProviderID: routeChannel, CatalogRouteModelID: runtimeModelID, Protocols: []string{"openai_chat"},
+	}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(otherID) })
+
+	for _, projected := range []bool{false, true} {
+		wantCalls := int32(1)
+		if projected {
+			manager.modelRouting.Store(compileModelRouting(&modelrouting.Config{
+				Aliases: []modelrouting.Alias{{Name: "unrelated"}},
+			}))
+			wantCalls++
+		}
+		opts := modelRoutingOptions()
+		opts.Headers.Set(probeRouteSelectorHeader, selector)
+		opts.Headers.Set(credentialReferenceHeader, CredentialReferenceID(otherID))
+		response, errExecute := manager.Execute(
+			context.Background(), []string{routeChannel},
+			cliproxyexecutor.Request{Model: runtimeModelID, Payload: []byte(`{"messages":[]}`)}, opts,
+		)
+		if errExecute != nil {
+			t.Fatalf("Execute() bootstrap selector error = %v", errExecute)
+		}
+		if executor.executeCalls.Load() != wantCalls {
+			t.Fatalf("bootstrap route executions = %d, want %d", executor.executeCalls.Load(), wantCalls)
+		}
+		if got := response.DownstreamHeaders.Get(probeRouteSelectorHeader); got != selector {
+			t.Fatalf("bootstrap selector evidence = %q, want %q", got, selector)
+		}
+		if got := response.DownstreamHeaders.Get(credentialReferenceHeader); got != CredentialReferenceID(otherID) {
+			t.Fatalf("probe executed with the wrong credential: %q", got)
+		}
+		live, _ := manager.GetByID(otherID)
+		if got := response.DownstreamHeaders.Get(credentialRevisionHeader); got != live.RoutingCredentialRevision() {
+			t.Fatalf("probe revision = %q, want %q", got, live.RoutingCredentialRevision())
+		}
+		opts.Headers.Set(credentialReferenceHeader, CredentialReferenceID("unregistered"))
+		if _, err := manager.Execute(context.Background(), []string{routeChannel}, cliproxyexecutor.Request{Model: runtimeModelID}, opts); err == nil {
+			t.Fatal("probe accepted an unregistered credential")
+		}
+		if executor.executeCalls.Load() != wantCalls {
+			t.Fatal("invalid credential probe executed upstream")
+		}
+	}
+}
+
+func TestModelRoutingRejectsRotationBetweenSelectionAndExecution(t *testing.T) {
+	first := &modelRoutingAttemptExecutor{identifier: "route-first"}
+	runtime := newModelRoutingTestRuntime(t, first, &modelRoutingAttemptExecutor{identifier: "route-second"}, 1)
 	opts := modelRoutingOptions()
-	opts.Headers.Set(probeRouteSelectorHeader, selector)
-	response, errExecute := manager.Execute(
-		context.Background(), []string{routeChannel},
-		cliproxyexecutor.Request{Model: runtimeModelID, Payload: []byte(`{"messages":[]}`)}, opts,
-	)
-	if errExecute != nil {
-		t.Fatalf("Execute() bootstrap selector error = %v", errExecute)
+	opts.RequestAfterAuthInterceptor = func(_ context.Context, _ cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+		for _, auth := range runtime.manager.List() {
+			if auth.Provider != first.identifier {
+				continue
+			}
+			if auth.Attributes == nil {
+				auth.Attributes = map[string]string{}
+			}
+			auth.Attributes["api_key"] = "replacement"
+			if _, err := runtime.manager.Update(context.Background(), auth); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return cliproxyexecutor.RequestAfterAuthInterceptResponse{}
 	}
-	if executor.executeCalls.Load() != 1 {
-		t.Fatalf("bootstrap route executions = %d, want 1", executor.executeCalls.Load())
-	}
-	if got := response.DownstreamHeaders.Get(probeRouteSelectorHeader); got != selector {
-		t.Fatalf("bootstrap selector evidence = %q, want %q", got, selector)
+	_, err := runtime.manager.Execute(context.Background(), []string{first.identifier}, cliproxyexecutor.Request{Model: runtime.requestedModel}, opts)
+	if first.executeCalls.Load() != 0 || err != nil || runtime.secondExecutor.executeCalls.Load() != 1 {
+		t.Fatalf("rotation must advance only to the next qualified route: first=%d second=%d error=%v",
+			first.executeCalls.Load(), runtime.secondExecutor.executeCalls.Load(), err)
 	}
 }
 
@@ -1038,6 +1101,17 @@ func TestModelRoutingQuotaCooldownWithoutRetryAfterRecoversAtRecoveryInstant(t *
 	}})
 	t.Cleanup(func() { reg.UnregisterClient(credentialID) })
 
+	unprobedID := credentialID + "-unprobed"
+	mustRegisterAuth(t, manager, context.Background(), &Auth{
+		ID: unprobedID, Provider: routeChannel, QuotaDomain: routeChannel + "-unprobed-quota", Status: StatusActive,
+		Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth},
+	})
+	reg.RegisterClient(unprobedID, routeChannel, []*registry.ModelInfo{{
+		ID: runtimeModelID, CatalogProviderID: modelKey.CatalogProviderID, CatalogModelID: modelKey.CanonicalModelID,
+		CatalogRouteProviderID: routeChannel, CatalogRouteModelID: runtimeModelID, Protocols: []string{"openai_chat"},
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(unprobedID) })
+
 	projection := &modelrouting.Config{DirectModels: []modelrouting.DirectModel{{
 		ModelKey: modelKey, DisplayName: runtimeModelID, Active: true,
 		Routes: []modelrouting.DirectRoute{{
@@ -1056,8 +1130,11 @@ func TestModelRoutingQuotaCooldownWithoutRetryAfterRecoversAtRecoveryInstant(t *
 		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"},
 	})
 
-	if reason := reg.GetClientModelSuspensionReason(credentialID, runtimeModelID); reason != "" {
-		t.Fatalf("registry suspension after quota cooldown = %q, want none", reason)
+	for _, route := range reg.RegisteredRouteSnapshots() {
+		if route.ClientID == credentialID && route.RuntimeModelID == runtimeModelID &&
+			route.SuspensionReason != "" && route.SuspensionReason != "quota" {
+			t.Fatalf("registry suspension after quota cooldown = %q", route.SuspensionReason)
+		}
 	}
 	auth, ok := manager.GetByID(credentialID)
 	if !ok || auth == nil || auth.ModelStates[runtimeModelID] == nil {
@@ -1068,6 +1145,14 @@ func TestModelRoutingQuotaCooldownWithoutRetryAfterRecoversAtRecoveryInstant(t *
 		t.Fatal("quota cooldown without Retry-After has no recovery instant")
 	}
 
+	ref := &projection.DirectModels[0].Routes[0].CredentialRefs[0]
+	ref.Revision = auth.RoutingCredentialRevision()
+	expectedRevision := ref.Revision
+	ref.Revision = "0:0"
+	if err := manager.validateModelRoutingRuntime(projection, recoverAt); err == nil {
+		t.Fatal("publication accepted a stale credential revision")
+	}
+	ref.Revision = expectedRevision
 	errBlocked := manager.validateModelRoutingRuntime(projection, recoverAt.Add(-time.Nanosecond))
 	if errBlocked == nil || !strings.Contains(errBlocked.Error(), "credential-refs: differ from selectable live credentials") {
 		t.Fatalf("runtime validation before recovery error = %v, want credential excluded", errBlocked)

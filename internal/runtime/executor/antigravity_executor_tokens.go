@@ -21,6 +21,9 @@ import (
 // CountTokens counts tokens for the given request using the Antigravity API.
 func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if antigravityInTOSPause(e.cfg, auth) {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+	}
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -66,7 +69,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	e.obfuscateSensitiveWordsDoc(doc)
 	helps.PrepareAntigravityClaudeStructuredOutputDoc(baseModel, doc)
 	sanitizeAntigravityGeminiRequestSignaturesDoc(baseModel, doc)
-	if _, _, errReplay := prepareAntigravityGeminiReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
+	if _, errReplay := prepareAntigravityGeminiCountTokensReasoningReplayPayloadDoc(ctx, baseModel, req, opts, doc); errReplay != nil {
 		return cliproxyexecutor.Response{}, errReplay
 	}
 	ensureAntigravityGeminiLeadingUserContentDoc(baseModel, doc)
@@ -140,11 +143,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("antigravity executor: close response body error: %v", errClose)
 	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return cliproxyexecutor.Response{}, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
 	if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 		count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
@@ -152,7 +155,10 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 	}
 
-	sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+	if httpResp.StatusCode == http.StatusForbidden {
+		e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+	}
+	sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 	if httpResp.StatusCode == http.StatusTooManyRequests {
 		closeAntigravityAuthIdleTransports(auth)
 		if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {

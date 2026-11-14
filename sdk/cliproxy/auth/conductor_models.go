@@ -237,40 +237,98 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	}
 
 	state := existingModelState(auth, targetKey)
-	isSuspended := auth.Disabled || auth.Status == StatusDisabled
+	authDisabled := auth.Disabled || auth.Status == StatusDisabled
+	stateDisabled := state != nil && state.Status == StatusDisabled
+	terminalUnauthorized := hasUnauthorizedAuthFailure(auth)
+	openEnded := authDisabled || stateDisabled || terminalUnauthorized
+	isSuspended := openEnded
+
+	var credQuotaUntil time.Time
+	credQuotaSuspended := false
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" {
+		if auth.Quota.NextRecoverAt.IsZero() {
+			isSuspended = true
+			credQuotaSuspended = true
+			openEnded = true
+		} else if auth.Quota.NextRecoverAt.After(now) {
+			isSuspended = true
+			credQuotaSuspended = true
+			credQuotaUntil = auth.Quota.NextRecoverAt
+		}
+	}
+
 	isQuotaExceeded := false
-	var suspendReason string
+	stateSuspended := false
+	var stateUntil time.Time
 	if state != nil {
+		if stateDisabled {
+			stateSuspended = true
+		} else if blocked, _, retryAfter := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now); blocked && state.Quota.Reason != "cloudflare challenge" {
+			isSuspended = true
+			stateSuspended = true
+			if retryAfter.IsZero() {
+				openEnded = true
+			} else {
+				stateUntil = retryAfter
+			}
+		}
 		if state.Quota.Exceeded && state.Quota.Reason != "cloudflare challenge" && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			isQuotaExceeded = true
 		}
-		if state.Status == StatusDisabled {
+	}
+
+	var authFallbackUntil time.Time
+	if len(auth.ModelStates) == 0 {
+		// With no per-model states, scheduling falls back to the credential-wide
+		// cooldown (isAuthBlockedForModel); the projection must agree with it.
+		// When states exist, unmatched models stay schedulable by design, so the
+		// credential-wide fields must not suspend them here either.
+		if blocked, _, retryAfter := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
 			isSuspended = true
-		} else if !state.Quota.Exceeded && (state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now))) {
-			// A non-quota cooldown (auth-level 401/403, terminal route failure)
-			// blocks selection and must be reported as suspended.
-			isSuspended = true
+			if retryAfter.IsZero() {
+				openEnded = true
+			} else {
+				authFallbackUntil = retryAfter
+			}
 		}
 	}
-	if !isSuspended && state == nil && len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) {
-		// A credential-wide cooldown with no per-model state blocks every model.
-		// With per-model states, an unrelated model keeps its own projection.
-		isSuspended = true
-	}
+
+	var suspendReason string
+	var suspendUntil time.Time
 	if isSuspended {
-		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
-		if suspendReason == "" && state != nil {
+		switch {
+		case authDisabled || stateDisabled:
+			suspendReason = "disabled"
+		case terminalUnauthorized:
+			suspendReason = cooldownReason(auth.StatusMessage, QuotaState{}, auth.LastError)
+			if suspendReason == "" {
+				suspendReason = "unauthorized"
+			}
+		case stateSuspended:
 			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
+			suspendUntil = stateUntil
+			if credQuotaSuspended && (strings.EqualFold(suspendReason, "quota") || strings.EqualFold(suspendReason, "credential_quota")) && credQuotaUntil.After(suspendUntil) {
+				suspendUntil = credQuotaUntil
+			}
+		default:
+			suspendUntil = authFallbackUntil
+			if credQuotaUntil.After(suspendUntil) {
+				suspendUntil = credQuotaUntil
+			}
 		}
 		if suspendReason == "" {
-			suspendReason = "disabled"
+			suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
 		}
+	}
+	if openEnded || !isSuspended {
+		suspendUntil = time.Time{}
 	}
 
 	return registry.ClientModelProjection{
 		ModelID:       targetModel,
 		Suspended:     isSuspended,
 		SuspendReason: suspendReason,
+		SuspendUntil:  suspendUntil,
 		QuotaExceeded: isQuotaExceeded,
 	}
 }
@@ -286,7 +344,7 @@ func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel s
 	}
 	stateModel := executionResultModel(routeModel, upstreamModel, pooled)
 	selectionModel := m.selectionModelForAuth(auth, routeModel)
-	if canonicalModelKey(selectionModel) == canonicalModelKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
+	if sameCanonicalModelKey(selectionModel, upstreamModel) && strings.TrimSpace(selectionModel) != "" {
 		return strings.TrimSpace(upstreamModel)
 	}
 	return stateModel
