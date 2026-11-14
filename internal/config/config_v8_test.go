@@ -104,6 +104,28 @@ func TestV8ExampleLoadsAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestV8ShutdownTimeoutParse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"v8 nested", "server:\n  shutdown-timeout: 15\n", 15},
+		{"legacy top-level", "shutdown-timeout: 7\n", 7},
+		{"absent defaults to zero", "server:\n  port: 8317\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseConfigBytes([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ShutdownTimeoutSeconds != tc.want {
+				t.Fatalf("ShutdownTimeoutSeconds = %d, want %d", cfg.ShutdownTimeoutSeconds, tc.want)
+			}
+		})
+	}
+}
+
 func TestV8PresencePrecedenceAndCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw string

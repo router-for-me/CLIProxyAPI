@@ -4,7 +4,7 @@ package auth
 // snapshots without cloning the whole pool. Legacy and fast-path selections use
 // the same selector-owned credits, including pending reservations.
 // The scheduler mutex must be held while reading entries and selecting an auth.
-func (s *authScheduler) pickWeightedPoolLocked(route string, entries []*scheduledAuth, predicate func(*scheduledAuth) bool, pinnedAuthID string, nonWebsocketOnly bool) (*Auth, error) {
+func (s *authScheduler) pickWeightedPoolLocked(route string, priority int, transportClass string, entries []*scheduledAuth, predicate func(*scheduledAuth) bool, pinnedAuthID string, nonWebsocketOnly bool) (*Auth, error) {
 	if s.weightedSelector == nil {
 		return nil, &Error{Code: "auth_unavailable", Message: "weighted selector is not configured"}
 	}
@@ -25,7 +25,7 @@ func (s *authScheduler) pickWeightedPoolLocked(route string, entries []*schedule
 		ids = append(ids, entry.auth.ID)
 		weights = append(weights, entry.meta.weight)
 	}
-	picked, reservation := s.weightedSelector.reservePool(route, auths, weights, ids, pinnedAuthID)
+	picked, reservation := s.weightedSelector.reservePoolScoped(route, priority, transportClass, auths, weights, ids, pinnedAuthID)
 	if picked == nil {
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
 	}

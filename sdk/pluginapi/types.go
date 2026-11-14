@@ -4,9 +4,12 @@ package pluginapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Plugin is the host-side representation produced from a dynamic plugin registration.
@@ -105,7 +108,10 @@ type Capabilities struct {
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
-	// Empty defaults to ExecutorModelScopeBoth for backward compatibility.
+	// Empty defaults to ExecutorModelScopeOAuth when AuthProvider/AuthProviders is declared,
+	// and ExecutorModelScopeBoth otherwise for backward compatibility.
+	// When AuthProvider/AuthProviders is declared, only ExecutorModelScopeStatic registers an
+	// unauthenticated static model client in ModelRegistry.
 	ExecutorModelScope ExecutorModelScope
 	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
 	ExecutorInputFormats []string
@@ -169,7 +175,8 @@ type Capabilities struct {
 type ExecutorModelScope string
 
 const (
-	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models.
+	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models
+	// when no AuthProvider/AuthProviders is declared, or OAuth auth-bound models when credential-bound.
 	ExecutorModelScopeBoth ExecutorModelScope = "both"
 	// ExecutorModelScopeStatic means the executor supports only non-OAuth static models.
 	ExecutorModelScopeStatic ExecutorModelScope = "static"
@@ -635,23 +642,28 @@ type SchedulerPickResponse struct {
 	RejectReason string
 	// RejectCode is an optional machine-readable error code for the rejection (defaults to "auth_unavailable").
 	RejectCode string
+	// ExcludeCandidates optionally lists auth IDs to exclude for the current selection pass
+	// when the scheduler declines handling (Handled: false) or delegates to a built-in scheduler.
+	ExcludeCandidates []string
 }
 
 // UnmarshalJSON supports both Go struct field names and snake_case field names.
 func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 	type rawResponse struct {
-		AuthID          *string `json:"AuthID"`
-		AltAuthID       *string `json:"auth_id"`
-		DelegateBuiltin *string `json:"DelegateBuiltin"`
-		AltDelegate     *string `json:"delegate_builtin"`
-		Handled         *bool   `json:"Handled"`
-		AltHandled      *bool   `json:"handled"`
-		Reject          *bool   `json:"Reject"`
-		AltReject       *bool   `json:"reject"`
-		RejectReason    *string `json:"RejectReason"`
-		AltRejectReason *string `json:"reject_reason"`
-		RejectCode      *string `json:"RejectCode"`
-		AltRejectCode   *string `json:"reject_code"`
+		AuthID               *string         `json:"AuthID"`
+		AltAuthID            *string         `json:"auth_id"`
+		DelegateBuiltin      *string         `json:"DelegateBuiltin"`
+		AltDelegate          *string         `json:"delegate_builtin"`
+		Handled              *bool           `json:"Handled"`
+		AltHandled           *bool           `json:"handled"`
+		Reject               *bool           `json:"Reject"`
+		AltReject            *bool           `json:"reject"`
+		RejectReason         *string         `json:"RejectReason"`
+		AltRejectReason      *string         `json:"reject_reason"`
+		RejectCode           *string         `json:"RejectCode"`
+		AltRejectCode        *string         `json:"reject_code"`
+		ExcludeCandidates    json.RawMessage `json:"ExcludeCandidates"`
+		AltExcludeCandidates json.RawMessage `json:"exclude_candidates"`
 	}
 	var raw rawResponse
 	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
@@ -687,7 +699,42 @@ func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 	} else if raw.AltRejectCode != nil {
 		r.RejectCode = *raw.AltRejectCode
 	}
+	if len(raw.ExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.ExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	} else if len(raw.AltExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.AltExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	}
 	return nil
+}
+
+func parseExcludeCandidatesJSON(raw []byte) ([]string, error) {
+	if !ojson.ValidBytes(raw) {
+		return nil, fmt.Errorf("exclude_candidates contains invalid JSON")
+	}
+	parsed := ojson.ParseBytes(raw)
+	if parsed.Type == ojson.Null {
+		return nil, nil
+	}
+	if !parsed.IsArray() {
+		return nil, fmt.Errorf("exclude_candidates must be a JSON array")
+	}
+	items := parsed.Array()
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type != ojson.String {
+			return nil, fmt.Errorf("exclude_candidates entries must be strings")
+		}
+		out = append(out, item.String())
+	}
+	return out, nil
 }
 
 // ModelRouteRequest describes the original request context offered to a model router plugin.

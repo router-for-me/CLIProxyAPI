@@ -20,13 +20,15 @@ import (
 )
 
 const (
-	apiAttemptsKey                 = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey                  = "API_REQUEST"
-	apiResponseKey                 = "API_RESPONSE"
-	apiWebsocketTimelineKey        = "API_WEBSOCKET_TIMELINE"
-	deferredAPIRequestBytesKey     = "DEFERRED_API_REQUEST_BYTES"
-	creditsUsedKey                 = "__antigravity_credits_used__"
-	maxDeferredAPIRequestBodyBytes = 32 << 20 // 32 MiB
+	apiAttemptsKey                       = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey                        = "API_REQUEST"
+	apiResponseKey                       = "API_RESPONSE"
+	apiWebsocketTimelineKey              = "API_WEBSOCKET_TIMELINE"
+	deferredAPIRequestBytesKey           = "DEFERRED_API_REQUEST_BYTES"
+	creditsUsedKey                       = "__antigravity_credits_used__"
+	maxDeferredAPIRequestBodyBytes       = logging.MaxDeferredAPIRequestBodyBytes
+	maxDeferredAPIResponseBodyBytes      = logging.MaxDeferredAPIResponseBodyBytes
+	maxTotalDeferredAPIResponseBodyBytes = logging.MaxTotalDeferredAPIResponseBodyBytes
 )
 
 // UpstreamRequestLog captures the outbound upstream request details for logging.
@@ -66,16 +68,24 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	if cfg == nil || cfg.CommercialMode {
 		return
 	}
-	// Check the immutable policy before accessing the pooled request context.
-	if !cfg.RequestLog && logging.DeferredAPIRequestCaptureDisabled(ctx) {
+	// Check the immutable policy and request-scoped capture before accessing the pooled Gin context.
+	if !cfg.RequestLog {
+		if logging.DeferredAPIRequestCaptureDisabled(ctx) {
+			return
+		}
+		if capture := logging.DeferredAPICaptureFromContext(ctx); capture != nil {
+			deferAPIRequestToCapture(capture, info)
+			return
+		}
+		ginCtx := ginContextFrom(ctx)
+		if ginCtx == nil {
+			return
+		}
+		deferAPIRequest(ginCtx, info)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
-		return
-	}
-	if !cfg.RequestLog {
-		deferAPIRequest(ginCtx, info)
 		return
 	}
 
@@ -129,45 +139,133 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	}
 }
 
-func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
+func buildDeferredAPIRequestCallback(capturedInfo UpstreamRequestLog, index int, capturedAt time.Time, capturedBody []byte, bodyEmpty, bodyTruncated bool) logging.DeferredAPIRequest {
+	reqInfo := capturedInfo
+	reqInfo.Body = capturedBody
+	return func() []byte {
+		builder := newAPIRequestLogBuilder(index, reqInfo, capturedAt)
+		if bodyEmpty {
+			builder.WriteString("<empty>")
+		} else {
+			builder.Write(reqInfo.Body)
+			if bodyTruncated {
+				builder.WriteString(fmt.Sprintf("\n[API REQUEST BODY TRUNCATED: captured first %d bytes]", len(reqInfo.Body)))
+			}
+		}
+		builder.WriteString("\n\n")
+		return []byte(builder.String())
+	}
+}
+
+func deferAPIRequestToCapture(capture *logging.DeferredAPICapture, info UpstreamRequestLog) (logging.DeferredAPIRequest, int, bool) {
+	capturedInfo := info
+	return capture.RecordRequest(info.Body, func(index int, capturedAt time.Time, capturedBody []byte, bodyEmpty, bodyTruncated bool) logging.DeferredAPIRequest {
+		return buildDeferredAPIRequestCallback(capturedInfo, index, capturedAt, capturedBody, bodyEmpty, bodyTruncated)
+	})
+}
+
+func deferOrReplacePendingAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
+	if !deferredResponseCaptureEnabled(ctx, cfg) {
+		return
+	}
+	capturedInfo := info
+	if capture := logging.DeferredAPICaptureFromContext(ctx); capture != nil {
+		capture.RecordOrReplacePendingRequest(info.Body, func(index int, capturedAt time.Time, capturedBody []byte, bodyEmpty, bodyTruncated bool) logging.DeferredAPIRequest {
+			return buildDeferredAPIRequestCallback(capturedInfo, index, capturedAt, capturedBody, bodyEmpty, bodyTruncated)
+		})
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	capture := deferredResponseCaptureFrom(ginCtx)
+	fn, bytesUsed, replaced, ok := capture.RecordOrReplacePendingRequest(info.Body, func(index int, capturedAt time.Time, capturedBody []byte, bodyEmpty, bodyTruncated bool) logging.DeferredAPIRequest {
+		return buildDeferredAPIRequestCallback(capturedInfo, index, capturedAt, capturedBody, bodyEmpty, bodyTruncated)
+	})
+	if !ok {
 		return
 	}
 	var requests []logging.DeferredAPIRequest
 	if value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey); exists {
 		requests, _ = value.([]logging.DeferredAPIRequest)
 	}
-	index := len(requests) + 1
-	capturedInfo := info
-	capturedAt := time.Now()
-	capturedBytes, _ := ginCtx.Get(deferredAPIRequestBytesKey)
-	bytesUsed, _ := capturedBytes.(int)
-	remaining := maxDeferredAPIRequestBodyBytes - bytesUsed
-	if remaining < 0 {
-		remaining = 0
+	if replaced && len(requests) > 0 {
+		requests[len(requests)-1] = fn
+	} else {
+		requests = append(requests, fn)
 	}
-	captureLength := len(info.Body)
-	if captureLength > remaining {
-		captureLength = remaining
-	}
-	capturedInfo.Body = bytes.Clone(info.Body[:captureLength])
-	bodyEmpty := len(info.Body) == 0
-	bodyTruncated := captureLength < len(info.Body)
-	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed+captureLength)
-	requests = append(requests, func() []byte {
-		builder := newAPIRequestLogBuilder(index, capturedInfo, capturedAt)
-		if bodyEmpty {
-			builder.WriteString("<empty>")
-		} else {
-			builder.Write(capturedInfo.Body)
-			if bodyTruncated {
-				builder.WriteString(fmt.Sprintf("\n[API REQUEST BODY TRUNCATED: captured first %d bytes]", captureLength))
-			}
-		}
-		builder.WriteString("\n\n")
-		return []byte(builder.String())
-	})
+	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed)
 	ginCtx.Set(logging.DeferredAPIRequestContextKey, requests)
+}
+
+func deferAPIRequest(ginCtx *gin.Context, info UpstreamRequestLog) {
+	if ginCtx == nil {
+		return
+	}
+	capture := deferredResponseCaptureFrom(ginCtx)
+	fn, bytesUsed, ok := deferAPIRequestToCapture(capture, info)
+	if !ok {
+		return
+	}
+	var requests []logging.DeferredAPIRequest
+	if value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey); exists {
+		requests, _ = value.([]logging.DeferredAPIRequest)
+	}
+	requests = append(requests, fn)
+	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed)
+	ginCtx.Set(logging.DeferredAPIRequestContextKey, requests)
+}
+
+func deferredResponseCaptureEnabled(ctx context.Context, cfg *config.Config) bool {
+	if cfg == nil || cfg.CommercialMode || cfg.RequestLog {
+		return false
+	}
+	return !logging.DeferredAPIRequestCaptureDisabled(ctx)
+}
+
+func resolveDeferredAPICapture(ctx context.Context, cfg *config.Config) *logging.DeferredAPICapture {
+	// Check the immutable policy and request-scoped capture before accessing the pooled Gin context.
+	if !deferredResponseCaptureEnabled(ctx, cfg) {
+		return nil
+	}
+	if capture := logging.DeferredAPICaptureFromContext(ctx); capture != nil {
+		return capture
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return nil
+	}
+	return deferredResponseCaptureFrom(ginCtx)
+}
+
+func deferredResponseCaptureFrom(ginCtx *gin.Context) *logging.DeferredAPICapture {
+	if value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey); exists {
+		if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil {
+			return capture
+		}
+	}
+	capture := logging.NewDeferredAPICapture()
+	ginCtx.Set(logging.DeferredAPIResponseContextKey, capture)
+	return capture
+}
+
+func recordDeferredResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	if capture := resolveDeferredAPICapture(ctx, cfg); capture != nil {
+		capture.RecordResponseMetadata(status, headers)
+	}
+}
+
+func recordDeferredResponseError(ctx context.Context, cfg *config.Config, err error) {
+	if capture := resolveDeferredAPICapture(ctx, cfg); capture != nil {
+		capture.RecordResponseError(err)
+	}
+}
+
+func appendDeferredResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	if capture := resolveDeferredAPICapture(ctx, cfg); capture != nil {
+		capture.AppendResponseChunk(chunk)
+	}
 }
 
 func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.Time) *strings.Builder {
@@ -195,6 +293,7 @@ func newAPIRequestLogBuilder(index int, info UpstreamRequestLog, timestamp time.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
+		recordDeferredResponseMetadata(ctx, cfg, status, headers)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -222,7 +321,11 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if err == nil {
+		return
+	}
+	if !requestLogCaptureEnabled(cfg) {
+		recordDeferredResponseError(ctx, cfg, err)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -248,6 +351,7 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
 	if !requestLogCaptureEnabled(cfg) {
+		appendDeferredResponseChunk(ctx, cfg, chunk)
 		return
 	}
 	data := bytes.TrimSpace(chunk)
@@ -291,7 +395,11 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
 func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
-	if !requestLogCaptureEnabled(cfg) {
+	if cfg == nil || cfg.CommercialMode {
+		return
+	}
+	if !cfg.RequestLog {
+		RecordAPIRequest(ctx, cfg, info)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -325,6 +433,7 @@ func RecordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info Ups
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
+		recordDeferredResponseMetadata(ctx, cfg, status, headers)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -348,7 +457,17 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 // RecordAPIWebsocketUpgradeRejection stores a rejected websocket upgrade as an HTTP attempt.
 func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte) {
 	logging.SetResponseHeaders(ctx, headers)
-	if !requestLogCaptureEnabled(cfg) {
+	if cfg == nil || cfg.CommercialMode {
+		return
+	}
+	// Check the immutable policy and request-scoped capture before accessing the pooled Gin context.
+	if !cfg.RequestLog {
+		if logging.DeferredAPIRequestCaptureDisabled(ctx) {
+			return
+		}
+		deferOrReplacePendingAPIRequest(ctx, cfg, info)
+		RecordAPIResponseMetadata(ctx, cfg, status, headers)
+		AppendAPIResponseChunk(ctx, cfg, body)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -383,6 +502,7 @@ func WebsocketUpgradeRequestURL(rawURL string) string {
 // AppendAPIWebsocketResponse stores an upstream websocket response frame in Gin context.
 func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
 	if !requestLogCaptureEnabled(cfg) {
+		appendDeferredResponseChunk(ctx, cfg, payload)
 		return
 	}
 	data := bytes.TrimSpace(payload)
@@ -413,7 +533,15 @@ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, pa
 
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
-	if !requestLogCaptureEnabled(cfg) || err == nil {
+	if err == nil {
+		return
+	}
+	if !requestLogCaptureEnabled(cfg) {
+		stageErr := err
+		if trimmed := strings.TrimSpace(stage); trimmed != "" {
+			stageErr = fmt.Errorf("%s: %w", trimmed, err)
+		}
+		recordDeferredResponseError(ctx, cfg, stageErr)
 		return
 	}
 	ginCtx := ginContextFrom(ctx)

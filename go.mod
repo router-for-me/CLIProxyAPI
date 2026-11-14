@@ -3,7 +3,7 @@ module github.com/router-for-me/CLIProxyAPI/v8
 go 1.26.10
 
 require (
-	github.com/MoeForge/moego v0.1.0-alpha.1
+	github.com/MoeForge/moego v0.1.0-alpha.3
 	github.com/andybalholm/brotli v1.0.6
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v1.0.0
@@ -34,6 +34,7 @@ require (
 	github.com/tidwall/gjson v1.20.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/tiktoken-go/tokenizer v0.8.1
+	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.60.0
 	golang.org/x/oauth2 v0.30.0
@@ -43,8 +44,6 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-replace github.com/MoeForge/moego v0.1.0-alpha.1 => github.com/router-for-me/moego v0.1.2
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -62,7 +61,6 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	go.etcd.io/bbolt v1.5.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )

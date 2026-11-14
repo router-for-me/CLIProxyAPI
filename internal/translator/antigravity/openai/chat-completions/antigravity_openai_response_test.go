@@ -77,10 +77,15 @@ func TestFinishReasonMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "max_tokens"
+	// Verify finish_reason is "length" (the OpenAI value for an output token limit)
 	fr := ojson.GetBytesNoCopy(result2[0], "choices.0.finish_reason").String()
-	if fr != "max_tokens" {
-		t.Errorf("Expected finish_reason 'max_tokens', got: %s", fr)
+	if fr != "length" {
+		t.Errorf("Expected finish_reason 'length', got: %s", fr)
+	}
+	// Verify native_finish_reason preserves the upstream value
+	nfr := ojson.GetBytesNoCopy(result2[0], "choices.0.native_finish_reason").String()
+	if nfr != "max_tokens" {
+		t.Errorf("Expected native_finish_reason 'max_tokens', got: %s", nfr)
 	}
 }
 
@@ -96,7 +101,7 @@ func TestToolCallTakesPriorityOverMaxTokens(t *testing.T) {
 	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
 	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
-	// Verify finish_reason is "tool_calls" (takes priority over max_tokens)
+	// Verify finish_reason is "tool_calls" (takes priority over upstream MAX_TOKENS)
 	fr := ojson.GetBytesNoCopy(result2[0], "choices.0.finish_reason").String()
 	if fr != "tool_calls" {
 		t.Errorf("Expected finish_reason 'tool_calls', got: %s", fr)
@@ -500,4 +505,19 @@ func TestConvertAntigravityResponseToOpenAI_MultiPartThoughtAndTrailingSignature
 			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Hello world", out[0])
 		}
 	})
+}
+
+func TestConvertAntigravityResponseToOpenAI_SignatureOnlyEmptyTextDoesNotStartStreamOrEmitNullDelta(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	chunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig","text":""}]}}],"cpaUsageMetadata":{"promptTokenCount":378515,"cachedContentTokenCount":376466,"totalTokenCount":378515},"modelVersion":"gemini-4-hydrogen","responseId":"resp-7536"}}`)
+	out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-hydrogen", nil, nil, chunk, &param)
+	if len(out) != 0 {
+		t.Fatalf("signature-only empty-text chunk with filtered usage must not emit all-null delta, got %d chunk(s): %s", len(out), out[0])
+	}
+	done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-4-hydrogen", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 0 {
+		t.Fatalf("signature-only empty-text stream must not synthesize stop on [DONE], got %d chunk(s): %s", len(done), done[0])
+	}
 }

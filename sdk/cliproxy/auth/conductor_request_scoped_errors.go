@@ -83,6 +83,74 @@ func wrapRequestStopError(err error) error {
 	return requestStopError{error: unwrapRequestStopError(err)}
 }
 
+type schedulerRejectError struct {
+	error
+}
+
+func (e schedulerRejectError) Unwrap() error {
+	return e.error
+}
+
+func (e schedulerRejectError) IsSchedulerReject() bool {
+	return true
+}
+
+func isSchedulerRejectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type rejectChecker interface {
+		IsSchedulerReject() bool
+	}
+	var rc rejectChecker
+	return errors.As(err, &rc) && rc != nil && rc.IsSchedulerReject()
+}
+
+func unwrapSchedulerRejectError(err error) error {
+	var rejectErr schedulerRejectError
+	if errors.As(err, &rejectErr) {
+		return rejectErr.error
+	}
+	return err
+}
+
+func wrapSchedulerRejectError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return schedulerRejectError{error: unwrapSchedulerRejectError(err)}
+}
+
+type roundEndedBySchedulerRejectError struct {
+	cause error
+}
+
+func (e *roundEndedBySchedulerRejectError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *roundEndedBySchedulerRejectError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func hasRoundEndedBySchedulerReject(err error) bool {
+	var marked *roundEndedBySchedulerRejectError
+	return errors.As(err, &marked) && marked != nil
+}
+
+func markRoundEndedBySchedulerReject(err error) error {
+	if err == nil || hasRoundEndedBySchedulerReject(err) {
+		return err
+	}
+	return &roundEndedBySchedulerRejectError{cause: err}
+}
+
 func (m *Manager) runtimeConfigSnapshot() *internalconfig.Config {
 	if m == nil {
 		return nil
@@ -316,6 +384,18 @@ func applyRequestScopedActionToResult(action string, okAction bool, result *Resu
 	} else if action == RequestScopedActionStopAndCooldown || action == RequestScopedActionContinueAndCooldown {
 		result.Error.Code = ErrorCodeForceCooldown
 	}
+}
+
+// ApplyRequestScopedErrorResult evaluates request-scoped error rules for auth
+// and applies any matched action code onto result before MarkResult.
+func (m *Manager) ApplyRequestScopedErrorResult(ctx context.Context, auth *Auth, err error, result *Result) (string, bool) {
+	var cfg *internalconfig.Config
+	if m != nil {
+		cfg = m.requestScopedErrorConfig(ctx)
+	}
+	action, okAction := matchRequestScopedErrorAction(auth, err, cfg)
+	applyRequestScopedActionToResult(action, okAction, result)
+	return action, okAction
 }
 
 func isRequestScopedStop(action string, okAction bool) bool {

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
@@ -170,6 +171,118 @@ func TestListPluginsIncludesScannedAndConfiguredPlugins(t *testing.T) {
 	if got, ok := entries["configured-only"]; !ok || !got.Configured || got.Enabled || got.EffectiveEnabled || got.Path != "" {
 		t.Fatalf("configured-only entry = %#v, exists=%v", got, ok)
 	}
+}
+
+func TestListPluginsRuntimePriority(t *testing.T) {
+	t.Parallel()
+
+	pluginsDir := writeManagementPluginFile(t, "scanned")
+	archDir := filepath.Join(pluginsDir, runtime.GOOS, runtime.GOARCH)
+	discoveredConfiguredPath := filepath.Join(archDir, "discovered-configured"+managementPluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(discoveredConfiguredPath, []byte("x"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile(%s) error = %v", discoveredConfiguredPath, errWrite)
+	}
+
+	host := pluginhost.New()
+	host.RegisterPluginForTest("registered", pluginapi.Plugin{})
+	host.RegisterPluginWithPriorityForTest("zero-priority", 0, pluginapi.Plugin{})
+	host.RegisterPluginWithPriorityForTest("negative-priority", -5, pluginapi.Plugin{})
+
+	enabled := true
+	disabled := false
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"registered":            {Enabled: &enabled, Priority: 99},
+					"zero-priority":         {Enabled: &enabled, Priority: 50},
+					"negative-priority":     {Enabled: &disabled, Priority: 10},
+					"configured-only":       {Enabled: &enabled, Priority: 42},
+					"discovered-configured": {Enabled: &disabled, Priority: 24},
+				},
+			},
+		},
+		pluginHost: host,
+	}
+
+	router := gin.New()
+	v8 := router.Group("/v8/management", func(c *gin.Context) {
+		c.Set(ConfigV8ContextKey, true)
+		c.Next()
+	})
+	v8.GET("/plugins", h.ListPlugins)
+	router.GET("/v0/management/plugins", h.ListPlugins)
+
+	directV8Router := gin.New()
+	directV8Router.GET("/v8/management/plugins", h.ListPlugins)
+
+	fetchEntries := func(t *testing.T, srv http.Handler, path string) map[string]ojson.Result {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK || !ojson.ValidBytes(rec.Body.Bytes()) {
+			t.Fatalf("GET %s status=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+		plugins := ojson.Parse(rec.Body.String()).Get("plugins")
+		if !plugins.IsArray() {
+			t.Fatalf("GET %s missing plugins array: %s", path, rec.Body.String())
+		}
+		out := make(map[string]ojson.Result, len(plugins.Array()))
+		for _, item := range plugins.Array() {
+			out[item.Get("id").String()] = item
+		}
+		return out
+	}
+
+	for _, tc := range []struct {
+		name string
+		srv  http.Handler
+	}{
+		{name: "v8-context", srv: router},
+		{name: "v8-direct-path", srv: directV8Router},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := fetchEntries(t, tc.srv, "/v8/management/plugins")
+			for id, want := range map[string]int64{
+				"registered":        1,
+				"zero-priority":     0,
+				"negative-priority": -5,
+			} {
+				reg, okReg := entries[id]
+				if !okReg {
+					t.Fatalf("missing %s plugin entry", id)
+				}
+				priority := reg.Get("priority")
+				if !priority.Exists() || priority.Type != ojson.Number || priority.Int() != want {
+					t.Fatalf("%s priority = %s (exists=%v, type=%v), want numeric runtime priority %d; entry=%s", id, priority.Raw, priority.Exists(), priority.Type, want, reg.Raw)
+				}
+			}
+			for _, unregisteredID := range []string{"configured-only", "scanned", "discovered-configured"} {
+				entry, okEntry := entries[unregisteredID]
+				if !okEntry {
+					t.Fatalf("missing %s plugin entry", unregisteredID)
+				}
+				if p := entry.Get("priority"); p.Exists() {
+					t.Fatalf("%s unregistered plugin exposed priority = %s; entry=%s", unregisteredID, p.Raw, entry.Raw)
+				}
+			}
+		})
+	}
+
+	t.Run("v0-deprecated-frozen", func(t *testing.T) {
+		entries := fetchEntries(t, router, "/v0/management/plugins")
+		for _, id := range []string{"registered", "zero-priority", "negative-priority", "configured-only", "scanned", "discovered-configured"} {
+			entry, okEntry := entries[id]
+			if !okEntry {
+				t.Fatalf("missing %s plugin entry on v0", id)
+			}
+			if p := entry.Get("priority"); p.Exists() {
+				t.Fatalf("deprecated v0 route exposed priority on %s: %s", id, entry.Raw)
+			}
+		}
+	})
 }
 
 func TestListPluginsUsesConfiguredStoreVersionWhenFilesCoexist(t *testing.T) {

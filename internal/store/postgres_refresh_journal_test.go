@@ -86,6 +86,13 @@ func (c *refreshSQLConn) ExecContext(_ context.Context, query string, args []dri
 		c.database.rows[key] = append([]byte(nil), args[1].Value.([]byte)...)
 		return driver.RowsAffected(1), nil
 	}
+	if strings.HasPrefix(query, "DELETE FROM ") && strings.Contains(query, "AND receipt IS NULL") {
+		if data, exists := c.database.rows[key]; !exists || data != nil {
+			return driver.RowsAffected(0), nil
+		}
+		delete(c.database.rows, key)
+		return driver.RowsAffected(1), nil
+	}
 	return nil, fmt.Errorf("unexpected journal SQL: %s", query)
 }
 func (c *refreshSQLConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {

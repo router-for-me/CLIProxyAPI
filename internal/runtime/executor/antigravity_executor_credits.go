@@ -355,14 +355,87 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
+// antigravityTOSViolation captures the parsed state of a 403 PERMISSION_DENIED
+// carrying an ErrorInfo reason=TOS_VIOLATION (issue #7515). This is a
+// terminal, service-scoped credential suspension — the OAuth token and model
+// catalog keep working while inference is refused — so the credential must be
+// deactivated rather than cooled, and sibling credentials in the same pool
+// should not be hammered during an automated sweep.
+type antigravityTOSViolation struct {
+	AppealURL     string
+	AppealURLText string
+}
+
+// parseAntigravityTOSViolation extracts the TOS_VIOLATION signature from a
+// Google RPC error body. It returns nil for any other shape, including
+// transient 429 quota errors and non-TOS 403s.
+func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
+	if len(body) == 0 {
+		return nil
+	}
+	code := int(ojson.GetBytesNoCopy(body, "error.code").Int())
+	if code != http.StatusForbidden {
+		return nil
+	}
+	status := strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String())
+	if !strings.EqualFold(status, "PERMISSION_DENIED") {
+		return nil
+	}
+	details := ojson.GetBytesNoCopy(body, "error.details")
+	if !details.Exists() || !details.IsArray() {
+		return nil
+	}
+	for _, detail := range details.Array() {
+		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+			continue
+		}
+		reason := strings.TrimSpace(detail.Get("reason").String())
+		if !strings.EqualFold(reason, "TOS_VIOLATION") {
+			continue
+		}
+		meta := detail.Get("metadata")
+		return &antigravityTOSViolation{
+			AppealURL:     strings.Clone(strings.TrimSpace(meta.Get("appeal_url").String())),
+			AppealURLText: strings.Clone(strings.TrimSpace(meta.Get("appeal_url_link_text").String())),
+		}
+	}
+	return nil
+}
+
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+	} else if statusCode == http.StatusForbidden {
+		if violation := parseAntigravityTOSViolation(body); violation != nil {
+			err.tosViolation = true
+			err.credentialScoped = true
+			err.tosAppealURL = violation.AppealURL
+			err.tosAppealURLText = violation.AppealURLText
+		}
 	}
 	return err
+}
+
+// applyAntigravityTOSState performs the executor-side bookkeeping for a terminal
+// TOS_VIOLATION: it arms the optional pool-wide protective pause and logs the
+// appeal URL for the operator. The durable credential deactivation and the
+// appeal metadata on the auth record are carried by the returned statusErr
+// (tos_violation code + Error.Metadata) through the conductor, since the
+// executor only sees a cloned auth. It is a no-op for non-TOS errors.
+func (e *AntigravityExecutor) applyAntigravityTOSState(cfg *config.Config, auth *cliproxyauth.Auth, body []byte) {
+	violation := parseAntigravityTOSViolation(body)
+	if violation == nil || auth == nil {
+		return
+	}
+	markAntigravityTOSPause(cfg, auth)
+	if violation.AppealURL != "" {
+		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION; submit appeal: %s (%s)", auth.ID, redactTOSAppealURL(violation.AppealURL), violation.AppealURLText)
+	} else {
+		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION", auth.ID)
+	}
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
@@ -797,4 +870,119 @@ func homeKVUnavailableStatusErr(cause error) statusErr {
 		return statusErr{code: http.StatusServiceUnavailable, msg: "home kv store unavailable"}
 	}
 	return statusErr{code: http.StatusServiceUnavailable, msg: fmt.Sprintf("home kv store unavailable: %v", cause)}
+}
+
+// antigravityTOSPauseUntil stores the pool-wide protective pause deadline.
+// It mirrors the credits/cooldown dual-track pattern: an in-process map for
+// standalone mode and the home KV store (prefix cpa:antigravity:*) so the pause
+// is shared when the control plane is active.
+var antigravityTOSPauseUntil sync.Map
+
+const antigravityTOSPauseKVKey = "cpa:antigravity:tos-pause:until"
+
+// antigravityTOSPauseWindow resolves the configured protective pause window.
+// Defaults to 6h (community convention from issue #7515); "0", "off", "false",
+// or "none" disable the pause entirely.
+func antigravityTOSPauseWindow(cfg *config.Config) (time.Duration, bool) {
+	raw := "6h"
+	if cfg != nil {
+		if trimmed := strings.TrimSpace(cfg.Antigravity.TOSPauseWindow); trimmed != "" {
+			raw = trimmed
+		}
+	}
+	switch strings.ToLower(raw) {
+	case "0", "off", "false", "none", "disabled":
+		return 0, false
+	}
+	window, err := time.ParseDuration(raw)
+	if err != nil || window <= 0 {
+		return 6 * time.Hour, true
+	}
+	return window, true
+}
+
+func antigravityTOSPauseKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	_ = auth
+	return "pool"
+}
+
+// markAntigravityTOSPause records a pool-wide protective pause after the first
+// TOS_VIOLATION. Only the TOS path calls this; transient 429 quota errors must
+// never write or extend the pause.
+func markAntigravityTOSPause(cfg *config.Config, auth *cliproxyauth.Auth) {
+	window, enabled := antigravityTOSPauseWindow(cfg)
+	if !enabled || window <= 0 {
+		return
+	}
+	until := time.Now().Add(window)
+	key := antigravityTOSPauseKey(auth)
+	antigravityTOSPauseUntil.Store(key, until)
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv tos pause write error: %v", errClient)
+			return
+		}
+		payload := []byte(strconv.FormatInt(until.UnixNano(), 10))
+		if _, errSet := client.KVSet(context.Background(), antigravityTOSPauseKVKey, payload, homekv.KVSetOptions{EX: window + 5*time.Second}); errSet != nil {
+			log.Errorf("antigravity executor: home kv tos pause write error: %v", errSet)
+		}
+	}
+	log.Warnf("antigravity executor: TOS_VIOLATION pause armed for %s (pool-wide until %s)", window, until.Format(time.RFC3339))
+}
+
+// antigravityInTOSPause reports whether the Antigravity pool is currently under
+// a protective TOS pause. The check is provider-scoped (any Antigravity
+// credential) and ignores per-credential identity.
+func antigravityInTOSPause(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	_, enabled := antigravityTOSPauseWindow(cfg)
+	if !enabled {
+		return false
+	}
+	key := antigravityTOSPauseKey(auth)
+	if key == "" {
+		return false
+	}
+	now := time.Now()
+	if value, ok := antigravityTOSPauseUntil.Load(key); ok {
+		if until, ok := value.(time.Time); ok && until.After(now) {
+			return true
+		}
+		// Delete only if it is still the same expired value; a concurrent
+		// markAntigravityTOSPause may have already installed a newer deadline.
+		antigravityTOSPauseUntil.CompareAndDelete(key, value)
+	}
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv tos pause read error: %v", errClient)
+			return false
+		}
+		raw, found, errGet := client.KVGet(context.Background(), antigravityTOSPauseKVKey)
+		if errGet != nil || !found {
+			return false
+		}
+		untilNano, errParse := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		if errParse != nil {
+			return false
+		}
+		remaining := time.Unix(0, untilNano).Sub(now)
+		// An expired deadline is treated as absent; the KV EX ttl reclaims the
+		// key, so no explicit delete is needed (which could race a concurrent
+		// markAntigravityTOSPause writing a newer deadline).
+		return remaining > 0
+	}
+	return false
+}
+
+// redactTOSAppealURL strips query parameters and fragments from an appeal URL
+// before logging, so a signed or tracking URL cannot leak through log output.
+// The full URL remains available on the auth record for operator use.
+func redactTOSAppealURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if idx := strings.IndexAny(trimmed, "?#"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	return trimmed
 }
