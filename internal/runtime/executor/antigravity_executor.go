@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -50,7 +51,10 @@ const (
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
-	cfg *config.Config
+	cfg           *config.Config
+	matcherMu     sync.RWMutex
+	lastWordsKey  string
+	cachedMatcher *helps.SensitiveWordMatcher
 }
 
 // NewAntigravityExecutor creates a new Antigravity executor instance.
@@ -64,19 +68,50 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
+func (e *AntigravityExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
+	if e == nil || e.cfg == nil {
+		return nil
+	}
+	words := e.cfg.Antigravity.SensitiveWords
+	replacements := e.cfg.Antigravity.SensitiveWordsReplace
+	if len(words) == 0 && len(replacements) == 0 {
+		return nil
+	}
+	key := helps.SensitiveWordConfigCacheKey(words, replacements)
+	e.matcherMu.RLock()
+	if e.lastWordsKey == key {
+		m := e.cachedMatcher
+		e.matcherMu.RUnlock()
+		return m
+	}
+	e.matcherMu.RUnlock()
+
+	e.matcherMu.Lock()
+	defer e.matcherMu.Unlock()
+	if e.lastWordsKey == key {
+		return e.cachedMatcher
+	}
+	e.lastWordsKey = key
+	e.cachedMatcher = helps.BuildAntigravitySensitiveWordMatcher(words, replacements)
+	return e.cachedMatcher
+}
+
 func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
-	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	matcher := e.getSensitiveWordMatcher()
+	if matcher == nil {
 		return payload
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
 }
 
 func (e *AntigravityExecutor) obfuscateSensitiveWordsDoc(doc *ojson.Doc) bool {
-	if doc == nil || e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	if doc == nil {
 		return false
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+	matcher := e.getSensitiveWordMatcher()
+	if matcher == nil {
+		return false
+	}
 	return helps.ObfuscateSensitiveWordsInSystemInstructionDoc(doc, matcher)
 }
 

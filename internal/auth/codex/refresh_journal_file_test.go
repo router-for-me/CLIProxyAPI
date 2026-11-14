@@ -46,4 +46,17 @@ func TestFileRefreshClaimCreatesDurableAncestorDirectories(t *testing.T) {
 	if claimed || errClaim != nil {
 		t.Fatalf("claim was recreated: %v, %v", claimed, errClaim)
 	}
+	if errRelease := journal.RefreshRelease(context.Background(), key); errRelease != nil {
+		t.Fatalf("release pending file claim: %v", errRelease)
+	}
+	reclaimed, errReclaim := journal.RefreshClaim(context.Background(), key)
+	if !reclaimed || errReclaim != nil {
+		t.Fatalf("reclaim after release failed: %v, %v", reclaimed, errReclaim)
+	}
+	if errComplete := journal.RefreshComplete(context.Background(), key, []byte(`{"stage":"transport"}`)); errComplete != nil {
+		t.Fatalf("complete receipt: %v", errComplete)
+	}
+	if errReleaseCompleted := journal.RefreshRelease(context.Background(), key); errReleaseCompleted == nil {
+		t.Fatal("completed file receipt must never be released")
+	}
 }

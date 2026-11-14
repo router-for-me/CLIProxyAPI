@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math"
 	"net/http"
 	"regexp"
@@ -43,11 +44,31 @@ type WeightedRoundRobinSelector struct {
 	states     map[[32]byte]*weightedPoolState
 	stateCount int
 	maxKeys    int
+	// largeStates holds one shared dynamic accumulator per (route, priority, transport)
+	// bucket once a pool exceeds maxExactWeightedPoolMembers, preserving rotation credits
+	// across transient retry exclusions and cooldowns.
+	largeStates map[string]*weightedPoolState
+	largeOrder  []string
+}
+
+// UnwrapWeightedRoundRobinSelector extracts the underlying *WeightedRoundRobinSelector
+// from a bare selector or a SessionAffinitySelector wrapper.
+func UnwrapWeightedRoundRobinSelector(selector Selector) *WeightedRoundRobinSelector {
+	if weighted, ok := selector.(*WeightedRoundRobinSelector); ok {
+		return weighted
+	}
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		if weighted, okFallback := affinity.fallback.(*WeightedRoundRobinSelector); okFallback {
+			return weighted
+		}
+	}
+	return nil
 }
 
 type smoothWeightedState struct {
 	current map[string]int64
 	weights map[string]int64
+	peak    int
 }
 
 type weightedSelectorStateModelKey struct{}
@@ -83,10 +104,12 @@ const (
 )
 
 type modelCooldownError struct {
-	model    string
-	resetIn  time.Duration
-	provider string
-	cause    error
+	model          string
+	resetIn        time.Duration
+	provider       string
+	cause          error
+	claudeCooldown bool
+	claudeSignals  map[string]string
 }
 
 // NewModelCooldownError creates an error representing model-level cooldown.
@@ -99,15 +122,25 @@ func newModelCooldownError(model, provider string, resetIn time.Duration) *model
 }
 
 func newModelCooldownErrorWithCause(model, provider string, resetIn time.Duration, cause error) *modelCooldownError {
+	return newModelCooldownErrorForCandidates(model, provider, resetIn, cause, isClaudeCooldownProvider(provider), nil)
+}
+
+func newModelCooldownErrorForCandidates(model, provider string, resetIn time.Duration, cause error, claudeCooldown bool, claudeSignals map[string]string) *modelCooldownError {
 	if resetIn < 0 {
 		resetIn = 0
 	}
 	return &modelCooldownError{
-		model:    model,
-		provider: provider,
-		resetIn:  resetIn,
-		cause:    cause,
+		model:          model,
+		provider:       provider,
+		resetIn:        resetIn,
+		cause:          cause,
+		claudeCooldown: claudeCooldown,
+		claudeSignals:  maps.Clone(claudeSignals),
 	}
+}
+
+func isClaudeCooldownProvider(provider string) bool {
+	return strings.EqualFold(strings.TrimSpace(provider), "claude")
 }
 
 func (e *modelCooldownError) IsModelCooldown() bool {
@@ -352,15 +385,417 @@ func (e *modelCooldownError) StatusCode() int {
 	return http.StatusTooManyRequests
 }
 
-func (e *modelCooldownError) Headers() http.Header {
+func (e *modelCooldownError) resetSeconds() int64 {
+	if e == nil || e.resetIn <= 0 {
+		return 0
+	}
+	seconds := int64(e.resetIn / time.Second)
+	if e.resetIn%time.Second > 0 {
+		seconds++
+	}
+	return seconds
+}
+
+// SafeResponseHeaders exposes only the locally trusted cooldown headers.
+func (e *modelCooldownError) SafeResponseHeaders() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
-	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
+	headers.Set("Retry-After", strconv.FormatInt(e.resetSeconds(), 10))
 	return headers
+}
+
+func (e *modelCooldownError) Headers() http.Header {
+	headers := e.SafeResponseHeaders()
+	if e != nil && e.claudeCooldown && e.resetIn > 0 {
+		e.appendClaudeUnifiedHeaders(headers)
+	}
+	return headers
+}
+
+func (e *modelCooldownError) appendClaudeUnifiedHeaders(headers http.Header) {
+	resetSeconds := e.resetSeconds()
+	if resetSeconds <= 0 {
+		return
+	}
+	resetAt := time.Now().Unix() + resetSeconds
+	resetStr := strconv.FormatInt(resetAt, 10)
+
+	if hasRejectedClaudeUnifiedSignals(e.claudeSignals) {
+		for key, value := range e.claudeSignals {
+			if strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "anthropic-ratelimit-unified-") {
+				headers.Set(key, value)
+			}
+		}
+		headers.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		headers.Set("Anthropic-Ratelimit-Unified-Reset", resetStr)
+
+		rejWindows := rejectedClaudeUnifiedWindows(headers)
+		claim := strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim")))
+		if len(rejWindows) == 0 && claim == "" && isClaudeOverageOnlyHeaders(headers) {
+			claim = "overage"
+			headers.Set("Anthropic-Ratelimit-Unified-Representative-Claim", claim)
+		}
+		if len(rejWindows) == 0 && claim != "overage" {
+			fallbackWindow := fallbackClaudeWindowForClaim(headers, claim, e.resetIn)
+			if fallbackWindow != "" {
+				statusHeader := claudeUnifiedWindowHeader(fallbackWindow, "Status")
+				if strings.TrimSpace(headers.Get(statusHeader)) == "" {
+					headers.Set(statusHeader, "rejected")
+					rejWindows = append(rejWindows, fallbackWindow)
+				}
+			}
+		}
+
+		if len(rejWindows) == 1 {
+			headers.Set(claudeUnifiedWindowHeader(rejWindows[0], "Reset"), resetStr)
+		} else if len(rejWindows) > 1 {
+			latestHeader := ""
+			var latestEpoch int64
+			for _, window := range rejWindows {
+				resetHeader := claudeUnifiedWindowHeader(window, "Reset")
+				raw := strings.TrimSpace(headers.Get(resetHeader))
+				if raw == "" {
+					headers.Set(resetHeader, resetStr)
+					continue
+				}
+				if parsed, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && (latestHeader == "" || parsed >= latestEpoch) {
+					latestHeader = resetHeader
+					latestEpoch = parsed
+				}
+			}
+			if latestHeader != "" {
+				headers.Set(latestHeader, resetStr)
+			}
+		}
+
+		if claim == "" {
+			if inferred := inferClaudeRepresentativeClaim(headers, rejWindows, e.resetIn); inferred != "" {
+				headers.Set("Anthropic-Ratelimit-Unified-Representative-Claim", inferred)
+			}
+		}
+		if strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Status")) == "" {
+			headers.Set("Anthropic-Ratelimit-Unified-Overage-Status", "rejected")
+		}
+		return
+	}
+
+	claim := "five_hour"
+	if e.resetIn > 5*time.Hour {
+		claim = "seven_day"
+	}
+	headers.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+	headers.Set("Anthropic-Ratelimit-Unified-Reset", resetStr)
+	headers.Set("Anthropic-Ratelimit-Unified-Representative-Claim", claim)
+	headers.Set("Anthropic-Ratelimit-Unified-Overage-Status", "rejected")
+	if claim == "five_hour" {
+		headers.Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+		headers.Set("Anthropic-Ratelimit-Unified-5h-Reset", resetStr)
+	} else {
+		headers.Set("Anthropic-Ratelimit-Unified-7d-Status", "rejected")
+		headers.Set("Anthropic-Ratelimit-Unified-7d-Reset", resetStr)
+	}
+}
+
+func claudeUnifiedWindowName(headerKey string) (string, bool) {
+	lower := strings.ToLower(strings.TrimSpace(headerKey))
+	rest, hasPrefix := strings.CutPrefix(lower, "anthropic-ratelimit-unified-")
+	if !hasPrefix {
+		return "", false
+	}
+	window, hasSuffix := strings.CutSuffix(rest, "-status")
+	if !hasSuffix || window == "" || window == "overage" {
+		return "", false
+	}
+	return window, true
+}
+
+func claudeUnifiedWindowHeader(window, field string) string {
+	return http.CanonicalHeaderKey("Anthropic-Ratelimit-Unified-" + window + "-" + field)
+}
+
+func rejectedClaudeUnifiedWindows(headers http.Header) []string {
+	var windows []string
+	for key := range headers {
+		window, ok := claudeUnifiedWindowName(key)
+		if ok && strings.EqualFold(strings.TrimSpace(headers.Get(key)), "rejected") {
+			windows = append(windows, window)
+		}
+	}
+	sort.Strings(windows)
+	return windows
+}
+
+func isAllowedClaudeWindowStatus(status string) bool {
+	lower := strings.ToLower(strings.TrimSpace(status))
+	return lower == "allowed" || lower == "allowed_warning"
+}
+
+func isClaudeUtilizationBelowCap(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, errParse := strconv.ParseFloat(raw, 64)
+	if errParse != nil || math.IsNaN(u) || math.IsInf(u, 0) {
+		return false
+	}
+	return u >= 0 && u < 1.0
+}
+
+func isClaudeOverageOnlyHeaders(headers http.Header) bool {
+	overageRejected := strings.EqualFold(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Status")), "rejected") ||
+		strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason")) != ""
+	if !overageRejected {
+		return false
+	}
+	status5h := strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-5h-Status"))
+	status7d := strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-7d-Status"))
+	allowed5h := isAllowedClaudeWindowStatus(status5h)
+	allowed7d := isAllowedClaudeWindowStatus(status7d)
+	if allowed5h && allowed7d {
+		return true
+	}
+	if allowed7d && status5h == "" {
+		util5h := strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-5h-Utilization"))
+		if util5h == "" || isClaudeUtilizationBelowCap(util5h) {
+			return true
+		}
+	}
+	if allowed5h && status7d == "" && isClaudeUtilizationBelowCap(headers.Get("Anthropic-Ratelimit-Unified-7d-Utilization")) {
+		return true
+	}
+	return false
+}
+
+func fallbackClaudeWindowForClaim(headers http.Header, claim string, resetIn time.Duration) string {
+	switch {
+	case claim == "seven_day_overage_included":
+		return "7d_oi"
+	case strings.HasPrefix(claim, "seven_day_"):
+		if suffix := strings.TrimPrefix(claim, "seven_day_"); suffix != "" {
+			return "7d_" + suffix
+		}
+	case claim == "seven_day":
+		return "7d"
+	case claim == "five_hour":
+		return "5h"
+	case claim == "":
+		allowed5h := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-5h-Status"))
+		allowed7d := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-7d-Status"))
+		switch {
+		case allowed5h && allowed7d:
+			return ""
+		case allowed5h:
+			return "7d"
+		case allowed7d:
+			return "5h"
+		case resetIn > 5*time.Hour:
+			return "7d"
+		default:
+			return "5h"
+		}
+	}
+	return ""
+}
+
+func inferClaudeRepresentativeClaim(headers http.Header, windows []string, resetIn time.Duration) string {
+	has5h := false
+	has7d := false
+	has7dOI := false
+	modelFamily7d := ""
+	otherWindow := ""
+	for _, window := range windows {
+		switch {
+		case window == "7d_oi":
+			has7dOI = true
+		case strings.HasPrefix(window, "7d_"):
+			if modelFamily7d == "" {
+				modelFamily7d = "seven_day_" + strings.TrimPrefix(window, "7d_")
+			}
+		case window == "7d":
+			has7d = true
+		case window == "5h":
+			has5h = true
+		default:
+			if otherWindow == "" {
+				otherWindow = window
+			}
+		}
+	}
+	switch {
+	case has7dOI:
+		return "seven_day_overage_included"
+	case modelFamily7d != "":
+		return modelFamily7d
+	case has7d:
+		return "seven_day"
+	case has5h:
+		return "five_hour"
+	case otherWindow != "":
+		return otherWindow
+	}
+	if strings.EqualFold(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Status")), "rejected") ||
+		strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason")) != "" {
+		return "overage"
+	}
+	allowed5h := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-5h-Status"))
+	allowed7d := isAllowedClaudeWindowStatus(headers.Get("Anthropic-Ratelimit-Unified-7d-Status"))
+	switch {
+	case allowed5h && allowed7d:
+		return ""
+	case allowed5h:
+		return "seven_day"
+	case allowed7d:
+		return "five_hour"
+	case resetIn > 5*time.Hour:
+		return "seven_day"
+	default:
+		return "five_hour"
+	}
+}
+
+func hasRejectedClaudeUnifiedSignals(signals map[string]string) bool {
+	if len(signals) == 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(signals["Anthropic-Ratelimit-Unified-Status"]), "rejected") {
+		return true
+	}
+	for key, val := range signals {
+		if _, ok := claudeUnifiedWindowName(key); ok && strings.EqualFold(strings.TrimSpace(val), "rejected") {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeSignalsFromEvaluatedQuota(q QuotaState) (bool, map[string]string) {
+	if hasRejectedClaudeUnifiedSignals(q.cooldownSignals) {
+		return true, maps.Clone(q.cooldownSignals)
+	}
+	if q.cooldownEvaluated {
+		return false, nil
+	}
+	if hasRejectedClaudeUnifiedSignals(q.Signals) {
+		return true, maps.Clone(q.Signals)
+	}
+	return false, nil
+}
+
+func claudeUnifiedCooldownForAuth(auth *Auth, model string, now time.Time) (bool, map[string]string) {
+	if auth == nil || executorKeyFromAuth(auth) != "claude" {
+		return false, nil
+	}
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+		state := existingModelState(auth, model)
+		if state != nil && state.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
+			if shadow := state.credentialQuotaShadow; shadow != nil {
+				if !shadow.Quota.Exceeded || !shadow.Quota.NextRecoverAt.After(now) || shadow.NextRetryAfter.After(shadow.Quota.NextRecoverAt) {
+					return false, nil
+				}
+				if strings.EqualFold(strings.TrimSpace(shadow.Quota.Reason), "cloudflare challenge") {
+					return false, nil
+				}
+				return claudeSignalsFromEvaluatedQuota(shadow.Quota)
+			}
+			return false, nil
+		}
+		if ok, signals := claudeSignalsFromEvaluatedQuota(auth.Quota); ok {
+			return true, signals
+		}
+		if state != nil && !state.Quota.NextRecoverAt.Before(auth.Quota.NextRecoverAt) {
+			if ok, signals := claudeSignalsFromEvaluatedQuota(state.Quota); ok {
+				return true, signals
+			}
+		}
+		return true, nil
+	}
+	if len(auth.ModelStates) > 0 {
+		if model == "" {
+			if !auth.Unavailable {
+				return false, nil
+			}
+			keys := make([]string, 0, len(auth.ModelStates))
+			for key := range auth.ModelStates {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			var earliestRecover time.Time
+			var earliestSignals map[string]string
+			found := false
+			for _, key := range keys {
+				st := auth.ModelStates[key]
+				if st != nil && (st.credentialQuotaPropagated || st.Quota.Reason == "credential_quota") {
+					st = st.credentialQuotaShadow
+				}
+				if st == nil || !st.Quota.Exceeded || !st.Quota.NextRecoverAt.After(now) || st.NextRetryAfter.After(st.Quota.NextRecoverAt) {
+					return false, nil
+				}
+				if strings.EqualFold(strings.TrimSpace(st.Quota.Reason), "cloudflare challenge") {
+					return false, nil
+				}
+				okSt, sig := claudeSignalsFromEvaluatedQuota(st.Quota)
+				if !okSt {
+					return false, nil
+				}
+				if !found || st.Quota.NextRecoverAt.Before(earliestRecover) {
+					found = true
+					earliestRecover = st.Quota.NextRecoverAt
+					earliestSignals = sig
+				}
+			}
+			return found, earliestSignals
+		}
+		state := existingModelState(auth, model)
+		if state != nil && (state.credentialQuotaPropagated || state.Quota.Reason == "credential_quota") {
+			state = state.credentialQuotaShadow
+		}
+		if state == nil || !state.Quota.Exceeded || !state.Quota.NextRecoverAt.After(now) || state.NextRetryAfter.After(state.Quota.NextRecoverAt) {
+			return false, nil
+		}
+		if strings.EqualFold(strings.TrimSpace(state.Quota.Reason), "cloudflare challenge") {
+			return false, nil
+		}
+		return claudeSignalsFromEvaluatedQuota(state.Quota)
+	}
+	if !auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.After(now) || auth.NextRetryAfter.After(auth.Quota.NextRecoverAt) {
+		return false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Quota.Reason), "cloudflare challenge") {
+		return false, nil
+	}
+	return claudeSignalsFromEvaluatedQuota(auth.Quota)
+}
+
+func claudeCooldownMetadataForAuths(ctx context.Context, auths []*Auth, modelForAuth func(*Auth) string, now time.Time, clientHeaders ...http.Header) (bool, map[string]string) {
+	if len(auths) == 0 {
+		return false, nil
+	}
+	var earliestAuth *Auth
+	var earliestSignals map[string]string
+	var earliestNext time.Time
+	for _, candidate := range auths {
+		checkModel := ""
+		if modelForAuth != nil {
+			checkModel = modelForAuth(candidate)
+		}
+		okClaude, signals := claudeUnifiedCooldownForAuth(candidate, checkModel, now)
+		if !okClaude {
+			return false, nil
+		}
+		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
+		if blocked && reason == blockReasonCooldown && next.After(now) {
+			if earliestAuth == nil || next.Before(earliestNext) || (next.Equal(earliestNext) && candidate.ID < earliestAuth.ID) {
+				earliestAuth = candidate
+				earliestSignals = signals
+				earliestNext = next
+			}
+		}
+	}
+	if earliestAuth == nil {
+		return false, nil
+	}
+	return true, earliestSignals
 }
 
 func authPriority(auth *Auth) int {
@@ -558,7 +993,10 @@ func getAvailableAuthsWithPriorityModeForRequest(ctx context.Context, auths []*A
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownError(model, providerForError, resetIn)
+			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(*Auth) string {
+				return model
+			}, now, clientHeaders...)
+			return nil, newModelCooldownErrorForCandidates(model, providerForError, resetIn, nil, claudeCooldown, claudeSignals)
 		}
 		return nil, newAuthUnavailableError(earliest, now)
 	}
@@ -701,9 +1139,10 @@ func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model s
 	return picked, nil
 }
 
-// maxSmoothWeightedStateEntries bounds a single accumulator map so credentials that are
-// removed permanently cannot leak entries. Real pools stay far below this bound, so the
-// transient subsets produced by retry exclusions and cooldowns are never pruned.
+// maxSmoothWeightedStateEntries is the floor bound on a single accumulator map so
+// permanently removed credentials cannot leak entries on small pools. Larger pools scale
+// their prune bound with the historical peak size (2*peak) so transient retry exclusions
+// and cooldowns never wipe accumulated credits.
 const maxSmoothWeightedStateEntries = 1024
 
 // prepare syncs the configured weights into the state without discarding accumulated
@@ -712,6 +1151,9 @@ const maxSmoothWeightedStateEntries = 1024
 // affinity), because discarding credits there would collapse selection onto the first
 // candidate in slice order.
 func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if len(weights) > s.peak {
+		s.peak = len(weights)
+	}
 	if s.current == nil || weightsConfigChanged(s.weights, weights) {
 		s.current = make(map[string]int64, len(weights))
 	}
@@ -724,10 +1166,18 @@ func (s *smoothWeightedState) prepare(weights map[string]int64) {
 	s.pruneStale(weights)
 }
 
+func (s *smoothWeightedState) pruneLimit() int {
+	if scaled := 2 * s.peak; scaled > maxSmoothWeightedStateEntries {
+		return scaled
+	}
+	return maxSmoothWeightedStateEntries
+}
+
 // pruneStale drops entries for credentials outside the current candidate set, but only
-// once a map exceeds the safety bound, so ordinary transient exclusions keep their credits.
+// once a map exceeds the scaled safety bound, so transient exclusions keep their credits.
 func (s *smoothWeightedState) pruneStale(weights map[string]int64) {
-	if len(s.current) <= maxSmoothWeightedStateEntries && len(s.weights) <= maxSmoothWeightedStateEntries {
+	limit := s.pruneLimit()
+	if len(s.current) <= limit && len(s.weights) <= limit {
 		return
 	}
 	for authID := range s.current {
@@ -818,8 +1268,65 @@ func isAuthBlockedForModelForRequest(ctx context.Context, auth *Auth, model stri
 	if exp, ok := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...); ok && !exp.IsZero() && !exp.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
+	if authForce := effectiveAuthForceUntil(auth); authForce.After(now) && auth.NextRetryAfter.After(now) {
+		next := authForce
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(next) {
+			next = auth.Quota.NextRecoverAt
+		}
+		if model != "" && len(auth.ModelStates) > 0 {
+			modelKey := canonicalModelLookupKey(model)
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+					continue
+				}
+				if state.Status == StatusDisabled {
+					return true, blockReasonDisabled, time.Time{}
+				}
+				stateBlocked, _, stateNext := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if stateBlocked && stateNext.After(next) {
+					next = stateNext
+				}
+			}
+		}
+		return true, blockReasonCooldown, next
+	}
 	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		return true, blockReasonCooldown, auth.Quota.NextRecoverAt
+		credNext := auth.Quota.NextRecoverAt
+		if model != "" && len(auth.ModelStates) > 0 {
+			modelKey := canonicalModelLookupKey(model)
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+					continue
+				}
+				if state.Status == StatusDisabled {
+					return true, blockReasonDisabled, time.Time{}
+				}
+				stateBlocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if stateBlocked && next.After(credNext) {
+					credNext = next
+				}
+			}
+		}
+		return true, blockReasonCooldown, credNext
+	}
+	if !auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) {
+		credNext := auth.credentialRetryAfter
+		if model != "" && len(auth.ModelStates) > 0 {
+			modelKey := canonicalModelLookupKey(model)
+			for stateModel, state := range auth.ModelStates {
+				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+					continue
+				}
+				if state.Status == StatusDisabled {
+					return true, blockReasonDisabled, time.Time{}
+				}
+				stateBlocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+				if stateBlocked && next.After(credNext) {
+					credNext = next
+				}
+			}
+		}
+		return true, blockReasonOther, credNext
 	}
 	unavailable := codexRefreshUnavailableForRequest(ctx, auth, now, clientHeaders...)
 	if model != "" {
@@ -1630,6 +2137,30 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 	}
 	if s.matcher != nil {
 		s.matcher.InvalidateAuth(authID)
+	}
+}
+
+// ForgetAuth forwards permanent credential removal to the fallback selector so
+// weighted round-robin accounting can prune deregistered credentials without
+// disturbing credits of transiently excluded credentials.
+func (s *SessionAffinitySelector) ForgetAuth(authID string) {
+	s.ForgetAuthUpTo(authID, ^uint64(0), ^uint64(0))
+}
+
+// ForgetAuthUpTo forwards epoch-gated permanent credential removal to the fallback selector
+// so delayed removals never evict a newly re-registered credential with the same ID.
+func (s *SessionAffinitySelector) ForgetAuthUpTo(authID string, maxEpoch, maxGen uint64) {
+	if s == nil || authID == "" {
+		return
+	}
+	if epochForgetter, ok := s.fallback.(interface {
+		ForgetAuthUpTo(string, uint64, uint64)
+	}); ok && epochForgetter != nil {
+		epochForgetter.ForgetAuthUpTo(authID, maxEpoch, maxGen)
+		return
+	}
+	if forgetter, ok := s.fallback.(interface{ ForgetAuth(string) }); ok && forgetter != nil {
+		forgetter.ForgetAuth(authID)
 	}
 }
 

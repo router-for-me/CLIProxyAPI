@@ -15,6 +15,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	geminicommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
@@ -28,7 +29,9 @@ type Params struct {
 	ToolNameMap                  map[string]string
 	SanitizedNameMap             map[string]string
 	SawToolCall                  bool
+	HasVisibleOutput             bool
 	HasFinalEvents               bool
+	HasMalformedError            bool
 	FinishReason                 string
 	InputTokens                  int64
 	OutputTokens                 int64
@@ -40,12 +43,33 @@ type Params struct {
 	ActiveToolCall               *translatorcommon.VertexStreamingToolCall
 	PendingToolThoughtSignatures []string
 	HasIncompleteToolCall        bool
+	LastSignatureTarget          string
+	CurrentThinkingHasText       bool
 }
 
 const geminiMalformedFunctionCallErrorPayload = `{"type":"error","error":{"type":"api_error","message":"Gemini response finished with MALFORMED_FUNCTION_CALL"}}`
 
-func isGeminiMalformedFunctionCall(finishReason string, sawToolCall bool) bool {
-	return finishReason == "MALFORMED_FUNCTION_CALL" && !sawToolCall
+func isGeminiMalformedFunctionCall(finishReason string, hasVisibleOutput bool) bool {
+	return strings.EqualFold(strings.TrimSpace(finishReason), "MALFORMED_FUNCTION_CALL") && !hasVisibleOutput
+}
+
+func isGeminiNonEmptyFunctionCall(fc ojson.Result) bool {
+	if !fc.IsObject() {
+		return false
+	}
+	if strings.TrimSpace(fc.Get("name").String()) != "" || strings.TrimSpace(fc.Get("id").String()) != "" {
+		return true
+	}
+	if partial := fc.Get("partialArgs"); partial.IsArray() && len(partial.Array()) > 0 {
+		return true
+	}
+	if partial := fc.Get("partial_args"); partial.IsArray() && len(partial.Array()) > 0 {
+		return true
+	}
+	if args := fc.Get("args"); args.IsObject() && len(args.Map()) > 0 {
+		return true
+	}
+	return false
 }
 
 func resolveGeminiClaudeStopReason(finishReason string, sawToolCall bool) string {
@@ -111,6 +135,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 	}
 	abortActiveToolCall := func() {
 		p.HasIncompleteToolCall = true
+		p.LastSignatureTarget = ""
 		if p.ActiveToolCall != nil {
 			p.ActiveToolCall = nil
 			p.PendingToolThoughtSignatures = nil
@@ -126,7 +151,10 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		if p.ActiveToolCall != nil || p.HasIncompleteToolCall {
 			return [][]byte{}
 		}
-		if isGeminiMalformedFunctionCall(p.FinishReason, p.SawToolCall) {
+		if p.HasMalformedError && p.HasFinalEvents {
+			return [][]byte{}
+		}
+		if isGeminiMalformedFunctionCall(p.FinishReason, p.HasVisibleOutput) {
 			if p.ResponseType != 0 {
 				flushPendingToolInput()
 				appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex))
@@ -135,6 +163,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			if !p.HasFinalEvents {
 				appendEvent("error", geminiMalformedFunctionCallErrorPayload)
 				p.HasFinalEvents = true
+				p.HasMalformedError = true
 			}
 			if len(output) > 0 {
 				return [][]byte{output}
@@ -169,7 +198,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		return [][]byte{}
 	}
 
-	if isGeminiMalformedFunctionCall(p.FinishReason, p.SawToolCall) && p.HasFinalEvents {
+	if p.HasMalformedError && p.HasFinalEvents {
 		return [][]byte{}
 	}
 
@@ -202,6 +231,17 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		p.HasContent = true
 	}
 
+	appendTrailingCarrierThinkingBlock := func(signature string) {
+		target := p.LastSignatureTarget
+		if target == geminiClaudeUnsupportedSignatureTarget {
+			return
+		}
+		if target != "" {
+			signature = translatorcommon.EncodeGeminiClaudeCarrierSignature(signature, translatorcommon.GeminiClaudeCarrierPrevious, target)
+		}
+		appendCarrierThinkingBlock(signature)
+	}
+
 	// Initialize the streaming session with a message_start event
 	// This is only sent for the very first response chunk
 	if !(*param).(*Params).HasFirstResponse {
@@ -228,6 +268,20 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		partResults := partsResult.Array()
 		for i := 0; i < len(partResults); i++ {
 			partResult := partResults[i]
+			if geminicommon.HasUnsupportedPartPayload(partResult, "text", "functionCall") {
+				if p.ActiveToolCall != nil {
+					abortActiveToolCall()
+				}
+				if p.ResponseType != 0 {
+					flushPendingToolInput()
+					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex))
+					p.ResponseIndex++
+					p.ResponseType = 0
+				}
+				p.LastSignatureTarget = geminiClaudeUnsupportedSignatureTarget
+				p.CurrentThinkingHasText = false
+				continue
+			}
 
 			// Extract the different types of content from each part
 			partTextResult := partResult.Get("text")
@@ -244,7 +298,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			isThought := partResult.Get("thought").Bool()
 
 			if hasThoughtSignature && (!partTextResult.Exists() || partTextResult.String() == "") && !functionCallResult.Exists() {
-				if (*param).(*Params).ResponseType == 2 {
+				if p.ResponseType == 2 && p.CurrentThinkingHasText {
 					appendSignatureDelta(partSig)
 					continue
 				}
@@ -252,13 +306,13 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					p.PendingToolThoughtSignatures = append(p.PendingToolThoughtSignatures, partSig)
 					continue
 				}
-				appendCarrierThinkingBlock(partSig)
+				appendTrailingCarrierThinkingBlock(partSig)
 				continue
 			}
 
 			if isThought {
 				if hasThoughtSignature && (!partTextResult.Exists() || partTextResult.String() == "") {
-					if (*param).(*Params).ResponseType == 2 {
+					if p.ResponseType == 2 && p.CurrentThinkingHasText {
 						appendSignatureDelta(partSig)
 					} else if p.ActiveToolCall != nil {
 						p.PendingToolThoughtSignatures = append(p.PendingToolThoughtSignatures, partSig)
@@ -286,11 +340,16 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						(*param).(*Params).ResponseIndex++
 					}
 
+					p.CurrentThinkingHasText = false
 					appendEvent("content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, (*param).(*Params).ResponseIndex))
 					data, _ := ojson.SetBytes([]byte(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, (*param).(*Params).ResponseIndex)), "delta.thinking", partText)
 					appendEvent("content_block_delta", string(data))
 					(*param).(*Params).ResponseType = 2
 					(*param).(*Params).HasContent = true
+				}
+				if partText != "" {
+					p.CurrentThinkingHasText = true
+					p.LastSignatureTarget = translatorcommon.GeminiClaudeCarrierText
 				}
 				if hasThoughtSignature {
 					appendSignatureDelta(partSig)
@@ -306,6 +365,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 
 				if active := p.ActiveToolCall; active != nil && active.CanContinueWith(functionCallResult) {
 					p.SawToolCall = true
+					p.HasVisibleOutput = true
 					delta, fcDone := active.Assembler.PushFunctionCall(functionCallResult)
 					if active.Assembler.Err() != nil {
 						abortActiveToolCall()
@@ -337,7 +397,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 							sigs := p.PendingToolThoughtSignatures
 							p.PendingToolThoughtSignatures = nil
 							for _, sig := range sigs {
-								appendCarrierThinkingBlock(sig)
+								appendCarrierThinkingBlock(translatorcommon.EncodeGeminiClaudeCarrierSignature(sig, translatorcommon.GeminiClaudeCarrierPrevious, translatorcommon.GeminiClaudeCarrierFunction))
 							}
 						}
 					}
@@ -370,6 +430,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					}
 
 					p.SawToolCall = true
+					p.HasVisibleOutput = true
 					if hasThoughtSignature {
 						appendCarrierThinkingBlock(partSig)
 					}
@@ -391,6 +452,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					appendEvent("content_block_start", dataDoc.String())
 					p.ResponseType = 3
 					p.HasContent = true
+					p.LastSignatureTarget = translatorcommon.GeminiClaudeCarrierFunction
 
 					if p.CurrentToolIsParameterless {
 						if fcDone {
@@ -420,6 +482,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				if (*param).(*Params).ResponseType == 3 && upstreamToolName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 						(*param).(*Params).SawToolCall = true
+						if fcArgsResult.IsObject() && len(fcArgsResult.Map()) > 0 {
+							(*param).(*Params).HasVisibleOutput = true
+						}
 						partialJSON := util.CleanClaudeToolArgumentsWithTranslated(fcArgsResult.Raw, (*param).(*Params).CurrentToolName, originalRequestRawJSON, requestRawJSON)
 						if (*param).(*Params).CurrentToolIsParameterless {
 							if (*param).(*Params).CurrentToolInputEmitted {
@@ -443,17 +508,18 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 						}
 					}
 					if hasThoughtSignature {
-						appendCarrierThinkingBlock(partSig)
+						appendTrailingCarrierThinkingBlock(partSig)
 					}
 					continue
 				}
-				if rawToolName == "" && !functionCallResult.Get("args").Exists() {
+				if !isGeminiNonEmptyFunctionCall(functionCallResult) {
 					if hasThoughtSignature {
-						appendCarrierThinkingBlock(partSig)
+						appendTrailingCarrierThinkingBlock(partSig)
 					}
 					continue
 				}
 				(*param).(*Params).SawToolCall = true
+				(*param).(*Params).HasVisibleOutput = true
 
 				if hasThoughtSignature {
 					appendCarrierThinkingBlock(partSig)
@@ -501,13 +567,14 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 				}
 				(*param).(*Params).ResponseType = 3
 				(*param).(*Params).HasContent = true
+				p.LastSignatureTarget = translatorcommon.GeminiClaudeCarrierFunction
 				continue
 			}
 
 			if partTextResult.Exists() {
 				partText := partTextResult.String()
 				if hasThoughtSignature && partText == "" {
-					if (*param).(*Params).ResponseType == 2 {
+					if p.ResponseType == 2 && p.CurrentThinkingHasText {
 						appendSignatureDelta(partSig)
 						continue
 					}
@@ -542,6 +609,18 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					appendEvent("content_block_delta", string(data))
 					(*param).(*Params).ResponseType = 1
 					(*param).(*Params).HasContent = true
+				}
+				if partText != "" {
+					p.LastSignatureTarget = translatorcommon.GeminiClaudeCarrierText
+					if strings.TrimSpace(partText) != "" {
+						p.HasVisibleOutput = true
+					}
+				}
+				if partText != "" {
+					// Preserve native part boundaries for signatures that may arrive later.
+					appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, p.ResponseIndex))
+					p.ResponseIndex++
+					p.ResponseType = 0
 				}
 				continue
 			}
@@ -581,7 +660,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		(*param).(*Params).CachedTokens = cachedTokens
 	}
 
-	if isGeminiMalformedFunctionCall((*param).(*Params).FinishReason, (*param).(*Params).SawToolCall) && !(*param).(*Params).HasFinalEvents {
+	if isGeminiMalformedFunctionCall((*param).(*Params).FinishReason, (*param).(*Params).HasVisibleOutput) && !(*param).(*Params).HasFinalEvents {
 		if (*param).(*Params).ResponseType != 0 {
 			flushPendingToolInput()
 			appendEvent("content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex))
@@ -589,6 +668,7 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 		}
 		appendEvent("error", geminiMalformedFunctionCallErrorPayload)
 		(*param).(*Params).HasFinalEvents = true
+		(*param).(*Params).HasMalformedError = true
 		return [][]byte{output}
 	}
 
@@ -660,6 +740,8 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	thinkingBuilder := strings.Builder{}
 	var thinkingSignature string
 	hasToolCall := false
+	hasVisibleOutput := false
+	lastSignatureTarget := ""
 	var blocks [][]byte
 
 	flushText := func() {
@@ -697,6 +779,12 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 	if parts.IsArray() {
 		for _, part := range parts.Array() {
+			if geminicommon.HasUnsupportedPartPayload(part, "text", "functionCall") {
+				flushThinking()
+				flushText()
+				lastSignatureTarget = geminiClaudeUnsupportedSignatureTarget
+				continue
+			}
 			thoughtSignatureResult := part.Get("thoughtSignature")
 			if !thoughtSignatureResult.Exists() {
 				thoughtSignatureResult = part.Get("thought_signature")
@@ -710,13 +798,14 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 			functionCall := part.Get("functionCall")
 			isThought := part.Get("thought").Bool()
 
-			if isThought {
+			if isThought && (text.String() != "" || partSig == "") {
 				flushText()
 				if partSig != "" {
 					thinkingSignature = partSig
 				}
 				if text.Exists() && text.String() != "" {
 					thinkingBuilder.WriteString(text.String())
+					lastSignatureTarget = translatorcommon.GeminiClaudeCarrierText
 				}
 				continue
 			}
@@ -729,8 +818,14 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					continue
 				}
 				if partSig != "" {
+					if lastSignatureTarget == geminiClaudeUnsupportedSignatureTarget {
+						continue
+					}
 					flushThinking()
 					flushText()
+					if lastSignatureTarget != "" {
+						partSig = translatorcommon.EncodeGeminiClaudeCarrierSignature(partSig, translatorcommon.GeminiClaudeCarrierPrevious, lastSignatureTarget)
+					}
 					appendCarrierThinkingBlock(partSig)
 					continue
 				}
@@ -741,11 +836,20 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 			flushThinking()
 
 			if functionCall.Exists() {
+				if !isGeminiNonEmptyFunctionCall(functionCall) {
+					if partSig != "" {
+						flushText()
+						appendCarrierThinkingBlock(partSig)
+					}
+					continue
+				}
 				flushText()
 				if partSig != "" {
 					appendCarrierThinkingBlock(partSig)
 				}
 				hasToolCall = true
+				hasVisibleOutput = true
+				lastSignatureTarget = translatorcommon.GeminiClaudeCarrierFunction
 
 				upstreamToolName := functionCall.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName(sanitizedNameMap, upstreamToolName)
@@ -768,6 +872,11 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					appendCarrierThinkingBlock(partSig)
 				}
 				textBuilder.WriteString(text.String())
+				if strings.TrimSpace(text.String()) != "" {
+					hasVisibleOutput = true
+				}
+				lastSignatureTarget = translatorcommon.GeminiClaudeCarrierText
+				flushText()
 				continue
 			}
 
@@ -790,7 +899,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	if finish := root.Get("candidates.0.finishReason"); finish.Exists() {
 		finishReason = finish.String()
 	}
-	if isGeminiMalformedFunctionCall(finishReason, hasToolCall) {
+	if isGeminiMalformedFunctionCall(finishReason, hasVisibleOutput) {
 		return []byte(geminiMalformedFunctionCallErrorPayload)
 	}
 	_ = outDoc.Set("stop_reason", resolveGeminiClaudeStopReason(finishReason, hasToolCall))
