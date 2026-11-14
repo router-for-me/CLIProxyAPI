@@ -221,6 +221,20 @@ func TestModelScopedCombo(t *testing.T) {
 	}
 }
 
+func TestDefaultComboNotShadowedByCatchAll(t *testing.T) {
+	cfg := Config{
+		Enabled:      true,
+		DefaultCombo: "standard",
+		Combos: []Combo{
+			{Name: "standard", Models: []string{"*"}, Pipeline: []Step{{Engine: EngineLite}}},
+			{Name: "aggressive", Models: []string{"*"}, Pipeline: []Step{{Engine: EngineLite}}},
+		},
+	}
+	if got := cfg.resolve("gpt-4o"); got == nil || got.Name != "standard" {
+		t.Fatalf("catch-all default resolved to %v", got)
+	}
+}
+
 func TestSanitizeDropsUnknownEngines(t *testing.T) {
 	cfg := Config{Combos: []Combo{{
 		Name:     "Mixed",

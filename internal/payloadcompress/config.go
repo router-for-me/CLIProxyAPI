@@ -637,24 +637,47 @@ func sanitizeStyles(in []OutputStyle) []OutputStyle {
 	return styles
 }
 
-// resolve picks the first model-scoped combo that matches, then the default
-// combo. A nil result means nothing applies to this request.
+// resolve picks the most specific matching combo and prefers the default combo
+// on ties, so catch-all combos do not shadow the operator's default. A nil
+// result means nothing applies to this request.
 func (c Config) resolve(model string) *Combo {
 	var fallback *Combo
+	fallbackScore := -1
+	var best *Combo
+	bestScore := -1
 	for i := range c.Combos {
 		combo := &c.Combos[i]
-		if combo.Name == c.DefaultCombo {
-			fallback = combo
+		score := comboMatchScore(combo, model)
+		if score < 0 {
 			continue
 		}
-		if comboMatchesModel(combo, model) {
-			return combo
+		if combo.Name == c.DefaultCombo {
+			fallback, fallbackScore = combo, score
+			continue
+		}
+		if score > bestScore {
+			best, bestScore = combo, score
 		}
 	}
-	if fallback != nil && comboMatchesModel(fallback, model) {
-		return fallback
+	if best != nil && bestScore > fallbackScore {
+		return best
 	}
-	return nil
+	return fallback
+}
+
+// comboMatchScore returns -1 when no pattern matches, otherwise the matched
+// pattern's specificity: catch-alls score 0, literal characters add up.
+func comboMatchScore(combo *Combo, model string) int {
+	if len(combo.Models) == 0 {
+		return 0
+	}
+	score := -1
+	for _, pattern := range combo.Models {
+		if matchGlob(pattern, model) {
+			score = max(score, len(strings.ReplaceAll(strings.TrimSpace(pattern), "*", "")))
+		}
+	}
+	return score
 }
 
 // comboByName finds a combo by exact name, or the built-in "lite" pipeline when
@@ -669,18 +692,6 @@ func (c Config) comboByName(name string) *Combo {
 		}
 	}
 	return nil
-}
-
-func comboMatchesModel(combo *Combo, model string) bool {
-	if len(combo.Models) == 0 {
-		return true
-	}
-	for _, pattern := range combo.Models {
-		if matchGlob(pattern, model) {
-			return true
-		}
-	}
-	return false
 }
 
 // matchGlob supports a single '*' wildcard, matching payload rule semantics.
