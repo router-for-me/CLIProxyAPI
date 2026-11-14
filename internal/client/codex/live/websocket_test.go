@@ -187,6 +187,194 @@ func TestHandleDirectWebsocketAppliesClientSecretSession(t *testing.T) {
 	}
 }
 
+func TestHandleDirectWebsocketTranscriptionIntentUsesAPIKeyUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamRequest := make(chan *http.Request, 1)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		connection, errUpgrade := upgrader.Upgrade(writer, request, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		upstreamRequest <- request.Clone(request.Context())
+		if errWrite := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"transcription_session.created"}`)); errWrite != nil {
+			return
+		}
+	}))
+	defer upstreamServer.Close()
+
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	registerCredential(t, manager, &auth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	registerCredential(t, manager, &auth.Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Status:     auth.StatusActive,
+		Attributes: map[string]string{"api_key": "sk-upstream", "base_url": upstreamServer.URL + "/v1"},
+	})
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws://127.0.0.1:1/unused"
+
+	router := gin.New()
+	router.GET("/v1/realtime", handler.HandleRealtimeWebsocket)
+	downstreamServer := httptest.NewServer(router)
+	defer downstreamServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/realtime?intent=transcription"
+	connection, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial downstream websocket: %v", errDial)
+	}
+	defer func() { _ = connection.Close() }()
+
+	_, created, errRead := connection.ReadMessage()
+	if errRead != nil {
+		t.Fatalf("read transcription_session.created: %v", errRead)
+	}
+	if string(created) != `{"type":"transcription_session.created"}` {
+		t.Fatalf("created event = %s", created)
+	}
+
+	select {
+	case request := <-upstreamRequest:
+		if request.Header.Get("Authorization") != "Bearer sk-upstream" {
+			t.Fatalf("Authorization = %q", request.Header.Get("Authorization"))
+		}
+		if request.Header.Get("Originator") != "" {
+			t.Fatalf("Originator = %q, want empty for API-key upstream", request.Header.Get("Originator"))
+		}
+		query, errParse := url.ParseQuery(request.URL.RawQuery)
+		if errParse != nil {
+			t.Fatalf("parse upstream query: %v", errParse)
+		}
+		if query.Get("intent") != "transcription" || query.Get("model") != defaultTranscriptionModel {
+			t.Fatalf("upstream query = %v", query)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream request not captured")
+	}
+}
+
+func TestHandleDirectWebsocketAppliesTranscriptionClientSecret(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstreamUpdate := make(chan []byte, 1)
+	upstreamRequest := make(chan *http.Request, 1)
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+		connection, errUpgrade := upgrader.Upgrade(writer, request, nil)
+		if errUpgrade != nil {
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		upstreamRequest <- request.Clone(request.Context())
+		_, payload, errRead := connection.ReadMessage()
+		if errRead != nil {
+			return
+		}
+		upstreamUpdate <- append([]byte(nil), payload...)
+		_ = connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"transcription_session.created"}`))
+	}))
+	defer upstreamServer.Close()
+
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	registerCredential(t, manager, &auth.Auth{
+		ID:         "codex-api-key",
+		Provider:   "codex",
+		Status:     auth.StatusActive,
+		Attributes: map[string]string{"api_key": "sk-upstream", "base_url": upstreamServer.URL + "/v1"},
+	})
+	handler := NewHandler(manager, nil)
+	handler.sidebandAPIBaseURL = "ws://127.0.0.1:1/unused"
+
+	secretRouter := gin.New()
+	secretRouter.POST("/v1/realtime/transcription_sessions", handler.HandleTranscriptionSession)
+	secretRequest := httptest.NewRequest(http.MethodPost, "/v1/realtime/transcription_sessions", strings.NewReader(`{"session":{"language":"en","turn_detection":null}}`))
+	secretRecorder := httptest.NewRecorder()
+	secretRouter.ServeHTTP(secretRecorder, secretRequest)
+	if secretRecorder.Code != http.StatusOK {
+		t.Fatalf("transcription_sessions status = %d, want %d; body=%s", secretRecorder.Code, http.StatusOK, secretRecorder.Body.String())
+	}
+	var secretResponse struct {
+		ClientSecret struct {
+			Value string `json:"value"`
+		} `json:"client_secret"`
+	}
+	if errUnmarshal := json.Unmarshal(secretRecorder.Body.Bytes(), &secretResponse); errUnmarshal != nil {
+		t.Fatalf("unmarshal transcription session: %v", errUnmarshal)
+	}
+	authRequest := httptest.NewRequest(http.MethodGet, "/v1/realtime", nil)
+	authRequest.Header.Set("Authorization", "Bearer "+secretResponse.ClientSecret.Value)
+	authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(authRequest)
+	if errAuthenticate != nil || !matched {
+		t.Fatalf("AuthenticateClientSecret() matched=%t error=%v", matched, errAuthenticate)
+	}
+
+	router := gin.New()
+	router.GET("/v1/realtime", func(c *gin.Context) {
+		c.Set(ClientSecretSessionContextKey, authorization.Session)
+		c.Set(ClientSecretPrincipalContextKey, authorization.Principal)
+		c.Next()
+	}, handler.HandleRealtimeWebsocket)
+	downstreamServer := httptest.NewServer(router)
+	defer downstreamServer.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(downstreamServer.URL, "http") + "/v1/realtime"
+	connection, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial downstream websocket: %v", errDial)
+	}
+	defer func() { _ = connection.Close() }()
+	_, _, _ = connection.ReadMessage()
+
+	select {
+	case request := <-upstreamRequest:
+		query, errParse := url.ParseQuery(request.URL.RawQuery)
+		if errParse != nil {
+			t.Fatalf("parse upstream query: %v", errParse)
+		}
+		if query.Get("intent") != "transcription" || query.Get("model") != defaultTranscriptionModel {
+			t.Fatalf("upstream query = %v", query)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream request not captured")
+	}
+	select {
+	case update := <-upstreamUpdate:
+		var event struct {
+			Type    string `json:"type"`
+			Session struct {
+				Type     string          `json:"type"`
+				Model    string          `json:"model"`
+				Language string          `json:"language"`
+				ID       string          `json:"id"`
+				Raw      json.RawMessage `json:"-"`
+			} `json:"session"`
+		}
+		if errUnmarshal := json.Unmarshal(update, &event); errUnmarshal != nil {
+			t.Fatalf("unmarshal session update: %v", errUnmarshal)
+		}
+		if event.Type != "transcription_session.update" {
+			t.Fatalf("update type = %q", event.Type)
+		}
+		if event.Session.Model != "" || event.Session.ID != "" {
+			t.Fatalf("session update must drop model/id, got %s", update)
+		}
+		if event.Session.Language != "en" {
+			t.Fatalf("session update = %s", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session update not captured")
+	}
+}
+
 func TestHandleDirectWebsocketRelaysStandardRealtimeFrames(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

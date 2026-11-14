@@ -185,6 +185,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable")
 		return
 	}
+	if clientSecretSessionType(clientSecretSession(c)) == sessionTypeTranscription {
+		writeRealtimeError(c, http.StatusForbidden, "Realtime transcription client secrets require an intent=transcription WebSocket session", "invalid_request_error", "realtime_client_secret_scope_mismatch")
+		return
+	}
 
 	body, errRead := readBody(c.Request.Body)
 	if errRead != nil {
@@ -502,6 +506,52 @@ func (h *Handler) selectOAuth(ctx context.Context, model string, opts coreexecut
 		selection.End("selection_failed")
 	}
 	return selection, selected, errSelect
+}
+
+// selectAPIKey selects a Codex API-key credential for capabilities the OAuth
+// upstream cannot serve (transcription-only realtime sessions).
+func (h *Handler) selectAPIKey(ctx context.Context, model string, opts coreexecutor.Options) (*auth.HomeDispatchSelection, *auth.Auth, error) {
+	var selection *auth.HomeDispatchSelection
+	var selected *auth.Auth
+	var errSelect error
+	if h.authManager.HomeEnabled() {
+		selection, errSelect = h.authManager.SelectHomeAuthByKind(ctx, "codex", model, auth.AuthKindAPIKey, opts)
+		if selection != nil {
+			selected = selection.CloneAuth()
+		}
+	} else {
+		selected, errSelect = h.authManager.SelectAuthByKind(ctx, "codex", "", auth.AuthKindAPIKey, opts)
+	}
+	if errSelect != nil && selection != nil {
+		selection.End("selection_failed")
+	}
+	return selection, selected, errSelect
+}
+
+// codexAPIKeyConfigured reports whether a Codex API-key upstream exists for
+// capabilities the ChatGPT/Codex OAuth upstream cannot serve.
+func (h *Handler) codexAPIKeyConfigured(c *gin.Context) bool {
+	if h == nil || h.authManager == nil {
+		return false
+	}
+	if h.authManager.HomeEnabled() {
+		ctx := context.WithValue(c.Request.Context(), "gin", c)
+		selection, errSelect := h.authManager.SelectHomeAuthByKind(ctx, "codex", "", auth.AuthKindAPIKey, coreexecutor.Options{})
+		if errSelect != nil || selection == nil {
+			return false
+		}
+		selection.End("capability_probe")
+		return true
+	}
+	for _, candidate := range h.authManager.List() {
+		if candidate == nil || candidate.Disabled || candidate.Status == auth.StatusDisabled {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(candidate.Provider), "codex") && candidate.AuthKind() == auth.AuthKindAPIKey {
+			return true
+		}
+	}
+	return false
 }
 
 var errBodyTooLarge = errors.New("Codex live request body too large")

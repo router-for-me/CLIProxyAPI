@@ -73,6 +73,9 @@ func (*captureExecutor) CountTokens(context.Context, *auth.Auth, coreexecutor.Re
 
 func (*captureExecutor) PrepareRequest(req *http.Request, credential *auth.Auth) error {
 	token, _ := credential.Metadata["access_token"].(string)
+	if strings.TrimSpace(token) == "" && credential != nil && credential.Attributes != nil {
+		token = strings.TrimSpace(credential.Attributes["api_key"])
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	return nil
 }
