@@ -15,6 +15,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
@@ -423,8 +424,8 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 		// Read file to get type field
 		full := filepath.Join(h.cfg.AuthDir, name)
 		if data, errRead := os.ReadFile(full); errRead == nil {
-			var fieldBuf [7]ojson.Result
-			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets")
+			var fieldBuf [8]ojson.Result
+			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets", claude.RefreshTokenExpiresAtMetadataKey)
 			typeValue := strings.Clone(fields[0].String())
 			emailValue := strings.Clone(fields[1].String())
 			fileData["type"] = typeValue
@@ -475,6 +476,9 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 			}
 			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
 				fileData["request_retry"] = requestRetry
+			}
+			if expiresAt, okExpiresAt := normalizeRefreshTokenExpiresAt(fields[7].String()); okExpiresAt {
+				fileData[claude.RefreshTokenExpiresAtMetadataKey] = expiresAt
 			}
 		}
 
@@ -743,6 +747,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	if !nextRetryAfter.IsZero() {
 		entry["next_retry_after"] = nextRetryAfter
 	}
+	rawRefreshExpiry, _ := auth.Metadata[claude.RefreshTokenExpiresAtMetadataKey].(string)
+	if expiresAt, ok := normalizeRefreshTokenExpiresAt(rawRefreshExpiry); ok {
+		entry[claude.RefreshTokenExpiresAtMetadataKey] = expiresAt
+	}
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
@@ -877,6 +885,20 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		}
 	}
 	return entry
+}
+
+// normalizeRefreshTokenExpiresAt returns a stored refresh token expiry as an
+// RFC3339 UTC string. It reports false when the value is empty or malformed.
+func normalizeRefreshTokenExpiresAt(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	expiresAt, errParse := time.Parse(time.RFC3339, raw)
+	if errParse != nil {
+		return "", false
+	}
+	return expiresAt.UTC().Format(time.RFC3339), true
 }
 
 func authFileRequestRetryFromJSON(data []byte) (int, bool) {
