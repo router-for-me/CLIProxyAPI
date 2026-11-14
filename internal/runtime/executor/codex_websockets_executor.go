@@ -24,6 +24,9 @@ type CodexWebsocketsExecutor struct {
 	*CodexExecutor
 
 	store *codexWebsocketSessionStore
+
+	// Set before execution by concurrency tests; never mutated during a session.
+	duplexStateObserver func(event string, ready bool)
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {

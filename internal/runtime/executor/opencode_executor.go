@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
@@ -39,6 +41,83 @@ func NewOpenCodeExecutor(id string) *OpenCodeExecutor {
 		gateway = "go"
 	}
 	return &OpenCodeExecutor{id: id, gateway: gateway}
+}
+
+// FetchOpenCodeModels joins the gateway's explicit model identity to routes
+// whose wire protocol this executor supports. The public catalog does not
+// prove account availability; each credential still requires inference.
+func FetchOpenCodeModels(ctx context.Context, auth *clipoauth.Auth, cfg *config.Config, provider string) ([]*registry.ModelInfo, error) {
+	e := NewOpenCodeExecutor(provider)
+	routeAuth := e.cloneAuthWithBaseURL(auth)
+	if routeAuth == nil {
+		return nil, fmt.Errorf("OpenCode catalog requires route auth")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(routeAuth.Attributes["base_url"], "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := newProxyAwareHTTPClient(ctx, cfg, routeAuth, 10*time.Second).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OpenCode catalog returned HTTP %d", resp.StatusCode)
+	}
+	const maxCatalogBytes = 8 << 20
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxCatalogBytes {
+		return nil, fmt.Errorf("OpenCode catalog exceeds %d bytes", maxCatalogBytes)
+	}
+	var catalog struct {
+		Data []struct {
+			ID          string                     `json:"id"`
+			CanonicalID string                     `json:"canonical_id"`
+			API         map[string]json.RawMessage `json:"api"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &catalog); err != nil {
+		return nil, fmt.Errorf("decode OpenCode catalog: %w", err)
+	}
+	if len(catalog.Data) == 0 {
+		return nil, fmt.Errorf("OpenCode catalog contains no models")
+	}
+	byID := make(map[string]int, len(catalog.Data))
+	for i, row := range catalog.Data {
+		if _, exists := byID[row.ID]; exists || row.ID == "" {
+			return nil, fmt.Errorf("OpenCode catalog has missing or duplicate model identity")
+		}
+		byID[row.ID] = i
+	}
+	apiNames := map[string]string{"chat": "chat-completions", "messages": "messages", "responses": "responses", "gemini": "generate-content"}
+	models := registry.GetOpenCodeModels(e.gateway)
+	available := models[:0]
+	for _, model := range models {
+		index, ok := byID[model.ID]
+		if !ok {
+			continue
+		}
+		row := catalog.Data[index]
+		apiName := apiNames[registry.ResolveOpenCodeProtocol(e.gateway, model.ID)]
+		if _, supported := row.API[apiName]; !supported {
+			continue
+		}
+		if row.CanonicalID != "" && len(model.Protocols) > 0 {
+			owner, canonical, ok := strings.Cut(row.CanonicalID, "/")
+			if !ok || owner == "" || canonical == "" || strings.TrimSpace(row.CanonicalID) != row.CanonicalID {
+				return nil, fmt.Errorf("OpenCode catalog has invalid canonical identity for %q", model.ID)
+			}
+			model.CatalogProviderID = owner
+			model.CatalogModelID = canonical
+			model.CatalogRouteProviderID = provider
+			model.CatalogRouteModelID = model.ID
+		}
+		available = append(available, model)
+	}
+	return available, nil
 }
 
 func (e *OpenCodeExecutor) Identifier() string  { return e.id }
@@ -103,9 +182,6 @@ func (e *OpenCodeExecutor) requestAuth(auth *clipoauth.Auth, opts cliproxyexecut
 	if apiKey, ok := openCodeCreds(auth); ok {
 		cloned.Attributes["api_key"] = apiKey
 	}
-	// OpenCode serves its messages protocol with Anthropic authentication:
-	// the gateway reads x-api-key and rejects a Bearer key as missing.
-	cloned.Attributes["anthropic_auth_scheme"] = "x-api-key"
 	sessionID := helps.AffinitySessionUUID(e.id, clipoauth.ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata))
 	if sessionID != "" {
 		cloned.Attributes["header:"+openCodeSessionHeader] = sessionID
@@ -113,15 +189,9 @@ func (e *OpenCodeExecutor) requestAuth(auth *clipoauth.Auth, opts cliproxyexecut
 	return cloned
 }
 
-// openCodeSetAuthHeader applies the configured authentication scheme. OpenCode's
-// messages gateway reads x-api-key; other gateways read a Bearer token.
-func openCodeSetAuthHeader(req *http.Request, auth *clipoauth.Auth, apiKey string) {
+// openCodeSetBearer authenticates requests on the OpenAI-compatible transport.
+func openCodeSetBearer(req *http.Request, apiKey string) {
 	if req == nil || apiKey == "" {
-		return
-	}
-	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key") {
-		req.Header.Del("Authorization")
-		req.Header.Set("x-api-key", apiKey)
 		return
 	}
 	req.Header.Del("x-api-key")
@@ -150,6 +220,8 @@ func (e *OpenCodeExecutor) Execute(ctx context.Context, auth *clipoauth.Auth, re
 
 	switch protocol {
 	case "messages":
+		// The legacy native Messages endpoint accepts the Anthropic API key header.
+		clonedAuth.Attributes["anthropic_auth_scheme"] = "x-api-key"
 		ce := NewClaudeExecutor(e.cfg)
 		return ce.Execute(ctx, clonedAuth, req, opts)
 	case "responses":
@@ -178,6 +250,8 @@ func (e *OpenCodeExecutor) ExecuteStream(ctx context.Context, auth *clipoauth.Au
 
 	switch protocol {
 	case "messages":
+		// The legacy native Messages endpoint accepts the Anthropic API key header.
+		clonedAuth.Attributes["anthropic_auth_scheme"] = "x-api-key"
 		ce := NewClaudeExecutor(e.cfg)
 		return ce.ExecuteStream(ctx, clonedAuth, req, opts)
 	case "responses":
@@ -224,7 +298,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpoint(ctx context.Context, auth *clip
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	openCodeSetAuthHeader(httpReq, auth, apiKey)
+	openCodeSetBearer(httpReq, apiKey)
 	httpReq.Header.Set("User-Agent", "cli-proxy-opencode")
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes, opts.Headers)
 
@@ -302,7 +376,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	openCodeSetAuthHeader(httpReq, auth, apiKey)
+	openCodeSetBearer(httpReq, apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	httpReq.Header.Set("User-Agent", "cli-proxy-opencode")
@@ -360,6 +434,12 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			streamUsage.ObserveOpenAIStream(line)
+			// Native Responses carries event and data lines in the same SSE
+			// frame. Preserve their separators across the line scanner.
+			frameLine := bytes.Clone(line)
+			if sourceFormatEqual(from, toFormat) && toFormat == sdktranslator.FormatOpenAIResponse {
+				frameLine = append(frameLine, '\n')
+			}
 			chunks := sdktranslator.TranslateStream(
 				ctx,
 				from,
@@ -367,7 +447,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 				req.Model,
 				opts.OriginalRequest,
 				translated,
-				bytes.Clone(line),
+				frameLine,
 				&param,
 			)
 			for i := range chunks {
@@ -396,7 +476,7 @@ func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *clipoauth.Aut
 		return nil
 	}
 	token, _ := openCodeCreds(auth)
-	openCodeSetAuthHeader(req, auth, token)
+	openCodeSetBearer(req, token)
 	return nil
 }
 

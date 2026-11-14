@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -272,5 +273,107 @@ func TestRefreshModelDefinitions_UpdatesCatalogAndReportsChangedProviders(t *tes
 	h.RefreshModelDefinitions(ctxFail)
 	if recFail.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d; body = %s", recFail.Code, http.StatusBadGateway, recFail.Body.String())
+	}
+}
+
+type oauthCatalogPlugin struct {
+	provider string
+	models   []pluginapi.ModelInfo
+}
+
+func (p oauthCatalogPlugin) Identifier() string { return p.provider }
+
+func (p oauthCatalogPlugin) ParseAuth(context.Context, pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+	return pluginapi.AuthParseResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) StartLogin(context.Context, pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+	return pluginapi.AuthLoginStartResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) PollLogin(context.Context, pluginapi.AuthLoginPollRequest) (pluginapi.AuthLoginPollResponse, error) {
+	return pluginapi.AuthLoginPollResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) RefreshAuth(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
+	return pluginapi.AuthRefreshResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) StaticModels(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+	return pluginapi.ModelResponse{Provider: p.provider, Models: p.models}, nil
+}
+
+func (p oauthCatalogPlugin) ModelsForAuth(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+	return pluginapi.ModelResponse{Provider: p.provider, Models: p.models}, nil
+}
+
+func (p oauthCatalogPlugin) Execute(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+	return pluginapi.ExecutorResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) ExecuteStream(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+	return pluginapi.ExecutorStreamResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) CountTokens(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+	return pluginapi.ExecutorResponse{}, nil
+}
+
+func (p oauthCatalogPlugin) HttpRequest(context.Context, pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
+	return pluginapi.ExecutorHTTPResponse{}, nil
+}
+
+func TestGetStaticModelDefinitions_OAuthPluginCatalogDecoupledFromRegistry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		scope pluginapi.ExecutorModelScope
+	}{
+		{name: "unset scope with auth provider", scope: ""},
+		{name: "explicit oauth scope", scope: pluginapi.ExecutorModelScopeOAuth},
+		{name: "explicit both scope with auth provider", scope: pluginapi.ExecutorModelScopeBoth},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := "demo-oauth-7512-" + strings.ReplaceAll(tc.name, " ", "-")
+			reg := registry.GetGlobalRegistry()
+			pluginID := provider + "-plugin"
+			staticClientID := "plugin:" + pluginID + ":" + provider + ":executor"
+			t.Cleanup(func() {
+				reg.UnregisterClient(staticClientID)
+			})
+
+			plugin := oauthCatalogPlugin{
+				provider: provider,
+				models: []pluginapi.ModelInfo{
+					{ID: "demo-a", DisplayName: "Demo A"},
+					{ID: "demo-blocked", DisplayName: "Demo Blocked"},
+				},
+			}
+			host := pluginhost.New()
+			host.RegisterPluginForTest(pluginID, pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider:       plugin,
+					ModelProvider:      plugin,
+					Executor:           plugin,
+					ExecutorModelScope: tc.scope,
+				},
+			})
+			host.RegisterModels(t.Context(), reg)
+			host.RegisterExecutors(coreauth.NewManager(nil, nil, nil), reg)
+
+			if available := reg.GetAvailableModelsByProvider(provider); len(available) != 0 {
+				t.Fatalf("GetAvailableModelsByProvider(%q) = %#v, want empty without active credentials", provider, available)
+			}
+
+			h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+			h.SetPluginHost(host)
+
+			rec, body := invokeGetStaticModelDefinitions(t, h, provider)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if len(body.Models) != 2 || body.Models[0].ID != "demo-a" || body.Models[1].ID != "demo-blocked" {
+				t.Fatalf("models = %#v, want [demo-a demo-blocked]", body.Models)
+			}
+		})
 	}
 }

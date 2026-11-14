@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,8 +24,10 @@ import (
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdkhandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -8108,5 +8111,553 @@ func TestXAIWebsocketUsagePreservesFilteredSearch(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("usage not published")
+	}
+}
+
+func TestXAIExecutorExecuteReturnsTerminalStreamFailures(t *testing.T) {
+	t.Parallel()
+
+	want24h := 24 * time.Hour
+	tests := []struct {
+		name           string
+		sseBody        string
+		contentType    string
+		wantStatus     int
+		wantMsg        string
+		wantCode       string
+		wantType       string
+		wantRetryAfter *time.Duration
+	}{
+		{
+			name:        "error event with invalid_request_error",
+			sseBody:     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.7-build\"}}\n\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"invalid_value\",\"message\":\"Invalid input.\"},\"sequence_number\":2}\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusBadRequest,
+			wantMsg:     "Invalid input.",
+			wantCode:    "invalid_value",
+			wantType:    "invalid_request_error",
+		},
+		{
+			name:        "error event with bad-credentials remaps to 401",
+			sseBody:     "data: {\"type\":\"error\",\"status\":403,\"error\":{\"code\":\"unauthenticated:bad-credentials\",\"message\":\"The OAuth2 access token could not be validated.\"}}\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusUnauthorized,
+			wantMsg:     "The OAuth2 access token could not be validated.",
+			wantCode:    "unauthenticated:bad-credentials",
+		},
+		{
+			name:           "error event with free-usage-exhausted maps to 429 with 24h retry-after",
+			sseBody:        "data: {\"type\":\"error\",\"error\":{\"code\":\"subscription:free-usage-exhausted\",\"message\":\"You've used all the included free usage for model grok-4.7 for now.\"}}\n\n",
+			contentType:    "text/event-stream",
+			wantStatus:     http.StatusTooManyRequests,
+			wantMsg:        "You've used all the included free usage for model grok-4.7 for now.",
+			wantCode:       "subscription:free-usage-exhausted",
+			wantRetryAfter: &want24h,
+		},
+		{
+			name:        "event error header with flat xai refusal payload",
+			sseBody:     "event: error\ndata: {\"code\":\"permission-denied\",\"error\":\"I'm sorry, I can't help with that request.\"}\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusForbidden,
+			wantMsg:     "I'm sorry, I can't help with that request.",
+			wantCode:    "permission-denied",
+		},
+		{
+			name:        "data line before event error header",
+			sseBody:     "data: {\"code\":\"invalid_argument\",\"message\":\"Invalid input.\"}\nevent: error\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusBadRequest,
+			wantMsg:     "Invalid input.",
+			wantCode:    "invalid_argument",
+		},
+		{
+			name:        "response.failed event with server_error",
+			sseBody:     "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.7-build\"}}\n\ndata: {\"type\":\"response.failed\",\"sequence_number\":3,\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"code\":\"server_error\",\"message\":\"Upstream generation failed.\"}}}\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusBadGateway,
+			wantMsg:     "Upstream generation failed.",
+			wantCode:    "server_error",
+			wantType:    "server_error",
+		},
+		{
+			name:        "multiline sse data error event",
+			sseBody:     "event: error\ndata: {\"type\":\"error\",\ndata: \"error\":{\"type\":\"invalid_request_error\",\"code\":\"invalid_argument\",\"message\":\"Multiline error.\"}}\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusBadRequest,
+			wantMsg:     "Multiline error.",
+			wantCode:    "invalid_argument",
+			wantType:    "invalid_request_error",
+		},
+		{
+			name:        "plain text data under event error header",
+			sseBody:     "event: error\ndata: upstream gateway error\n\n",
+			contentType: "text/event-stream",
+			wantStatus:  http.StatusBadGateway,
+			wantMsg:     "upstream gateway error",
+		},
+		{
+			name:        "non-sse json error body on 200",
+			sseBody:     `{"code":"permission-denied","error":"Request blocked."}`,
+			contentType: "application/json",
+			wantStatus:  http.StatusForbidden,
+			wantMsg:     "Request blocked.",
+			wantCode:    "permission-denied",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = io.WriteString(w, tc.sseBody)
+			}))
+			defer server.Close()
+
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "xai-token"},
+			}
+			payload := []byte(`{"model":"grok-4.7","stream":false,"messages":[{"role":"user","content":"Reply with one word: ready."}]}`)
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "grok-4.7",
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatOpenAI,
+				ResponseFormat:  sdktranslator.FormatOpenAI,
+				OriginalRequest: payload,
+				Stream:          false,
+			})
+			if err == nil {
+				t.Fatal("Execute() error = nil, want terminal stream error")
+			}
+
+			var statusCoder cliproxyexecutor.StatusError
+			if !errors.As(err, &statusCoder) || statusCoder.StatusCode() != tc.wantStatus {
+				t.Fatalf("status = %v, want %d; err=%v", statusCoder, tc.wantStatus, err)
+			}
+			var scopedErr cliproxyexecutor.RequestScopedError
+			if errors.As(err, &scopedErr) && scopedErr.IsRequestScoped() {
+				t.Fatalf("explicit upstream terminal error must not set IsRequestScoped() = true: %T (%v)", err, err)
+			}
+
+			clientBody := sdkhandlers.BuildErrorResponseBodyWithError(statusCoder.StatusCode(), err.Error(), err)
+			if got := ojson.GetBytes(clientBody, "error.message").String(); got != tc.wantMsg {
+				t.Fatalf("error.message = %q, want %q; body=%s", got, tc.wantMsg, clientBody)
+			}
+			if got := ojson.GetBytes(clientBody, "error.code").String(); got != tc.wantCode {
+				t.Fatalf("error.code = %q, want %q; body=%s", got, tc.wantCode, clientBody)
+			}
+			if tc.wantType != "" {
+				if got := ojson.GetBytes(clientBody, "error.type").String(); got != tc.wantType {
+					t.Fatalf("error.type = %q, want %q; body=%s", got, tc.wantType, clientBody)
+				}
+			}
+
+			type retryAfterProvider interface {
+				RetryAfter() *time.Duration
+			}
+			var raProvider retryAfterProvider
+			if tc.wantRetryAfter != nil {
+				if !errors.As(err, &raProvider) || raProvider.RetryAfter() == nil || *raProvider.RetryAfter() != *tc.wantRetryAfter {
+					t.Fatalf("RetryAfter = %v, want %v; err=%v", raProvider, *tc.wantRetryAfter, err)
+				}
+			}
+		})
+	}
+}
+
+func TestXAIExecutorExecuteEmptyStreamReturns502(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "zero byte body", body: ""},
+		{name: "sse comment only", body: ": keep-alive\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "xai-token"},
+			}
+			payload := []byte(`{"model":"grok-4.7","stream":false,"messages":[{"role":"user","content":"hello"}]}`)
+			_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "grok-4.7",
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatOpenAI,
+				ResponseFormat:  sdktranslator.FormatOpenAI,
+				OriginalRequest: payload,
+				Stream:          false,
+			})
+			if err == nil {
+				t.Fatal("Execute() error = nil, want 502 empty stream error")
+			}
+
+			var statusCoder cliproxyexecutor.StatusError
+			if !errors.As(err, &statusCoder) || statusCoder.StatusCode() != http.StatusBadGateway {
+				t.Fatalf("status = %v, want %d; err=%v", statusCoder, http.StatusBadGateway, err)
+			}
+			lower := strings.ToLower(err.Error())
+			if !strings.Contains(lower, "empty") || !strings.Contains(lower, "stream") {
+				t.Fatalf("error = %q, want empty stream message", err.Error())
+			}
+			if strings.Contains(lower, "timeout") {
+				t.Fatalf("error = %q, must not claim timeout", err.Error())
+			}
+			var scopedErr cliproxyexecutor.RequestScopedError
+			if !errors.As(err, &scopedErr) || !scopedErr.IsRequestScoped() {
+				t.Fatalf("empty stream error %T (%v) must implement IsRequestScoped() = true", err, err)
+			}
+			clientBody := sdkhandlers.BuildErrorResponseBodyWithError(statusCoder.StatusCode(), err.Error(), err)
+			if got := ojson.GetBytes(clientBody, "error.code").String(); got == "request_timeout" {
+				t.Fatalf("client body error.code = %q, must not be request_timeout; body=%s", got, clientBody)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorExecuteIncompleteStreamDoesNotCooldownCredential(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		call := upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if call == 1 {
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"grok-4.7-build\"}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.7-build\",\"output\":[{\"id\":\"msg_2\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"ready\"}]}],\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"total_tokens\":6}}}\n\n")
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		RequestRetry:     3,
+		MaxRetryInterval: 30,
+	}
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.SetRetryConfig(3, 30*time.Second, 0)
+	manager.RegisterExecutor(NewXAIExecutor(cfg))
+
+	authID := "xai-single-cred-issue-7419"
+	auth := &cliproxyauth.Auth{
+		ID:         authID,
+		Provider:   "xai",
+		Status:     cliproxyauth.StatusActive,
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	if _, errReg := manager.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register() error = %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, "xai", []*registry.ModelInfo{{ID: "grok-4.7"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+
+	payload := []byte(`{"model":"grok-4.7","stream":false,"messages":[{"role":"user","content":"hello"}]}`)
+	opts := cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		ResponseFormat:  sdktranslator.FormatOpenAI,
+		OriginalRequest: payload,
+		Stream:          false,
+	}
+	_, err := manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{
+		Model:   "grok-4.7",
+		Payload: payload,
+	}, opts)
+	if err == nil {
+		t.Fatal("manager.Execute() error = nil, want incomplete stream error")
+	}
+	if gotCalls := upstreamCalls.Load(); gotCalls != 1 {
+		t.Fatalf("upstream calls on request-scoped incomplete stream = %d, want 1", gotCalls)
+	}
+
+	var statusCoder cliproxyexecutor.StatusError
+	if !errors.As(err, &statusCoder) || statusCoder.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("status = %v, want %d; err=%v", statusCoder, http.StatusBadGateway, err)
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		t.Fatalf("error = %q, must not claim timeout", err.Error())
+	}
+	var scopedErr cliproxyexecutor.RequestScopedError
+	if !errors.As(err, &scopedErr) || !scopedErr.IsRequestScoped() {
+		t.Fatalf("incomplete stream error %T (%v) must implement IsRequestScoped() = true", err, err)
+	}
+	clientBody := sdkhandlers.BuildErrorResponseBodyWithError(statusCoder.StatusCode(), err.Error(), err)
+	if got := ojson.GetBytes(clientBody, "error.code").String(); got == "request_timeout" {
+		t.Fatalf("client body error.code = %q, must not be request_timeout; body=%s", got, clientBody)
+	}
+
+	stored, ok := manager.GetByID(authID)
+	if !ok || stored == nil {
+		t.Fatalf("GetByID(%q) missing", authID)
+	}
+	if state := stored.ModelStates["grok-4.7"]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("model state cooled down after incomplete stream: Unavailable=%v NextRetryAfter=%v", state.Unavailable, state.NextRetryAfter)
+	}
+
+	// Verify the single credential remains immediately selectable without a 60s transient cooldown.
+	resp, errNext := manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{
+		Model:   "grok-4.7",
+		Payload: payload,
+	}, opts)
+	if errNext != nil {
+		t.Fatalf("subsequent manager.Execute() failed on uncooled credential: %v", errNext)
+	}
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "ready" {
+		t.Fatalf("subsequent response content = %q, want %q; payload=%s", got, "ready", resp.Payload)
+	}
+	if gotCalls := upstreamCalls.Load(); gotCalls != 2 {
+		t.Fatalf("total upstream calls = %d, want 2", gotCalls)
+	}
+}
+
+func TestXAIExecutorExecuteTruncatedCompletedFrameReturnsIncompleteStream(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[{\"id\":\"msg_1\"")
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata:   map[string]any{"access_token": "xai-token"},
+	}
+	payload := []byte(`{"model":"grok-4.7","input":"hello"}`)
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "grok-4.7",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: payload,
+		Stream:          false,
+	})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want incomplete stream error on truncated response.completed")
+	}
+	var scopedErr cliproxyexecutor.RequestScopedError
+	if !errors.As(err, &scopedErr) || !scopedErr.IsRequestScoped() {
+		t.Fatalf("truncated stream error %T (%v) must implement IsRequestScoped() = true", err, err)
+	}
+	if strings.Contains(err.Error(), "apply_patch") {
+		t.Fatalf("truncated response.completed misclassified as apply_patch error: %v", err)
+	}
+}
+
+func TestXAIExecutorExecuteCustomApplyPatchEmptyAndIncompleteStreamsDoNotCooldown(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		firstStream string
+		wantStatus  int
+		wantMessage string
+	}{
+		{
+			name:        "empty_stream_with_custom_apply_patch",
+			firstStream: "",
+			wantStatus:  http.StatusBadGateway,
+			wantMessage: xaiEmptyStreamMessage,
+		},
+		{
+			name:        "response_created_eof_with_custom_apply_patch",
+			firstStream: "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n",
+			wantStatus:  http.StatusBadGateway,
+			wantMessage: xaiIncompleteStreamMessage,
+		},
+		{
+			name: "partial_apply_patch_call_eof_preserves_patch_error_without_cooldown",
+			firstStream: "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n\n" +
+				"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"a\",\"call_id\":\"c\",\"name\":\"apply_patch\",\"arguments\":\"\"}}\n\n" +
+				"data: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"item_id\":\"a\",\"call_id\":\"c\",\"arguments\":\"{\\\"input\\\":\\\"valid patch\\\"}\"}\n\n",
+			wantStatus:  http.StatusBadGateway,
+			wantMessage: "Invalid apply_patch tool arguments received from upstream.",
+		},
+		{
+			name:        "raw_json_error_with_custom_apply_patch",
+			firstStream: `{"error":{"message":"Upstream overloaded","type":"server_error","code":"server_is_overloaded"}}`,
+			wantStatus:  http.StatusServiceUnavailable,
+			wantMessage: "Upstream overloaded",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var upstreamCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				call := upstreamCalls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				if call == 1 {
+					_, _ = io.WriteString(w, tc.firstStream)
+					return
+				}
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.7\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n")
+			}))
+			defer server.Close()
+
+			manager := cliproxyauth.NewManager(nil, &cliproxyauth.RoundRobinSelector{}, nil)
+			manager.RegisterExecutor(NewXAIExecutor(&config.Config{}))
+
+			authID := "xai-patch-cooldown-" + tc.name
+			auth := &cliproxyauth.Auth{
+				ID:         authID,
+				Provider:   "xai",
+				Status:     cliproxyauth.StatusActive,
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "xai-token"},
+			}
+			if _, errReg := manager.Register(context.Background(), auth); errReg != nil {
+				t.Fatalf("manager.Register() error = %v", errReg)
+			}
+			registry.GetGlobalRegistry().RegisterClient(authID, "xai", []*registry.ModelInfo{{ID: "grok-4.7"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(authID)
+			})
+
+			payload := []byte(`{"model":"grok-4.7","input":"hello","tools":[{"type":"custom","name":"apply_patch"}]}`)
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatOpenAIResponse,
+				ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+				OriginalRequest: payload,
+				Stream:          false,
+			}
+
+			_, errFirst := manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{
+				Model:   "grok-4.7",
+				Payload: payload,
+			}, opts)
+			if errFirst == nil {
+				t.Fatal("first manager.Execute() error = nil, want failure")
+			}
+			var statusErrVal cliproxyexecutor.StatusError
+			if !errors.As(errFirst, &statusErrVal) || statusErrVal.StatusCode() != tc.wantStatus {
+				t.Fatalf("first error status = %v (%T), want %d", errFirst, errFirst, tc.wantStatus)
+			}
+			if !strings.Contains(errFirst.Error(), tc.wantMessage) {
+				t.Fatalf("first error = %q, want substring %q", errFirst.Error(), tc.wantMessage)
+			}
+
+			if tc.name == "raw_json_error_with_custom_apply_patch" {
+				return
+			}
+
+			var scopedErr cliproxyexecutor.RequestScopedError
+			if !errors.As(errFirst, &scopedErr) || !scopedErr.IsRequestScoped() {
+				t.Fatalf("first error %T (%v) must implement IsRequestScoped() = true", errFirst, errFirst)
+			}
+
+			resp, errSecond := manager.Execute(context.Background(), []string{"xai"}, cliproxyexecutor.Request{
+				Model:   "grok-4.7",
+				Payload: payload,
+			}, opts)
+			if errSecond != nil {
+				t.Fatalf("subsequent manager.Execute() failed on uncooled credential: %v", errSecond)
+			}
+			if got := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "recovered" {
+				t.Fatalf("subsequent response text = %q, want %q; payload=%s", got, "recovered", resp.Payload)
+			}
+		})
+	}
+}
+
+func TestXAIExecutorPreservesPartialUpstreamBodyOnReadErrorWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, tc := range []struct {
+		name       string
+		statusLine string
+		partial    string
+	}{
+		{
+			name:       "200 stream truncated mid-body",
+			statusLine: "HTTP/1.1 200 OK",
+			partial:    `data: {"type":"response.created","response":{"id":"resp_partial_200"}}`,
+		},
+		{
+			name:       "502 error body truncated mid-body",
+			statusLine: "HTTP/1.1 502 Bad Gateway",
+			partial:    `{"error":{"message":"partial upstream 502 detail"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Error("response writer does not support hijacking")
+					return
+				}
+				conn, buf, errHijack := hijacker.Hijack()
+				if errHijack != nil {
+					t.Errorf("hijack: %v", errHijack)
+					return
+				}
+				rawResponse := fmt.Sprintf("%s\r\nContent-Type: text/event-stream\r\nContent-Length: 4096\r\n\r\n%s", tc.statusLine, tc.partial)
+				_, _ = buf.WriteString(rawResponse)
+				_ = buf.Flush()
+				_ = conn.Close()
+			}))
+			defer server.Close()
+
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			exec := NewXAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL},
+				Metadata:   map[string]any{"access_token": "test-token"},
+			}
+			_, errExec := exec.Execute(
+				ctx,
+				auth,
+				cliproxyexecutor.Request{
+					Model:   "grok-4.7",
+					Payload: []byte(`{"model":"grok-4.7","messages":[{"role":"user","content":"hi"}],"stream":false}`),
+				},
+				cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatOpenAI,
+					ResponseFormat: sdktranslator.FormatOpenAI,
+				},
+			)
+			if errExec == nil {
+				t.Fatal("expected read error from truncated upstream connection")
+			}
+
+			value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !exists {
+				t.Fatal("deferred API response was not captured")
+			}
+			deferred, ok := value.(logging.DeferredAPIResponse)
+			if !ok || deferred == nil {
+				t.Fatalf("deferred API response = %#v, want logging.DeferredAPIResponse", value)
+			}
+			rendered := string(deferred.RenderAPIResponse())
+			if !strings.Contains(rendered, tc.partial) {
+				t.Fatalf("deferred API response dropped partial body %q on read error:\n%s", tc.partial, rendered)
+			}
+			if !strings.Contains(rendered, "Error: unexpected EOF") {
+				t.Fatalf("deferred API response missing read error:\n%s", rendered)
+			}
+		})
 	}
 }

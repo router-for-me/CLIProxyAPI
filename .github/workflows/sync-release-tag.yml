@@ -2,10 +2,6 @@ name: Sync Fork Release Tag
 run-name: sync-fork-release ref=${{ github.ref_name }} commit=${{ github.sha }}
 
 on:
-  push:
-    branches: [main, dc-use]
-  schedule:
-    - cron: '47 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -21,6 +17,7 @@ env:
 
 jobs:
   tag:
+    if: github.repository == 'marlon-costa-dc/cliproxy' && github.ref == 'refs/heads/dc-use'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fork
@@ -31,13 +28,13 @@ jobs:
 
       - name: Configure git
         run: |
-          git config user.name "ccs-upstream-sync[bot]"
-          git config user.email "ccs-upstream-sync@users.noreply.github.com"
+          git config user.name "cliproxy-release[bot]"
+          git config user.email "cliproxy-release@users.noreply.github.com"
 
       - name: Fetch upstream tags
         run: |
           git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
-          git fetch upstream main --tags
+          git fetch --no-tags upstream main
 
       - name: Create and bind the fork release tag
         env:
@@ -46,24 +43,33 @@ jobs:
           set -euo pipefail
 
           # shellcheck disable=SC1091
-          . ./.ccs-fork-upstream.env
+          . ./.fork-upstream.env
           HEAD_COMMIT="$(git rev-parse HEAD)"
           RELEASE_REF="${GITHUB_REF_NAME}"
 
           case "${RELEASE_REF}" in
-            main|dc-use) ;;
+            dc-use) ;;
             *)
-              echo "Release dispatch is allowed only from main or dc-use; got ${RELEASE_REF}." >&2
+              echo "Release dispatch is allowed only from dc-use; got ${RELEASE_REF}." >&2
               exit 1
               ;;
           esac
 
           if ! printf '%s' "${UPSTREAM_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Invalid UPSTREAM_TAG in .ccs-fork-upstream.env" >&2
+            echo "Invalid UPSTREAM_TAG in .fork-upstream.env" >&2
             exit 1
           fi
           if ! printf '%s' "${UPSTREAM_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "Invalid UPSTREAM_COMMIT in .ccs-fork-upstream.env" >&2
+            echo "Invalid UPSTREAM_COMMIT in .fork-upstream.env" >&2
+            exit 1
+          fi
+          git fetch --no-tags upstream "refs/tags/${UPSTREAM_TAG}:refs/upstream-tags/${UPSTREAM_TAG}"
+          if [ "$(git rev-parse "refs/upstream-tags/${UPSTREAM_TAG}^{commit}")" != "${UPSTREAM_COMMIT}" ]; then
+            echo "The upstream tag does not resolve to the recorded commit." >&2
+            exit 1
+          fi
+          if [ "$(git ls-remote origin refs/heads/dc-use | cut -f1)" != "${HEAD_COMMIT}" ]; then
+            echo "Only the current dc-use tip can be released." >&2
             exit 1
           fi
           if ! git merge-base --is-ancestor "${UPSTREAM_COMMIT}" "${HEAD_COMMIT}"; then
@@ -71,53 +77,42 @@ jobs:
             exit 1
           fi
 
-          dispatch_downstream() {
-            local tag="$1"
-            local commit="$2"
-            local release_run
-            local docker_run
+          # Dispatch returns before a workflow starts, so ignore all prior runs
+          # with the same tag/SHA and wait for the new run's conclusion.
+          dispatch_and_watch() {
+            local workflow="$1" title="$2" tag="$3" commit="$4"
+            local before run_id=""
+            before="$(gh run list --workflow "$workflow" --event workflow_dispatch \
+              --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+            before="${before:-0}"
+            gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_REF" \
+              -f tag="$tag" -f commit="$commit"
 
-            gh workflow run release.yaml --repo "${GITHUB_REPOSITORY}" --ref "${RELEASE_REF}" \
-              -f tag="${tag}" -f commit="${commit}"
-            gh workflow run docker-image.yml --repo "${GITHUB_REPOSITORY}" --ref "${RELEASE_REF}" \
-              -f tag="${tag}" -f commit="${commit}"
-
-            release_run="$(resolve_downstream_run release.yaml "goreleaser tag=${tag} commit=${commit}")"
-            docker_run="$(resolve_downstream_run docker-image.yml "docker-image tag=${tag} commit=${commit}")"
-
-            echo "Release workflow run: ${release_run}"
-            echo "Docker workflow run: ${docker_run}"
-            {
-              echo "## Downstream release dispatch"
-              echo "- tag: \`${tag}\`"
-              echo "- commit: \`${commit}\`"
-              echo "- GoReleaser run: ${release_run}"
-              echo "- Docker run: ${docker_run}"
-            } >> "${GITHUB_STEP_SUMMARY}"
-          }
-
-          resolve_downstream_run() {
-            local workflow="$1"
-            local title="$2"
-            local run_id=""
-
-            for _ in $(seq 1 12); do
-              run_id="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow "${workflow}" \
-                --event workflow_dispatch --limit 20 --json databaseId,displayTitle \
-                | jq -r --arg title "${title}" \
-                  'first(.[] | select(.displayTitle == $title) | .databaseId) // empty')"
-              if [ -n "${run_id}" ]; then
-                printf '%s' "${run_id}"
-                return 0
+            for _ in $(seq 1 20); do
+              run_id="$(gh run list --workflow "$workflow" --event workflow_dispatch \
+                --limit 20 --json databaseId,displayTitle \
+                | jq -r --arg title "$title" --argjson before "$before" \
+                  'first(.[] | select(.displayTitle == $title and .databaseId > $before) | .databaseId) // empty')"
+              if [ -n "$run_id" ]; then
+                printf -- '- %s: %s\n' "$workflow" "$run_id" >> "$GITHUB_STEP_SUMMARY"
+                gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status
+                return
               fi
               sleep 5
             done
-
-            echo "Unable to identify ${workflow} run for ${title}" >&2
+            echo "Unable to identify the new run for $title" >&2
             return 1
           }
 
-          # The fork publishes on the `-dc` line (v7.2.145-dc1), so the tag
+          dispatch_downstream() {
+            local tag="$1" commit="$2"
+            printf '## Fork release %s at %s\n' "$tag" "$commit" >> "$GITHUB_STEP_SUMMARY"
+            # A public archive release means both artifact paths completed.
+            dispatch_and_watch docker-image.yml "docker-image tag=$tag commit=$commit" "$tag" "$commit"
+            dispatch_and_watch release.yaml "release tag=$tag commit=$commit" "$tag" "$commit"
+          }
+
+          # The fork publishes on the `-dc` line (v8.0.71-dc1), so the tag
           # search has to see those. Globbing "${UPSTREAM_TAG}-[0-9]*" matched
           # only bare numeric suffixes, missed every -dc tag, and restarted the
           # counter at 0 -- emitting a tag OLDER than what production runs.
@@ -130,7 +125,7 @@ jobs:
             local suffix="1"
 
             if [ -n "${latest}" ]; then
-              # v7.2.145-dc1 -> dc1 -> 1
+              # v8.0.71-dc1 -> dc1 -> 1
               suffix="${latest##*-dc}"
               suffix="$((suffix + 1))"
             fi
@@ -159,7 +154,9 @@ jobs:
             LATEST_FORK_COMMIT="$(git rev-list -n 1 "${LATEST_FORK_TAG}")"
 
             if [ "${LATEST_FORK_COMMIT}" = "${HEAD_COMMIT}" ]; then
-              if gh release view "${LATEST_FORK_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              if gh release view "${LATEST_FORK_TAG}" --repo "${GITHUB_REPOSITORY}" \
+                --json isDraft,assets --jq 'if (.isDraft | not) and any(.assets[]; .name == "checksums.txt") then "published" else "" end' \
+                | grep -Fx 'published'; then
                 echo "${LATEST_FORK_TAG} release already exists; nothing to tag."
                 exit 0
               fi
@@ -182,6 +179,6 @@ jobs:
 
           FORK_TAG="$(next_fork_tag "${LATEST_FORK_TAG}")"
           echo "Creating ${FORK_TAG} for upstream ${UPSTREAM_TAG} at ${HEAD_COMMIT}."
-          git tag -a "${FORK_TAG}" -m "CLIProxyAPIPlus ${FORK_TAG} (upstream ${UPSTREAM_TAG} ${UPSTREAM_COMMIT})"
+          git tag -a "${FORK_TAG}" -m "CLIProxyAPI ${FORK_TAG} (upstream ${UPSTREAM_TAG} ${UPSTREAM_COMMIT})"
           git push origin "refs/tags/${FORK_TAG}"
           dispatch_downstream "${FORK_TAG}" "${HEAD_COMMIT}"

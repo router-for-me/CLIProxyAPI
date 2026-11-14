@@ -84,7 +84,7 @@ func newTrustedSinkRouter(t *testing.T, host handlers.PluginInterceptorHost) (*g
 		}
 		info := &registry.ModelInfo{ID: model.id}
 		if model.ep != "" {
-			info.SupportedEndpoints = []string{model.ep}
+			info.Protocols = []string{endpointProtocol(model.ep)}
 		}
 		if model.typ != "" {
 			info.Type = model.typ
@@ -221,7 +221,7 @@ func TestOpenAIUntrustedDirectResponseStrippedAtRealSink(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(),
-		[]*registry.ModelInfo{{ID: "sink-untrusted-model", SupportedEndpoints: []string{openAIChatEndpoint}}})
+		[]*registry.ModelInfo{{ID: "sink-untrusted-model", Protocols: []string{endpointProtocol(openAIChatEndpoint)}}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)

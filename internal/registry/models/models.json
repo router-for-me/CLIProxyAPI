@@ -279,6 +279,35 @@
       ]
     },
     {
+      "id": "claude-fable-5-2",
+      "object": "model",
+      "created": 1794250800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Fable 5.2",
+      "description": "Claude Fable 5.2 extends Claude Fable 5 at the same input and output prices, with cache reads at a quarter of the cost, and brings stronger long-running agentic coding, multistep research, and document, spreadsheet, and slide work.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-opus-5-5",
       "native_capabilities": {
         "web_search": true
@@ -1035,6 +1064,36 @@
       "native_capabilities": {
         "web_search": true
       }
+    },
+    {
+      "id": "gemini-omni-1.2-flash",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini Omni 1.2 Flash",
+      "name": "models/gemini-omni-1.2-flash",
+      "version": "1.2",
+      "description": "Gemini Omni 1.2 Flash",
+      "context_length": 131072,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "video"
+      ]
     }
   ],
   "vertex": [
@@ -1756,6 +1815,98 @@
       "native_capabilities": {
         "web_search": true
       }
+    },
+    {
+      "id": "gemini-4-carbon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Carbon",
+      "name": "gemini-4-carbon",
+      "description": "Gemini 4 Carbon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Hydrogen",
+      "name": "gemini-4-hydrogen",
+      "description": "Gemini 4 Hydrogen",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-omni-1.2-flash",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini Omni 1.2 Flash",
+      "name": "gemini-omni-1.2-flash",
+      "description": "Gemini Omni 1.2 Flash",
+      "context_length": 131072,
+      "max_completion_tokens": 260640,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "video"
+      ]
     }
   ],
   "gemini-cli": [
@@ -2590,9 +2741,74 @@
       "native_capabilities": {
         "web_search": true
       }
+    },
+    {
+      "id": "gemini-omni-1.2-flash",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini Omni 1.2 Flash",
+      "name": "models/gemini-omni-1.2-flash",
+      "version": "1.2",
+      "description": "Gemini Omni 1.2 Flash",
+      "context_length": 131072,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 128,
+        "max": 32768,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text",
+        "video"
+      ]
     }
   ],
   "codex-free": [
+    {
+      "id": "gpt-6-chat-thinking",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-6 Chat Thinking",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Chat Thinking for the paid CCA experiment.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
     {
       "id": "gpt-6-luna",
       "object": "model",
@@ -2948,6 +3164,41 @@
       "support_configuration_update": true
     },
     {
+      "id": "gpt-6-chat-thinking",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-6 Chat Thinking",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Chat Thinking for the paid CCA experiment.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-5.6-sol",
       "object": "model",
       "created": 1783616400,
@@ -3266,6 +3517,41 @@
       "support_configuration_update": true
     },
     {
+      "id": "gpt-6-chat-thinking",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-6 Chat Thinking",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Chat Thinking for the paid CCA experiment.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-5.6-sol",
       "object": "model",
       "created": 1783616400,
@@ -3557,6 +3843,41 @@
       "display_name": "GPT 6.0 Luna",
       "version": "gpt-6.0",
       "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-chat-thinking",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT-6 Chat Thinking",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Chat Thinking for the paid CCA experiment.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -4175,6 +4496,75 @@
       }
     },
     {
+      "id": "gemini-4-carbon-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Carbon",
+      "name": "gemini-4-carbon-high",
+      "description": "Gemini 4 Carbon (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-hydrogen-xhigh",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Hydrogen",
+      "name": "gemini-4-hydrogen-xhigh",
+      "description": "Gemini 4 Hydrogen (XHigh)",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
       "id": "gemini-3.8-flash-high",
       "object": "model",
       "owned_by": "antigravity",
@@ -4183,6 +4573,40 @@
       "display_name": "Gemini 3.8 Flash",
       "name": "gemini-3.8-flash-high",
       "description": "Gemini 3.8 Flash (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-3.8-flash-tiered",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 3.8 Flash (Tiered)",
+      "name": "gemini-3.8-flash-tiered",
+      "description": "Gemini 3.8 Flash (Tiered)",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
@@ -4755,6 +5179,40 @@
     }
   ],
   "meta": [
+    {
+      "id": "muse-ember-1.0",
+      "object": "model",
+      "created": 1794182400,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Ember 1.0",
+      "name": "muse-ember-1.0",
+      "description": "Meta's smallest and most efficient model designed for complex reasoning execution, tool calls, coding subtasks, routing, extraction, and long document parsing.",
+      "context_length": 1048576,
+      "max_completion_tokens": 524288,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
     {
       "id": "muse-wonder-1.0",
       "object": "model",

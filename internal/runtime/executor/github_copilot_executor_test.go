@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -100,12 +101,12 @@ func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *test
 	clientID := "github-copilot-test-client"
 	reg.RegisterClient(clientID, "github-copilot", []*registry.ModelInfo{
 		{
-			ID:                 "gpt-5.4",
-			SupportedEndpoints: []string{"/chat/completions", "/responses"},
+			ID:        "gpt-5.4",
+			Protocols: []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 		},
 		{
-			ID:                 "gpt-5.4-mini",
-			SupportedEndpoints: []string{"/chat/completions", "/responses"},
+			ID:        "gpt-5.4-mini",
+			Protocols: []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 		},
 	})
 	defer reg.UnregisterClient(clientID)

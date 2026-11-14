@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -399,6 +400,74 @@ func TestListPluginStoreShowsLatestReleaseVersionAndCaches(t *testing.T) {
 	releaseCalls := httpClient.count("https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest")
 	if releaseCalls != 1 {
 		t.Fatalf("latest release fetched %d times, want 1 (cached)", releaseCalls)
+	}
+}
+
+func TestListPluginStoreRefreshQueryBypassesCache(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	httpClient := &countingPluginStoreHTTPClient{responses: fakePluginStoreHTTPClient{
+		"https://registry.example/registry.json": registryJSON(t),
+		"https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest": []byte(`{
+			"tag_name": "v0.1.0",
+			"assets": []
+		}`),
+	}}
+	h := &Handler{
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     writeManagementPluginFile(t, "sample-provider-v0.1.0"),
+			},
+		},
+		configFilePath:         writeTestConfigFile(t),
+		pluginStoreRegistryURL: "https://registry.example/registry.json",
+		pluginStoreHTTPClient:  httpClient,
+		pluginReleases:         pluginReleaseCache{nowFunc: func() time.Time { return now }},
+	}
+
+	listWithQuery := func(query string) pluginStoreListResponse {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodGet, "/v8/management/plugins/store"+query, nil)
+		h.ListPluginStore(c)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var body pluginStoreListResponse
+		if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+			t.Fatalf("Unmarshal() error = %v; body=%s", errDecode, rec.Body.String())
+		}
+		return body
+	}
+
+	body := listWithQuery("")
+	if body.Plugins[0].Version != "0.1.0" || body.Plugins[0].UpdateAvailable {
+		t.Fatalf("initial plugin = %#v, want 0.1.0 without update", body.Plugins[0])
+	}
+
+	httpClient.mu.Lock()
+	httpClient.responses["https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest"] = []byte(`{
+		"tag_name": "v0.2.0",
+		"assets": []
+	}`)
+	httpClient.mu.Unlock()
+
+	now = now.Add(pluginReleaseRefreshFloor)
+	body = listWithQuery("?refresh=false")
+	if body.Plugins[0].Version != "0.1.0" || body.Plugins[0].UpdateAvailable {
+		t.Fatalf("refresh=false plugin = %#v, want cached 0.1.0", body.Plugins[0])
+	}
+
+	body = listWithQuery("?refresh=true")
+	if body.Plugins[0].Version != "0.2.0" || !body.Plugins[0].UpdateAvailable {
+		t.Fatalf("refresh=true plugin = %#v, want refreshed 0.2.0 with update_available=true", body.Plugins[0])
+	}
+	releaseCalls := httpClient.count("https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/latest")
+	if releaseCalls != 2 {
+		t.Fatalf("latest release fetched %d times, want 2", releaseCalls)
 	}
 }
 

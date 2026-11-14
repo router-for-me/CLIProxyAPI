@@ -270,21 +270,26 @@ func cleanupUnselectedPluginFiles(root string, loaded []pluginFile) error {
 		paths[filepath.Clean(file.Path)] = struct{}{}
 	}
 	var errs []error
+	keptCandidates := make([]pluginFile, 0, len(candidates))
 	for _, candidate := range candidates {
 		paths := loadedByID[candidate.ID]
 		if len(paths) == 0 {
+			keptCandidates = append(keptCandidates, candidate)
 			continue
 		}
 		if _, selected := paths[filepath.Clean(candidate.Path)]; selected {
+			keptCandidates = append(keptCandidates, candidate)
 			continue
 		}
 		if errRemove := os.Remove(candidate.Path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
 			errs = append(errs, errRemove)
+			keptCandidates = append(keptCandidates, candidate)
 			log.WithError(errRemove).Warnf("pluginhost: failed to remove old plugin file %s", candidate.Path)
 			continue
 		}
 		log.WithFields(pluginLogFields(candidate.ID, "", candidate.Version, candidate.Path)).Info("pluginhost: old plugin file removed")
 	}
+	cleanupStaleShadowPlugins(root, append(keptCandidates, loaded...))
 	return errors.Join(errs...)
 }
 

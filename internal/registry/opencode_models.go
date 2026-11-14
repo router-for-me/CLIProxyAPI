@@ -42,31 +42,17 @@ func declareOpenCodeProtocols(gateway string, info *ModelInfo) {
 	}
 }
 
-// openCodeRoutesModelInfo builds a ModelInfo from an embedded OpenCode route-table
-// entry (opencode_routes.json). The route table only carries ID -> protocol, so
-// capability fields are populated with the OpenCode-wide defaults.
-func openCodeRoutesModelInfo(gateway, modelID, protocol string) *ModelInfo {
-	info := &ModelInfo{
-		ID:                        modelID,
-		Object:                    "model",
-		OwnedBy:                   "opencode",
-		Type:                      "opencode",
-		DisplayName:               modelID,
-		Description:               "OpenCode " + gateway + " gateway — " + modelID,
-		ContextLength:             500000,
-		MaxCompletionTokens:       65536,
-		SupportedInputModalities:  []string{"text"},
-		SupportedOutputModalities: []string{"text"},
-		Thinking: &ThinkingSupport{
-			Levels: []string{"low", "medium", "high", "xhigh"},
-		},
+// openCodeRoutesModelInfo declares only facts present in the route table.
+// Limits and reasoning capabilities require independent catalog evidence.
+func openCodeRoutesModelInfo(gateway, modelID string) *ModelInfo {
+	return &ModelInfo{
+		ID:          modelID,
+		Object:      "model",
+		OwnedBy:     "opencode",
+		Type:        "opencode",
+		DisplayName: modelID,
+		Description: "OpenCode " + gateway + " gateway — " + modelID,
 	}
-	if protocol == "gemini" {
-		info.SupportedEndpoints = []string{"/v1/models/" + modelID}
-	} else {
-		info.SupportedEndpoints = []string{OpenCodeModelPath(gateway, modelID)}
-	}
-	return info
 }
 
 // openCodeModelsFromRoutes materializes ModelInfo entries from the embedded
@@ -77,8 +63,8 @@ func openCodeModelsFromRoutes(gateway string) []*ModelInfo {
 		return nil
 	}
 	out := make([]*ModelInfo, 0, len(routes))
-	for id, protocol := range routes {
-		out = append(out, openCodeRoutesModelInfo(gateway, id, protocol))
+	for id := range routes {
+		out = append(out, openCodeRoutesModelInfo(gateway, id))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

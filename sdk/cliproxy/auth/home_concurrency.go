@@ -283,14 +283,6 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 // SafeResponseHeaders returns trusted response headers only for concrete
 // retry/cooldown errors.
 func SafeResponseHeaders(err error) http.Header {
-	var dbgExhausted *homeRetryRoundExhaustedError
-	var dbgBusy *HomeConcurrencyBusyError
-	fmt.Printf("DEBUGSAFE type=%T err=%v exhausted=%v busy=%v markerRA=%v\n", err, err, errors.As(err, &dbgExhausted), errors.As(err, &dbgBusy), func() any {
-		if dbgExhausted != nil {
-			return dbgExhausted.RetryAfter()
-		}
-		return nil
-	}())
 	// An exhausted Home round owns the aggregated multi-credential deadline;
 	// a per-attempt trusted annotation deeper in the chain must not replace it.
 	var exhausted *homeRetryRoundExhaustedError
@@ -301,6 +293,10 @@ func SafeResponseHeaders(err error) http.Header {
 			return safeRetryAfterHeader(*retryAfter)
 		}
 		return nil
+	}
+	var poolCooldown *poolCooldownTerminalError
+	if errors.As(err, &poolCooldown) && poolCooldown != nil {
+		return poolCooldown.SafeResponseHeaders()
 	}
 	var trusted *trustedRetryAfterError
 	if errors.As(err, &trusted) && trusted != nil {
@@ -324,7 +320,7 @@ func SafeResponseHeaders(err error) http.Header {
 	}
 	var modelCooldown *modelCooldownError
 	if errors.As(err, &modelCooldown) && modelCooldown != nil {
-		return modelCooldown.Headers()
+		return modelCooldown.SafeResponseHeaders()
 	}
 	var unavailable *authUnavailableError
 	if errors.As(err, &unavailable) && unavailable != nil {

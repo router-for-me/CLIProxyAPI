@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1313,6 +1314,269 @@ func xaiPatchCompletedOutput(eventData []byte, outputItemsByIndex map[int64][]by
 // cli-chat-proxy ("Usage resets over a rolling 24-hour window").
 const xaiFreeUsageExhaustedCooldown = 24 * time.Hour
 
+const (
+	xaiEmptyStreamMessage      = "xai stream error: empty upstream stream"
+	xaiIncompleteStreamMessage = "xai stream error: stream closed before response.completed or response.incomplete"
+)
+
+type xaiRequestScopedStreamError struct {
+	statusErr
+}
+
+func (xaiRequestScopedStreamError) IsRequestScoped() bool {
+	return true
+}
+
+func newXAIEmptyStreamError() xaiRequestScopedStreamError {
+	return xaiRequestScopedStreamError{statusErr: statusErr{
+		code: http.StatusBadGateway,
+		msg:  xaiEmptyStreamMessage,
+	}}
+}
+
+func newXAIIncompleteStreamError() xaiRequestScopedStreamError {
+	return xaiRequestScopedStreamError{statusErr: statusErr{
+		code: http.StatusBadGateway,
+		msg:  xaiIncompleteStreamMessage,
+	}}
+}
+
+func xaiTerminalFailureErr(eventName string, eventData []byte) (statusErr, bool) {
+	doc, ok := xaiTerminalFailureDoc(eventName, eventData)
+	if !ok || doc == nil {
+		return statusErr{}, false
+	}
+	status := xaiTerminalFailureStatus(eventData, doc)
+	return xaiStatusErr(status, doc.Bytes()), true
+}
+
+func xaiTerminalFailureDoc(eventName string, eventData []byte) (*ojson.Doc, bool) {
+	trimmed := bytes.TrimSpace(eventData)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+	if !ojson.ValidBytes(trimmed) {
+		if strings.EqualFold(strings.TrimSpace(eventName), "error") {
+			doc := ojson.NewDocString(`{"error":{}}`)
+			_ = doc.Set("error.message", string(trimmed))
+			return doc, true
+		}
+		return nil, false
+	}
+
+	eventType := strings.TrimSpace(ojson.GetBytesNoCopy(trimmed, "type").String())
+	if eventType == "" {
+		normalizedEventName := strings.TrimSpace(eventName)
+		if normalizedEventName == "error" || normalizedEventName == "response.failed" {
+			eventType = normalizedEventName
+		} else if errField := ojson.GetBytesNoCopy(trimmed, "error"); errField.Exists() && errField.Type != ojson.Null && !ojson.GetBytesNoCopy(trimmed, "output").Exists() {
+			if errField.Type == ojson.JSON || strings.TrimSpace(errField.String()) != "" {
+				eventType = "error"
+			}
+		}
+	}
+
+	var doc *ojson.Doc
+	switch eventType {
+	case "error":
+		doc = xaiTerminalErrorDoc(trimmed, "error")
+		if doc == nil {
+			doc = xaiTerminalErrorDoc(trimmed, "body.error")
+		}
+		if doc == nil {
+			doc = xaiTerminalTopLevelErrorDoc(trimmed)
+		}
+	case "response.failed":
+		doc = xaiTerminalErrorDoc(trimmed, "response.error")
+		if doc == nil {
+			doc = xaiTerminalErrorDoc(trimmed, "error")
+		}
+	default:
+		return nil, false
+	}
+
+	if doc == nil {
+		doc = ojson.NewDocString(`{"error":{"message":"upstream stream failed without error details"}}`)
+	}
+	if seq := ojson.GetBytesNoCopy(trimmed, "sequence_number"); seq.Exists() && seq.Type == ojson.Number {
+		_ = doc.Set("sequence_number", seq.Int())
+	}
+	return doc, true
+}
+
+func xaiTerminalErrorDoc(eventData []byte, path string) *ojson.Doc {
+	errorResult := ojson.GetBytesNoCopy(eventData, path)
+	if !errorResult.Exists() || errorResult.Type == ojson.Null {
+		return nil
+	}
+
+	doc := ojson.NewDocString(`{"error":{}}`)
+	hasField := false
+	if errorResult.Type == ojson.JSON {
+		if errorResult.IsObject() && len(errorResult.Map()) > 0 {
+			_ = doc.SetRawBytes("error", []byte(errorResult.Raw))
+			hasField = true
+		}
+	} else if message := strings.TrimSpace(errorResult.String()); message != "" {
+		_ = doc.Set("error.message", message)
+		hasField = true
+	}
+
+	if strings.TrimSpace(doc.Get("error.code").String()) == "" {
+		for _, codePath := range []string{"response.error.code", "code", "body.error.code"} {
+			if code := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, codePath).String()); code != "" {
+				_ = doc.Set("error.code", code)
+				hasField = true
+				break
+			}
+		}
+	}
+	if strings.TrimSpace(doc.Get("error.type").String()) == "" {
+		for _, typePath := range []string{"response.error.type", "error_type", "body.error.type"} {
+			if errType := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, typePath).String()); errType != "" {
+				_ = doc.Set("error.type", errType)
+				hasField = true
+				break
+			}
+		}
+	}
+	if strings.TrimSpace(doc.Get("error.param").String()) == "" {
+		for _, paramPath := range []string{"response.error.param", "param", "body.error.param"} {
+			if param := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, paramPath).String()); param != "" {
+				_ = doc.Set("error.param", param)
+				hasField = true
+				break
+			}
+		}
+	}
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
+		for _, msgPath := range []string{"response.error.message", "message", "body.error.message"} {
+			if message := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, msgPath).String()); message != "" {
+				_ = doc.Set("error.message", message)
+				hasField = true
+				break
+			}
+		}
+	}
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
+		if code := strings.TrimSpace(doc.Get("error.code").String()); code != "" {
+			_ = doc.Set("error.message", code)
+			hasField = true
+		} else if errType := strings.TrimSpace(doc.Get("error.type").String()); errType != "" {
+			_ = doc.Set("error.message", errType)
+			hasField = true
+		}
+	}
+	if !hasField {
+		return nil
+	}
+	return doc
+}
+
+func xaiTerminalTopLevelErrorDoc(eventData []byte) *ojson.Doc {
+	message := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "message").String())
+	code := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "code").String())
+	errorType := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "error_type").String())
+	param := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "param").String())
+	if message == "" && code == "" && errorType == "" && param == "" {
+		return nil
+	}
+
+	doc := ojson.NewDocString(`{"error":{}}`)
+	if message != "" {
+		_ = doc.Set("error.message", message)
+	}
+	if code != "" {
+		_ = doc.Set("error.code", code)
+	}
+	if errorType != "" {
+		_ = doc.Set("error.type", errorType)
+	}
+	if param != "" {
+		_ = doc.Set("error.param", param)
+	}
+	if strings.TrimSpace(doc.Get("error.message").String()) == "" {
+		if code != "" {
+			_ = doc.Set("error.message", code)
+		} else if errorType != "" {
+			_ = doc.Set("error.message", errorType)
+		}
+	}
+	return doc
+}
+
+func xaiTerminalFailureStatus(eventData []byte, doc *ojson.Doc) int {
+	for _, path := range []string{"status", "status_code", "error.status", "error.status_code", "response.error.status", "response.error.status_code", "body.status", "body.error.status"} {
+		res := ojson.GetBytesNoCopy(eventData, path)
+		switch res.Type {
+		case ojson.Number:
+			if status := int(res.Int()); status >= 400 && status <= 599 {
+				return status
+			}
+		case ojson.String:
+			if status, errAtoi := strconv.Atoi(strings.TrimSpace(res.String())); errAtoi == nil && status >= 400 && status <= 599 {
+				return status
+			}
+		}
+	}
+
+	errorType := strings.ToLower(strings.TrimSpace(doc.Get("error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(doc.Get("error.code").String()))
+	errorMsg := strings.ToLower(strings.TrimSpace(doc.Get("error.message").String()))
+	if status, errAtoi := strconv.Atoi(errorCode); errAtoi == nil && status >= 400 && status <= 599 {
+		return status
+	}
+
+	switch {
+	case errorType == "authentication_error",
+		errorCode == "invalid_api_key",
+		errorCode == "unauthorized",
+		strings.HasPrefix(errorCode, "unauthenticated"),
+		strings.Contains(errorCode, "bad-credentials"),
+		strings.Contains(errorMsg, "access token could not be validated"):
+		return http.StatusUnauthorized
+	case errorType == "permission_error",
+		errorCode == "forbidden",
+		errorCode == "permission_denied",
+		errorCode == "permission-denied",
+		strings.HasPrefix(errorCode, "permission_denied:"),
+		strings.HasPrefix(errorCode, "permission-denied:"):
+		return http.StatusForbidden
+	case errorType == "not_found_error",
+		errorCode == "not_found",
+		errorCode == "model_not_found":
+		return http.StatusNotFound
+	case errorType == "rate_limit_error",
+		errorCode == "rate_limit_exceeded",
+		errorCode == "rate_limit",
+		strings.Contains(errorCode, "free-usage-exhausted"),
+		strings.Contains(errorCode, "resource_exhausted"),
+		strings.Contains(errorCode, "resource-exhausted"),
+		strings.Contains(errorMsg, "free-usage-exhausted"),
+		strings.Contains(errorMsg, "included free usage"):
+		return http.StatusTooManyRequests
+	case errorCode == "cyber_policy",
+		errorCode == "content_policy_violation",
+		errorType == "invalid_request_error",
+		errorType == "invalid_request",
+		errorType == "bad_request_error",
+		errorType == "image_generation_user_error",
+		errorCode == "invalid_value",
+		errorCode == "invalid_request_error",
+		errorCode == "invalid_argument",
+		errorCode == "invalid-argument",
+		errorCode == "context_length_exceeded",
+		errorCode == "context_too_large":
+		return http.StatusBadRequest
+	case errorType == "service_unavailable_error",
+		errorCode == "server_is_overloaded",
+		errorCode == "service_unavailable":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadGateway
+	}
+}
+
 // xaiStatusErr normalizes upstream xAI error bodies for conductor behavior:
 //   - credential invalidation (403 bad-credentials) is remapped to 401 so the
 //     existing OAuth refresh-once-and-retry path runs instead of payment cooldown
@@ -1335,7 +1599,13 @@ func xaiStatusErr(code int, body []byte) statusErr {
 		return err
 	}
 	codeStr := strings.ToLower(ojson.GetBytesNoCopy(body, "code").String())
-	msg := strings.ToLower(ojson.GetBytesNoCopy(body, "error").String())
+	if codeStr == "" {
+		codeStr = strings.ToLower(ojson.GetBytesNoCopy(body, "error.code").String())
+	}
+	msg := strings.ToLower(ojson.GetBytesNoCopy(body, "error.message").String())
+	if msg == "" {
+		msg = strings.ToLower(ojson.GetBytesNoCopy(body, "error").String())
+	}
 	if msg == "" {
 		msg = strings.ToLower(string(body))
 	}

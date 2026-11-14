@@ -699,6 +699,17 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 			entry["quota_plugin_id"] = pluginID
 		}
 	}
+	// Surface a TOS appeal link for operator action when the credential was
+	// deactivated by an Antigravity TOS_VIOLATION (issue #7515). Only exposed on
+	// the maintained v8 surface; the deprecated v0 shape stays frozen.
+	if quota.v8 && auth.Metadata != nil {
+		if appeal, ok := auth.Metadata["tos_appeal_url"].(string); ok && strings.TrimSpace(appeal) != "" {
+			entry["tos_appeal_url"] = strings.TrimSpace(appeal)
+		}
+		if appealText, ok := auth.Metadata["tos_appeal_url_text"].(string); ok && strings.TrimSpace(appealText) != "" {
+			entry["tos_appeal_url_text"] = strings.TrimSpace(appealText)
+		}
+	}
 	// Declarative quota_probe is only executed by the v0 quota/fetch route.
 	if !quota.v8 && auth.Metadata != nil {
 		if probe, okProbe := auth.Metadata["quota_probe"]; okProbe && probe != nil {
@@ -814,6 +825,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		entry["request_retry"] = requestRetry
 	}
 	if quota.v8 {
+		// OAuth login entry the credential was signed in through; multi-entry plugins store it
+		// next to the provider, and the deprecated v0 route keeps its frozen response shape.
+		if oauthProvider := authOAuthProvider(auth); oauthProvider != "" {
+			entry["oauth_provider"] = oauthProvider
+		}
 		nowUTC := time.Now().UTC()
 		if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
 			entry["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
@@ -997,6 +1013,27 @@ func authProjectID(auth *coreauth.Auth) string {
 	if auth.Attributes != nil {
 		if projectID := strings.TrimSpace(auth.Attributes["project_id"]); projectID != "" {
 			return projectID
+		}
+	}
+	return ""
+}
+
+func authOAuthProvider(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	for _, key := range []string{"oauth_provider", "portal"} {
+		if auth.Attributes != nil {
+			if v := strings.ToLower(strings.TrimSpace(auth.Attributes[key])); v != "" {
+				return v
+			}
+		}
+		if auth.Metadata != nil {
+			if raw, ok := auth.Metadata[key].(string); ok {
+				if v := strings.ToLower(strings.TrimSpace(raw)); v != "" {
+					return v
+				}
+			}
 		}
 	}
 	return ""

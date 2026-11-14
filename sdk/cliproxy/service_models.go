@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -13,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // fetchCursorModelsForRegistration is overridable in tests to avoid real credentials and network requests.
@@ -187,12 +189,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			models = registry.GetCodexProModels()
 		}
 		models = applyExcludedModels(models, excluded)
-	case "opencode":
-		models = registry.GetOpenCodeModels("zen")
-		models = applyExcludedModels(models, excluded)
-	case "opencode-go":
-		models = registry.GetOpenCodeModels("go")
-		models = applyExcludedModels(models, excluded)
+	case "opencode", "opencode-go":
+		discovered, err := executor.FetchOpenCodeModels(ctx, a, cfg, provider)
+		if err != nil {
+			log.WithError(err).WithField("provider", provider).Warn("could not read OpenCode model catalog")
+		}
+		models = applyExcludedModels(discovered, excluded)
 	case "devin":
 		models = registry.GetDevinModels()
 		models = applyExcludedModels(models, excluded)
@@ -877,6 +879,17 @@ func buildConfiguredModelInfo(model modelEntry, ownedBy, modelType string, creat
 	}
 	if compatModel, okCompat := any(model).(modelCompatEntry); okCompat {
 		info.IsCompat = compatModel.GetIsCompat()
+	}
+	switch declared := model.(type) {
+	case internalconfig.ClaudeModel:
+		info.CatalogProviderID, info.CatalogModelID = declared.CatalogProviderID, declared.CatalogModelID
+		info.CatalogRouteProviderID, info.CatalogRouteModelID = declared.CatalogRouteProviderID, declared.CatalogRouteModelID
+		info.Protocols = append([]string(nil), declared.Protocols...)
+	case config.OpenAICompatibilityModel:
+		info.CatalogProviderID, info.CatalogModelID = declared.CatalogProviderID, declared.CatalogModelID
+		info.CatalogRouteProviderID, info.CatalogRouteModelID = declared.CatalogRouteProviderID, declared.CatalogRouteModelID
+		info.Protocols = append([]string(nil), declared.Protocols...)
+		info.VariantID = declared.VariantID
 	}
 	return info
 }

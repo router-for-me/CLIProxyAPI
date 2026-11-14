@@ -129,8 +129,8 @@ func TestCleanupExpiredQuotasInvalidatesAvailableModelsCache(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "openai", []*ModelInfo{{ID: "m1", Created: 1}})
 	r.SetModelQuotaExceeded("client-1", "m1")
-	if models := r.GetAvailableModels("openai"); len(models) != 0 {
-		t.Fatalf("expected model with no selectable route to be hidden before cleanup, got %d", len(models))
+	if models := r.GetAvailableModels("openai"); len(models) != 1 {
+		t.Fatalf("expected cooldown model to remain listed before cleanup, got %d", len(models))
 	}
 
 	r.mutex.Lock()

@@ -1,5 +1,7 @@
 package registry
 
+import "github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
+
 // GetCodeBuddyModels returns the available models for CodeBuddy (Tencent).
 // These models are served through the copilot.tencent.com API.
 func GetCodeBuddyModels() []*ModelInfo {
@@ -15,7 +17,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "Automatic model selection via CodeBuddy",
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "glm-5v-turbo",
@@ -27,7 +29,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "GLM-5v Turbo via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "glm-5.1",
@@ -39,7 +41,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "GLM-5.1 via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "glm-5.0-turbo",
@@ -51,7 +53,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "GLM-5.0 Turbo via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "glm-5.0",
@@ -63,7 +65,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "GLM-5.0 via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "glm-4.7",
@@ -75,7 +77,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "GLM-4.7 via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "minimax-m2.7",
@@ -87,7 +89,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "MiniMax M2.7 via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "minimax-m2.5",
@@ -99,7 +101,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "MiniMax M2.5 via CodeBuddy",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "kimi-k2.5",
@@ -111,7 +113,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "Kimi K2.5 via CodeBuddy",
 			ContextLength:       256000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "kimi-k2.6",
@@ -123,7 +125,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "Kimi K2.6 via CodeBuddy",
 			ContextLength:       256000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "kimi-k2-thinking",
@@ -136,7 +138,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			ContextLength:       256000,
 			MaxCompletionTokens: 32768,
 			Thinking:            &ThinkingSupport{ZeroAllowed: true},
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "deepseek-v3-2-volc",
@@ -148,7 +150,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			Description:         "DeepSeek V3.2 via CodeBuddy",
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "hy3-preview",
@@ -161,7 +163,7 @@ func GetCodeBuddyModels() []*ModelInfo {
 			ContextLength:       128000,
 			MaxCompletionTokens: 32768,
 			Thinking:            &ThinkingSupport{ZeroAllowed: true},
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 	}
 }

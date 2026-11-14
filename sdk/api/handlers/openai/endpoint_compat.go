@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
@@ -21,16 +22,16 @@ func resolveEndpointOverride(modelName, requestedEndpoint string) (string, bool)
 			info = registry.GetGlobalRegistry().GetModelInfo(baseModel, "")
 		}
 	}
-	if info == nil || len(info.SupportedEndpoints) == 0 {
+	if info == nil || len(info.Protocols) == 0 {
 		return "", false
 	}
-	if endpointListContains(info.SupportedEndpoints, requestedEndpoint) {
+	if endpointListContains(info.Protocols, endpointProtocol(requestedEndpoint)) {
 		return "", false
 	}
-	if requestedEndpoint == openAIChatEndpoint && endpointListContains(info.SupportedEndpoints, openAIResponsesEndpoint) {
+	if requestedEndpoint == openAIChatEndpoint && endpointListContains(info.Protocols, modelrouting.ProtocolOpenAIResponses) {
 		return openAIResponsesEndpoint, true
 	}
-	if requestedEndpoint == openAIResponsesEndpoint && endpointListContains(info.SupportedEndpoints, openAIChatEndpoint) {
+	if requestedEndpoint == openAIResponsesEndpoint && endpointListContains(info.Protocols, modelrouting.ProtocolOpenAIChat) {
 		return openAIChatEndpoint, true
 	}
 	return "", false
@@ -43,4 +44,15 @@ func endpointListContains(items []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func endpointProtocol(endpoint string) string {
+	switch endpoint {
+	case openAIChatEndpoint:
+		return modelrouting.ProtocolOpenAIChat
+	case openAIResponsesEndpoint:
+		return modelrouting.ProtocolOpenAIResponses
+	default:
+		return ""
+	}
 }

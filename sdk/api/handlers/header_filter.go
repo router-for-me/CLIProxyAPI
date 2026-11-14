@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"net/http"
 	"strings"
 )
@@ -48,6 +49,11 @@ var cpaReservedResponseHeaders = map[string]struct{}{
 
 // IsCPAReservedResponseHeader reports whether a downstream response header is managed by CPA.
 func IsCPAReservedResponseHeader(name string) bool {
+	for _, evidence := range coreauth.ModelRoutingResponseHeaderNames() {
+		if strings.EqualFold(name, evidence) {
+			return true
+		}
+	}
 	_, reserved := cpaReservedResponseHeaders[http.CanonicalHeaderKey(name)]
 	return reserved
 }
@@ -65,7 +71,7 @@ func FilterUpstreamHeaders(src http.Header) http.Header {
 		if _, blocked := hopByHopHeaders[canonicalKey]; blocked {
 			continue
 		}
-		if _, reserved := cpaReservedResponseHeaders[canonicalKey]; reserved {
+		if IsCPAReservedResponseHeader(canonicalKey) {
 			continue
 		}
 		if _, scoped := connectionScoped[canonicalKey]; scoped {
@@ -123,22 +129,14 @@ func WriteUpstreamHeaders(dst http.Header, src http.Header) {
 	}
 }
 
-// mergeTrustedDownstreamHeaders applies headers produced inside CLIProxy after
-// upstream filtering and response interceptors. The separate carrier prevents
-// an upstream response from impersonating routing evidence.
-func mergeTrustedDownstreamHeaders(dst, trusted http.Header) http.Header {
-	if len(trusted) == 0 {
-		return dst
-	}
-	result := dst.Clone()
-	if result == nil {
-		result = make(http.Header)
-	}
-	for key, values := range trusted {
-		result.Del(key)
-		for _, value := range values {
-			result.Add(key, value)
+func withRoutingEvidence(headers, evidence http.Header) http.Header {
+	for _, key := range coreauth.ModelRoutingResponseHeaderNames() {
+		if value := evidence.Get(key); value != "" {
+			if headers == nil {
+				headers = make(http.Header)
+			}
+			headers.Set(key, value)
 		}
 	}
-	return result
+	return headers
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 )
 
 var (
-	digestPattern        = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	decimalPattern       = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?$`)
-	signedDecimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+	credentialRevisionPattern = regexp.MustCompile(`^[0-9]+:[0-9]+$`)
+	digestPattern             = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	decimalPattern            = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?$`)
+	signedDecimalPattern      = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
 )
 
 // UnmarshalYAML rejects unknown projection fields recursively. The rest of the
@@ -132,7 +134,6 @@ func (cfg *Config) Validate() error {
 
 	models := make(map[string]DirectModel, len(cfg.DirectModels))
 	routes := make(map[string]DirectRoute)
-	selectors := make(map[string]string)
 	variants := make(map[string]struct{})
 	for index, model := range cfg.DirectModels {
 		path := fmt.Sprintf("model-routing.direct-models[%d]", index)
@@ -166,15 +167,10 @@ func (cfg *Config) Validate() error {
 			if err := validateRoute(routePath, model.ModelKey, route); err != nil {
 				return err
 			}
-			key := routeKeyID(route.RouteKey)
-			if _, duplicate := routes[key]; duplicate {
-				return fmt.Errorf("%s.route-key: duplicate RouteKey", routePath)
+			if _, duplicate := routes[route.RouteSelector]; duplicate {
+				return fmt.Errorf("%s.route-selector: duplicate execution selector", routePath)
 			}
-			if prior, duplicate := selectors[route.RouteSelector]; duplicate {
-				return fmt.Errorf("%s.route-selector: already bound to %s", routePath, prior)
-			}
-			selectors[route.RouteSelector] = routePath
-			routes[key] = route
+			routes[route.RouteSelector] = route
 		}
 	}
 
@@ -238,7 +234,7 @@ func (cfg *Config) Validate() error {
 				if err := validateCandidate(candidatePath, member.ModelKey, candidate, model, routes, variants); err != nil {
 					return err
 				}
-				candidateID := routeKeyID(candidate.RouteKey) + "\x00" + optionalString(candidate.VariantID)
+				candidateID := candidate.RouteSelector + "\x00" + optionalString(candidate.VariantID)
 				if _, duplicate := candidateKeys[candidateID]; duplicate {
 					return fmt.Errorf("%s: duplicate CandidateKey", candidatePath)
 				}
@@ -348,8 +344,8 @@ func validateCandidate(path string, parent ModelKey, candidate Candidate, model 
 	if !digestPattern.MatchString(candidate.RouteSelector) {
 		return fmt.Errorf("%s.route-selector: must be an opaque sha256 selector", path)
 	}
-	route, exists := routes[routeKeyID(candidate.RouteKey)]
-	if !exists || !route.Selectable || !route.Health.Selectable {
+	route, exists := routes[candidate.RouteSelector]
+	if !exists || route.RouteKey != candidate.RouteKey || !route.Selectable || !route.Health.Selectable {
 		return fmt.Errorf("%s.route-key: candidate does not reference a selectable direct route", path)
 	}
 	if candidate.RuntimeModelID != route.RuntimeModelID {
@@ -357,9 +353,6 @@ func validateCandidate(path string, parent ModelKey, candidate Candidate, model 
 	}
 	if candidate.CatalogRouteProviderID != route.CatalogRouteProviderID || candidate.CatalogRouteModelID != route.CatalogRouteModelID {
 		return fmt.Errorf("%s: candidate catalog route facts differ from its direct route", path)
-	}
-	if candidate.RouteSelector != route.RouteSelector {
-		return fmt.Errorf("%s.route-selector: differs from the referenced direct route", path)
 	}
 	if candidate.VariantID != nil {
 		if err := requireCanonical(path+".variant-id", *candidate.VariantID); err != nil {
@@ -386,13 +379,15 @@ func validateCandidate(path string, parent ModelKey, candidate Candidate, model 
 	if err := validateCredentialRefs(path+".credential-refs", candidate.CredentialRefs); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(candidate.CredentialRefs, route.CredentialRefs) {
-		return fmt.Errorf("%s.credential-refs: differ from the referenced direct route", path)
+	for _, ref := range candidate.CredentialRefs {
+		if !slices.Contains(route.CredentialRefs, ref) {
+			return fmt.Errorf("%s.credential-refs: outside the referenced direct route", path)
+		}
 	}
 	if err := validateSortedStrings(path+".protocols", candidate.Protocols, false); err != nil {
 		return err
 	}
-	if !reflect.DeepEqual(candidate.QuotaDomains, route.QuotaDomains) || !reflect.DeepEqual(candidate.Protocols, route.Protocols) {
+	if !stringsSubset(candidate.QuotaDomains, route.QuotaDomains) || !stringsSubset(candidate.Protocols, route.Protocols) {
 		return fmt.Errorf("%s: candidate quota/protocol facts differ from its direct route", path)
 	}
 	if err := validateHealth(path+".health", candidate.Health); err != nil {
@@ -602,6 +597,9 @@ func validateCredentialRefs(path string, refs []CredentialRef) error {
 		if err := requireCanonical(itemPath+".kind", ref.Kind); err != nil {
 			return err
 		}
+		if ref.Revision != "" && !credentialRevisionPattern.MatchString(ref.Revision) {
+			return fmt.Errorf("%s.revision: invalid registration and credential revision", itemPath)
+		}
 		identity := ref.ID + "\x00" + ref.Kind
 		if _, duplicate := seen[identity]; duplicate {
 			return fmt.Errorf("%s: duplicate credential reference", itemPath)
@@ -669,10 +667,6 @@ func validateSortedStrings(path string, values []string, allowEmpty bool) error 
 
 func modelKeyID(key ModelKey) string {
 	return key.CatalogProviderID + "\x00" + key.CanonicalModelID
-}
-
-func routeKeyID(key RouteKey) string {
-	return modelKeyID(key.ModelKey) + "\x00" + key.RouteChannel
 }
 
 // SelectorForRoute returns the stable, secret-free selector bound to one route

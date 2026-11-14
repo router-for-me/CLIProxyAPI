@@ -2,39 +2,24 @@ package management
 
 import (
 	"fmt"
-	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
-// GetModelInventory returns a route-aware secret-free snapshot. It extends the
-// existing management surface; configuration writes remain CCS-owned.
-func (h *Handler) GetModelInventory(c *gin.Context) {
+// BuildRoutingInventory combines registered runtime routes with the adopted projection.
+func BuildRoutingInventory(manager *coreauth.Manager, activeState modelrouting.ActiveStateV2) (modelrouting.Inventory, error) {
 	now := time.Now().UTC()
-	h.mu.Lock()
-	manager := h.authManager
-	state := h.modelRoutingStateHook
-	h.mu.Unlock()
-	activeState := modelrouting.ActiveStateV2{}
-	if state != nil {
-		activeState = state()
-	}
 	active := activeState.Identity
 	projection := activeState.Projection
 	if (active == nil) != (activeState.LoadedAt == nil) || (active == nil) != (projection == nil) {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "active model-routing identity and activation timestamp are inconsistent"})
-		return
-	}
-	if projection != nil && active == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "active model-routing identity is unavailable"})
-		return
+		return modelrouting.Inventory{}, fmt.Errorf("inconsistent routing activation")
 	}
 
 	auths := make(map[string]*coreauth.Auth)
@@ -45,7 +30,7 @@ func (h *Handler) GetModelInventory(c *gin.Context) {
 			}
 		}
 	}
-	registered := registry.GetGlobalRegistry().RegisteredRouteSnapshots()
+	registered := registry.GetGlobalRegistry().RegisteredRouteSnapshotsAt(now)
 	inventory := modelrouting.Inventory{
 		SchemaVersion:      modelrouting.SchemaVersion,
 		GeneratedAt:        now,
@@ -68,15 +53,14 @@ func (h *Handler) GetModelInventory(c *gin.Context) {
 	// instead of being hidden from the pipeline.
 	registryModels, errRegistry := bootstrapInventoryModels(registered, auths, now)
 	if errRegistry != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("build model inventory: %v", errRegistry)})
-		return
+		return modelrouting.Inventory{}, fmt.Errorf("build model inventory: %w", errRegistry)
 	}
 	inventory.DirectModels = registryModels
 	if projection != nil {
 		inventory.DirectModels = mergeRegistryRoutes(projectedInventoryModels(projection, registered, auths, now), registryModels)
 		inventory.Aliases = projectedInventoryAliases(projection)
 	}
-	c.JSON(http.StatusOK, inventory)
+	return inventory, nil
 }
 
 // mergeRegistryRoutes adds every registered route the projection does not
@@ -129,11 +113,15 @@ func mergeRegistryRoutes(projected, registryModels []modelrouting.InventoryModel
 	return merged
 }
 
-// sortInventoryModel orders one model's routes by channel and its variants by
-// identity, the order the inventory contract requires of every model.
+// sortInventoryModel orders concrete routes by channel and runtime ID and
+// variants by identity.
 func sortInventoryModel(model *modelrouting.InventoryModel) {
 	sort.Slice(model.Routes, func(i, j int) bool {
-		return model.Routes[i].RouteKey.RouteChannel < model.Routes[j].RouteKey.RouteChannel
+		left, right := model.Routes[i], model.Routes[j]
+		if left.RouteKey.RouteChannel != right.RouteKey.RouteChannel {
+			return left.RouteKey.RouteChannel < right.RouteKey.RouteChannel
+		}
+		return left.RuntimeModelID < right.RuntimeModelID
 	})
 	sort.Slice(model.Variants, func(i, j int) bool {
 		return model.Variants[i].VariantKey.VariantID < model.Variants[j].VariantKey.VariantID
@@ -176,26 +164,20 @@ func projectedInventoryModels(projection *modelrouting.Config, registered []regi
 			})
 		}
 		for _, directRoute := range direct.Routes {
-			allowed := make(map[string]struct{}, len(directRoute.CredentialRefs))
-			for _, ref := range directRoute.CredentialRefs {
-				allowed[ref.ID+"\x00"+ref.Kind] = struct{}{}
-			}
 			credentials := make([]modelrouting.InventoryCredential, 0, len(directRoute.CredentialRefs))
 			for _, registeredRoute := range byRoute[directRoute.RouteKey.RouteChannel+"\x00"+directRoute.RuntimeModelID] {
-				credential := inventoryCredential(registeredRoute, auths[registeredRoute.ClientID], now)
-				identity := credential.CredentialRef.ID + "\x00" + credential.CredentialRef.Kind
-				if _, exists := allowed[identity]; exists {
-					credentials = append(credentials, credential)
-				}
+				credentials = append(credentials, inventoryCredential(registeredRoute, auths[registeredRoute.ClientID], now))
 			}
 			sortCredentials(credentials)
-			selectable := directRoute.Selectable && hasSelectableCredential(credentials)
+			selectable := hasSelectableCredential(credentials)
 			reason := directRoute.SelectionReason
-			if !selectable && directRoute.Selectable {
-				reason = "no projected credential is currently selectable"
+			if selectable {
+				reason = "live credentials available for qualification"
+			} else {
+				reason = "no live credential is currently selectable"
 			}
 			health := inventoryHealth(directRoute.Health)
-			health.Selectable = health.Selectable && selectable
+			health.Selectable = selectable
 			if !health.Selectable && health.Status == "healthy" {
 				health.Status = "blocked"
 			}
@@ -208,7 +190,7 @@ func projectedInventoryModels(projection *modelrouting.Config, registered []regi
 				CatalogRouteModelID:    directRoute.CatalogRouteModelID,
 				RuntimeModelID:         directRoute.RuntimeModelID,
 				RouteSelector:          directRoute.RouteSelector,
-				QuotaDomains:           append([]string(nil), directRoute.QuotaDomains...),
+				QuotaDomains:           quotaDomains(credentials),
 				Protocols:              append([]string(nil), directRoute.Protocols...),
 				Restrictions:           inventoryRestrictions(directRoute.Restrictions),
 				Health:                 health,
@@ -324,10 +306,10 @@ func bootstrapInventoryModels(registered []registry.RegisteredRouteSnapshot, aut
 		if auth == nil {
 			return nil, fmt.Errorf("registered route %d has no matching credential", routeIndex)
 		}
-		if auth.QuotaDomain == "" || strings.TrimSpace(auth.QuotaDomain) != auth.QuotaDomain || auth.QuotaDomain == "unknown" {
+		if domain := auth.RoutingQuotaDomain(); domain == "" || strings.TrimSpace(domain) != domain || domain == "unknown" {
 			// The credential is named by its hashed reference: the raw client id
 			// is never serialized, and for a file-based auth it is a path.
-			return nil, fmt.Errorf("registered route %d has no canonical quota domain (credential=%q provider=%q quotaDomain=%q channel=%q model=%q)", routeIndex, coreauth.CredentialReferenceID(registeredRoute.ClientID), auth.Provider, auth.QuotaDomain, registeredRoute.RouteChannel, registeredRoute.RuntimeModelID)
+			return nil, fmt.Errorf("registered route %d has no canonical quota domain (credential=%q provider=%q quotaDomain=%q channel=%q model=%q)", routeIndex, coreauth.CredentialReferenceID(registeredRoute.ClientID), auth.Provider, domain, registeredRoute.RouteChannel, registeredRoute.RuntimeModelID)
 		}
 		if kind := inventoryAuthKind(auth.AuthKind()); kind != "api_key" && kind != "oauth" {
 			return nil, fmt.Errorf("registered route %d has no supported credential kind", routeIndex)
@@ -376,7 +358,7 @@ func bootstrapInventoryModels(registered []registry.RegisteredRouteSnapshot, aut
 			built.routes[routeID] = routeIndexExisting
 		} else if route := built.model.Routes[routeIndexExisting]; route.CatalogRouteProviderID != facts.catalogRouteProviderID ||
 			route.CatalogRouteModelID != facts.catalogRouteModelID ||
-			!equalStrings(route.Protocols, facts.protocols) {
+			!slices.Equal(route.Protocols, facts.protocols) {
 			return nil, fmt.Errorf("registered route %d conflicts with an existing catalog route", routeIndex)
 		}
 		built.model.Routes[routeIndexExisting].Credentials = append(
@@ -415,87 +397,8 @@ func routeProtocols(protocols []string) []string {
 	return append(make([]string, 0, len(protocols)), protocols...)
 }
 
-func equalStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
 func inventoryCredential(route registry.RegisteredRouteSnapshot, auth *coreauth.Auth, now time.Time) modelrouting.InventoryCredential {
-	refID := coreauth.CredentialReferenceID(route.ClientID)
-	kind := "unknown"
-	if auth != nil {
-		kind = inventoryAuthKind(auth.AuthKind())
-	}
-	suspended := strings.TrimSpace(route.SuspensionReason) != ""
-	suspensionReason := optionalTrimmed(route.SuspensionReason)
-	quotaBlocked := route.QuotaBlocked
-	var quotaReason, remaining, resetsAt, resumesAt *string
-	observedAt := route.LastUpdated
-	selectable := auth != nil
-	status := "unknown"
-	quotaStatus := "unknown"
-	if auth != nil {
-		if auth.UpdatedAt.After(observedAt) {
-			observedAt = auth.UpdatedAt
-		}
-		// Availability follows request-time selection, so a cooldown or quota
-		// window ends at its recovery instant instead of at the next success.
-		availability := coreauth.AvailabilityForModel(auth, route.RuntimeModelID, now)
-		quota := auth.Quota
-		statusMessage := auth.StatusMessage
-		if modelState := auth.ModelStates[route.RuntimeModelID]; modelState != nil {
-			quota = modelState.Quota
-			if !auth.Disabled && auth.Status != coreauth.StatusDisabled {
-				statusMessage = modelState.StatusMessage
-			}
-		}
-		quotaBlocked = availability.QuotaCooldown
-		if quotaBlocked {
-			quotaReason = optionalTrimmed(quota.Reason)
-			resetsAt = optionalInstant(availability.RecoverAt)
-		}
-		if availability.Blocked && !availability.QuotaCooldown {
-			if suspensionReason == nil {
-				suspensionReason = optionalTrimmed(statusMessage)
-			}
-			if !suspended {
-				resumesAt = optionalInstant(availability.RecoverAt)
-			}
-			suspended = true
-		}
-		if value := strings.TrimSpace(quota.Signals["remaining"]); value != "" {
-			remaining = &value
-		}
-		selectable = !availability.Blocked && !suspended
-		status = boolStatus(selectable, "healthy", "blocked")
-		quotaStatus = boolStatus(quotaBlocked, "blocked", "available")
-	} else if route.QuotaResetsAt != nil {
-		resetsAt = optionalInstant(*route.QuotaResetsAt)
-	}
-	if observedAt.IsZero() {
-		observedAt = now
-	}
-	return modelrouting.InventoryCredential{
-		CredentialRef: modelrouting.InventoryCredentialRef{ID: refID, Kind: kind},
-		QuotaDomain:   credentialQuotaDomainForInventory(auth),
-		Health: modelrouting.InventoryHealth{
-			Status: status, Selectable: selectable, ObservedAt: observedAt.UTC().Format(time.RFC3339Nano), LatencyMS: nil,
-		},
-		Quota: modelrouting.InventoryQuota{
-			Status: quotaStatus, Remaining: remaining, ResetsAt: resetsAt, Reason: quotaReason,
-		},
-		Suspension: modelrouting.InventorySuspension{
-			Active: suspended, Reason: suspensionReason, ResumesAt: resumesAt,
-		},
-		Restrictions: []modelrouting.InventoryRestriction{},
-	}
+	return routingInventoryCredential(route, auth, credentialQuotaDomainForInventory(auth), now)
 }
 
 func appendBootstrapVariant(model *modelrouting.InventoryModel, info *registry.ModelInfo, variantID string, protocols []string) {
@@ -557,8 +460,8 @@ func modelKeyJSON(value modelrouting.ModelKey) modelrouting.ModelKeyJSON {
 }
 
 func credentialQuotaDomainForInventory(auth *coreauth.Auth) string {
-	if auth != nil && strings.TrimSpace(auth.QuotaDomain) != "" {
-		return strings.TrimSpace(auth.QuotaDomain)
+	if domain := auth.RoutingQuotaDomain(); domain != "" {
+		return domain
 	}
 	return "unknown"
 }

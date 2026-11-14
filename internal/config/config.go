@@ -14,6 +14,9 @@ type ServerResponseCompression = ResponseCompressionConfig
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
+	// ModelRouting is owned by the generation publication transaction.
+	ModelRouting *modelrouting.Config `yaml:"model-routing,omitempty" json:"-"`
+
 	// ServerResponseCompression is the JSON-visible mirror of the downstream
 	// response compression settings (YAML: server.response-compression).
 	ServerResponseCompression ResponseCompressionConfig `yaml:"-" json:"response-compression"`
@@ -36,6 +39,12 @@ type Config struct {
 
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
+
+	// ShutdownTimeoutSeconds controls how long the API server waits for in-flight
+	// requests to finish during shutdown before forcibly closing connections.
+	// 0 (the default) keeps the legacy behavior of closing immediately without draining.
+	// Values are in seconds.
+	ShutdownTimeoutSeconds int `yaml:"shutdown-timeout" json:"shutdown-timeout"`
 
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
@@ -246,9 +255,6 @@ type Config struct {
 
 	// OAuthSettings defines per-channel model settings (such as max-context-length) applied to OAuth/file-backed auth entries.
 	OAuthSettings map[string][]OAuthModelSetting `yaml:"oauth-settings,omitempty" json:"oauth-settings,omitempty"`
-
-	// ModelRouting is the versioned AI Hub projection rendered exclusively by CCS.
-	ModelRouting *modelrouting.Config `yaml:"model-routing,omitempty" json:"model-routing,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`

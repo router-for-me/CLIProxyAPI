@@ -576,7 +576,7 @@ func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue578
 	}
 	cfg.Codex.StreamBootstrapBuffering = false
 
-	// 2. Real completed stream succeeds and the translated body preserves VerifyInference's max_output_tokens=1 while setting stream=true.
+	// 2. Real completed stream succeeds and the translated body carries VerifyInference's max_output_tokens=16 while setting stream=true.
 	sseResponse = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\"}}\n\n" +
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\"}]}]}}\n\n"
@@ -594,8 +594,8 @@ func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue578
 	if upstreamJSON["stream"] != true || upstreamJSON["store"] != false {
 		t.Fatalf("expected translated Codex body with stream=true and store=false, got: %s", string(capturedBody))
 	}
-	if maxOutputTokens := upstreamJSON["max_output_tokens"]; maxOutputTokens != float64(1) {
-		t.Fatalf("translated Codex body must preserve max_output_tokens=1, got: %s", string(capturedBody))
+	if maxOutputTokens := upstreamJSON["max_output_tokens"]; maxOutputTokens != float64(16) {
+		t.Fatalf("translated Codex body must carry max_output_tokens=16, got: %s", string(capturedBody))
 	}
 }
 

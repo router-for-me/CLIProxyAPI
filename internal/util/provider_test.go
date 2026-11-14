@@ -37,3 +37,25 @@ func TestMaskSensitiveQueryMasksValue(t *testing.T) {
 		}
 	})
 }
+
+func TestMaskSensitiveHeaderValueMasksCookiesAndSecrets(t *testing.T) {
+	for _, tc := range []struct {
+		key      string
+		value    string
+		wantLeak string
+	}{
+		{key: "Authorization", value: "Bearer super-secret-token-value", wantLeak: "super-secret-token-value"},
+		{key: "X-Api-Key", value: "sk-super-secret-api-key", wantLeak: "sk-super-secret-api-key"},
+		{key: "Cookie", value: "session=super-secret-cookie", wantLeak: "super-secret-cookie"},
+		{key: "Set-Cookie", value: "__cf_bm=super-secret-cf-cookie; Path=/; HttpOnly", wantLeak: "super-secret-cf-cookie"},
+	} {
+		masked := util.MaskSensitiveHeaderValue(tc.key, tc.value)
+		if strings.Contains(masked, tc.wantLeak) {
+			t.Fatalf("MaskSensitiveHeaderValue(%q) leaked %q in %q", tc.key, tc.wantLeak, masked)
+		}
+	}
+
+	if got := util.MaskSensitiveHeaderValue("X-Request-Id", "req-plain-123"); got != "req-plain-123" {
+		t.Fatalf("MaskSensitiveHeaderValue(X-Request-Id) = %q, want unchanged", got)
+	}
+}

@@ -8,7 +8,7 @@ import (
 	"fmt"
 )
 
-// CanonicalProjectionJSON returns the compact canonical JSON used by CCS and
+// CanonicalProjectionJSON returns the compact canonical JSON used by AI Hub and
 // CLIProxy to identify a routing projection. The root projection-digest field is
 // deliberately omitted so the digest is acyclic. JSON object keys are sorted
 // recursively by encoding/json after decoding with json.Number preservation.
@@ -47,7 +47,7 @@ func ProjectionDigest(cfg *Config) (string, error) {
 	return "sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-// ConfigDigest identifies the exact complete YAML bytes staged for activation.
+// ConfigDigest identifies the canonical YAML bytes of the activated routing resource.
 func ConfigDigest(data []byte) string {
 	digest := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(digest[:])

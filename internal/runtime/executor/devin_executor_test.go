@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
@@ -138,6 +139,45 @@ func TestDevinExecutor_GetSensitiveWords(t *testing.T) {
 	words := eWithWords.getSensitiveWords()
 	if len(words) != 2 || words[0] != "sample-word-1" || words[1] != "sample-word-2" {
 		t.Errorf("words = %v, want [sample-word-1 sample-word-2]", words)
+	}
+}
+
+func TestDevinSensitiveWordsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`devin:
+  sensitive-words:
+    - "Codex"
+  sensitive-words-replace:
+    "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	e := NewDevinExecutor(cfg)
+	got := helps.SanitizeDevinSystemPrompt("You are Codex, an agent based on GPT-5.\nFollow project conventions.", e.getSensitiveWordMatcher())
+	want := "You are a helpful coding assistant.\nFollow project conventions."
+	if got != want {
+		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", got, want)
+	}
+}
+
+func TestDevinSensitivePatternsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`devin:
+  sensitive-words:
+    - "omp"
+  sensitive-patterns-replace:
+    - pattern: '(?m)^You are omp[^\n]*'
+      replacement: "You are a coding assistant."
+    - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+      replacement: ""
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	e := NewDevinExecutor(cfg)
+	got := helps.SanitizeDevinSystemPrompt("You are omp's assistant.\n<system-conventions>\nRFC 2119.\n</system-conventions>\nFollow project conventions.", e.getSensitiveWordMatcher())
+	want := "You are a coding assistant.\nFollow project conventions."
+	if got != want {
+		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", got, want)
 	}
 }
 
@@ -3196,8 +3236,9 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	}
 
 	root := ojson.ParseBytes(interactionsJSON)
-	if root.Get("usage.total_input_tokens").Int() != 53 {
-		t.Errorf("usage.total_input_tokens = %d, want 53", root.Get("usage.total_input_tokens").Int())
+	// total input = uncached 3 + cache read 50 + cache write 14361
+	if root.Get("usage.total_input_tokens").Int() != 14414 {
+		t.Errorf("usage.total_input_tokens = %d, want 14414", root.Get("usage.total_input_tokens").Int())
 	}
 	if root.Get("usage.cache_write_tokens").Int() != 14361 {
 		t.Errorf("usage.cache_write_tokens = %d, want 14361", root.Get("usage.cache_write_tokens").Int())
@@ -3206,8 +3247,11 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if detail.CacheCreationTokens != 14361 {
 		t.Errorf("ParseInteractionsUsage CacheCreationTokens = %d, want 14361", detail.CacheCreationTokens)
 	}
-	if detail.InputTokens != 53 {
-		t.Errorf("ParseInteractionsUsage InputTokens = %d, want 53", detail.InputTokens)
+	if detail.InputTokens != 14414 {
+		t.Errorf("ParseInteractionsUsage InputTokens = %d, want 14414", detail.InputTokens)
+	}
+	if detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete || detail.TokenBreakdown.Input.UncachedTokens != 3 {
+		t.Errorf("token breakdown = %+v, want complete with 3 uncached", detail.TokenBreakdown)
 	}
 
 	// 2. Streaming test
@@ -3265,8 +3309,11 @@ func TestRegressionIssue5910_UsageStatsCacheWriteTokensInResponses(t *testing.T)
 	if sDetail.CacheCreationTokens != 14361 {
 		t.Errorf("ParseInteractionsStreamUsage CacheCreationTokens = %d, want 14361", sDetail.CacheCreationTokens)
 	}
-	if sDetail.InputTokens != 53 {
-		t.Errorf("ParseInteractionsStreamUsage InputTokens = %d, want 53", sDetail.InputTokens)
+	if sDetail.InputTokens != 14414 {
+		t.Errorf("ParseInteractionsStreamUsage InputTokens = %d, want 14414", sDetail.InputTokens)
+	}
+	if got := cRoot.Get("interaction.usage.total_input_tokens").Int(); got != 14414 {
+		t.Errorf("interaction.usage.total_input_tokens = %d, want 14414", got)
 	}
 }
 

@@ -1,12 +1,13 @@
 package auth
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,20 +22,21 @@ import (
 	thinkingopenai "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
+	routingExecutionEvidenceKey        = "cliproxy.model_routing.execution_evidence"
 	probeRouteSelectorHeader           = "X-CLIProxy-Route-Selector"
 	probeVariantIDHeader               = "X-CLIProxy-Variant-ID"
 	effectiveModelHeader               = "X-CLIProxy-Effective-Model"
 	quotaDomainHeader                  = "X-CLIProxy-Quota-Domain"
+	credentialRevisionHeader           = "X-CLIProxy-Credential-Revision"
 	credentialReferenceHeader          = "X-CLIProxy-Credential-Ref"
 	projectionDigestHeader             = "X-CLIProxy-Projection-Digest"
 	failureModeHeader                  = "X-CLIProxy-Failure-Mode"
 	attemptsHeader                     = "X-CLIProxy-Attempts"
 	failoverEvidenceHeader             = "X-CLIProxy-Failover-Evidence"
-	allowedAuthIDsMetadataKey          = "cliproxy.model_routing.allowed_auth_ids"
+	allowedCredentialsMetadataKey      = "cliproxy.model_routing.allowed_credentials"
 	modelRoutingMetadataKey            = "cliproxy.model_routing.fail_fast"
 	routingIndexMetadataKey            = "cliproxy.model_routing.candidate.index"
 	routingChannelMetadataKey          = "cliproxy.model_routing.candidate.channel"
@@ -53,6 +55,7 @@ func ModelRoutingResponseHeaderNames() []string {
 		effectiveModelHeader,
 		quotaDomainHeader,
 		credentialReferenceHeader,
+		credentialRevisionHeader,
 		projectionDigestHeader,
 		failureModeHeader,
 		attemptsHeader,
@@ -67,7 +70,6 @@ type modelRoutingTable struct {
 	variants         map[string]map[string]modelrouting.Variant
 	failurePolicy    modelrouting.FailurePolicy
 	projectionDigest string
-	projected        bool
 }
 
 // RoutingCandidate is one immutable option in the already-ranked candidate chain.
@@ -152,7 +154,7 @@ func (m *Manager) validateModelRoutingRuntime(projection *modelrouting.Config, n
 	if projection == nil {
 		return nil
 	}
-	registered := registry.GetGlobalRegistry().RegisteredRouteSnapshots()
+	registered := registry.GetGlobalRegistry().RegisteredRouteSnapshotsAt(now)
 	for modelIndex, model := range projection.DirectModels {
 		for routeIndex, route := range model.Routes {
 			if !route.Selectable {
@@ -167,9 +169,9 @@ func (m *Manager) validateModelRoutingRuntime(projection *modelrouting.Config, n
 				return fmt.Errorf("%s.route-selector: differs from the live route identity", path)
 			}
 
-			credentialSet := make(map[string]modelrouting.CredentialRef)
+			wanted := route.CredentialRefs
+			found := make(map[modelrouting.CredentialRef]struct{}, len(wanted))
 			quotaSet := make(map[string]struct{})
-			protocolSet := make(map[string]struct{})
 			matchedRoute := false
 			for registeredIndex, snapshot := range registered {
 				if strings.ToLower(snapshot.RouteChannel) != channel || snapshot.RuntimeModelID != route.RuntimeModelID {
@@ -215,49 +217,53 @@ func (m *Manager) validateModelRoutingRuntime(projection *modelrouting.Config, n
 				if ref.ID == "" || ref.Kind == "" {
 					return fmt.Errorf("%s: registered route %d has an invalid credential reference", path, registeredIndex)
 				}
-				credentialSet[ref.ID+"\x00"+ref.Kind] = ref
+				approved, included := matchingCredentialRef(wanted, auth)
+				if !included {
+					continue
+				}
+				found[approved] = struct{}{}
 				quotaDomain := credentialQuotaDomain(auth)
 				if quotaDomain == "" {
 					return fmt.Errorf("%s: registered route %d has no explicit quota domain", path, registeredIndex)
 				}
 				quotaSet[quotaDomain] = struct{}{}
-				if len(info.Protocols) == 0 {
-					return fmt.Errorf("%s: registered route %d has no explicit protocols", path, registeredIndex)
-				}
-				for _, protocol := range info.Protocols {
-					protocol = strings.TrimSpace(protocol)
-					if protocol == "" {
-						return fmt.Errorf("%s: registered route %d has an empty protocol", path, registeredIndex)
+				protocols := snapshot.RoutingProtocols()
+				for _, protocol := range route.Protocols {
+					if !slices.Contains(protocols, protocol) {
+						return fmt.Errorf("%s.protocols: protocol is not executable by an included credential", path)
 					}
-					protocolSet[protocol] = struct{}{}
 				}
 			}
+
 			if !matchedRoute {
 				return fmt.Errorf("%s: route is absent from the live registry", path)
 			}
-			credentials := make([]modelrouting.CredentialRef, 0, len(credentialSet))
-			for _, ref := range credentialSet {
-				credentials = append(credentials, ref)
-			}
-			sort.Slice(credentials, func(i, j int) bool {
-				if credentials[i].ID != credentials[j].ID {
-					return credentials[i].ID < credentials[j].ID
-				}
-				return credentials[i].Kind < credentials[j].Kind
-			})
 			quotaDomains := sortedRoutingKeys(quotaSet)
-			protocols := sortedRoutingKeys(protocolSet)
-			if !equalCredentialRefs(credentials, route.CredentialRefs) {
-				return fmt.Errorf("%s.credential-refs: differ from selectable live credentials", path)
+			if len(wanted) == 0 || len(found) != len(wanted) {
+				return fmt.Errorf("%s.credential-refs: differ from selectable live credentials (published references must be a nonempty subset)", path)
 			}
 			if !equalStrings(quotaDomains, route.QuotaDomains) {
 				return fmt.Errorf("%s.quota-domains: differ from selectable live quota domains", path)
 			}
-			if !equalStrings(protocols, route.Protocols) {
-				return fmt.Errorf("%s.protocols: differ from executable live protocols", path)
+
+		}
+	}
+	for _, alias := range projection.Aliases {
+		for _, member := range alias.Members {
+			for _, candidate := range member.Candidates {
+				domains := make(map[string]struct{})
+				for _, auth := range m.snapshotAuths() {
+					if credentialAllowed(candidate.CredentialRefs, auth) {
+						domains[credentialQuotaDomain(auth)] = struct{}{}
+					}
+				}
+				if !equalStrings(sortedRoutingKeys(domains), candidate.QuotaDomains) {
+					return fmt.Errorf("alias %q candidate quota domains do not match its credentials", alias.Name)
+				}
 			}
 		}
 	}
+
 	return nil
 }
 
@@ -282,25 +288,12 @@ func equalStrings(left, right []string) bool {
 	return true
 }
 
-func equalCredentialRefs(left, right []modelrouting.CredentialRef) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
 func compileModelRouting(projection *modelrouting.Config) *modelRoutingTable {
 	table := &modelRoutingTable{
 		aliases:         make(map[string][]RoutingCandidate),
 		declaredAliases: make(map[string]struct{}),
 		routes:          make(map[string]RoutingCandidate),
 		variants:        make(map[string]map[string]modelrouting.Variant),
-		projected:       projection != nil,
 	}
 	if projection == nil {
 		return table
@@ -431,17 +424,31 @@ func (m *Manager) modelRoutingCandidates(requestedModel string, opts cliproxyexe
 	}
 	selector := strings.TrimSpace(opts.Headers.Get(probeRouteSelectorHeader))
 	variantHeader := strings.TrimSpace(opts.Headers.Get(probeVariantIDHeader))
+	credentialHeader := strings.TrimSpace(opts.Headers.Get(credentialReferenceHeader))
 	if selector != "" {
 		route, exists := table.routes[selector]
-		if !exists && !table.projected {
+		if !exists || credentialHeader != "" {
 			var errBootstrap error
-			route, exists, errBootstrap = m.bootstrapRoutingCandidate(selector, requestedModel)
+			route, exists, errBootstrap = m.liveRoutingCandidate(selector, requestedModel)
 			if errBootstrap != nil {
 				return nil, true, errBootstrap
 			}
 		}
 		if !exists || route.RuntimeModelID != requestedModel {
 			return nil, true, routingContractError("route_not_selectable", "route selector is not bound to the requested runtime model", http.StatusServiceUnavailable)
+		}
+		if credentialHeader != "" {
+			var matched bool
+			for _, ref := range route.CredentialRefs {
+				if ref.ID == credentialHeader {
+					route.CredentialRefs = []modelrouting.CredentialRef{ref}
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return nil, true, routingContractError("route_not_selectable", "credential reference is not registered for the selected route", http.StatusServiceUnavailable)
+			}
 		}
 		if variantHeader != "" {
 			modelID := routingModelIdentity(route.CatalogProviderID, route.CanonicalModelID)
@@ -456,6 +463,9 @@ func (m *Manager) modelRoutingCandidates(requestedModel string, opts cliproxyexe
 			}
 		}
 		return []RoutingCandidate{cloneRoutingCandidate(route)}, true, nil
+	}
+	if credentialHeader != "" {
+		return nil, true, routingContractError("route_not_selectable", "credential reference requires a direct route selector", http.StatusBadRequest)
 	}
 	if variantHeader != "" {
 		return nil, true, routingContractError("variant_not_executable", "variant header requires a route selector", http.StatusUnprocessableEntity)
@@ -473,10 +483,10 @@ func (m *Manager) modelRoutingCandidates(requestedModel string, opts cliproxyexe
 	return nil, false, nil
 }
 
-// bootstrapRoutingCandidate resolves one inventory selector directly from the
-// live registry before CCS has published a routing projection. It never creates
+// liveRoutingCandidate resolves one inventory selector directly from the
+// live registry when the selector is absent from the active projection. It never creates
 // an alias, ranks routes, or permits movement to another route.
-func (m *Manager) bootstrapRoutingCandidate(selector, requestedModel string) (RoutingCandidate, bool, error) {
+func (m *Manager) liveRoutingCandidate(selector, requestedModel string) (RoutingCandidate, bool, error) {
 	if m == nil {
 		return RoutingCandidate{}, false, nil
 	}
@@ -533,6 +543,7 @@ func (m *Manager) bootstrapRoutingCandidate(selector, requestedModel string) (Ro
 			return RoutingCandidate{}, true, routingContractError("route_not_selectable", "registered route channel differs from its credential channel", http.StatusServiceUnavailable)
 		}
 		ref := credentialReference(auth)
+		ref.Revision = auth.RoutingCredentialRevision()
 		if ref.Kind != "api_key" && ref.Kind != AuthKindOAuth {
 			return RoutingCandidate{}, true, routingContractError("route_not_selectable", "registered route has an unsupported credential kind", http.StatusServiceUnavailable)
 		}
@@ -560,7 +571,7 @@ func cloneRoutingCandidates(values []RoutingCandidate) []RoutingCandidate {
 }
 
 // ModelRoutingProviders resolves only the executor channels already projected by
-// CCS. API handlers use it before the legacy registry lookup so managed aliases
+// AI Hub. API handlers use it before the legacy registry lookup so managed aliases
 // reach the model-routing executor without duplicating selection policy.
 func (m *Manager) ModelRoutingProviders(requestedModel string) ([]string, bool, error) {
 	candidates, matched, errCandidates := m.modelRoutingCandidates(requestedModel, cliproxyexecutor.Options{})
@@ -611,11 +622,40 @@ func credentialReference(auth *Auth) modelrouting.CredentialRef {
 	return modelrouting.CredentialRef{ID: CredentialReferenceID(auth.ID), Kind: kind}
 }
 
-// CredentialReferenceID returns the stable secret-free identifier used by the
-// management inventory and model-routing allowlists.
-func CredentialReferenceID(rawID string) string {
-	digest := sha256.Sum256([]byte(rawID))
-	return "sha256:" + hex.EncodeToString(digest[:])
+func matchingCredentialRef(refs []modelrouting.CredentialRef, auth *Auth) (modelrouting.CredentialRef, bool) {
+	if auth != nil {
+		current := credentialReference(auth)
+		for _, ref := range refs {
+			if ref.ID == current.ID && ref.Kind == current.Kind &&
+				(ref.Revision == "" || ref.Revision == auth.RoutingCredentialRevision()) {
+				return ref, true
+			}
+		}
+	}
+	return modelrouting.CredentialRef{}, false
+}
+
+func credentialAllowed(refs []modelrouting.CredentialRef, auth *Auth) bool {
+	_, allowed := matchingCredentialRef(refs, auth)
+	return allowed
+}
+
+// checkRoutingExecutionCredential fences the prepared credential at the upstream boundary.
+func (m *Manager) checkRoutingExecutionCredential(opts cliproxyexecutor.Options, auth *Auth) error {
+	if !isModelRoutingOptions(opts) {
+		return nil
+	}
+	refs, _ := allowedCredentialsFromMetadata(opts.Metadata)
+	if credentialAllowed(refs, auth) {
+		live, exists := m.GetByID(auth.ID)
+		if exists && credentialAllowed(refs, live) && live.RoutingCredentialRevision() == auth.RoutingCredentialRevision() {
+			if evidence, ok := opts.Metadata[routingExecutionEvidenceKey].(*modelRoutingSelectionEvidence); ok {
+				evidence.record(auth)
+			}
+			return nil
+		}
+	}
+	return &Error{Code: "credential_revision_changed", Message: "routing credential changed before execution", HTTPStatus: http.StatusServiceUnavailable}
 }
 
 func (m *Manager) routingCandidateKnownSelectable(ctx context.Context, candidate RoutingCandidate, opts cliproxyexecutor.Options) bool {
@@ -625,18 +665,13 @@ func (m *Manager) routingCandidateKnownSelectable(ctx context.Context, candidate
 	if _, exists := m.Executor(strings.ToLower(candidate.Channel)); !exists {
 		return false
 	}
-	allowed := make(map[string]struct{}, len(candidate.CredentialRefs))
-	for _, ref := range candidate.CredentialRefs {
-		allowed[ref.ID+"\x00"+ref.Kind] = struct{}{}
-	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	now := time.Now()
 	for _, auth := range m.snapshotAuths() {
 		if auth == nil || executorKeyFromAuth(auth) != strings.ToLower(candidate.Channel) || !eligibility.allows(auth) {
 			continue
 		}
-		ref := credentialReference(auth)
-		if _, exists := allowed[ref.ID+"\x00"+ref.Kind]; !exists {
+		if !credentialAllowed(candidate.CredentialRefs, auth) {
 			continue
 		}
 		blocked, _, _ := isAuthBlockedForModel(auth, candidate.RuntimeModelID, now)
@@ -651,7 +686,7 @@ func (m *Manager) candidateOptions(
 	opts cliproxyexecutor.Options,
 	index int,
 	candidate RoutingCandidate,
-	recordSelectedAuth func(string),
+	evidence *modelRoutingSelectionEvidence,
 ) cliproxyexecutor.Options {
 	headers := opts.Headers.Clone()
 	if headers == nil {
@@ -659,24 +694,14 @@ func (m *Manager) candidateOptions(
 	}
 	headers.Del(probeRouteSelectorHeader)
 	headers.Del(probeVariantIDHeader)
+	headers.Del(credentialReferenceHeader)
 	opts.Headers = headers
 
-	allowedRefs := make(map[string]struct{}, len(candidate.CredentialRefs))
-	for _, ref := range candidate.CredentialRefs {
-		allowedRefs[ref.ID+"\x00"+ref.Kind] = struct{}{}
-	}
-	allowedIDs := make(map[string]struct{})
-	for _, auth := range m.snapshotAuths() {
-		ref := credentialReference(auth)
-		if _, allowed := allowedRefs[ref.ID+"\x00"+ref.Kind]; allowed {
-			allowedIDs[auth.ID] = struct{}{}
-		}
-	}
 	meta := make(map[string]any, len(opts.Metadata)+8)
 	for key, value := range opts.Metadata {
 		meta[key] = value
 	}
-	meta[allowedAuthIDsMetadataKey] = allowedIDs
+	meta[allowedCredentialsMetadataKey] = cloneCredentialRefs(candidate.CredentialRefs)
 	meta[modelRoutingMetadataKey] = true
 	meta[routingIndexMetadataKey] = index
 	meta[routingChannelMetadataKey] = candidate.Channel
@@ -684,15 +709,7 @@ func (m *Manager) candidateOptions(
 	meta[routingAliasMetadataKey] = candidate.Alias
 	meta[routingSelectorMetadataKey] = candidate.RouteSelector
 	meta[cliproxyexecutor.AuthSelectionModelMetadataKey] = candidate.RuntimeModelID
-	priorSelectedAuthCallback, _ := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string))
-	meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey] = func(authID string) {
-		if priorSelectedAuthCallback != nil {
-			priorSelectedAuthCallback(authID)
-		}
-		if recordSelectedAuth != nil {
-			recordSelectedAuth(authID)
-		}
-	}
+	meta[routingExecutionEvidenceKey] = evidence
 	if candidate.VariantReasoningOption != nil {
 		meta[cliproxyexecutor.ReasoningEffortMetadataKey] = *candidate.VariantReasoningOption
 	}
@@ -705,15 +722,15 @@ func isModelRoutingOptions(opts cliproxyexecutor.Options) bool {
 	return value
 }
 
-func allowedAuthIDsFromMetadata(metadata map[string]any) (map[string]struct{}, bool) {
+func allowedCredentialsFromMetadata(metadata map[string]any) ([]modelrouting.CredentialRef, bool) {
 	if metadata == nil {
 		return nil, false
 	}
-	raw, exists := metadata[allowedAuthIDsMetadataKey]
+	raw, exists := metadata[allowedCredentialsMetadataKey]
 	if !exists {
 		return nil, false
 	}
-	values, ok := raw.(map[string]struct{})
+	values, ok := raw.([]modelrouting.CredentialRef)
 	return values, ok
 }
 
@@ -752,7 +769,7 @@ func prepareRoutingCandidateRequest(req cliproxyexecutor.Request, opts cliproxye
 	if candidate.VariantReasoningOption == nil {
 		return req, routingContractError("variant_not_executable", "variant has no catalog-owned runtime option", http.StatusUnprocessableEntity)
 	}
-	if len(req.Payload) == 0 || !gjson.ValidBytes(req.Payload) || !gjson.ParseBytes(req.Payload).IsObject() {
+	if !json.Valid(req.Payload) || !bytes.HasPrefix(bytes.TrimSpace(req.Payload), []byte("{")) {
 		return req, routingContractError("variant_not_executable", "variant requires a JSON object request payload", http.StatusUnprocessableEntity)
 	}
 	updated, err := applyRoutingReasoningOption(req.Payload, protocol, *candidate.VariantReasoningOption)
@@ -865,7 +882,7 @@ func mergeModelRoutingHeaders(existing, routing http.Header) http.Header {
 	return result
 }
 
-func (m *Manager) modelRoutingResponseHeaders(candidate RoutingCandidate, selectedAuthID string) http.Header {
+func modelRoutingResponseHeaders(candidate RoutingCandidate, credential modelRoutingCredentialEvidence) http.Header {
 	headers := make(http.Header)
 	headers.Set(probeRouteSelectorHeader, candidate.RouteSelector)
 	headers.Set(effectiveModelHeader, candidate.RuntimeModelID)
@@ -875,19 +892,10 @@ func (m *Manager) modelRoutingResponseHeaders(candidate RoutingCandidate, select
 	if candidate.VariantID != nil {
 		headers.Set(probeVariantIDHeader, *candidate.VariantID)
 	}
-	if selectedAuthID == "" || m == nil {
-		return headers
-	}
-	auth, exists := m.GetByID(selectedAuthID)
-	if !exists || auth == nil {
-		return headers
-	}
-	ref := credentialReference(auth)
-	if ref.ID != "" {
-		headers.Set(credentialReferenceHeader, ref.ID)
-	}
-	if domain := credentialQuotaDomain(auth); domain != "" {
-		headers.Set(quotaDomainHeader, domain)
+	if credential.ref.ID != "" {
+		headers.Set(credentialReferenceHeader, credential.ref.ID)
+		headers.Set(credentialRevisionHeader, credential.revision)
+		headers.Set(quotaDomainHeader, credential.quotaDomain)
 	}
 	return headers
 }
@@ -896,7 +904,7 @@ func credentialQuotaDomain(auth *Auth) string {
 	if auth == nil {
 		return ""
 	}
-	return strings.TrimSpace(auth.QuotaDomain)
+	return auth.RoutingQuotaDomain()
 }
 
 type modelRoutingPointer = atomic.Pointer[modelRoutingTable]

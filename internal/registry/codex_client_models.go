@@ -20,9 +20,11 @@ type codexClientModelsPayload struct {
 }
 
 type codexClientModelsStore struct {
-	mu       sync.RWMutex
-	data     []byte
-	revision uint64
+	mu                sync.RWMutex
+	data              []byte
+	revision          uint64
+	responsesLiteMap  map[string]bool
+	thinkingLevelsMap map[string][]string
 }
 
 var codexClientCatalogStore = &codexClientModelsStore{}
@@ -54,8 +56,37 @@ func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 	return append([]byte(nil), codexClientCatalogStore.data...), codexClientCatalogStore.revision
 }
 
+// CodexClientModelUsesResponsesLite reports whether slug is marked
+// use_responses_lite in the active Codex client model catalog.
+func CodexClientModelUsesResponsesLite(slug string) bool {
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	if slug == "" {
+		return false
+	}
+	codexClientCatalogStore.mu.RLock()
+	defer codexClientCatalogStore.mu.RUnlock()
+	return codexClientCatalogStore.responsesLiteMap[slug]
+}
+
+// CodexClientModelThinkingLevels returns a copy of the supported reasoning
+// levels for slug in the active Codex client model catalog, or nil if absent.
+func CodexClientModelThinkingLevels(slug string) []string {
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	if slug == "" {
+		return nil
+	}
+	codexClientCatalogStore.mu.RLock()
+	defer codexClientCatalogStore.mu.RUnlock()
+	levels := codexClientCatalogStore.thinkingLevelsMap[slug]
+	if len(levels) == 0 {
+		return nil
+	}
+	return append([]string(nil), levels...)
+}
+
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
-	if err := ValidateCodexClientModelsJSON(data); err != nil {
+	responsesLiteMap, thinkingLevelsMap, err := parseAndValidateCodexClientModelsJSON(data)
+	if err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
 
@@ -66,6 +97,8 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 		return false, nil
 	}
 	codexClientCatalogStore.data = cloned
+	codexClientCatalogStore.responsesLiteMap = responsesLiteMap
+	codexClientCatalogStore.thinkingLevelsMap = thinkingLevelsMap
 	codexClientCatalogStore.revision++
 	return true, nil
 }
@@ -73,30 +106,54 @@ func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 // ValidateCodexClientModelsJSON validates the fields required to serve a
 // complete Codex client model catalog.
 func ValidateCodexClientModelsJSON(data []byte) error {
+	_, _, err := parseAndValidateCodexClientModelsJSON(data)
+	return err
+}
+
+func parseAndValidateCodexClientModelsJSON(data []byte) (map[string]bool, map[string][]string, error) {
 	var payload codexClientModelsPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return fmt.Errorf("decode Codex client model catalog: %w", err)
+		return nil, nil, fmt.Errorf("decode Codex client model catalog: %w", err)
 	}
 	if len(payload.Models) == 0 {
-		return fmt.Errorf("Codex client model catalog has no models")
+		return nil, nil, fmt.Errorf("Codex client model catalog has no models")
 	}
 
 	seen := make(map[string]struct{}, len(payload.Models))
+	responsesLiteMap := make(map[string]bool, len(payload.Models))
+	thinkingLevelsMap := make(map[string][]string, len(payload.Models))
 	for i, model := range payload.Models {
 		slug, err := requiredCodexClientModelString(model, "slug")
 		if err != nil {
-			return fmt.Errorf("Codex client model catalog models[%d]: %w", i, err)
+			return nil, nil, fmt.Errorf("Codex client model catalog models[%d]: %w", i, err)
 		}
 		if _, exists := seen[slug]; exists {
-			return fmt.Errorf("Codex client model catalog contains duplicate slug %q", slug)
+			return nil, nil, fmt.Errorf("Codex client model catalog contains duplicate slug %q", slug)
 		}
 		seen[slug] = struct{}{}
 
 		if err = validateCodexClientModel(model); err != nil {
-			return fmt.Errorf("Codex client model catalog model %q: %w", slug, err)
+			return nil, nil, fmt.Errorf("Codex client model catalog model %q: %w", slug, err)
+		}
+		lowerSlug := strings.ToLower(slug)
+		if lite, ok := model["use_responses_lite"].(bool); ok && lite {
+			responsesLiteMap[lowerSlug] = true
+		}
+		if rawLevels, ok := model["supported_reasoning_levels"].([]any); ok {
+			levels := make([]string, 0, len(rawLevels))
+			for _, rawLevel := range rawLevels {
+				if entry, okMap := rawLevel.(map[string]any); okMap {
+					if effort, okEffort := entry["effort"].(string); okEffort && strings.TrimSpace(effort) != "" {
+						levels = append(levels, strings.TrimSpace(effort))
+					}
+				}
+			}
+			if len(levels) > 0 {
+				thinkingLevelsMap[lowerSlug] = levels
+			}
 		}
 	}
-	return nil
+	return responsesLiteMap, thinkingLevelsMap, nil
 }
 
 func validateCodexClientModel(model map[string]any) error {

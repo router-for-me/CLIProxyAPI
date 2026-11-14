@@ -65,9 +65,11 @@ func TestOpenCodeExecutor_RoutesByProtocol(t *testing.T) {
 }
 
 func TestOpenCodeExecutor_ExecuteDispatchesResponses(t *testing.T) {
-	var capturedPath string
+	var capturedPath, bearer, anthropicKey string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedPath = r.URL.Path
+		bearer = r.Header.Get("Authorization")
+		anthropicKey = r.Header.Get("X-Api-Key")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
 		_, _ = w.Write([]byte(`{"id":"resp-1","object":"chat.completion","choices":[{"index":0,"message":{"content":"hi","role":"assistant"}}]}`))
@@ -93,6 +95,9 @@ func TestOpenCodeExecutor_ExecuteDispatchesResponses(t *testing.T) {
 	}
 	if capturedPath != "/v1/responses" {
 		t.Errorf("upstream path = %q, want /v1/responses", capturedPath)
+	}
+	if bearer != "Bearer test-key" || anthropicKey != "" {
+		t.Fatal("Responses transport did not use exclusive Bearer authentication")
 	}
 	if len(resp.Payload) == 0 {
 		t.Error("expected non-empty response payload")
@@ -325,5 +330,64 @@ func TestOpenCodeExecutor_DelegatedMessagesSendMetadataKey(t *testing.T) {
 	}
 	if _, leaked := auth.Attributes["api_key"]; leaked {
 		t.Fatal("request key leaked into the shared auth attributes")
+	}
+}
+
+func TestOpenCodeExecutor_PreservesNativeResponsesSSEFrames(t *testing.T) {
+	const events = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"PONG\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(events))
+	}))
+	defer server.Close()
+	exec := NewOpenCodeExecutor(constant.OpenCodeGo)
+	exec.cfg = &config.Config{}
+	auth := &clipoauth.Auth{
+		Provider:   constant.OpenCodeGo,
+		Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+	}
+	result, err := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model: "gpt-5.6-luna", Payload: []byte(`{"model":"gpt-5.6-luna","input":"Reply with PONG.","stream":true}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+		received.Write(chunk.Payload)
+	}
+	if received.String() != events {
+		t.Fatalf("native Responses SSE framing changed: %q", received.String())
+	}
+}
+
+func TestOpenCodeCatalogUsesDeclaredCanonicalIDAndAPICapability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "" {
+			t.Errorf("unexpected public catalog request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"gpt-5.6-luna","canonical_id":"owner/exact-release","type":"chat","api":{"responses":{}}},
+			{"id":"glm-5.2","canonical_id":"owner/mismatched","api":{"responses":{}}}
+		]}`))
+	}))
+	defer server.Close()
+	auth := &clipoauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "private"}}
+	models, err := FetchOpenCodeModels(context.Background(), auth, &config.Config{}, "opencode-go")
+	if err != nil || len(models) != 1 {
+		t.Fatalf("expected one executable model, got %v, %v", models, err)
+	}
+	model := models[0]
+	if model.ID != "gpt-5.6-luna" || model.CatalogProviderID != "owner" ||
+		model.CatalogModelID != "exact-release" || model.CatalogRouteProviderID != "opencode-go" ||
+		model.CatalogRouteModelID != model.ID {
+		t.Fatalf("model identity does not preserve the producer's declaration: %+v", model)
 	}
 }

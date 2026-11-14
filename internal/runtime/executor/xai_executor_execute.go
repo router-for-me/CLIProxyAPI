@@ -72,33 +72,53 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, errRead := io.ReadAll(httpResp.Body)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return resp, errRead
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return resp, xaiStatusErr(httpResp.StatusCode, data)
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseFilter := newXAIInternalXSearchResponseFilter(prepared.filterInternalXSearch, prepared.clientDeclaredTools)
 	namespaceRestorer := newXAINamespaceRestorer(prepared.namespaceTools)
 	var upstreamUsage helps.StreamUsageBuffer
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		if !bytes.HasPrefix(line, xaiDataTag) {
-			continue
+	events := helps.NewCodexSSEScanner(ctx, bytes.NewReader(data), len(data)+1)
+	sawSSEData := false
+	var pendingEventName string
+	var pendingData []byte
+	hasPendingData := false
+
+	dispatchSSEEvent := func(eventName string, rawEventData []byte) (cliproxyexecutor.Response, bool, error) {
+		rawEventData = bytes.TrimSpace(rawEventData)
+		if len(rawEventData) == 0 || bytes.Equal(rawEventData, []byte("[DONE]")) {
+			return cliproxyexecutor.Response{}, false, nil
 		}
-		eventData := xaiNormalizeReasoningSummaryData(bytes.TrimSpace(line[len(xaiDataTag):]))
+		sawSSEData = true
+		if !ojson.ValidBytes(rawEventData) {
+			if errTerminal, ok := xaiTerminalFailureErr(eventName, rawEventData); ok {
+				upstreamUsage.PublishFailure(ctx, reporter, errTerminal)
+				return cliproxyexecutor.Response{}, true, errTerminal
+			}
+			return cliproxyexecutor.Response{}, false, nil
+		}
+		eventData := xaiNormalizeReasoningSummaryData(rawEventData)
 		upstreamUsage.ObserveResponsesStream(eventData)
+		reporter.ObserveResponseModel(eventData)
+		if errTerminal, ok := xaiTerminalFailureErr(eventName, eventData); ok {
+			upstreamUsage.PublishFailure(ctx, reporter, errTerminal)
+			return cliproxyexecutor.Response{}, true, errTerminal
+		}
 		prepared.applyPatch.RememberDispatcherEvent(eventData)
 		eventData = namespaceRestorer.restore(eventData)
 		if prepared.webSearchAlias != "" {
@@ -106,15 +126,15 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		eventData = responseFilter.apply(eventData)
 		if len(eventData) == 0 {
-			continue
+			return cliproxyexecutor.Response{}, false, nil
 		}
-		events, errBridge := prepared.applyPatch.Transform(eventData)
+		transformedEvents, errBridge := prepared.applyPatch.Transform(eventData)
 		if errBridge != nil {
 			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 			upstreamUsage.PublishFailure(ctx, reporter, errBridge)
-			return resp, errBridge
+			return cliproxyexecutor.Response{}, true, errBridge
 		}
-		for _, eventData := range events {
+		for _, eventData := range transformedEvents {
 			reporter.ObserveResponseModel(eventData)
 			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			switch eventType {
@@ -133,7 +153,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
 					errTranslation := statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
 					upstreamUsage.PublishFailure(ctx, reporter, errTranslation)
-					return cliproxyexecutor.Response{}, errTranslation
+					return cliproxyexecutor.Response{}, true, errTranslation
 				}
 				if !upstreamUsage.Publish(ctx, reporter) {
 					if detail, ok := helps.ParseCodexUsageWithOutputItems(completedData, outputItemsByIndex, outputItemsFallback); ok {
@@ -143,17 +163,92 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 				if prepared.responseFormat == sdktranslator.FormatOpenAIResponse {
 					out = helps.EnsureResponsesUsageDetails(out)
 				}
-				return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
+				return cliproxyexecutor.Response{
+					Payload:    out,
+					Incomplete: eventType == "response.incomplete",
+					Headers:    httpResp.Header.Clone(),
+				}, true, nil
+			}
+		}
+		return cliproxyexecutor.Response{}, false, nil
+	}
+
+	flushPendingEvent := func() (cliproxyexecutor.Response, bool, error) {
+		if !hasPendingData {
+			pendingEventName = ""
+			pendingData = nil
+			return cliproxyexecutor.Response{}, false, nil
+		}
+		eventName := pendingEventName
+		eventPayload := pendingData
+		pendingEventName = ""
+		pendingData = nil
+		hasPendingData = false
+		return dispatchSSEEvent(eventName, eventPayload)
+	}
+
+	for events.Scan() {
+		line := bytes.TrimRight(events.Bytes(), "\r")
+		if len(bytes.TrimSpace(line)) == 0 {
+			if outResp, done, errDispatch := flushPendingEvent(); done {
+				return outResp, errDispatch
+			}
+			continue
+		}
+		if bytes.HasPrefix(line, xaiEventTag) {
+			nextEventName := strings.TrimSpace(string(line[len(xaiEventTag):]))
+			if hasPendingData && pendingEventName != "" {
+				if outResp, done, errDispatch := flushPendingEvent(); done {
+					return outResp, errDispatch
+				}
+			}
+			pendingEventName = nextEventName
+			continue
+		}
+		if !bytes.HasPrefix(line, xaiDataTag) {
+			continue
+		}
+		rawEventData := bytes.TrimSpace(line[len(xaiDataTag):])
+		if hasPendingData {
+			if ojson.ValidBytes(pendingData) || bytes.Equal(pendingData, []byte("[DONE]")) {
+				if outResp, done, errDispatch := flushPendingEvent(); done {
+					return outResp, errDispatch
+				}
+			} else {
+				pendingData = append(append(pendingData, '\n'), rawEventData...)
+				continue
+			}
+		}
+		pendingData = bytes.Clone(rawEventData)
+		hasPendingData = true
+	}
+	if outResp, done, errDispatch := flushPendingEvent(); done {
+		return outResp, errDispatch
+	}
+
+	if !sawSSEData {
+		if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 {
+			if errTerminal, ok := xaiTerminalFailureErr("", trimmed); ok {
+				upstreamUsage.PublishFailure(ctx, reporter, errTerminal)
+				return resp, errTerminal
 			}
 		}
 	}
-
-	if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
-		errFinish = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
-		upstreamUsage.PublishFailure(ctx, reporter, errFinish)
-		return resp, errFinish
+	if prepared.applyPatch.HasPatchActivity() {
+		if errFinish := prepared.applyPatch.Finish(); errFinish != nil {
+			errFinish = xaiRequestScopedStreamError{statusErr: statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}}
+			upstreamUsage.PublishFailure(ctx, reporter, errFinish)
+			return resp, errFinish
+		}
 	}
-	return resp, statusErr{code: http.StatusRequestTimeout, msg: "xai stream error: stream disconnected before response.completed or response.incomplete"}
+	if !sawSSEData {
+		errEmpty := newXAIEmptyStreamError()
+		upstreamUsage.PublishFailure(ctx, reporter, errEmpty)
+		return resp, errEmpty
+	}
+	errIncomplete := newXAIIncompleteStreamError()
+	upstreamUsage.PublishFailure(ctx, reporter, errIncomplete)
+	return resp, errIncomplete
 }
 
 func (e *XAIExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -242,11 +337,11 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	data, err := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, nil, nil, nil, err
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))

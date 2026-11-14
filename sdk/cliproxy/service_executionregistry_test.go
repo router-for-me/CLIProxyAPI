@@ -1452,7 +1452,10 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-started:
+		t.Fatal("heartbeat failover drained the scope before resubscribing")
+	// First retry jitter can approach one second after the heartbeat timeout.
+	case <-time.After(3 * time.Second):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
@@ -2974,6 +2977,46 @@ func TestServiceApplyConfigRuntimeSessionAffinityRebindOnChangeRecreatesSelector
 	changedSelector := manager.Selector()
 	if changedSelector == initialSelector {
 		t.Fatal("changing SessionAffinityRebindOn should recreate selector")
+	}
+
+	neverCfg := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "never",
+	}})
+	if !service.applyConfigRuntime(context.Background(), neverCfg, false) {
+		t.Fatal("never config runtime apply failed")
+	}
+	neverSelector := manager.Selector()
+	if neverSelector == changedSelector {
+		t.Fatal("changing SessionAffinityRebindOn to never should recreate selector")
+	}
+
+	sameNeverCfg := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: " NEVER ",
+	}})
+	if !service.applyConfigRuntime(context.Background(), sameNeverCfg, false) {
+		t.Fatal("same never config runtime apply failed")
+	}
+	if manager.Selector() != neverSelector {
+		t.Fatal("equivalent never SessionAffinityRebindOn should preserve selector")
+	}
+
+	backToAnyCfg := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "any",
+	}})
+	if !service.applyConfigRuntime(context.Background(), backToAnyCfg, false) {
+		t.Fatal("back to any config runtime apply failed")
+	}
+	if manager.Selector() == neverSelector {
+		t.Fatal("changing SessionAffinityRebindOn from never to any should recreate selector")
 	}
 }
 

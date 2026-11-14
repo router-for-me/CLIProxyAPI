@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
@@ -28,6 +29,8 @@ import (
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
 type Service struct {
+	routingPublicationMu sync.Mutex
+	routingPublication   modelrouting.ActiveStateV2
 	// cfg holds the current application configuration.
 	cfg *config.Config
 
@@ -46,12 +49,6 @@ type Service struct {
 	authRegWaiters         map[string]chan struct{}
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
-
-	// modelRoutingStateMu protects the active CCS projection identity.
-	modelRoutingStateMu      sync.RWMutex
-	activeModelRouting       *modelrouting.ActiveIdentityV2
-	modelRoutingLoadedAt     time.Time
-	activeModelRoutingConfig *modelrouting.Config
 
 	// proxyPoolPublisher scopes connection-pool fencing to this service, so a reload
 	// here never retires config snapshots served by another service.
@@ -116,6 +113,10 @@ type Service struct {
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
+
+	// pluginInterceptorHost optionally overrides the PluginInterceptorHost
+	// installed on request handlers. Nil means the internal pluginHost is used.
+	pluginInterceptorHost handlers.PluginInterceptorHost
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once

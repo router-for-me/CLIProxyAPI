@@ -134,7 +134,7 @@ func TestPluginReleaseCacheRetainsSuccessAndUsesCompletionTime(t *testing.T) {
 	})}
 	check := func(want string, wantCalls int) {
 		t.Helper()
-		if got := h.latestPluginVersion(context.Background(), client, plugin); got != want || calls != wantCalls {
+		if got := h.latestPluginVersion(context.Background(), client, plugin, false); got != want || calls != wantCalls {
 			t.Fatalf("version=%q calls=%d, want %q/%d", got, calls, want, wantCalls)
 		}
 	}
@@ -176,11 +176,11 @@ func TestPluginReleaseCacheCoalescesConcurrentLookups(t *testing.T) {
 	h := &Handler{}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/plugin"}
 	results := make(chan string, 21)
-	go func() { results <- h.latestPluginVersion(context.Background(), client, plugin) }()
+	go func() { results <- h.latestPluginVersion(context.Background(), client, plugin, false) }()
 	<-started
 	for range 20 {
 		ctx := &pluginReleaseWaitContext{Context: context.Background(), waiting: make(chan struct{})}
-		go func() { results <- h.latestPluginVersion(ctx, client, plugin) }()
+		go func() { results <- h.latestPluginVersion(ctx, client, plugin, false) }()
 		<-ctx.waiting
 	}
 	close(release)
@@ -211,11 +211,11 @@ func TestPluginReleaseCacheCanceledLeaderHandsOffToFollower(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	leaderResult := make(chan string, 1)
-	go func() { leaderResult <- h.latestPluginVersion(ctx, client, plugin) }()
+	go func() { leaderResult <- h.latestPluginVersion(ctx, client, plugin, false) }()
 	<-started
 	waitCtx := &pluginReleaseWaitContext{Context: context.Background(), waiting: make(chan struct{})}
 	followerResult := make(chan string, 1)
-	go func() { followerResult <- h.latestPluginVersion(waitCtx, client, plugin) }()
+	go func() { followerResult <- h.latestPluginVersion(waitCtx, client, plugin, false) }()
 	<-waitCtx.waiting
 	cancel()
 	if got := <-leaderResult; got != "" {
@@ -237,13 +237,13 @@ func TestPluginReleaseCacheCanceledFollowerDoesNotCancelLeader(t *testing.T) {
 	h := &Handler{}
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/plugin"}
 	leaderResult := make(chan string, 1)
-	go func() { leaderResult <- h.latestPluginVersion(context.Background(), client, plugin) }()
+	go func() { leaderResult <- h.latestPluginVersion(context.Background(), client, plugin, false) }()
 	<-started
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	waitCtx := &pluginReleaseWaitContext{Context: ctx, waiting: make(chan struct{})}
 	followerResult := make(chan string, 1)
-	go func() { followerResult <- h.latestPluginVersion(waitCtx, client, plugin) }()
+	go func() { followerResult <- h.latestPluginVersion(waitCtx, client, plugin, false) }()
 	<-waitCtx.waiting
 	cancel()
 	if got := <-followerResult; got != "" {
@@ -269,7 +269,7 @@ func TestPluginReleaseCacheSharesConcurrencyAndCancelsQueuedLookup(t *testing.T)
 	results := make(chan string, pluginReleaseConcurrency)
 	for index := range pluginReleaseConcurrency {
 		go func() {
-			results <- h.latestPluginVersion(context.Background(), client, pluginstore.Plugin{Repository: fmt.Sprintf("https://github.com/test/plugin-%d", index)})
+			results <- h.latestPluginVersion(context.Background(), client, pluginstore.Plugin{Repository: fmt.Sprintf("https://github.com/test/plugin-%d", index)}, false)
 		}()
 	}
 	for range pluginReleaseConcurrency {
@@ -280,7 +280,7 @@ func TestPluginReleaseCacheSharesConcurrencyAndCancelsQueuedLookup(t *testing.T)
 	waitCtx := &pluginReleaseWaitContext{Context: ctx, waiting: make(chan struct{})}
 	queuedResult := make(chan string, 1)
 	plugin := pluginstore.Plugin{Repository: "https://github.com/test/queued"}
-	go func() { queuedResult <- h.latestPluginVersion(waitCtx, client, plugin) }()
+	go func() { queuedResult <- h.latestPluginVersion(waitCtx, client, plugin, false) }()
 	<-waitCtx.waiting
 	cancel()
 	if got := <-queuedResult; got != "" || calls.Load() != pluginReleaseConcurrency {
@@ -290,7 +290,7 @@ func TestPluginReleaseCacheSharesConcurrencyAndCancelsQueuedLookup(t *testing.T)
 	for range pluginReleaseConcurrency {
 		<-results
 	}
-	if got := h.latestPluginVersion(context.Background(), client, plugin); got != "1.0.0" || calls.Load() != pluginReleaseConcurrency+1 {
+	if got := h.latestPluginVersion(context.Background(), client, plugin, false); got != "1.0.0" || calls.Load() != pluginReleaseConcurrency+1 {
 		t.Fatalf("canceled lookup was negatively cached: version=%q calls=%d", got, calls.Load())
 	}
 }
@@ -310,7 +310,7 @@ func TestPluginReleaseCacheSeparatesCredentialsAndEgress(t *testing.T) {
 			client.ResolvedAuth = []pluginstore.ResolvedAuthConfig{{Match: "https://api.github.com/", Type: pluginstore.AuthTypeGitHubToken, Token: pluginstore.Secret(token)}}
 			client.ResolvedAuthExpiresAt = time.Now().Add(time.Hour)
 		}
-		if got := h.latestPluginVersion(context.Background(), client, plugin); got != "1.0.0" {
+		if got := h.latestPluginVersion(context.Background(), client, plugin, false); got != "1.0.0" {
 			t.Fatalf("version = %q", got)
 		}
 	}
@@ -318,7 +318,7 @@ func TestPluginReleaseCacheSeparatesCredentialsAndEgress(t *testing.T) {
 		t.Fatalf("calls = %d, want 3", calls.Load())
 	}
 	client.NetworkScope = "other-proxy"
-	h.latestPluginVersion(context.Background(), client, plugin)
+	h.latestPluginVersion(context.Background(), client, plugin, false)
 	if calls.Load() != 4 {
 		t.Fatalf("calls after proxy change = %d, want 4", calls.Load())
 	}
@@ -352,7 +352,7 @@ func TestPluginReleaseChecksStopQueuedRequestsDuringCooldown(t *testing.T) {
 		h.pluginReleases.entries[pluginReleaseKey(client, plugins[index])] = pluginReleaseCacheEntry{version: "1.0.0"}
 	}
 	result := make(chan []string, 1)
-	go func() { result <- h.latestPluginVersions(context.Background(), client, plugins) }()
+	go func() { result <- h.latestPluginVersions(context.Background(), client, plugins, false) }()
 	for range pluginReleaseConcurrency {
 		<-started
 	}
@@ -461,5 +461,134 @@ func TestListPluginStoreUsesCachedUninstalledVersionWithoutRefresh(t *testing.T)
 	body := listPluginStoreForTest(t, h)
 	if body.Plugins[0].Version != "2.0.0" || len(httpClient.counts) != 1 {
 		t.Fatalf("plugins=%#v requests=%v", body.Plugins, httpClient.counts)
+	}
+}
+
+func listPluginStoreWithQueryForTest(t *testing.T, h *Handler, query string) pluginStoreListResponse {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v8/management/plugins/store"+query, nil)
+	h.ListPluginStore(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var body pluginStoreListResponse
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	return body
+}
+
+func TestListPluginStoreRefreshBypassesCacheWithFloor(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	releaseTag := "v0.1.0"
+	var releaseCalls int
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Dir: writeManagementPluginFile(t, "sample-provider-v0.1.0"),
+		}},
+		pluginReleases: pluginReleaseCache{nowFunc: func() time.Time { return now }},
+		pluginStoreHTTPClient: pluginReleaseDoerFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "api.github.com" {
+				return fakePluginStoreHTTPClient{pluginstore.DefaultRegistryURL: registryJSON(t)}.Do(req)
+			}
+			releaseCalls++
+			return pluginReleaseResponse(releaseTag), nil
+		}),
+	}
+
+	body := listPluginStoreWithQueryForTest(t, h, "")
+	if body.Plugins[0].Version != "0.1.0" || body.Plugins[0].UpdateAvailable || releaseCalls != 1 {
+		t.Fatalf("initial entry=%#v releaseCalls=%d", body.Plugins[0], releaseCalls)
+	}
+
+	releaseTag = "v0.2.0"
+	now = now.Add(time.Minute)
+	body = listPluginStoreWithQueryForTest(t, h, "")
+	if body.Plugins[0].Version != "0.1.0" || body.Plugins[0].UpdateAvailable || releaseCalls != 1 {
+		t.Fatalf("cached entry=%#v releaseCalls=%d, want cached 0.1.0 without network call", body.Plugins[0], releaseCalls)
+	}
+
+	body = listPluginStoreWithQueryForTest(t, h, "?refresh=true")
+	if body.Plugins[0].Version != "0.2.0" || !body.Plugins[0].UpdateAvailable || releaseCalls != 2 {
+		t.Fatalf("refreshed entry=%#v releaseCalls=%d, want 0.2.0 with update_available=true and 2 calls", body.Plugins[0], releaseCalls)
+	}
+
+	releaseTag = "v0.3.0"
+	now = now.Add(5 * time.Second)
+	body = listPluginStoreWithQueryForTest(t, h, "?refresh=true")
+	if body.Plugins[0].Version != "0.2.0" || releaseCalls != 2 {
+		t.Fatalf("floor-throttled entry=%#v releaseCalls=%d, want 0.2.0 and 2 calls within 10s floor", body.Plugins[0], releaseCalls)
+	}
+
+	now = now.Add(5 * time.Second)
+	body = listPluginStoreWithQueryForTest(t, h, "?refresh=1")
+	if body.Plugins[0].Version != "0.3.0" || !body.Plugins[0].UpdateAvailable || releaseCalls != 3 {
+		t.Fatalf("refresh=1 entry=%#v releaseCalls=%d, want 0.3.0 and 3 calls after 10s floor", body.Plugins[0], releaseCalls)
+	}
+}
+
+func TestListPluginStoreRefreshPreservesRateLimiterAndSkipsUninstalled(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	reset := time.Now().Add(time.Hour).Truncate(time.Second)
+	registry := pluginstore.Registry{
+		SchemaVersion: pluginstore.SchemaVersion,
+		Plugins: []pluginstore.Plugin{
+			{
+				ID: "installed-plugin", Name: "Installed", Description: "Installed plugin", Author: "owner",
+				Version: "0.1.0", Repository: "https://github.com/owner/installed-plugin",
+			},
+			{
+				ID: "uninstalled-plugin", Name: "Uninstalled", Description: "Uninstalled plugin", Author: "owner",
+				Version: "0.1.0", Repository: "https://github.com/owner/uninstalled-plugin",
+			},
+		},
+	}
+	registryBytes, errMarshal := json.Marshal(registry)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	var releaseCalls int
+	rateLimited := false
+	h := &Handler{
+		cfg: &config.Config{Plugins: config.PluginsConfig{
+			Dir: writeManagementPluginFile(t, "installed-plugin-v0.1.0"),
+		}},
+		pluginReleases:         pluginReleaseCache{nowFunc: func() time.Time { return now }},
+		pluginStoreRateLimiter: &pluginstore.GitHubRateLimiter{},
+		pluginStoreHTTPClient: pluginReleaseDoerFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Host != "api.github.com" {
+				return fakePluginStoreHTTPClient{pluginstore.DefaultRegistryURL: registryBytes}.Do(req)
+			}
+			releaseCalls++
+			if !rateLimited {
+				return pluginReleaseResponse("v0.2.0"), nil
+			}
+			headers := make(http.Header)
+			headers.Set("X-RateLimit-Remaining", "0")
+			headers.Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+			return &http.Response{StatusCode: http.StatusForbidden, Header: headers, Body: io.NopCloser(strings.NewReader("limited"))}, nil
+		}),
+	}
+
+	body := listPluginStoreWithQueryForTest(t, h, "?refresh=true")
+	if body.Plugins[0].Version != "0.2.0" || body.Plugins[1].Version != "0.1.0" || releaseCalls != 1 {
+		t.Fatalf("first refresh plugins=%#v releaseCalls=%d, want installed=0.2.0 uninstalled=0.1.0 calls=1", body.Plugins, releaseCalls)
+	}
+
+	rateLimited = true
+	now = now.Add(time.Minute)
+	body = listPluginStoreWithQueryForTest(t, h, "?refresh=true")
+	if body.Plugins[0].Version != "0.2.0" || releaseCalls != 2 {
+		t.Fatalf("rate-limited refresh plugins=%#v releaseCalls=%d, want cached 0.2.0 and 2 calls", body.Plugins, releaseCalls)
+	}
+
+	now = now.Add(time.Minute)
+	body = listPluginStoreWithQueryForTest(t, h, "?refresh=true")
+	if body.Plugins[0].Version != "0.2.0" || releaseCalls != 2 {
+		t.Fatalf("cooldown refresh plugins=%#v releaseCalls=%d, want rate limiter to block network call during cooldown", body.Plugins, releaseCalls)
 	}
 }

@@ -2,11 +2,8 @@
 
 The base path is `/v8/management`. Configuration endpoints follow the structure in
 [config.example.yaml](../config.example.yaml); operational endpoints are grouped
-by function. Plus keeps the existing `/v0/management` API mounted for Management
-Center v1.24.2, including Plus provider login, quota, and Amp operations. The v8
-tree retains the upstream grouped routes rather than replacing the legacy tree.
-The legacy reference is available in the
-[management API guide](https://help.router-for.me/management/api).
+by function. The existing `/v0/management` API remains supported. Its reference is
+available in the [management API guide](https://help.router-for.me/management/api).
 
 ## Access
 
@@ -67,10 +64,47 @@ The Home-owned revision fields
 `credentials.concurrency.observation-barrier-revision`, and `plugins.auth-revision`
 cannot be changed through these endpoints.
 
-Credential-specific `excluded-models` override global OAuth exclusions when the
-credential supplies a nonempty list; the lists are not combined. This precedence
-also applies to Plus providers. In Home mode, Home owns dispatched credential
-availability: local cooldown state does not veto a credential chosen by Home.
+### Weighted routing with session affinity
+
+Set `routing.strategy` to `weighted-round-robin` to use per-credential integer
+`weight` values (default `1`, maximum `1000000`; non-positive values are excluded).
+With `routing.session-affinity` enabled, sticky requests, parent inheritance,
+Guardian selections, and LCP matches also consume weighted credits without moving
+existing bindings. New or reselected sessions favor under-served credentials
+within the same eligible credential set. For example, with weights `3:1`, four
+sticky requests to the second credential can be compensated by twelve new
+requests to the first when both remain eligible.
+
+Different priority tiers, transport preferences, and retry/cooldown candidate
+sets keep separate credits; returning to a set resumes its retained credits.
+Pinned requests account against the eligible pool before pinning, within the
+pinned credential's priority tier and transport class, even when session affinity
+is disabled. Pinned and ordinary requests share the same weighted credits. A
+lower-priority binding never shifts the request ratio among higher-priority credentials.
+
+Settled credits are capped at ±32 times the eligible pool total, so request
+ratios are approximate rather than guaranteed. While reservations are in flight,
+committed balances can temporarily exceed the cap; their pending offsets remain
+intact until the pool settles, including when the last reservation rolls back. Sticky requests still use their binding at
+the cap, but stop adding compensation when their full credit delta cannot fit.
+New sessions continue repaying debt and earning credit, so excessive sticky
+traffic does not starve smaller-weight peers.
+
+Credits are local to the CPA process and reset on restart, selector replacement,
+or bounded pool-cache eviction. Concurrent selections see pending credit; local
+selection/binding success confirms it, while failure releases it. In Home mode,
+scheduling and credit accounting remain owned by Home. With matching CPA and Home
+versions, retained WebSocket responses (including Codex duplex successors) report
+`home_selection.reused` through usage so Home can charge later turns without
+redispatching or acquiring another concurrency slot. The scheduling model is
+carried separately from the upstream model. First-turn primary usage does not
+charge again. Split additional-model billing records (such as image usage) carry
+`home_selection.additional` and never add scheduling charges, even when they have
+independent execution IDs. Each reused execution is charged once through primary
+usage; redelivery of that execution ID is deduplicated.
+Compensation arrives after completion and uses Home's current eligible
+pool and API-key permissions, so it remains approximate. Old peers ignore the
+optional metadata; missing usage cannot compensate a reused turn.
 
 ### Codex multi-agent configuration migration
 
@@ -122,7 +156,7 @@ retain the corresponding business operation's fields.
 | `/oauth/callback` | GET, POST | Submit an OAuth callback. |
 | `/plugins` | GET | List installed plugins. |
 | `/plugins/<id>` | DELETE | Delete a plugin. |
-| `/plugins/store` | GET | List the plugin store. |
+| `/plugins/store` | GET | List the plugin store (supports optional `?refresh=true` to bypass cached release checks). |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
 
@@ -274,3 +308,79 @@ accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
 Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.
+
+## OpenCode gateway keys
+
+Configure Zen and Go credentials in `api-keys.opencode` and
+`api-keys.opencode-go`, respectively, using the same grouped key layout as
+other v8 providers. The gateway supplies the default base URL when omitted.
+Client access keys remain under `access.api-keys`.
+
+## DataCosmos routing publication
+
+For OpenAI-compatible accounts, a per-key `quota-domain` in
+`api-keys.openai-compatibility` is carried through to inventory and execution
+evidence. Use the same identifier for credentials sharing one quota pool.
+
+The standard management API remains under `/v8/management`. A standalone
+CLIProxy with the routing publisher adds only the following authenticated
+operations under `/v8dc/management/routing`:
+
+| Method | Resource | Result |
+| --- | --- | --- |
+| GET | `model-inventory` | Registered runtime routes, credential eligibility without secret values, and the adopted generation. |
+| GET | `config.yaml` | Adopted `model-routing` YAML and its generation ETag; an empty runtime returns `model-routing: null`. |
+| PUT | `config.yaml` | Activate a YAML document containing only `model-routing` and return the adopted-generation receipt and ETag. |
+
+Bootstrap uses `If-None-Match: *`. Subsequent publications use the full ETag
+received from the routing resource as `If-Match`. A stale identity returns
+`412`; a missing or ambiguous precondition returns `428`. The ordinary v8
+configuration ETag identifies file bytes and cannot authorize a routing update.
+The ordinary v8 configuration API retains the published routing block but
+rejects attempts to modify or remove it.
+
+An inference request for a direct runtime model may use its inventory selector
+in `X-CLIProxy-Route-Selector` before the first publication and when a later
+publication does not yet contain that selector. The proxy resolves that selector
+against its live registered routes and returns execution evidence for the
+credential used. This does not create an alias or add the route to any lane.
+
+
+For a credential-specific probe, also send `X-CLIProxy-Credential-Ref` with
+the opaque reference from the live inventory. The reference must belong to the
+requested direct route. Unavailable credentials and mismatched references
+fail without switching accounts. The response echoes the reference that
+executed; the request selector is not sent upstream.
+
+
+A selectable published route may name a nonempty subset of live credentials.
+Its quota domains must describe that subset, and all published protocols
+must be executable by every included credential.
+
+
+A lane candidate may further narrow its direct route for a variant. Its
+credential references, protocols and quota domains must be subsets of that
+route, and its quota domains must match its own credential references.
+
+Live inventory credentials include a secret-free `revision`, derived from
+their registration epoch and credential version. A change invalidates
+in-flight qualification evidence even when the opaque account reference
+and the published generation stay the same.
+
+
+AI Hub includes that revision in the published credential references. The
+publisher rejects stale revisions; alias selection also checks the revision
+against the live credential before using it. The account reference alone
+does not establish that a rotated grant passed qualification.
+
+The execution boundary rechecks the prepared credential against the live
+registration. A stale candidate is classified as a credential failure
+before any upstream bytes are sent. Responses report
+`X-CLIProxy-Credential-Revision` from the credential actually handed to the
+executor.
+
+
+OpenCode DeepSeek Flash routes use the current gateway IDs published by
+the provider. An older name or a free-tier suffix is not enough to establish
+a route. An account-level balance or free-tier denial remains a failed probe;
+do not classify it as an invalid inference response.

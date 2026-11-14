@@ -5,7 +5,7 @@ cli-proxy-api-plus
 /server
 *.exe
 
-# Release artifacts must never be committed
+# Release archives
 /CLIProxyAPI_*.tar.gz
 /cliproxy_*.tar.gz
 
@@ -42,6 +42,8 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
+!docs/websocket-tunnel.md
+!docs/websocket-tunnel_CN.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

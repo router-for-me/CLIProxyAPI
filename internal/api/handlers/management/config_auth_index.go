@@ -435,7 +435,7 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 	}
 
 	authByConfigIndex := make(map[string]map[string]*coreauth.Auth)
-	for _, p := range []string{"codex", "claude", "xai", "meta"} {
+	for _, p := range []string{"codex", "claude", "xai", "meta", "opencode", "opencode-go"} {
 		authByConfigIndex[p] = make(map[string]*coreauth.Auth)
 		for _, a := range authsByProvider[p] {
 			if a != nil && a.Attributes != nil {
@@ -508,7 +508,7 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 			continue
 		}
 
-		if providerName == "claude" {
+		if providerName == "claude" || providerName == "opencode" || providerName == "opencode-go" {
 			rawIdx := 0
 			for _, group := range groupsNode.Content {
 				if group == nil || group.Kind != yaml.MappingNode {
@@ -529,7 +529,7 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 					if apiKey == "" && groupBase == "" {
 						continue
 					}
-					if a := authByConfigIndex["claude"][targetIdx]; a != nil {
+					if a := authByConfigIndex[providerName][targetIdx]; a != nil {
 						if idx := resolveAuthIndex(a); idx != "" {
 							setMapScalar(keyNode, "auth_index", idx)
 						}

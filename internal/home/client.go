@@ -2018,6 +2018,7 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 		}
 		return c.endConfigSubscriberLifetimeWithSubscription(errACK, pubsub, "failed ACK")
 	}
+	heartbeatStarted := time.Now()
 	// A protocol-one ACK means Home already committed this membership. Preserve it if the command probe fails.
 	if len(args) > 1 {
 		c.markMembershipTakeoverEligible()
@@ -2065,10 +2066,16 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 	}()
 	go func() {
 		defer close(receiveDone)
+		lastHeartbeat := heartbeatStarted
 		for {
 			_, timeout := c.subscriptionParameters()
-			event, errReceive := receiveSubscriptionEvent(receiveCtx, pubsub, sampler, timeout)
+			event, errReceive := receiveSubscriptionEvent(receiveCtx, pubsub, sampler, lastHeartbeat.Add(timeout))
 			if errReceive == nil {
+				// Only a persisted heartbeat PONG renews liveness. Config, cluster traffic,
+				// and RTT echoes cannot extend the deadline while the consumer is busy.
+				if pong, ok := event.(*redis.Pong); ok && pong != nil && pong.Payload == "" {
+					lastHeartbeat = time.Now()
+				}
 				select {
 				case events <- event:
 					continue
@@ -2144,16 +2151,17 @@ func (c *Client) RunConfigSubscriberLifetime(ctx context.Context, onConfig func(
 				log.Warn("failed to apply config update from home control center, ignoring")
 			}
 		case *redis.Pong:
-			c.resetReconnectFailures()
+			if msg != nil && msg.Payload == "" {
+				c.resetReconnectFailures()
+			}
 		default:
 			log.Debugf("home subscription returned unsupported message type %T", event)
 		}
 	}
 }
 
-// receiveSubscriptionEvent consumes telemetry without extending the heartbeat deadline.
-func receiveSubscriptionEvent(ctx context.Context, pubsub *redis.PubSub, sampler *clusterRTTSampler, timeout time.Duration) (any, error) {
-	deadline := time.Now().Add(timeout)
+// receiveSubscriptionEvent preserves the absolute heartbeat deadline across ordinary messages.
+func receiveSubscriptionEvent(ctx context.Context, pubsub *redis.PubSub, sampler *clusterRTTSampler, deadline time.Time) (any, error) {
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
@@ -2162,6 +2170,9 @@ func receiveSubscriptionEvent(ctx context.Context, pubsub *redis.PubSub, sampler
 		event, errReceive := pubsub.ReceiveTimeout(ctx, remaining)
 		if errReceive != nil {
 			return nil, errReceive
+		}
+		if !time.Now().Before(deadline) {
+			return nil, os.ErrDeadlineExceeded
 		}
 		if _, ok := event.(*redis.Subscription); ok {
 			return nil, fmt.Errorf("unexpected Home subscription ACK after initialization")

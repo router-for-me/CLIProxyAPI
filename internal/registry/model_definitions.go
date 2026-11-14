@@ -4,6 +4,8 @@ package registry
 
 import (
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 )
 
 const (
@@ -712,7 +714,7 @@ const defaultCopilotClaudeContextLength = 128000
 // These models are available through the GitHub Copilot API at api.githubcopilot.com.
 func GetGitHubCopilotModels() []*ModelInfo {
 	now := int64(1732752000) // 2024-11-27
-	copilotClaudeEndpoints := []string{"/chat/completions", "/messages"}
+	copilotClaudeProtocols := []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolAnthropicMessages}
 	gpt4oEntries := []struct {
 		ID          string
 		DisplayName string
@@ -736,7 +738,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-4.1 via GitHub Copilot",
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 		},
 	}
 
@@ -751,7 +753,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         entry.Description,
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 		})
 	}
 
@@ -766,7 +768,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5 via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -779,7 +781,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5 Mini via GitHub Copilot",
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -792,7 +794,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5 Codex via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -805,7 +807,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.1 via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
@@ -818,7 +820,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.1 Codex via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
@@ -831,7 +833,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.1 Codex Mini via GitHub Copilot",
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
@@ -844,7 +846,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.1 Codex Max via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -857,7 +859,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.2 via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -870,7 +872,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.2 Codex via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -883,7 +885,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.3 Codex via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -896,7 +898,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.4 via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -909,7 +911,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "OpenAI GPT-5.4 mini via GitHub Copilot",
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIResponses},
 			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
@@ -922,7 +924,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Haiku 4.5 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 		},
 		{
 			ID:                  "claude-opus-4.1",
@@ -934,7 +936,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Opus 4.1 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 32000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 		},
 		{
 			ID:                  "claude-opus-4.5",
@@ -946,7 +948,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Opus 4.5 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -959,7 +961,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Opus 4.6 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -972,7 +974,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Sonnet 4 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -985,7 +987,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Sonnet 4.5 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -998,7 +1000,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Anthropic Claude Sonnet 4.6 via GitHub Copilot",
 			ContextLength:       defaultCopilotClaudeContextLength,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  copilotClaudeEndpoints,
+			Protocols:           copilotClaudeProtocols,
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
@@ -1011,7 +1013,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Google Gemini 2.5 Pro via GitHub Copilot",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 65536,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "gemini-3-pro-preview",
@@ -1023,7 +1025,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Google Gemini 3 Pro Preview via GitHub Copilot",
 			ContextLength:       1048576,
 			MaxCompletionTokens: 65536,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "gemini-3.1-pro-preview",
@@ -1035,7 +1037,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Google Gemini 3.1 Pro Preview via GitHub Copilot",
 			ContextLength:       173000,
 			MaxCompletionTokens: 65536,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "gemini-3-flash-preview",
@@ -1047,7 +1049,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Google Gemini 3 Flash Preview via GitHub Copilot",
 			ContextLength:       173000,
 			MaxCompletionTokens: 65536,
-			SupportedEndpoints:  []string{"/chat/completions"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat},
 		},
 		{
 			ID:                  "grok-code-fast-1",
@@ -1070,7 +1072,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			Description:         "Raptor mini via GitHub Copilot",
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
-			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Protocols:           []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolOpenAIResponses},
 		},
 	}...)
 }
@@ -1083,7 +1085,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 // unavailable.
 func GetKiroModels() []*ModelInfo {
 	now := int64(1732752000) // 2024-11-27
-	endpoints := []string{"/chat/completions", "/messages"}
+	endpoints := []string{modelrouting.ProtocolOpenAIChat, modelrouting.ProtocolAnthropicMessages}
 	entries := []struct {
 		id          string
 		displayName string
@@ -1138,7 +1140,7 @@ func GetKiroModels() []*ModelInfo {
 			Description:         entry.description,
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			SupportedEndpoints:  endpoints,
+			Protocols:           endpoints,
 			Thinking:            cloneThinkingSupport(DefaultKiroThinkingSupport),
 		})
 	}

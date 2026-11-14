@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -45,7 +46,7 @@ func cursorCacheTestModel(id string) *registry.ModelInfo {
 		ContextLength:              200,
 		MaxCompletionTokens:        100,
 		SupportedParameters:        []string{"temperature"},
-		SupportedEndpoints:         []string{"/v1/chat/completions"},
+		Protocols:                  []string{modelrouting.ProtocolOpenAIChat},
 		SupportedInputModalities:   []string{"TEXT", "IMAGE"},
 		SupportedOutputModalities:  []string{"TEXT"},
 		SupportsWebSearch:          true,
@@ -229,7 +230,7 @@ func mutateCursorCacheTestModel(model *registry.ModelInfo) {
 	model.DisplayName = "mutated"
 	model.SupportedGenerationMethods[0] = "mutated"
 	model.SupportedParameters[0] = "mutated"
-	model.SupportedEndpoints[0] = "mutated"
+	model.Protocols[0] = "mutated"
 	model.SupportedInputModalities[0] = "mutated"
 	model.SupportedOutputModalities[0] = "mutated"
 	model.Thinking.Levels[0] = "mutated"
