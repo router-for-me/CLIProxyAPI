@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -12,6 +13,10 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 )
+
+// ErrStaleFileSnapshot means Register rejected a file observation that no longer
+// matches the credential on disk. Watcher callers can reread that observation.
+var ErrStaleFileSnapshot = errors.New("register auth: stale file snapshot")
 
 // SetRetryConfig updates additional credential retry rounds, the per-round credential limit, and the cooldown wait interval.
 func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxRetryCredentials int) {
@@ -97,6 +102,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, errMutation
 	}
 	defer releaseMutation()
+	// Validate an unversioned file observation before assigning a new runtime
+	// generation. File I/O holds only this credential's mutation gate.
+	if auth.HasFileSnapshot() && !auth.FileSnapshotMatchesDisk() {
+		return nil, ErrStaleFileSnapshot
+	}
 	now := time.Now()
 	if auth.Generation == 0 {
 		auth.Generation = 1
