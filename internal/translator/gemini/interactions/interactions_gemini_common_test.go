@@ -933,8 +933,11 @@ func TestConvertInteractionsRequestToGeminiBuiltinTools(t *testing.T) {
 		if len(tools) != 2 {
 			t.Fatalf("expected 2 tools, got %d. Output: %s", len(tools), string(out))
 		}
-		if got := tools[0].Get("google_search.mode").String(); got != "search" {
-			t.Fatalf("expected google_search.mode=search, got %s", tools[0].Raw)
+		if got := tools[0].Get("google_search").Exists(); got {
+			t.Fatalf("expected nested google_search parameter to be dropped, got %s", tools[0].Raw)
+		}
+		if got := tools[0].Get("type").String(); got != "google_search" {
+			t.Fatalf("expected type=google_search, got %s", tools[0].Raw)
 		}
 		if got := tools[1].Get("code_execution.sandbox").Bool(); !got {
 			t.Fatalf("expected code_execution.sandbox=true, got %s", tools[1].Raw)
@@ -1464,5 +1467,42 @@ func TestConvertInteractionsResponseToGemini_ResponseFailed(t *testing.T) {
 				t.Errorf("error.message = %q, want containing %q", gotMsg, tt.wantMsg)
 			}
 		})
+	}
+}
+
+func TestConvertGeminiRequestToInteractionsResponseModalitiesTopLevel(t *testing.T) {
+	out, _ := ConvertGeminiRequestToInteractions("gemini-nano-banana-2.1", []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"weather card"}]}],
+		"generationConfig":{"responseModalities":["IMAGE"],"imageConfig":{"aspectRatio":"16:9"},"thinkingConfig":{"thinkingLevel":"minimal"}}
+	}`), false)
+	if ojson.GetBytesNoCopy(out, "generation_config.response_modalities").Exists() {
+		t.Fatalf("response_modalities must not stay in generation_config. Output: %s", string(out))
+	}
+	mods := ojson.GetBytesNoCopy(out, "response_modalities").Array()
+	if len(mods) != 1 || mods[0].String() != "image" {
+		t.Fatalf("expected top-level response_modalities [image], got %s", string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "generation_config.image_config.aspect_ratio").String(); got != "16:9" {
+		t.Fatalf("expected image_config preserved, got %s", string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "minimal" {
+		t.Fatalf("expected thinking_config normalized, got %s", string(out))
+	}
+}
+
+func TestConvertGeminiRequestToInteractionsGoogleSearchTypeOnly(t *testing.T) {
+	out, _ := ConvertGeminiRequestToInteractions("gemini-3.1-flash", []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"weather card"}]}],
+		"tools":[{"googleSearch":{"searchTypes":{"webSearch":{},"imageSearch":{}}}}]
+	}`), false)
+	tools := ojson.GetBytesNoCopy(out, "tools").Array()
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d. Output: %s", len(tools), string(out))
+	}
+	if tools[0].Get("google_search").Exists() {
+		t.Fatalf("expected no nested google_search parameter, got %s", tools[0].Raw)
+	}
+	if got := tools[0].Get("type").String(); got != "google_search" {
+		t.Fatalf("expected type=google_search, got %s. Output: %s", got, string(out))
 	}
 }

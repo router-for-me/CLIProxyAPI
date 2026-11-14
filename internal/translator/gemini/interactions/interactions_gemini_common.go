@@ -69,6 +69,9 @@ func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 	copyGeminiSystemInstructionToInteractionsDoc(outDoc, root)
 	if root.Get("generationConfig").Exists() {
 		converted := convertCamelCaseKeysToSnakeCase([]byte(root.Get("generationConfig").Raw))
+		genDoc := ojson.NewDocString(string(converted))
+		moveGeminiResponseModalitiesToInteractionsDoc(outDoc, genDoc)
+		converted = genDoc.Bytes()
 		_ = outDoc.SetRawBytes("generation_config", converted)
 		normalizeGeminiThinkingConfigForInteractionsDoc(outDoc, util.ParseGJSONBytesNoCopy(converted))
 	}
@@ -178,6 +181,28 @@ func geminiSystemInstructionText(sys ojson.Result) string {
 	return builder.String()
 }
 
+// moveGeminiResponseModalitiesToInteractionsDoc lifts generationConfig.response_modalities
+// to the top-level response_modalities field. The Interactions API rejects
+// "response_modalities" nested inside generation_config and expects lowercase
+// modality names ("text", "image", "audio").
+func moveGeminiResponseModalitiesToInteractionsDoc(outDoc *ojson.Doc, genDoc *ojson.Doc) {
+	mods := genDoc.Get("response_modalities")
+	if !mods.Exists() || !mods.IsArray() {
+		return
+	}
+	responseMods := make([]string, 0)
+	mods.ForEach(func(_, mod ojson.Result) bool {
+		if name := strings.ToLower(strings.TrimSpace(mod.String())); name != "" {
+			responseMods = append(responseMods, name)
+		}
+		return true
+	})
+	_ = genDoc.Delete("response_modalities")
+	if len(responseMods) > 0 {
+		_ = outDoc.Set("response_modalities", responseMods)
+	}
+}
+
 func normalizeGeminiThinkingConfigForInteractionsDoc(outDoc *ojson.Doc, genCfg ojson.Result) {
 	if level := firstExistingPath(genCfg, []string{
 		"thinking_config.thinking_level",
@@ -256,17 +281,13 @@ func copyGeminiToolsToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 			normalized = append(normalized, entry)
 		}
 		if gs := tool.Get("googleSearch"); gs.Exists() {
-			entry := map[string]any{"type": "google_search"}
-			if gs.IsObject() && len(gs.Map()) > 0 {
-				entry["google_search"] = json.RawMessage(gs.Raw)
-			}
-			normalized = append(normalized, entry)
+			// The Interactions API rejects a nested "google_search" parameter at
+			// tools[N] ("Unknown parameter 'google_search' at 'tools[0]'"), so any
+			// Gemini googleSearch options (e.g. searchTypes) are dropped and the
+			// tool is sent as a type-only entry.
+			normalized = append(normalized, map[string]any{"type": "google_search"})
 		} else if gs := tool.Get("google_search"); gs.Exists() {
-			entry := map[string]any{"type": "google_search"}
-			if gs.IsObject() && len(gs.Map()) > 0 {
-				entry["google_search"] = json.RawMessage(gs.Raw)
-			}
-			normalized = append(normalized, entry)
+			normalized = append(normalized, map[string]any{"type": "google_search"})
 		}
 		if name := tool.Get("name"); name.Exists() {
 			entry := map[string]any{
