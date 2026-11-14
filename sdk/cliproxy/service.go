@@ -72,6 +72,9 @@ type Service struct {
 	// server is the HTTP API server instance.
 	server *api.Server
 
+	// requestReady gates requests until initial model registration completes.
+	requestReady atomic.Bool
+
 	// pprofServer manages the optional pprof HTTP debug server.
 	pprofServer *pprofServer
 
