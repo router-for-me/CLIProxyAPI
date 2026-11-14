@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestEnqueueBroadcastsToUsageSubscribersAndSkipsQueue(t *testing.T) {
+func TestEnqueueBroadcastsToUsageSubscribersAndKeepsQueue(t *testing.T) {
 	withEnabledQueue(t, func() {
 		first, unsubscribeFirst := SubscribeUsage()
 		defer unsubscribeFirst()
@@ -20,17 +20,20 @@ func TestEnqueueBroadcastsToUsageSubscribersAndSkipsQueue(t *testing.T) {
 		requireUsageSubscriberPayload(t, first, "usage-record")
 		requireUsageSubscriberPayload(t, second, "usage-record")
 
-		if items := PopOldest(1); len(items) != 0 {
-			t.Fatalf("PopOldest() items = %q, want empty after subscriber broadcast", items)
+		items := PopOldest(2)
+		if len(items) != 1 || string(items[0]) != "usage-record" {
+			t.Fatalf("PopOldest() items = %q, want the broadcast record still queued", items)
 		}
 
-		unsubscribeFirst()
-		unsubscribeSecond()
-
-		Enqueue([]byte("queued-record"))
-		items := PopOldest(1)
-		if len(items) != 1 || string(items[0]) != "queued-record" {
-			t.Fatalf("PopOldest() items = %q, want queued record after unsubscribe", items)
+		Requeue([]byte("requeued-record"))
+		select {
+		case got := <-first:
+			t.Fatalf("subscriber received requeued record %q", string(got))
+		default:
+		}
+		items = PopOldest(1)
+		if len(items) != 1 || string(items[0]) != "requeued-record" {
+			t.Fatalf("PopOldest() items = %q, want requeued record", items)
 		}
 	})
 }

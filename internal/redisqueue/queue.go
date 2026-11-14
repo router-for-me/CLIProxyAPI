@@ -69,7 +69,19 @@ func Enqueue(payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
-	if global.publishToSubscribers(payload) {
+	// Subscribers get a copy and the queue keeps the record, so a live subscriber
+	// never starves a client that pops the queue.
+	global.publishToSubscribers(payload)
+	global.enqueue(payload)
+}
+
+// Requeue puts a popped record back on the queue without publishing it again,
+// so subscribers that already received it do not see it twice.
+func Requeue(payload []byte) {
+	if !Enabled() {
+		return
+	}
+	if len(payload) == 0 {
 		return
 	}
 	global.enqueue(payload)
