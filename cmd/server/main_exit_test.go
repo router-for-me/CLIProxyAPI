@@ -40,6 +40,8 @@ func newServerExitCommand(t *testing.T, dir string, args ...string) (*exec.Cmd, 
 	cmdArgs := append([]string{"-test.run=^TestServerExitHelper$", "--"}, args...)
 	command := exec.CommandContext(ctx, os.Args[0], cmdArgs...)
 	command.Dir = dir
+	// The TUI tests expect startup to fail without a terminal.
+	detachFromTerminal(command)
 	// Isolate from host store environment variables and prevent external network calls.
 	command.Env = append(os.Environ(),
 		serverExitHelperEnv+"=1",
