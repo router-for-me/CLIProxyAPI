@@ -683,3 +683,212 @@ func TestObserveResponseHeadersKeepsPrimaryWhenTruncatingAdditional(t *testing.T
 		t.Fatalf("snapshot size = %d, want %d", len(quota.Signals), maxQuotaSignalHeaders)
 	}
 }
+
+func TestObserveResponseHeadersIfNotOlderKeepsNewestSnapshot(t *testing.T) {
+	t.Parallel()
+
+	newer := time.Unix(1790000100, 0)
+	older := newer.Add(-time.Minute)
+	quota := QuotaState{
+		ObservedAt: newer,
+		Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "40"},
+	}
+
+	if quota.observeResponseHeadersIfNotOlder("codex", http.Header{"X-Codex-Primary-Used-Percent": []string{"10"}}, older) {
+		t.Fatal("older observation replaced a newer snapshot")
+	}
+	if quota.ObservedAt != newer || quota.Signals["X-Codex-Primary-Used-Percent"] != "40" {
+		t.Fatalf("snapshot changed by older observation: %#v", quota)
+	}
+
+	latest := newer.Add(time.Minute)
+	if !quota.observeResponseHeadersIfNotOlder("codex", http.Header{"X-Codex-Primary-Used-Percent": []string{"55"}}, latest) {
+		t.Fatal("newer observation was not applied")
+	}
+	if quota.ObservedAt != latest || quota.Signals["X-Codex-Primary-Used-Percent"] != "55" {
+		t.Fatalf("snapshot = %#v, want newest observation", quota)
+	}
+}
+
+func TestRebaseRelativeQuotaHeaders(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000600, 0)
+	headers := http.Header{
+		"X-Codex-Primary-Reset-After-Seconds":   []string{"3600"},
+		"X-Codex-Secondary-Reset-After-Seconds": []string{"120"},
+		"X-Codex-Primary-Used-Percent":          []string{"12"},
+	}
+	received := map[string]time.Time{
+		"X-Codex-Primary-Reset-After-Seconds":   observedAt.Add(-10 * time.Minute),
+		"X-Codex-Secondary-Reset-After-Seconds": observedAt.Add(-5 * time.Minute),
+		"X-Codex-Primary-Used-Percent":          observedAt,
+	}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(name string) time.Time { return received[name] })
+	if v := got.Get("X-Codex-Primary-Reset-After-Seconds"); v != "3000" {
+		t.Fatalf("primary reset-after = %q, want 3000", v)
+	}
+	if v := got.Get("X-Codex-Secondary-Reset-After-Seconds"); v != "0" {
+		t.Fatalf("secondary reset-after = %q, want 0 (already elapsed)", v)
+	}
+	if v := got.Get("X-Codex-Primary-Used-Percent"); v != "12" {
+		t.Fatalf("used percent = %q, want 12", v)
+	}
+	if v := headers.Get("X-Codex-Primary-Reset-After-Seconds"); v != "3600" {
+		t.Fatalf("input headers modified: %q", v)
+	}
+}
+
+func TestRebaseRelativeQuotaHeadersLeavesInvalidValuesAlone(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000600, 0)
+	headers := http.Header{"X-Codex-Secondary-Reset-After-Seconds": []string{"-5"}}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(string) time.Time { return observedAt.Add(-time.Minute) })
+	if v := got.Get("X-Codex-Secondary-Reset-After-Seconds"); v != "-5" {
+		t.Fatalf("reset-after = %q, want -5 (0 would read as a valid reset)", v)
+	}
+}
+
+func TestRebaseRelativeQuotaHeadersMovesLaterReceiptsForward(t *testing.T) {
+	t.Parallel()
+
+	observedAt := time.Unix(1790000000, 0)
+	headers := http.Header{"X-Codex-Primary-Reset-After-Seconds": []string{"60"}}
+
+	got := rebaseRelativeQuotaHeaders(headers, observedAt, func(string) time.Time { return observedAt.Add(10 * time.Minute) })
+	if v := got.Get("X-Codex-Primary-Reset-After-Seconds"); v != "660" {
+		t.Fatalf("reset-after = %q, want 660 (received 600s after the snapshot time)", v)
+	}
+}
+
+func TestQuotaAccountIdentityIncludesProviderAccountFields(t *testing.T) {
+	t.Parallel()
+
+	identity := func(metadata map[string]any) string {
+		return quotaAccountIdentity(&Auth{ID: "x", Provider: "claude", Metadata: metadata})
+	}
+	base := identity(map[string]any{"email": "same@example.com", "account_uuid": "acct-1", "organization_uuid": "org-1"})
+	if base == "" {
+		t.Fatal("identity is empty")
+	}
+	if got := identity(map[string]any{"email": "same@example.com", "account_uuid": "acct-1", "organization_uuid": "org-1"}); got != base {
+		t.Fatalf("identical account identity = %q, want %q", got, base)
+	}
+	for name, metadata := range map[string]map[string]any{
+		"different account uuid":      {"email": "same@example.com", "account_uuid": "acct-2", "organization_uuid": "org-1"},
+		"different organization uuid": {"email": "same@example.com", "account_uuid": "acct-1", "organization_uuid": "org-2"},
+	} {
+		if got := identity(metadata); got == base {
+			t.Fatalf("%s: identity did not change", name)
+		}
+	}
+}
+
+func TestQuotaResetReceivedAtCountsOnlyReadableResets(t *testing.T) {
+	t.Parallel()
+
+	early := time.Unix(1790000000, 0)
+	late := early.Add(10 * time.Minute)
+	unix := strconv.FormatInt(early.Add(24*time.Hour).Unix(), 10)
+	received := map[string]time.Time{
+		"X-Codex-Primary-Reset-At":              late,
+		"X-Codex-Primary-Reset-After-Seconds":   late,
+		"X-Codex-Secondary-Reset-After-Seconds": early,
+		"Anthropic-Ratelimit-Unified-7d-Reset":  late,
+		"Anthropic-Ratelimit-Unified-Reset":     early,
+	}
+	receivedAt := func(name string) time.Time { return received[name] }
+
+	tests := []struct {
+		name    string
+		headers http.Header
+		want    time.Time
+	}{
+		{
+			name: "codex skips a longer window with an unreadable reset-at",
+			headers: http.Header{
+				"X-Codex-Primary-Window-Minutes":        []string{"20160"},
+				"X-Codex-Primary-Reset-At":              []string{"not-a-time"},
+				"X-Codex-Secondary-Window-Minutes":      []string{"10080"},
+				"X-Codex-Secondary-Reset-After-Seconds": []string{"3600"},
+			},
+			want: early,
+		},
+		{
+			name: "codex skips a longer window with a negative reset-after",
+			headers: http.Header{
+				"X-Codex-Primary-Window-Minutes":        []string{"20160"},
+				"X-Codex-Primary-Reset-After-Seconds":   []string{"-5"},
+				"X-Codex-Secondary-Window-Minutes":      []string{"10080"},
+				"X-Codex-Secondary-Reset-After-Seconds": []string{"3600"},
+			},
+			want: early,
+		},
+		{
+			name: "claude skips an unreadable 7d reset",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-7d-Reset": []string{"not-a-time"},
+				"Anthropic-Ratelimit-Unified-Reset":    []string{unix},
+			},
+			want: early,
+		},
+		{
+			name: "claude skips the overage billing boundary",
+			headers: http.Header{
+				"Anthropic-Ratelimit-Unified-Representative-Claim": []string{"overage"},
+				"Anthropic-Ratelimit-Unified-Reset":                []string{unix},
+				"Anthropic-Ratelimit-Unified-Overage-Reset":        []string{unix},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := quotaResetReceivedAt(tt.headers, receivedAt); !got.Equal(tt.want) {
+				t.Fatalf("quotaResetReceivedAt() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDropSupersededResetHeadersKeepsOlderValueWhenNewerIsUnreadable(t *testing.T) {
+	t.Parallel()
+
+	const absolute, relative = "X-Codex-Primary-Reset-At", "X-Codex-Primary-Reset-After-Seconds"
+	early := time.Unix(1790000000, 0)
+	late := early.Add(time.Minute)
+
+	tests := []struct {
+		name         string
+		absolute     string
+		relative     string
+		absoluteAt   time.Time
+		relativeAt   time.Time
+		wantAbsolute bool
+		wantRelative bool
+	}{
+		{name: "readable newer relative replaces absolute", absolute: "1790003600", relative: "60", absoluteAt: early, relativeAt: late, wantRelative: true},
+		{name: "readable newer absolute replaces relative", absolute: "1790003600", relative: "60", absoluteAt: late, relativeAt: early, wantAbsolute: true},
+		{name: "negative newer relative keeps both", absolute: "1790003600", relative: "-5", absoluteAt: early, relativeAt: late, wantAbsolute: true, wantRelative: true},
+		{name: "unreadable newer absolute keeps both", absolute: "not-a-time", relative: "60", absoluteAt: late, relativeAt: early, wantAbsolute: true, wantRelative: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{absolute: []string{tt.absolute}, relative: []string{tt.relative}}
+			got := dropSupersededResetHeaders(headers, func(name string) time.Time {
+				if name == absolute {
+					return tt.absoluteAt
+				}
+				return tt.relativeAt
+			})
+			if _, ok := got[absolute]; ok != tt.wantAbsolute {
+				t.Fatalf("absolute kept = %v, want %v", ok, tt.wantAbsolute)
+			}
+			if _, ok := got[relative]; ok != tt.wantRelative {
+				t.Fatalf("relative kept = %v, want %v", ok, tt.wantRelative)
+			}
+		})
+	}
+}

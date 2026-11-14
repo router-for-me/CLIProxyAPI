@@ -545,6 +545,17 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 				auth.Status = existing.Status
 			}
 		}
+		// Must follow every path above that copies existing.Quota onto auth.
+		if quotaSnapshotIsForAnotherAccount(existing, auth, credChanged && mode == updateModeReplace) {
+			// The credential may now be a different account, so the preserved
+			// passive snapshot may describe the former account's quota.
+			auth.Quota.ClearObservationSignals()
+			for _, state := range auth.ModelStates {
+				if state != nil {
+					state.Quota.ClearObservationSignals()
+				}
+			}
+		}
 	} else {
 		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 		applyPreservedRenewalState(existing, auth, mode, now)

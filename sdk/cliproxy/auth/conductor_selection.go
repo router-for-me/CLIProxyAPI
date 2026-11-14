@@ -80,6 +80,17 @@ func isBuiltInSelector(selector Selector) bool {
 	}
 }
 
+// selectorUsesPrevalidatedCandidates reports whether selector picks from the
+// manager's prevalidated, ID-sorted candidates with built-in model handling.
+// SoonestResetSelector shares this handling but not the scheduler fast path.
+func selectorUsesPrevalidatedCandidates(selector Selector) bool {
+	if isBuiltInSelector(selector) {
+		return true
+	}
+	_, soonestReset := selector.(*SoonestResetSelector)
+	return soonestReset
+}
+
 type requiredAuthKindContextKey struct{}
 type credentialPolicyContextKey struct{}
 
@@ -976,7 +987,7 @@ func (m *Manager) availableAuthsForSelector(ctx context.Context, selector Select
 }
 
 func selectionArgForSelector(selector Selector, routeModel string) string {
-	if isBuiltInSelector(selector) {
+	if selectorUsesPrevalidatedCandidates(selector) {
 		return ""
 	}
 	return routeModel
@@ -984,7 +995,7 @@ func selectionArgForSelector(selector Selector, routeModel string) string {
 
 func selectorContextForAvailableAuths(ctx context.Context, selector Selector, routeModel string) context.Context {
 	ctx = withWeightedSelectorStateModel(ctx, selector, routeModel)
-	if !isBuiltInSelector(selector) {
+	if !selectorUsesPrevalidatedCandidates(selector) {
 		if _, sessionAffinity := selector.(*SessionAffinitySelector); !sessionAffinity {
 			return ctx
 		}
@@ -2362,7 +2373,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 					errPick = &Error{Code: "auth_not_found", Message: "no auth available"}
 				}
 			}
-			if isBuiltInSelector(selector) {
+			if selectorUsesPrevalidatedCandidates(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
 			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
@@ -2849,7 +2860,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 					errPick = &Error{Code: "auth_not_found", Message: "no auth available"}
 				}
 			}
-			if isBuiltInSelector(selector) {
+			if selectorUsesPrevalidatedCandidates(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
 			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)

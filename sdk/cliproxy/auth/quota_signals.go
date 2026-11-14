@@ -1,12 +1,19 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"maps"
+	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// codexQuotaWindowPrefixes lists the Codex base quota windows, in tie-break order.
+var codexQuotaWindowPrefixes = []string{"X-Codex-Primary-", "X-Codex-Secondary-"}
 
 const (
 	maxQuotaSignalHeaders = 64
@@ -52,6 +59,179 @@ func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers 
 	q.Signals = next
 	q.ObservedAt = observedAt
 	return true
+}
+
+// quotaAccountIdentity identifies whose quota a passive snapshot describes:
+// a digest of the provider plus the account email and, when present, the
+// upstream account and organization IDs. API-key credentials identify by their key, so only the
+// digest is returned and the secret is never retained. It is empty when the
+// auth carries no account identity.
+func quotaAccountIdentity(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	_, account := auth.AccountInfo()
+	for _, key := range []string{"account_id", "account_uuid", "organization_uuid"} {
+		if value, ok := auth.Metadata[key].(string); ok && strings.TrimSpace(value) != "" {
+			account += "|" + key + "=" + strings.TrimSpace(value)
+		}
+	}
+	if account == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(auth.Provider)) + "|" + account))
+	return hex.EncodeToString(sum[:16])
+}
+
+// quotaSnapshotIsForAnotherAccount reports whether a snapshot kept from existing
+// may describe a different account than auth. Without an identity on both
+// sides, a credential replacement cannot be shown to be the same account, and
+// wrongly clearing a snapshot costs only one probe request.
+func quotaSnapshotIsForAnotherAccount(existing, auth *Auth, credentialsReplaced bool) bool {
+	before, after := quotaAccountIdentity(existing), quotaAccountIdentity(auth)
+	if before != "" && after != "" {
+		return before != after
+	}
+	return credentialsReplaced
+}
+
+// observeResponseHeadersIfNotOlder applies an observation unless the snapshot
+// already holds a newer one. Observations are stamped at header receipt, and
+// concurrent requests on one credential can finish out of order, so an older
+// stream that drains last must not replace a newer snapshot.
+func (q *QuotaState) observeResponseHeadersIfNotOlder(provider string, headers http.Header, observedAt time.Time) bool {
+	if q == nil || (!q.ObservedAt.IsZero() && observedAt.Before(q.ObservedAt)) {
+		return false
+	}
+	return q.ObserveResponseHeadersForProvider(provider, headers, observedAt)
+}
+
+// dropSupersededResetHeaders removes the older of a window's absolute
+// (-Reset-At) and relative (-Reset-After-Seconds) reset values when they were
+// received at different times. A websocket frame can update only one of them
+// while the holder keeps the other from an earlier frame, which may describe
+// the previous window. A newer value that cannot be read supersedes nothing.
+// headers is not modified.
+func dropSupersededResetHeaders(headers http.Header, receivedAt func(string) time.Time) http.Header {
+	if len(headers) == 0 || receivedAt == nil {
+		return headers
+	}
+	const relativeSuffix = "-reset-after-seconds"
+	result := headers
+	cloned := false
+	for key := range headers {
+		lower := strings.ToLower(key)
+		if !strings.HasSuffix(lower, relativeSuffix) {
+			continue
+		}
+		absoluteKey := http.CanonicalHeaderKey(key[:len(key)-len(relativeSuffix)] + "-Reset-At")
+		if _, ok := headers[absoluteKey]; !ok {
+			continue
+		}
+		relativeAt, absoluteAt := receivedAt(key), receivedAt(absoluteKey)
+		if relativeAt.Equal(absoluteAt) {
+			continue
+		}
+		// Only a readable newer value can supersede the older one.
+		superseded := key
+		if relativeAt.After(absoluteAt) {
+			superseded = absoluteKey
+			if _, ok := parseResetAfterSeconds(headers.Get(key)); !ok {
+				continue
+			}
+		} else if _, ok := parseResetTimestamp(headers.Get(absoluteKey)); !ok {
+			continue
+		}
+		if !cloned {
+			result = headers.Clone()
+			cloned = true
+		}
+		delete(result, superseded)
+	}
+	return result
+}
+
+// quotaResetReceivedAt returns when the reset value the selector will score
+// arrived, or the zero time when headers carry none it can read. It chooses
+// the window and validates values the same way quotaWindowReset does. Snapshots are ordered by this time: an
+// attempt can merge other headers late, even another window's reset, while
+// still holding an older value for the scored window, and must not be taken
+// for a newer observation of it.
+func quotaResetReceivedAt(headers http.Header, receivedAt func(string) time.Time) time.Time {
+	var scored time.Time
+	if receivedAt == nil {
+		return scored
+	}
+	longest := int64(-1)
+	for _, prefix := range codexQuotaWindowPrefixes {
+		var windowReceived time.Time
+		if _, ok := parseResetTimestamp(headers.Get(prefix + "Reset-At")); ok {
+			windowReceived = receivedAt(prefix + "Reset-At")
+		}
+		if _, ok := parseResetAfterSeconds(headers.Get(prefix + "Reset-After-Seconds")); ok {
+			if received := receivedAt(prefix + "Reset-After-Seconds"); received.After(windowReceived) {
+				windowReceived = received
+			}
+		}
+		if windowReceived.IsZero() {
+			continue
+		}
+		minutes, _ := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"Window-Minutes")), 10, 64)
+		if minutes > longest {
+			longest = minutes
+			scored = windowReceived
+		}
+	}
+	if longest >= 0 {
+		return scored
+	}
+	if _, ok := parseResetTimestamp(headers.Get("Anthropic-Ratelimit-Unified-7d-Reset")); ok {
+		return receivedAt("Anthropic-Ratelimit-Unified-7d-Reset")
+	}
+	const unifiedReset = "Anthropic-Ratelimit-Unified-Reset"
+	if parsed, ok := parseResetTimestamp(headers.Get(unifiedReset)); ok {
+		claims := map[string]string{
+			"Anthropic-Ratelimit-Unified-Representative-Claim": headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim"),
+			"Anthropic-Ratelimit-Unified-Overage-Reset":        headers.Get("Anthropic-Ratelimit-Unified-Overage-Reset"),
+		}
+		if received := receivedAt(unifiedReset); !claudeResetIsBillingBoundary(claims, parsed, received) {
+			return received
+		}
+	}
+	return scored
+}
+
+// rebaseRelativeQuotaHeaders rewrites relative reset values so they count from
+// observedAt. A websocket quota frame can merge only some headers, so a
+// Reset-After-Seconds value received at another time than observedAt would
+// otherwise be anchored at the wrong moment and its reset would drift.
+// receivedAt reports when a header was received; headers is not modified.
+func rebaseRelativeQuotaHeaders(headers http.Header, observedAt time.Time, receivedAt func(string) time.Time) http.Header {
+	if len(headers) == 0 || receivedAt == nil {
+		return headers
+	}
+	rebased := headers
+	cloned := false
+	for key, values := range headers {
+		if len(values) == 0 || !strings.HasSuffix(strings.ToLower(key), "-reset-after-seconds") {
+			continue
+		}
+		received := receivedAt(key)
+		if received.IsZero() || received.Equal(observedAt) {
+			continue
+		}
+		seconds, ok := parseResetAfterSeconds(values[len(values)-1])
+		if !ok {
+			continue
+		}
+		remaining := math.Max(0, seconds-observedAt.Sub(received).Seconds())
+		if !cloned {
+			rebased = headers.Clone()
+			cloned = true
+		}
+		rebased[key] = []string{strconv.FormatInt(int64(math.Round(remaining)), 10)}
+	}
+	return rebased
 }
 
 // ClearObservationSignals removes only passive observation data. It leaves

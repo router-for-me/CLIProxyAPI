@@ -2159,9 +2159,25 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.UpdatedAt = now
 
 		if !result.SkipQuotaObservation {
-			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+			// Anchor the snapshot at the receipt of its reset headers: streamed
+			// results are recorded only after the stream drains, relative values
+			// such as Reset-After-Seconds count from when they arrived, and a late
+			// merge of unrelated headers must not make an older reset look newer.
+			headerReceivedAt := func(name string) time.Time {
+				return internallogging.GetResponseHeaderReceivedAt(ctx, name)
+			}
+			currentHeaders := dropSupersededResetHeaders(responseHeaders, headerReceivedAt)
+			observedAt := quotaResetReceivedAt(currentHeaders, headerReceivedAt)
+			if observedAt.IsZero() {
+				observedAt = internallogging.GetResponseHeadersReceivedAt(ctx)
+			}
+			if observedAt.IsZero() || observedAt.After(now) {
+				observedAt = now
+			}
+			observedHeaders := rebaseRelativeQuotaHeaders(currentHeaders, observedAt, headerReceivedAt)
+			auth.Quota.observeResponseHeadersIfNotOlder(result.Provider, observedHeaders, observedAt)
 			if modelState != nil {
-				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+				modelState.Quota.observeResponseHeadersIfNotOlder(result.Provider, observedHeaders, observedAt)
 			}
 		}
 
