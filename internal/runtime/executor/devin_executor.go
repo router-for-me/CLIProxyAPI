@@ -559,6 +559,13 @@ func (e *DevinExecutor) streamDevinFrames(
 	e.streamDevinFramesForAuth(ctx, body, req, opts, chatModelUID, responseFormat, reporter, out, nil)
 }
 
+// devinFramePacket carries one frame read from the upstream Connect stream.
+type devinFramePacket struct {
+	flag    byte
+	payload []byte
+	err     error
+}
+
 // streamDevinFramesForAuth streams Devin frames for auth; auth may be nil in tests,
 // in which case quota errors carry credential scope without a reset-based delay.
 func (e *DevinExecutor) streamDevinFramesForAuth(
@@ -736,6 +743,47 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 		select {
 		case out <- cliproxyexecutor.StreamChunk{Err: err}:
 		case <-ctx.Done():
+		}
+	}
+
+	// Hold the interaction.created bookkeeping event until the upstream proves
+	// it produced generated output (the first step.* event) or the stream ends
+	// in a terminal event. A dead upstream slot emits only bookkeeping; keeping
+	// it buffered leaves the downstream stream uncommitted so the caller can
+	// still fail over to another credential.
+	emitInteractionsEventNow := emitInteractionsEvent
+	generatedSeen := false
+	var heldBootstrapEvents [][]byte
+	flushHeldBootstrapEvents := func() bool {
+		for _, held := range heldBootstrapEvents {
+			if !emitInteractionsEventNow(held) {
+				return false
+			}
+		}
+		heldBootstrapEvents = nil
+		return true
+	}
+	emitInteractionsEvent = func(rawJSON []byte) bool {
+		if generatedSeen {
+			return emitInteractionsEventNow(rawJSON)
+		}
+		eventType := ojson.GetBytesNoCopy(bytes.TrimSpace(rawJSON), "event_type").String()
+		switch {
+		case eventType == "interaction.created":
+			heldBootstrapEvents = append(heldBootstrapEvents, rawJSON)
+			return true
+		case eventType == "response.failed" || eventType == "interaction.failed":
+			// Pre-content failures must stay suppressible at the bootstrap layer:
+			// emit through the raw path without releasing the held created event
+			// so createdSent stays false and the failure can fail over cleanly.
+			return emitInteractionsEventNow(rawJSON)
+		default:
+			// First generated output or a terminal/unknown event: release the hold.
+			generatedSeen = true
+			if !flushHeldBootstrapEvents() {
+				return false
+			}
+			return emitInteractionsEventNow(rawJSON)
 		}
 	}
 
@@ -1385,8 +1433,11 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 		emitStreamError(emptyErr)
 		return
 	}
-
 	if ctx.Err() != nil {
+		return
+	}
+
+	if !flushHeldBootstrapEvents() {
 		return
 	}
 
