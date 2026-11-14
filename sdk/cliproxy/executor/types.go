@@ -302,6 +302,18 @@ type RequestScopedError interface {
 	IsRequestScoped() bool
 }
 
+// SameAuthRefreshError optionally permits the existing selected-auth refresh
+// after a pre-output request-scoped 401. The error remains request-scoped and
+// must not permit selection of another credential or provider. The caller must
+// keep failures from the refreshed attempt scoped as well. This marker does not
+// bypass request stops, cancellation, configured error rules, refresh policy or
+// the once-per-attempt limit. It has no effect on other status codes and is not
+// serialized across plugin boundaries.
+type SameAuthRefreshError interface {
+	error
+	AllowSameAuthRefresh() bool
+}
+
 // StreamTruncatedError identifies a locally synthesized failure for an
 // accepted upstream stream that ended without its terminal frame. The
 // upstream generation was already submitted, so auth managers must not cool
