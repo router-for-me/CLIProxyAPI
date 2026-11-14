@@ -655,6 +655,40 @@ func TestResponsesSSEFramer_FiltersUpstreamPrivateEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesSSEFramer_FiltersResponseMetadataCompatibilityEvent(t *testing.T) {
+	var output bytes.Buffer
+	framer := &responsesSSEFramer{failureEvent: "error"}
+
+	eventMetadataFrame := []byte("event: response.metadata\ndata: {\"type\":\"response.metadata\",\"metadata\":{\"transport\":\"private\"}}\n\n")
+	framer.WriteChunk(&output, eventMetadataFrame)
+
+	dataOnlyMetadataFrame := []byte("data: {\"type\":\"response.metadata\",\"metadata\":{\"transport\":\"private\"}}\n\n")
+	framer.WriteChunk(&output, dataOnlyMetadataFrame)
+
+	createdFrame := []byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\n")
+	framer.WriteChunk(&output, createdFrame)
+
+	completedFrame := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\",\"metadata\":{\"safe\":true}}}\n\n")
+	framer.WriteChunk(&output, completedFrame)
+
+	got := output.String()
+	if strings.Contains(got, "event: response.metadata") {
+		t.Fatalf("expected event response.metadata to be stripped, got: %q", got)
+	}
+	if strings.Contains(got, "\"type\":\"response.metadata\"") {
+		t.Fatalf("expected payload type response.metadata to be stripped, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.created") {
+		t.Fatalf("expected response.created in output, got: %q", got)
+	}
+	if !strings.Contains(got, "event: response.completed") {
+		t.Fatalf("expected response.completed in output, got: %q", got)
+	}
+	if !strings.Contains(got, "\"metadata\":{\"safe\":true}") {
+		t.Fatalf("expected response.completed metadata field to be preserved, got: %q", got)
+	}
+}
+
 func TestForwardResponsesStream_FiltersUpstreamPrivateEvents(t *testing.T) {
 	h, recorder, c, flusher := newResponsesStreamTestHandler(t)
 
