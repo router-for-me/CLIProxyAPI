@@ -143,10 +143,12 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return false
 	}
 	if authHasUnchangedRejectedRefreshToken(a) {
-		if a.HasValidAccessToken(now) {
-			return false
-		}
-		return !a.Disabled && a.Status != StatusDisabled
+		// The refresh token is unchanged and was rejected upstream. Without a
+		// valid access token there is nothing to fall back on, and retrying the
+		// same refresh is guaranteed to fail again; report false so the auto
+		// refresh loop does not reschedule at zero delay (issue #7491).
+		// The auth becomes refreshable again once the credential is updated.
+		return false
 	}
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		return evaluator.ShouldRefresh(now, a)
@@ -1397,10 +1399,6 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.LastError = refreshAccessError(current, msg, accessTokenRejected, wasTerminalUnauthorized)
 			if current.LastError.Code == "refresh_outcome_unknown" {
 				current.StatusMessage = current.LastError.Message
-				if current.Status != StatusDisabled {
-					// Job completion reschedules this recovery state, so retain a positive delay.
-					current.NextRefreshAfter = checkNow.Add(refreshCheckInterval)
-				}
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {

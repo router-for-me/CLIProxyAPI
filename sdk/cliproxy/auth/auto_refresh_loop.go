@@ -437,10 +437,12 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 			}
 			return time.Time{}, false
 		}
-		if auth.Disabled || auth.Status == StatusDisabled {
-			return time.Time{}, false
-		}
-		return now, true
+		// The refresh token is unchanged and was rejected upstream, and there
+		// is no valid access token. Refreshing again is guaranteed to fail the
+		// same way, so do not schedule a check; scheduling immediately would
+		// spin the loop at zero delay (issue #7491). The auth stays unschedulable
+		// until the credential is updated (e.g. sign-in) or the token changes.
+		return time.Time{}, false
 	}
 
 	if siwcDueAt, hasSIWC, _ := CodexSIWCNeedsRefresh(auth, now); hasSIWC {
