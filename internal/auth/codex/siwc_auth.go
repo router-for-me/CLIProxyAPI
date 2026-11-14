@@ -44,6 +44,15 @@ var (
 	siwcRefreshGroup     singleflight.Group
 )
 
+// OverrideSIWCTokenEndpointURLForTest overrides the SIWC token endpoint URL for tests and returns a restore function.
+func OverrideSIWCTokenEndpointURLForTest(endpoint string) func() {
+	previous := siwcTokenEndpointURL
+	siwcTokenEndpointURL = endpoint
+	return func() {
+		siwcTokenEndpointURL = previous
+	}
+}
+
 // IsValidUUID reports whether raw is a canonical 36-char UUID string.
 func IsValidUUID(raw string) bool {
 	return siwcUUIDPattern.MatchString(strings.TrimSpace(raw))
