@@ -111,6 +111,28 @@ func (a *XAIAuth) Discover(ctx context.Context) (*Discovery, error) {
 	}, nil
 }
 
+// ResolveTokenEndpoint returns the token endpoint advertised by xAI discovery,
+// falling back to the stored endpoint when discovery is unavailable. xAI moves
+// OAuth endpoints over time and retired ones stop answering, so a stored value
+// must not be trusted over a live discovery response.
+func (a *XAIAuth) ResolveTokenEndpoint(ctx context.Context, stored string) string {
+	stored = strings.TrimSpace(stored)
+	if a == nil {
+		return stored
+	}
+	discovery, err := a.Discover(ctx)
+	if err != nil || discovery == nil {
+		if err != nil {
+			log.Warnf("xai discovery failed; using stored token endpoint: %v", err)
+		}
+		return stored
+	}
+	if resolved := strings.TrimSpace(discovery.TokenEndpoint); resolved != "" {
+		return resolved
+	}
+	return stored
+}
+
 // StartDeviceFlow requests a device code from xAI.
 func (a *XAIAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
 	discovery, errDiscover := a.Discover(ctx)
