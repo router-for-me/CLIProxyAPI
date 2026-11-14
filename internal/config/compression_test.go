@@ -25,6 +25,9 @@ requests:
               auto-detect: true
               skip-rules: ["articles"]
           - engine: not-an-engine
+        output-styles:
+          - id: less-code
+            level: lite
 `
 
 const compressionLegacyYAML = `compression:
@@ -66,6 +69,9 @@ func TestCompressionConfigV8Layout(t *testing.T) {
 	}
 	if got := cfg.Compression.OutputStyles[1]; got.ID != "antislop-copy" || got.Level != "full" {
 		t.Fatalf("output style level default = %+v", got)
+	}
+	if got := cfg.Compression.Combos[0].OutputStyles; len(got) != 1 || got[0].ID != "less-code" || got[0].Level != "lite" {
+		t.Fatalf("combo output styles = %+v", got)
 	}
 	caveman := cfg.Compression.Combos[0].Pipeline[1]
 	if caveman.Engine != "caveman" || caveman.Level != "ultra" {
