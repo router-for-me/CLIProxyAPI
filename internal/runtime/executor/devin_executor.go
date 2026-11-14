@@ -73,6 +73,10 @@ type DevinExecutor struct {
 	matcherMu     sync.RWMutex
 	lastWordsKey  string
 	cachedMatcher *helps.SensitiveWordMatcher
+	// streamIdleTimeout overrides the upstream frame idle watchdog. Zero uses
+	// defaultDevinUpstreamStreamIdle. Tests set a short value; it is not a
+	// request-wide deadline.
+	streamIdleTimeout time.Duration
 }
 
 // NewDevinExecutor creates a new Devin executor instance.
@@ -290,7 +294,9 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, newDevinStatusErrorForAuth(httpResp.StatusCode, httpResp.Header, errData, auth)
 	}
 
-	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractionsForAuth(httpResp.Body, req.Model, chatModelUID, auth, helps.ApplyPatchOriginalRequest(req, opts))
+	watchedBody, stopIdle := watchDevinUpstream(ctx, httpResp.Body, e.devinUpstreamIdleTimeout())
+	defer stopIdle()
+	interactionsJSON, respLog, errConsume := consumeDevinFramesToInteractionsForAuth(watchedBody, req.Model, chatModelUID, auth, helps.ApplyPatchOriginalRequest(req, opts))
 	if respLog != nil || len(interactionsJSON) > 0 {
 		logRespBody := helps.BuildDevinUpstreamResponseLogBody(respLog, interactionsJSON)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, logRespBody)
@@ -572,6 +578,9 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	out chan<- cliproxyexecutor.StreamChunk,
 	auth *cliproxyauth.Auth,
 ) {
+	watchedBody, stopIdle := watchDevinUpstream(ctx, body, e.devinUpstreamIdleTimeout())
+	defer stopIdle()
+	body = watchedBody
 	completedPublished := false
 	if reporter != nil {
 		if chatModelUID != "" {
@@ -1055,6 +1064,14 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	for {
 		flag, payload, errRead := helps.ReadConnectFrame(body)
 		if errRead != nil {
+			if errors.Is(errRead, errDevinStreamIdle) {
+				// The upstream sent no frames for the idle interval. Treat it
+				// like any other pre-output stream failure so the conductor
+				// can rotate to the next credential.
+				streamErr = errRead
+				log.Warnf("devin executor: %v", newDevinStreamIdleError())
+				break
+			}
 			if errors.Is(errRead, io.EOF) || errors.Is(errRead, net.ErrClosed) || ctx.Err() != nil {
 				break
 			}
@@ -1329,7 +1346,9 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	// If stream encountered an abnormal read error mid-flight, record failure and emit response.failed
 	if streamErr != nil && ctx.Err() == nil {
 		var errOut error
-		if !createdSent && !hasGeneratedOutput && (finalUsage == nil || finalUsage.CompletionTokens == 0) {
+		if errors.Is(streamErr, errDevinStreamIdle) {
+			errOut = newDevinStreamIdleError()
+		} else if !createdSent && !hasGeneratedOutput && (finalUsage == nil || finalUsage.CompletionTokens == 0) {
 			errOut = newDevinTransientStreamError(fmt.Sprintf("devin upstream stream read error: %v", streamErr), streamErr)
 		} else {
 			errOut = newDevinTruncatedStreamError(fmt.Sprintf("devin upstream stream read error: %v", streamErr), streamErr)
@@ -1557,6 +1576,9 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 				Usage:                 finalUsage,
 				UnknownFields:         unknownFields,
 				ApplyPatchDiagnostics: patchDiagnostics,
+			}
+			if errors.Is(errRead, errDevinStreamIdle) {
+				return nil, respLog, newDevinStreamIdleError()
 			}
 			if errors.Is(errRead, context.Canceled) || errors.Is(errRead, context.DeadlineExceeded) {
 				return nil, respLog, errRead
