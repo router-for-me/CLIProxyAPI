@@ -4,6 +4,12 @@ Claude Code can remain the client while CLIProxyAPI routes its Messages requests
 to a Codex credential. Client model names are routing aliases: they do not change
 the upstream model or make the connection an Anthropic subscription session.
 
+## Context-limit recovery
+
+Translated HTTP 400 and 413 errors with `context_length_exceeded` or `context_too_large` receive a `Prompt is too long:` prefix. The same applies to the exact message `Your input exceeds the context window of this model. Please adjust your input and try again.` when the upstream supplies no usable error code. The original status, error type and explanation are retained. Unrelated error codes are not reclassified, and an existing prompt-too-long message is not prefixed again.
+
+Claude Code can use this response to trigger its own compaction and retry. The proxy does not enlarge the model's context window, invent token counts or trim the conversation. Native direct context-error responses remain unchanged.
+
 ## Public progress during tool use
 
 Codex distinguishes public `commentary` messages from `final_answer` messages.

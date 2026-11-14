@@ -23,7 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
-	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -54,7 +54,7 @@ func NewClaudeCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ClaudeCodeAP
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *ClaudeCodeAPIHandler) HandlerType() string {
-	return Claude
+	return constant.Claude
 }
 
 // Models returns a list of models supported by this handler.
@@ -692,20 +692,36 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 		message = http.StatusText(status)
 	}
 	errType := claudeErrorTypeFromStatus(status)
+	upstreamCode := ""
 
 	var payload map[string]any
 	if json.Valid([]byte(message)) {
 		if err := json.Unmarshal([]byte(message), &payload); err == nil {
 			if e, ok := payload["error"].(map[string]any); ok {
-				if t, ok := e["type"].(string); ok && strings.TrimSpace(t) != "" {
-					errType = strings.TrimSpace(t)
+				if t, ok := e["type"].(string); ok {
+					if typeText := strings.TrimSpace(t); typeText != "" {
+						errType = typeText
+					}
 				}
-				if m, ok := e["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
-				} else if c, ok := e["code"].(string); ok && strings.TrimSpace(c) != "" {
-					message = strings.TrimSpace(c)
+				messageText := ""
+				if m, ok := e["message"].(string); ok {
+					messageText = strings.TrimSpace(m)
+					if messageText != "" {
+						message = messageText
+					}
+				}
+				if c, ok := e["code"].(string); ok {
+					if codeText := strings.TrimSpace(c); codeText != "" {
+						upstreamCode = strings.ToLower(codeText)
+						if messageText == "" {
+							message = codeText
+						}
+					}
 				}
 			} else {
+				if c, ok := payload["code"].(string); ok {
+					upstreamCode = strings.ToLower(strings.TrimSpace(c))
+				}
 				if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) != "" && strings.TrimSpace(t) != "error" {
 					errType = strings.TrimSpace(t)
 				}
@@ -714,6 +730,14 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 				}
 			}
 		}
+	}
+
+	// Claude Code uses this phrase to trigger reactive compaction.
+	if (status == http.StatusBadRequest || status == http.StatusRequestEntityTooLarge) &&
+		(upstreamCode == "context_length_exceeded" || upstreamCode == "context_too_large" ||
+			upstreamCode == "" && message == "Your input exceeds the context window of this model. Please adjust your input and try again.") &&
+		!strings.Contains(strings.ToLower(message), "prompt is too long") {
+		message = "Prompt is too long: " + message
 	}
 
 	return errType, message

@@ -114,8 +114,116 @@ func TestClaudeErrorExtractsOpenAIStyleUpstreamJSON(t *testing.T) {
 	if got.Error.Type != "invalid_request_error" {
 		t.Fatalf("error.type = %q, want invalid_request_error", got.Error.Type)
 	}
-	if got.Error.Message != "Your input exceeds the context window of this model. Please adjust your input and try again." {
+	if got.Error.Message != "Prompt is too long: Your input exceeds the context window of this model. Please adjust your input and try again." {
 		t.Fatalf("error.message = %q", got.Error.Message)
+	}
+}
+
+func TestClaudeContextErrorNormalization(t *testing.T) {
+	const message = "Your input exceeds the context window of this model. Please adjust your input and try again."
+	for _, tt := range []struct {
+		name   string
+		status int
+		input  string
+		want   string
+	}{
+		{"context code", 400, `{"error":{"code":"context_length_exceeded","message":"Maximum context length exceeded."}}`, "Prompt is too long: Maximum context length exceeded."},
+		{"context code on 413", 413, `{"error":{"code":"context_too_large","message":"Maximum context length exceeded."}}`, "Prompt is too long: Maximum context length exceeded."},
+		{"message without code", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"` + message + `"}}`, "Prompt is too long: " + message},
+		{"plain message", 400, message, "Prompt is too long: " + message},
+		{"top-level message", 400, `{"type":"invalid_request_error","message":"` + message + `"}`, "Prompt is too long: " + message},
+		{"top-level context code", 400, `{"code":"context_length_exceeded","message":"Maximum context length exceeded."}`, "Prompt is too long: Maximum context length exceeded."},
+		{"null code", 400, `{"error":{"code":null,"message":"` + message + `"}}`, "Prompt is too long: " + message},
+		{"trimmed code without message", 400, `{"error":{"code":" CONTEXT_TOO_LARGE ","message":" "}}`, "Prompt is too long: CONTEXT_TOO_LARGE"},
+		{"explicit unrelated code", 400, `{"error":{"code":"invalid_request","message":"` + message + `"}}`, message},
+		{"explicit unrelated top-level code", 400, `{"code":"invalid_request","message":"` + message + `"}`, message},
+		{"rate limit status", 429, `{"error":{"code":"context_length_exceeded","message":"` + message + `"}}`, message},
+		{"already normalized", 400, `{"error":{"code":"context_length_exceeded","message":"Prompt is too long: upstream context limit exceeded."}}`, "Prompt is too long: upstream context limit exceeded."},
+		{"native Anthropic error", 400, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 950000 tokens > 900000 maximum"}}`, "prompt is too long: 950000 tokens > 900000 maximum"},
+		{"unrelated bad request", 400, `{"error":{"code":"invalid_request","message":"Invalid request body."}}`, "Invalid request body."},
+		{"unrelated large request", 413, `{"error":{"code":"request_too_large","message":"Upload exceeds the request size limit."}}`, "Upload exceeds the request size limit."},
+		{"server error", 500, message, message},
+		{"output budget overflow", 400, "Input length and `max_tokens` exceed context limit", "Input length and `max_tokens` exceed context limit"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, got := claudeErrorDetailFromText(tt.status, tt.input)
+			if got != tt.want {
+				t.Fatalf("message = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeContextErrorResponses(t *testing.T) {
+	const message = "Your input exceeds the context window of this model. Please adjust your input and try again."
+	for _, tt := range []struct {
+		name      string
+		status    int
+		streaming bool
+	}{
+		{"400 JSON", http.StatusBadRequest, false},
+		{"400 committed SSE", http.StatusBadRequest, true},
+		{"413 JSON", http.StatusRequestEntityTooLarge, false},
+		{"413 committed SSE", http.StatusRequestEntityTooLarge, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			handler := NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{})
+			msg := &interfaces.ErrorMessage{
+				StatusCode: tt.status,
+				Error:      errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"` + message + `"}}`),
+			}
+			wantStatus := tt.status
+			if tt.streaming {
+				c.Header("Content-Type", "text/event-stream")
+				_, _ = c.Writer.Write([]byte("event: message_start\ndata: {}\n\n"))
+				c.Writer.Flush()
+				errs := make(chan *interfaces.ErrorMessage, 1)
+				errs <- msg
+				close(errs)
+				handler.forwardClaudeStream(c, c.Writer, func(error) {}, nil, errs)
+				wantStatus = http.StatusOK
+			} else {
+				handler.WriteErrorResponse(c, msg)
+			}
+			if recorder.Code != wantStatus {
+				t.Fatalf("status = %d, want %d", recorder.Code, wantStatus)
+			}
+			body := recorder.Body.String()
+			if tt.streaming {
+				const prefix = "event: error\ndata: "
+				if strings.Count(body, prefix) != 1 {
+					t.Fatalf("expected one terminal error event; body=%s", body)
+				}
+				_, body, _ = strings.Cut(body, prefix)
+				body = strings.TrimSpace(body)
+			}
+			if got := ojson.Get(body, "error.message").String(); got != "Prompt is too long: "+message {
+				t.Fatalf("message = %q", got)
+			}
+			if got := ojson.Get(body, "error.type").String(); got != "invalid_request_error" {
+				t.Fatalf("error type = %q", got)
+			}
+		})
+	}
+}
+
+func TestClaudeDirectContextErrorUnchanged(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	body := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 950000 tokens > 900000 maximum"},"request_id":"req_test"}`)
+	handler := &ClaudeCodeAPIHandler{}
+	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
+		StatusCode:     http.StatusBadRequest,
+		DirectResponse: true,
+		Body:           body,
+	})
+	if recorder.Code != http.StatusBadRequest || recorder.Body.String() != string(body) {
+		t.Fatalf("native response changed: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -258,7 +366,7 @@ func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	if got := ojson.GetBytesNoCopy(body, "error.type").String(); got != "invalid_request_error" {
 		t.Fatalf("error.type = %q, want invalid_request_error; body=%s", got, body)
 	}
-	if got := ojson.GetBytesNoCopy(body, "error.message").String(); got != "Your input exceeds the context window of this model. Please adjust your input and try again." {
+	if got := ojson.GetBytesNoCopy(body, "error.message").String(); got != "Prompt is too long: Your input exceeds the context window of this model. Please adjust your input and try again." {
 		t.Fatalf("error.message = %q; body=%s", got, body)
 	}
 }
