@@ -5,9 +5,13 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -24,6 +28,60 @@ type RefreshJournal interface {
 	RefreshClaim(context.Context, string) (bool, error)
 	RefreshRead(context.Context, string) ([]byte, error)
 	RefreshComplete(context.Context, string, []byte) error
+	RefreshRelease(context.Context, string) error
+}
+
+// RefreshPreSendError reports a failure that occurred strictly before any
+// refresh request bytes could be sent to the token endpoint.
+type RefreshPreSendError struct {
+	Stage string
+	Cause error
+}
+
+func (e *RefreshPreSendError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Cause != nil {
+		return fmt.Sprintf("token refresh failed before send (%s): %v", e.Stage, e.Cause)
+	}
+	return "token refresh failed before send: " + e.Stage
+}
+
+func (e *RefreshPreSendError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// IsRefreshPreSendError reports whether err occurred strictly before sending
+// the refresh grant, including wrapped partition errors when all failed
+// partitions failed before send.
+func IsRefreshPreSendError(err error) bool {
+	if err == nil || IsRefreshOutcomeUnknown(err) {
+		return false
+	}
+	var partitions interface {
+		OuterRefreshError() error
+		SIWCRefreshError() error
+	}
+	if errors.As(err, &partitions) && partitions != nil {
+		outerErr := partitions.OuterRefreshError()
+		siwcErr := partitions.SIWCRefreshError()
+		if outerErr == nil && siwcErr == nil {
+			return false
+		}
+		if outerErr != nil && !IsRefreshPreSendError(outerErr) {
+			return false
+		}
+		if siwcErr != nil && !IsRefreshPreSendError(siwcErr) {
+			return false
+		}
+		return true
+	}
+	var preSend *RefreshPreSendError
+	return errors.As(err, &preSend)
 }
 
 // RefreshOutcomeUnknownError preserves the stage without exposing transport URLs,
@@ -91,8 +149,11 @@ func journalRefresh[T any](ctx context.Context, journal RefreshJournal, clientID
 			if errRead != nil {
 				return zero, &RefreshOutcomeUnknownError{Stage: "receipt-read", Cause: errRead}
 			}
-			if len(receipt) == 0 && len(seen) > 1 {
-				return usableRefreshReceipt(value, expires)
+			if len(receipt) == 0 {
+				if len(seen) > 1 {
+					return usableRefreshReceipt(value, expires)
+				}
+				return zero, &RefreshPreSendError{Stage: "claim-released"}
 			}
 			if !ojson.ValidBytes(receipt) {
 				return zero, &RefreshOutcomeUnknownError{Stage: "pending"}
@@ -120,6 +181,14 @@ func journalRefresh[T any](ctx context.Context, journal RefreshJournal, clientID
 	}
 
 	value, errRun := run()
+	completeCtx, cancelComplete := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
+	defer cancelComplete()
+	if errRun != nil && IsRefreshPreSendError(errRun) {
+		if errRelease := journal.RefreshRelease(completeCtx, key); errRelease != nil {
+			return zero, errors.Join(errRun, &RefreshOutcomeUnknownError{Stage: "claim-release", Cause: errRelease})
+		}
+		return zero, errRun
+	}
 	doc := ojson.NewDoc(nil)
 	var errSet error
 	if errRun == nil {
@@ -137,7 +206,7 @@ func journalRefresh[T any](ctx context.Context, journal RefreshJournal, clientID
 	}
 	// Use an independent acquisition context for the receipt, just as for the
 	// exchange itself. Caller cancellation must not discard a successful rotation.
-	if errComplete := journal.RefreshComplete(ctx, key, doc.Bytes()); errComplete != nil {
+	if errComplete := journal.RefreshComplete(completeCtx, key, doc.Bytes()); errComplete != nil {
 		return zero, errors.Join(errRun, &RefreshOutcomeUnknownError{Stage: "receipt-write", Cause: errComplete})
 	}
 	return value, errRun
@@ -236,9 +305,83 @@ func (j *memoryRefreshJournal) RefreshComplete(_ context.Context, key string, re
 	return nil
 }
 
-// doRefreshRequest forbids 307/308 redirects from silently replaying a POST body.
+func (j *memoryRefreshJournal) RefreshRelease(_ context.Context, key string) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	receipt, exists := j.receipts[key]
+	if !exists {
+		return nil
+	}
+	if receipt != nil {
+		return fmt.Errorf("refresh receipt already exists")
+	}
+	delete(j.receipts, key)
+	return nil
+}
+
+type refreshBodyReadTracker struct {
+	body     io.ReadCloser
+	readSeen *atomic.Bool
+}
+
+func (r *refreshBodyReadTracker) Read(p []byte) (int, error) {
+	r.readSeen.Store(true)
+	return r.body.Read(p)
+}
+
+func (r *refreshBodyReadTracker) Close() error {
+	if r.body == nil {
+		return nil
+	}
+	return r.body.Close()
+}
+
+func isTypedPreConnectRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr != nil {
+		return true
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr) && opErr != nil && opErr.Op == "dial"
+}
+
+// doRefreshRequest forbids 307/308 redirects from silently replaying a POST body
+// and classifies errors that occurred strictly before a connection could carry
+// any request bytes.
 func (o *CodexAuth) doRefreshRequest(req *http.Request) (*http.Response, error) {
-	client := *o.httpClient
+	var sawPreConn, sawConnReady, sawBodyRead atomic.Bool
+	if req != nil {
+		// Prevent net/http.Transport from internally replaying the POST body across connections.
+		req.GetBody = nil
+		if req.Body != nil && req.Body != http.NoBody {
+			req.Body = &refreshBodyReadTracker{body: req.Body, readSeen: &sawBodyRead}
+		}
+		trace := &httptrace.ClientTrace{
+			GetConn:           func(string) { sawPreConn.Store(true) },
+			DNSStart:          func(httptrace.DNSStartInfo) { sawPreConn.Store(true) },
+			ConnectStart:      func(string, string) { sawPreConn.Store(true) },
+			TLSHandshakeStart: func() { sawPreConn.Store(true) },
+			GotConn:           func(httptrace.GotConnInfo) { sawConnReady.Store(true) },
+			WroteHeaderField:  func(string, []string) { sawConnReady.Store(true) },
+			WroteHeaders:      func() { sawConnReady.Store(true) },
+			WroteRequest:      func(httptrace.WroteRequestInfo) { sawConnReady.Store(true) },
+		}
+		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	}
+	var client http.Client
+	if o != nil && o.httpClient != nil {
+		client = *o.httpClient
+	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return client.Do(req)
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		if !sawConnReady.Load() && !sawBodyRead.Load() && (sawPreConn.Load() || isTypedPreConnectRefreshError(errDo)) {
+			return nil, &RefreshPreSendError{Stage: "connect", Cause: errDo}
+		}
+		return nil, &RefreshOutcomeUnknownError{Stage: "transport", Cause: errDo}
+	}
+	return resp, nil
 }

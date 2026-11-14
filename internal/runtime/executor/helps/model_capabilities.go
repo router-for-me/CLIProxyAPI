@@ -1,6 +1,9 @@
 package helps
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -41,10 +44,23 @@ func ApplyRequestThinkingWithModelInfo(body []byte, req cliproxyexecutor.Request
 		source = opts.OriginalRequest
 	}
 	summaryConfig := translatedRequestSummaryConfig(body, req.Payload, originalSource, req.Model, fromFormat, toFormat)
+	var out []byte
+	var err error
 	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
-		return thinking.ApplyThinkingWithModelInfoAndSummary(body, source, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, normalizedUpdatesChanged...)
+		out, err = thinking.ApplyThinkingWithModelInfoAndSummary(body, source, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, normalizedUpdatesChanged...)
+	} else {
+		out, err = thinking.ApplyThinkingWithFallbackModelInfoAndSummary(body, source, req.Model, fromFormat, toFormat, provider, fallbackModelInfo, summaryConfig, normalizedUpdatesChanged...)
 	}
-	return thinking.ApplyThinkingWithFallbackModelInfoAndSummary(body, source, req.Model, fromFormat, toFormat, provider, fallbackModelInfo, summaryConfig, normalizedUpdatesChanged...)
+	if err != nil {
+		return out, err
+	}
+	if shouldReconcileClaudeOpenAICompatToolCallReasoning(req, fromFormat, toFormat) && len(out) > 0 {
+		doc := ojson.NewDoc(out)
+		if reconcileClaudeOpenAICompatToolCallReasoningDoc(doc) {
+			out = doc.Bytes()
+		}
+	}
+	return out, nil
 }
 
 // ApplyRequestThinkingWithModelInfoDoc applies request thinking onto doc in place
@@ -63,8 +79,66 @@ func ApplyRequestThinkingWithModelInfoDoc(doc *ojson.Doc, req cliproxyexecutor.R
 		source = opts.OriginalRequest
 	}
 	summaryConfig := translatedRequestSummaryConfigDoc(doc, req.Payload, originalSource, req.Model, fromFormat, toFormat)
+	var err error
 	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
-		return thinking.ApplyThinkingWithModelInfoAndSummaryDoc(doc, source, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, normalizedUpdatesChanged...)
+		err = thinking.ApplyThinkingWithModelInfoAndSummaryDoc(doc, source, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, normalizedUpdatesChanged...)
+	} else {
+		err = thinking.ApplyThinkingWithFallbackModelInfoAndSummaryDoc(doc, source, req.Model, fromFormat, toFormat, provider, fallbackModelInfo, summaryConfig, normalizedUpdatesChanged...)
 	}
-	return thinking.ApplyThinkingWithFallbackModelInfoAndSummaryDoc(doc, source, req.Model, fromFormat, toFormat, provider, fallbackModelInfo, summaryConfig, normalizedUpdatesChanged...)
+	if err != nil {
+		return err
+	}
+	if shouldReconcileClaudeOpenAICompatToolCallReasoning(req, fromFormat, toFormat) {
+		reconcileClaudeOpenAICompatToolCallReasoningDoc(doc)
+	}
+	return nil
+}
+
+func shouldReconcileClaudeOpenAICompatToolCallReasoning(req cliproxyexecutor.Request, fromFormat, toFormat string) bool {
+	return APIKeyModelIsCompat(req) &&
+		strings.EqualFold(strings.TrimSpace(fromFormat), "claude") &&
+		strings.EqualFold(strings.TrimSpace(toFormat), "openai")
+}
+
+func reconcileClaudeOpenAICompatToolCallReasoningDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	messages := doc.Get("messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return false
+	}
+	reasoningActive := false
+	if effortRes := doc.Get("reasoning_effort"); effortRes.Exists() {
+		resolvedEffort := strings.ToLower(strings.TrimSpace(effortRes.String()))
+		if resolvedEffort != "" && resolvedEffort != string(thinking.LevelNone) && resolvedEffort != "0" && resolvedEffort != "false" {
+			reasoningActive = true
+		}
+	}
+
+	modified := false
+	for idx, msg := range messages.Array() {
+		if strings.TrimSpace(msg.Get("role").String()) != "assistant" {
+			continue
+		}
+		toolCalls := msg.Get("tool_calls")
+		if !toolCalls.Exists() || !toolCalls.IsArray() || len(toolCalls.Array()) == 0 {
+			continue
+		}
+		reasoning := msg.Get("reasoning_content")
+		if reasoningActive {
+			if !reasoning.Exists() || (strings.TrimSpace(reasoning.String()) == "" && reasoning.String() != " ") {
+				if doc.Set(fmt.Sprintf("messages.%d.reasoning_content", idx), " ") == nil {
+					modified = true
+				}
+			}
+			continue
+		}
+		if reasoning.Exists() && strings.TrimSpace(reasoning.String()) == "" {
+			if doc.Delete(fmt.Sprintf("messages.%d.reasoning_content", idx)) == nil {
+				modified = true
+			}
+		}
+	}
+	return modified
 }
