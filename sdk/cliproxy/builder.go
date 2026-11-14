@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -52,6 +53,11 @@ type Builder struct {
 	// cooldownStateStore overrides runtime cooldown persistence.
 	cooldownStateStore coreauth.CooldownStateStore
 
+	// pluginInterceptorHost optionally overrides the PluginInterceptorHost
+	// installed on request handlers. The internal pluginHost still owns management
+	// routes and plugin executor wiring.
+	pluginInterceptorHost handlers.PluginInterceptorHost
+
 	// pluginHost owns dynamic plugin lifecycle and adapters.
 	pluginHost *pluginhost.Host
 
@@ -72,6 +78,13 @@ type Hooks struct {
 	// OnBeforeStart is called before the service starts, allowing configuration
 	// modifications or additional setup.
 	OnBeforeStart func(*config.Config)
+
+	// OnConfigApplied is called once at the end of every successful runtime
+	// config apply, after executor re-registration and model sync. Embedders can
+	// use it to reinstall caller-owned state (executor wrappers, custom selector
+	// adjustments, interceptor context) that config apply would otherwise reset.
+	// The hook runs inside the service config runtime mutex; it must not block.
+	OnConfigApplied func(*Service, *config.Config)
 
 	// OnAfterStart is called after the service has started successfully,
 	// providing access to the service instance for additional operations.
@@ -156,6 +169,16 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 // WithCooldownStateStore overrides the store used for runtime cooldown persistence.
 func (b *Builder) WithCooldownStateStore(store coreauth.CooldownStateStore) *Builder {
 	b.cooldownStateStore = store
+	return b
+}
+
+// WithPluginInterceptorHost sets a caller-provided plugin interceptor host for
+// request handling. The server wraps it so plugin model routing, lifecycle
+// callbacks, and websocket observers keep delegating to the internal plugin
+// host; management routes and plugin executors are unaffected. When unset the
+// internal plugin host remains the request interceptor host as before.
+func (b *Builder) WithPluginInterceptorHost(host handlers.PluginInterceptorHost) *Builder {
+	b.pluginInterceptorHost = host
 	return b
 }
 
@@ -278,25 +301,29 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:                 b.cfg.CloneForRuntime(),
-		configPath:          b.configPath,
-		tokenProvider:       tokenProvider,
-		apiKeyProvider:      apiKeyProvider,
-		watcherFactory:      watcherFactory,
-		hooks:               b.hooks,
-		authManager:         authManager,
-		accessManager:       accessManager,
-		coreManager:         coreManager,
-		cooldownStateStore:  cooldownStateStore,
-		pluginHost:          pluginHost,
-		discoveryManager:    newDiscoveryAdvertiserManager(),
-		appliedRoutingState: appliedRoutingState,
-		serverOptions:       append([]api.ServerOption(nil), b.serverOptions...),
+		pluginInterceptorHost: b.pluginInterceptorHost,
+		cfg:                   b.cfg.CloneForRuntime(),
+		configPath:            b.configPath,
+		tokenProvider:         tokenProvider,
+		apiKeyProvider:        apiKeyProvider,
+		watcherFactory:        watcherFactory,
+		hooks:                 b.hooks,
+		authManager:           authManager,
+		accessManager:         accessManager,
+		coreManager:           coreManager,
+		cooldownStateStore:    cooldownStateStore,
+		pluginHost:            pluginHost,
+		discoveryManager:      newDiscoveryAdvertiserManager(),
+		appliedRoutingState:   appliedRoutingState,
+		serverOptions:         append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	service.proxyPoolPublisher = helps.RegisterProxyPoolPublisher()
 	helps.AdvanceProxyPoolGeneration(service.proxyPoolPublisher, service.cfg)
 	if b.postAuthHook != nil {
 		service.serverOptions = append(service.serverOptions, api.WithPostAuthHook(b.postAuthHook))
+	}
+	if b.pluginInterceptorHost != nil {
+		service.serverOptions = append(service.serverOptions, api.WithPluginInterceptorHost(b.pluginInterceptorHost))
 	}
 	service.serverOptions = append(service.serverOptions,
 		api.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),

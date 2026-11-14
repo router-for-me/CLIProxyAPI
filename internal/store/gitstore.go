@@ -35,18 +35,19 @@ const (
 
 // GitTokenStore persists token records and auth metadata using git as the backing storage.
 type GitTokenStore struct {
-	mu        sync.Mutex
-	dirLock   sync.RWMutex
-	baseDir   string
-	repoDir   string
-	configDir string
-	remote    string
-	branch    string
-	username  string
-	password  string
-	lastGC    time.Time
-	pullFn    func(ctx context.Context, worktree *git.Worktree, pullOpts *git.PullOptions) error
-	pushFn    func(ctx context.Context, repo *git.Repository, pushOpts *git.PushOptions) error
+	mu            sync.Mutex
+	dirLock       sync.RWMutex
+	baseDir       string
+	repoDir       string
+	configDir     string
+	remote        string
+	branch        string
+	username      string
+	password      string
+	lastGC        time.Time
+	pullFn        func(ctx context.Context, worktree *git.Worktree, pullOpts *git.PullOptions) error
+	pushFn        func(ctx context.Context, repo *git.Repository, pushOpts *git.PushOptions) error
+	refreshClaims sync.Map
 }
 
 type resolvedRemoteBranch struct {

@@ -470,12 +470,20 @@ func TestApplyPatchRepairResponsesSourceTerminalNonStream(t *testing.T) {
 				if len(response.Payload) != 0 {
 					t.Errorf("failed source returned payload: %s", response.Payload)
 				}
-				assertTask6PatchError(t, errExecute)
+				wantGatewayMsg := "Invalid apply_patch tool arguments received from upstream."
+				if provider == "xai" && mode == "empty" {
+					wantGatewayMsg = xaiEmptyStreamMessage
+					if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusBadGateway || errExecute.Error() != xaiEmptyStreamMessage {
+						t.Fatalf("expected xai empty stream 502, got %T %v", errExecute, errExecute)
+					}
+				} else {
+					assertTask6PatchError(t, errExecute)
+				}
 				checkUsage()
 				auth.ID += "-gateway"
 				checkGatewayUsage := task6CaptureFailureUsage(t, auth.ID)
 				result := task6Gateway(t, exec, auth, false)
-				if result.Code != http.StatusBadGateway || !strings.Contains(result.Body.String(), "Invalid apply_patch tool arguments received from upstream.") {
+				if result.Code != http.StatusBadGateway || !strings.Contains(result.Body.String(), wantGatewayMsg) {
 					t.Errorf("non-stream gateway did not return clean 502: %d %s", result.Code, result.Body)
 				}
 				checkGatewayUsage()
@@ -614,6 +622,10 @@ func TestApplyPatchRepairOrdinaryEmptyHTTPPassthrough(t *testing.T) {
 			if provider == "kimi" {
 				if errExecute != nil || len(response.Payload) != 0 {
 					t.Fatalf("ordinary Kimi response changed: %s %v", response.Payload, errExecute)
+				}
+			} else if provider == "xai" {
+				if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusBadGateway || errExecute.Error() != xaiEmptyStreamMessage {
+					t.Fatalf("ordinary xAI empty stream changed: %v", errExecute)
 				}
 			} else if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusRequestTimeout {
 				t.Fatalf("ordinary disconnect changed: %v", errExecute)

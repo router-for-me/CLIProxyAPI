@@ -292,6 +292,10 @@ func SafeResponseHeaders(err error) http.Header {
 		}
 		return nil
 	}
+	var poolCooldown *poolCooldownTerminalError
+	if errors.As(err, &poolCooldown) && poolCooldown != nil {
+		return poolCooldown.SafeResponseHeaders()
+	}
 	var trusted *trustedRetryAfterError
 	if errors.As(err, &trusted) && trusted != nil {
 		return trusted.SafeResponseHeaders()
@@ -310,7 +314,7 @@ func SafeResponseHeaders(err error) http.Header {
 	}
 	var modelCooldown *modelCooldownError
 	if errors.As(err, &modelCooldown) && modelCooldown != nil {
-		return modelCooldown.Headers()
+		return modelCooldown.SafeResponseHeaders()
 	}
 	var unavailable *authUnavailableError
 	if errors.As(err, &unavailable) && unavailable != nil {

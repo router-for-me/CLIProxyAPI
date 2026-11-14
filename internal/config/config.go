@@ -35,6 +35,12 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
+	// ShutdownTimeoutSeconds controls how long the API server waits for in-flight
+	// requests to finish during shutdown before forcibly closing connections.
+	// 0 (the default) keeps the legacy behavior of closing immediately without draining.
+	// Values are in seconds.
+	ShutdownTimeoutSeconds int `yaml:"shutdown-timeout" json:"shutdown-timeout"`
+
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 
