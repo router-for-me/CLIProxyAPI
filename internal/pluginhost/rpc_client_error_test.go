@@ -91,9 +91,6 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 	if errExec == nil {
 		t.Fatal("authMgr.Execute returned nil error")
 	}
-	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "7" {
-		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 7", got)
-	}
 	updated, okAuth := authMgr.GetByID(authID)
 	if !okAuth || updated == nil {
 		t.Fatalf("GetByID(%q) missing", authID)
@@ -101,6 +98,17 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 	state := updated.ModelStates[model]
 	if state == nil || !state.NextRetryAfter.After(before.Add(5*time.Second)) {
 		t.Fatalf("model NextRetryAfter = %v, want at least %v (7s cooldown)", state, before.Add(7*time.Second))
+	}
+	// The terminal error reports when the pool actually recovers: the recorded
+	// cooldown, which honours the 7s hint but may raise it to the manager's
+	// minimum quota cooldown. It must not undercut the hint or outlast the
+	// recorded deadline (whole seconds, rounded up).
+	header := coreauth.SafeResponseHeaders(errExec).Get("Retry-After")
+	got, errAtoi := strconv.Atoi(header)
+	remaining := state.NextRetryAfter.Sub(before)
+	maxSeconds := int((remaining + time.Second - 1) / time.Second)
+	if errAtoi != nil || got < 7 || got > maxSeconds {
+		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want between 7 and %d (recorded cooldown)", header, maxSeconds)
 	}
 }
 
