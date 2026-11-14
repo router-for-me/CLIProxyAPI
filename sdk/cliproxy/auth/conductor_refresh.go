@@ -373,6 +373,8 @@ func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, regis
 	job := &authRefreshJob{
 		id:                id,
 		registrationEpoch: registrationEpoch,
+		credentialVersion: auth.CredentialVersion,
+		markerOwned:       true,
 		pendingUntil:      now.Add(refreshPendingBackoff),
 		loop:              loop,
 	}
@@ -407,12 +409,13 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 		return
 	}
 	delete(m.refreshJobs, job.id)
-	if auth := m.auths[job.id]; auth != nil && auth.RegistrationEpoch == job.registrationEpoch && auth.NextRefreshAfter.Equal(job.pendingUntil) {
+	if auth := m.auths[job.id]; refreshJobOwnsPendingMarker(auth, job) {
 		// Clear only this job's pending marker, preserving newer refresh outcomes.
 		auth.NextRefreshAfter = retryAt
 		auth.Generation++
 		auth.UpdatedAt = time.Now()
 	}
+	job.markerOwned = false
 	m.mu.Unlock()
 	// Notify the current loop, which may differ from the job's original loop.
 	m.queueRefreshReschedule(job.id)
@@ -1256,6 +1259,10 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 }
 
 func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64) (*Auth, error) {
+	return m.refreshAuthForRequestWithJob(ctx, id, failedAccessToken, registrationEpoch, nil)
+}
+
+func (m *Manager) refreshAuthForRequestWithJob(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64, job *authRefreshJob) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -1286,6 +1293,8 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 
 	m.mu.RLock()
 	auth := m.auths[id].Clone()
+	jobCurrent := job == nil || (m.refreshJobs[id] == job && refreshJobMatchesAuth(auth, job))
+	ownedMarker := job != nil && jobCurrent && refreshJobOwnsPendingMarker(auth, job)
 	var exec ProviderExecutor
 	store := m.store
 	if auth != nil {
@@ -1296,6 +1305,27 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
 		return nil, errors.New("auth or executor not found")
+	}
+	if job != nil {
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
+		}
+		if !jobCurrent {
+			return auth, nil
+		}
+		probe := auth.Clone()
+		if ownedMarker {
+			probe.NextRefreshAfter = time.Time{}
+		}
+		// Reevaluate after waiting for a foreground refresh. The disposable
+		// probe excludes only this job's pending marker, never a later outcome.
+		due := m.shouldRefresh(probe, time.Now())
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
+		}
+		if !due {
+			return auth, nil
+		}
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		if resolver, okResolver := store.(interface {
@@ -1339,6 +1369,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				current.RegistrationEpoch == auth.RegistrationEpoch &&
 				current.CredentialVersion == auth.CredentialVersion &&
 				authHasUnchangedRejectedRefreshToken(current) {
+				m.retireRefreshJobMarkerLocked(current)
 				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(checkNow) {
 					if !current.NextRefreshAfter.Equal(exp) {
 						current.NextRefreshAfter = exp
@@ -1373,6 +1404,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.RegistrationEpoch == auth.RegistrationEpoch &&
 			current.CredentialVersion == auth.CredentialVersion &&
 			authHasUnchangedRejectedRefreshToken(current) {
+			m.retireRefreshJobMarkerLocked(current)
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			current.Generation++
 			current.UpdatedAt = checkNow
@@ -1442,8 +1474,11 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		retryAfter := now.Add(backoff)
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
-			pendingJob := m.refreshJobs[id]
-			isJobPending := pendingJob != nil && current.NextRefreshAfter.Equal(pendingJob.pendingUntil)
+			if current.RegistrationEpoch != base.RegistrationEpoch || current.CredentialVersion != base.CredentialVersion || secretGrantChanged(base, current) {
+				m.mu.Unlock()
+				return nil, err
+			}
+			isJobPending := m.retireRefreshJobMarkerLocked(current)
 			if isJobPending || current.NextRefreshAfter.IsZero() || current.NextRefreshAfter.Before(retryAfter) {
 				current.NextRefreshAfter = retryAfter
 			}
@@ -1491,6 +1526,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				m.mu.Unlock()
 				return nil, err
 			}
+			m.retireRefreshJobMarkerLocked(current)
 			terminalRefresh := isTerminalRefreshError(current, err)
 			sanitizedRefreshErr := sanitizeRenewalError(current, err)
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
