@@ -159,6 +159,39 @@ func TestSanitizeDevinSystemPrompt_AndSensitiveWords(t *testing.T) {
 	}
 }
 
+func TestSanitizeDevinSystemPrompt_ReplacementsAndMultiline(t *testing.T) {
+	matcher := BuildSensitiveWordMatcherWithReplacements(
+		[]string{"Claude", "DROP_LINE_TOKEN"},
+		map[string]string{
+			"Claude Code":               "Claude",
+			"First Header\nSecond Line": "Merged Header",
+		},
+	)
+	rawPrompt := "First Header\r\nSecond Line\r\nUse Claude Code safely.\r\nLine with DROP_LINE_TOKEN should be dropped."
+	sanitized := SanitizeDevinSystemPrompt(rawPrompt, matcher)
+	want := "Merged Header\nUse Claude safely."
+	if sanitized != want {
+		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", sanitized, want)
+	}
+}
+
+func TestSanitizeDevinSystemPrompt_MultilineReplacementSinglePassNoDropOrCascade(t *testing.T) {
+	matcher := BuildSensitiveWordMatcherWithReplacements(
+		[]string{"Claude"},
+		map[string]string{
+			"First\nSecond": "Claude",
+			"Multi\nLine":   "Alias",
+			"Alias":         "Final",
+		},
+	)
+	rawPrompt := "First\r\nSecond\r\nMulti\r\nLine"
+	sanitized := SanitizeDevinSystemPrompt(rawPrompt, matcher)
+	want := "Claude\nAlias"
+	if sanitized != want {
+		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", sanitized, want)
+	}
+}
+
 func TestBuildDevinGetChatMessageRequest_WithImages(t *testing.T) {
 	prompts := []DevinPrompt{
 		{

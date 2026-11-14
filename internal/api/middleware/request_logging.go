@@ -66,6 +66,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		wrapper.ginContext = c
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
+			deferredAPICapture := logging.NewDeferredAPICapture()
+			wrapper.deferredAPICapture = deferredAPICapture
+			c.Request = c.Request.WithContext(logging.WithDeferredAPICapture(c.Request.Context(), deferredAPICapture))
+			c.Set(logging.DeferredAPIResponseContextKey, deferredAPICapture)
 		}
 		c.Writer = wrapper
 		attachRequestLogSources(c, logger, loggerEnabled && hasMatchedRoute)

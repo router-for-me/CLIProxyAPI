@@ -668,8 +668,8 @@ func TestRegisterExecutorsOAuthScopeSkipsStaticModelClientButRegistersExecutor(t
 	host.RegisterModels(context.Background(), modelRegistry)
 	host.RegisterExecutors(manager, modelRegistry)
 
-	if staticCalled {
-		t.Fatal("StaticModels was called for an OAuth-only executor")
+	if !staticCalled {
+		t.Fatal("StaticModels was not called to populate catalog metadata for OAuth executor")
 	}
 	if _, okExecutor := manager.executors["sample-provider"]; !okExecutor {
 		t.Fatal("OAuth-only executor was not registered")
@@ -677,8 +677,11 @@ func TestRegisterExecutorsOAuthScopeSkipsStaticModelClientButRegistersExecutor(t
 	if _, okClient := modelRegistry.clients[pluginExecutorModelClientID("sample-provider", "sample-provider")]; okClient {
 		t.Fatal("OAuth-only executor registered a static model client")
 	}
-	if got := host.ModelsForProvider("sample-provider"); len(got) != 0 {
-		t.Fatalf("OAuth-only provider models = %#v, want none", got)
+	if got := host.ModelsForProvider("sample-provider"); len(got) != 1 || got[0].ID != "static-model" {
+		t.Fatalf("OAuth-only provider catalog models = %#v, want [static-model]", got)
+	}
+	if got := host.StaticAppendModelsForProvider("sample-provider"); len(got) != 0 {
+		t.Fatalf("OAuth-only StaticAppendModelsForProvider = %#v, want none", got)
 	}
 
 	result := host.ModelsForAuth(context.Background(), &coreauth.Auth{
@@ -766,45 +769,377 @@ func TestRegisterExecutorsStaticScopeSkipsModelsForAuth(t *testing.T) {
 }
 
 func TestRegisterExecutorsBothScopeKeepsStaticAndOAuthModels(t *testing.T) {
+	t.Run("without auth provider keeps static model client and oauth models", func(t *testing.T) {
+		modelRegistry := newFakeModelRegistry()
+		manager := newFakeExecutorManager()
+		host := newHostWithRecords(capabilityRecord{
+			id: "alpha",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				ModelProvider: modelProviderFunc{
+					staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{
+							Provider: "plugin-provider",
+							Models:   []pluginapi.ModelInfo{{ID: "static-model"}},
+						}, nil
+					},
+					modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{
+							Provider: "plugin-provider",
+							Models:   []pluginapi.ModelInfo{{ID: "oauth-model"}},
+						}, nil
+					},
+				},
+				Executor:           &fakeExecutor{identifier: "plugin-provider"},
+				ExecutorModelScope: pluginapi.ExecutorModelScopeBoth,
+			}},
+		})
+
+		host.RegisterModels(context.Background(), modelRegistry)
+		host.RegisterExecutors(manager, modelRegistry)
+
+		clientID := pluginExecutorModelClientID("alpha", "plugin-provider")
+		reg := modelRegistry.clients[clientID]
+		if reg == nil || reg.provider != "plugin-provider" || len(reg.models) != 1 || reg.models[0].ID != "static-model" {
+			t.Fatalf("both-scope static model client = %#v, want static-model", reg)
+		}
+		result := host.ModelsForAuth(context.Background(), &coreauth.Auth{
+			ID:       "plugin-auth",
+			Provider: "plugin-provider",
+		})
+		if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
+			t.Fatalf("both-scope OAuth model result = %#v, want oauth-model", result)
+		}
+	})
+
+	t.Run("with auth provider skips static model client and keeps catalog and oauth models", func(t *testing.T) {
+		modelRegistry := newFakeModelRegistry()
+		manager := newFakeExecutorManager()
+		host := newHostWithRecords(capabilityRecord{
+			id: "alpha",
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{identifier: "plugin-provider"},
+				ModelProvider: modelProviderFunc{
+					staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{
+							Provider: "plugin-provider",
+							Models:   []pluginapi.ModelInfo{{ID: "static-model"}},
+						}, nil
+					},
+					modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+						return pluginapi.ModelResponse{
+							Provider: "plugin-provider",
+							Models:   []pluginapi.ModelInfo{{ID: "oauth-model"}},
+						}, nil
+					},
+				},
+				Executor:           &fakeExecutor{identifier: "plugin-provider"},
+				ExecutorModelScope: pluginapi.ExecutorModelScopeBoth,
+			}},
+		})
+
+		host.RegisterModels(context.Background(), modelRegistry)
+		host.RegisterExecutors(manager, modelRegistry)
+
+		clientID := pluginExecutorModelClientID("alpha", "plugin-provider")
+		if _, okClient := modelRegistry.clients[clientID]; okClient {
+			t.Fatal("credential-bound both-scope executor registered a static model client")
+		}
+		if _, okExecutor := manager.executors["plugin-provider"]; !okExecutor {
+			t.Fatal("credential-bound both-scope executor was not registered")
+		}
+		if host.executorPluginReady("alpha", pluginapi.ModelRouteRequest{RequestedModel: "static-model", SourceFormat: "openai"}) {
+			t.Fatal("executorPluginReady returned true for credential-bound both-scope plugin")
+		}
+		if catalog := host.ModelsForProvider("plugin-provider"); len(catalog) != 1 || catalog[0].ID != "static-model" {
+			t.Fatalf("ModelsForProvider = %#v, want [static-model]", catalog)
+		}
+		result := host.ModelsForAuth(context.Background(), &coreauth.Auth{
+			ID:       "plugin-auth",
+			Provider: "plugin-provider",
+		})
+		if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
+			t.Fatalf("both-scope OAuth model result = %#v, want oauth-model", result)
+		}
+	})
+}
+
+func TestRegisterExecutorsAuthProviderUnsetScopeSkipsStaticModelClientAndPreservesCatalog(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	modelRegistry.RegisterClient("native-client", "claude", []*registry.ModelInfo{{ID: "native-overlap-model"}})
+	manager := newFakeExecutorManager()
+	manager.RegisterExecutor(&fakeProviderExecutor{provider: "claude"})
+
+	plugin := pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+		AuthProvider: fakeAuthProvider{identifier: "demo"},
+		ModelProvider: modelProviderFunc{
+			staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+				return pluginapi.ModelResponse{
+					Provider: "demo",
+					Models: []pluginapi.ModelInfo{
+						{ID: "demo-a"},
+						{ID: "demo-blocked"},
+						{ID: "native-overlap-model"},
+					},
+				}, nil
+			},
+			modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+				return pluginapi.ModelResponse{
+					Provider: "demo",
+					Models: []pluginapi.ModelInfo{
+						{ID: "demo-a"},
+						{ID: "demo-blocked"},
+					},
+				}, nil
+			},
+		},
+		Executor: &fakeExecutor{identifier: "demo"},
+	}}
+	host := newHostWithRecords(capabilityRecord{id: "demo-oauth-plugin", plugin: plugin})
+
+	if rpcCaps := rpcCapabilitiesFromPlugin(plugin); rpcCaps.ExecutorModelScope != pluginapi.ExecutorModelScopeOAuth {
+		t.Fatalf("rpcCapabilitiesFromPlugin ExecutorModelScope = %q, want %q", rpcCaps.ExecutorModelScope, pluginapi.ExecutorModelScopeOAuth)
+	}
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if _, okClient := modelRegistry.clients[pluginExecutorModelClientID("demo-oauth-plugin", "demo")]; okClient {
+		t.Fatal("credential-bound plugin with unset ExecutorModelScope leaked synthetic static model client into ModelRegistry")
+	}
+	if _, okExecutor := manager.executors["demo"]; !okExecutor {
+		t.Fatal("credential-bound plugin executor was not registered")
+	}
+	if got := host.ModelsForProvider("demo"); len(got) != 3 {
+		t.Fatalf("ModelsForProvider(demo) = %#v, want 3 static catalog models", got)
+	}
+	if got := host.StaticAppendModelsForProvider("demo"); len(got) != 0 {
+		t.Fatalf("StaticAppendModelsForProvider(demo) = %#v, want none", got)
+	}
+	if host.executorPluginReady("demo-oauth-plugin", pluginapi.ModelRouteRequest{RequestedModel: "demo-a", SourceFormat: "openai"}) {
+		t.Fatal("executorPluginReady returned true for credential-bound plugin with unset ExecutorModelScope")
+	}
+	result := host.ModelsForAuth(context.Background(), &coreauth.Auth{ID: "demo-auth", Provider: "demo"})
+	if !result.Handled || len(result.Models) != 2 {
+		t.Fatalf("ModelsForAuth(demo) = %#v, want 2 models", result)
+	}
+}
+
+func TestRegisterExecutorsAuthProviderCredentialProviderMatchesModelsForAuthWithStaticCatalog(t *testing.T) {
 	modelRegistry := newFakeModelRegistry()
 	manager := newFakeExecutorManager()
+
 	host := newHostWithRecords(capabilityRecord{
-		id: "alpha",
+		id: "multi-portal-oauth",
 		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
-			AuthProvider: fakeAuthProvider{identifier: "plugin-provider"},
+			AuthProvider: fakeAuthProvider{
+				identifier:          "portal-a",
+				credentialProviders: []string{"cred-a"},
+			},
 			ModelProvider: modelProviderFunc{
 				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
 					return pluginapi.ModelResponse{
-						Provider: "plugin-provider",
-						Models:   []pluginapi.ModelInfo{{ID: "static-model"}},
+						Provider: "portal-a",
+						Models:   []pluginapi.ModelInfo{{ID: "portal-model"}},
 					}, nil
 				},
 				modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
 					return pluginapi.ModelResponse{
-						Provider: "plugin-provider",
-						Models:   []pluginapi.ModelInfo{{ID: "oauth-model"}},
+						Provider: "cred-a",
+						Models:   []pluginapi.ModelInfo{{ID: "cred-model"}},
 					}, nil
 				},
 			},
-			Executor:           &fakeExecutor{identifier: "plugin-provider"},
-			ExecutorModelScope: pluginapi.ExecutorModelScopeBoth,
+			Executor:           &fakeExecutor{identifier: "cred-a"},
+			ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
 		}},
 	})
 
 	host.RegisterModels(context.Background(), modelRegistry)
 	host.RegisterExecutors(manager, modelRegistry)
 
-	clientID := pluginExecutorModelClientID("alpha", "plugin-provider")
-	reg := modelRegistry.clients[clientID]
-	if reg == nil || reg.provider != "plugin-provider" || len(reg.models) != 1 || reg.models[0].ID != "static-model" {
-		t.Fatalf("both-scope static model client = %#v, want static-model", reg)
+	if _, okExec := manager.executors["cred-a"]; !okExec {
+		t.Fatal("executor for credential provider cred-a was not registered")
 	}
-	result := host.ModelsForAuth(context.Background(), &coreauth.Auth{
-		ID:       "plugin-auth",
-		Provider: "plugin-provider",
+	if _, okPortalExec := manager.executors["portal-a"]; !okPortalExec {
+		t.Fatal("executor for auth portal portal-a was not registered")
+	}
+	if !host.HasExecutorCandidateProvider("cred-a") || !host.HasExecutorCandidateProvider("portal-a") {
+		t.Fatal("HasExecutorCandidateProvider failed for cred-a or portal-a")
+	}
+	if !host.HasAuthModelProvider("cred-a") {
+		t.Fatal("HasAuthModelProvider(cred-a) = false, want true")
+	}
+	result := host.ModelsForAuth(context.Background(), &coreauth.Auth{ID: "cred-auth", Provider: "cred-a"})
+	if !result.Handled || result.Provider != "cred-a" || len(result.Models) != 1 || result.Models[0].ID != "cred-model" {
+		t.Fatalf("ModelsForAuth(cred-a) = %#v, want cred-model", result)
+	}
+}
+
+func TestShutdownAllContextClearsStaticAppendProviderModels(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+	host := newHostWithRecords(capabilityRecord{
+		id: "catalog-only",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ModelRegistrar: staticModelRegistrar("kimi", "catalog-model"),
+		}},
 	})
-	if !result.Handled || result.Provider != "plugin-provider" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
-		t.Fatalf("both-scope OAuth model result = %#v, want oauth-model", result)
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if got := host.ModelsForProvider("kimi"); len(got) != 1 || got[0].ID != "catalog-model" {
+		t.Fatalf("ModelsForProvider(kimi) = %#v, want [catalog-model]", got)
+	}
+	if got := host.StaticAppendModelsForProvider("kimi"); len(got) != 1 || got[0].ID != "catalog-model" {
+		t.Fatalf("StaticAppendModelsForProvider(kimi) = %#v, want [catalog-model]", got)
+	}
+
+	host.ShutdownAllContext(context.Background())
+
+	if got := host.ModelsForProvider("kimi"); len(got) != 0 {
+		t.Fatalf("ModelsForProvider(kimi) after shutdown = %#v, want empty", got)
+	}
+	if got := host.StaticAppendModelsForProvider("kimi"); len(got) != 0 {
+		t.Fatalf("StaticAppendModelsForProvider(kimi) after shutdown = %#v, want empty", got)
+	}
+}
+
+func TestModelsForAuthOAuthScopeWithoutAuthProviderMatchesExecutorIdentifierWithStaticCatalog(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "oauth-no-auth-provider",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			ModelProvider: modelProviderFunc{
+				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+					return pluginapi.ModelResponse{
+						Provider: "catalog-a",
+						Models:   []pluginapi.ModelInfo{{ID: "catalog-model"}},
+					}, nil
+				},
+				modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+					return pluginapi.ModelResponse{
+						Provider: "cred-a",
+						Models:   []pluginapi.ModelInfo{{ID: "cred-model"}},
+					}, nil
+				},
+			},
+			Executor:           &fakeExecutor{identifier: "cred-a"},
+			ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+		}},
+	})
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if _, okExec := manager.executors["cred-a"]; !okExec {
+		t.Fatal("OAuth-only executor cred-a was not registered")
+	}
+	if !host.HasAuthModelProvider("cred-a") {
+		t.Fatal("HasAuthModelProvider(cred-a) = false, want true")
+	}
+	result := host.ModelsForAuth(context.Background(), &coreauth.Auth{ID: "cred-auth", Provider: "cred-a"})
+	if !result.Handled || result.Provider != "cred-a" || len(result.Models) != 1 || result.Models[0].ID != "cred-model" {
+		t.Fatalf("ModelsForAuth(cred-a) = %#v, want cred-model", result)
+	}
+	if catalog := host.ModelsForProvider("catalog-a"); len(catalog) != 1 || catalog[0].ID != "catalog-model" {
+		t.Fatalf("ModelsForProvider(catalog-a) = %#v, want [catalog-model]", catalog)
+	}
+}
+
+func TestRegisterExecutorsNativePrimaryProviderStillRegistersOAuthAuthProviders(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+	nativeClaude := &fakeProviderExecutor{provider: "claude"}
+	manager.RegisterExecutor(nativeClaude)
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "oauth-native-primary-conflict",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			AuthProvider: fakeAuthProvider{
+				identifier:          "portal-a",
+				credentialProviders: []string{"cred-a"},
+			},
+			ModelProvider: modelProviderFunc{
+				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+					return pluginapi.ModelResponse{
+						Provider: "catalog-a",
+						Models:   []pluginapi.ModelInfo{{ID: "catalog-model"}},
+					}, nil
+				},
+				modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+					return pluginapi.ModelResponse{
+						Provider: "cred-a",
+						Models:   []pluginapi.ModelInfo{{ID: "cred-model"}},
+					}, nil
+				},
+			},
+			Executor: &fakeExecutor{identifier: "claude"},
+		}},
+	})
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if manager.executors["claude"] != nativeClaude {
+		t.Fatalf("native claude executor was overwritten: %#v", manager.executors["claude"])
+	}
+	if _, okPortal := manager.executors["portal-a"]; !okPortal {
+		t.Fatal("auth portal executor portal-a was skipped when primary provider conflicted with native claude")
+	}
+	if _, okCred := manager.executors["cred-a"]; !okCred {
+		t.Fatal("credential provider executor cred-a was skipped when primary provider conflicted with native claude")
+	}
+	if catalog := host.ModelsForProvider("catalog-a"); len(catalog) != 1 || catalog[0].ID != "catalog-model" {
+		t.Fatalf("ModelsForProvider(catalog-a) = %#v, want [catalog-model]", catalog)
+	}
+}
+
+func TestRegisterExecutorsOAuthScopePreservesStaticCatalogAndRegistersExecutorWithNativeOverlap(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	modelRegistry.RegisterClient("native-client", "claude", []*registry.ModelInfo{{ID: "native-overlap-model"}})
+	manager := newFakeExecutorManager()
+	manager.RegisterExecutor(&fakeProviderExecutor{provider: "claude"})
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "oauth-catalog-plugin",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			AuthProvider: fakeAuthProvider{identifier: "demo-oauth"},
+			ModelProvider: modelProviderFunc{
+				staticModels: func(ctx context.Context, req pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+					return pluginapi.ModelResponse{
+						Provider: "demo-oauth",
+						Models: []pluginapi.ModelInfo{
+							{ID: "native-overlap-model"},
+						},
+					}, nil
+				},
+				modelsForAuth: func(ctx context.Context, req pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+					return pluginapi.ModelResponse{
+						Provider: "demo-oauth",
+						Models:   []pluginapi.ModelInfo{{ID: "demo-oauth-model"}},
+					}, nil
+				},
+			},
+			Executor:           &fakeExecutor{identifier: "demo-oauth"},
+			ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+		}},
+	})
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+
+	if _, okClient := modelRegistry.clients[pluginExecutorModelClientID("oauth-catalog-plugin", "demo-oauth")]; okClient {
+		t.Fatal("OAuth-scoped executor leaked synthetic static model client into ModelRegistry")
+	}
+	if _, okExecutor := manager.executors["demo-oauth"]; !okExecutor {
+		t.Fatal("OAuth-scoped executor was suppressed due to native catalog overlap")
+	}
+	got := host.ModelsForProvider("demo-oauth")
+	if len(got) != 1 || got[0].ID != "native-overlap-model" {
+		t.Fatalf("ModelsForProvider(demo-oauth) = %#v, want [native-overlap-model]", got)
 	}
 }
 

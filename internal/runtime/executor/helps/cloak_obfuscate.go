@@ -3,7 +3,9 @@ package helps
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/MoeForge/moego/ojson"
@@ -12,49 +14,218 @@ import (
 // zeroWidthSpace is the Unicode zero-width space character used for obfuscation.
 const zeroWidthSpace = "\u200B"
 
-// SensitiveWordMatcher holds the compiled regex for matching sensitive words.
-type SensitiveWordMatcher struct {
-	regex *regexp.Regexp
+// combiningGraphemeJoiner is the Unicode combining grapheme joiner (U+034F)
+// used for Antigravity system-instruction obfuscation where U+200B obfuscation
+// remains rejected by the upstream endpoint.
+const combiningGraphemeJoiner = "\u034F"
+
+type sensitiveWordRule struct {
+	target        string
+	lowerTarget   string
+	replacement   string
+	isReplacement bool
 }
 
-// BuildSensitiveWordMatcher compiles a regex from the word list.
+// SensitiveWordMatcher holds the compiled regex and replacement state for matching sensitive words.
+type SensitiveWordMatcher struct {
+	regex             *regexp.Regexp
+	replaceFn         func(string) string
+	lookupReplacement func(string) (string, bool)
+}
+
+// SensitiveWordConfigCacheKey builds a deterministic, collision-free cache key
+// for a (words, replacements) configuration pair.
+func SensitiveWordConfigCacheKey(words []string, replacements map[string]string) string {
+	var b strings.Builder
+	b.WriteString("w:")
+	b.WriteString(strconv.Itoa(len(words)))
+	b.WriteByte(';')
+	for _, w := range words {
+		b.WriteString(strconv.Itoa(len(w)))
+		b.WriteByte(':')
+		b.WriteString(w)
+		b.WriteByte(';')
+	}
+	b.WriteString("|r:")
+	b.WriteString(strconv.Itoa(len(replacements)))
+	b.WriteByte(';')
+	if len(replacements) > 0 {
+		keys := make([]string, 0, len(replacements))
+		for k := range replacements {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := replacements[k]
+			b.WriteString(strconv.Itoa(len(k)))
+			b.WriteByte(':')
+			b.WriteString(k)
+			b.WriteByte('=')
+			b.WriteString(strconv.Itoa(len(v)))
+			b.WriteByte(':')
+			b.WriteString(v)
+			b.WriteByte(';')
+		}
+	}
+	return b.String()
+}
+
+// BuildSensitiveWordMatcher compiles a regex from the word list using U+200B.
 // Words are sorted by length (longest first) for proper matching.
 func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
-	if len(words) == 0 {
+	return BuildSensitiveWordMatcherWithReplacements(words, nil)
+}
+
+// BuildSensitiveWordMatcherWithReplacements compiles a matcher combining literal
+// replacements and U+200B sensitive-word obfuscation.
+func BuildSensitiveWordMatcherWithReplacements(words []string, replacements map[string]string) *SensitiveWordMatcher {
+	return buildSensitiveWordMatcher(words, replacements, obfuscateWord, zeroWidthSpace)
+}
+
+// BuildAntigravitySensitiveWordMatcher compiles a matcher for Antigravity system
+// instructions combining literal replacements and per-subword U+034F obfuscation.
+func BuildAntigravitySensitiveWordMatcher(words []string, replacements map[string]string) *SensitiveWordMatcher {
+	return buildSensitiveWordMatcher(words, replacements, obfuscateAntigravityPhrase, combiningGraphemeJoiner)
+}
+
+func buildSensitiveWordMatcher(
+	words []string,
+	replacements map[string]string,
+	obfuscateFn func(string) string,
+	marker string,
+) *SensitiveWordMatcher {
+	if len(words) == 0 && len(replacements) == 0 {
 		return nil
 	}
 
-	// Filter and normalize words
-	var validWords []string
-	for _, w := range words {
-		w = strings.TrimSpace(w)
-		if utf8.RuneCountInString(w) >= 2 && !strings.Contains(w, zeroWidthSpace) {
-			validWords = append(validWords, w)
+	var rules []sensitiveWordRule
+	var replacementRules []sensitiveWordRule
+	var exactReplacements map[string]string
+	var lowerReplacements map[string]string
+	seenLower := make(map[string]struct{}, len(words)+len(replacements))
+
+	if len(replacements) > 0 {
+		rawKeys := make([]string, 0, len(replacements))
+		for k := range replacements {
+			rawKeys = append(rawKeys, k)
+		}
+		sort.Strings(rawKeys)
+
+		for _, rawKey := range rawKeys {
+			target := strings.TrimSpace(rawKey)
+			if target == "" {
+				continue
+			}
+			if exactReplacements == nil {
+				exactReplacements = make(map[string]string, len(rawKeys))
+				lowerReplacements = make(map[string]string, len(rawKeys))
+			}
+			if _, exists := exactReplacements[target]; !exists || rawKey == target {
+				exactReplacements[target] = replacements[rawKey]
+			}
+			lower := strings.ToLower(target)
+			if _, exists := lowerReplacements[lower]; !exists {
+				lowerReplacements[lower] = replacements[rawKey]
+			}
+			if _, exists := seenLower[lower]; exists {
+				continue
+			}
+			seenLower[lower] = struct{}{}
+			rule := sensitiveWordRule{
+				target:        target,
+				lowerTarget:   lower,
+				replacement:   replacements[rawKey],
+				isReplacement: true,
+			}
+			rules = append(rules, rule)
+			replacementRules = append(replacementRules, rule)
 		}
 	}
 
-	if len(validWords) == 0 {
+	for _, rawWord := range words {
+		w := strings.TrimSpace(rawWord)
+		if utf8.RuneCountInString(w) < 2 || strings.Contains(w, marker) {
+			continue
+		}
+		if obfuscateFn(w) == w {
+			continue
+		}
+		lower := strings.ToLower(w)
+		if _, exists := seenLower[lower]; exists {
+			continue
+		}
+		seenLower[lower] = struct{}{}
+		rules = append(rules, sensitiveWordRule{
+			target:      w,
+			lowerTarget: lower,
+		})
+	}
+
+	if len(rules) == 0 {
 		return nil
 	}
 
-	// Sort by length (longest first) for proper matching
-	sort.Slice(validWords, func(i, j int) bool {
-		return len(validWords[i]) > len(validWords[j])
+	sortRulesLongestFirst(rules)
+	sortRulesLongestFirst(replacementRules)
+
+	escaped := make([]string, len(rules))
+	for i, r := range rules {
+		escaped[i] = regexp.QuoteMeta(r.target)
+	}
+
+	pattern := "(?i:" + strings.Join(escaped, "|") + ")"
+	re, errCompile := regexp.Compile(pattern)
+	if errCompile != nil {
+		return nil
+	}
+
+	var lookupReplacement func(string) (string, bool)
+	replaceFn := obfuscateFn
+	if len(exactReplacements) > 0 {
+		lookupReplacement = func(matched string) (string, bool) {
+			if repl, ok := exactReplacements[matched]; ok {
+				return repl, true
+			}
+			if repl, ok := lowerReplacements[strings.ToLower(matched)]; ok {
+				return repl, true
+			}
+			for _, r := range replacementRules {
+				if strings.EqualFold(matched, r.target) {
+					return r.replacement, true
+				}
+			}
+			return "", false
+		}
+		replaceFn = func(matched string) string {
+			if repl, ok := lookupReplacement(matched); ok {
+				return repl
+			}
+			return obfuscateFn(matched)
+		}
+	}
+
+	return &SensitiveWordMatcher{
+		regex:             re,
+		replaceFn:         replaceFn,
+		lookupReplacement: lookupReplacement,
+	}
+}
+
+func sortRulesLongestFirst(rules []sensitiveWordRule) {
+	sort.SliceStable(rules, func(i, j int) bool {
+		ri := utf8.RuneCountInString(rules[i].target)
+		rj := utf8.RuneCountInString(rules[j].target)
+		if ri != rj {
+			return ri > rj
+		}
+		if len(rules[i].target) != len(rules[j].target) {
+			return len(rules[i].target) > len(rules[j].target)
+		}
+		if rules[i].isReplacement != rules[j].isReplacement {
+			return rules[i].isReplacement
+		}
+		return rules[i].lowerTarget < rules[j].lowerTarget
 	})
-
-	// Escape and join
-	escaped := make([]string, len(validWords))
-	for i, w := range validWords {
-		escaped[i] = regexp.QuoteMeta(w)
-	}
-
-	pattern := "(?i)" + strings.Join(escaped, "|")
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return nil
-	}
-
-	return &SensitiveWordMatcher{regex: re}
 }
 
 // obfuscateWord inserts a zero-width space after the first grapheme.
@@ -63,7 +234,6 @@ func obfuscateWord(word string) string {
 		return word
 	}
 
-	// Get first rune
 	r, size := utf8.DecodeRuneInString(word)
 	if r == utf8.RuneError || size >= len(word) {
 		return word
@@ -72,15 +242,81 @@ func obfuscateWord(word string) string {
 	return string(r) + zeroWidthSpace + word[size:]
 }
 
-// obfuscateText replaces all sensitive words in the text.
+func isAntigravitySubwordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '\u034F' || r == '\u200B'
+}
+
+func obfuscateSingleSubwordCGJ(subword string) (string, bool) {
+	if strings.Contains(subword, combiningGraphemeJoiner) {
+		return subword, true
+	}
+	r, size := utf8.DecodeRuneInString(subword)
+	if r == utf8.RuneError || size >= len(subword) {
+		return subword, false
+	}
+	return string(r) + combiningGraphemeJoiner + subword[size:], true
+}
+
+// obfuscateAntigravityPhrase inserts U+034F after the first rune of every
+// alphanumeric subword (>= 2 runes) within phrase, preserving punctuation and whitespace.
+func obfuscateAntigravityPhrase(phrase string) string {
+	if phrase == "" || strings.Contains(phrase, combiningGraphemeJoiner) {
+		return phrase
+	}
+
+	var b strings.Builder
+	b.Grow(len(phrase) + len(combiningGraphemeJoiner)*2)
+	subwordStart := -1
+	inserted := false
+
+	for i, r := range phrase {
+		if isAntigravitySubwordRune(r) {
+			if subwordStart < 0 {
+				subwordStart = i
+			}
+			continue
+		}
+		if subwordStart >= 0 {
+			obf, did := obfuscateSingleSubwordCGJ(phrase[subwordStart:i])
+			b.WriteString(obf)
+			if did {
+				inserted = true
+			}
+			subwordStart = -1
+		}
+		b.WriteRune(r)
+	}
+	if subwordStart >= 0 {
+		obf, did := obfuscateSingleSubwordCGJ(phrase[subwordStart:])
+		b.WriteString(obf)
+		if did {
+			inserted = true
+		}
+	}
+
+	if inserted {
+		return b.String()
+	}
+
+	r, size := utf8.DecodeRuneInString(phrase)
+	if r == utf8.RuneError || size >= len(phrase) {
+		return phrase
+	}
+	return string(r) + combiningGraphemeJoiner + phrase[size:]
+}
+
+// obfuscateText replaces or obfuscates all sensitive words in the text.
 func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	if m == nil || m.regex == nil {
 		return text
 	}
+	if m.replaceFn != nil {
+		return m.regex.ReplaceAllStringFunc(text, m.replaceFn)
+	}
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
-// Matches reports whether the text contains any of the configured sensitive words.
+// Matches reports whether the text contains any configured sensitive word or replacement target.
 func (m *SensitiveWordMatcher) Matches(text string) bool {
 	if m == nil || m.regex == nil {
 		return false
@@ -88,7 +324,80 @@ func (m *SensitiveWordMatcher) Matches(text string) bool {
 	return m.regex.MatchString(text)
 }
 
-// ObfuscateText replaces all sensitive words in the text.
+// SanitizeDevinText applies configured replacements and Devin line-level
+// sensitive-word filtering in a single non-cascading pass:
+//   - matches handled by sensitive-words-replace emit their literal replacement
+//     verbatim without re-scanning or triggering line deletion;
+//   - lines containing an unreplaced sensitive-words match are dropped.
+func (m *SensitiveWordMatcher) SanitizeDevinText(text string) string {
+	if m == nil || m.regex == nil || text == "" {
+		return text
+	}
+	indices := m.regex.FindAllStringIndex(text, -1)
+	if len(indices) == 0 {
+		return strings.TrimSpace(text)
+	}
+
+	var keptLines []string
+	var currentLine strings.Builder
+	dropCurrentLine := false
+
+	flushLine := func() {
+		if !dropCurrentLine {
+			keptLines = append(keptLines, currentLine.String())
+		}
+		currentLine.Reset()
+		dropCurrentLine = false
+	}
+
+	appendLiteral := func(seg string) {
+		for {
+			nl := strings.IndexByte(seg, '\n')
+			if nl < 0 {
+				currentLine.WriteString(seg)
+				return
+			}
+			currentLine.WriteString(seg[:nl])
+			flushLine()
+			seg = seg[nl+1:]
+		}
+	}
+
+	last := 0
+	for _, pair := range indices {
+		start, end := pair[0], pair[1]
+		if start > last {
+			appendLiteral(text[last:start])
+		}
+		matched := text[start:end]
+		if m.lookupReplacement != nil {
+			if repl, ok := m.lookupReplacement(matched); ok {
+				currentLine.WriteString(repl)
+				last = end
+				continue
+			}
+		}
+		dropCurrentLine = true
+		for {
+			nl := strings.IndexByte(matched, '\n')
+			if nl < 0 {
+				break
+			}
+			flushLine()
+			dropCurrentLine = true
+			matched = matched[nl+1:]
+		}
+		last = end
+	}
+	if last < len(text) {
+		appendLiteral(text[last:])
+	}
+	flushLine()
+
+	return strings.TrimSpace(strings.Join(keptLines, "\n"))
+}
+
+// ObfuscateText replaces or obfuscates all sensitive words in the text.
 func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
 	return m.obfuscateText(text)
 }

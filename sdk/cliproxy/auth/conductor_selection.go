@@ -909,7 +909,10 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 			if resetIn < 0 {
 				resetIn = 0
 			}
-			return nil, newModelCooldownErrorWithCause(routeModel, providerForError, resetIn, lastCandidateErr)
+			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(candidate *Auth) string {
+				return m.selectionModelForAuth(candidate, routeModel)
+			}, now, clientHeaders...)
+			return nil, newModelCooldownErrorForCandidates(routeModel, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -1024,7 +1027,14 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorWithCause(requestedModel, cooldownErr.provider, cooldownErr.resetIn, cooldownErr.cause)
+	return newModelCooldownErrorForCandidates(
+		requestedModel,
+		cooldownErr.provider,
+		cooldownErr.resetIn,
+		cooldownErr.cause,
+		cooldownErr.claudeCooldown,
+		cooldownErr.claudeSignals,
+	)
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {
@@ -1337,7 +1347,7 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		if rejectMessage == "" {
 			rejectMessage = "scheduler rejected candidate selection"
 		}
-		return nil, true, wrapRequestStopError(&Error{Code: rejectCode, Message: rejectMessage})
+		return nil, true, wrapSchedulerRejectError(&Error{Code: rejectCode, Message: rejectMessage})
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
 		keepSelectionID = true
@@ -1769,7 +1779,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if status == http.StatusOK {
 		return 0, false
 	}
-	if isRequestInvalidError(err) || isRequestStopError(err) {
+	if isRequestInvalidError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
 		return 0, false
 	}
 	if m.HomeEnabled() {
@@ -2377,10 +2387,16 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 // SelectAuth selects one credential through the configured scheduling strategy.
 // It does not execute or alter the selected credential's result state.
 func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	return m.SelectAuthExcluding(ctx, provider, model, opts, nil)
+}
+
+// SelectAuthExcluding selects one credential through the configured scheduling strategy
+// while excluding any credential IDs present in tried.
+func (m *Manager) SelectAuthExcluding(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
-	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, nil)
+	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, tried)
 	if errPick != nil {
 		return nil, unwrapExecutionBoundaryError(errPick)
 	}
@@ -2388,6 +2404,14 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
 	return selected, nil
+}
+
+// MaxRetryCredentials returns the configured per-request credential retry cap (0 means unlimited).
+func (m *Manager) MaxRetryCredentials() int {
+	if m == nil {
+		return 0
+	}
+	return int(m.maxRetryCredentials.Load())
 }
 
 // SelectAuthByKind selects one credential of the required kind through the
@@ -2986,6 +3010,144 @@ func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time)
 		remaining = next.Sub(now).Round(time.Second).String()
 	}
 	return fmt.Sprintf("[%s, reason=%s, remaining=%s]", ident, reason, remaining)
+}
+
+func selectorExcludesZeroWeight(selector Selector) bool {
+	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
+		return true
+	}
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		_, weighted := affinity.fallback.(*WeightedRoundRobinSelector)
+		return weighted
+	}
+	return false
+}
+
+// earliestPoolCooldownForModelAt scans the model's candidate credentials with
+// the same filters selection uses. It reports:
+//   - earliest: the earliest active timed cooldown recovery instant
+//   - hasUnblocked: true when at least one eligible candidate is still available
+//   - ok: true when no candidate is available and at least one is in a timed cooldown
+func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, now time.Time) (earliest time.Time, hasUnblocked bool, ok bool) {
+	if m == nil {
+		return time.Time{}, false, false
+	}
+	excludeZeroWeight := selectorExcludesZeroWeight(m.Selector())
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, p := range providers {
+		if norm := canonicalSchedulingProvider(p); norm != "" && norm != "mixed" {
+			providerSet[norm] = struct{}{}
+		}
+	}
+	registryRef := registry.GetGlobalRegistry()
+	trimmedModel := strings.TrimSpace(model)
+
+	totalCandidates := 0
+	cooling := 0
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if excludeZeroWeight && authWeight(candidate) <= 0 {
+			continue
+		}
+		rawProvider := executorKeyFromAuth(candidate)
+		providerKey := canonicalSchedulingProvider(rawProvider)
+		if providerKey == "" {
+			continue
+		}
+		if len(providerSet) > 0 {
+			if _, match := providerSet[providerKey]; !match {
+				continue
+			}
+		}
+		if _, hasExec := m.executorLocked(rawProvider); !hasExec {
+			if _, hasNormExec := m.executorLocked(providerKey); !hasNormExec {
+				continue
+			}
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if !eligibility.allows(candidate) {
+			continue
+		}
+		if trimmedModel != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			continue
+		}
+		totalCandidates++
+		checkModel := m.selectionModelForAuth(candidate, model)
+		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, opts.Headers)
+		if !blocked {
+			return time.Time{}, true, false
+		}
+		if reason == blockReasonCooldown {
+			cooling++
+		}
+		// Count every timed auto-recovery toward the pool's earliest reset,
+		// including transient non-cooldown blocks (e.g. a short capacity 429),
+		// matching how selection computes the earliest availability.
+		if reason != blockReasonDisabled && !next.IsZero() && next.After(now) {
+			if earliest.IsZero() || next.Before(earliest) {
+				earliest = next
+			}
+		}
+	}
+	if totalCandidates > 0 && cooling > 0 && !earliest.IsZero() {
+		return earliest, false, true
+	}
+	return time.Time{}, false, false
+}
+
+func observeSelectionCooldownDeadline(dst *time.Time, err error, now time.Time) {
+	if dst == nil || err == nil {
+		return
+	}
+	var cooldown *modelCooldownError
+	if !errors.As(err, &cooldown) || cooldown == nil || cooldown.resetIn <= 0 {
+		return
+	}
+	candidate := now.Add(cooldown.resetIn)
+	if dst.IsZero() || candidate.Before(*dst) {
+		*dst = candidate
+	}
+}
+
+func (m *Manager) annotatePoolCooldownTerminalError(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, lastErr error, selectionCooldownDeadline time.Time) error {
+	return m.annotatePoolCooldownTerminalErrorAt(ctx, providers, model, opts, lastErr, selectionCooldownDeadline, time.Now())
+}
+
+func (m *Manager) annotatePoolCooldownTerminalErrorAt(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, lastErr error, selectionCooldownDeadline time.Time, now time.Time) error {
+	if m == nil || lastErr == nil {
+		return lastErr
+	}
+	if statusCodeFromError(lastErr) != http.StatusTooManyRequests {
+		return lastErr
+	}
+	var marker interface{ IsModelCooldown() bool }
+	if errors.As(lastErr, &marker) && marker != nil && marker.IsModelCooldown() {
+		return lastErr
+	}
+	var existing *poolCooldownTerminalError
+	if errors.As(lastErr, &existing) && existing != nil {
+		return lastErr
+	}
+	deadline, hasUnblocked, ok := m.earliestPoolCooldownForModelAt(ctx, providers, model, opts, now)
+	if hasUnblocked {
+		return lastErr
+	}
+	if !ok && !selectionCooldownDeadline.IsZero() && selectionCooldownDeadline.After(now) {
+		deadline = selectionCooldownDeadline
+		ok = true
+	}
+	if !ok {
+		return lastErr
+	}
+	return &poolCooldownTerminalError{cause: lastErr, deadline: deadline}
 }
 
 func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, err error) {

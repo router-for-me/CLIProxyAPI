@@ -1,9 +1,11 @@
 package thinking
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 func isResponsesFormat(format string) bool {
@@ -52,6 +54,55 @@ func extractConfigurationUpdateConfigFromInput(input ojson.Result) ThinkingConfi
 	default:
 		return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(effort)}
 	}
+}
+
+// normalizeNativeResponsesEffortDoc validates each effort without collapsing the
+// baseline or update timeline. A valid model suffix replaces the baseline later.
+func normalizeNativeResponsesEffortDoc(doc *ojson.Doc, docValid bool, modelInfo *registry.ModelInfo, applier ProviderApplier, fromFormat, toFormat string, skipBaseline bool) (bool, error) {
+	if doc == nil || !docValid || IsUserDefinedModel(modelInfo) || modelInfo.Thinking == nil || len(modelInfo.Thinking.Levels) == 0 {
+		return false, nil
+	}
+
+	var paths []string
+	if !skipBaseline {
+		paths = append(paths, "reasoning.effort")
+	}
+	if input := doc.Get("input"); input.IsArray() {
+		input.ForEach(func(index, item ojson.Result) bool {
+			if item.Get("type").String() == "configuration_update" {
+				paths = append(paths, "input."+strconv.FormatInt(index.Int(), 10)+".reasoning.effort")
+			}
+			return true
+		})
+	}
+
+	modified := false
+	for _, path := range paths {
+		effort := doc.Get(path)
+		if effort.Type != ojson.String || strings.TrimSpace(effort.String()) == "" || HasLevel(modelInfo.Thinking.Levels, effort.String()) {
+			continue
+		}
+		config := ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(strings.ToLower(strings.TrimSpace(effort.String())))}
+		validated, errValidate := ValidateConfig(config, modelInfo, fromFormat, toFormat, false)
+		if errValidate != nil {
+			return modified, errValidate
+		}
+
+		// Use the provider's output rules, including ModeNone with a minimum Level.
+		normalized := ojson.NewDocString("{}")
+		normalizedValid := true
+		if _, errApply := invokeProviderApplierOnDoc(applier, normalized, &normalizedValid, *validated, modelInfo); errApply != nil {
+			return modified, errApply
+		}
+		value := normalized.Get("reasoning.effort")
+		if value.Type == ojson.String && value.String() != effort.String() {
+			if errSet := doc.Set(path, value.String()); errSet != nil {
+				return modified, errSet
+			}
+			modified = true
+		}
+	}
+	return modified, nil
 }
 
 // CollapseConfigurationUpdates removes every configuration_update input item.
