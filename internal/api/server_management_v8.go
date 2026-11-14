@@ -45,6 +45,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/usage/speed", s.mgmt.GetUsageSpeed)
 	v8.GET("/observability/usage/settings", s.mgmt.GetUsageSettings)
 	v8.PUT("/observability/usage/settings", s.mgmt.PutUsageSettings)
+	v8.GET("/observability/requests/in-flight", s.mgmt.GetInFlightRequests)
 
 	v8.GET("/credentials", s.mgmt.ListAuthFiles)
 	v8.POST("/credentials", s.mgmt.UploadAuthFileV8)

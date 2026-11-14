@@ -382,7 +382,7 @@ func TestPayloadBarrierEffectiveServiceTierUsageAfterOverride(t *testing.T) {
 
 	t.Run("devin omits unencoded effective service tier", func(t *testing.T) {
 		var frames []byte
-		frame := appendDevinFieldBytes(nil, 2, []byte("ok"))
+		frame := appendDevinFieldBytes(nil, 3, []byte("ok"))
 		frames = append(frames, helps.WrapConnectEnvelope(frame)...)
 		frames = append(frames, helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`))...)
 

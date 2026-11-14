@@ -28,6 +28,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
 )
 
 func resetClaudeDeviceProfileCache() {
@@ -5928,6 +5929,48 @@ func TestClaudeCloakSensitiveWordsReplaceFromYAML(t *testing.T) {
 	}
 }
 
+func TestClaudeCloakSensitivePatternsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`claude-api-key:
+  - api-key: "key-pattern-123"
+    cloak:
+      mode: "always"
+      sensitive-words:
+        - "proxy"
+      sensitive-patterns-replace:
+        - pattern: '(?m)^You are omp[^\n]*\n?'
+          replacement: ""
+        - pattern: 'Claude\s+Code'
+          replacement: "Claude"
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-pattern-123"}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"You are omp's agent.\nUse Claude  Code through proxy."}]}]}`)
+
+	out, cloaked, errCloaking := applyCloaking(
+		context.Background(),
+		cfg,
+		auth,
+		payload,
+		"key-pattern-123",
+		false,
+		false,
+	)
+	if errCloaking != nil {
+		t.Fatalf("applyCloaking() error = %v", errCloaking)
+	}
+	if !cloaked {
+		t.Fatal("applyCloaking() cloaked = false, want true")
+	}
+	content := ojson.GetBytes(out, "messages.0.content").Array()
+	got := content[len(content)-1].Get("text").String()
+	want := "Use Claude through p\u200Broxy."
+	if got != want {
+		t.Fatalf("user message = %q, want %q", got, want)
+	}
+}
+
 func TestClaudeOAuthMetadataSensitiveWordsReplaceAndDisabledCloaking(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Attributes: map[string]string{"api_key": "sk-ant-oat-replace-test"},
@@ -5967,6 +6010,96 @@ func TestClaudeOAuthMetadataSensitiveWordsReplaceAndDisabledCloaking(t *testing.
 	}
 	if !strings.Contains(string(outNever), "You are Codex, an agent based on GPT-5.") {
 		t.Fatalf("disabled cloaking should preserve cleartext, got: %s", outNever)
+	}
+
+	authPattern := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-oat-pattern-test"},
+		Metadata: map[string]any{
+			"cloak_mode": "always",
+			"cloak_sensitive_patterns_replace": []map[string]any{
+				{"pattern": `(?m)^You are omp[^\n]*\n?`, "replacement": ""},
+			},
+		},
+	}
+	patternPayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"You are omp's assistant.\nKeep me."}]}]}`)
+	outPattern, cloakedPattern, errPattern := applyCloaking(context.Background(), &config.Config{}, authPattern, patternPayload, "sk-ant-oat-pattern-test", false, false)
+	if errPattern != nil {
+		t.Fatalf("applyCloaking(patterns) error = %v", errPattern)
+	}
+	if !cloakedPattern {
+		t.Fatal("expected cloaked = true for pattern metadata")
+	}
+	patternContent := ojson.GetBytes(outPattern, "messages.0.content").Array()
+	if got := patternContent[len(patternContent)-1].Get("text").String(); got != "Keep me." {
+		t.Fatalf("rewritten pattern message = %q, want %q", got, "Keep me.")
+	}
+
+	// Verify matcher cache reuse and single invalid-regex log across repeated resolutions.
+	claudeMatcherCacheMu.Lock()
+	savedCache := claudeMatcherCache
+	savedOrder := claudeMatcherCacheOrder
+	claudeMatcherCache = make(map[string]*helps.SensitiveWordMatcher)
+	claudeMatcherCacheOrder = nil
+	claudeMatcherCacheMu.Unlock()
+	t.Cleanup(func() {
+		claudeMatcherCacheMu.Lock()
+		claudeMatcherCache = savedCache
+		claudeMatcherCacheOrder = savedOrder
+		claudeMatcherCacheMu.Unlock()
+	})
+
+	var logBuf bytes.Buffer
+	origOut := log.StandardLogger().Out
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOut)
+
+	authInvalid := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-oat-invalid-cache-test"},
+		Metadata: map[string]any{
+			"cloak_mode": "always",
+			"cloak_sensitive_patterns_replace": []map[string]any{
+				{"pattern": `[invalid-claude-cache-test`, "replacement": ""},
+				{"pattern": `(?m)^DropMe[^\n]*\n?`, "replacement": ""},
+			},
+		},
+	}
+	_, settings1 := resolveClaudeWirePolicy(&config.Config{}, authInvalid, "sk-ant-oat-invalid-cache-test", false)
+	_, settings2 := resolveClaudeWirePolicy(&config.Config{}, authInvalid, "sk-ant-oat-invalid-cache-test", false)
+	m1 := settings1.buildSensitiveWordMatcher()
+	m2 := settings2.buildSensitiveWordMatcher()
+	if m1 == nil || m1 != m2 {
+		t.Fatalf("expected cached Claude matcher reuse, got m1=%p m2=%p", m1, m2)
+	}
+	if warnCount := strings.Count(logBuf.String(), "invalid-claude-cache-test"); warnCount != 1 {
+		t.Fatalf("expected 1 invalid-regex warning across repeated resolutions, got %d in %q", warnCount, logBuf.String())
+	}
+
+	// Verify Home credential_options.cloak.sensitive-patterns-replace end-to-end.
+	homeAuth := &cliproxyauth.Auth{
+		Attributes: map[string]string{"api_key": "sk-ant-home-pattern-test"},
+		Metadata: map[string]any{
+			"credential_options": map[string]any{
+				"cloak": map[string]any{
+					"mode": "always",
+					"sensitive-patterns-replace": []map[string]any{
+						{"pattern": `(?m)^You are omp[^\n]*\n?`, "replacement": ""},
+					},
+				},
+			},
+		},
+	}
+	homeCfg := &config.Config{Home: config.HomeConfig{Enabled: true}}
+	homePayload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"You are omp's assistant.\nKeep Home rule."}]}]}`)
+	outHome, cloakedHome, errHome := applyCloaking(context.Background(), homeCfg, homeAuth, homePayload, "sk-ant-home-pattern-test", false, false)
+	if errHome != nil {
+		t.Fatalf("applyCloaking(home patterns) error = %v", errHome)
+	}
+	if !cloakedHome {
+		t.Fatal("expected cloaked = true for Home cloak patterns")
+	}
+	homeContent := ojson.GetBytes(outHome, "messages.0.content").Array()
+	if got := homeContent[len(homeContent)-1].Get("text").String(); got != "Keep Home rule." {
+		t.Fatalf("Home pattern message = %q, want %q", got, "Keep Home rule.")
 	}
 }
 

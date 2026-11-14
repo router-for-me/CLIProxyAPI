@@ -309,6 +309,12 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "antigravity":
 		s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	case "claude":
+		if existing, found := s.coreManager.Executor("claude"); found {
+			if previous, ok := existing.(*executor.ClaudeExecutor); ok {
+				s.coreManager.RegisterExecutor(previous.WithConfig(cfg))
+				return
+			}
+		}
 		s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(cfg))
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
@@ -502,7 +508,7 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 	if s == nil || s.pluginHost == nil {
 		return nil
 	}
-	return s.pluginHost.ModelsForProvider(providerKey)
+	return s.pluginHost.StaticAppendModelsForProvider(providerKey)
 }
 
 // appendPluginModels appends the provider's plugin static models that are not excluded.
