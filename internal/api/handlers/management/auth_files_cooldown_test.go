@@ -933,6 +933,7 @@ func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testi
 	if errUnmarshal := json.Unmarshal(wDiffStart.Body.Bytes(), &diffStartResp); errUnmarshal != nil {
 		t.Fatalf("unmarshal diffStartResp: %v", errUnmarshal)
 	}
+	mockSvc.callback(t, diffStartResp.State)
 	diffStatus := pollOAuthStatusUntilDone(t, router, diffStartResp.State)
 	if diffStatus["status"] != "error" || !strings.Contains(fmt.Sprint(diffStatus["error"]), "does not match target credential") {
 		t.Fatalf("expected account mismatch error, got %#v", diffStatus)
@@ -966,6 +967,7 @@ func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testi
 		if errUnmarshal := json.Unmarshal(wMissing.Body.Bytes(), &missingStartResp); errUnmarshal != nil {
 			t.Fatalf("unmarshal missingStartResp (%s): %v", missingCase.name, errUnmarshal)
 		}
+		mockSvc.callback(t, missingStartResp.State)
 		missingStatus := pollOAuthStatusUntilDone(t, router, missingStartResp.State)
 		if missingStatus["status"] != "error" || !strings.Contains(fmt.Sprint(missingStatus["error"]), "does not match target credential") {
 			t.Fatalf("%s: expected mismatch error, got %#v", missingCase.name, missingStatus)
@@ -995,6 +997,7 @@ func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testi
 	if errUnmarshal := json.Unmarshal(wUnadoptedStart.Body.Bytes(), &unadoptedStartResp); errUnmarshal != nil {
 		t.Fatalf("unmarshal unadoptedStartResp: %v", errUnmarshal)
 	}
+	mockSvc.callback(t, unadoptedStartResp.State)
 	unadoptedStatus := pollOAuthStatusUntilDone(t, router, unadoptedStartResp.State)
 	if unadoptedStatus["status"] != "ok" || unadoptedStatus["saved"] != true || unadoptedStatus["adopted"] != false || unadoptedStatus["recovery_stage"] != coreauth.RecoveryStageCredentialSaved {
 		t.Fatalf("expected saved=true adopted=false recovery_stage=credential_saved when runtime adoption fails, got %#v", unadoptedStatus)
@@ -1041,6 +1044,7 @@ func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testi
 	if errUnmarshal := json.Unmarshal(wMatchStart.Body.Bytes(), &matchStartResp); errUnmarshal != nil {
 		t.Fatalf("unmarshal matchStartResp: %v", errUnmarshal)
 	}
+	mockSvc.callback(t, matchStartResp.State)
 	matchStatus := pollOAuthStatusUntilDone(t, router, matchStartResp.State)
 	if matchStatus["status"] != "ok" || matchStatus["auth_id"] != "codex-a.json" || matchStatus["saved"] != true || matchStatus["adopted"] != true {
 		t.Fatalf("expected saved & adopted ok status for codex-a.json, got %#v", matchStatus)
@@ -1178,6 +1182,7 @@ func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testi
 	if errUnmarshal := json.Unmarshal(wVerifyOptIn.Body.Bytes(), &verifyOptInStartResp); errUnmarshal != nil {
 		t.Fatalf("unmarshal verifyOptInStartResp: %v", errUnmarshal)
 	}
+	mockSvc.callback(t, verifyOptInStartResp.State)
 	optInStatus := pollOAuthStatusUntilDone(t, router, verifyOptInStartResp.State)
 	if optInStatus["status"] != "ok" || optInStatus["adopted"] != true || optInStatus["quota_blocked"] != true {
 		t.Fatalf("expected adopted=true quota_blocked=true after opt-in verify quota error, got %#v", optInStatus)
@@ -1200,10 +1205,14 @@ type targetedRecoveryTestCodexOAuthService struct {
 }
 
 func (s *targetedRecoveryTestCodexOAuthService) GenerateAuthURL(state string, _ *codex.PKCECodes) (string, error) {
-	waitFile := filepath.Join(s.authDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
-	payload, _ := json.Marshal(map[string]string{"state": state, "code": "code-" + state})
-	_ = os.WriteFile(waitFile, payload, 0o600)
 	return "https://auth.example.test/authorize?state=" + state, nil
+}
+
+func (s *targetedRecoveryTestCodexOAuthService) callback(t *testing.T, state string) {
+	t.Helper()
+	if _, err := WriteOAuthCallbackFileForPendingSession(s.authDir, "codex", state, "code-"+state, ""); err != nil {
+		t.Fatal("targeted OAuth fixture callback publication failed")
+	}
 }
 
 func (s *targetedRecoveryTestCodexOAuthService) ExchangeCodeForTokens(_ context.Context, code string, _ *codex.PKCECodes) (*codex.CodexAuthBundle, error) {

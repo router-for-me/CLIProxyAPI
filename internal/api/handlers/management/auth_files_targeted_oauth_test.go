@@ -103,12 +103,14 @@ type targetedTestClaudeOAuthService struct {
 }
 
 func (s *targetedTestClaudeOAuthService) GenerateAuthURL(state string, _ *claude.PKCECodes) (string, string, error) {
-	if s.authDir != "" {
-		waitFile := filepath.Join(s.authDir, ".oauth-anthropic-"+state+".oauth")
-		payload, _ := json.Marshal(map[string]string{"state": state, "code": "claude-code-" + state})
-		_ = os.WriteFile(waitFile, payload, 0o600)
-	}
 	return "https://claude.ai/oauth/authorize?state=" + state, state, nil
+}
+
+func (s *targetedTestClaudeOAuthService) callback(t *testing.T, state string) {
+	t.Helper()
+	if _, err := WriteOAuthCallbackFileForPendingSession(s.authDir, "anthropic", state, "claude-code-"+state, ""); err != nil {
+		t.Fatal("targeted OAuth fixture callback publication failed")
+	}
 }
 
 func (s *targetedTestClaudeOAuthService) ExchangeCodeForTokens(_ context.Context, code, _ string, _ *claude.PKCECodes) (*claude.ClaudeAuthBundle, error) {
@@ -661,6 +663,7 @@ func TestTargetedOAuthReloginClaudeXAIMetaDevinAndAuthIndexVerify(t *testing.T) 
 	if claudeMismatchStart.TargetAuthID != "claude-custom.json" {
 		t.Fatalf("claude target_auth_id = %q, want claude-custom.json", claudeMismatchStart.TargetAuthID)
 	}
+	claudeSvc.callback(t, claudeMismatchStart.State)
 	if st := pollOAuthStatusUntilDone(t, router, claudeMismatchStart.State); st["status"] != "error" {
 		t.Fatalf("claude mismatch status = %#v, want error", st)
 	}
@@ -675,6 +678,7 @@ func TestTargetedOAuthReloginClaudeXAIMetaDevinAndAuthIndexVerify(t *testing.T) 
 		State string `json:"state"`
 	}
 	_ = json.Unmarshal(wClaudeMatch.Body.Bytes(), &claudeMatchStart)
+	claudeSvc.callback(t, claudeMatchStart.State)
 	if st := pollOAuthStatusUntilDone(t, router, claudeMatchStart.State); st["status"] != "ok" || st["auth_id"] != "claude-custom.json" || st["adopted"] != true {
 		t.Fatalf("claude match status = %#v, want ok & adopted", st)
 	}
@@ -850,6 +854,7 @@ func TestTargetedOAuthReloginReviewEdgeCasesAndVerification(t *testing.T) {
 	router.ServeHTTP(wOrgMismatch, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"claude","name":"claude-org-a.json"}`)))
 	var orgMismatchStart struct{ State string }
 	_ = json.Unmarshal(wOrgMismatch.Body.Bytes(), &orgMismatchStart)
+	claudeOrgSvc.callback(t, orgMismatchStart.State)
 	if st := pollOAuthStatusUntilDone(t, router, orgMismatchStart.State); st["status"] != "error" || st["error"] != "Authenticated account does not match target credential" {
 		t.Fatalf("claude org mismatch status = %#v, want error", st)
 	}
@@ -860,6 +865,7 @@ func TestTargetedOAuthReloginReviewEdgeCasesAndVerification(t *testing.T) {
 	router.ServeHTTP(wOrgMatch, httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"claude","name":"claude-org-a.json"}`)))
 	var orgMatchStart struct{ State string }
 	_ = json.Unmarshal(wOrgMatch.Body.Bytes(), &orgMatchStart)
+	claudeOrgSvc.callback(t, orgMatchStart.State)
 	if st := pollOAuthStatusUntilDone(t, router, orgMatchStart.State); st["status"] != "ok" || st["auth_id"] != "claude-org-a.json" || st["adopted"] != true {
 		t.Fatalf("claude org match status = %#v, want ok & adopted", st)
 	}

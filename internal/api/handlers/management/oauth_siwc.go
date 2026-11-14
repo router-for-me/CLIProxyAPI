@@ -276,9 +276,13 @@ func (h *Handler) StartSIWCBind(c *gin.Context) {
 
 func (s *oauthSessionStore) registerSIWC(state string, flow *siwcBindSession) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
 	now := time.Now()
-	s.purgeExpiredLocked(now)
+	cleanup = s.purgeExpiredLocked(now)
 	if _, exists := s.sessions[state]; exists {
 		return false
 	}
@@ -296,8 +300,12 @@ func (s *oauthSessionStore) registerSIWC(state string, flow *siwcBindSession) bo
 // unknown-state response. Cancellation is serialized by the session gate.
 func (s *oauthSessionStore) claimSIWCCommit(state string, flow *siwcBindSession) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.purgeExpiredLocked(time.Now())
+	var cleanup []*oauthCallbackReceipt
+	defer func() {
+		s.mu.Unlock()
+		s.cleanupCallbacks(cleanup)
+	}()
+	cleanup = s.purgeExpiredLocked(time.Now())
 	session, ok := s.sessions[state]
 	if !ok || session.SIWC != flow || session.Completed || session.Status != "" || session.SIWCCommitting || flow.ctx.Err() != nil {
 		return false

@@ -201,6 +201,9 @@ func TestCompleteDevinOAuthFailures(t *testing.T) {
 				payload = `{"state":"test-state","code":"code"}`
 			}
 			path := filepath.Join(authDir, ".oauth-devin-"+state+".oauth")
+			if _, err := WriteOAuthCallbackFileForPendingSession(authDir, "devin", state, "code", ""); err != nil {
+				t.Fatal("Devin OAuth fixture callback publication failed")
+			}
 			if errWrite := os.WriteFile(path, []byte(payload), 0o600); errWrite != nil {
 				t.Fatal(errWrite)
 			}
