@@ -441,6 +441,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	// returned header snapshot is never modified by the stream goroutine.
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
 	baseStreamHeaders := cloneHeader(streamResult.Headers)
+	routingEvidence := streamResult.DownstreamHeaders
 	chunks := streamResult.Chunks
 	if chunks == nil {
 		closed := make(chan coreexecutor.StreamChunk)
@@ -621,6 +622,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 		rawStreamHeaders = cloneHeader(retryResult.Headers)
 		baseStreamHeaders = cloneHeader(retryResult.Headers)
+		routingEvidence = retryResult.DownstreamHeaders
 		streamHeaderInitialized = false
 		streamClosedBeforeRead = false
 		bootstrapStreamErr = nil
@@ -639,6 +641,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	upstreamHeaders := downstreamHeadersAfterInterceptors(baseStreamHeaders, rawStreamHeaders, passthroughHeadersEnabled)
+	upstreamHeaders = withRoutingEvidence(upstreamHeaders, routingEvidence)
 	if upstreamHeaders == nil && (passthroughHeadersEnabled || streamInterceptorsActive) {
 		upstreamHeaders = make(http.Header)
 	}
