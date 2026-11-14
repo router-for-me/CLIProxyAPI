@@ -534,7 +534,11 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 			delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 		}
 	} else if len(resp.Headers) > 0 {
-		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, opts.Metadata); ok && info.SessionID != "" {
+		evalPayload := opts.OriginalRequest
+		if len(evalPayload) == 0 {
+			evalPayload = req.Payload
+		}
+		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, evalPayload, opts.Metadata); ok && info.SessionID != "" {
 			if opts.Metadata == nil {
 				opts.Metadata = make(map[string]any, 2)
 			}

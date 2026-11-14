@@ -2286,12 +2286,12 @@ func TestExtractSessionIDNativeSignalPriority(t *testing.T) {
 			want:    "pck:shared-cache-bucket",
 		},
 		{
-			name: "client request id beats body fallbacks",
+			name: "stable prompt cache key beats client request id",
 			headers: http.Header{
 				"X-Client-Request-Id": []string{"client-session"},
 			},
 			payload: `{"prompt_cache_key":"prompt-session","conversation":{"id":"conversation-session"}}`,
-			want:    "clientreq:client-session",
+			want:    "pck:prompt-session",
 		},
 	}
 
