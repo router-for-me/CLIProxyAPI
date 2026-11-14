@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // retryableRateLimitError carries an explicit Retry-After so
@@ -68,7 +68,7 @@ func (e *rateLimitedExecutor) HttpRequest(context.Context, *Auth, *http.Request)
 func TestCooldownRetryResetsExclusions(t *testing.T) {
 	newManager := func() (*Manager, *rateLimitedExecutor) {
 		manager := NewManager(nil, nil, nil)
-		manager.SetRetryConfig(1, 5*time.Second, 0)
+		manager.SetRetryConfig(1, 15*time.Second, 0)
 		auth := &Auth{ID: "auth-429", Provider: "gemini", Status: StatusActive}
 		if _, err := manager.Register(context.Background(), auth); err != nil {
 			t.Fatalf("register auth: %v", err)
@@ -175,7 +175,7 @@ func (e *idRecordingRateLimitedExecutor) count(id string) int {
 // ruled out can be executed once the wait completes.
 func TestCooldownRetryPreservesCallerExclusions(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.SetRetryConfig(1, 5*time.Second, 0)
+	manager.SetRetryConfig(1, 15*time.Second, 0)
 	authRateLimited := &Auth{ID: "auth-429", Provider: "gemini", Status: StatusActive}
 	authCallerExcluded := &Auth{ID: "auth-caller", Provider: "gemini", Status: StatusActive}
 	for _, a := range []*Auth{authRateLimited, authCallerExcluded} {
@@ -220,7 +220,7 @@ func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
 	t.Run("global config disable cooling retains exclusion on retry", func(t *testing.T) {
 		manager := NewManager(nil, nil, nil)
 		manager.SetConfigSnapshot(&internalconfig.Config{DisableCooling: true})
-		manager.SetRetryConfig(1, 5*time.Second, 0)
+		manager.SetRetryConfig(1, 15*time.Second, 0)
 		auth := &Auth{ID: "auth-global-disabled", Provider: "gemini", Status: StatusActive}
 		if _, err := manager.Register(context.Background(), auth); err != nil {
 			t.Fatalf("register auth: %v", err)
@@ -254,7 +254,7 @@ func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
 				},
 			},
 		})
-		manager.SetRetryConfig(1, 5*time.Second, 0)
+		manager.SetRetryConfig(1, 15*time.Second, 0)
 		auth := &Auth{
 			ID:       "auth-compat-disabled",
 			Provider: "openai-compatibility",
@@ -289,7 +289,7 @@ func TestCooldownRetryPreservesConfigDisabledCoolingExclusions(t *testing.T) {
 	t.Run("control cooling enabled normally resets exclusion on retry", func(t *testing.T) {
 		manager := NewManager(nil, nil, nil)
 		manager.SetConfigSnapshot(&internalconfig.Config{DisableCooling: false})
-		manager.SetRetryConfig(1, 5*time.Second, 0)
+		manager.SetRetryConfig(1, 15*time.Second, 0)
 		auth := &Auth{ID: "auth-cooling-enabled", Provider: "gemini", Status: StatusActive}
 		if _, err := manager.Register(context.Background(), auth); err != nil {
 			t.Fatalf("register auth: %v", err)

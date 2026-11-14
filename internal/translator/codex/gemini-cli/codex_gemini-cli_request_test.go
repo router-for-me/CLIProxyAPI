@@ -3,7 +3,7 @@ package geminiCLI
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertGeminiCLIRequestToCodex_PreservesSchemaPropertyNamedType(t *testing.T) {
@@ -56,8 +56,11 @@ func TestConvertGeminiCLIRequestToCodex_PreservesSchemaPropertyNamedType(t *test
 		}
 	}`)
 
-	out := ConvertGeminiCLIRequestToCodex("gpt-5.2", input, true)
-	tool := gjson.GetBytes(out, "tools.0")
+	out, err := ConvertGeminiCLIRequestToCodex("gpt-5.2", input, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := ojson.GetBytes(out, "tools.0")
 	if got := tool.Get("type").String(); got != "function" {
 		t.Fatalf("expected tool type %q, got %q; output=%s", "function", got, string(out))
 	}

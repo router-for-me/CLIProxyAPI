@@ -9,11 +9,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -56,6 +57,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
 	selection, selected, errSelect := h.selectOAuth(ctx, selectionModel, selectionOpts)
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
@@ -67,6 +69,19 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 	if selection != nil {
 		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
@@ -113,23 +128,19 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
 	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-		closeHandshakeBody(handshakeResponse, "direct websocket unauthorized")
-		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
-		if errRefresh != nil {
-			writeSelectionError(c, errRefresh)
-			return
-		}
-		if didRefresh && refreshed != nil {
-			selected = refreshed
-			logging.SetGinCPATraceID(c, selected.EnsureIndex())
-			upstream, handshakeResponse, errDial = dialUpstream(selected)
-		}
 	}
 	if errDial != nil {
 		status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
 		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
 			status = handshakeResponse.StatusCode
 			copyRealtimeHandshakeHeaders(c.Writer.Header(), handshakeResponse.Header)
+		}
+		if status == http.StatusUnauthorized && handshakeResponse != nil && handshakeResponse.Body != nil {
+			body, _ := readLimitedBody(handshakeResponse.Body)
+			_ = handshakeResponse.Body.Close()
+			helps.AppendAPIWebsocketBody(ctx, h.currentConfig(), body)
+			c.Data(status, handshakeResponse.Header.Get("Content-Type"), body)
+			return
 		}
 		closeHandshakeBody(handshakeResponse, "direct websocket rejected")
 		helpConfig := h.currentConfig()

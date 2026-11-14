@@ -11,10 +11,10 @@ import (
 	"encoding/json"
 	"strings"
 
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/MoeForge/moego/ojson"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // ConvertKiroStreamToOpenAI converts Kiro streaming response to OpenAI format.
@@ -68,7 +68,7 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 	}
 
 	// Parse the event data as JSON
-	eventJSON := gjson.Parse(eventData)
+	eventJSON := ojson.Parse(eventData)
 	if !eventJSON.Exists() {
 		return [][]byte{}
 	}
@@ -171,7 +171,7 @@ func ConvertKiroStreamToOpenAI(ctx context.Context, model string, originalReques
 // from Claude format to OpenAI format.
 func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalRequest, request, rawResponse []byte, param *any) []byte {
 	// Parse the Claude-format response
-	response := gjson.ParseBytes(rawResponse)
+	response := ojson.ParseBytes(rawResponse)
 
 	// Extract content
 	var content string
@@ -201,7 +201,7 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 				var inputMap map[string]interface{}
 				if toolInput.IsObject() {
 					inputMap = make(map[string]interface{})
-					toolInput.ForEach(func(key, value gjson.Result) bool {
+					toolInput.ForEach(func(key, value ojson.Result) bool {
 						inputMap[key.String()] = value.Value()
 						return true
 					})
@@ -234,7 +234,7 @@ func ConvertKiroNonStreamToOpenAI(ctx context.Context, model string, originalReq
 	return openaiResponse
 }
 
-func usageDetailFromClaudeUsage(usageNode gjson.Result) usage.Detail {
+func usageDetailFromClaudeUsage(usageNode ojson.Result) usage.Detail {
 	detail := usage.Detail{
 		InputTokens:         usageNode.Get("input_tokens").Int(),
 		OutputTokens:        usageNode.Get("output_tokens").Int(),

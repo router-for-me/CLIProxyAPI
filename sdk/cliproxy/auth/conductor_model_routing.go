@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelrouting"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type modelRoutingCandidateAttempt struct {
@@ -71,6 +71,47 @@ type modelRoutingAcquisitionScope struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	once   sync.Once
+}
+
+// modelRoutingAcquisitionContext carries the acquisition scope without
+// allowing its deadline to reach the connected upstream execution.
+type modelRoutingAcquisitionContext struct {
+	scope *modelRoutingAcquisitionScope
+	base  context.Context
+}
+
+type modelRoutingAcquisitionContextKey struct{}
+
+func withModelRoutingAcquisition(ctx context.Context, scope *modelRoutingAcquisitionScope) context.Context {
+	if scope == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, modelRoutingAcquisitionContextKey{}, &modelRoutingAcquisitionContext{scope: scope, base: ctx})
+}
+
+func modelRoutingAcquisitionFromContext(ctx context.Context) *modelRoutingAcquisitionScope {
+	value, _ := ctx.Value(modelRoutingAcquisitionContextKey{}).(*modelRoutingAcquisitionContext)
+	if value == nil {
+		return nil
+	}
+	return value.scope
+}
+
+func modelRoutingBaseContextFromContext(ctx context.Context) context.Context {
+	value, _ := ctx.Value(modelRoutingAcquisitionContextKey{}).(*modelRoutingAcquisitionContext)
+	if value == nil {
+		return nil
+	}
+	return value.base
+}
+
+// modelRoutingSelectionContext bounds credential selection and preparation by
+// the acquisition deadline while connected execution uses the caller context.
+func modelRoutingSelectionContext(ctx context.Context) context.Context {
+	if acquisition := modelRoutingAcquisitionFromContext(ctx); acquisition != nil {
+		return acquisition.contextOr(ctx)
+	}
+	return ctx
 }
 
 func (m *Manager) newModelRoutingAcquisitionScope(ctx context.Context, bootstrap bool) (*modelRoutingAcquisitionScope, error) {
@@ -203,17 +244,15 @@ func (m *Manager) executeWithModelRouting(ctx context.Context, providers []strin
 		if errContext != nil {
 			return cliproxyexecutor.Response{}, m.newModelRoutingExecutionError(joinModelRoutingCauses(causes, errContext), firstAttempt, trace)
 		}
-		state := newRouteExecutionState(attempt.options, tracker)
-		state.modelRoutingAcquisition = acquisition
 		response, errExecute := m.executeMixedOnce(
-			ctx,
+			withModelRoutingAcquisition(ctx, acquisition),
 			[]string{attempt.candidate.Channel},
 			attempt.request,
 			attempt.options,
 			1,
 			0,
 			0,
-			state,
+			tracker,
 		)
 		acquisition.finish()
 		if len(causes) == 0 {
@@ -260,17 +299,15 @@ func (m *Manager) executeCountWithModelRouting(ctx context.Context, providers []
 		if errContext != nil {
 			return cliproxyexecutor.Response{}, m.newModelRoutingExecutionError(joinModelRoutingCauses(causes, errContext), firstAttempt, trace)
 		}
-		state := newRouteExecutionState(attempt.options, tracker)
-		state.modelRoutingAcquisition = acquisition
 		response, errExecute := m.executeCountMixedOnce(
-			ctx,
+			withModelRoutingAcquisition(ctx, acquisition),
 			[]string{attempt.candidate.Channel},
 			attempt.request,
 			attempt.options,
 			1,
 			0,
 			0,
-			state,
+			tracker,
 		)
 		acquisition.finish()
 		if len(causes) == 0 {
@@ -318,11 +355,9 @@ func (m *Manager) executeStreamWithModelRouting(ctx context.Context, providers [
 			return nil, m.newModelRoutingExecutionError(joinModelRoutingCauses(causes, errContext), firstAttempt, trace)
 		}
 		homeRetryLimit := -1
-		state := newRouteExecutionState(attempt.options, tracker)
-		state.modelRoutingAcquisition = acquisition
 		streamCtx, cancelStream := context.WithCancel(ctx)
 		result, errExecute := m.executeStreamMixedOnce(
-			streamCtx,
+			withModelRoutingAcquisition(streamCtx, acquisition),
 			[]string{attempt.candidate.Channel},
 			attempt.request,
 			attempt.options,
@@ -330,7 +365,7 @@ func (m *Manager) executeStreamWithModelRouting(ctx context.Context, providers [
 			&homeRetryLimit,
 			0,
 			0,
-			state,
+			tracker,
 		)
 		acquisition.finish()
 		if len(causes) == 0 {

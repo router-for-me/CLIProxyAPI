@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"strings"
 
-	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	zaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/zai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // ZAIExecutor is a stateless executor for Z.AI / ZCode (GLM) coding plans.

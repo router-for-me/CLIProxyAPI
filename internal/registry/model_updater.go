@@ -5,8 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -14,10 +13,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const (
-	modelsFetchTimeout    = 30 * time.Second
-	modelsRefreshInterval = 3 * time.Hour
-)
+// ModelsRefreshInterval is the shared cadence for model catalogs and account entitlements.
+const ModelsRefreshInterval = 3 * time.Hour
 
 var modelsURLs = []string{
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
@@ -33,13 +30,6 @@ type modelStore struct {
 }
 
 var modelsCatalogStore = &modelStore{}
-
-var updaterOnce sync.Once
-
-// embeddedZAIModels holds the GLM (zai) definitions shipped in the embedded
-// catalog. They are kept as a fallback for remote catalogs that predate the zai
-// provider and would otherwise replace the section with an empty one.
-var embeddedZAIModels []*ModelInfo
 
 // ModelRefreshCallback is invoked when startup or periodic model refresh detects changes.
 // changedProviders contains the provider names whose model definitions changed.
@@ -74,136 +64,13 @@ func init() {
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
 		log.Warnf("registry: failed to parse embedded models.json (embedded catalog may be incomplete or invalid; continuing startup and will rely on remote model refresh): %v", err)
 	}
-	// Capture the embedded zai (GLM) definitions before any remote refresh can
-	// overwrite the catalog, so they can be preserved when the remote omits them.
-	if d := getModels(); d != nil {
-		embeddedZAIModels = d.ZAI
-	}
 }
 
 // StartModelsUpdater starts a background updater that fetches models
 // immediately on startup and then refreshes the model catalog every 3 hours.
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context) {
-	updaterOnce.Do(func() {
-		go runModelsUpdater(ctx)
-	})
-}
-
-func runModelsUpdater(ctx context.Context) {
-	tryStartupRefresh(ctx)
-	periodicRefresh(ctx)
-}
-
-func periodicRefresh(ctx context.Context) {
-	ticker := time.NewTicker(modelsRefreshInterval)
-	defer ticker.Stop()
-	log.Infof("periodic model refresh started (interval=%s)", modelsRefreshInterval)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryPeriodicRefresh(ctx)
-		}
-	}
-}
-
-// tryPeriodicRefresh fetches models from remote, compares with the current
-// catalog, and notifies the registered callback if any provider changed.
-func tryPeriodicRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "periodic model refresh")
-}
-
-// tryStartupRefresh fetches models from remote in the background during
-// process startup. It uses the same change detection as periodic refresh so
-// existing auth registrations can be updated after the callback is registered.
-func tryStartupRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "startup model refresh")
-}
-
-func tryRefreshModels(ctx context.Context, label string) {
-	oldData := getModels()
-
-	parsed, url := fetchModelsFromRemote(ctx)
-	if parsed == nil {
-		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
-		return
-	}
-
-	// A remote catalog that predates the zai provider would otherwise replace the
-	// embedded GLM definitions with an empty section, breaking glm-* provider
-	// resolution. Keep the embedded zai models until the remote ships its own.
-	if applyEmbeddedZAIFallback(parsed) {
-		log.Infof("%s: remote catalog omits zai models; keeping embedded GLM definitions", label)
-	}
-
-	// Detect changes before updating store.
-	changed := detectChangedProviders(oldData, parsed)
-
-	// Update store with new data regardless.
-	modelsCatalogStore.mu.Lock()
-	modelsCatalogStore.data = parsed
-	modelsCatalogStore.mu.Unlock()
-
-	if len(changed) == 0 {
-		log.Infof("%s completed from %s, no changes detected", label, url)
-		return
-	}
-
-	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
-	notifyModelRefresh(changed)
-}
-
-// fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
-// along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
-func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
-	client := &http.Client{Timeout: modelsFetchTimeout}
-	for _, url := range modelsURLs {
-		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
-		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
-		if err != nil {
-			cancel()
-			log.Debugf("models fetch request creation failed for %s: %v", url, err)
-			continue
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			cancel()
-			log.Debugf("models fetch failed from %s: %v", url, err)
-			continue
-		}
-
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			cancel()
-			log.Debugf("models fetch returned %d from %s", resp.StatusCode, url)
-			continue
-		}
-
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		cancel()
-
-		if err != nil {
-			log.Debugf("models fetch read error from %s: %v", url, err)
-			continue
-		}
-
-		var parsed staticModelsJSON
-		if err := json.Unmarshal(data, &parsed); err != nil {
-			log.Warnf("models parse failed from %s: %v", url, err)
-			continue
-		}
-		if err := validateModelsCatalog(&parsed); err != nil {
-			log.Warnf("models validate failed from %s: %v", url, err)
-			continue
-		}
-
-		return &parsed, url
-	}
-	return nil, ""
+	generalCatalogUpdater.configure(ctx, "")
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names
@@ -231,10 +98,14 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"codex", oldData.CodexPlus, newData.CodexPlus},
 		{"codex", oldData.CodexPro, newData.CodexPro},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"kimi-ai", oldData.Kimi, newData.Kimi},
+		{"kimi.ai", oldData.Kimi, newData.Kimi},
+		{"kimi.com", oldData.Kimi, newData.Kimi},
 		{"qoder", oldData.Qoder, newData.Qoder},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
-		{"zai", oldData.ZAI, newData.ZAI},
+		{"devin", oldData.Devin, newData.Devin},
+		{"meta", oldData.Meta, newData.Meta},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -251,13 +122,21 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	return changed
 }
 
-// modelSectionChanged reports whether two model slices differ.
+// modelSectionChanged reports whether two model slices differ, including
+// internal metadata that is intentionally omitted from normal JSON responses.
 func modelSectionChanged(a, b []*ModelInfo) bool {
 	if len(a) != len(b) {
 		return true
 	}
 	if len(a) == 0 {
 		return false
+	}
+	for i := range a {
+		if a[i] != nil && b[i] != nil {
+			if !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) || a[i].SupportConfigurationUpdate != b[i].SupportConfigurationUpdate {
+				return true
+			}
+		}
 	}
 	aj, err1 := json.Marshal(a)
 	bj, err2 := json.Marshal(b)
@@ -335,18 +214,6 @@ func getModels() *staticModelsJSON {
 	return modelsCatalogStore.data
 }
 
-// applyEmbeddedZAIFallback fills the zai section from the embedded catalog when a
-// remote catalog omits it (e.g. one published before the zai provider existed),
-// so refreshing cannot wipe the GLM definitions and break provider resolution. It
-// reports whether the fallback was applied.
-func applyEmbeddedZAIFallback(parsed *staticModelsJSON) bool {
-	if parsed == nil || len(parsed.ZAI) > 0 || len(embeddedZAIModels) == 0 {
-		return false
-	}
-	parsed.ZAI = embeddedZAIModels
-	return true
-}
-
 func validateModelsCatalog(data *staticModelsJSON) error {
 	if data == nil {
 		return fmt.Errorf("catalog is nil")
@@ -368,7 +235,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "qoder", models: data.Qoder},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
-		{name: "zai", models: data.ZAI},
+		{name: "meta", models: data.Meta},
 	}
 
 	for _, section := range requiredSections {

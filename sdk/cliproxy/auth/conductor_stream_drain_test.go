@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type drainTestExecutor struct {
@@ -132,7 +132,6 @@ func TestConductor_ExecuteStreamDrainsSourceOnTerminalEmpty_ModelPoolFailover(t 
 		nil,
 		true,
 		false,
-		nil,
 	)
 	if err != nil {
 		t.Fatalf("executeStreamWithModelPool unexpected error: %v", err)

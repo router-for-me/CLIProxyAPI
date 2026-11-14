@@ -5,12 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/antigravity"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/antigravity"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestSummaryIntentTranslation(t *testing.T) {
@@ -23,7 +23,7 @@ func TestSummaryIntentTranslation(t *testing.T) {
 		want       string
 		wantExists bool
 	}{
-		{name: "Chat effort enables Claude summary", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatClaude, body: `{"model":"claude-opus-5","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, path: "thinking.display", want: "summarized", wantExists: true},
+		{name: "Chat effort leaves Claude display unspecified", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatClaude, body: `{"model":"claude-opus-5","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, path: "thinking.display"},
 		// Anthropic rejects display next to a disabled thinking block, so a "none"
 		// effort must leave the field off rather than write "omitted".
 		{name: "Chat none leaves disabled Claude thinking without display", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatClaude, body: `{"model":"claude-opus-5","reasoning_effort":"none","messages":[{"role":"user","content":"hi"}]}`, path: "thinking.display"},
@@ -57,8 +57,10 @@ func TestSummaryIntentTranslation(t *testing.T) {
 		{name: "Google Chat extension overrides Gemini summary", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatGemini, body: `{"model":"gemini-3.6-flash","reasoning_effort":"high","extra_body":{"google":{"thinking_config":{"include_thoughts":false}}},"messages":[{"role":"user","content":"hi"}]}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
 		{name: "Responses effort alone leaves Gemini summary absent", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatGemini, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high"},"input":"hi"}`, path: "generationConfig.thinkingConfig.includeThoughts"},
 		{name: "Responses detailed summary enables Gemini summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatGemini, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":"detailed"},"input":"hi"}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
-		{name: "Responses effort alone leaves Antigravity summary absent", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts"},
+		{name: "Responses effort enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
 		{name: "Responses summary enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":"auto"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
+		{name: "Responses generate_summary enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","generate_summary":"detailed"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
+		{name: "Responses null summary disables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":null},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
 		{name: "Chat effort enables Interactions summary", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatInteractions, body: `{"model":"gemini-3.6-flash","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`, path: "generation_config.thinking_summaries", want: "auto", wantExists: true},
 		{name: "Responses concise summary maps to Interactions auto", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatInteractions, body: `{"model":"gemini-3.6-flash","reasoning":{"effort":"high","summary":"concise"},"input":"hi"}`, path: "generation_config.thinking_summaries", want: "auto", wantExists: true},
 		{name: "Native Claude summarized enables Gemini summary", from: sdktranslator.FormatClaude, to: sdktranslator.FormatGemini, body: `{"model":"claude-opus-5","thinking":{"type":"adaptive","display":"summarized"},"messages":[{"role":"user","content":"hi"}]}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
@@ -72,7 +74,7 @@ func TestSummaryIntentTranslation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			out := sdktranslator.TranslateRequest(test.from, test.to, "", []byte(test.body), true)
-			result := gjson.GetBytes(out, test.path)
+			result := ojson.GetBytesNoCopy(out, test.path)
 			if result.Exists() != test.wantExists {
 				t.Fatalf("%s exists = %v, want %v; body=%s", test.path, result.Exists(), test.wantExists, out)
 			}
@@ -96,7 +98,7 @@ func TestInvalidInteractionsSummaryDoesNotWriteTargetControl(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			out := sdktranslator.TranslateRequest(sdktranslator.FormatInteractions, test.to, "model", body, false)
-			if result := gjson.GetBytes(out, test.path); result.Exists() {
+			if result := ojson.GetBytesNoCopy(out, test.path); result.Exists() {
 				t.Fatalf("invalid Interactions summary wrote %s=%s; body=%s", test.path, result.Raw, out)
 			}
 		})
@@ -130,7 +132,7 @@ func TestSummaryIntentFinalPipeline(t *testing.T) {
 		{name: "Interactions compatibility summary activates valid Claude thinking", from: sdktranslator.FormatInteractions, to: sdktranslator.FormatClaude, model: "claude-sonnet-4-6-model", body: `{"model":"claude-sonnet-4-6-model","reasoning":{"summary":"auto"},"input":"hi"}`, path: "thinking.display", want: "summarized", wantExists: true},
 		{name: "Claude suffix none removes otherwise enabled display", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatClaude, model: "claude-sonnet-4-6-model(none)", body: `{"model":"claude-sonnet-4-6-model(none)","reasoning":{"summary":"auto"},"input":"hi"}`, path: "thinking.display"},
 		{name: "Claude suffix preserves explicit disabled summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatClaude, model: "claude-sonnet-4-6-model(high)", body: `{"model":"claude-sonnet-4-6-model(high)","reasoning":{"summary":null},"input":"hi"}`, path: "thinking.display", want: "omitted", wantExists: true},
-		{name: "Responses effort alone stays omitted on Antigravity", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, model: "antigravity-budget-model", body: `{"model":"antigravity-budget-model","reasoning":{"effort":"medium"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts"},
+		{name: "Responses effort enables Antigravity summary", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, model: "antigravity-budget-model", body: `{"model":"antigravity-budget-model","reasoning":{"effort":"medium"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
 		{name: "Responses summary reaches Antigravity", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatAntigravity, model: "antigravity-budget-model", body: `{"model":"antigravity-budget-model","reasoning":{"effort":"medium","summary":"auto"},"input":"hi"}`, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true", wantExists: true},
 		{name: "Responses null summary alone hides default Gemini thoughts", from: sdktranslator.FormatOpenAIResponse, to: sdktranslator.FormatGemini, model: "gemini-mixed-model", body: `{"model":"gemini-mixed-model","reasoning":{"summary":null},"input":"hi"}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
 		{name: "Google Chat extension false survives Gemini applier", from: sdktranslator.FormatOpenAI, to: sdktranslator.FormatGemini, model: "gemini-mixed-model", body: `{"model":"gemini-mixed-model","reasoning_effort":"high","extra_body":{"google":{"thinking_config":{"include_thoughts":false}}},"messages":[{"role":"user","content":"hi"}]}`, path: "generationConfig.thinkingConfig.includeThoughts", want: "false", wantExists: true},
@@ -163,14 +165,14 @@ func TestSummaryIntentFinalPipeline(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinking() error = %v; body=%s", err, out)
 			}
-			result := gjson.GetBytes(out, test.path)
+			result := ojson.GetBytesNoCopy(out, test.path)
 			if result.Exists() != test.wantExists {
 				t.Fatalf("%s exists = %v, want %v; body=%s", test.path, result.Exists(), test.wantExists, out)
 			}
 			if test.wantExists && result.String() != test.want {
 				t.Fatalf("%s = %q, want %q; body=%s", test.path, result.String(), test.want, out)
 			}
-			if test.to == sdktranslator.FormatClaude && gjson.GetBytes(out, "thinking.type").String() == "disabled" && gjson.GetBytes(out, "thinking.display").Exists() {
+			if test.to == sdktranslator.FormatClaude && ojson.GetBytesNoCopy(out, "thinking.type").String() == "disabled" && ojson.GetBytesNoCopy(out, "thinking.display").Exists() {
 				t.Fatalf("disabled Claude thinking retained display: %s", out)
 			}
 		})
@@ -196,13 +198,13 @@ func TestGeminiSummaryOnlyProducesValidClaudeThinking(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			body := []byte(`{"model":"` + test.model + `","generationConfig":{"thinkingConfig":{"includeThoughts":true}},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
 			out := sdktranslator.TranslateRequest(sdktranslator.FormatGemini, sdktranslator.FormatClaude, test.model, body, false)
-			if got := gjson.GetBytes(out, "thinking.type").String(); got != test.wantType {
+			if got := ojson.GetBytesNoCopy(out, "thinking.type").String(); got != test.wantType {
 				t.Fatalf("thinking.type = %q, want %q; body=%s", got, test.wantType, out)
 			}
-			if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
+			if got := ojson.GetBytesNoCopy(out, "thinking.display").String(); got != "summarized" {
 				t.Fatalf("thinking.display = %q, want summarized; body=%s", got, out)
 			}
-			budget := gjson.GetBytes(out, "thinking.budget_tokens")
+			budget := ojson.GetBytesNoCopy(out, "thinking.budget_tokens")
 			if test.wantBudget > 0 {
 				if budget.Int() != test.wantBudget {
 					t.Fatalf("thinking.budget_tokens = %d, want %d; body=%s", budget.Int(), test.wantBudget, out)
@@ -217,11 +219,11 @@ func TestGeminiSummaryOnlyProducesValidClaudeThinking(t *testing.T) {
 func TestNativeClaudeMissingDisplayPreservesSignatureOnlyHistory(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-5","thinking":{"type":"adaptive"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":"opus-signature"}]},{"role":"user","content":"continue"}]}`)
 	out := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatClaude, "claude-opus-5", body, true)
-	if gjson.GetBytes(out, "thinking.display").Exists() {
+	if ojson.GetBytesNoCopy(out, "thinking.display").Exists() {
 		t.Fatalf("native Claude request without display gained one: %s", out)
 	}
-	if got := gjson.GetBytes(out, "messages").Raw; got != gjson.GetBytes(body, "messages").Raw {
-		t.Fatalf("signature-only history changed: got %s, want %s", got, gjson.GetBytes(body, "messages").Raw)
+	if got := ojson.GetBytesNoCopy(out, "messages").Raw; got != ojson.GetBytesNoCopy(body, "messages").Raw {
+		t.Fatalf("signature-only history changed: got %s, want %s", got, ojson.GetBytesNoCopy(body, "messages").Raw)
 	}
 }
 
@@ -256,7 +258,7 @@ func TestAntigravityIncludeThoughtsPreservesExplicitness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyThinking() error = %v; body=%s", err, out)
 			}
-			result := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
+			result := ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.includeThoughts")
 			if result.Exists() != test.wantExists {
 				t.Fatalf("includeThoughts exists = %v, want %v; body=%s", result.Exists(), test.wantExists, out)
 			}
@@ -265,7 +267,7 @@ func TestAntigravityIncludeThoughtsPreservesExplicitness(t *testing.T) {
 					t.Fatalf("includeThoughts = %s, want %s; body=%s", got, test.want, out)
 				}
 			}
-			if gjson.GetBytes(out, "request.generationConfig.thinkingConfig.include_thoughts").Exists() {
+			if ojson.GetBytesNoCopy(out, "request.generationConfig.thinkingConfig.include_thoughts").Exists() {
 				t.Fatalf("snake_case includeThoughts left in payload: %s", out)
 			}
 		})

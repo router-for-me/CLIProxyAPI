@@ -112,9 +112,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -142,9 +141,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -163,6 +161,9 @@
     },
     {
       "id": "claude-opus-5",
+      "native_capabilities": {
+        "web_search": true
+      },
       "object": "model",
       "created": 1784038800,
       "owned_by": "anthropic",
@@ -230,9 +231,134 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-fable-5-1",
+      "object": "model",
+      "created": 1788220800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Fable 5.1",
+      "description": "Claude Fable 5.1 extends Claude Fable 5 at the same input and output prices, with cache reads at a quarter of the cost, and brings stronger long-running agentic coding, multistep research, and document, spreadsheet, and slide work.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-opus-5-5",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Opus 5.5",
+      "description": "Latest premium model combining maximum intelligence with practical performance",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790553600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Sonnet 5.5",
+      "description": "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
         "zero_allowed": true,
+        "dynamic_allowed": true,
+        "disable_type": "between_tools",
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1790553600,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Haiku 5.5",
+      "description": "For high-volume, latency-sensitive tasks such as classification, extraction, and routing.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -355,6 +481,16 @@
       "supportedOutputModalities": [
         "text"
       ]
+    },
+    {
+      "id": "claude-3-5-haiku-20241022",
+      "object": "model",
+      "created": 1729555200,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude 3.5 Haiku",
+      "context_length": 128000,
+      "max_completion_tokens": 8192
     }
   ],
   "gemini": [
@@ -389,7 +525,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -422,7 +561,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -455,7 +597,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-preview",
@@ -492,7 +637,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -530,7 +678,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image-preview",
@@ -566,7 +717,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash-preview",
@@ -605,7 +759,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -642,7 +799,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-image-preview",
@@ -678,7 +838,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash",
@@ -717,7 +880,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -756,7 +922,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.6-flash",
@@ -795,17 +964,20 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
-      "id": "gemini-3.7-flash",
+      "id": "gemini-3.8-flash",
       "object": "model",
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.7 Flash",
-      "name": "models/gemini-3.7-flash",
-      "version": "3.7",
-      "description": "Gemini 3.7 Flash",
+      "display_name": "Gemini 3.8 Flash",
+      "name": "models/gemini-3.8-flash",
+      "version": "3.8",
+      "description": "Gemini 3.8 Flash",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
@@ -813,7 +985,6 @@
         "max": 65535,
         "dynamic_allowed": true,
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high"
@@ -827,7 +998,43 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-argon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Argon",
+      "name": "models/gemini-4-argon",
+      "description": "Gemini 4 Argon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "vertex": [
@@ -862,7 +1069,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -895,7 +1105,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-image",
@@ -927,7 +1140,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -960,7 +1176,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro",
@@ -997,7 +1216,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash",
@@ -1036,7 +1258,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro",
@@ -1074,7 +1299,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1112,7 +1340,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image",
@@ -1148,7 +1379,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite",
@@ -1187,7 +1421,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-image",
@@ -1223,7 +1460,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "imagen-4.0-generate-001",
@@ -1362,7 +1602,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -1401,7 +1644,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.6-flash",
@@ -1440,16 +1686,19 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
-      "id": "gemini-3.7-flash",
+      "id": "gemini-3.8-flash",
       "object": "model",
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.7 Flash",
-      "name": "gemini-3.7-flash",
-      "description": "Gemini 3.7 Flash",
+      "display_name": "Gemini 3.8 Flash",
+      "name": "gemini-3.8-flash",
+      "description": "Gemini 3.8 Flash",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
@@ -1457,7 +1706,6 @@
         "max": 65535,
         "dynamic_allowed": true,
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high"
@@ -1471,7 +1719,43 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-argon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Argon",
+      "name": "gemini-4-argon",
+      "description": "Gemini 4 Argon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "gemini-cli": [
@@ -1506,7 +1790,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -1539,7 +1826,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1572,7 +1862,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-preview",
@@ -1609,7 +1902,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1647,7 +1943,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash-preview",
@@ -1686,7 +1985,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -1725,7 +2027,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "aistudio": [
@@ -1760,7 +2065,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash",
@@ -1793,7 +2101,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-lite",
@@ -1826,7 +2137,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-pro-preview",
@@ -1859,7 +2173,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-pro-preview",
@@ -1892,7 +2209,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash-preview",
@@ -1925,7 +2245,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-lite-preview",
@@ -1964,7 +2287,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-pro-latest",
@@ -1997,7 +2323,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-flash-latest",
@@ -2030,7 +2359,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-flash-lite-latest",
@@ -2064,7 +2396,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-2.5-flash-image",
@@ -2091,7 +2426,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash",
@@ -2130,7 +2468,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.5-flash-lite",
@@ -2169,7 +2510,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.6-flash",
@@ -2208,17 +2552,20 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
-      "id": "gemini-3.7-flash",
+      "id": "gemini-3.8-flash",
       "object": "model",
       "owned_by": "google",
       "type": "gemini",
-      "display_name": "Gemini 3.7 Flash",
-      "name": "models/gemini-3.7-flash",
-      "version": "3.7",
-      "description": "Gemini 3.7 Flash",
+      "display_name": "Gemini 3.8 Flash",
+      "name": "models/gemini-3.8-flash",
+      "version": "3.8",
+      "description": "Gemini 3.8 Flash",
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
@@ -2226,7 +2573,6 @@
         "max": 65535,
         "dynamic_allowed": true,
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high"
@@ -2240,49 +2586,22 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "codex-free": [
     {
-      "id": "gpt-5.4-mini",
+      "id": "gpt-6-luna",
       "object": "model",
-      "created": 1773705600,
+      "created": 1790035200,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2293,7 +2612,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -2302,7 +2622,46 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-terra",
@@ -2333,7 +2692,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-luna",
@@ -2360,7 +2722,7 @@
       },
       "config": {
         "override_header": {
-          "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
+          "user-agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)",
           "originator": "codex-tui"
         }
       },
@@ -2370,7 +2732,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "codex-auto-review",
@@ -2400,79 +2765,22 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "codex-team": [
     {
-      "id": "gpt-5.4",
+      "id": "gpt-6-astra",
       "object": "model",
-      "created": 1772668800,
+      "created": 1783616400,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "created": 1773705600,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.0 Astra",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2483,7 +2791,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -2492,7 +2801,151 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "object": "model",
+      "created": 1790640000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Sol",
+      "version": "gpt-6.0",
+      "description": "Latest workhorse model for coding and everyday work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -2502,7 +2955,7 @@
       "type": "openai",
       "display_name": "GPT 5.6 Sol",
       "version": "gpt-5.6",
-      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts—try starting lower, then turn it up for harder jobs.",
+      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts\u2014try starting lower, then turn it up for harder jobs.",
       "context_length": 372000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2523,7 +2976,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-terra",
@@ -2554,7 +3010,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-luna",
@@ -2581,7 +3040,7 @@
       },
       "config": {
         "override_header": {
-          "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
+          "user-agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)",
           "originator": "codex-tui"
         }
       },
@@ -2591,7 +3050,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "codex-auto-review",
@@ -2621,108 +3083,22 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "codex-plus": [
     {
-      "id": "gpt-5.3-codex-spark",
+      "id": "gpt-6-astra",
       "object": "model",
-      "created": 1770912000,
+      "created": 1783616400,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4",
-      "object": "model",
-      "created": 1772668800,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "created": 1773705600,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.0 Astra",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2733,7 +3109,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -2742,7 +3119,151 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "object": "model",
+      "created": 1790640000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Sol",
+      "version": "gpt-6.0",
+      "description": "Latest workhorse model for coding and everyday work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -2752,7 +3273,7 @@
       "type": "openai",
       "display_name": "GPT 5.6 Sol",
       "version": "gpt-5.6",
-      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts—try starting lower, then turn it up for harder jobs.",
+      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts\u2014try starting lower, then turn it up for harder jobs.",
       "context_length": 372000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2773,7 +3294,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-terra",
@@ -2804,7 +3328,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-luna",
@@ -2831,7 +3358,7 @@
       },
       "config": {
         "override_header": {
-          "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
+          "user-agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)",
           "originator": "codex-tui"
         }
       },
@@ -2841,7 +3368,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "codex-auto-review",
@@ -2871,108 +3401,22 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "codex-pro": [
     {
-      "id": "gpt-5.3-codex-spark",
+      "id": "gpt-6-astra",
       "object": "model",
-      "created": 1770912000,
+      "created": 1783616400,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 5.3 Codex Spark",
-      "version": "gpt-5.3",
-      "description": "Ultra-fast coding model.",
-      "context_length": 128000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4",
-      "object": "model",
-      "created": 1772668800,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4",
-      "version": "gpt-5.4",
-      "description": "Stable version of GPT 5.4",
-      "context_length": 1050000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "created": 1773705600,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.4 Mini",
-      "version": "gpt-5.4-mini",
-      "description": "GPT-5.4 mini brings the strengths of GPT-5.4 to a faster, more efficient model designed for high-volume workloads.",
-      "context_length": 400000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "created": 1776902400,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 5.5",
-      "version": "gpt-5.5",
-      "description": "Frontier model for complex coding, research, and real-world work.",
+      "display_name": "GPT 6.0 Astra",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -2983,7 +3427,8 @@
           "low",
           "medium",
           "high",
-          "xhigh"
+          "xhigh",
+          "max"
         ]
       },
       "supportedInputModalities": [
@@ -2992,7 +3437,151 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Sol",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Sol Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "object": "model",
+      "created": 1790640000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Sol",
+      "version": "gpt-6.0",
+      "description": "Latest workhorse model for coding and everyday work.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.0",
+      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6-luna",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.0 Luna",
+      "version": "gpt-6.0",
+      "description": "GPT-6 Luna Codex model.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
     },
     {
       "id": "gpt-5.6-sol",
@@ -3002,7 +3591,7 @@
       "type": "openai",
       "display_name": "GPT 5.6 Sol",
       "version": "gpt-5.6",
-      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts—try starting lower, then turn it up for harder jobs.",
+      "description": "Our most capable model yet. GPT-5.6 Sol can tackle complex code changes, dig into research, produce polished documents, and take on your most ambitious work. Sol is highly capable at lower reasoning efforts\u2014try starting lower, then turn it up for harder jobs.",
       "context_length": 372000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -3023,7 +3612,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-terra",
@@ -3054,7 +3646,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-5.6-luna",
@@ -3081,7 +3676,7 @@
       },
       "config": {
         "override_header": {
-          "user-agent": "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)",
+          "user-agent": "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)",
           "originator": "codex-tui"
         }
       },
@@ -3091,7 +3686,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "codex-auto-review",
@@ -3121,7 +3719,10 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "kimi": [
@@ -3271,6 +3872,60 @@
       ]
     },
     {
+      "id": "kimi-k2.8",
+      "object": "model",
+      "created": 1789115500,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.8 Preview",
+      "description": "Kimi K2.8 Preview - Lightweight coding and agent model with near-K3 performance and 1M context window",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "kimi-k2.8-code",
+      "object": "model",
+      "created": 1789115500,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K2.8 Code Preview",
+      "description": "Kimi K2.8 Code Preview - Lightweight coding and agent model with near-K3 performance and 1M context window",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "zero_allowed": true,
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "kimi-k3",
       "object": "model",
       "created": 1784073600,
@@ -3281,7 +3936,7 @@
       "context_length": 1048576,
       "max_completion_tokens": 65536,
       "thinking": {
-        "zero_allowed": false,
+        "zero_allowed": true,
         "levels": [
           "low",
           "high",
@@ -3308,7 +3963,7 @@
       "context_length": 262144,
       "max_completion_tokens": 65536,
       "thinking": {
-        "zero_allowed": false,
+        "zero_allowed": true,
         "levels": [
           "low",
           "high",
@@ -3322,148 +3977,60 @@
       "supportedOutputModalities": [
         "text"
       ]
-    }
-  ],
-  "zai": [
+    },
     {
-      "id": "glm-5.2",
+      "id": "kimi-k3.1-pro",
       "object": "model",
-      "created": 1781740800,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-5.2",
-      "description": "Z.AI GLM-5.2 - flagship coding model on the GLM Coding Plan",
-      "context_length": 1000000,
-      "max_completion_tokens": 131072,
+      "created": 1792713600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3.1 Pro",
+      "description": "Kimi K3.1 Pro - Moonshot AI's flagship coding and reasoning model with 1M context window and multimodal input",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true,
         "levels": [
+          "low",
           "high",
           "max"
         ]
-      }
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     },
     {
-      "id": "glm-4.5",
+      "id": "kimi-k3.1-pro-highspeed",
       "object": "model",
-      "created": 1753142400,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-4.5",
-      "description": "Z.AI GLM-4.5 - flagship hybrid reasoning coding model",
-      "context_length": 131072,
-      "max_completion_tokens": 98304,
+      "created": 1792713600,
+      "owned_by": "moonshot",
+      "type": "kimi",
+      "display_name": "Kimi K3.1 Pro Highspeed",
+      "description": "Kimi K3.1 Pro Highspeed - High-speed version of Kimi K3.1 Pro with 1M context window and multimodal input",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
       "thinking": {
-        "min": 1024,
-        "max": 32000,
         "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-4.5-air",
-      "object": "model",
-      "created": 1753142400,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-4.5-Air",
-      "description": "Z.AI GLM-4.5-Air - lightweight, lower-latency GLM-4.5 variant",
-      "context_length": 131072,
-      "max_completion_tokens": 98304,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-4.6",
-      "object": "model",
-      "created": 1759276800,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-4.6",
-      "description": "Z.AI GLM-4.6 - 200K context hybrid reasoning coding model",
-      "context_length": 200000,
-      "max_completion_tokens": 131072,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-4.7",
-      "object": "model",
-      "created": 1771200000,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-4.7",
-      "description": "Z.AI GLM-4.7 - hybrid reasoning coding model",
-      "context_length": 200000,
-      "max_completion_tokens": 131072,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-5",
-      "object": "model",
-      "created": 1778198400,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-5",
-      "description": "Z.AI GLM-5 - latest flagship reasoning coding model",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-5.1",
-      "object": "model",
-      "created": 1780396800,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-5.1",
-      "description": "Z.AI GLM-5.1 - latest GLM-5 series reasoning coding model",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-5-turbo",
-      "object": "model",
-      "created": 1778198400,
-      "owned_by": "zai",
-      "type": "zai",
-      "display_name": "GLM-5-Turbo",
-      "description": "Z.AI GLM-5-Turbo - faster, lower-cost GLM-5 variant",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "thinking": {
-        "min": 1024,
-        "max": 32000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
+        "levels": [
+          "low",
+          "high",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "antigravity": [
@@ -3516,21 +4083,21 @@
       ]
     },
     {
-      "id": "gemini-3.6-flash-high",
+      "id": "claude-opus-5-5-high",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Gemini 3.6 Flash",
-      "name": "gemini-3.6-flash-high",
-      "description": "Gemini 3.6 Flash (High)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65536,
+      "display_name": "Claude Opus 5.5 (High)",
+      "name": "claude-opus-5-5-high",
+      "description": "Claude Opus 5.5 (High)",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1,
-        "max": 65535,
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
         "dynamic_allowed": true,
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high"
@@ -3538,30 +4105,57 @@
       },
       "supportedInputModalities": [
         "text",
-        "image",
-        "audio",
-        "video"
+        "image"
       ],
       "supportedOutputModalities": [
         "text"
       ]
     },
     {
-      "id": "gemini-3.7-flash-high",
+      "id": "claude-sonnet-5-5-high",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Gemini 3.7 Flash",
-      "name": "gemini-3.7-flash-high",
-      "description": "Gemini 3.7 Flash (High)",
+      "display_name": "Claude Sonnet 5.5 (High)",
+      "name": "claude-sonnet-5-5-high",
+      "description": "Claude Sonnet 5.5 (High)",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "min": 1024,
+        "max": 64000,
+        "zero_allowed": true,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "gemini-4-argon-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Argon",
+      "name": "gemini-4-argon-high",
+      "description": "Gemini 4 Argon (High)",
       "context_length": 1048576,
-      "max_completion_tokens": 65536,
+      "max_completion_tokens": 1048576,
       "thinking": {
         "min": 1,
         "max": 65535,
         "dynamic_allowed": true,
         "levels": [
-          "minimal",
           "low",
           "medium",
           "high"
@@ -3575,13 +4169,51 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-3.8-flash-high",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 3.8 Flash",
+      "name": "gemini-3.8-flash-high",
+      "description": "Gemini 3.8 Flash (High)",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3-flash",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3 Flash",
       "name": "gemini-3-flash",
       "description": "Gemini 3 Flash",
@@ -3606,44 +4238,17 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
-    },
-    {
-      "id": "gemini-3-flash-agent",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3.5 Flash (High)",
-      "name": "gemini-3-flash-agent",
-      "description": "Gemini 3.5 Flash (High)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65536,
-      "thinking": {
-        "min": 128,
-        "max": 32768,
-        "dynamic_allowed": true,
-        "levels": [
-          "minimal",
-          "low",
-          "medium",
-          "high"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image",
-        "audio",
-        "video"
       ],
-      "supportedOutputModalities": [
-        "text"
-      ]
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gemini-3.1-flash-image",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.1 Flash Image",
       "name": "gemini-3.1-flash-image",
       "description": "Gemini 3.1 Flash Image",
@@ -3663,67 +4268,10 @@
       "supportedOutputModalities": [
         "text",
         "image"
-      ]
-    },
-    {
-      "id": "gemini-pro-agent",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3.1 Pro (High)",
-      "name": "gemini-pro-agent",
-      "description": "Gemini 3.1 Pro (High)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 1,
-        "max": 65535,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image",
-        "audio",
-        "video"
       ],
-      "supportedOutputModalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gemini-3.1-pro-low",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3.1 Pro (Low)",
-      "name": "gemini-3.1-pro-low",
-      "description": "Gemini 3.1 Pro (Low)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 1,
-        "max": 65535,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image",
-        "audio",
-        "video"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ]
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
       "id": "gpt-oss-120b-medium",
@@ -3747,6 +4295,7 @@
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
+      "supports_web_search": true,
       "display_name": "Gemini 3.1 Flash Lite",
       "name": "gemini-3.1-flash-lite",
       "description": "Gemini 3.1 Flash Lite",
@@ -3772,16 +4321,20 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
     },
     {
-      "id": "gemini-3.5-flash-low",
+      "id": "gemini-3.5-flash-lite",
       "object": "model",
       "owned_by": "antigravity",
       "type": "antigravity",
-      "display_name": "Gemini 3.5 Flash (Medium)",
-      "name": "gemini-3.5-flash-low",
-      "description": "Gemini 3.5 Flash (Medium)",
+      "supports_web_search": true,
+      "display_name": "Gemini 3.5 Flash Lite",
+      "name": "gemini-3.5-flash-lite",
+      "description": "Gemini 3.5 Flash Lite",
       "context_length": 1048576,
       "max_completion_tokens": 65535,
       "thinking": {
@@ -3789,6 +4342,7 @@
         "max": 65535,
         "dynamic_allowed": true,
         "levels": [
+          "minimal",
           "low",
           "medium",
           "high"
@@ -3802,42 +4356,80 @@
       ],
       "supportedOutputModalities": [
         "text"
-      ]
-    },
-    {
-      "id": "gemini-3.5-flash-extra-low",
-      "object": "model",
-      "owned_by": "antigravity",
-      "type": "antigravity",
-      "display_name": "Gemini 3.5 Flash (Low)",
-      "name": "gemini-3.5-flash-extra-low",
-      "description": "Gemini 3.5 Flash (Low)",
-      "context_length": 1048576,
-      "max_completion_tokens": 65535,
-      "thinking": {
-        "min": 1,
-        "max": 65535,
-        "dynamic_allowed": true,
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image",
-        "audio",
-        "video"
       ],
-      "supportedOutputModalities": [
-        "text"
-      ]
+      "native_capabilities": {
+        "web_search": true
+      }
     }
   ],
   "xai": [
     {
+      "id": "grok-4.7",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1789948800,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.7",
+      "name": "grok-4.7",
+      "description": "SpaceXAI's frontier model for coding, agentic tasks, and knowledge work.",
+      "context_length": 500000,
+      "max_completion_tokens": 500000,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "grok-4.7-build-fast",
+      "native_capabilities": {
+        "web_search": true
+      },
+      "object": "model",
+      "created": 1789948800,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok 4.7 Fast",
+      "name": "grok-4.7-build-fast",
+      "description": "Grok 4.7 Fast as served by the Grok Build chat-proxy. Same model as grok-4.7 on the faster tier.",
+      "context_length": 500000,
+      "max_completion_tokens": 500000,
+      "thinking": {
+        "zero_allowed": false,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "grok-4.6",
+      "native_capabilities": {
+        "web_search": true
+      },
       "object": "model",
       "created": 1785974400,
       "owned_by": "xai",
@@ -3872,7 +4464,7 @@
       "type": "xai",
       "display_name": "Grok Build 0.1",
       "name": "grok-build-0.1",
-      "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
+      "description": "Grok Build 0.1 is xAI\u2019s fast coding model trained specifically for agentic software engineering workflows.",
       "context_length": 256000,
       "max_completion_tokens": 256000,
       "supportedInputModalities": [
@@ -4063,6 +4655,369 @@
       "description": "xAI Composer 2.5 Fast model for the Responses API.",
       "context_length": 200000,
       "max_completion_tokens": 32768
+    },
+    {
+      "id": "grok-imagine-image",
+      "object": "model",
+      "created": 1769558400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-image",
+      "name": "grok-imagine-image",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "grok-imagine-image-2.0",
+      "object": "model",
+      "created": 1786147200,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-image-2.0",
+      "name": "grok-imagine-image-2.0",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "grok-imagine-image-quality",
+      "object": "model",
+      "created": 1775174400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-image-quality",
+      "name": "grok-imagine-image-quality",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "image"
+      ]
+    },
+    {
+      "id": "grok-imagine-video",
+      "object": "model",
+      "created": 1769558400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-video",
+      "name": "grok-imagine-video",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "video"
+      ]
+    },
+    {
+      "id": "grok-imagine-video-1.5",
+      "object": "model",
+      "created": 1779840000,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "grok-imagine-video-1.5",
+      "name": "grok-imagine-video-1.5",
+      "description": "",
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "video"
+      ]
+    },
+    {
+      "id": "grok-imagine-video-1.5-lite",
+      "object": "model",
+      "created": 1787702400,
+      "owned_by": "xai",
+      "type": "xai",
+      "display_name": "Grok Imagine Video 1.5 Lite",
+      "name": "grok-imagine-video-1.5-lite",
+      "description": "xAI Grok Imagine Video 1.5 Lite supports text-to-video and image-to-video generation. Output pricing per second: $0.02 at 480p, $0.03 at 720p, and $0.14 at 1080p.",
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "video"
+      ]
+    }
+  ],
+  "meta": [
+    {
+      "id": "muse-wonder-1.0",
+      "object": "model",
+      "created": 1791763200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Wonder 1.0",
+      "name": "muse-wonder-1.0",
+      "description": "Meta's most capable model, built for complex software engineering and long-horizon agentic work.",
+      "context_length": 1007997,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-wonder-1.0-contributor",
+      "object": "model",
+      "created": 1791763200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Wonder 1.0 Contributor",
+      "name": "muse-wonder-1.0-contributor",
+      "description": "Meta's most capable model, built for complex software engineering and long-horizon agentic work.",
+      "context_length": 1007997,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-wonder-full-1.0",
+      "object": "model",
+      "created": 1791763200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Wonder Full 1.0",
+      "name": "muse-wonder-full-1.0",
+      "description": "Meta's most capable model, built for complex software engineering and long-horizon agentic work.",
+      "context_length": 1007997,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-wonder-full-1.0-contributor",
+      "object": "model",
+      "created": 1791763200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Wonder Full 1.0 Contributor",
+      "name": "muse-wonder-full-1.0-contributor",
+      "description": "Meta's most capable model, built for complex software engineering and long-horizon agentic work.",
+      "context_length": 1007997,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "video",
+        "audio"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.3",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.3",
+      "name": "muse-spark-1.3",
+      "description": "Meta Muse Spark 1.3 flagship reasoning and agentic coding model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.3-contributor",
+      "object": "model",
+      "created": 1788307200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.3 Contributor",
+      "name": "muse-spark-1.3-contributor",
+      "description": "Meta Muse Spark 1.3 contributor model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.2",
+      "object": "model",
+      "created": 1785888000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.2",
+      "name": "muse-spark-1.2",
+      "description": "Meta Muse Spark 1.2 reasoning and agentic coding model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.2-contributor",
+      "object": "model",
+      "created": 1785888000,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.2 Contributor",
+      "name": "muse-spark-1.2-contributor",
+      "description": "Meta Muse Spark 1.2 contributor model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "muse-spark-1.1",
+      "object": "model",
+      "created": 1783555200,
+      "owned_by": "meta",
+      "type": "meta",
+      "display_name": "Muse Spark 1.1",
+      "name": "muse-spark-1.1",
+      "description": "Meta Muse Spark 1.1 reasoning model",
+      "context_length": 1048576,
+      "max_completion_tokens": 65536,
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
     }
   ],
   "qoder": [
@@ -4353,1854 +5308,6 @@
       "description": "SWE-1.6 - Free model via Devin CLI (200K context)",
       "context_length": 200000,
       "max_completion_tokens": 64000
-    }
-  ],
-  "opencode": [
-    {
-      "id": "gpt-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5 (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5-nano",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5 Nano (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5-nano",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.1",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.1 (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.1",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.1-codex",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.1 Codex (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.1-codex",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.1-codex-max",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.1 Codex Max (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.1-codex-max",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.1-codex-mini",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.1 Codex Mini (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.1-codex-mini",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.2",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.2 (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.2",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.2-codex",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.2 Codex (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.2-codex",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.3-codex",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.3 Codex (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.3-codex",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.3-codex-spark",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.3 Codex Spark (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.3-codex-spark",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.4",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.4 (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.4",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.4 Mini (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.4-mini",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.4-nano",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.4 Nano (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.4-nano",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.4-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.4 Pro (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.4-pro",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.5 (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.5",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.5-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.5 Pro (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.5-pro",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.6-luna",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.6 Luna (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.6-luna",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.6-sol",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.6 Sol (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.6-sol",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "gpt-5.6-terra",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.6 Terra (Zen)",
-      "description": "OpenCode Zen gateway — gpt-5.6-terra",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "grok-4.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Grok 4.5 (Zen)",
-      "description": "OpenCode Zen gateway — grok-4.5",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "zero_allowed": false
-      }
-    },
-    {
-      "id": "grok-4.6",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Grok 4.6 (Zen)",
-      "description": "OpenCode Zen gateway — grok-4.6",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "zero_allowed": false
-      }
-    },
-    {
-      "id": "grok-build-0.1",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Grok Build 0.1 (Zen)",
-      "description": "OpenCode Zen gateway — grok-build-0.1",
-      "context_length": 256000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "muse-spark-1.2",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Muse Spark 1.2 (Zen)",
-      "description": "OpenCode Zen gateway — muse-spark-1.2",
-      "context_length": 200000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "muse-spark-1.2-contributor",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Muse Spark 1.2 Contributor (Zen)",
-      "description": "OpenCode Zen gateway — muse-spark-1.2-contributor",
-      "context_length": 200000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "claude-fable-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Fable 5 (Zen)",
-      "description": "OpenCode Zen gateway — claude-fable-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-sonnet-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Sonnet 5 (Zen)",
-      "description": "OpenCode Zen gateway — claude-sonnet-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-sonnet-4-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Sonnet 4 5 (Zen)",
-      "description": "OpenCode Zen gateway — claude-sonnet-4-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-sonnet-4-6",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Sonnet 4 6 (Zen)",
-      "description": "OpenCode Zen gateway — claude-sonnet-4-6",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-opus-4-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Opus 4 5 (Zen)",
-      "description": "OpenCode Zen gateway — claude-opus-4-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-opus-4-6",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Opus 4 6 (Zen)",
-      "description": "OpenCode Zen gateway — claude-opus-4-6",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-opus-4-7",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Opus 4 7 (Zen)",
-      "description": "OpenCode Zen gateway — claude-opus-4-7",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-opus-4-8",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Opus 4 8 (Zen)",
-      "description": "OpenCode Zen gateway — claude-opus-4-8",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-opus-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Opus 5 (Zen)",
-      "description": "OpenCode Zen gateway — claude-opus-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "claude-haiku-4-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Haiku 4 5 (Zen)",
-      "description": "OpenCode Zen gateway — claude-haiku-4-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.5-plus",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.5 Plus (Zen)",
-      "description": "OpenCode Zen gateway — qwen3.5-plus",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.6-plus",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.6 Plus (Zen)",
-      "description": "OpenCode Zen gateway — qwen3.6-plus",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.7-plus",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.7 Plus (Zen)",
-      "description": "OpenCode Zen gateway — qwen3.7-plus",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.7-max",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.7 Max (Zen)",
-      "description": "OpenCode Zen gateway — qwen3.7-max",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "minimax-m2.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Minimax M2.5 (Zen)",
-      "description": "OpenCode Zen gateway — minimax-m2.5",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "minimax-m2.7",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Minimax M2.7 (Zen)",
-      "description": "OpenCode Zen gateway — minimax-m2.7",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "minimax-m3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Minimax M3 (Zen)",
-      "description": "OpenCode Zen gateway — minimax-m3",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "deepseek-v4-flash",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Deepseek V4 Flash (Zen)",
-      "description": "OpenCode Zen gateway — deepseek-v4-flash",
-      "context_length": 128000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "deepseek-v4-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Deepseek V4 Pro (Zen)",
-      "description": "OpenCode Zen gateway — deepseek-v4-pro",
-      "context_length": 272000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "deepseek-v4-flash-free",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Deepseek V4 Flash Free (Zen)",
-      "description": "OpenCode Zen gateway — deepseek-v4-flash-free",
-      "context_length": 128000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "mimo-v2.5-free",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Mimo V2.5 Free (Zen)",
-      "description": "OpenCode Zen gateway — mimo-v2.5-free",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "mimo-v2.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Mimo V2.5 (Zen)",
-      "description": "OpenCode Zen gateway — mimo-v2.5",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "hy3-free",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Hy3 Free (Zen)",
-      "description": "OpenCode Zen gateway — hy3-free",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "big-pickle",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Big Pickle (Zen)",
-      "description": "OpenCode Zen gateway — big-pickle",
-      "context_length": 200000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "nemotron-3-ultra-free",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Nemotron 3 Ultra Free (Zen)",
-      "description": "OpenCode Zen gateway — nemotron-3-ultra-free",
-      "context_length": 200000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "nemotron-3.5-lightning-free",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Nemotron 3.5 Lightning Free (Zen)",
-      "description": "OpenCode Zen gateway — nemotron-3.5-lightning-free",
-      "context_length": 200000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "laguna-s-2.1-free",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Laguna S 2.1 Free (Zen)",
-      "description": "OpenCode Zen gateway — laguna-s-2.1-free",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5 (Zen)",
-      "description": "OpenCode Zen gateway — glm-5",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5.1",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5.1 (Zen)",
-      "description": "OpenCode Zen gateway — glm-5.1",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5.2",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5.2 (Zen)",
-      "description": "OpenCode Zen gateway — glm-5.2",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5.3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5.3 (Zen)",
-      "description": "OpenCode Zen gateway — glm-5.3",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k2.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K2.5 (Zen)",
-      "description": "OpenCode Zen gateway — kimi-k2.5",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k2.6",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K2.6 (Zen)",
-      "description": "OpenCode Zen gateway — kimi-k2.6",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k2.7-code",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K2.7 Code (Zen)",
-      "description": "OpenCode Zen gateway — kimi-k2.7-code",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K3 (Zen)",
-      "description": "OpenCode Zen gateway — kimi-k3",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "gemini-3-flash",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gemini 3 Flash (Zen)",
-      "description": "OpenCode Zen gateway — gemini-3-flash",
-      "context_length": 1000000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "high"
-        ],
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "gemini-3.5-flash",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gemini 3.5 Flash (Zen)",
-      "description": "OpenCode Zen gateway — gemini-3.5-flash",
-      "context_length": 1000000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "high"
-        ],
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "gemini-3.5-flash-lite",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gemini 3.5 Flash Lite (Zen)",
-      "description": "OpenCode Zen gateway — gemini-3.5-flash-lite",
-      "context_length": 1000000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "high"
-        ],
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "gemini-3.6-flash",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gemini 3.6 Flash (Zen)",
-      "description": "OpenCode Zen gateway — gemini-3.6-flash",
-      "context_length": 1000000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "high"
-        ],
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "gemini-3.7-flash",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gemini 3.7 Flash (Zen)",
-      "description": "OpenCode Zen gateway — gemini-3.7-flash",
-      "context_length": 1000000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "high"
-        ],
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "gemini-3.1-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gemini 3.1 Pro (Zen)",
-      "description": "OpenCode Zen gateway — gemini-3.1-pro",
-      "context_length": 1000000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "high"
-        ],
-        "dynamic_allowed": true
-      }
-    }
-  ],
-  "opencode-go": [
-    {
-      "id": "gpt-5.6-luna",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Gpt 5.6 Luna (Go)",
-      "description": "OpenCode Go gateway — gpt-5.6-luna",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh"
-        ],
-        "dynamic_allowed": false
-      }
-    },
-    {
-      "id": "grok-4.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Grok 4.5 (Go)",
-      "description": "OpenCode Go gateway — grok-4.5",
-      "context_length": 500000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high"
-        ],
-        "zero_allowed": false
-      }
-    },
-    {
-      "id": "muse-spark-1.2-contributor",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Muse Spark 1.2 Contributor (Go)",
-      "description": "OpenCode Go gateway — muse-spark-1.2-contributor",
-      "context_length": 200000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "claude-fable-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Claude Fable 5 (Go)",
-      "description": "OpenCode Go gateway — claude-fable-5",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ],
-      "thinking": {
-        "min": 1024,
-        "max": 64000,
-        "zero_allowed": true,
-        "dynamic_allowed": true
-      }
-    },
-    {
-      "id": "glm-5.3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5.3 (Go)",
-      "description": "OpenCode Go gateway — glm-5.3",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5.2",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5.2 (Go)",
-      "description": "OpenCode Go gateway — glm-5.2",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5.1",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5.1 (Go)",
-      "description": "OpenCode Go gateway — glm-5.1",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "glm-5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Glm 5 (Go)",
-      "description": "OpenCode Go gateway — glm-5",
-      "context_length": 131072,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K3 (Go)",
-      "description": "OpenCode Go gateway — kimi-k3",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k2.7-code",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K2.7 Code (Go)",
-      "description": "OpenCode Go gateway — kimi-k2.7-code",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k2.6",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K2.6 (Go)",
-      "description": "OpenCode Go gateway — kimi-k2.6",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "kimi-k2.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Kimi K2.5 (Go)",
-      "description": "OpenCode Go gateway — kimi-k2.5",
-      "context_length": 262144,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "deepseek-v4-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Deepseek V4 Pro (Go)",
-      "description": "OpenCode Go gateway — deepseek-v4-pro",
-      "context_length": 272000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "deepseek-v4-flash",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Deepseek V4 Flash (Go)",
-      "description": "OpenCode Go gateway — deepseek-v4-flash",
-      "context_length": 128000,
-      "max_completion_tokens": 8192,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "mimo-v2.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Mimo V2.5 (Go)",
-      "description": "OpenCode Go gateway — mimo-v2.5",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "mimo-v2-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Mimo V2 Pro (Go)",
-      "description": "OpenCode Go gateway — mimo-v2-pro",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "mimo-v2.5-pro",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Mimo V2.5 Pro (Go)",
-      "description": "OpenCode Go gateway — mimo-v2.5-pro",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "minimax-m2.5",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Minimax M2.5 (Go)",
-      "description": "OpenCode Go gateway — minimax-m2.5",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "minimax-m2.7",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Minimax M2.7 (Go)",
-      "description": "OpenCode Go gateway — minimax-m2.7",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "minimax-m3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Minimax M3 (Go)",
-      "description": "OpenCode Go gateway — minimax-m3",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "muse-spark-1.2",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Muse Spark 1.2 (Go)",
-      "description": "OpenCode Go gateway — muse-spark-1.2",
-      "context_length": 200000,
-      "max_completion_tokens": 65536,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.7-max",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.7 Max (Go)",
-      "description": "OpenCode Go gateway — qwen3.7-max",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.8-max",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.8 Max (Go)",
-      "description": "OpenCode Go gateway — qwen3.8-max",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.7-plus",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.7 Plus (Go)",
-      "description": "OpenCode Go gateway — qwen3.7-plus",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.6-plus",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.6 Plus (Go)",
-      "description": "OpenCode Go gateway — qwen3.6-plus",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "hy3",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Hy3 (Go)",
-      "description": "OpenCode Go gateway — hy3",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "hy3-preview",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Hy3 Preview (Go)",
-      "description": "OpenCode Go gateway — hy3-preview",
-      "context_length": 200000,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "qwen3.5-plus",
-      "object": "model",
-      "owned_by": "opencode",
-      "type": "opencode",
-      "display_name": "Qwen3.5 Plus (Go)",
-      "description": "OpenCode Go gateway — qwen3.5-plus",
-      "context_length": 262144,
-      "max_completion_tokens": 16384,
-      "supported_input_modalities": [
-        "text"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    }
-  ],
-  "poolside": [
-    {
-      "id": "poolside/laguna-s-2.1",
-      "object": "model",
-      "created": 1771372800,
-      "owned_by": "poolside",
-      "type": "poolside",
-      "display_name": "Laguna S 2.1 (Poolside)",
-      "description": "Poolside AI gateway — fallback model proxying to Claude Sonnet 4.6 via Anthropic Messages",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
-    },
-    {
-      "id": "poolside/laguna-xs-2.1",
-      "object": "model",
-      "created": 1771372800,
-      "owned_by": "poolside",
-      "type": "poolside",
-      "display_name": "Laguna XS 2.1 (Poolside)",
-      "description": "Poolside AI gateway — small Laguna 2.1 model proxying to Claude Sonnet 4.6 via Anthropic Messages",
-      "context_length": 200000,
-      "max_completion_tokens": 64000,
-      "supported_input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_output_modalities": [
-        "text"
-      ]
     }
   ]
 }

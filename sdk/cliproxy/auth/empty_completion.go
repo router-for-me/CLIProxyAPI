@@ -10,14 +10,11 @@ import (
 	"net/http"
 	"strings"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-// tokenCount is a tolerant usage count that accepts any valid JSON number
-// (integer, decimal, or exponent) and treats every other JSON value (null,
-// string, object, array, or malformed) as unset, absorbing it without failing
-// the enclosing frame. positive reports whether the count is a finite number
-// greater than zero, the only property the empty-completion logic needs.
+// tokenCount tolerates usage values that cannot be decoded as json.Number
+// without rejecting the enclosing frame.
 type tokenCount json.Number
 
 func (t *tokenCount) UnmarshalJSON(b []byte) error {
@@ -498,11 +495,8 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 	a.sawMessageData = true
 	var chunk openAIChunk
 	if err := json.Unmarshal(data, &chunk); err != nil {
-		// A recognized choices-bearing payload whose shape does not decode
-		// (for example message.content as an array of content parts) carries
-		// forward-compatible output we cannot inspect. Treat it as unknown
-		// data so it passes through instead of being misjudged as an empty
-		// completion.
+		// Forward shapes we cannot inspect, such as content-part arrays,
+		// rather than misclassifying them as empty.
 		a.sawUnknownData = true
 		return true
 	}
@@ -545,11 +539,7 @@ func (a *emptyCompletionAccum) evalOpenAI(data []byte) bool {
 		}
 	}
 	if len(chunk.Choices) == 0 && chunk.Usage != nil {
-		// A completed non-streaming payload with zero choices
-		// ({"choices":[], "usage":...}) never enters the loop above, so
-		// terminal would never be set and the payload would be accepted as a
-		// successful response. With usage present the response is complete, so
-		// the empty judgment can run.
+		// Usage marks a response complete even when no choices set terminal above.
 		a.terminal = true
 	}
 	return true
@@ -679,6 +669,9 @@ func (a *emptyCompletionAccum) evalOpenAIResponse(data []byte) bool {
 
 	var chunk openAIResponseChunk
 	if err := json.Unmarshal(data, &chunk); err != nil {
+		// Responses objects use text for format configuration, while text-done
+		// events use a string. An uninspectable shape is not evidence of emptiness.
+		a.sawUnknownData = true
 		return true
 	}
 
@@ -900,11 +893,7 @@ func (a *emptyCompletionAccum) evalGemini(data []byte) bool {
 	promptBlocked := promptFeedback != nil && strings.TrimSpace(promptFeedback.BlockReason) != ""
 
 	if len(candidates) == 0 {
-		// Only treat an empty candidates array as a recognized empty completion
-		// when the candidates key is actually present (e.g. a Gemini
-		// safety/empty response with zero candidate tokens, or a stream
-		// aggregate with nothing else). An absent candidates key is not a
-		// Gemini shape at all.
+		// An empty candidates array is a Gemini shape; an absent key is not.
 		if hasJSONKey(data, "candidates") || hasNestedResponseCandidates(data) {
 			a.recognized = true
 			a.sawMessageData = true
@@ -1329,10 +1318,7 @@ func couldBeSSEPrefix(payload []byte) bool {
 func isEmptyCompletionPayload(payload []byte) bool {
 	trimmed := bytes.TrimSpace(payload)
 	if len(trimmed) == 0 {
-		// A zero-length or whitespace-only body on an HTTP success is the
-		// canonical empty completion: without this, Execute and plugin
-		// executors returned it as a successful response and never rotated
-		// credentials.
+		// An empty HTTP success body must trigger credential rotation.
 		return true
 	}
 

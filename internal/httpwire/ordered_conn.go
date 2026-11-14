@@ -18,8 +18,9 @@ const maxBufferedRequestHeader = 1 << 20
 // returned list retain their original relative order after the listed headers.
 type RequestHeaderOrder func(method, requestTarget string) []string
 
-// NewOrderedRequestConn wraps conn and rewrites only HTTP/1.1 request-header
-// order. Request lines, header casing and values, and body bytes remain intact.
+// NewOrderedRequestConn wraps conn and rewrites HTTP/1.1 request-header order
+// and matches header casing to the desired order list. Request lines, unlisted
+// header casing and values, and body bytes remain intact.
 func NewOrderedRequestConn(conn net.Conn, order RequestHeaderOrder) net.Conn {
 	if conn == nil || order == nil {
 		return conn
@@ -76,6 +77,15 @@ func (c *orderedRequestConn) Write(p []byte) (int, error) {
 			}
 			remaining = remaining[chunkBytes:]
 			continue
+		}
+
+		if len(c.header) == 0 && c.bodyRemaining == 0 && c.chunked == nil && !isHTTPMethodPrefix(remaining) {
+			written, errWrite := writeAll(c.Conn, remaining)
+			consumed += written
+			if errWrite != nil {
+				return consumed, errWrite
+			}
+			return originalLength, nil
 		}
 
 		previousHeaderLength := len(c.header)
@@ -136,7 +146,15 @@ func orderRequestHeader(header []byte, order RequestHeaderOrder) ([]byte, int64,
 			if used[index] || !headerLineNamed(line, name) {
 				continue
 			}
-			orderedLines = append(orderedLines, line)
+			colon := bytes.IndexByte(line, ':')
+			if colon > 0 && name != "" {
+				rewritten := make([]byte, 0, len(name)+len(line)-colon)
+				rewritten = append(rewritten, name...)
+				rewritten = append(rewritten, line[colon:]...)
+				orderedLines = append(orderedLines, rewritten)
+			} else {
+				orderedLines = append(orderedLines, line)
+			}
 			used[index] = true
 		}
 	}
@@ -158,6 +176,30 @@ func orderRequestHeader(header []byte, order RequestHeaderOrder) ([]byte, int64,
 func headerLineNamed(line []byte, name string) bool {
 	colon := bytes.IndexByte(line, ':')
 	return colon > 0 && strings.EqualFold(string(line[:colon]), name)
+}
+
+func isHTTPTokenChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '!' || b == '#' || b == '$' || b == '%' || b == '&' ||
+		b == '\'' || b == '*' || b == '+' || b == '-' || b == '.' ||
+		b == '^' || b == '_' || b == '`' || b == '|' || b == '~'
+}
+
+func isHTTPMethodPrefix(p []byte) bool {
+	if len(p) == 0 {
+		return false
+	}
+	for i, b := range p {
+		if b == ' ' && i > 0 {
+			return true
+		}
+		if !isHTTPTokenChar(b) {
+			return false
+		}
+	}
+	return true
 }
 
 func requestContentLength(lines [][]byte) int64 {

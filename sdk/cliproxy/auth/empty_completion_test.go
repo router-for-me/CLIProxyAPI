@@ -9,27 +9,22 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-// emptyCompletionTestExecutor returns a configurable payload per auth, allowing
-// tests to make one auth produce an empty completion and another a real one.
 type emptyCompletionTestExecutor struct {
-	executePayloads map[string][]byte   // auth ID -> non-stream payload
-	streamPayloads  map[string][][]byte // auth ID -> SSE chunk payloads
-	executeErr      map[string]error    // auth ID -> forced execute error
-	streamErr       map[string]error    // auth ID -> forced stream error
-	executeCalls    map[string]int      // auth ID -> call count (non-stream)
-	streamCalls     map[string]int      // auth ID -> call count (stream)
+	executePayloads map[string][]byte
+	streamPayloads  map[string][][]byte
+	executeErr      map[string]error
+	streamErr       map[string]error
+	executeCalls    map[string]int
+	streamCalls     map[string]int
 	hook            func(authID, kind string)
 
-	// firstExecute records the first auth that was picked for a non-stream
-	// execution, so tests can deterministically wire the empty payload to it
-	// regardless of global selector state.
+	// Track the first selected auth so rotation tests do not depend on selector order.
 	firstExecute string
-	// firstStream records the first auth picked for a stream execution.
-	firstStream string
+	firstStream  string
 
 	// emptyStreamPayload/contentStreamPayload override the default first-auth
 	// empty stream and subsequent-auth content stream (used to exercise
@@ -55,9 +50,6 @@ func (e *emptyCompletionTestExecutor) Execute(ctx context.Context, auth *Auth, _
 	if err := e.executeErr[auth.ID]; err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	// The first auth picked returns an empty completion; every subsequent auth
-	// returns real content. This guarantees the rotation test exercises the
-	// empty-completion failure path regardless of global selector state.
 	if len(e.executePayloads) == 0 && e.firstExecute == auth.ID {
 		return cliproxyexecutor.Response{Payload: []byte(`{"choices":[{"message":{"content":""},"finish_reason":"stop"}],"usage":{"completion_tokens":0}}`)}, nil
 	}
@@ -79,10 +71,6 @@ func (e *emptyCompletionTestExecutor) ExecuteStream(ctx context.Context, auth *A
 	if err := e.streamErr[auth.ID]; err != nil {
 		return nil, err
 	}
-	// When the test pre-wires explicit payloads (e.g. the thinking-then-content
-	// positive control), honor them. Otherwise force the first auth to stream an
-	// empty completion and subsequent auths to stream real content, so rotation
-	// tests are deterministic regardless of global selector state.
 	if len(e.streamPayloads) == 0 && e.firstStream == auth.ID {
 		empty := e.emptyStreamPayload
 		if len(empty) == 0 {
@@ -785,11 +773,7 @@ func TestEmptyCompletionTolerantUsage(t *testing.T) {
 	}
 }
 
-// TestStreamBootstrapDetectorClaudePing is a regression guard for the codex
-// P2 finding on PR #4881: Claude streams may emit {"type":"ping"} keep-alive
-// events. evalClaude used to treat them as unknown payloads, permanently
-// switching the detector to forwarding mode, so a terminally empty completion
-// after a ping bypassed failover and surfaced as a successful empty stream.
+// A Claude keep-alive ping must not start forwarding and bypass empty-completion failover.
 func TestStreamBootstrapDetectorClaudePing(t *testing.T) {
 	var detector StreamBootstrapDetector
 	if detector.Observe([]byte("event: ping\ndata: {\"type\":\"ping\"}\n\n")) {
@@ -1406,8 +1390,6 @@ func TestExecuteStreamThinkingThenContentNotRotated(t *testing.T) {
 	}
 	manager, ids, model, _ := newEmptyCompletionTestManager(t, executor)
 
-	// Positive control: a thinking-first-then-content stream must NOT be
-	// treated as empty, so it should not rotate to the second auth.
 	content := [][]byte{
 		[]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null}]}\n\n"),
 		[]byte("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n"),
@@ -1429,7 +1411,6 @@ func TestExecuteStreamThinkingThenContentNotRotated(t *testing.T) {
 	if !strings.Contains(got.String(), "answer") {
 		t.Fatalf("stream payload = %q, want thinking-then-content stream to pass through", got.String())
 	}
-	// The first auth must NOT have been cooled (it produced a real completion).
 	if auth, ok := manager.GetByID(ids[0]); ok && auth != nil {
 		if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
 			t.Fatalf("auth %q was cooled despite producing a real completion", ids[0])
@@ -2712,7 +2693,6 @@ func TestExecuteStream_MeaningfulContentWithOpenChannelForwardsImmediately(t *te
 	chunks := make(chan cliproxyexecutor.StreamChunk, 2)
 	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"meaningful_content\"}}]}\n\n")}
 	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
-	// Leave channel open
 
 	customExec := &customStreamOpenChannelExecutor{chunks: chunks}
 
@@ -3110,5 +3090,33 @@ func TestEmptyCompletionResponsesImageGenerationCallResult(t *testing.T) {
 	wsDetector := &StreamBootstrapDetector{}
 	if got := wsDetector.Observe([]byte("data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"   \"}}\n\n")); got != false {
 		t.Fatalf("StreamBootstrapDetector.Observe(whitespace result) = %v, want false", got)
+	}
+}
+
+func TestResponsesTextConfigurationIsNotEmptyCompletion(t *testing.T) {
+	payload := []byte(`{"object":"response","status":"completed","text":{"format":{"type":"text"},"verbosity":"medium"},"output":[{"type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"OK","annotations":[],"logprobs":[]}]}],"usage":{"input_tokens":9,"output_tokens":5,"total_tokens":14}}`)
+	if IsEmptyCompletionPayload(payload) {
+		t.Fatal("completed response with text configuration and output classified as empty")
+	}
+	detector := new(StreamBootstrapDetector)
+	if !detector.Observe(payload) || detector.Finish() {
+		t.Fatal("completed response with text configuration was not forwarded")
+	}
+}
+
+func TestResponsesUninspectableShapeIsNotEmptyCompletion(t *testing.T) {
+	for _, payload := range []string{
+		`{"object":"response","usage":[]}`,
+		`{"type":"response.output_text.delta","delta":{"text":"OK"}}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			if IsEmptyCompletionPayload([]byte(payload)) {
+				t.Fatal("uninspectable response classified as empty")
+			}
+			detector := new(StreamBootstrapDetector)
+			if !detector.Observe([]byte(payload)) || detector.Finish() {
+				t.Fatal("uninspectable response was not forwarded")
+			}
+		})
 	}
 }

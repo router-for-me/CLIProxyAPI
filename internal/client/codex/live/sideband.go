@@ -14,13 +14,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	xproxy "golang.org/x/net/proxy"
 )
@@ -45,6 +46,8 @@ type liveSession struct {
 	callID                string
 	authID                string
 	model                 string
+	sessionID             string
+	parentSessionID       string
 	ownerPrincipal        string
 	ownerProvider         string
 	clientSecretPrincipal string
@@ -354,6 +357,15 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, c.Request.Header, nil, map[string]any{
+		coreexecutor.ExecutionSessionMetadataKey: session.callID,
+	})
+	if session.sessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = session.sessionID
+		meta.ParentSessionID = session.parentSessionID
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
+	}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	var errSelect error
@@ -378,6 +390,19 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 	if selected == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
@@ -427,27 +452,6 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	upstream, handshakeResponse, errDial := dialUpstream(selected)
 	if errDial != nil && selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
 		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
-		helps.RecordAPIWebsocketHandshake(ctx, runtimeConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
-		if handshakeResponse.Body != nil {
-			if errClose := handshakeResponse.Body.Close(); errClose != nil {
-				log.Errorf("codex live sideband: close unauthorized handshake body error: %v", errClose)
-			}
-		}
-		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
-		if errRefresh != nil {
-			writeSelectionError(c, errRefresh)
-			return
-		}
-		if !didRefresh || refreshed == nil {
-			writeLiveError(c, http.StatusUnauthorized, "Codex credential unauthorized")
-			return
-		}
-		selected = refreshed
-		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		upstream, handshakeResponse, errDial = dialUpstream(selected)
-		if errDial != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
-			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model)
-		}
 	}
 	if errDial != nil {
 		handleSidebandDialError(c, ctx, runtimeConfig, handshakeResponse, errDial)
@@ -575,7 +579,25 @@ func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Co
 		}
 		copyRealtimeHandshakeHeaders(c.Writer.Header(), response.Header)
 		helps.RecordAPIWebsocketHandshake(ctx, cfg, response.StatusCode, callResponseHeaders(response.Header))
+		if status == http.StatusUnauthorized {
+			contentType := response.Header.Get("Content-Type")
+			var body []byte
+			if response.Body != nil {
+				// Forward the bytes already received even when the read ends in an
+				// error: the client must see the upstream unauthorized body.
+				body, _ = readLimitedBody(response.Body)
+				helps.AppendAPIWebsocketBody(ctx, cfg, body)
+				if errClose := response.Body.Close(); errClose != nil {
+					log.Errorf("codex live sideband: close rejected handshake body error: %v", errClose)
+				}
+			}
+			helps.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
+			c.Data(status, contentType, body)
+			return
+		}
 		if response.Body != nil {
+			body, _ := readLimitedBody(response.Body)
+			helps.AppendAPIWebsocketBody(ctx, cfg, body)
 			if errClose := response.Body.Close(); errClose != nil {
 				log.Errorf("codex live sideband: close rejected handshake body error: %v", errClose)
 			}
@@ -584,7 +606,6 @@ func handleSidebandDialError(c *gin.Context, ctx context.Context, cfg *config.Co
 	helps.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
 	writeLiveError(c, status, "Codex live sideband upstream unavailable")
 }
-
 func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	var once sync.Once
 	var closeErr error

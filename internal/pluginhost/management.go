@@ -3,13 +3,15 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/htmlsanitize"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -20,10 +22,11 @@ const (
 )
 
 type managementRouteRecord struct {
-	pluginID string
-	path     string
-	version  string
-	route    pluginapi.ManagementRoute
+	pluginID      string
+	path          string
+	version       string
+	schemaVersion uint32
+	route         pluginapi.ManagementRoute
 }
 
 type resourceRouteRecord struct {
@@ -76,10 +79,11 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 			item.Method = method
 			item.Path = path
 			nextRoutes[key] = managementRouteRecord{
-				pluginID: record.id,
-				path:     record.path,
-				version:  record.version,
-				route:    item,
+				pluginID:      record.id,
+				path:          record.path,
+				version:       record.version,
+				schemaVersion: record.plugin.SchemaVersion,
+				route:         item,
 			}
 		}
 
@@ -243,7 +247,12 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 		var errRead error
 		body, errRead = io.ReadAll(r.Body)
 		if errRead != nil {
-			http.Error(w, "failed to read plugin management request body", http.StatusBadRequest)
+			status := http.StatusBadRequest
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(errRead, &maxBytesErr) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			http.Error(w, "failed to read plugin management request body", status)
 			return true
 		}
 		if errClose := r.Body.Close(); errClose != nil {
@@ -264,7 +273,9 @@ func (h *Host) ServeManagementHTTP(w http.ResponseWriter, r *http.Request) bool 
 		http.Error(w, "plugin management handler failed", http.StatusBadGateway)
 		return true
 	}
-	resp.Body = escapeManagementResponseBody(resp)
+	if managementResponseEscapesHTML(record.schemaVersion) {
+		resp.Body = escapeManagementResponseBody(resp)
+	}
 
 	for keyHeader, values := range resp.Headers {
 		for _, value := range values {
@@ -346,6 +357,10 @@ func escapeManagementResponseBody(resp pluginapi.ManagementResponse) []byte {
 		return resp.Body
 	}
 	return body
+}
+
+func managementResponseEscapesHTML(schemaVersion uint32) bool {
+	return schemaVersion < pluginabi.SchemaVersionRawManagementResponse
 }
 
 func (h *Host) callResourceHandler(ctx context.Context, record resourceRouteRecord, req pluginapi.ManagementRequest) (resp pluginapi.ManagementResponse, err error) {

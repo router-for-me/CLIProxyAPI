@@ -11,16 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codebuddy"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codebuddy"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -107,8 +106,8 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel)
-	translated, _ = sjson.SetBytes(translated, "stream", true)
-	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	translated, _ = ojson.SetBytes(translated, "stream", true)
+	translated, _ = ojson.SetBytes(translated, "stream_options.include_usage", true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -395,11 +394,11 @@ func aggregateOpenAIChatCompletionStream(raw []byte) ([]byte, usage.Detail, erro
 		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
 		}
-		if !gjson.ValidBytes(payload) {
+		if !ojson.ValidBytes(payload) {
 			continue
 		}
 
-		root := gjson.ParseBytes(payload)
+		root := ojson.ParseBytes(payload)
 		if responseID == "" {
 			responseID = root.Get("id").String()
 		}

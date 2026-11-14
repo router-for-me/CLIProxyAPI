@@ -3,10 +3,12 @@ package claude
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing.T) {
@@ -36,7 +38,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingIncludesSignature(t *testing
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
@@ -144,7 +146,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingWithoutReasoningItemStillInc
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
 				thinkingStartFound = true
 				if data.Get("content_block.signature").Exists() {
@@ -202,7 +204,7 @@ func digestCodexThinkingStream(t *testing.T, chunks [][]byte) codexThinkingStrea
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
@@ -356,7 +358,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingUsesEarlyCapturedSignatureWh
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "signature_delta" {
 				signatureDeltaCount++
 				if got := data.Get("delta.signature").String(); got != "enc_sig_early" {
@@ -396,7 +398,7 @@ func TestConvertCodexResponseToClaude_StreamThinkingUsesFinalDoneSignature(t *te
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "thinking" {
 				events = append(events, "thinking_start")
 			}
@@ -455,7 +457,7 @@ func TestConvertCodexResponseToClaude_StreamSignatureOnlyReasoningEmitsThinkingS
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "thinking" {
@@ -536,7 +538,7 @@ func TestConvertCodexResponseToClaudeNonStream_ThinkingIncludesSignature(t *test
 	}`)
 
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 
 	thinking := parsed.Get("content.0")
 	if thinking.Get("type").String() != "thinking" {
@@ -585,7 +587,7 @@ func TestConvertCodexResponseToClaude_StreamTextBeforeToolCallsDoesNotEmitGhostS
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				startIndices = append(startIndices, data.Get("index").Int())
@@ -634,7 +636,7 @@ func TestConvertCodexResponseToClaude_StreamFunctionCallDefersStartUntilDoneName
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() != "tool_use" {
@@ -692,7 +694,7 @@ func TestConvertCodexResponseToClaude_StreamUnnamedFunctionCallDoneByCallIDKeeps
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				if data.Get("content_block.type").String() == "tool_use" {
@@ -744,7 +746,7 @@ func TestConvertCodexResponseToClaude_StreamDeferredUnnamedFunctionCallDoesNotRe
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "text" {
 				if got := data.Get("index").Int(); got != 0 {
 					t.Fatalf("text block index = %d, want 0; outputs=%q", got, outputs)
@@ -783,7 +785,7 @@ func TestConvertCodexResponseToClaude_StreamTerminalOutputHydratesOpenFunctionCa
 				continue
 			}
 			position++
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_delta":
 				if data.Get("delta.type").String() == "input_json_delta" && data.Get("delta.partial_json").String() == `{"query":"example"}` {
@@ -906,7 +908,7 @@ func TestConvertCodexResponseToClaude_StreamEmptyOutputUsesOutputItemDoneMessage
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "content_block_delta" && data.Get("delta.type").String() == "text_delta" && data.Get("delta.text").String() == "ok" {
 				foundText = true
 				break
@@ -989,6 +991,59 @@ func TestConvertCodexResponseToClaude_StreamWebSearchCallReusesFallbackToolUseID
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamWebSearchCallActionSources(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		"messages":[{"role":"user","content":"search xai docs"}]
+	}`)
+	var param any
+
+	chunks := [][]byte{
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"grok-4"}}`),
+		[]byte(`data: {"type":"response.output_item.added","item":{"id":"ws_123","type":"web_search_call","status":"in_progress"}}`),
+		[]byte(`data: {"type":"response.output_item.done","item":{"id":"ws_123","type":"web_search_call","status":"completed","action":{"type":"search","query":"xAI web search docs","sources":[{"type":"url","url":"https://docs.x.ai/developers/tools/web-search","title":"xAI Docs"},{"type":"url","url":"https://example.com/notitle"},{"type":"url","url":""},{"type":"url","url":"   "}]}}}`),
+		[]byte(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":{"input_tokens":5,"output_tokens":10}}}`),
+	}
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+	}
+
+	var webSearchResultBlock ojson.Result
+	for _, out := range outputs {
+		for _, line := range strings.Split(string(out), "\n") {
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
+			if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "web_search_tool_result" {
+				webSearchResultBlock = data.Get("content_block")
+			}
+		}
+	}
+
+	if !webSearchResultBlock.Exists() {
+		t.Fatalf("expected web_search_tool_result block in stream output")
+	}
+	content := webSearchResultBlock.Get("content").Array()
+	if len(content) != 2 {
+		t.Fatalf("web_search_tool_result.content length = %d, want 2; raw: %s", len(content), webSearchResultBlock.Get("content").Raw)
+	}
+	if got := content[0].Get("url").String(); got != "https://docs.x.ai/developers/tools/web-search" {
+		t.Errorf("content[0].url = %q, want https://docs.x.ai/developers/tools/web-search", got)
+	}
+	if got := content[0].Get("title").String(); got != "xAI Docs" {
+		t.Errorf("content[0].title = %q, want xAI Docs", got)
+	}
+	if got := content[1].Get("url").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].url = %q, want https://example.com/notitle", got)
+	}
+	if got := content[1].Get("title").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].title = %q, want https://example.com/notitle (fallback to url)", got)
+	}
+}
+
 func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 	longCallID := "call_" + strings.Repeat("a", 62)
 	if len(longCallID) <= 64 {
@@ -1008,7 +1063,7 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 				if !strings.HasPrefix(line, "data: ") {
 					continue
 				}
-				data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+				data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 				if data.Get("type").String() == "content_block_start" && data.Get("content_block.type").String() == "tool_use" {
 					toolID = data.Get("content_block.id").String()
 				}
@@ -1040,7 +1095,7 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 		}`)
 
 		out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-		toolID := gjson.GetBytes(out, "content.0.id").String()
+		toolID := ojson.GetBytesNoCopy(out, "content.0.id").String()
 		if toolID == "" {
 			t.Fatalf("missing nonstream tool_use id. Output: %s", string(out))
 		}
@@ -1135,9 +1190,9 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchCallEmitsServerToolBlock
 	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
 	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 	types := []string{}
-	parsed.Get("content").ForEach(func(_, value gjson.Result) bool {
+	parsed.Get("content").ForEach(func(_, value ojson.Result) bool {
 		types = append(types, value.Get("type").String())
 		return true
 	})
@@ -1168,7 +1223,7 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchStopReasonEndTurn(t *tes
 	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search weather"}]}`)
 	response := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex-spark","stop_reason":"stop","usage":{"input_tokens":3,"output_tokens":2},"output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","query":"search weather"}},{"type":"message","content":[{"type":"output_text","text":"done"}]}]}}`)
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 	if got := parsed.Get("stop_reason").String(); got != "end_turn" {
 		t.Fatalf("stop_reason = %q, want end_turn when only server web_search and text are present", got)
 	}
@@ -1184,6 +1239,70 @@ func TestConvertCodexResponseToClaudeNonStream_WebSearchDedupesEmptyOpenPageItem
 	}
 	if !strings.Contains(string(out), "weather") {
 		t.Fatalf("expected populated query item to be kept: %s", string(out))
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_WebSearchCallActionSources(t *testing.T) {
+	ctx := context.Background()
+	originalRequest := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"search xai docs"}]}`)
+	response := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"model":"grok-4",
+			"stop_reason":"stop",
+			"usage":{"input_tokens":5,"output_tokens":10},
+			"output":[
+				{
+					"type":"web_search_call",
+					"id":"ws_123",
+					"status":"completed",
+					"action":{
+						"type":"search",
+						"query":"xAI web search docs",
+						"sources":[
+							{"type":"url","url":"https://docs.x.ai/developers/tools/web-search","title":"xAI Docs"},
+							{"type":"url","url":"https://example.com/notitle"},
+							{"type":"url","url":""},
+							{"type":"url","url":"   "}
+						]
+					}
+				},
+				{
+					"type":"message",
+					"content":[{"type":"output_text","text":"here are the docs"}]
+				}
+			]
+		}
+	}`)
+	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
+	parsed := util.ParseGJSONBytesNoCopy(out)
+	var resultContent ojson.Result
+	parsed.Get("content").ForEach(func(_, block ojson.Result) bool {
+		if block.Get("type").String() == "web_search_tool_result" {
+			resultContent = block.Get("content")
+			return false
+		}
+		return true
+	})
+	if !resultContent.Exists() {
+		t.Fatalf("missing web_search_tool_result in non-stream content: %s", string(out))
+	}
+	contentArray := resultContent.Array()
+	if len(contentArray) != 2 {
+		t.Fatalf("web_search_tool_result content length = %d, want 2; raw: %s", len(contentArray), resultContent.Raw)
+	}
+	if got := contentArray[0].Get("url").String(); got != "https://docs.x.ai/developers/tools/web-search" {
+		t.Errorf("content[0].url = %q, want https://docs.x.ai/developers/tools/web-search", got)
+	}
+	if got := contentArray[0].Get("title").String(); got != "xAI Docs" {
+		t.Errorf("content[0].title = %q, want xAI Docs", got)
+	}
+	if got := contentArray[1].Get("url").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].url = %q, want https://example.com/notitle", got)
+	}
+	if got := contentArray[1].Get("title").String(); got != "https://example.com/notitle" {
+		t.Errorf("content[1].title = %q, want https://example.com/notitle (fallback to url)", got)
 	}
 }
 
@@ -1256,7 +1375,7 @@ func TestConvertCodexResponseToClaudeNonStream_StopReasonMapping(t *testing.T) {
 			ctx := context.Background()
 			originalRequest := []byte(`{"tools":[{"name":"lookup","input_schema":{"type":"object","properties":{}}}]}`)
 			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, tt.response, nil)
-			parsed := gjson.ParseBytes(out)
+			parsed := util.ParseGJSONBytesNoCopy(out)
 
 			if got := parsed.Get("stop_reason").String(); got != tt.wantReason {
 				t.Fatalf("stop_reason = %q, want %q. Output: %s", got, tt.wantReason, string(out))
@@ -1281,7 +1400,7 @@ func TestConvertCodexResponseToClaudeNonStream_StopSequenceMapping(t *testing.T)
 	}`)
 
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, response, nil)
-	parsed := gjson.ParseBytes(out)
+	parsed := util.ParseGJSONBytesNoCopy(out)
 
 	if got := parsed.Get("stop_reason").String(); got != "stop_sequence" {
 		t.Fatalf("stop_reason = %q, want stop_sequence. Output: %s", got, string(out))
@@ -1299,22 +1418,22 @@ func findClaudeStreamStopReason(outputs [][]byte) (string, bool) {
 	return messageDelta.Get("delta.stop_reason").String(), true
 }
 
-func findClaudeStreamMessageDelta(outputs [][]byte) (gjson.Result, bool) {
+func findClaudeStreamMessageDelta(outputs [][]byte) (ojson.Result, bool) {
 	for _, out := range outputs {
 		for _, line := range strings.Split(string(out), "\n") {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			if data.Get("type").String() == "message_delta" {
 				return data, true
 			}
 		}
 	}
-	return gjson.Result{}, false
+	return ojson.Result{}, false
 }
 
-func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool) {
+func firstClaudeStreamPayloadForEvent(output, event string) (ojson.Result, bool) {
 	var currentEvent string
 	for _, line := range strings.Split(output, "\n") {
 		if strings.HasPrefix(line, "event: ") {
@@ -1324,7 +1443,666 @@ func firstClaudeStreamPayloadForEvent(output, event string) (gjson.Result, bool)
 		if currentEvent != event || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		return gjson.Parse(strings.TrimPrefix(line, "data: ")), true
+		return ojson.Parse(strings.TrimPrefix(line, "data: ")), true
 	}
-	return gjson.Result{}, false
+	return ojson.Result{}, false
+}
+
+func TestConvertCodexResponseToClaude_StreamPreservesCacheWriteUsage(t *testing.T) {
+	tests := []struct {
+		name                 string
+		terminalUsageJSON    string
+		wantInputTokens      int64
+		wantOutputTokens     int64
+		wantCacheReadTokens  int64
+		wantCacheWriteTokens int64
+	}{
+		{
+			name:                 "cache_write_tokens field",
+			terminalUsageJSON:    `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":150}}`,
+			wantInputTokens:      50,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name:                 "cache_creation_tokens field alias",
+			terminalUsageJSON:    `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_creation_tokens":150}}`,
+			wantInputTokens:      50,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name:                 "cached_tokens greater than input_tokens clamps input_tokens to zero",
+			terminalUsageJSON:    `{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":50}}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 50,
+		},
+		{
+			name:                 "zero cache_write_tokens does not emit cache_creation_input_tokens",
+			terminalUsageJSON:    `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":0}}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "cache_write_tokens only deducts from input_tokens",
+			terminalUsageJSON:    `{"input_tokens":4022,"output_tokens":462,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":4019}}`,
+			wantInputTokens:      3,
+			wantOutputTokens:     462,
+			wantCacheReadTokens:  0,
+			wantCacheWriteTokens: 4019,
+		},
+		{
+			name:                 "combined cached and cache_write greater than input_tokens clamps to zero",
+			terminalUsageJSON:    `{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":300,"cache_write_tokens":300}}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCacheReadTokens:  300,
+			wantCacheWriteTokens: 300,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			var param any
+
+			chunks := [][]byte{
+				[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+				[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`),
+				[]byte(fmt.Sprintf(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":%s}}`, tt.terminalUsageJSON)),
+			}
+
+			var outputs [][]byte
+			for _, chunk := range chunks {
+				outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+			}
+
+			delta, ok := findClaudeStreamMessageDelta(outputs)
+			if !ok {
+				t.Fatalf("missing message_delta event; outputs=%q", outputs)
+			}
+
+			usage := delta.Get("usage")
+			if got := usage.Get("input_tokens").Int(); got != tt.wantInputTokens {
+				t.Fatalf("input_tokens = %d, want %d", got, tt.wantInputTokens)
+			}
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			if got := usage.Get("cache_read_input_tokens").Int(); got != tt.wantCacheReadTokens {
+				t.Fatalf("cache_read_input_tokens = %d, want %d", got, tt.wantCacheReadTokens)
+			}
+			if tt.wantCacheWriteTokens == 0 {
+				if usage.Get("cache_creation_input_tokens").Exists() {
+					t.Fatalf("cache_creation_input_tokens should not be emitted when zero; got %v", usage.Get("cache_creation_input_tokens").Raw)
+				}
+			} else if got := usage.Get("cache_creation_input_tokens").Int(); got != tt.wantCacheWriteTokens {
+				t.Fatalf("cache_creation_input_tokens = %d, want %d", got, tt.wantCacheWriteTokens)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_PreservesCacheWriteUsage(t *testing.T) {
+	tests := []struct {
+		name                 string
+		responseJSON         string
+		wantInputTokens      int64
+		wantOutputTokens     int64
+		wantCacheReadTokens  int64
+		wantCacheWriteTokens int64
+	}{
+		{
+			name: "cache_write_tokens field",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":150}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      50,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name: "cache_creation_tokens alias",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_creation_tokens":150}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      50,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name: "cached_tokens greater than input_tokens clamps input_tokens to zero",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":50}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 50,
+		},
+		{
+			name: "zero cache_write_tokens does not emit cache_creation_input_tokens",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":0}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      200,
+			wantOutputTokens:     200,
+			wantCacheReadTokens:  800,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name: "cache_write_tokens only deducts from input_tokens",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":4022,"output_tokens":462,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":4019}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      3,
+			wantOutputTokens:     462,
+			wantCacheReadTokens:  0,
+			wantCacheWriteTokens: 4019,
+		},
+		{
+			name: "combined cached and cache_write greater than input_tokens clamps to zero",
+			responseJSON: `{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":300,"cache_write_tokens":300}},
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCacheReadTokens:  300,
+			wantCacheWriteTokens: 300,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, []byte(tt.responseJSON), nil)
+			parsed := util.ParseGJSONBytesNoCopy(out)
+
+			usage := parsed.Get("usage")
+			if got := usage.Get("input_tokens").Int(); got != tt.wantInputTokens {
+				t.Fatalf("input_tokens = %d, want %d", got, tt.wantInputTokens)
+			}
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			if got := usage.Get("cache_read_input_tokens").Int(); got != tt.wantCacheReadTokens {
+				t.Fatalf("cache_read_input_tokens = %d, want %d", got, tt.wantCacheReadTokens)
+			}
+			if tt.wantCacheWriteTokens == 0 {
+				if usage.Get("cache_creation_input_tokens").Exists() {
+					t.Fatalf("cache_creation_input_tokens should not be emitted when zero; got %v", usage.Get("cache_creation_input_tokens").Raw)
+				}
+			} else if got := usage.Get("cache_creation_input_tokens").Int(); got != tt.wantCacheWriteTokens {
+				t.Fatalf("cache_creation_input_tokens = %d, want %d", got, tt.wantCacheWriteTokens)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaude_PreservesReasoningUsage(t *testing.T) {
+	tests := []struct {
+		name                string
+		terminalUsageJSON   string
+		wantOutputTokens    int64
+		wantReasoningExist  bool
+		wantReasoningTokens int64
+	}{
+		{
+			name:                "preserves positive reasoning tokens",
+			terminalUsageJSON:   `{"input_tokens":420,"output_tokens":518,"output_tokens_details":{"reasoning_tokens":163},"total_tokens":938}`,
+			wantOutputTokens:    518,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 163,
+		},
+		{
+			name:                "preserves explicit zero reasoning tokens",
+			terminalUsageJSON:   `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":0}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 0,
+		},
+		{
+			name:               "omits reasoning detail when absent",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized reasoning tokens to output tokens",
+			terminalUsageJSON:   `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":999}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "rejects negative reasoning tokens",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "rejects negative float reasoning tokens",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-0.5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized int64 overflow reasoning tokens to output tokens",
+			terminalUsageJSON:   `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":9223372036854775808}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "omits string reasoning detail",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":"163"}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits boolean reasoning detail",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":true}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits null reasoning detail",
+			terminalUsageJSON:  `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":null}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			var param any
+
+			chunks := [][]byte{
+				[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5"}}`),
+				[]byte(`data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}}`),
+				[]byte(fmt.Sprintf(`data: {"type":"response.completed","response":{"stop_reason":"stop","usage":%s}}`, tt.terminalUsageJSON)),
+			}
+
+			var outputs [][]byte
+			for _, chunk := range chunks {
+				outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, chunk, &param)...)
+			}
+
+			delta, ok := findClaudeStreamMessageDelta(outputs)
+			if !ok {
+				t.Fatalf("missing message_delta event; outputs=%q", outputs)
+			}
+
+			usage := delta.Get("usage")
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			thinkingNode := usage.Get("output_tokens_details.thinking_tokens")
+			if tt.wantReasoningExist {
+				if !thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to exist, got none in %s", usage.Raw)
+				}
+				if got := thinkingNode.Int(); got != tt.wantReasoningTokens {
+					t.Fatalf("thinking_tokens = %d, want %d", got, tt.wantReasoningTokens)
+				}
+			} else {
+				if thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to be absent, got %v", thinkingNode.Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStream_PreservesReasoningUsage(t *testing.T) {
+	tests := []struct {
+		name                string
+		usageJSON           string
+		wantOutputTokens    int64
+		wantReasoningExist  bool
+		wantReasoningTokens int64
+	}{
+		{
+			name:                "preserves positive reasoning tokens",
+			usageJSON:           `{"input_tokens":420,"output_tokens":518,"output_tokens_details":{"reasoning_tokens":163},"total_tokens":938}`,
+			wantOutputTokens:    518,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 163,
+		},
+		{
+			name:                "preserves explicit zero reasoning tokens",
+			usageJSON:           `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":0}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 0,
+		},
+		{
+			name:               "omits reasoning detail when absent",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized reasoning tokens to output tokens",
+			usageJSON:           `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":999}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "rejects negative reasoning tokens",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "rejects negative float reasoning tokens",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":-0.5}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:                "clamps oversized int64 overflow reasoning tokens to output tokens",
+			usageJSON:           `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":9223372036854775808}}`,
+			wantOutputTokens:    50,
+			wantReasoningExist:  true,
+			wantReasoningTokens: 50,
+		},
+		{
+			name:               "omits string reasoning detail",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":"163"}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits boolean reasoning detail",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":true}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+		{
+			name:               "omits null reasoning detail",
+			usageJSON:          `{"input_tokens":100,"output_tokens":50,"output_tokens_details":{"reasoning_tokens":null}}`,
+			wantOutputTokens:   50,
+			wantReasoningExist: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			originalRequest := []byte(`{"messages":[]}`)
+			responseJSON := fmt.Sprintf(`{
+				"type":"response.completed",
+				"response":{
+					"id":"resp_1",
+					"model":"gpt-5",
+					"stop_reason":"stop",
+					"usage":%s,
+					"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]
+				}
+			}`, tt.usageJSON)
+			out := ConvertCodexResponseToClaudeNonStream(ctx, "", originalRequest, nil, []byte(responseJSON), nil)
+			parsed := util.ParseGJSONBytesNoCopy(out)
+
+			usage := parsed.Get("usage")
+			if got := usage.Get("output_tokens").Int(); got != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", got, tt.wantOutputTokens)
+			}
+			thinkingNode := usage.Get("output_tokens_details.thinking_tokens")
+			if tt.wantReasoningExist {
+				if !thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to exist, got none in %s", usage.Raw)
+				}
+				if got := thinkingNode.Int(); got != tt.wantReasoningTokens {
+					t.Fatalf("thinking_tokens = %d, want %d", got, tt.wantReasoningTokens)
+				}
+			} else {
+				if thinkingNode.Exists() {
+					t.Fatalf("expected output_tokens_details.thinking_tokens to be absent, got %v", thinkingNode.Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractResponsesUsage(t *testing.T) {
+	tests := []struct {
+		name                 string
+		rawUsage             string
+		wantInputTokens      int64
+		wantOutputTokens     int64
+		wantCachedTokens     int64
+		wantCacheWriteTokens int64
+	}{
+		{
+			name:                 "nil / absent usage",
+			rawUsage:             "",
+			wantInputTokens:      0,
+			wantOutputTokens:     0,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "null usage",
+			rawUsage:             "null",
+			wantInputTokens:      0,
+			wantOutputTokens:     0,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "only input and output tokens without cache details",
+			rawUsage:             `{"input_tokens":100,"output_tokens":50}`,
+			wantInputTokens:      100,
+			wantOutputTokens:     50,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "deducts cache_read_tokens only",
+			rawUsage:             `{"input_tokens":100,"output_tokens":50,"input_tokens_details":{"cached_tokens":30}}`,
+			wantInputTokens:      70,
+			wantOutputTokens:     50,
+			wantCachedTokens:     30,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "deducts cache_write_tokens only (issue 5956)",
+			rawUsage:             `{"input_tokens":4022,"output_tokens":462,"input_tokens_details":{"cache_write_tokens":4019}}`,
+			wantInputTokens:      3,
+			wantOutputTokens:     462,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 4019,
+		},
+		{
+			name:                 "deducts cache_creation_tokens alias only",
+			rawUsage:             `{"input_tokens":4022,"output_tokens":462,"input_tokens_details":{"cache_creation_tokens":4019}}`,
+			wantInputTokens:      3,
+			wantOutputTokens:     462,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 4019,
+		},
+		{
+			name:                 "deducts both cached_tokens and cache_write_tokens",
+			rawUsage:             `{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":150}}`,
+			wantInputTokens:      50,
+			wantOutputTokens:     200,
+			wantCachedTokens:     800,
+			wantCacheWriteTokens: 150,
+		},
+		{
+			name:                 "clamps input_tokens to zero when cache exceeds input",
+			rawUsage:             `{"input_tokens":500,"output_tokens":100,"input_tokens_details":{"cached_tokens":300,"cache_write_tokens":300}}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     100,
+			wantCachedTokens:     300,
+			wantCacheWriteTokens: 300,
+		},
+		{
+			name:                 "handles negative cache numbers safely without corrupting input",
+			rawUsage:             `{"input_tokens":100,"output_tokens":50,"input_tokens_details":{"cached_tokens":-10,"cache_write_tokens":-5}}`,
+			wantInputTokens:      100,
+			wantOutputTokens:     50,
+			wantCachedTokens:     -10,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "clamps raw negative input_tokens to zero",
+			rawUsage:             `{"input_tokens":-10,"output_tokens":50}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     50,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 0,
+		},
+		{
+			name:                 "negative cache_write_tokens falls back to cache_creation_tokens alias",
+			rawUsage:             `{"input_tokens":100,"output_tokens":50,"input_tokens_details":{"cache_write_tokens":-1,"cache_creation_tokens":40}}`,
+			wantInputTokens:      60,
+			wantOutputTokens:     50,
+			wantCachedTokens:     0,
+			wantCacheWriteTokens: 40,
+		},
+		{
+			name:                 "prevents int64 overflow when cached_tokens and cache_write_tokens are huge",
+			rawUsage:             `{"input_tokens":100,"output_tokens":50,"input_tokens_details":{"cached_tokens":9223372036854775800,"cache_write_tokens":100}}`,
+			wantInputTokens:      0,
+			wantOutputTokens:     50,
+			wantCachedTokens:     9223372036854775800,
+			wantCacheWriteTokens: 100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ojson.Parse(tt.rawUsage)
+			input, output, cached, cacheWrite := extractResponsesUsage(usage)
+			if input != tt.wantInputTokens {
+				t.Fatalf("input_tokens = %d, want %d", input, tt.wantInputTokens)
+			}
+			if output != tt.wantOutputTokens {
+				t.Fatalf("output_tokens = %d, want %d", output, tt.wantOutputTokens)
+			}
+			if cached != tt.wantCachedTokens {
+				t.Fatalf("cached_tokens = %d, want %d", cached, tt.wantCachedTokens)
+			}
+			if cacheWrite != tt.wantCacheWriteTokens {
+				t.Fatalf("cache_write_tokens = %d, want %d", cacheWrite, tt.wantCacheWriteTokens)
+			}
+		})
+	}
+}
+
+func TestConvertCodexResponseToClaude_RestoresLongMidConversationToolAdditionName(t *testing.T) {
+	// Two >64-char MCP tools that share the same post-"__" suffix so the mid-conversation
+	// tool_addition collides with the top-level tool and receives a "_1" suffix.
+	topLongMCPTool := "mcp__alpha_very_long_server_name_for_testing__deliver_final_subagent_handback_report"
+	midLongMCPTool := "mcp__bravo_very_long_server_name_for_testing__deliver_final_subagent_handback_report"
+	// Use JSON Unicode escape \u005f in "tool\u005faddition" to cover escaped JSON tokens too.
+	originalRequest := []byte(`{
+		"model": "gpt-6.1-sol",
+		"tools": [{"name": "` + topLongMCPTool + `", "input_schema": {"type": "object"}}],
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{
+				"role": "system",
+				"content": [
+					{
+						"type": "tool\u005faddition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"name": "` + midLongMCPTool + `",
+								"description": "Long MCP tool added mid-conversation",
+								"input_schema": {"type": "object"}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	translatedReq, err := ConvertClaudeRequestToCodex("gpt-6.1-sol", originalRequest, false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToCodex returned error: %v", err)
+	}
+	topShortName := ojson.GetBytesNoCopy(translatedReq, "tools.0.name").String()
+	midShortName := ojson.GetBytesNoCopy(translatedReq, "input.1.tools.0.name").String()
+	if topShortName == "" || midShortName == "" || topShortName == midShortName {
+		t.Fatalf("expected distinct shortened names for colliding MCP tools, got top=%q mid=%q", topShortName, midShortName)
+	}
+
+	// 1. Streaming response restoration
+	var param any
+	addedEvent := []byte(fmt.Sprintf(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":%q,"arguments":""}}`, midShortName))
+	chunks := ConvertCodexResponseToClaude(context.Background(), "gpt-6.1-sol", originalRequest, nil, addedEvent, &param)
+	joined := string(bytes.Join(chunks, nil))
+	if !strings.Contains(joined, `"name":"`+midLongMCPTool+`"`) {
+		t.Fatalf("streaming response did not restore long mid-conversation tool name %q, got: %s", midLongMCPTool, joined)
+	}
+
+	// 2. Non-streaming response restoration
+	completedEvent := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-6.1-sol","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":%q,"arguments":"{}"},{"type":"function_call","id":"fc_2","call_id":"call_2","name":%q,"arguments":"{}"}],"usage":{"input_tokens":10,"output_tokens":5}}}`, topShortName, midShortName))
+	nonStreamOut := ConvertCodexResponseToClaudeNonStream(context.Background(), "gpt-6.1-sol", originalRequest, nil, completedEvent, nil)
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "content.0.name").String(); got != topLongMCPTool {
+		t.Fatalf("non-streaming response content.0.name = %q, want %q; body=%s", got, topLongMCPTool, nonStreamOut)
+	}
+	if got := ojson.GetBytesNoCopy(nonStreamOut, "content.1.name").String(); got != midLongMCPTool {
+		t.Fatalf("non-streaming response content.1.name = %q, want %q; body=%s", got, midLongMCPTool, nonStreamOut)
+	}
 }

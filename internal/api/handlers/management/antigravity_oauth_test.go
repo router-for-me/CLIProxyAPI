@@ -3,7 +3,7 @@ package management
 import (
 	"testing"
 
-	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 )
 
 func TestAntigravityOAuthClientValueFallsBackToDefaults(t *testing.T) {

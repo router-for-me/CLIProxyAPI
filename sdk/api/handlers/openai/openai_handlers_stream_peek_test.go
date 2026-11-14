@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // peekStreamExecutor feeds a fake executor stream that closes the chunk channel
@@ -164,7 +164,7 @@ func TestStreamingPeekCleanCloseStillEmitsDone(t *testing.T) {
 			name:    "legacy",
 			route:   "/v1/completions",
 			body:    `{"model":"peek-stream-model","stream":true,"prompt":"hi"}`,
-			payload: chatPayload,
+			payload: strings.TrimPrefix(chatPayload, "data: "),
 		},
 	}
 	for _, tc := range cases {
@@ -352,7 +352,7 @@ func TestSanitizeOpenAIErrorMessageLongValueBound(t *testing.T) {
 	if out.Error == nil {
 		t.Fatal("expected sanitized error, got nil")
 	}
-	msg := gjson.Get(out.Error.Error(), "error.message").String()
+	msg := ojson.Get(out.Error.Error(), "error.message").String()
 	// Allow the truncation suffix (one ellipsis rune) over the hard limit.
 	if len([]rune(msg)) > openAIStreamErrorMessageLimit+4 {
 		t.Fatalf("sanitized JSON message field too large: %d chars", len(msg))
@@ -591,13 +591,13 @@ func TestResponsesWebsocketTerminalErrorRedacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildResponsesWebsocketErrorPayload: %v", err)
 	}
-	if gjson.GetBytes(payload, "type").String() != "error" {
-		t.Fatalf("type = %q, want error", gjson.GetBytes(payload, "type").String())
+	if ojson.GetBytes(payload, "type").String() != "error" {
+		t.Fatalf("type = %q, want error", ojson.GetBytes(payload, "type").String())
 	}
-	if status := int(gjson.GetBytes(payload, "status").Int()); status != http.StatusBadRequest {
+	if status := int(ojson.GetBytes(payload, "status").Int()); status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
 	}
-	if code := gjson.GetBytes(payload, "error.code").String(); code != "cyber_policy" {
+	if code := ojson.GetBytes(payload, "error.code").String(); code != "cyber_policy" {
 		t.Fatalf("error.code = %q, want cyber_policy", code)
 	}
 	raw := string(payload)

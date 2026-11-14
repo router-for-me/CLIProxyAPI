@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -159,7 +159,7 @@ func (m *Manager) executeWithOrderedFailover(ctx context.Context, providers []st
 	tracker := newRouteAttemptTracker()
 	if len(chain) <= 1 {
 		// No ordered pool: preserve legacy behavior exactly.
-		state := newRouteExecutionState(opts, tracker)
+		state := tracker
 		return m.executeMixedOnce(ctx, providers, req, opts, maxRetryCredentials, 0, 0, state)
 	}
 	var lastErr error
@@ -168,8 +168,7 @@ func (m *Manager) executeWithOrderedFailover(ctx context.Context, providers []st
 		candidateReq.Model = candidate.UpstreamModel
 		candidateOpts := withOrderedCandidateMetadata(opts, idx, candidate)
 		candidateProviders := orderedCandidateProviders(providers, candidate.Channel)
-		tried := make(map[string]struct{})
-		state := &routeExecutionState{tracker: tracker, tried: tried}
+		state := tracker
 		resp, err := m.executeMixedOnce(ctx, candidateProviders, candidateReq, candidateOpts, maxRetryCredentials, 0, 0, state)
 		if err == nil {
 			return resp, nil
@@ -203,8 +202,7 @@ func (m *Manager) executeCountWithOrderedFailover(ctx context.Context, providers
 	chain := m.orderedCandidateChainForRequest(providers, req, opts)
 	tracker := newRouteAttemptTracker()
 	if len(chain) <= 1 {
-		tried := make(map[string]struct{})
-		state := &routeExecutionState{tracker: tracker, tried: tried}
+		state := tracker
 		return m.executeCountMixedOnce(ctx, providers, req, opts, maxRetryCredentials, 0, 0, state)
 	}
 	var lastErr error
@@ -213,8 +211,7 @@ func (m *Manager) executeCountWithOrderedFailover(ctx context.Context, providers
 		candidateReq.Model = candidate.UpstreamModel
 		candidateOpts := withOrderedCandidateMetadata(opts, idx, candidate)
 		candidateProviders := orderedCandidateProviders(providers, candidate.Channel)
-		tried := make(map[string]struct{})
-		state := &routeExecutionState{tracker: tracker, tried: tried}
+		state := tracker
 		resp, err := m.executeCountMixedOnce(ctx, candidateProviders, candidateReq, candidateOpts, maxRetryCredentials, 0, 0, state)
 		if err == nil {
 			return resp, nil
@@ -248,8 +245,7 @@ func (m *Manager) executeStreamWithOrderedFailover(ctx context.Context, provider
 	chain := m.orderedCandidateChainForRequest(providers, req, opts)
 	tracker := newRouteAttemptTracker()
 	if len(chain) <= 1 {
-		tried := make(map[string]struct{})
-		state := &routeExecutionState{tracker: tracker, tried: tried}
+		state := tracker
 		return m.executeStreamMixedOnce(ctx, providers, req, opts, maxRetryCredentials, nil, 0, 0, state)
 	}
 	var lastErr error
@@ -258,8 +254,7 @@ func (m *Manager) executeStreamWithOrderedFailover(ctx context.Context, provider
 		candidateReq.Model = candidate.UpstreamModel
 		candidateOpts := withOrderedCandidateMetadata(opts, idx, candidate)
 		candidateProviders := orderedCandidateProviders(providers, candidate.Channel)
-		tried := make(map[string]struct{})
-		state := &routeExecutionState{tracker: tracker, tried: tried}
+		state := tracker
 		streamResult, err := m.executeStreamMixedOnce(ctx, candidateProviders, candidateReq, candidateOpts, maxRetryCredentials, nil, 0, 0, state)
 		if err == nil {
 			// Bytes are flowing from this candidate. No further fallback is

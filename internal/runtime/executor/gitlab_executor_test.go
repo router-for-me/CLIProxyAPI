@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestGitLabExecutorExecuteUsesChatEndpoint(t *testing.T) {
@@ -46,10 +46,10 @@ func TestGitLabExecutorExecuteUsesChatEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "chat response" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "chat response" {
 		t.Fatalf("expected chat response, got %q", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "model").String(); got != "claude-sonnet-4-5" {
+	if got := ojson.GetBytes(resp.Payload, "model").String(); got != "claude-sonnet-4-5" {
 		t.Fatalf("expected resolved model, got %q", got)
 	}
 }
@@ -96,7 +96,7 @@ func TestGitLabExecutorExecuteFallsBackToCodeSuggestions(t *testing.T) {
 	if chatCalls != 1 {
 		t.Fatalf("expected chat endpoint to be tried once, got %d", chatCalls)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "fallback response" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "fallback response" {
 		t.Fatalf("expected fallback response, got %q", got)
 	}
 }
@@ -109,7 +109,7 @@ func TestGitLabExecutorExecuteUsesAnthropicGateway(t *testing.T) {
 		gotPath = r.URL.Path
 		gotAuthHeader = r.Header.Get("Authorization")
 		gotRealmHeader = r.Header.Get("X-Gitlab-Realm")
-		gotModel = gjson.GetBytes(readBody(t, r), "model").String()
+		gotModel = ojson.GetBytes(readBody(t, r), "model").String()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"cmd":"ls"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":11,"output_tokens":4}}`))
 	}))
@@ -154,10 +154,10 @@ func TestGitLabExecutorExecuteUsesAnthropicGateway(t *testing.T) {
 	if gotModel != "claude-sonnet-4-5" {
 		t.Fatalf("model = %q, want claude-sonnet-4-5", gotModel)
 	}
-	if got := gjson.GetBytes(resp.Payload, "content.0.type").String(); got != "tool_use" {
+	if got := ojson.GetBytes(resp.Payload, "content.0.type").String(); got != "tool_use" {
 		t.Fatalf("expected tool_use response, got %q", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "content.0.name").String(); got != "Bash" {
+	if got := ojson.GetBytes(resp.Payload, "content.0.name").String(); got != "Bash" {
 		t.Fatalf("expected tool name Bash, got %q", got)
 	}
 }
@@ -170,7 +170,7 @@ func TestGitLabExecutorExecuteUsesOpenAIGateway(t *testing.T) {
 		gotPath = r.URL.Path
 		gotAuthHeader = r.Header.Get("Authorization")
 		gotRealmHeader = r.Header.Get("X-Gitlab-Realm")
-		gotModel = gjson.GetBytes(readBody(t, r), "model").String()
+		gotModel = ojson.GetBytes(readBody(t, r), "model").String()
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"gpt-5-codex\"}}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from openai gateway\"}\n\n"))
@@ -212,7 +212,7 @@ func TestGitLabExecutorExecuteUsesOpenAIGateway(t *testing.T) {
 	if gotModel != "gpt-5-codex" {
 		t.Fatalf("model = %q, want gpt-5-codex", gotModel)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "hello from openai gateway" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "hello from openai gateway" {
 		t.Fatalf("expected openai gateway response, got %q payload=%s", got, string(resp.Payload))
 	}
 }
@@ -227,7 +227,7 @@ func TestGitLabExecutorExecuteUsesRequestedModelToSelectOpenAIGateway(t *testing
 		gotRealmHeader = r.Header.Get("X-Gitlab-Realm")
 		gotBetaHeader = r.Header.Get("anthropic-beta")
 		gotUserAgent = r.Header.Get("User-Agent")
-		gotModel = gjson.GetBytes(readBody(t, r), "model").String()
+		gotModel = ojson.GetBytes(readBody(t, r), "model").String()
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"created_at\":1710000000,\"model\":\"duo-chat-gpt-5-codex\"}}\n\n"))
 		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello from explicit openai model\"}\n\n"))
@@ -275,7 +275,7 @@ func TestGitLabExecutorExecuteUsesRequestedModelToSelectOpenAIGateway(t *testing
 	if gotModel != "duo-chat-gpt-5-codex" {
 		t.Fatalf("model = %q, want duo-chat-gpt-5-codex", gotModel)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "hello from explicit openai model" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "hello from explicit openai model" {
 		t.Fatalf("expected explicit openai model response, got %q payload=%s", got, string(resp.Payload))
 	}
 }
@@ -345,7 +345,7 @@ func TestGitLabExecutorExecuteStreamUsesCodeSuggestionsSSE(t *testing.T) {
 		gotAccept = r.Header.Get("Accept")
 		gotStreamingHeader = r.Header.Get(gitLabSSEStreamingHeader)
 		gotEncoding = r.Header.Get("Accept-Encoding")
-		gotStreamFlag = gjson.GetBytes(readBody(t, r), "stream").Bool()
+		gotStreamFlag = ojson.GetBytes(readBody(t, r), "stream").Bool()
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: stream_start\n"))

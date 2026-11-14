@@ -18,6 +18,15 @@ var inPlaceSJSONTokens = []string{"ReplaceInPlace", "Optimistic"}
 // from the same buffer can still be alive at that point.
 var inPlaceSJSONAllowlist = map[string]struct{}{}
 
+// skippedWalkDirs are directories the source walker never descends into. The
+// build and tool dirs are excluded because they hold cloned third-party or
+// generated Go sources (build output, caches, temporary GOPATH/module trees)
+// that must not be treated as product code governed by these invariants.
+var skippedWalkDirs = map[string]struct{}{
+	".git": {}, "vendor": {}, "node_modules": {}, "testdata": {},
+	".tmp_build": {}, ".go-cache": {}, ".go-tmp": {}, ".gocache": {},
+}
+
 // forEachSourceFile visits every non-test Go file in the repository.
 func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []byte)) {
 	t.Helper()
@@ -26,11 +35,7 @@ func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []
 			return err
 		}
 		if d.IsDir() {
-			if strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			switch d.Name() {
-			case "vendor", "node_modules", "testdata":
+			if _, skip := skippedWalkDirs[d.Name()]; skip {
 				return filepath.SkipDir
 			}
 			return nil
@@ -54,10 +59,54 @@ func forEachSourceFile(t *testing.T, root string, visit func(rel string, data []
 	}
 }
 
+// TestForEachSourceFileSkipsBuildDirs pins the walker's directory exclusions
+// and its non-exclusion of arbitrary hidden dirs. Every listed build/tool dir
+// must be skipped even when it holds a poisoned *.go file, while a hidden
+// source dir with no special meaning must still be scanned.
+func TestForEachSourceFileSkipsBuildDirs(t *testing.T) {
+	root := t.TempDir()
+	poison := "-- FORBIDDEN: ReplaceInPlace --\n"
+	// Every dir the walker must skip, seeded with a poisoned Go file.
+	for name := range skippedWalkDirs {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(poison), 0o644); err != nil {
+			t.Fatalf("write skip fixture: %v", err)
+		}
+	}
+	// A hidden dir with no special meaning must still be scanned.
+	hidden := filepath.Join(root, ".hidden-source")
+	if err := os.MkdirAll(hidden, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", hidden, err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, "x.go"), []byte("// .hidden-source scanned\n"), 0o644); err != nil {
+		t.Fatalf("write hidden fixture: %v", err)
+	}
+
+	var skipped, kept []string
+	forEachSourceFile(t, root, func(rel string, data []byte) {
+		if strings.Contains(string(data), "FORBIDDEN") {
+			skipped = append(skipped, rel)
+			return
+		}
+		if strings.Contains(string(data), ".hidden-source scanned") {
+			kept = append(kept, rel)
+		}
+	})
+	if len(skipped) != 0 {
+		t.Fatalf("blocked dirs were walked: %v", skipped)
+	}
+	if len(kept) != 1 {
+		t.Fatalf("expected hidden-source dir to be scanned once, got %v", kept)
+	}
+}
+
 // TestNoInPlaceSJSONWrites protects the invariant that request payload buffers
 // stay immutable for their whole lifetime.
 //
-// GetGJSONBytesNoCopy and ParseGJSONBytesNoCopy hand out gjson.Result values
+// GetGJSONBytesNoCopy and ParseGJSONBytesNoCopy hand out ojson.Result values
 // whose Raw and Str alias the caller's []byte. Go strings must never change,
 // so any in-place mutation of that buffer turns already-derived results into
 // silently wrong data: re-parsing sees the new bytes, and strings that were
@@ -104,15 +153,20 @@ type reviewedInPlaceByteWrite struct {
 }
 
 var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
-	"internal/runtime/executor/claude_signing.go":           {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
-	"internal/runtime/executor/claude_executor_cloaking.go": {1, "shifts []string headers to prepend a block; no byte of any payload is rewritten"},
-	"internal/runtime/executor/claude_executor_request.go":  {2, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
-	"internal/runtime/executor/helps/claude_mcp_alias.go":   {1, "copies an HMAC sum into a local fixed-size digest array"},
-	"internal/client/codex/live/tcp_proxy.go":               {1, "copies header and payload into a freshly allocated frame"},
-	"internal/runtime/executor/devin_protobuf.go":           {1, "copies a protobuf payload into a freshly allocated Connect frame"},
-	"internal/auth/cursor/proto/connect.go":                 {1, "copies a protobuf payload into a freshly allocated Connect frame"},
-	"internal/home/client.go":                               {1, "zeroes a secret buffer after json.Unmarshal has copied every value out"},
-	"internal/pluginstore/auth.go":                          {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},
+	"internal/translator/common/apply_patch_responses.go":           {1, "shifts [][]byte item references in a private output slice; no byte of any JSON payload is rewritten"},
+	"internal/translator/common/vertex_partial_args.go":             {1, "shifts []string object keys to insert a key; no byte of any payload is rewritten"},
+	"internal/runtime/executor/claude_signing.go":                   {2, "writes CCH digits into bytes.Clone(body); the caller's body is never touched"},
+	"internal/runtime/executor/claude_executor_cloaking.go":         {4, "shifts []string headers to prepend a block, or copies streamed tokens into private scanner/quote scratch buffers; no byte of any payload is rewritten"},
+	"internal/runtime/executor/claude_executor_request.go":          {3, "shifts []string headers to insert a part; no byte of any payload is rewritten"},
+	"internal/runtime/executor/xai_executor_request.go":             {5, "copies streamed tokens into private scanner/quote scratch buffers; no byte of any payload is rewritten"},
+	"internal/runtime/executor/helps/claude_credential_identity.go": {1, "copies key bytes into a local stack-allocated quote array for json.Unmarshal"},
+	"internal/runtime/executor/helps/claude_mcp_alias.go":           {1, "copies an HMAC sum into a local fixed-size digest array"},
+	"internal/client/codex/live/tcp_proxy.go":                       {1, "copies header and payload into a freshly allocated frame"},
+	"internal/home/client.go":                                       {1, "zeroes a secret buffer after json.Unmarshal has copied every value out"},
+	"internal/pluginstore/auth.go":                                  {1, "zeroes a locally built credential buffer after base64 encoding copied it out"},
+	"internal/runtime/executor/devin_protobuf.go":                   {1, "copies a protobuf payload into a freshly allocated Connect frame"},
+	"internal/auth/cursor/proto/connect.go":                         {1, "copies a protobuf payload into a freshly allocated Connect frame"},
+	"internal/kvstore/bolt_store.go":                                {1, "copies payload into a freshly allocated envelope buffer"},
 }
 
 // TestInPlaceByteWritesAreReviewed keeps the set of in-place byte writes small
@@ -180,24 +234,5 @@ func TestInPlaceByteWritePatterns_CRLF(t *testing.T) {
 	}
 	if !matched {
 		t.Fatalf("inPlaceByteWritePatterns failed to match CRLF line %q", crlfLine)
-	}
-}
-
-func TestForEachSourceFile_SkipsDotDirs(t *testing.T) {
-	tempDir := t.TempDir()
-	dotDir := filepath.Join(tempDir, ".gomodcache")
-	if err := os.MkdirAll(dotDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	sampleFile := filepath.Join(dotDir, "sample.go")
-	if err := os.WriteFile(sampleFile, []byte("package sample\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	var visited []string
-	forEachSourceFile(t, tempDir, func(rel string, data []byte) {
-		visited = append(visited, rel)
-	})
-	if len(visited) > 0 {
-		t.Fatalf("forEachSourceFile should have skipped dot directories, but visited: %v", visited)
 	}
 }

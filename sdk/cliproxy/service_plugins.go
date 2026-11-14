@@ -2,20 +2,18 @@ package cliproxy
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -33,7 +31,8 @@ const (
 type modelRegistrationTask struct {
 	phase    int
 	category string
-	run      func(*openAICompatibilityRegistrationCache) error
+	run      func(*openAICompatibilityRegistrationCache)
+	done     func()
 }
 
 type executorRegistrationOptions struct {
@@ -50,6 +49,16 @@ var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Mana
 	host.RegisterExecutors(manager, registry.GetGlobalRegistry())
 }
 
+// modelRegistrationTaskHook, if set, runs after auth-update commits and before
+// model registration workers start. Tests use it to prove registration no longer
+// holds authUpdateMu.
+var modelRegistrationTaskHook func()
+
+// modelRegistrationTaskPostRunHook, if set, runs synchronously inside model registration
+// tasks after completeModelRegistrationForAuthWithCache completes. Tests use it to inject
+// concurrent auth updates before batch registration finishes.
+var modelRegistrationTaskPostRunHook func(authID string)
+
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
 // This allows external code to monitor API usage and token consumption.
 //
@@ -65,26 +74,22 @@ func (s *Service) registerPluginAuthParser() {
 		parser = s.pluginHost
 	}
 	sdkAuth.RegisterPluginAuthParser(parser)
-	if s != nil && s.watcher != nil {
-		s.watcher.SetPluginAuthParser(parser)
+	if watcher := s.currentWatcher(); watcher != nil {
+		watcher.SetPluginAuthParser(parser)
 	}
 }
 
-func (s *Service) syncPluginRuntime(ctx context.Context) error {
-	configured, errConfig := s.syncPluginRuntimeConfig(ctx)
-	if errConfig != nil {
-		return errConfig
+func (s *Service) syncPluginRuntime(ctx context.Context) {
+	if !s.syncPluginRuntimeConfig(ctx) {
+		return
 	}
-	if !configured {
-		return nil
-	}
-	return s.syncPluginModelRuntime(ctx)
+	s.syncPluginModelRuntime(ctx)
 }
 
-func (s *Service) syncPluginRuntimeConfig(ctx context.Context) (bool, error) {
+func (s *Service) syncPluginRuntimeConfig(ctx context.Context) bool {
 	if s == nil {
 		sdkAuth.RegisterPluginAuthParser(nil)
-		return false, nil
+		return false
 	}
 	s.cfgMu.RLock()
 	cfg := s.cfg
@@ -92,34 +97,34 @@ func (s *Service) syncPluginRuntimeConfig(ctx context.Context) (bool, error) {
 	return s.syncPluginRuntimeConfigForConfig(ctx, cfg)
 }
 
-func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *config.Config) (bool, error) {
+func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *config.Config) bool {
 	if s == nil {
 		sdkAuth.RegisterPluginAuthParser(nil)
-		return false, nil
+		return false
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if errContext := ctx.Err(); errContext != nil {
-		return false, errContext
+		return false
 	}
 
 	if s.pluginHost != nil {
 		s.pluginHost.ApplyConfig(ctx, cfg)
 	}
 	if errContext := ctx.Err(); errContext != nil {
-		return false, errContext
+		return false
 	}
 	if s.coreManager != nil {
 		s.coreManager.SetPluginScheduler(s.pluginHost)
 	}
 	s.registerPluginAuthParser()
 	if s.pluginHost == nil {
-		return false, nil
+		return false
 	}
 	s.pluginHost.RegisterFrontendAuthProviders()
 	if errContext := ctx.Err(); errContext != nil {
-		return false, errContext
+		return false
 	}
 	if s.accessManager != nil {
 		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
@@ -129,22 +134,19 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 	if s.server != nil {
 		s.server.RefreshPluginManagementRoutes()
 	}
-	if errContext := ctx.Err(); errContext != nil {
-		return false, errContext
-	}
-	return true, nil
+	return ctx.Err() == nil
 }
 
-func (s *Service) syncPluginModelRuntime(ctx context.Context) error {
+func (s *Service) syncPluginModelRuntime(ctx context.Context) {
 	if s == nil || s.pluginHost == nil || s.coreManager == nil {
-		return nil
+		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return
 	}
 	s.cfgMu.RLock()
 	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
@@ -155,27 +157,27 @@ func (s *Service) syncPluginModelRuntime(ctx context.Context) error {
 		forceReplaceAuths: false,
 		auths:             s.coreManager.List(),
 	})
-	if errRefresh := s.refreshPluginModelRegistrations(ctx); errRefresh != nil {
-		return errRefresh
-	}
+	s.refreshPluginModelRegistrations(ctx)
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return
 	}
 	s.coreManager.RefreshSchedulerAll()
-	return nil
 }
 
-func (s *Service) refreshPluginModelRegistrations(ctx context.Context) error {
+func (s *Service) refreshPluginModelRegistrations(ctx context.Context) {
 	if s == nil || s.pluginHost == nil || s.coreManager == nil {
-		return nil
+		return
 	}
-	return s.registerModelsForAuthBatch(ctx, s.coreManager.List())
+	// Native capability probes publish and refresh their scheduler entries
+	// asynchronously; startup and config updates must not wait for network I/O.
+	s.registerModelsForAuthBatch(ctx, s.coreManager.List())
 }
 
-func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*coreauth.Auth) error {
+func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*coreauth.Auth) {
 	if s == nil || s.coreManager == nil || len(auths) == 0 {
-		return nil
+		return
 	}
+	var registeredGen sync.Map
 	tasks := make([]modelRegistrationTask, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil {
@@ -185,17 +187,37 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 		tasks = append(tasks, modelRegistrationTask{
 			phase:    modelRegistrationPhase(authForRegistration),
 			category: modelRegistrationCategory(authForRegistration),
-			run: func(compatCache *openAICompatibilityRegistrationCache) error {
-				return s.completeModelRegistrationForAuthWithCache(ctx, authForRegistration, compatCache)
+			run: func(compatCache *openAICompatibilityRegistrationCache) {
+				gen := s.completeModelRegistrationForAuthWithCache(ctx, authForRegistration, compatCache)
+				registeredGen.Store(authForRegistration.ID, gen)
+				if modelRegistrationTaskPostRunHook != nil {
+					modelRegistrationTaskPostRunHook(authForRegistration.ID)
+				}
 			},
 		})
 	}
-	return s.runModelRegistrationTasks(ctx, tasks)
+	s.runModelRegistrationTasks(ctx, tasks)
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+
+	compatCache := s.newOpenAICompatibilityRegistrationCache()
+	for _, latest := range s.coreManager.List() {
+		if latest == nil || latest.ID == "" {
+			continue
+		}
+		lastGenVal, loaded := registeredGen.Load(latest.ID)
+		lastGen, _ := lastGenVal.(uint64)
+		if !loaded || latest.Generation != lastGen {
+			s.ensureExecutorsForAuthWithContext(ctx, latest, false)
+			s.completeModelRegistrationForAuthWithCache(ctx, latest, compatCache)
+		}
+	}
 }
 
-func (s *Service) runModelRegistrationTasks(ctx context.Context, tasks []modelRegistrationTask) error {
+func (s *Service) runModelRegistrationTasks(ctx context.Context, tasks []modelRegistrationTask) {
 	if len(tasks) == 0 {
-		return nil
+		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -212,18 +234,13 @@ func (s *Service) runModelRegistrationTasks(ctx context.Context, tasks []modelRe
 	}
 
 	compatCache := s.newOpenAICompatibilityRegistrationCache()
-	if errPhase := s.runModelRegistrationTaskPhase(ctx, configAPIKeyTasks, compatCache); errPhase != nil {
-		return fmt.Errorf("register config API key models: %w", errPhase)
-	}
-	if errPhase := s.runModelRegistrationTaskPhase(ctx, otherTasks, compatCache); errPhase != nil {
-		return fmt.Errorf("register runtime auth models: %w", errPhase)
-	}
-	return nil
+	s.runModelRegistrationTaskPhase(ctx, configAPIKeyTasks, compatCache)
+	s.runModelRegistrationTaskPhase(ctx, otherTasks, compatCache)
 }
 
-func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []modelRegistrationTask, compatCache *openAICompatibilityRegistrationCache) error {
+func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []modelRegistrationTask, compatCache *openAICompatibilityRegistrationCache) {
 	if len(tasks) == 0 {
-		return nil
+		return
 	}
 
 	grouped := make(map[string][]modelRegistrationTask)
@@ -243,9 +260,7 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 	}
 
 	var wg sync.WaitGroup
-	phaseErrors := make([]error, len(order))
-	phaseErrorMu := make([]sync.Mutex, len(order))
-	for categoryIndex, category := range order {
+	for _, category := range order {
 		group := grouped[category]
 		workers := len(group)
 		maxWorkers := modelRegistrationMaxWorkersForCategory(category)
@@ -262,16 +277,20 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 			go func() {
 				defer wg.Done()
 				for task := range taskCh {
-					select {
-					case <-ctx.Done():
-						return
-					default:
-					}
-					if errRun := task.run(compatCache); errRun != nil {
-						phaseErrorMu[categoryIndex].Lock()
-						phaseErrors[categoryIndex] = errors.Join(phaseErrors[categoryIndex], errRun)
-						phaseErrorMu[categoryIndex].Unlock()
-					}
+					func(task modelRegistrationTask) {
+						if task.done != nil {
+							defer task.done()
+						}
+						select {
+						case <-ctx.Done():
+							return
+						default:
+						}
+						if modelRegistrationTaskHook != nil {
+							modelRegistrationTaskHook()
+						}
+						task.run(compatCache)
+					}(task)
 				}
 			}()
 		}
@@ -287,10 +306,6 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 		}(group)
 	}
 	wg.Wait()
-	if errContext := ctx.Err(); errContext != nil {
-		return errors.Join(errContext, errors.Join(phaseErrors...))
-	}
-	return errors.Join(phaseErrors...)
 }
 
 func modelRegistrationPhase(auth *coreauth.Auth) int {
@@ -343,7 +358,17 @@ func (s *Service) registerModelRefreshCallback() {
 
 		providerSet := make(map[string]bool, len(changedProviders))
 		for _, p := range changedProviders {
-			providerSet[strings.ToLower(strings.TrimSpace(p))] = true
+			norm := strings.ToLower(strings.TrimSpace(p))
+			if norm != "" {
+				providerSet[norm] = true
+				switch norm {
+				case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
+					providerSet["kimi"] = true
+					providerSet["kimi-ai"] = true
+					providerSet["kimi.ai"] = true
+					providerSet["kimi.com"] = true
+				}
+			}
 		}
 
 		auths := s.coreManager.List()
@@ -366,24 +391,16 @@ func (s *Service) registerModelRefreshCallback() {
 			tasks = append(tasks, modelRegistrationTask{
 				phase:    modelRegistrationPhase(authForRefresh),
 				category: modelRegistrationCategory(authForRefresh),
-				run: func(compatCache *openAICompatibilityRegistrationCache) error {
-					refreshedAuth, errRefresh := s.refreshModelRegistrationForAuthWithCache(authForRefresh, compatCache)
-					if errRefresh != nil {
-						return errRefresh
-					}
-					if refreshedAuth {
+				run: func(compatCache *openAICompatibilityRegistrationCache) {
+					if s.refreshModelRegistrationForAuthWithCache(authForRefresh, compatCache) {
 						refreshedMu.Lock()
 						refreshed++
 						refreshedMu.Unlock()
 					}
-					return nil
 				},
 			})
 		}
-		if errRegister := s.runModelRegistrationTasks(context.Background(), tasks); errRegister != nil {
-			s.reportRuntimeError(fmt.Errorf("refresh model catalog registrations: %w", errRegister))
-			return
-		}
+		s.runModelRegistrationTasks(context.Background(), tasks)
 
 		if refreshed > 0 {
 			log.Infof("re-registered models for %d auth(s) due to model catalog changes: %v", refreshed, changedProviders)

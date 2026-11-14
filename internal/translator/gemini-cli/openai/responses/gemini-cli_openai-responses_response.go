@@ -3,12 +3,12 @@ package responses
 import (
 	"context"
 
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
 )
 
 func ConvertGeminiCLIResponseToOpenAIResponses(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	responseResult := gjson.GetBytes(rawJSON, "response")
+	responseResult := ojson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
@@ -16,17 +16,17 @@ func ConvertGeminiCLIResponseToOpenAIResponses(ctx context.Context, modelName st
 }
 
 func ConvertGeminiCLIResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
-	responseResult := gjson.GetBytes(rawJSON, "response")
+	responseResult := ojson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
 
-	requestResult := gjson.GetBytes(originalRequestRawJSON, "request")
+	requestResult := ojson.GetBytes(originalRequestRawJSON, "request")
 	if responseResult.Exists() {
 		originalRequestRawJSON = []byte(requestResult.Raw)
 	}
 
-	requestResult = gjson.GetBytes(requestRawJSON, "request")
+	requestResult = ojson.GetBytes(requestRawJSON, "request")
 	if responseResult.Exists() {
 		requestRawJSON = []byte(requestResult.Raw)
 	}

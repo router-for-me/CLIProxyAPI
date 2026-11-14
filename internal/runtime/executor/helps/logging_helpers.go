@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -63,6 +63,10 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 // RecordAPIRequest stores the upstream request metadata in Gin context for request logging.
 func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequestLog) {
 	if cfg == nil || cfg.CommercialMode {
+		return
+	}
+	// Check the immutable policy before accessing the pooled request context.
+	if !cfg.RequestLog && logging.DeferredAPIRequestCaptureDisabled(ctx) {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
@@ -406,6 +410,20 @@ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, pa
 	AppendAPIWebsocketResponse(ctx, cfg, payload)
 }
 
+// AppendAPIWebsocketBody stores the upstream rejected-handshake body bytes in
+// the websocket timeline so operators can see the original error.
+func AppendAPIWebsocketBody(ctx context.Context, cfg *config.Config, body []byte) {
+	if !requestLogCaptureEnabled(cfg) || len(body) == 0 {
+		return
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return
+	}
+	markAPIResponseTimestamp(ginCtx)
+	appendAPIWebsocketTimeline(ginCtx, body)
+}
+
 // RecordAPIWebsocketError stores an upstream websocket error event in Gin context.
 func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
 	if !requestLogCaptureEnabled(cfg) || err == nil {
@@ -474,7 +492,24 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.response == nil || attempt.responseIntroWritten {
 		return
 	}
-	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index)))
+	prefix := ""
+	if attempt.index > 1 {
+		if attempt.response != nil {
+			written := attempt.response.String()
+			switch {
+			case strings.HasSuffix(written, "\n\n"):
+				prefix = ""
+			case strings.HasSuffix(written, "\n"):
+				prefix = "\n"
+			default:
+				prefix = "\n\n"
+			}
+		} else if attempt.responseSource != nil {
+			// File-backed bodies end with the writeAttemptResponse newline.
+			prefix = "\n"
+		}
+	}
+	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("%s=== API RESPONSE %d ===\n", prefix, attempt.index)))
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano))))
 	writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	attempt.responseIntroWritten = true
@@ -726,9 +761,9 @@ func extractHTMLTitle(body []byte) string {
 
 // extractJSONErrorMessage attempts to extract error.message from JSON error responses
 func extractJSONErrorMessage(body []byte) string {
-	result := gjson.GetBytes(body, "error.message")
+	result := ojson.GetBytesNoCopy(body, "error.message")
 	if result.Exists() && result.String() != "" {
-		return result.String()
+		return strings.Clone(result.String())
 	}
 	return ""
 }

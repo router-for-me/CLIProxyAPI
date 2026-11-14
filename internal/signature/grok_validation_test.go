@@ -2,8 +2,9 @@ package signature
 
 import (
 	"bytes"
-	"encoding/base64"
+	"crypto/sha256"
 	"encoding/json"
+	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -248,6 +249,32 @@ func TestByteEntropyRatio_SingleByteReturnsZero(t *testing.T) {
 	}
 }
 
+func TestInspectGrokEncryptedContent_RouterSuffixed(t *testing.T) {
+	rawBytes := make([]byte, 135)
+	for i := range rawBytes {
+		rawBytes[i] = byte((i*73 + 19) & 0xff)
+	}
+	native := base64.RawStdEncoding.EncodeToString(rawBytes)
+	suffix := strings.Repeat("Ab3", 21)[:62]
+	routed := native + "." + suffix
+
+	info, err := InspectGrokEncryptedContent(routed)
+	if err != nil {
+		t.Fatalf("InspectGrokEncryptedContent(routed) error = %v", err)
+	}
+	if info.RouterSuffix != suffix || info.DecodedLen != len(rawBytes) {
+		t.Fatalf("info = %+v, want DecodedLen=%d RouterSuffix=%q", info, len(rawBytes), suffix)
+	}
+	if !IsRecognizedReasoningSignature(routed) {
+		t.Fatal("IsRecognizedReasoningSignature(routed Grok) = false, want true")
+	}
+	for _, bad := range []string{native + ".", native + ".bad-dash", native + ".a.b"} {
+		if _, err := InspectGrokEncryptedContent(bad); err == nil {
+			t.Fatalf("InspectGrokEncryptedContent(%q) unexpectedly succeeded", bad)
+		}
+	}
+}
+
 func testGeminiThoughtSignatureEnvelope() string {
 	payload := []byte{0x01, 0x0c}
 	for i := 0; i < 97; i++ {
@@ -389,4 +416,29 @@ func TestDecideSignatureCompatibility_GrokDropsBlock(t *testing.T) {
 	if decision.Action != SignatureActionDropBlock {
 		t.Errorf("Action = %q, want %q", decision.Action, SignatureActionDropBlock)
 	}
+}
+
+func TestInspectGrokEncryptedContent_AcceptsPayloadStartingWithTinkPrefixByte(t *testing.T) {
+	// Uniform xAI ciphertext starts with 0x01 about once in 256 values; that
+	// alone must not make it look like a Gemini Vertex bare-Tink signature.
+	for seed := 0; seed < 4096; seed++ {
+		buf := make([]byte, 0, 256)
+		for i := 0; len(buf) < 256; i++ {
+			sum := sha256.Sum256([]byte{byte(seed), byte(seed >> 8), byte(i)})
+			buf = append(buf, sum[:]...)
+		}
+		buf = buf[:256]
+		if buf[0] != 0x01 {
+			continue
+		}
+		sig := base64.RawStdEncoding.EncodeToString(buf)
+		if _, err := InspectGrokEncryptedContent(sig); err != nil {
+			t.Fatalf("seed %d: Grok payload starting with 0x01 rejected: %v", seed, err)
+		}
+		if got := DetectSignatureProvider(sig); got != SignatureProviderUnknown {
+			t.Fatalf("seed %d: DetectSignatureProvider = %q, want unknown", seed, got)
+		}
+		return
+	}
+	t.Fatal("no synthetic payload starting with 0x01 found")
 }

@@ -12,13 +12,13 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestResolveClaudeFingerprintPolicy(t *testing.T) {
@@ -235,7 +235,8 @@ func TestApplyClaudeHeaders_ClaudeCodeCLIProfileUsesOAuthBetasWithoutPretendingT
 	if errReq != nil {
 		t.Fatalf("NewRequest() error = %v", errReq)
 	}
-	if errHeaders := applyClaudeHeaders(req, auth, "key-third-party", false, nil, []byte(`{"model":"claude-sonnet-5"}`), &config.Config{}, nil, false, "11111111-2222-4333-8444-555555555555"); errHeaders != nil {
+	payload := []byte(`{"model":"claude-sonnet-5"}`)
+	if errHeaders := applyClaudeHeaders(req, auth, "key-third-party", false, nil, payload, &config.Config{}, nil, false, "11111111-2222-4333-8444-555555555555"); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	if got := req.Header.Get("Authorization"); got != "Bearer key-third-party" {
@@ -245,14 +246,8 @@ func TestApplyClaudeHeaders_ClaudeCodeCLIProfileUsesOAuthBetasWithoutPretendingT
 		t.Fatalf("x-api-key = %q, want empty on third-party gateway", got)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
-	if !strings.Contains(betas, "oauth-2025-04-20") {
-		t.Fatalf("Anthropic-Beta = %q, want oauth beta", betas)
-	}
-	if !strings.Contains(betas, "extended-cache-ttl-2025-04-11") {
-		t.Fatalf("Anthropic-Beta = %q, want extended-cache-ttl", betas)
-	}
-	if !strings.Contains(betas, "fallback-credit-2026-06-01") {
-		t.Fatalf("Anthropic-Beta = %q, want fallback-credit", betas)
+	if want := claudeCodeCLIBetas(payload, nil, true); betas != want {
+		t.Fatalf("Anthropic-Beta = %q, want %q", betas, want)
 	}
 }
 
@@ -324,7 +319,7 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintOnThirdPartyGateway(t *testing.T
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenBody, _ = io.ReadAll(r.Body)
 		seenHeaders = r.Header.Clone()
-		upstreamToolName := gjson.GetBytes(seenBody, "tools.0.name").String()
+		upstreamToolName := ojson.GetBytes(seenBody, "tools.0.name").String()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(
 			`{"id":"msg_1","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"` +
@@ -369,7 +364,7 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintOnThirdPartyGateway(t *testing.T
 		t.Fatalf("Anthropic-Beta = %q, want %q", got, wantBetas)
 	}
 
-	billing := gjson.GetBytes(seenBody, "system.0.text").String()
+	billing := ojson.GetBytes(seenBody, "system.0.text").String()
 	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") {
 		t.Fatalf("system.0.text = %q, want billing header", billing)
 	}
@@ -380,30 +375,30 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintOnThirdPartyGateway(t *testing.T
 	if strings.Contains(billing, "cch=") {
 		t.Fatalf("billing = %q, want no cch on a third-party gateway", billing)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
 		t.Fatalf("system.1.text = %q, want CLI identity", got)
 	}
 
-	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
+	userID := ojson.GetBytes(seenBody, "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
 		t.Fatalf("metadata.user_id = %q, want valid", userID)
 	}
-	if got := gjson.Get(userID, "account_uuid").String(); got == "" {
+	if got := ojson.Get(userID, "account_uuid").String(); got == "" {
 		t.Fatal("account_uuid is empty for claude-code-cli fingerprint identity")
 	}
 	sessionHeader := seenHeaders.Get("X-Claude-Code-Session-Id")
 	if sessionHeader == "" {
 		t.Fatal("missing X-Claude-Code-Session-Id")
 	}
-	if got := gjson.Get(userID, "session_id").String(); got != sessionHeader {
+	if got := ojson.Get(userID, "session_id").String(); got != sessionHeader {
 		t.Fatalf("metadata session_id = %q, header = %q", got, sessionHeader)
 	}
 
-	upstreamToolName := gjson.GetBytes(seenBody, "tools.0.name").String()
+	upstreamToolName := ojson.GetBytes(seenBody, "tools.0.name").String()
 	if !strings.HasPrefix(upstreamToolName, "mcp__") {
 		t.Fatalf("upstream tool name = %q, want OAuth CLI MCP alias", upstreamToolName)
 	}
-	if got := gjson.GetBytes(response.Payload, "content.0.name").String(); got != "read_file" {
+	if got := ojson.GetBytes(response.Payload, "content.0.name").String(); got != "read_file" {
 		t.Fatalf("downstream tool name = %q, want restored caller name", got)
 	}
 }
@@ -457,17 +452,17 @@ func TestClaudeExecutor_OfficialAPIKeyDefaultRespectsClient(t *testing.T) {
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if diagnostics := gjson.GetBytes(seenBody, "diagnostics"); diagnostics.Exists() {
+	if diagnostics := ojson.GetBytes(seenBody, "diagnostics"); diagnostics.Exists() {
 		t.Fatalf("diagnostics = %s, default official API key must not inject CLI diagnostics", diagnostics.Raw)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); got != "read_file" {
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); got != "read_file" {
 		t.Fatalf("tools.0.name = %q, want caller name", got)
 	}
 	if strings.Contains(string(seenBody), "x-anthropic-billing-header:") || strings.Contains(string(seenBody), "cch=") {
 		t.Fatalf("default official API key must not inject billing/CCH: %s", seenBody)
 	}
-	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
-	if userID != "" && gjson.Get(userID, "account_uuid").String() != "" {
+	userID := ojson.GetBytes(seenBody, "metadata.user_id").String()
+	if userID != "" && ojson.Get(userID, "account_uuid").String() != "" {
 		t.Fatalf("metadata.user_id = %q, default official API key must not synthesize CLI account_uuid", userID)
 	}
 	betas := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta")
@@ -503,10 +498,10 @@ func TestClaudeExecutor_OfficialAPIKeyDefaultPreservesCallerCCH(t *testing.T) {
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload}); errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if got := gjson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=caller; cch=abcde;" {
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != "x-anthropic-billing-header: cc_version=caller; cch=abcde;" {
 		t.Fatalf("caller billing/CCH = %q, want byte-preserved text", got)
 	}
-	if got := gjson.GetBytes(seenBody, "system.1.text").String(); got != "Keep this rule." {
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "Keep this rule." {
 		t.Fatalf("caller system text = %q, want preserved", got)
 	}
 }
@@ -550,20 +545,20 @@ func TestClaudeExecutor_OfficialAPIKeyClaudeCodeCLIFingerprintIncludesDiagnostic
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
-	if diagnostics := gjson.GetBytes(seenBody, "diagnostics"); !diagnostics.IsObject() {
+	if diagnostics := ojson.GetBytes(seenBody, "diagnostics"); !diagnostics.IsObject() {
 		t.Fatalf("diagnostics = %s, want object after fingerprint-profile opt-in", diagnostics.Raw)
 	}
 	// api.anthropic.com is the one API-key origin where native emits cch, so the
 	// opt-in must produce a finalized signature here.
-	billing := gjson.GetBytes(seenBody, "system.0.text").String()
+	billing := ojson.GetBytes(seenBody, "system.0.text").String()
 	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") || !strings.Contains(billing, "cch=") {
 		t.Fatalf("billing = %q, want signed cch on api.anthropic.com", billing)
 	}
 	if strings.Contains(billing, "cch=00000") {
 		t.Fatalf("billing = %q, want finalized cch signature", billing)
 	}
-	userID := gjson.GetBytes(seenBody, "metadata.user_id").String()
-	if !helps.IsValidUserID(userID) || gjson.Get(userID, "account_uuid").String() == "" {
+	userID := ojson.GetBytes(seenBody, "metadata.user_id").String()
+	if !helps.IsValidUserID(userID) || ojson.Get(userID, "account_uuid").String() == "" {
 		t.Fatalf("metadata.user_id = %q, want synthesized CLI identity", userID)
 	}
 	betas := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta")
@@ -622,10 +617,10 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintStreamMatchesWirePolicy(t *testi
 			t.Fatalf("stream chunk error = %v", chunk.Err)
 		}
 	}
-	if diagnostics := gjson.GetBytes(seenBody, "diagnostics"); diagnostics.Exists() {
+	if diagnostics := ojson.GetBytes(seenBody, "diagnostics"); diagnostics.Exists() {
 		t.Fatalf("diagnostics = %s, custom gateway must not inherit official diagnostics", diagnostics.Raw)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); !strings.HasPrefix(got, "mcp__") {
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); !strings.HasPrefix(got, "mcp__") {
 		t.Fatalf("stream tool name = %q, want OAuth CLI MCP alias", got)
 	}
 	betas := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta")
@@ -672,14 +667,14 @@ func TestClaudeExecutor_ClaudeCodeCLIFingerprintCountTokensKeepsNativeShape(t *t
 		t.Fatalf("countTokensUpstream() error = %v", errCount)
 	}
 	for _, field := range []string{"system", "metadata", "context_management", "diagnostics"} {
-		if got := gjson.GetBytes(seenBody, field); got.Exists() {
+		if got := ojson.GetBytes(seenBody, field); got.Exists() {
 			t.Fatalf("count_tokens %s = %s, want absent", field, got.Raw)
 		}
 	}
 	if strings.Contains(string(seenBody), "cch=") {
 		t.Fatalf("count_tokens body contains CCH: %s", seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "tools.0.name").String(); !strings.HasPrefix(got, "mcp__") {
+	if got := ojson.GetBytes(seenBody, "tools.0.name").String(); !strings.HasPrefix(got, "mcp__") {
 		t.Fatalf("count_tokens tool name = %q, want OAuth CLI MCP alias after fingerprint-profile opt-in", got)
 	}
 	if got, want := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta"), claudeCountTokensBetasForCredential(true); got != want {
@@ -759,7 +754,7 @@ func TestKimiExecutor_ClaudeMessagesWithAndWithoutClaudeCodeCLIFingerprint(t *te
 	}
 
 	// Default Kimi preserves caller fingerprint headers and strips billing/CCH.
-	if got := gjson.GetBytes(seenBodies[0], "metadata.user_id").String(); got != "" {
+	if got := ojson.GetBytes(seenBodies[0], "metadata.user_id").String(); got != "" {
 		t.Fatalf("default Kimi request should not have metadata.user_id: %q", got)
 	}
 	if strings.Contains(string(seenBodies[0]), "cch=") || strings.Contains(string(seenBodies[0]), "x-anthropic-billing-header:") {
@@ -775,14 +770,14 @@ func TestKimiExecutor_ClaudeMessagesWithAndWithoutClaudeCodeCLIFingerprint(t *te
 	// Opt-in Kimi requests use the complete CLI fingerprint. Kimi is not a native
 	// cch origin, so the billing header goes out unsigned, exactly as native does
 	// against a non-first-party base URL.
-	userID := gjson.GetBytes(seenBodies[1], "metadata.user_id").String()
+	userID := ojson.GetBytes(seenBodies[1], "metadata.user_id").String()
 	if !helps.IsValidUserID(userID) {
 		t.Fatalf("opt-in Kimi metadata.user_id = %q, want valid synthesized user_id", userID)
 	}
-	if got := gjson.Get(userID, "account_uuid").String(); got == "" {
+	if got := ojson.Get(userID, "account_uuid").String(); got == "" {
 		t.Fatal("opt-in Kimi request should have non-empty synthesized account_uuid")
 	}
-	billing := gjson.GetBytes(seenBodies[1], "system.0.text").String()
+	billing := ojson.GetBytes(seenBodies[1], "system.0.text").String()
 	if !strings.HasPrefix(billing, "x-anthropic-billing-header:") {
 		t.Fatalf("opt-in Kimi request must carry Claude billing attribution: %s", seenBodies[1])
 	}
@@ -845,7 +840,7 @@ func TestKimiExecutor_ClaudeCodeCLIProfileKeepsUnsignedBillingAndNativeCountToke
 			betas := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta")
 			if test.name == "count tokens" {
 				for _, field := range []string{"system", "metadata", "context_management", "diagnostics"} {
-					if got := gjson.GetBytes(seenBody, field); got.Exists() {
+					if got := ojson.GetBytes(seenBody, field); got.Exists() {
 						t.Fatalf("count_tokens %s = %s, want absent", field, got.Raw)
 					}
 				}
@@ -857,7 +852,7 @@ func TestKimiExecutor_ClaudeCodeCLIProfileKeepsUnsignedBillingAndNativeCountToke
 				}
 				return
 			}
-			billing := gjson.GetBytes(seenBody, "system.0.text").String()
+			billing := ojson.GetBytes(seenBody, "system.0.text").String()
 			if !strings.HasPrefix(billing, "x-anthropic-billing-header:") {
 				t.Fatalf("upstream body is missing opt-in billing attribution: %s", seenBody)
 			}
@@ -1031,18 +1026,18 @@ func TestKimiExecutor_DefaultCountTokensRespectsCallerBody(t *testing.T) {
 	}
 	// Positive pins first: assert the request really arrived for this model, so the
 	// preservation assertions below cannot pass vacuously.
-	if got := gjson.GetBytes(seenBody, "model").String(); got == "" {
+	if got := ojson.GetBytes(seenBody, "model").String(); got == "" {
 		t.Fatalf("upstream model is empty: %s", seenBody)
 	}
-	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
 		t.Fatalf("upstream messages length = %d, want 1: %s", got, seenBody)
 	}
 	for _, field := range []string{"system", "metadata", "context_management"} {
-		if !gjson.GetBytes(seenBody, field).Exists() {
+		if !ojson.GetBytes(seenBody, field).Exists() {
 			t.Fatalf("default count_tokens dropped caller-owned %q: %s", field, seenBody)
 		}
 	}
-	if got := gjson.GetBytes(seenBody, "metadata.user_id").String(); got != "caller-user" {
+	if got := ojson.GetBytes(seenBody, "metadata.user_id").String(); got != "caller-user" {
 		t.Fatalf("metadata.user_id = %q, want the caller value preserved", got)
 	}
 	// Default mode must not add the CLI billing/CCH attribution either.
@@ -1076,11 +1071,11 @@ func TestClaudeExecutor_DefaultCountTokensStillStripsAnthropicRejectedFields(t *
 	if len(seenBody) == 0 {
 		t.Fatal("expected an upstream count_tokens request")
 	}
-	if got := gjson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
 		t.Fatalf("upstream messages length = %d, want 1: %s", got, seenBody)
 	}
 	for _, field := range []string{"metadata", "context_management", "diagnostics"} {
-		if got := gjson.GetBytes(seenBody, field); got.Exists() {
+		if got := ojson.GetBytes(seenBody, field); got.Exists() {
 			t.Fatalf("api.anthropic.com count_tokens %s = %s, want stripped", field, got.Raw)
 		}
 	}
@@ -1118,10 +1113,10 @@ func TestKimiExecutor_ClaudeCodeCLIIdentitySurvivesAccessTokenRotation(t *testin
 	if len(seenBodies) != 2 {
 		t.Fatalf("captured %d requests, want 2", len(seenBodies))
 	}
-	firstUserID := gjson.GetBytes(seenBodies[0], "metadata.user_id").String()
-	secondUserID := gjson.GetBytes(seenBodies[1], "metadata.user_id").String()
+	firstUserID := ojson.GetBytes(seenBodies[0], "metadata.user_id").String()
+	secondUserID := ojson.GetBytes(seenBodies[1], "metadata.user_id").String()
 	for _, field := range []string{"account_uuid", "device_id"} {
-		if first, second := gjson.Get(firstUserID, field).String(), gjson.Get(secondUserID, field).String(); first == "" || first != second {
+		if first, second := ojson.Get(firstUserID, field).String(), ojson.Get(secondUserID, field).String(); first == "" || first != second {
 			t.Fatalf("%s changed across access token refresh: %q vs %q", field, first, second)
 		}
 	}
@@ -1247,4 +1242,295 @@ func claudeFingerprintHeaderValue(headers http.Header, name string) string {
 		}
 	}
 	return ""
+}
+
+func TestClaudeExecutor_OfficialAPIKeyCloakNeverStripsClaudeCodeIdentity(t *testing.T) {
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"11111111-2222-4333-8444-555555555555","session_id":"11111111-2222-4333-8444-555555555555"}`
+	const billing = "x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=00000; cc_turn_origin=human;"
+	incoming := http.Header{
+		"User-Agent":     {"claude-cli/2.1.280 (external, cli)"},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24,cache-diagnosis-2026-04-07"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Claude-Code-Request-Class":               {"main"},
+		"X-Stainless-Package-Version":               {"0.112.1"},
+		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	payload := []byte(
+		`{"model":"claude-opus-4-6","max_tokens":64,"system":[{"type":"text","text":"` + billing + `"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":` + `"` + strings.ReplaceAll(userID, `"`, `\"`) + `"` + `},"diagnostics":{"previous_message_id":null},"thinking":{"type":"adaptive"}}`,
+	)
+	if detection := helps.DetectClaudeCodeRequest(incoming, payload, false); !detection.Confirmed {
+		t.Fatal("fixture must be classified as a confirmed native Claude Code request")
+	}
+
+	for _, tc := range []struct {
+		name           string
+		mode           string
+		customUA       string
+		stream         bool
+		countTokens    bool
+		wantUserAgent  string
+		wantBetaSubstr string
+	}{
+		{
+			name:           "execute cloak never default user-agent",
+			mode:           "never",
+			wantUserAgent:  "CLIProxyAPI/",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "execute cloak never custom user-agent override",
+			mode:           "never",
+			customUA:       "my-api-client/1.0",
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "stream cloak never custom user-agent override",
+			mode:           "never",
+			customUA:       "my-api-client/1.0",
+			stream:         true,
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "execute cloak uncloak mode",
+			mode:           "uncloak",
+			customUA:       "my-api-client/1.0",
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "interleaved-thinking-2025-05-14",
+		},
+		{
+			name:           "count_tokens cloak never",
+			mode:           "never",
+			customUA:       "my-api-client/1.0",
+			countTokens:    true,
+			wantUserAgent:  "my-api-client/1.0",
+			wantBetaSubstr: "token-counting-2024-11-01",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seenBody []byte
+			var seenHeaders http.Header
+			transport := claudeFingerprintRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				seenBody, _ = io.ReadAll(req.Body)
+				seenHeaders = req.Header.Clone()
+				if tc.countTokens {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"input_tokens":12}`)),
+					}, nil
+				}
+				if tc.stream {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+						Body: io.NopCloser(strings.NewReader(
+							"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+						)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(
+						`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+					)),
+				}, nil
+			})
+			ctx := context.WithValue(
+				context.Background(),
+				"cliproxy.roundtripper",
+				http.RoundTripper(transport),
+			)
+
+			var customHeaders map[string]string
+			attrs := map[string]string{
+				"api_key": "sk-ant-api03-promotional-key",
+			}
+			if tc.customUA != "" {
+				customHeaders = map[string]string{"User-Agent": tc.customUA}
+				attrs["header:User-Agent"] = tc.customUA
+			}
+			cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{
+				APIKey:  "sk-ant-api03-promotional-key",
+				Cloak:   &config.CloakConfig{Mode: tc.mode},
+				Headers: customHeaders,
+			}}}
+			auth := &cliproxyauth.Auth{
+				ID:         "official-promotional-key",
+				Attributes: attrs,
+			}
+			exec := NewClaudeExecutor(cfg)
+			req := cliproxyexecutor.Request{
+				Model:   "claude-opus-4-6",
+				Payload: payload,
+			}
+			opts := cliproxyexecutor.Options{
+				Stream:          tc.stream,
+				SourceFormat:    sdktranslator.FormatClaude,
+				OriginalRequest: payload,
+				Headers:         incoming.Clone(),
+			}
+
+			if tc.countTokens {
+				if _, errCount := exec.CountTokens(ctx, auth, req, opts); errCount != nil {
+					t.Fatalf("CountTokens() error = %v", errCount)
+				}
+			} else if tc.stream {
+				res, errStream := exec.ExecuteStream(ctx, auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range res.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else {
+				if _, errExec := exec.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute() error = %v", errExec)
+				}
+			}
+
+			if strings.Contains(string(seenBody), "x-anthropic-billing-header:") || strings.Contains(string(seenBody), "cch=") {
+				t.Fatalf("upstream body still contains Claude Code billing header: %s", seenBody)
+			}
+			if strings.Contains(string(seenBody), claudeCodeCLIIdentity) {
+				t.Fatalf("upstream body still contains Claude Code CLI identity block: %s", seenBody)
+			}
+			if got := ojson.GetBytes(seenBody, "system.#").Int(); got != 1 {
+				t.Fatalf("system block count = %d, want 1 preserved instruction block: %s", got, seenBody)
+			}
+			if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != "You are an interactive CLI tool that helps users with software engineering tasks." {
+				t.Fatalf("system.0.text = %q, want preserved caller instructions", got)
+			}
+			if ojson.GetBytes(seenBody, "metadata").Exists() {
+				t.Fatalf("metadata = %s, want Claude Code metadata stripped", ojson.GetBytes(seenBody, "metadata").Raw)
+			}
+			if ojson.GetBytes(seenBody, "diagnostics").Exists() {
+				t.Fatalf("diagnostics = %s, want Claude Code diagnostics stripped", ojson.GetBytes(seenBody, "diagnostics").Raw)
+			}
+
+			ua := claudeFingerprintHeaderValue(seenHeaders, "User-Agent")
+			if strings.HasPrefix(strings.ToLower(ua), "claude-cli/") {
+				t.Fatalf("User-Agent = %q, must not forward claude-cli user-agent", ua)
+			}
+			if !strings.HasPrefix(ua, tc.wantUserAgent) {
+				t.Fatalf("User-Agent = %q, want prefix %q", ua, tc.wantUserAgent)
+			}
+			for _, forbiddenHdr := range []string{
+				"X-App",
+				"Anthropic-Dangerous-Direct-Browser-Access",
+				"X-Claude-Code-Session-Id",
+				"X-Claude-Code-Request-Class",
+				"X-Stainless-Runtime",
+				"X-Stainless-Lang",
+				"X-Stainless-Package-Version",
+			} {
+				if got := claudeFingerprintHeaderValue(seenHeaders, forbiddenHdr); got != "" {
+					t.Fatalf("header %s = %q, want stripped", forbiddenHdr, got)
+				}
+			}
+
+			betas := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta")
+			for _, forbiddenBeta := range []string{
+				"claude-code-20250219",
+				"oauth-2025-04-20",
+				"redact-thinking-2026-02-12",
+				"cache-diagnosis-2026-04-07",
+			} {
+				if strings.Contains(betas, forbiddenBeta) {
+					t.Fatalf("Anthropic-Beta = %q, want %q stripped", betas, forbiddenBeta)
+				}
+			}
+			if !strings.Contains(betas, tc.wantBetaSubstr) {
+				t.Fatalf("Anthropic-Beta = %q, want capability beta %q preserved", betas, tc.wantBetaSubstr)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_GlobalDisableClaudeCloakModePreservesConfirmedCallerIdentityWhenKeyUnconfigured(t *testing.T) {
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	const userID = `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"11111111-2222-4333-8444-555555555555","session_id":"11111111-2222-4333-8444-555555555555"}`
+	const billing = "x-anthropic-billing-header: cc_version=2.1.280.d7b; cc_entrypoint=cli; cch=00000; cc_turn_origin=human;"
+	incoming := http.Header{
+		"User-Agent":     {"claude-cli/2.1.280 (external, cli)"},
+		"X-App":          {"cli"},
+		"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"X-Claude-Code-Session-Id":                  {sessionID},
+		"X-Stainless-Package-Version":               {"0.112.1"},
+		"X-Stainless-Runtime-Version":               {"v26.3.0"},
+		"X-Stainless-Os":                            {"MacOS"},
+		"X-Stainless-Arch":                          {"arm64"},
+	}
+	payload := []byte(
+		`{"model":"claude-opus-4-6","max_tokens":64,"system":[{"type":"text","text":"` + billing + `"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"hello"}],"metadata":{"user_id":` + `"` + strings.ReplaceAll(userID, `"`, `\"`) + `"` + `}}`,
+	)
+
+	var seenBody []byte
+	var seenHeaders http.Header
+	transport := claudeFingerprintRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		seenBody, _ = io.ReadAll(req.Body)
+		seenHeaders = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"msg_1","type":"message","model":"claude-opus-4-6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+			)),
+		}, nil
+	})
+	ctx := context.WithValue(
+		context.Background(),
+		"cliproxy.roundtripper",
+		http.RoundTripper(transport),
+	)
+
+	cfg := &config.Config{
+		DisableClaudeCloakMode: true,
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "sk-ant-api03-global-disable-passthrough",
+		}},
+	}
+	auth := &cliproxyauth.Auth{
+		ID: "official-global-disable-passthrough",
+		Attributes: map[string]string{
+			"api_key": "sk-ant-api03-global-disable-passthrough",
+		},
+	}
+
+	if _, errExec := NewClaudeExecutor(cfg).Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-4-6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incoming,
+	}); errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+
+	if got := ojson.GetBytes(seenBody, "system.0.text").String(); got != billing {
+		t.Fatalf("system.0.text = %q, want preserved caller billing header %q", got, billing)
+	}
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != claudeCodeCLIIdentity {
+		t.Fatalf("system.1.text = %q, want preserved caller CLI identity", got)
+	}
+	if got := ojson.GetBytes(seenBody, "metadata.user_id").String(); got != userID {
+		t.Fatalf("metadata.user_id = %q, want preserved %q", got, userID)
+	}
+	if got := claudeFingerprintHeaderValue(seenHeaders, "X-App"); got != "cli" {
+		t.Fatalf("X-App = %q, want preserved cli", got)
+	}
+	if got := claudeFingerprintHeaderValue(seenHeaders, "Anthropic-Beta"); !strings.Contains(got, "claude-code-20250219") {
+		t.Fatalf("Anthropic-Beta = %q, want preserved claude-code-20250219", got)
+	}
 }

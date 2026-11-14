@@ -7,10 +7,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -87,7 +87,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForAssi
 	}
 	url := "https://example.com/responses"
 
-	httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+	httpReq, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, req, rawJSON, nil)
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_DropsPreviousResponseIDForComp
 			}
 			url := "https://example.com/responses"
 
-			httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+			httpReq, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, req, rawJSON, nil)
 			if err != nil {
 				t.Fatalf("cacheHelper error: %v", err)
 			}
@@ -151,7 +151,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPreviousResponseIDFor
 			}
 			url := "https://example.com/responses"
 
-			httpReq, _, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, nil, req, req.Payload, rawJSON)
+			httpReq, _, err := executor.cacheHelper(context.Background(), sdktranslator.FromString("openai-response"), url, req, rawJSON, nil)
 			if err != nil {
 				t.Fatalf("cacheHelper error: %v", err)
 			}

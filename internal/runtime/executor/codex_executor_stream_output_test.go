@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *testing.T) {
@@ -44,14 +45,104 @@ func TestCodexExecutorExecute_NonEmptyCompletionOutputHydratesMissingItemID(t *t
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if got := gjson.GetBytes(resp.Payload, "output.0.id").String(); got != "fc_123" {
+	if got := ojson.GetBytes(resp.Payload, "output.0.id").String(); got != "fc_123" {
 		t.Fatalf("output[0].id = %q, want %q; payload=%s", got, "fc_123", resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "output.0.name").String(); got != "weather-terminal" {
+	if got := ojson.GetBytes(resp.Payload, "output.0.name").String(); got != "weather-terminal" {
 		t.Fatalf("output[0].name = %q, want terminal value; payload=%s", got, resp.Payload)
 	}
-	if got := gjson.GetBytes(resp.Payload, "output.1.id").String(); got != "fc_existing" {
+	if got := ojson.GetBytes(resp.Payload, "output.1.id").String(); got != "fc_existing" {
 		t.Fatalf("output[1].id = %q, want existing value; payload=%s", got, resp.Payload)
+	}
+}
+
+// TestCodexExecutorExecute_NonStreamGPT56LunaIsNotClassifiedAsEmptyCompletion reproduces
+// the exact issue reported in Issue #187: a non-streaming Responses API request for gpt-5.6-luna
+// returning an SSE stream with text format configuration must not be misclassified as an empty completion.
+func TestCodexExecutorExecute_NonStreamGPT56LunaIsNotClassifiedAsEmptyCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.created","response":{"id":"resp_luna_1","status":"in_progress"}}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_luna_1","object":"response","status":"completed","text":{"format":{"type":"text"},"verbosity":"medium"},"output":[{"type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"pong"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}` + "\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewCodexExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL,
+		"api_key":  "test",
+	}}
+
+	reqPayload := []byte(`{"model":"gpt-5.6-luna","input":"pong","max_output_tokens":16}`)
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-5.6-luna",
+		Payload: reqPayload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       false,
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if cliproxyauth.IsEmptyCompletionPayload(resp.Payload) {
+		t.Fatalf("non-stream gpt-5.6-luna response was misclassified as empty completion; payload=%s", string(resp.Payload))
+	}
+	text := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String()
+	if text != "pong" {
+		t.Fatalf("output text = %q, want %q; payload=%s", text, "pong", string(resp.Payload))
+	}
+}
+
+func TestCodexExecutorExecuteStreamPreservesSSEEventLineBoundaries(t *testing.T) {
+	for _, buffering := range []bool{false, true} {
+		t.Run(fmt.Sprintf("buffering=%t", buffering), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.created\n")
+				_, _ = io.WriteString(w, `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`+"\n\n")
+				_, _ = io.WriteString(w, "event: response.output_text.delta\n")
+				_, _ = io.WriteString(w, `data: {"type":"response.output_text.delta","delta":"OK"}`+"\n\n")
+				_, _ = io.WriteString(w, "event: response.completed\n")
+				_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}],"usage":{"output_tokens":5}}}`+"\n\n")
+			}))
+			defer server.Close()
+
+			cfg := &config.Config{}
+			cfg.Codex.StreamBootstrapBuffering = buffering
+			executor := NewCodexExecutor(cfg)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"base_url": server.URL,
+				"api_key":  "test",
+			}}
+			stream, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "gpt-6-astra",
+				Payload: []byte(`{"model":"gpt-6-astra","input":"Reply with exactly OK.","stream":true}`),
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FormatOpenAIResponse,
+				Stream:       true,
+			})
+			if err != nil {
+				t.Fatalf("ExecuteStream error: %v", err)
+			}
+
+			var detector cliproxyauth.StreamBootstrapDetector
+			forwarded := false
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error: %v", chunk.Err)
+				}
+				if detector.Observe(chunk.Payload) {
+					forwarded = true
+				}
+			}
+			if !forwarded {
+				t.Fatal("stream bootstrap never observed the non-empty output_text delta")
+			}
+			if detector.Finish() {
+				t.Fatal("non-empty Responses stream was classified as an empty completion")
+			}
+		})
 	}
 }
 
@@ -80,7 +171,7 @@ func TestCodexExecutorExecute_EmptyStreamCompletionOutputUsesOutputItemDone(t *t
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	gotContent := gjson.GetBytes(resp.Payload, "choices.0.message.content").String()
+	gotContent := ojson.GetBytes(resp.Payload, "choices.0.message.content").String()
 	if gotContent != "ok" {
 		t.Fatalf("choices.0.message.content = %q, want %q; payload=%s", gotContent, "ok", string(resp.Payload))
 	}
@@ -146,7 +237,7 @@ func TestCodexExecutorExecuteIncompleteResponseIsSuccessful(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "stop_reason").String(); got != "max_tokens" {
+	if got := ojson.GetBytes(resp.Payload, "stop_reason").String(); got != "max_tokens" {
 		t.Fatalf("stop_reason = %q, want %q; payload=%s", got, "max_tokens", resp.Payload)
 	}
 }
@@ -295,12 +386,12 @@ func TestCodexAutoExecutorHTTPFallbackForwardsSequentialCutoffReasoningSummaryDe
 			t.Errorf("read request body: %v", errRead)
 			return
 		}
-		if gjson.GetBytes(body, "stream_options.include_usage").Exists() {
+		if ojson.GetBytes(body, "stream_options.include_usage").Exists() {
 			t.Errorf("unsupported stream option was forwarded: %s", body)
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
-		if delivery := gjson.GetBytes(body, "stream_options.reasoning_summary_delivery").String(); delivery == "sequential_cutoff" {
+		if delivery := ojson.GetBytes(body, "stream_options.reasoning_summary_delivery").String(); delivery == "sequential_cutoff" {
 			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","summary_index":0,"text":"Checking"}` + "\n\n"))
 		} else {
 			_, _ = w.Write([]byte(`data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"Checking"}` + "\n\n"))
@@ -419,7 +510,7 @@ func TestCodexExecutorExecuteIgnoresTransportErrorAfterCompletion(t *testing.T) 
 	if err != nil {
 		t.Fatalf("unexpected error after response.completed: %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "id").String(); got != "resp_1" {
+	if got := ojson.GetBytes(resp.Payload, "id").String(); got != "resp_1" {
 		t.Fatalf("response id = %q, want resp_1; payload=%s", got, resp.Payload)
 	}
 }
@@ -583,6 +674,11 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			event:      `{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`,
 			wantStatus: http.StatusBadGateway,
 		},
+		{
+			name:       "model not found with invalid_request_error type maps to 404",
+			event:      `{"type":"error","error":{"type":"invalid_request_error","code":"model_not_found","message":"The model gpt-5.5 does not exist or you do not have access to it."}}`,
+			wantStatus: http.StatusNotFound,
+		},
 	}
 
 	for _, tc := range tests {
@@ -700,7 +796,7 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 			continue
 		}
 		data := bytes.TrimSpace(payload[5:])
-		if gjson.GetBytes(data, "type").String() == "response.completed" {
+		if ojson.GetBytes(data, "type").String() == "response.completed" {
 			completed = append([]byte(nil), data...)
 		}
 	}
@@ -709,7 +805,7 @@ func TestCodexExecutorExecuteStream_EmptyStreamCompletionOutputUsesOutputItemDon
 		t.Fatal("missing response.completed chunk")
 	}
 
-	gotContent := gjson.GetBytes(completed, "response.output.0.content.0.text").String()
+	gotContent := ojson.GetBytes(completed, "response.output.0.content.0.text").String()
 	if gotContent != "ok" {
 		t.Fatalf("response.output[0].content[0].text = %q, want %q; completed=%s", gotContent, "ok", string(completed))
 	}

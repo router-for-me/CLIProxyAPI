@@ -1,5 +1,13 @@
 package config
 
+// NormalizeHomePort applies the standard proxy port when home config omits one.
+func NormalizeHomePort(port int) int {
+	if port <= 0 {
+		return 8317
+	}
+	return port
+}
+
 // HomeConfig stores runtime-only Home control plane settings from -home-jwt.
 type HomeConfig struct {
 	Enabled                 bool          `yaml:"enabled" json:"enabled"`

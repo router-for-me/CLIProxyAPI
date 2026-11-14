@@ -8,13 +8,13 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTurns(t *testing.T) {
@@ -58,7 +58,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 			}))
 			t.Cleanup(server.Close)
 
-			executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+			executor := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: true}}}})
 			const executionSessionID = "multi-agent-v2-incremental"
 			t.Cleanup(func() { executor.CloseExecutionSession(executionSessionID) })
 			auth := &cliproxyauth.Auth{
@@ -103,7 +103,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 
 			firstClientPayload := execute(codexSpawnAgentTestPayload())
 			firstUpstreamPayload := <-capturedPayload
-			if namespace := gjson.GetBytes(firstUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
+			if namespace := ojson.GetBytes(firstUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
 				t.Fatalf("first upstream namespace = %q, want collaboration-optimize", namespace)
 			}
 			assertCodexSpawnAgentClientNamespace(t, firstClientPayload)
@@ -119,7 +119,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 			conflictingRequest := []byte(`{"model":"gpt-5.4","tools":[{"type":"namespace","name":"collaboration-optimize","tools":[{"type":"function","name":"spawn_agent","description":"User-defined tool."}]}],"input":[{"type":"message","role":"user","content":"use the user-defined namespace"}]}`)
 			conflictingClientPayload := execute(conflictingRequest)
 			conflictingUpstreamPayload := <-capturedPayload
-			if namespace := gjson.GetBytes(conflictingUpstreamPayload, "tools.0.name").String(); namespace != "collaboration-optimize" {
+			if namespace := ojson.GetBytes(conflictingUpstreamPayload, "tools.0.name").String(); namespace != "collaboration-optimize" {
 				t.Fatalf("conflicting upstream namespace = %q, want collaboration-optimize", namespace)
 			}
 			if !strings.Contains(string(conflictingClientPayload), `"namespace":"collaboration-optimize"`) {
@@ -138,7 +138,7 @@ func TestCodexWebsocketsExecutorRestoresMultiAgentV2NamespaceAcrossIncrementalTu
 
 			fifthClientPayload := execute(codexSpawnAgentTestPayload())
 			fifthUpstreamPayload := <-capturedPayload
-			if namespace := gjson.GetBytes(fifthUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
+			if namespace := ojson.GetBytes(fifthUpstreamPayload, "input.0.tools.0.name").String(); namespace != "collaboration-optimize" {
 				t.Fatalf("re-enabled upstream namespace = %q, want collaboration-optimize", namespace)
 			}
 			assertCodexSpawnAgentClientNamespace(t, fifthClientPayload)
@@ -186,7 +186,7 @@ func TestCodexWebsocketsExecutorOptimizeMultiAgentV2(t *testing.T) {
 			return
 		}
 		capturedPayload <- payload
-		namespace := gjson.GetBytes(payload, "input.0.tools.0.name").String()
+		namespace := ojson.GetBytes(payload, "input.0.tools.0.name").String()
 		completed := []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"function_call","name":"spawn_agent","namespace":%q,"arguments":"{}","call_id":"call_1"}]}}`, namespace))
 		if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 			t.Errorf("write websocket response: %v", errWrite)
@@ -215,7 +215,7 @@ func TestCodexWebsocketsExecutorOptimizeMultiAgentV2(t *testing.T) {
 		{name: "stream disabled", enabled: false, stream: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			executor := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: tt.enabled}})
+			executor := NewCodexWebsocketsExecutor(&config.Config{SDKConfig: config.SDKConfig{Client: config.ClientConfig{Codex: config.CodexClientConfig{OptimizeMultiAgentV2: tt.enabled}}}})
 			var clientPayload []byte
 			if tt.stream {
 				result, errExecute := executor.ExecuteStream(codexSpawnAgentTestContext(), auth, req, opts)

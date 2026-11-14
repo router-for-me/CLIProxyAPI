@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 const (
@@ -235,6 +235,8 @@ func decodeHomeDispatchError(raw []byte) error {
 
 	result := &Error{Code: code, Message: message, Retryable: detail.Retryable, HTTPStatus: http.StatusBadGateway}
 	switch strings.ToLower(code) {
+	case ErrorCodeModelVariantUnavailable:
+		result.HTTPStatus = http.StatusBadRequest
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
 	case "model_cooldown":
@@ -253,6 +255,10 @@ func decodeHomeDispatchError(raw []byte) error {
 	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
 		result.HTTPStatus = http.StatusTooManyRequests
 		return newHomeConcurrencyBusyError(result, time.Duration(detail.RetryAfterMS)*time.Millisecond)
+	case "user_credits_insufficient":
+		result.HTTPStatus = http.StatusPaymentRequired
+	case "user_period_limit_exceeded":
+		result.HTTPStatus = http.StatusTooManyRequests
 	case "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "home_unavailable",
 		"concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
 		result.HTTPStatus = http.StatusServiceUnavailable
@@ -275,10 +281,30 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 }
 
 // SafeResponseHeaders returns trusted response headers only for concrete
-// Home-generated retry errors.
+// retry/cooldown errors.
 func SafeResponseHeaders(err error) http.Header {
-	if err == nil {
+	var dbgExhausted *homeRetryRoundExhaustedError
+	var dbgBusy *HomeConcurrencyBusyError
+	fmt.Printf("DEBUGSAFE type=%T err=%v exhausted=%v busy=%v markerRA=%v\n", err, err, errors.As(err, &dbgExhausted), errors.As(err, &dbgBusy), func() any {
+		if dbgExhausted != nil {
+			return dbgExhausted.RetryAfter()
+		}
 		return nil
+	}())
+	// An exhausted Home round owns the aggregated multi-credential deadline;
+	// a per-attempt trusted annotation deeper in the chain must not replace it.
+	var exhausted *homeRetryRoundExhaustedError
+	if errors.As(err, &exhausted) && exhausted != nil {
+		// A nil aggregate means immediate or no aggregate hint; the last
+		// attempt's positive hint must not replace that decision.
+		if retryAfter := exhausted.RetryAfter(); retryAfter != nil {
+			return safeRetryAfterHeader(*retryAfter)
+		}
+		return nil
+	}
+	var trusted *trustedRetryAfterError
+	if errors.As(err, &trusted) && trusted != nil {
+		return trusted.SafeResponseHeaders()
 	}
 	var carrier interface{ SafeResponseHeaders() http.Header }
 	if errors.As(err, &carrier) && carrier != nil {
@@ -288,23 +314,29 @@ func SafeResponseHeaders(err error) http.Header {
 	if errors.As(err, &busy) && busy != nil {
 		return busy.SafeResponseHeaders()
 	}
-	var exhausted *homeRetryRoundExhaustedError
-	if errors.As(err, &exhausted) && exhausted != nil {
-		retryAfter := exhausted.RetryAfter()
+	var cooldown *homeDispatchRetryAfterError
+	if errors.As(err, &cooldown) && cooldown != nil {
+		retryAfter := cooldown.RetryAfter()
 		if retryAfter == nil {
 			return nil
 		}
 		return safeRetryAfterHeader(*retryAfter)
 	}
-	var cooldown *homeDispatchRetryAfterError
-	if !errors.As(err, &cooldown) || cooldown == nil {
-		return nil
+	var modelCooldown *modelCooldownError
+	if errors.As(err, &modelCooldown) && modelCooldown != nil {
+		return modelCooldown.Headers()
 	}
-	retryAfter := cooldown.RetryAfter()
-	if retryAfter == nil {
-		return nil
+	var unavailable *authUnavailableError
+	if errors.As(err, &unavailable) && unavailable != nil {
+		return unavailable.Headers()
 	}
-	return safeRetryAfterHeader(*retryAfter)
+	var safeHeaderProvider interface{ SafeResponseHeaders() http.Header }
+	if errors.As(err, &safeHeaderProvider) && safeHeaderProvider != nil {
+		if value := safeHeaderProvider.SafeResponseHeaders().Get("Retry-After"); value != "" {
+			return http.Header{"Retry-After": []string{value}}
+		}
+	}
+	return nil
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {

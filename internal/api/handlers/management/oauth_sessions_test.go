@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestOAuthSessionStoreCompleteKeepsShortLivedSession(t *testing.T) {
@@ -237,11 +237,14 @@ func TestBeginOAuthSessionSaveCoversBuiltinAndPluginProviders(t *testing.T) {
 		"xai",
 		"qoder",
 		"kimi",
+		"kimi-ai",
+		"kimi.ai",
 		"iflow",
 		"github-copilot",
 		"kiro",
 		"kilo",
 		"cursor",
+		"meta",
 	}
 	for _, provider := range providers {
 		state := provider + "-begin-save"

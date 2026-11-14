@@ -3,8 +3,8 @@ package auth
 import (
 	"strings"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 // OrderedCandidate describes one step in an ordered candidate pool for a

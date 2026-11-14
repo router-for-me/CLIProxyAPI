@@ -1,11 +1,12 @@
 package codex
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
 )
 
 // JWTClaims represents the claims section of a JSON Web Token (JWT).
@@ -79,6 +80,9 @@ func ParseJWTToken(token string) (*JWTClaims, error) {
 // JWTs use a URL-safe Base64 alphabet and omit padding, so this function ensures
 // correct decoding by re-adding the padding before decoding.
 func base64URLDecode(data string) ([]byte, error) {
+	if decoded, errDecode := base64.RawURLEncoding.DecodeString(data); errDecode == nil {
+		return decoded, nil
+	}
 	// Add padding if necessary
 	switch len(data) % 4 {
 	case 2:
@@ -86,7 +90,6 @@ func base64URLDecode(data string) ([]byte, error) {
 	case 3:
 		data += "="
 	}
-
 	return base64.URLEncoding.DecodeString(data)
 }
 
@@ -99,4 +102,19 @@ func (c *JWTClaims) GetUserEmail() string {
 // It retrieves the unique identifier for the user's ChatGPT account.
 func (c *JWTClaims) GetAccountID() string {
 	return c.CodexAuthInfo.ChatgptAccountID
+}
+
+// DefaultPlanType defines the default subscription plan type when not present in claims.
+const DefaultPlanType = "free"
+
+// GetPlanType extracts the ChatGPT plan type from the JWT claims.
+// If the claim is missing or empty, it defaults to "free".
+func (c *JWTClaims) GetPlanType() string {
+	if c == nil {
+		return DefaultPlanType
+	}
+	if pt := strings.TrimSpace(c.CodexAuthInfo.ChatgptPlanType); pt != "" {
+		return pt
+	}
+	return DefaultPlanType
 }

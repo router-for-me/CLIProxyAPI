@@ -1,11 +1,9 @@
 package management
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,27 +12,43 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
+const defaultAuthFilesPageSize = 50
+
+type authFilesPagination struct {
+	enabled  bool
+	page     int
+	pageSize int
+}
+
+type diskAuthFileCandidate struct {
+	entry os.DirEntry
+	info  os.FileInfo
+}
+
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	authFileEntryMu       sync.Mutex
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
-	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
-	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	callbackForwardersMu       sync.Mutex
+	callbackForwarders         = make(map[int]*callbackForwarder)
+	authFileEntryMu            sync.Mutex
+	errAuthFileMustBeJSON      = errors.New("auth file must be .json")
+	errInvalidAuthFile         = errors.New("invalid auth file")
+	errAuthFileNotFound        = errors.New("auth file not found")
+	errPluginVirtualAuth       = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
+	newCodexOAuthService       = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	newAntigravityOAuthService = func(cfg *config.Config) antigravityOAuthService { return antigravity.NewAntigravityAuth(cfg, nil) }
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -95,19 +109,63 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
 	}
+	pagination, errPagination := parseAuthFilesPagination(c)
+	if errPagination != nil {
+		c.JSON(400, gin.H{"error": errPagination.Error()})
+		return
+	}
 	if h.authManager == nil {
-		h.listAuthFilesFromDisk(c)
+		h.listAuthFilesFromDisk(c, pagination)
 		return
 	}
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
+	h.mu.Lock()
+	host := h.pluginHost
+	h.mu.Unlock()
+	quota := authFileQuotaContext{v8: c.GetBool(ConfigV8ContextKey)}
+	if host != nil {
+		quota.pluginIDs = host.QuotaProviderPluginIDs(c.Request.Context())
+	}
 	auths := h.authManager.List()
+	observedAt := time.Now().UTC()
+	cooldownsKnown := !h.authManager.HomeEnabled()
+	if pagination.enabled {
+		matching := make([]*coreauth.Auth, 0, len(auths))
+		for _, auth := range auths {
+			if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) || !isAuthFileListable(auth) {
+				continue
+			}
+			matching = append(matching, auth)
+		}
+		sort.Slice(matching, func(i, j int) bool {
+			return compareAuthFileListOrder(matching[i], matching[j]) < 0
+		})
+		total := len(matching)
+		start, end := pagination.bounds(total)
+		files := make([]gin.H, 0, end-start)
+		for _, auth := range matching[start:end] {
+			if entry := h.buildAuthFileEntry(auth, quota); entry != nil {
+				entry["cooldowns"] = nil
+				if cooldownsKnown {
+					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
+				}
+				files = append(files, entry)
+			}
+		}
+		c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
+		return
+	}
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) {
 			continue
 		}
-		if entry := h.buildAuthFileEntry(auth); entry != nil {
+		if entry := h.buildAuthFileEntry(auth, quota); entry != nil {
+			entry["cooldowns"] = nil
+			if cooldownsKnown {
+				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
+			}
 			files = append(files, entry)
 		}
 	}
@@ -116,7 +174,114 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		nameJ, _ := files[j]["name"].(string)
 		return strings.ToLower(nameI) < strings.ToLower(nameJ)
 	})
-	c.JSON(200, gin.H{"files": files})
+	c.JSON(200, gin.H{"observed_at": observedAt, "files": files})
+}
+
+func parseAuthFilesPagination(c *gin.Context) (authFilesPagination, error) {
+	pageRaw, hasPage := c.GetQuery("page")
+	pageSizeRaw, hasPageSize := c.GetQuery("page_size")
+	if !hasPage && !hasPageSize {
+		return authFilesPagination{}, nil
+	}
+	pagination := authFilesPagination{enabled: true, page: 1, pageSize: defaultAuthFilesPageSize}
+	if hasPage {
+		page, errParse := strconv.Atoi(strings.TrimSpace(pageRaw))
+		if errParse != nil || page <= 0 {
+			return authFilesPagination{}, errors.New("page must be a positive integer")
+		}
+		pagination.page = page
+	}
+	if hasPageSize {
+		pageSize, errParse := strconv.Atoi(strings.TrimSpace(pageSizeRaw))
+		if errParse != nil || pageSize <= 0 {
+			return authFilesPagination{}, errors.New("page_size must be a positive integer")
+		}
+		pagination.pageSize = pageSize
+	}
+	return pagination, nil
+}
+
+func (p authFilesPagination) bounds(total int) (int, int) {
+	if !p.enabled || total <= 0 {
+		return 0, total
+	}
+	if p.page > 1 && p.page-1 > total/p.pageSize {
+		return total, total
+	}
+	start := (p.page - 1) * p.pageSize
+	if start >= total {
+		return total, total
+	}
+	remaining := total - start
+	if p.pageSize >= remaining {
+		return start, total
+	}
+	return start, start + p.pageSize
+}
+
+func authFilesListResponse(observedAt time.Time, files []gin.H, pagination authFilesPagination, total, end int) gin.H {
+	response := gin.H{"observed_at": observedAt, "files": files}
+	if pagination.enabled {
+		response["total"] = total
+		response["page"] = pagination.page
+		response["page_size"] = pagination.pageSize
+		response["has_more"] = end < total
+	}
+	return response
+}
+
+func authFileListName(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(auth.FileName); name != "" {
+		return name
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
+func compareAuthFileListOrder(left, right *coreauth.Auth) int {
+	leftName := authFileListName(left)
+	rightName := authFileListName(right)
+	if cmp := strings.Compare(strings.ToLower(leftName), strings.ToLower(rightName)); cmp != 0 {
+		return cmp
+	}
+	if cmp := strings.Compare(leftName, rightName); cmp != 0 {
+		return cmp
+	}
+	leftID, rightID := "", ""
+	leftIndex, rightIndex := "", ""
+	if left != nil {
+		leftID = strings.TrimSpace(left.ID)
+		leftIndex = strings.TrimSpace(left.Index)
+	}
+	if right != nil {
+		rightID = strings.TrimSpace(right.ID)
+		rightIndex = strings.TrimSpace(right.Index)
+	}
+	if cmp := strings.Compare(leftID, rightID); cmp != 0 {
+		return cmp
+	}
+	return strings.Compare(leftIndex, rightIndex)
+}
+
+func isAuthFileListable(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	runtimeOnly := isRuntimeOnlyAuth(auth)
+	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
+		return false
+	}
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	if path == "" {
+		return runtimeOnly
+	}
+	if _, errStat := os.Stat(path); os.IsNotExist(errStat) && !runtimeOnly &&
+		(auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
+		return false
+	}
+	return true
 }
 
 func lockedAuthIndex(auth *coreauth.Auth) string {
@@ -144,7 +309,7 @@ func matchesAuthFileLookup(auth *coreauth.Auth, name string, authIndex string) b
 func (h *Handler) lookupAuthFile(name string, authIndex string) (*coreauth.Auth, bool) {
 	name = strings.TrimSpace(name)
 	authIndex = strings.TrimSpace(authIndex)
-	if h == nil || h.authManager == nil || name == "" {
+	if h == nil || h.authManager == nil || (name == "" && authIndex == "") {
 		return nil, false
 	}
 	if authIndex == "" {
@@ -217,7 +382,8 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 }
 
 // List auth files from disk when the auth manager is unavailable.
-func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagination) {
+	observedAt := time.Now().UTC()
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
 	entries, err := os.ReadDir(h.cfg.AuthDir)
@@ -225,11 +391,11 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
 	}
-	files := make([]gin.H, 0)
 	if authIndexFilter != "" {
-		c.JSON(200, gin.H{"files": files})
+		c.JSON(200, authFilesListResponse(observedAt, []gin.H{}, pagination, 0, 0))
 		return
 	}
+	matching := make([]diskAuthFileCandidate, 0, len(entries))
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -242,77 +408,251 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			continue
 		}
 		if info, errInfo := e.Info(); errInfo == nil {
-			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
-
-			// Read file to get type field
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if data, errRead := os.ReadFile(full); errRead == nil {
-				typeValue := gjson.GetBytes(data, "type").String()
-				emailValue := gjson.GetBytes(data, "email").String()
-				fileData["type"] = typeValue
-				fileData["email"] = emailValue
-				if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
-					fileData["project_id"] = projectID
-				}
-				if pv := gjson.GetBytes(data, "priority"); pv.Exists() {
-					switch pv.Type {
-					case gjson.Number:
-						fileData["priority"] = int(pv.Int())
-					case gjson.String:
-						if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
-							fileData["priority"] = parsed
-						}
-					}
-				}
-				if wv := gjson.GetBytes(data, coreauth.AttributeWeight); wv.Exists() {
-					var rawWeight string
-					switch wv.Type {
-					case gjson.Number:
-						rawWeight = wv.Raw
-					case gjson.String:
-						rawWeight = wv.String()
-					}
-					if rawWeight != "" {
-						if weight, errWeight := credentialweight.ParseString(rawWeight); errWeight == nil {
-							fileData[coreauth.AttributeWeight] = weight
-						}
-					}
-				}
-				if nv := gjson.GetBytes(data, "note"); nv.Exists() && nv.Type == gjson.String {
-					if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
-						fileData["note"] = trimmed
-					}
-				}
-				if wv := gjson.GetBytes(data, "websockets"); wv.Exists() {
-					switch wv.Type {
-					case gjson.True:
-						fileData["websockets"] = true
-					case gjson.False:
-						fileData["websockets"] = false
-					case gjson.String:
-						if parsed, errParse := strconv.ParseBool(strings.TrimSpace(wv.String())); errParse == nil {
-							fileData["websockets"] = parsed
-						}
-					}
-				}
-				if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
-					fileData["request_retry"] = requestRetry
-				}
-			}
-
-			files = append(files, fileData)
+			matching = append(matching, diskAuthFileCandidate{entry: e, info: info})
 		}
 	}
-	c.JSON(200, gin.H{"files": files})
+	total := len(matching)
+	start, end := 0, total
+	if pagination.enabled {
+		start, end = pagination.bounds(total)
+	}
+	files := make([]gin.H, 0, end-start)
+	for _, candidate := range matching[start:end] {
+		name := candidate.entry.Name()
+		fileData := gin.H{"name": name, "size": candidate.info.Size(), "modtime": candidate.info.ModTime(), "cooldowns": nil}
+
+		// Read file to get type field
+		full := filepath.Join(h.cfg.AuthDir, name)
+		if data, errRead := os.ReadFile(full); errRead == nil {
+			var fieldBuf [7]ojson.Result
+			fields := ojson.GetManyBytesNoCopy(fieldBuf[:0], data, "type", "email", "project_id", "priority", coreauth.AttributeWeight, "note", "websockets")
+			typeValue := strings.Clone(fields[0].String())
+			emailValue := strings.Clone(fields[1].String())
+			fileData["type"] = typeValue
+			fileData["email"] = emailValue
+			if projectID := strings.TrimSpace(fields[2].String()); projectID != "" {
+				fileData["project_id"] = strings.Clone(projectID)
+			}
+			if pv := fields[3]; pv.Exists() {
+				switch pv.Type {
+				case ojson.Number:
+					fileData["priority"] = int(pv.Int())
+				case ojson.String:
+					if parsed, errAtoi := strconv.Atoi(strings.TrimSpace(pv.String())); errAtoi == nil {
+						fileData["priority"] = parsed
+					}
+				}
+			}
+			if wv := fields[4]; wv.Exists() {
+				var rawWeight string
+				switch wv.Type {
+				case ojson.Number:
+					rawWeight = wv.Raw
+				case ojson.String:
+					rawWeight = wv.String()
+				}
+				if rawWeight != "" {
+					if weight, errWeight := credentialweight.ParseString(rawWeight); errWeight == nil {
+						fileData[coreauth.AttributeWeight] = weight
+					}
+				}
+			}
+			if nv := fields[5]; nv.Exists() && nv.Type == ojson.String {
+				if trimmed := strings.TrimSpace(nv.String()); trimmed != "" {
+					fileData["note"] = strings.Clone(trimmed)
+				}
+			}
+			if wv := fields[6]; wv.Exists() {
+				switch wv.Type {
+				case ojson.True:
+					fileData["websockets"] = true
+				case ojson.False:
+					fileData["websockets"] = false
+				case ojson.String:
+					if parsed, errParse := strconv.ParseBool(strings.TrimSpace(wv.String())); errParse == nil {
+						fileData["websockets"] = parsed
+					}
+				}
+			}
+			if requestRetry, okRetry := authFileRequestRetryFromJSON(data); okRetry {
+				fileData["request_retry"] = requestRetry
+			}
+		}
+
+		files = append(files, fileData)
+	}
+	c.JSON(200, authFilesListResponse(observedAt, files, pagination, total, end))
 }
 
-func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
+// authFileQuotaContext carries request-scoped quota capability data for auth file entries.
+type authFileQuotaContext struct {
+	// pluginIDs maps normalized provider keys to the quota plugin selected for them.
+	// A nil map means no quota plugins are available.
+	pluginIDs map[string]string
+	// v8 hides declarative quota_probe support because v8 only serves plugin quota routes.
+	v8 bool
+}
+
+func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth, quota authFileQuotaContext) gin.H {
 	authFileEntryMu.Lock()
 	defer authFileEntryMu.Unlock()
-	return h.buildAuthFileEntryLocked(auth)
+	return h.buildAuthFileEntryLocked(auth, quota)
 }
 
-func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
+func isPersistentAuthFailure(auth *coreauth.Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	// Terminal unauthorized failure with no refresh scheduled.
+	if coreauth.HasUnauthorizedAuthFailure(auth) {
+		return true
+	}
+	// An OAuth credential whose access token is expired cannot be used to serve requests.
+	if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && !exp.After(now) {
+		return true
+	}
+	// An explicit token expiration status.
+	if strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "token expired") {
+		return true
+	}
+	return false
+}
+
+func isModelStateBlocked(state *coreauth.ModelState, now time.Time) bool {
+	if state == nil {
+		return false
+	}
+	if state.Status == coreauth.StatusDisabled {
+		return true
+	}
+	if !state.Unavailable && !state.Quota.Exceeded {
+		return false
+	}
+	hasRecoveryTime := !state.NextRetryAfter.IsZero() || (!state.Quota.NextRecoverAt.IsZero() && state.Quota.Exceeded)
+	if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+		return true
+	}
+	if state.Quota.Exceeded && !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+		return true
+	}
+	if hasRecoveryTime {
+		return false
+	}
+	return true
+}
+
+func reconcileAuthFileCooldownState(auth *coreauth.Auth, now time.Time) (unavailable bool, status coreauth.Status, statusMessage string, nextRetry time.Time) {
+	if auth == nil {
+		return false, coreauth.StatusActive, "", time.Time{}
+	}
+	unavailable = auth.Unavailable
+	status = auth.Status
+	statusMessage = auth.StatusMessage
+	if !auth.NextRetryAfter.IsZero() {
+		nextRetry = auth.NextRetryAfter
+	}
+
+	if auth.Disabled || auth.Status == coreauth.StatusDisabled {
+		return unavailable, coreauth.StatusDisabled, statusMessage, nextRetry
+	}
+
+	// Never reconcile an active authentication or token failure to active.
+	if isPersistentAuthFailure(auth, now) {
+		if !nextRetry.IsZero() && !nextRetry.After(now) {
+			nextRetry = time.Time{}
+		}
+		if statusMessage == "" && auth.RequiresSignIn {
+			statusMessage = "unauthorized (refresh token invalid)"
+		}
+		return true, coreauth.StatusError, statusMessage, nextRetry
+	}
+
+	// Check if there is an active credential-level cooldown.
+	// Matching selector.availabilityBlock: if neither Unavailable nor Quota.Exceeded is true,
+	// an inactive timestamp does not block the credential.
+	hasActiveCredCooldown := false
+	if auth.Unavailable || auth.Quota.Exceeded {
+		if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+			hasActiveCredCooldown = true
+		}
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+			hasActiveCredCooldown = true
+			if nextRetry.IsZero() || auth.Quota.NextRecoverAt.After(nextRetry) {
+				nextRetry = auth.Quota.NextRecoverAt
+			}
+		}
+	}
+
+	// Check per-model states.
+	hasSchedulableModels := false
+	allSchedulableBlocked := true
+	hasActiveModelCooldown := false
+	hadAnyModelCooldown := false
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if state.Status == coreauth.StatusDisabled {
+			continue
+		}
+		hasSchedulableModels = true
+		if !state.NextRetryAfter.IsZero() || (state.Quota.Exceeded && !state.Quota.NextRecoverAt.IsZero()) {
+			hadAnyModelCooldown = true
+		}
+		if (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) ||
+			(state.Quota.Exceeded && !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now)) {
+			hasActiveModelCooldown = true
+		}
+		if !isModelStateBlocked(state, now) {
+			allSchedulableBlocked = false
+		}
+	}
+
+	hadCooldown := !auth.NextRetryAfter.IsZero() ||
+		(auth.Quota.Exceeded && !auth.Quota.NextRecoverAt.IsZero()) ||
+		hadAnyModelCooldown
+
+	// If there is an active credential cooldown, keep unavailable/error.
+	// If all recorded models are blocked and the credential itself was marked unavailable, keep unavailable/error.
+	if hasActiveCredCooldown || (hasSchedulableModels && allSchedulableBlocked && auth.Unavailable) {
+		if !nextRetry.IsZero() && !nextRetry.After(now) {
+			nextRetry = time.Time{}
+		}
+		return true, coreauth.StatusError, statusMessage, nextRetry
+	}
+
+	// If the credential was not marked unavailable and has no active credential cooldown, keep unavailable=false.
+	if !auth.Unavailable && !hasActiveCredCooldown {
+		if status == coreauth.StatusError && hasSchedulableModels && !allSchedulableBlocked {
+			status = coreauth.StatusActive
+			statusMessage = ""
+		}
+		return false, status, statusMessage, time.Time{}
+	}
+
+	// If a cooldown was recorded but has expired (and no active model cooldown blocks all models):
+	if hadCooldown && !hasActiveCredCooldown && !hasActiveModelCooldown {
+		return false, coreauth.StatusActive, "", time.Time{}
+	}
+
+	// If partial models are still cooling, the credential as a whole remains available for other models.
+	if hadCooldown && hasSchedulableModels && !allSchedulableBlocked {
+		if status == coreauth.StatusError && !hasActiveCredCooldown {
+			status = coreauth.StatusActive
+			statusMessage = ""
+		}
+		return false, status, statusMessage, time.Time{}
+	}
+
+	// If nextRetry is in the past, do not expose a past retry deadline.
+	if !nextRetry.IsZero() && !nextRetry.After(now) {
+		nextRetry = time.Time{}
+	}
+
+	return unavailable, status, statusMessage, nextRetry
+}
+
+func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQuotaContext) gin.H {
 	if auth == nil {
 		return nil
 	}
@@ -329,6 +669,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if name == "" {
 		name = auth.ID
 	}
+	unavailable, status, statusMessage, nextRetryAfter := reconcileAuthFileCooldownState(auth, time.Now().UTC())
 	entry := gin.H{
 		"id":             auth.ID,
 		"auth_index":     auth.Index,
@@ -336,10 +677,10 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 		"type":           strings.TrimSpace(auth.Provider),
 		"provider":       strings.TrimSpace(auth.Provider),
 		"label":          auth.Label,
-		"status":         auth.Status,
-		"status_message": auth.StatusMessage,
+		"status":         status,
+		"status_message": statusMessage,
 		"disabled":       auth.Disabled,
-		"unavailable":    auth.Unavailable,
+		"unavailable":    unavailable,
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
@@ -350,6 +691,20 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
+	}
+	if pluginID := quota.pluginIDs[strings.ToLower(strings.TrimSpace(auth.Provider))]; pluginID != "" {
+		entry["supports_quota"] = true
+		entry["quota_provider"] = auth.Provider
+		if quota.v8 {
+			entry["quota_plugin_id"] = pluginID
+		}
+	}
+	// Declarative quota_probe is only executed by the v0 quota/fetch route.
+	if !quota.v8 && auth.Metadata != nil {
+		if probe, okProbe := auth.Metadata["quota_probe"]; okProbe && probe != nil {
+			entry["supports_quota"] = true
+			entry["quota_probe"] = probe
+		}
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -375,8 +730,8 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
-	if !auth.NextRetryAfter.IsZero() {
-		entry["next_retry_after"] = auth.NextRetryAfter
+	if !nextRetryAfter.IsZero() {
+		entry["next_retry_after"] = nextRetryAfter
 	}
 	if path != "" {
 		entry["path"] = path
@@ -434,8 +789,98 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth) gin.H {
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
 	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "qoder") {
+		if storage, ok := auth.Storage.(*qoderauth.QoderTokenStorage); ok {
+			if info := storage.GetUsageInfo(); info != nil {
+				usage := map[string]any{
+					"total":                  info.UserQuota.Total,
+					"used":                   info.UserQuota.Used,
+					"remaining":              info.UserQuota.Remaining,
+					"percentage":             info.UserQuota.Percentage,
+					"unit":                   info.UserQuota.Unit,
+					"total_usage_percentage": info.TotalUsagePercentage,
+					"is_quota_exceeded":      info.IsQuotaExceeded,
+					"expires_at":             info.ExpiresAt,
+				}
+				org := info.OrgResourcePackage
+				if org.Unit != "" || org.Total != 0 || org.Used != 0 || org.Remaining != 0 || org.Percentage != 0 {
+					usage["org_resource_remaining"] = org.Remaining
+				}
+				entry["usage"] = usage
+			}
+		}
+	}
 	if requestRetry, ok := auth.RequestRetryOverride(); ok {
 		entry["request_retry"] = requestRetry
+	}
+	if quota.v8 {
+		nowUTC := time.Now().UTC()
+		if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
+			entry["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
+		}
+		if !auth.NextRefreshAfter.IsZero() && auth.NextRefreshAfter.After(nowUTC) {
+			entry["next_refresh_after"] = auth.NextRefreshAfter.UTC().Format(time.RFC3339)
+		}
+		entry["requires_sign_in"] = auth.RequiresSignIn
+		if statusMessage != "" {
+			entry["status_message"] = coreauth.SanitizeRenewalMessage(statusMessage)
+		}
+		entry["renewal_state"] = auth.RenewalStateAt(nowUTC)
+		recoveryStage := auth.RecoveryStageAt(nowUTC)
+		entry["recovery_stage"] = recoveryStage
+		entry["quota_blocked"] = recoveryStage == coreauth.RecoveryStageQuotaBlocked
+		entry["adopted"] = !auth.AdoptedAt.IsZero() || auth.CredentialVersion > 0
+		if !auth.AdoptedAt.IsZero() {
+			entry["adopted_at"] = auth.AdoptedAt.UTC().Format(time.RFC3339)
+		}
+		entry["inference_verified"] = auth.InferenceVerified
+		if !auth.LastInferenceVerifiedAt.IsZero() {
+			entry["last_inference_verified_at"] = auth.LastInferenceVerifiedAt.UTC().Format(time.RFC3339)
+		}
+		entry["renewal_verified"] = auth.RenewalVerified
+		if !auth.LastRenewalVerifiedAt.IsZero() {
+			entry["last_renewal_verified_at"] = auth.LastRenewalVerifiedAt.UTC().Format(time.RFC3339)
+		}
+		if auth.RefreshError != nil {
+			entry["refresh_error"] = gin.H{
+				"code":        auth.RefreshError.Code,
+				"message":     auth.RefreshError.Message,
+				"http_status": auth.RefreshError.HTTPStatus,
+			}
+		}
+		if auth.RequiresSignIn {
+			entry["next_action"] = "sign_in"
+			entry["recovery_hint"] = "Re-authenticate this account on this proxy instance via OAuth login; signing in on another machine or a client's separate direct login does not update this instance."
+			event := gin.H{
+				"type":        "renewal_sign_in_required",
+				"auth_id":     auth.ID,
+				"provider":    strings.TrimSpace(auth.Provider),
+				"next_action": "sign_in",
+			}
+			if !auth.RenewalEventAt.IsZero() {
+				event["occurred_at"] = auth.RenewalEventAt.UTC().Format(time.RFC3339)
+			}
+			if email := authEmail(auth); email != "" {
+				event["account"] = email
+			}
+			if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
+				event["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
+			}
+			entry["renewal_event"] = event
+		}
+	}
+	if quota.v8 && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		entry["siwc_bind_supported"] = siwcBindEligible(auth)
+		entry["use_siwc"] = coreauth.IsCodexUseSIWC(auth)
+		entry["siwc_status"] = string(auth.CodexSIWCStatus(time.Now().UTC()))
+		section, _ := auth.Metadata["siwc"].(map[string]any)
+		accessToken, _ := section["access_token"].(string)
+		refreshToken, _ := section["refresh_token"].(string)
+		clientID, _ := section["client_id"].(string)
+		entry["siwc_bound"] = strings.TrimSpace(accessToken) != "" && strings.TrimSpace(refreshToken) != "" && strings.TrimSpace(clientID) != ""
+		if expiry, okExpiry := auth.SIWCExpirationTime(); okExpiry {
+			entry["siwc_expires_at"] = expiry.UTC().Format(time.RFC3339)
+		}
 	}
 	return entry
 }
@@ -642,145 +1087,4 @@ func isUnsafeAuthFileName(name string) bool {
 		return true
 	}
 	return false
-}
-
-// RequestZAIToken starts the ZCode CLI OAuth flow against Z.AI international.
-func (h *Handler) RequestZAIToken(c *gin.Context) {
-	h.requestZAIToken(c, zaiauth.ProviderZAI)
-}
-
-// RequestBigModelToken starts the ZCode CLI OAuth flow against Zhipu BigModel (China mainland).
-func (h *Handler) RequestBigModelToken(c *gin.Context) {
-	h.requestZAIToken(c, zaiauth.ProviderBigModel)
-}
-
-// requestZAIToken runs the poll-based ZCode CLI OAuth flow for the given identity
-// provider. The provider may also be overridden via the "provider" query parameter.
-func (h *Handler) requestZAIToken(c *gin.Context, provider string) {
-	ctx := context.Background()
-	ctx = PopulateAuthContext(ctx, c)
-
-	if p := strings.TrimSpace(c.Query("provider")); p != "" {
-		provider = p
-	}
-	provider = zaiauth.NormalizeProvider(provider)
-
-	fmt.Printf("Initializing Z.AI authentication (provider: %s)...\n", provider)
-
-	state := fmt.Sprintf("zai-%d", time.Now().UnixNano())
-	zaiAuth := zaiauth.NewZAIAuth(h.cfg, provider, "", 0)
-
-	init, errInit := zaiAuth.StartFlow(ctx)
-	if errInit != nil {
-		log.Errorf("Failed to generate authorization URL: %v", errInit)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
-	}
-
-	RegisterOAuthSession(state, "zai")
-
-	go func() {
-		fmt.Println("Waiting for authentication...")
-		stop := make(chan struct{})
-		defer close(stop)
-		// Both Z.AI international and BigModel use a loopback callback. When the
-		// browser runs on a different host, it cannot reach 127.0.0.1, so also
-		// accept the manually pasted callback that /oauth-callback writes to disk.
-		go h.watchManualZAICallback(state, zaiAuth, stop)
-		ready, errWait := zaiAuth.WaitForAuthorization(ctx, init)
-		if errWait != nil {
-			SetOAuthSessionError(state, "Authentication failed")
-			fmt.Printf("Authentication failed: %v\n", errWait)
-			return
-		}
-
-		apiKey, baseURL, errMint := zaiAuth.MintAPIKey(ctx, ready)
-		if errMint != nil {
-			SetOAuthSessionError(state, "Failed to provision API key")
-			fmt.Printf("Failed to provision API key: %v\n", errMint)
-			return
-		}
-
-		tokenStorage := zaiAuth.CreateTokenStorage(ready, apiKey, baseURL)
-
-		metadata := map[string]any{
-			"type":         "zai",
-			"provider":     provider,
-			"access_token": apiKey,
-			"base_url":     baseURL,
-			"timestamp":    time.Now().UnixMilli(),
-		}
-		if strings.TrimSpace(ready.ZAIAccessToken) != "" {
-			metadata["zai_access_token"] = ready.ZAIAccessToken
-		}
-		if strings.TrimSpace(ready.Email) != "" {
-			metadata["email"] = ready.Email
-		}
-		if strings.TrimSpace(ready.Name) != "" {
-			metadata["name"] = ready.Name
-		}
-
-		fileName := zaiauth.CredentialFileName(provider, ready.UserID, ready.Email)
-		label := strings.TrimSpace(ready.Email)
-		if label == "" {
-			label = strings.TrimSpace(ready.Name)
-		}
-		if label == "" {
-			label = fmt.Sprintf("Z.AI (%s)", provider)
-		}
-
-		record := &coreauth.Auth{
-			ID:       fileName,
-			Provider: "zai",
-			FileName: fileName,
-			Label:    label,
-			Storage:  tokenStorage,
-			Metadata: metadata,
-		}
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if errSave != nil {
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			return
-		}
-
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use Z.AI services through this CLI")
-		CompleteOAuthSession(state)
-	}()
-
-	c.JSON(200, gin.H{"status": "ok", "url": init.AuthorizeURL, "state": state})
-}
-
-// watchManualZAICallback polls for the callback file written by the management
-// /oauth-callback handler and injects the pasted authorization code into the
-// pending BigModel flow, so logins complete when a remote browser cannot reach
-// the loopback listener. It stops when the flow finishes (stop is closed).
-func (h *Handler) watchManualZAICallback(state string, auth *zaiauth.ZAIAuth, stop <-chan struct{}) {
-	path := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-zai-%s.oauth", state))
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			data, errRead := os.ReadFile(path)
-			if errRead != nil {
-				continue
-			}
-			_ = os.Remove(path)
-			var m map[string]string
-			_ = json.Unmarshal(data, &m)
-			// The file is keyed by this session's state, so it always belongs to
-			// this flow. Deliver the code, or fail the flow promptly when the
-			// callback carried an OAuth error / no code instead of timing out.
-			if code := strings.TrimSpace(m["code"]); code != "" {
-				auth.InjectCallback(code)
-			} else {
-				auth.InjectError(strings.TrimSpace(m["error"]))
-			}
-			return
-		}
-	}
 }

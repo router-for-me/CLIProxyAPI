@@ -17,12 +17,13 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -218,6 +219,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		Headers:         liveSelectionHeaders(c),
 		OriginalRequest: body,
 	}
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, body, nil)
 	selection, selected, errSelect := h.selectOAuth(ctx, model, selectionOpts)
 	if errSelect != nil {
 		writeSelectionError(c, errSelect)
@@ -229,6 +231,19 @@ func (h *Handler) Handle(c *gin.Context) {
 		}
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 
 	if selection != nil {
@@ -321,37 +336,6 @@ func (h *Handler) Handle(c *gin.Context) {
 		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 		return
 	}
-	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model)
-		helps.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, callResponseHeaders(resp.Header))
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("codex live: close unauthorized response body error: %v", errClose)
-		}
-		refreshed, didRefresh, errRefresh := h.authManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
-		if errRefresh != nil {
-			selection.End("refresh_failed")
-			writeSelectionError(c, errRefresh)
-			return
-		}
-		if !didRefresh || refreshed == nil {
-			selection.End("refresh_unavailable")
-			writeLiveError(c, http.StatusUnauthorized, "Codex credential unauthorized")
-			return
-		}
-		selected = refreshed
-		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		resp, errRequest = performRequest(selected)
-		if errRequest != nil {
-			selection.End("retry_failed")
-			helps.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
-			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
-			return
-		}
-		if resp.StatusCode == http.StatusUnauthorized {
-			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model)
-		}
-	}
 
 	var closeResponseOnce sync.Once
 	var closeResponseErr error
@@ -368,14 +352,43 @@ func (h *Handler) Handle(c *gin.Context) {
 	if selection != nil {
 		if errBind := selection.Bind(closeResponseBody); errBind != nil {
 			selection.End("response_bind_failed")
+			if resp.StatusCode == http.StatusUnauthorized {
+				h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model)
+			}
 			writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 			return
 		}
+	}
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		responseHeaders := callResponseHeaders(resp.Header)
+		helps.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders)
+		body, errRead := readLimitedBody(resp.Body)
+		helps.AppendAPIResponseChunk(ctx, runtimeConfig, body)
+		h.authManager.ReportHomeUnauthorizedBody(ctx, selected, "codex", model, string(body))
+		selection.End("unauthorized")
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("codex live: close unauthorized response body error: %v", errClose)
+		}
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, runtimeConfig, errRead)
+			writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadGateway), "Failed to read Codex live response")
+			return
+		}
+		copyRealtimeHandshakeHeaders(c.Writer.Header(), resp.Header)
+		if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+			c.Header("Content-Type", contentType)
+		}
+		c.Status(resp.StatusCode)
+		if _, errWrite := c.Writer.Write(body); errWrite != nil {
+			log.Warnf("codex live: write unauthorized response body: %v", errWrite)
+		}
+		return
 	}
 
 	responseHeaders := callResponseHeaders(resp.Header)
 	helps.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders)
 	responseBody, errResponse := readLimitedBody(resp.Body)
+	helps.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
 	if errResponse != nil {
 		helps.RecordAPIResponseError(ctx, runtimeConfig, errResponse)
 		message := "Failed to read Codex live response"
@@ -422,7 +435,14 @@ func (h *Handler) Handle(c *gin.Context) {
 	sessionStored := false
 	if success && h.sessions != nil {
 		if callID != "" {
-			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
+			clientMeta := logging.GetClientRequestMetadata(ctx)
+			session := liveSession{
+				authID:          selected.ID,
+				model:           model,
+				media:           mediaSession,
+				sessionID:       clientMeta.SessionID,
+				parentSessionID: clientMeta.ParentSessionID,
+			}
 			session.ownerPrincipal, session.ownerProvider = requestOwner(c)
 			if principal, ok := c.Get(ClientSecretPrincipalContextKey); ok {
 				session.clientSecretPrincipal, _ = principal.(string)
@@ -522,7 +542,9 @@ func readLimitedBody(body io.Reader) ([]byte, error) {
 	}
 	payload, errRead := io.ReadAll(io.LimitReader(body, maxBodySize+1))
 	if errRead != nil {
-		return nil, errRead
+		// Keep the bytes already received so callers can forward the upstream
+		// error body instead of replacing it with a generic message.
+		return payload, errRead
 	}
 	if len(payload) > maxBodySize {
 		return nil, errBodyTooLarge

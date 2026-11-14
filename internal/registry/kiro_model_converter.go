@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
 )
 
 // KiroAPIModel represents a model from Kiro API response.

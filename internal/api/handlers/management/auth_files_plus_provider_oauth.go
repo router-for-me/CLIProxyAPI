@@ -17,22 +17,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
-	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
-	geminiAuth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gemini"
-	gitlabauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/gitlab"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor"
+	geminiAuth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gemini"
+	gitlabauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/gitlab"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kilo"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -1104,20 +1104,41 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 		}
 
 		storage := qoderAuth.CreateTokenStorage(tokenData, deviceFlow.MachineID)
-		// Resolve a human-readable label: prefer the email from /userinfo,
-		// fall back to user_id, then to a timestamp so the auth file always
-		// gets a unique, non-empty name without prompting the operator.
-		name, email := qoderAuth.SaveUserInfo(ctx, tokenData.AccessToken, tokenData.UserID, "", "")
+		// Persist the organization identity as well as the display label. The
+		// current Qoder CN gateway requires organization_id in COSY headers.
+		name, email := "", ""
+		if qoderAuth.IsEnterpriseVPC() {
+			if details, errDetails := qoderAuth.FetchUserInfoDetails(ctx, tokenData.AccessToken); errDetails == nil {
+				if storage.UserID == "" {
+					storage.UserID = details.UserID
+				}
+				name = details.Name
+				email = details.Email
+				storage.OrganizationID = details.OrganizationID
+				storage.OrganizationTags = details.OrganizationTags
+			}
+		} else {
+			name, email = qoderAuth.SaveUserInfo(ctx, tokenData.AccessToken, tokenData.UserID, "", "")
+		}
 		storage.Name = name
 		switch {
 		case strings.TrimSpace(email) != "":
 			storage.Email = strings.TrimSpace(email)
-		case strings.TrimSpace(tokenData.UserID) != "":
-			storage.Email = strings.TrimSpace(tokenData.UserID)
+		case strings.TrimSpace(storage.UserID) != "":
+			storage.Email = strings.TrimSpace(storage.UserID)
 		default:
 			storage.Email = fmt.Sprintf("user-%d", time.Now().UnixMilli())
 		}
 		fileName := fmt.Sprintf("qoder-%s.json", storage.Email)
+		metadata := map[string]any{
+			"email":   storage.Email,
+			"name":    storage.Name,
+			"user_id": storage.UserID,
+		}
+		if qoderAuth.IsEnterpriseVPC() {
+			metadata["organization_id"] = storage.OrganizationID
+			metadata["organization_tags"] = storage.OrganizationTags
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "qoder",
@@ -1132,7 +1153,7 @@ func (h *Handler) RequestQoderToken(c *gin.Context) {
 				return "Qoder User"
 			}(),
 			Storage:  storage,
-			Metadata: map[string]any{"email": storage.Email},
+			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "qoder", record)
 		if errors.Is(errSave, errOAuthSessionNotPending) {
@@ -1268,7 +1289,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 
 		if resp.StatusCode == http.StatusOK {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			if gjson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
+			if ojson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
 				_ = resp.Body.Close()
 				continue
 			}
@@ -1289,7 +1310,7 @@ func checkCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		errMessage := string(bodyBytes)
-		errMessageResult := gjson.GetBytes(bodyBytes, "error.message")
+		errMessageResult := ojson.GetBytes(bodyBytes, "error.message")
 		if errMessageResult.Exists() {
 			errMessage = errMessageResult.String()
 		}

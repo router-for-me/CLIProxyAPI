@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
 func TestRegisterManagementRoutes(t *testing.T) {

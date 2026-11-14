@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
@@ -471,6 +471,11 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "claude-opus-4.5",
 		},
 		{
+			name:     "claude opus 4.8 hyphenated alias",
+			model:    "kiro-claude-opus-4-8",
+			expected: "claude-opus-4.8",
+		},
+		{
 			name:     "claude haiku 4.5 hyphenated alias",
 			model:    "kiro-claude-haiku-4-5",
 			expected: "claude-haiku-4.5",
@@ -484,6 +489,26 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			name:     "minimax m2.1 hyphenated alias",
 			model:    "kiro-minimax-m2-1",
 			expected: "minimax-m2.1",
+		},
+		{
+			name:     "claude opus 5.5 hyphenated alias",
+			model:    "kiro-claude-opus-5-5",
+			expected: "claude-opus-5.5",
+		},
+		{
+			name:     "claude sonnet 5.5 hyphenated alias",
+			model:    "kiro-claude-sonnet-5-5",
+			expected: "claude-sonnet-5.5",
+		},
+		{
+			name:     "claude opus 5.5 canonical ID",
+			model:    "claude-opus-5.5",
+			expected: "claude-opus-5.5",
+		},
+		{
+			name:     "claude sonnet 5.5 canonical ID",
+			model:    "claude-sonnet-5.5",
+			expected: "claude-sonnet-5.5",
 		},
 		{
 			name:     "non-Claude model passes through",

@@ -76,6 +76,24 @@ func (cache *BoundedLRU[K, V]) Get(key K) (V, bool) {
 	return zero, false
 }
 
+func (cache *BoundedLRU[K, V]) Delete(key K) bool {
+	cache.mu.Lock()
+	element, ok := cache.entries[key]
+	if !ok {
+		cache.mu.Unlock()
+		return false
+	}
+	entry := element.Value.(boundedLRUEntry[K, V])
+	delete(cache.entries, key)
+	cache.order.Remove(element)
+	cache.mu.Unlock()
+
+	if cache.onEvict != nil {
+		cache.onEvict(entry.key, entry.value)
+	}
+	return true
+}
+
 func (cache *BoundedLRU[K, V]) Len() int {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()

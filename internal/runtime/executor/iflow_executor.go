@@ -13,18 +13,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	iflowauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	iflowauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/iflow"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -99,7 +98,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = ojson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
 	if err != nil {
@@ -207,7 +206,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
-	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body, _ = ojson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
 	if err != nil {
@@ -216,7 +215,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	body = preserveReasoningContentInMessages(body)
 	// Ensure tools array exists to avoid provider quirks observed in some upstreams.
-	toolsResult := gjson.GetBytes(body, "tools")
+	toolsResult := ojson.GetBytes(body, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
 		body = ensureToolsArray(body)
 	}
@@ -532,7 +531,7 @@ func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 
 func ensureToolsArray(body []byte) []byte {
 	placeholder := `[{"type":"function","function":{"name":"noop","description":"Placeholder tool to stabilise streaming","parameters":{"type":"object"}}}]`
-	updated, err := sjson.SetRawBytes(body, "tools", []byte(placeholder))
+	updated, err := ojson.SetRawBytes(body, "tools", []byte(placeholder))
 	if err != nil {
 		return body
 	}
@@ -547,7 +546,7 @@ func ensureToolsArray(body []byte) []byte {
 // For GLM-4.6/4.7 and MiniMax M2/M2.1, it is recommended to include the full assistant
 // response (including reasoning_content) in message history for better context continuity.
 func preserveReasoningContentInMessages(body []byte) []byte {
-	model := strings.ToLower(gjson.GetBytes(body, "model").String())
+	model := strings.ToLower(ojson.GetBytes(body, "model").String())
 
 	// Only apply to models that support thinking with history preservation
 	needsPreservation := strings.HasPrefix(model, "glm-4") || strings.HasPrefix(model, "minimax-m2")
@@ -556,14 +555,14 @@ func preserveReasoningContentInMessages(body []byte) []byte {
 		return body
 	}
 
-	messages := gjson.GetBytes(body, "messages")
+	messages := ojson.GetBytes(body, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return body
 	}
 
 	// Check if any assistant message already has reasoning_content preserved
 	hasReasoningContent := false
-	messages.ForEach(func(_, msg gjson.Result) bool {
+	messages.ForEach(func(_, msg ojson.Result) bool {
 		role := msg.Get("role").String()
 		if role == "assistant" {
 			rc := msg.Get("reasoning_content")

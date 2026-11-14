@@ -11,11 +11,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/claude"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // Kiro API request structs - reuse from kiroclaude package structure
@@ -119,9 +119,9 @@ type KiroToolUse struct {
 // This is the main entry point for request translation.
 // Note: The actual payload building happens in the executor, this just passes through
 // the OpenAI format which will be converted by BuildKiroPayloadFromOpenAI.
-func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	// Pass through the OpenAI format - actual conversion happens in BuildKiroPayloadFromOpenAI
-	return inputRawJSON
+	return inputRawJSON, nil
 }
 
 // BuildKiroPayloadFromOpenAI constructs the Kiro API request payload from OpenAI format.
@@ -139,12 +139,12 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 	origin = normalizeOrigin(origin)
 	log.Debugf("kiro-openai: normalized origin value: %s", origin)
 
-	messages := gjson.GetBytes(openaiBody, "messages")
+	messages := ojson.GetBytes(openaiBody, "messages")
 
 	// For chat-only mode, don't include tools
-	var tools gjson.Result
+	var tools ojson.Result
 	if !isChatOnly {
-		tools = gjson.GetBytes(openaiBody, "tools")
+		tools = ojson.GetBytes(openaiBody, "tools")
 	}
 
 	// Extract system prompt from messages
@@ -332,7 +332,7 @@ func normalizeOrigin(origin string) string {
 
 // extractMetadataFromMessages extracts metadata from messages[].additional_kwargs (LangChain format).
 // Searches from the last message backwards, returns empty string if not found.
-func extractMetadataFromMessages(messages gjson.Result, key string) string {
+func extractMetadataFromMessages(messages ojson.Result, key string) string {
 	arr := messages.Array()
 	for i := len(arr) - 1; i >= 0; i-- {
 		if val := arr[i].Get("additional_kwargs." + key); val.Exists() && val.String() != "" {
@@ -343,7 +343,7 @@ func extractMetadataFromMessages(messages gjson.Result, key string) string {
 }
 
 // extractSystemPromptFromOpenAI extracts system prompt from OpenAI messages
-func extractSystemPromptFromOpenAI(messages gjson.Result) string {
+func extractSystemPromptFromOpenAI(messages ojson.Result) string {
 	if !messages.IsArray() {
 		return ""
 	}
@@ -352,7 +352,7 @@ func extractSystemPromptFromOpenAI(messages gjson.Result) string {
 	for _, msg := range messages.Array() {
 		if msg.Get("role").String() == "system" {
 			content := msg.Get("content")
-			if content.Type == gjson.String {
+			if content.Type == ojson.String {
 				systemParts = append(systemParts, content.String())
 			} else if content.IsArray() {
 				// Handle array content format
@@ -438,7 +438,7 @@ func synthesizeToolSpecsFromHistory(history []KiroHistoryMessage) []KiroToolWrap
 }
 
 // convertOpenAIToolsToKiro converts OpenAI tools to Kiro format
-func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
+func convertOpenAIToolsToKiro(tools ojson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
 	if !tools.IsArray() {
 		return kiroTools
@@ -450,7 +450,7 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		// 2. Flat format (Claude Code/Kiro IDE): {"name":"...","description":"...","parameters":{...}} or with "input_schema"
 		toolType := tool.Get("type").String()
 		var name, description string
-		var parametersResult gjson.Result
+		var parametersResult ojson.Result
 
 		if toolType == "function" {
 			fn := tool.Get("function")
@@ -480,7 +480,7 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		}
 
 		var parameters interface{}
-		if parametersResult.Exists() && parametersResult.Type != gjson.Null {
+		if parametersResult.Exists() && parametersResult.Type != ojson.Null {
 			parameters = parametersResult.Value()
 		}
 		parameters = ensureKiroInputSchema(parameters)
@@ -520,7 +520,7 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 }
 
 // processOpenAIMessages processes OpenAI messages and builds Kiro history
-func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
+func processOpenAIMessages(messages ojson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
 	var history []KiroHistoryMessage
 	var currentUserMsg *KiroUserInputMessage
 	var currentToolResults []KiroToolResult
@@ -718,7 +718,7 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 }
 
 // buildUserMessageFromOpenAI builds a user message from OpenAI format and extracts tool results
-func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroUserInputMessage, []KiroToolResult) {
+func buildUserMessageFromOpenAI(msg ojson.Result, modelID, origin string) (KiroUserInputMessage, []KiroToolResult) {
 	content := msg.Get("content")
 	var contentBuilder strings.Builder
 	var toolResults []KiroToolResult
@@ -741,11 +741,11 @@ func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroU
 					for _, item := range resultContent.Array() {
 						if item.Get("type").String() == "text" {
 							textContents = append(textContents, KiroTextContent{Text: item.Get("text").String()})
-						} else if item.Type == gjson.String {
+						} else if item.Type == ojson.String {
 							textContents = append(textContents, KiroTextContent{Text: item.String()})
 						}
 					}
-				} else if resultContent.Type == gjson.String {
+				} else if resultContent.Type == ojson.String {
 					textContents = append(textContents, KiroTextContent{Text: resultContent.String()})
 				}
 
@@ -809,7 +809,7 @@ func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroU
 				}
 			}
 		}
-	} else if content.Type == gjson.String {
+	} else if content.Type == ojson.String {
 		contentBuilder.WriteString(content.String())
 	}
 
@@ -827,13 +827,13 @@ func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroU
 }
 
 // buildAssistantMessageFromOpenAI builds an assistant message from OpenAI format
-func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMessage {
+func buildAssistantMessageFromOpenAI(msg ojson.Result) KiroAssistantResponseMessage {
 	content := msg.Get("content")
 	var contentBuilder strings.Builder
 	var toolUses []KiroToolUse
 
 	// Handle content
-	if content.Type == gjson.String {
+	if content.Type == ojson.String {
 		contentBuilder.WriteString(content.String())
 	} else if content.IsArray() {
 		for _, part := range content.Array() {
@@ -850,7 +850,7 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 
 				inputMap := make(map[string]interface{})
 				if inputData.Exists() && inputData.IsObject() {
-					inputData.ForEach(func(key, value gjson.Result) bool {
+					inputData.ForEach(func(key, value ojson.Result) bool {
 						inputMap[key.String()] = value.Value()
 						return true
 					})
@@ -967,7 +967,7 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 
 	// Check OpenAI format: reasoning_effort parameter
 	// Valid values: "low", "medium", "high", "auto" (not "none")
-	reasoningEffort := gjson.GetBytes(openaiBody, "reasoning_effort")
+	reasoningEffort := ojson.GetBytes(openaiBody, "reasoning_effort")
 	if reasoningEffort.Exists() {
 		effort := reasoningEffort.String()
 		if effort != "" && effort != "none" {
@@ -996,7 +996,7 @@ func checkThinkingModeFromOpenAIWithHeaders(openaiBody []byte, headers http.Head
 	}
 
 	// Check model name for thinking hints
-	model := gjson.GetBytes(openaiBody, "model").String()
+	model := ojson.GetBytes(openaiBody, "model").String()
 	modelLower := strings.ToLower(model)
 	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
 		log.Debugf("kiro-openai: thinking mode enabled via model name hint: %s", model)
@@ -1021,13 +1021,13 @@ func hasThinkingTagInBody(body []byte) bool {
 // - "required": Must use at least one tool
 // - {"type":"function","function":{"name":"..."}} : Must use specific tool
 func extractToolChoiceHint(openaiBody []byte) string {
-	toolChoice := gjson.GetBytes(openaiBody, "tool_choice")
+	toolChoice := ojson.GetBytes(openaiBody, "tool_choice")
 	if !toolChoice.Exists() {
 		return ""
 	}
 
 	// Handle string values
-	if toolChoice.Type == gjson.String {
+	if toolChoice.Type == ojson.String {
 		switch toolChoice.String() {
 		case "none":
 			// Note: When tool_choice is "none", we should ideally not pass tools at all
@@ -1060,7 +1060,7 @@ func extractToolChoiceHint(openaiBody []byte) string {
 // - {"type": "json_object"}: Must respond with valid JSON
 // - {"type": "json_schema", "json_schema": {...}}: Must respond with JSON matching schema
 func extractResponseFormatHint(openaiBody []byte) string {
-	responseFormat := gjson.GetBytes(openaiBody, "response_format")
+	responseFormat := ojson.GetBytes(openaiBody, "response_format")
 	if !responseFormat.Exists() {
 		return ""
 	}

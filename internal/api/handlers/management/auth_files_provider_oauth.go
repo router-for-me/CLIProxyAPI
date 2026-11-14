@@ -10,20 +10,24 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
-	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -31,6 +35,64 @@ type codexOAuthService interface {
 	GenerateAuthURL(state string, pkceCodes *codex.PKCECodes) (string, error)
 	ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error)
 	CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage
+}
+
+type antigravityOAuthService interface {
+	BuildAuthURL(state, redirectURI string) string
+	ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*antigravity.TokenResponse, error)
+	FetchUserInfo(ctx context.Context, accessToken string) (string, error)
+	FetchProjectID(ctx context.Context, accessToken string) (string, error)
+}
+
+type claudeOAuthService interface {
+	GenerateAuthURL(state string, pkceCodes *claude.PKCECodes) (string, string, error)
+	ExchangeCodeForTokens(ctx context.Context, code, state string, pkceCodes *claude.PKCECodes) (*claude.ClaudeAuthBundle, error)
+	CreateTokenStorage(bundle *claude.ClaudeAuthBundle) *claude.ClaudeTokenStorage
+}
+
+type kimiOAuthService interface {
+	StartDeviceFlow(ctx context.Context) (*kimi.DeviceCodeResponse, error)
+	WaitForAuthorization(ctx context.Context, deviceCode *kimi.DeviceCodeResponse) (*kimi.KimiAuthBundle, error)
+	CreateTokenStorage(bundle *kimi.KimiAuthBundle) *kimi.KimiTokenStorage
+}
+
+type xaiOAuthService interface {
+	StartDeviceFlow(ctx context.Context) (*xaiauth.DeviceCodeResponse, error)
+	WaitForAuthorization(ctx context.Context, dc *xaiauth.DeviceCodeResponse) (*xaiauth.AuthBundle, error)
+	CreateTokenStorage(bundle *xaiauth.AuthBundle) *xaiauth.TokenStorage
+}
+
+type metaOAuthService interface {
+	StartDeviceFlow(ctx context.Context) (*metaauth.DeviceCodeResponse, error)
+	WaitForAuthorization(ctx context.Context, dc *metaauth.DeviceCodeResponse) (*metaauth.MetaAuthBundle, error)
+	CreateTokenStorage(bundle *metaauth.MetaAuthBundle) *metaauth.MetaTokenStorage
+}
+
+var (
+	newClaudeOAuthService = func(cfg *config.Config, proxyURL string) claudeOAuthService {
+		return claude.NewClaudeAuthWithProxyURL(cfg, proxyURL)
+	}
+	newKimiOAuthService = func(cfg *config.Config, domain string) kimiOAuthService {
+		return kimi.NewKimiAuthWithDomain(cfg, domain)
+	}
+	newXAIOAuthService = func(cfg *config.Config, proxyURL string) xaiOAuthService {
+		return xaiauth.NewXAIAuthWithProxyURL(cfg, proxyURL)
+	}
+	newMetaOAuthService = func(cfg *config.Config, proxyURL string) metaOAuthService {
+		return metaauth.NewMetaAuthWithProxyURL(cfg, proxyURL)
+	}
+)
+
+func bindOAuthSessionTarget(c *gin.Context, state string, respPayload gin.H) (oauthRecoveryTarget, bool) {
+	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
+	if !hasSessionTarget {
+		return oauthRecoveryTarget{}, false
+	}
+	SetOAuthSessionTarget(state, sessionTarget)
+	if respPayload != nil {
+		respPayload["target_auth_id"] = sessionTarget.AuthID
+	}
+	return sessionTarget, true
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
@@ -55,8 +117,10 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	// Initialize Claude auth service
-	anthropicAuth := claude.NewClaudeAuth(h.cfg)
+	anthropicAuth := newClaudeOAuthService(cfg, sessionProxyURL)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
 	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
@@ -66,7 +130,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "anthropic")
+	RegisterOAuthSessionWithProxy(state, "anthropic", sessionProxyURL)
+	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
+	bindOAuthSessionTarget(c, state, respPayload)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -91,7 +157,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		}
 
 		// Helper: wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
 		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
 			deadline := time.Now().Add(timeout)
 			for {
@@ -145,7 +211,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
-			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
+			log.Errorf("Failed to exchange authorization code for tokens: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
 			return
 		}
@@ -165,20 +231,16 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if len(tokenStorage.DeviceIDs) > 0 {
 			metadata[claude.ClaudeDeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
 		}
+		fileName := claude.CredentialFileName(tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID)
 		record := &coreauth.Auth{
-			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			ID:       fileName,
 			Provider: "claude",
-			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
+			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "anthropic", record)
-		if errors.Is(errSave, errOAuthSessionNotPending) {
-			return
-		}
-		if errSave != nil {
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "anthropic", sessionProxyURL, record, "Failed to save authentication tokens", false)
+		if !okSaved {
 			return
 		}
 
@@ -187,10 +249,9 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Claude services through this CLI")
-		CompleteOAuthSession(state)
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(200, respPayload)
 }
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
@@ -215,8 +276,10 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	// Initialize Codex auth service
-	openaiAuth := newCodexOAuthService(h.cfg)
+	openaiAuth := newCodexOAuthService(cfg)
 
 	// Generate authorization URL
 	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
@@ -226,7 +289,11 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSession(state, "codex")
+	RegisterOAuthSessionWithProxy(state, "codex", sessionProxyURL)
+	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
+	if hasSessionTarget {
+		SetOAuthSessionTarget(state, sessionTarget)
+	}
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -251,7 +318,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		}
 
 		// Wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-codex-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var code string
 		for {
@@ -291,25 +358,34 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
-			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange), sessionProxyURL))
+			log.Errorf("Failed to exchange authorization code for tokens: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
 			return
 		}
 
 		// Extract additional info for filename generation
 		claims, _ := codex.ParseJWTToken(bundle.TokenData.IDToken)
 		planType := ""
+		if bundle != nil && strings.TrimSpace(bundle.TokenData.PlanType) != "" {
+			planType = strings.TrimSpace(bundle.TokenData.PlanType)
+		}
 		hashAccountID := ""
 		if claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
+			if pt := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); pt != "" {
+				planType = pt
+			}
 			if accountID := claims.GetAccountID(); accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
 				hashAccountID = hex.EncodeToString(digest[:])[:8]
 			}
 		}
+		if planType == "" {
+			planType = codex.DefaultPlanType
+		}
 
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
+		tokenStorage.PlanType = planType
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 		record := &coreauth.Auth{
 			ID:       fileName,
@@ -319,15 +395,14 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			Metadata: map[string]any{
 				"email":      tokenStorage.Email,
 				"account_id": tokenStorage.AccountID,
+				"plan_type":  planType,
+			},
+			Attributes: map[string]string{
+				"plan_type": planType,
 			},
 		}
-		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "codex", record)
-		if errors.Is(errSave, errOAuthSessionNotPending) {
-			return
-		}
-		if errSave != nil {
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "codex", sessionProxyURL, record, "Failed to save authentication tokens", true)
+		if !okSaved {
 			return
 		}
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
@@ -335,10 +410,320 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			fmt.Println("API key obtained and saved")
 		}
 		fmt.Println("You can now use Codex services through this CLI")
-		CompleteOAuthSession(state)
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
+	if hasSessionTarget {
+		respPayload["target_auth_id"] = sessionTarget.AuthID
+	}
+	c.JSON(200, respPayload)
+}
+
+func isIdentitylessOAuthProvider(provider string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(provider))
+	return trimmed == "kimi" || trimmed == "kimi-ai"
+}
+
+func matchesOAuthRecoveryTarget(target oauthRecoveryTarget, email, accountID, candidateFileName string) bool {
+	return matchesOAuthRecoveryTargetWithOrg(target, email, accountID, "", candidateFileName)
+}
+
+func matchesOAuthRecoveryTargetWithOrg(target oauthRecoveryTarget, email, accountID, organizationID, candidateFileName string) bool {
+	targetAccountID := strings.TrimSpace(target.AccountID)
+	targetEmail := strings.TrimSpace(target.Email)
+	targetOrgID := strings.TrimSpace(target.OrganizationID)
+	gotAccountID := strings.TrimSpace(accountID)
+	gotEmail := strings.TrimSpace(email)
+	gotOrgID := strings.TrimSpace(organizationID)
+
+	if targetOrgID != "" {
+		if gotOrgID == "" || !strings.EqualFold(gotOrgID, targetOrgID) {
+			return false
+		}
+	}
+
+	if strings.EqualFold(strings.TrimSpace(target.Provider), "xai") && (targetEmail != "" || targetAccountID != "") {
+		emailMatches := targetEmail != "" && gotEmail != "" && strings.EqualFold(targetEmail, gotEmail)
+		emailConflicts := targetEmail != "" && gotEmail != "" && !strings.EqualFold(targetEmail, gotEmail)
+		subjectMatches := targetAccountID != "" && gotAccountID != "" && targetAccountID == gotAccountID
+		subjectConflicts := targetAccountID != "" && gotAccountID != "" && targetAccountID != gotAccountID
+		return (emailMatches || subjectMatches) && !emailConflicts && !subjectConflicts
+	}
+
+	if targetAccountID != "" {
+		if gotAccountID == "" || !strings.EqualFold(gotAccountID, targetAccountID) {
+			return false
+		}
+	}
+	if targetEmail != "" {
+		if gotEmail == "" || !strings.EqualFold(gotEmail, targetEmail) {
+			return false
+		}
+	}
+	if targetAccountID == "" && targetEmail == "" {
+		if gotAccountID == "" && gotEmail == "" {
+			return isIdentitylessOAuthProvider(target.Provider)
+		}
+		if target.FileName != "" && candidateFileName != target.FileName && candidateFileName != target.AuthID {
+			return false
+		}
+	}
+	return true
+}
+
+func applyOAuthRecoveryTargetToRecord(target oauthRecoveryTarget, record *coreauth.Auth) bool {
+	if record == nil || strings.TrimSpace(target.AuthID) == "" {
+		return false
+	}
+	gotEmail, gotAccountID := authIdentityEmailAndAccountID(record)
+	gotOrgID := authIdentityOrganizationID(record)
+	candidateFileName := firstNonEmpty(strings.TrimSpace(record.FileName), strings.TrimSpace(record.ID))
+
+	if !matchesOAuthRecoveryTargetWithOrg(target, gotEmail, gotAccountID, gotOrgID, candidateFileName) {
+		return false
+	}
+
+	if strings.EqualFold(strings.TrimSpace(record.Provider), "xai") {
+		if gotEmail == "" && strings.TrimSpace(target.Email) != "" {
+			preservedEmail := strings.TrimSpace(target.Email)
+			if record.Metadata == nil {
+				record.Metadata = make(map[string]any)
+			}
+			record.Metadata["email"] = preservedEmail
+			if storage, ok := record.Storage.(*xaiauth.TokenStorage); ok && storage != nil {
+				storage.Email = preservedEmail
+			}
+			if record.Label == "" || record.Label == "xAI" {
+				record.Label = preservedEmail
+			}
+		}
+		if gotAccountID == "" && strings.TrimSpace(target.AccountID) != "" {
+			preservedSub := strings.TrimSpace(target.AccountID)
+			if record.Metadata == nil {
+				record.Metadata = make(map[string]any)
+			}
+			record.Metadata["sub"] = preservedSub
+			if storage, ok := record.Storage.(*xaiauth.TokenStorage); ok && storage != nil {
+				storage.Subject = preservedSub
+			}
+		}
+	}
+
+	record.ID = target.AuthID
+	targetFileName := strings.TrimSpace(target.FileName)
+	if targetFileName == "" {
+		targetFileName = target.AuthID
+	}
+	targetPath := strings.TrimSpace(target.Path)
+	if targetPath == "" && strings.ContainsAny(target.AuthID, "/\\") {
+		targetFileName = target.AuthID
+	}
+	record.FileName = targetFileName
+	if record.Attributes == nil {
+		record.Attributes = make(map[string]string)
+	}
+	if targetPath != "" {
+		record.Attributes[coreauth.AttributePath] = targetPath
+		record.Attributes[coreauth.AttributeSource] = targetPath
+	} else {
+		delete(record.Attributes, coreauth.AttributePath)
+		record.Attributes[coreauth.AttributeSource] = targetFileName
+	}
+	return true
+}
+
+func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, state, sessionProvider, sessionProxyURL string, record *coreauth.Auth, failSaveMessage string, alwaysTrackOutcome bool) (string, bool) {
+	if record == nil {
+		SetOAuthSessionError(state, failSaveMessage)
+		return "", false
+	}
+	target, hasTarget := GetOAuthSessionTarget(state)
+	isTargeted := hasTarget && strings.TrimSpace(target.AuthID) != ""
+	if isTargeted {
+		if strings.TrimSpace(target.Provider) != "" && strings.TrimSpace(record.Provider) != "" &&
+			!h.oauthTargetProviderMatches(target.Provider, record.Provider) {
+			SetOAuthSessionError(state, "Authenticated account does not match target credential")
+			log.Warnf("%s OAuth recovery rejected for %s: provider %s does not match target provider %s", record.Provider, target.AuthID, record.Provider, target.Provider)
+			return "", false
+		}
+		if !applyOAuthRecoveryTargetToRecord(target, record) {
+			SetOAuthSessionError(state, "Authenticated account does not match target credential")
+			log.Warnf("%s OAuth recovery rejected for %s: authenticated account does not match target credential", record.Provider, target.AuthID)
+			return "", false
+		}
+		ctx = withTargetedOAuthSave(ctx)
+	}
+
+	var hadPrevAuth bool
+	var prevVersion uint64
+	var prevEpoch uint64
+	if h != nil && h.authManager != nil {
+		if existing, okExisting := h.authManager.GetByID(record.ID); okExisting && existing != nil {
+			hadPrevAuth = true
+			prevVersion = existing.CredentialVersion
+			prevEpoch = existing.RegistrationEpoch
+		}
+	}
+
+	applySessionProxyToAuthRecord(record, sessionProxyURL)
+	if errGuard := claimOAuthSessionCommit(state, sessionProvider); errGuard != nil {
+		return "", false
+	}
+	savedPath, errSave := h.saveTokenRecord(ctx, record)
+	if !alwaysTrackOutcome && !isTargeted {
+		if errSave != nil {
+			log.Errorf("%s: %v", failSaveMessage, errSave)
+			FailOAuthSessionCommit(state, failSaveMessage)
+			return "", false
+		}
+		CompleteOAuthSession(state)
+		return savedPath, true
+	}
+
+	if errSave != nil && strings.TrimSpace(savedPath) == "" {
+		FailOAuthSessionCommit(state, failSaveMessage)
+		log.Errorf("%s: %v", failSaveMessage, errSave)
+		return "", false
+	}
+
+	savedGrantHash := authGrantFingerprint(record)
+	var adopted bool
+	var adoptedVersion uint64
+	var adoptedEpoch uint64
+	var adoptErr string
+	if errSave != nil {
+		adoptErr = "Credential saved to storage, but runtime adoption failed"
+		log.Errorf("%s credential saved to %s, but runtime adoption failed: %v", record.Provider, savedPath, errSave)
+	} else if h != nil && h.authManager != nil {
+		if runtimeAuth, okRuntime := h.authManager.GetByID(record.ID); okRuntime && runtimeAuth != nil {
+			if authGrantFingerprint(runtimeAuth) == savedGrantHash || runtimeAuth.AdoptedGrantHash == savedGrantHash {
+				adopted = true
+				adoptedVersion = runtimeAuth.CredentialVersion
+				adoptedEpoch = runtimeAuth.RegistrationEpoch
+			} else {
+				adoptErr = "Credential saved to storage, but runtime did not adopt the new credential version"
+			}
+		} else {
+			adoptErr = "Credential saved to storage, but was not registered in active runtime"
+		}
+	}
+
+	var verifyErr string
+	if adopted && isTargeted && target.VerifyAfterLogin && h != nil && h.authManager != nil {
+		if _, errVerify := h.authManager.VerifyInference(ctx, record.ID, target.VerifyModel); errVerify != nil {
+			verifyErr = coreauth.SanitizeRenewalMessage(errVerify.Error())
+		}
+	}
+
+	CompleteOAuthSessionWithOutcome(state, record.ID, savedGrantHash, strings.TrimSpace(savedPath) != "", adopted, hadPrevAuth, prevVersion, prevEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr)
+	return savedPath, true
+}
+
+func oauthGrantFingerprint(accessToken, refreshToken, email, accountID string) string {
+	return coreauth.OAuthGrantFingerprint(accessToken, refreshToken, email, accountID)
+}
+
+func authGrantFingerprint(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	var accessToken, refreshToken, accountID string
+	email := authEmail(auth)
+	switch storage := auth.Storage.(type) {
+	case *codex.CodexTokenStorage:
+		if storage != nil {
+			accessToken = strings.TrimSpace(storage.AccessToken)
+			refreshToken = strings.TrimSpace(storage.RefreshToken)
+			accountID = strings.TrimSpace(storage.AccountID)
+			if email == "" {
+				email = strings.TrimSpace(storage.Email)
+			}
+		}
+	case *claude.ClaudeTokenStorage:
+		if storage != nil {
+			accessToken = strings.TrimSpace(storage.AccessToken)
+			refreshToken = strings.TrimSpace(storage.RefreshToken)
+			if email == "" {
+				email = strings.TrimSpace(storage.Email)
+			}
+		}
+	case *kimi.KimiTokenStorage:
+		if storage != nil {
+			accessToken = strings.TrimSpace(storage.AccessToken)
+			refreshToken = strings.TrimSpace(storage.RefreshToken)
+		}
+	case *xaiauth.TokenStorage:
+		if storage != nil {
+			accessToken = strings.TrimSpace(storage.AccessToken)
+			refreshToken = strings.TrimSpace(storage.RefreshToken)
+			if email == "" {
+				email = strings.TrimSpace(storage.Email)
+			}
+		}
+	case *metaauth.MetaTokenStorage:
+		if storage != nil {
+			accessToken = strings.TrimSpace(storage.AccessToken)
+			if email == "" {
+				email = strings.TrimSpace(storage.Email)
+			}
+		}
+	}
+	if auth.Metadata != nil {
+		if accessToken == "" {
+			accessToken, _ = auth.Metadata["access_token"].(string)
+		}
+		if accessToken == "" {
+			accessToken, _ = auth.Metadata["api_key"].(string)
+		}
+		if accessToken == "" {
+			accessToken, _ = auth.Metadata["session_token"].(string)
+		}
+		if refreshToken == "" {
+			refreshToken, _ = auth.Metadata["refresh_token"].(string)
+		}
+		if accountID == "" {
+			accountID, _ = auth.Metadata["account_id"].(string)
+		}
+	}
+	if auth.Attributes != nil {
+		if accessToken == "" {
+			accessToken = strings.TrimSpace(auth.Attributes["api_key"])
+		}
+		if accessToken == "" {
+			accessToken = strings.TrimSpace(auth.Attributes["session_token"])
+		}
+		if accountID == "" {
+			accountID = strings.TrimSpace(auth.Attributes["account_id"])
+		}
+	}
+	if (accessToken == "" || refreshToken == "" || accountID == "" || email == "") && auth.Storage != nil {
+		if rawer, ok := auth.Storage.(interface{ RawJSON() []byte }); ok {
+			if raw := rawer.RawJSON(); len(raw) > 0 {
+				var rawMap map[string]any
+				if json.Unmarshal(raw, &rawMap) == nil {
+					if accessToken == "" {
+						accessToken, _ = rawMap["access_token"].(string)
+					}
+					if accessToken == "" {
+						accessToken, _ = rawMap["api_key"].(string)
+					}
+					if accessToken == "" {
+						accessToken, _ = rawMap["session_token"].(string)
+					}
+					if refreshToken == "" {
+						refreshToken, _ = rawMap["refresh_token"].(string)
+					}
+					if accountID == "" {
+						accountID, _ = rawMap["account_id"].(string)
+					}
+					if email == "" {
+						email, _ = rawMap["email"].(string)
+					}
+				}
+			}
+		}
+	}
+	return oauthGrantFingerprint(accessToken, refreshToken, email, accountID)
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
@@ -347,7 +732,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	fmt.Println("Initializing Antigravity authentication...")
 
-	authSvc := antigravity.NewAntigravityAuth(h.cfg, nil)
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
+	authSvc := newAntigravityOAuthService(cfg)
 
 	state, errState := misc.GenerateRandomState()
 	if errState != nil {
@@ -359,7 +746,9 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
-	RegisterOAuthSession(state, "antigravity")
+	RegisterOAuthSessionWithProxy(state, "antigravity", sessionProxyURL)
+	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
+	bindOAuthSessionTarget(c, state, respPayload)
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -383,7 +772,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
 		}
 
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
 		deadline := time.Now().Add(5 * time.Minute)
 		var authCode string
 		for {
@@ -422,7 +811,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 		tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI)
 		if errToken != nil {
-			log.Errorf("Failed to exchange token: %v", errToken)
+			log.Errorf("Failed to exchange token: %s", redactSessionProxyInString(errToken.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to exchange token")
 			return
 		}
@@ -436,7 +825,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 		email, errInfo := authSvc.FetchUserInfo(ctx, accessToken)
 		if errInfo != nil {
-			log.Errorf("Failed to fetch user info: %v", errInfo)
+			log.Errorf("Failed to fetch user info: %s", redactSessionProxyInString(errInfo.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to fetch user info")
 			return
 		}
@@ -451,6 +840,11 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		if accessToken != "" {
 			fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 			if errProject != nil {
+				if sessionProxyURL != "" {
+					log.Errorf("antigravity: failed to fetch project ID: %s", redactSessionProxyInString(errProject.Error(), sessionProxyURL))
+					SetOAuthSessionError(state, "Failed to fetch project ID")
+					return
+				}
 				log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
 			} else {
 				projectID = fetchedProjectID
@@ -487,17 +881,11 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			Label:    label,
 			Metadata: metadata,
 		}
-		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "antigravity", record)
-		if errors.Is(errSave, errOAuthSessionNotPending) {
-			return
-		}
-		if errSave != nil {
-			log.Errorf("Failed to save token to file: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save token to file")
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "antigravity", sessionProxyURL, record, "Failed to save token to file", false)
+		if !okSaved {
 			return
 		}
 
-		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		if projectID != "" {
 			fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
@@ -505,7 +893,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		fmt.Println("You can now use Antigravity services through this CLI")
 	}()
 
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(200, respPayload)
 }
 
 func (h *Handler) RequestXAIToken(c *gin.Context) {
@@ -514,12 +902,14 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 
 	fmt.Println("Initializing xAI authentication...")
 
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	state := fmt.Sprintf("xai-%d", time.Now().UnixNano())
-	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	authSvc := newXAIOAuthService(cfg, sessionProxyURL)
 
 	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
 	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to start xAI device flow: %v", errStartDeviceFlow)
+		log.Errorf("Failed to start xAI device flow: %s", redactSessionProxyInString(errStartDeviceFlow.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
 		return
 	}
@@ -528,7 +918,17 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
 	}
 
-	RegisterOAuthSession(state, "xai")
+	RegisterOAuthSessionWithProxy(state, "xai", sessionProxyURL)
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	} else {
+		response["expires_in"] = int(xaiauth.MaxPollDuration / time.Second)
+	}
+	bindOAuthSessionTarget(c, state, response)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
@@ -541,8 +941,8 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 			if !IsOAuthSessionPending(state, "xai") {
 				return
 			}
-			log.Errorf("xAI authentication failed: %v", errWaitForAuthorization)
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
+			log.Errorf("xAI authentication failed: %s", redactSessionProxyInString(errWaitForAuthorization.Error(), sessionProxyURL))
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization), sessionProxyURL))
 			return
 		}
 		if !IsOAuthSessionPending(state, "xai") {
@@ -594,21 +994,41 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 				"base_url":  tokenStorage.BaseURL,
 			},
 		}
-		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "xai", record)
-		if errors.Is(errSave, errOAuthSessionNotPending) {
-			return
-		}
-		if errSave != nil {
-			log.Errorf("Failed to save xAI token to file: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save token to file")
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "xai", sessionProxyURL, record, "Failed to save token to file", false)
+		if !okSaved {
 			return
 		}
 
-		CompleteOAuthSession(state)
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use xAI services through this CLI")
 	}()
 
+	c.JSON(200, response)
+}
+
+func (h *Handler) RequestMetaToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Meta authentication...")
+
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
+	state := fmt.Sprintf("meta-%d", time.Now().UnixNano())
+	authSvc := newMetaOAuthService(cfg, sessionProxyURL)
+
+	deviceFlow, errStartDeviceFlow := authSvc.StartDeviceFlow(ctx)
+	if errStartDeviceFlow != nil {
+		log.Errorf("Failed to start Meta device flow: %s", redactSessionProxyInString(errStartDeviceFlow.Error(), sessionProxyURL))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start device authorization flow"})
+		return
+	}
+	authURL := strings.TrimSpace(deviceFlow.VerificationURIComplete)
+	if authURL == "" {
+		authURL = strings.TrimSpace(deviceFlow.VerificationURI)
+	}
+
+	RegisterOAuthSessionWithProxy(state, "meta", sessionProxyURL)
 	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
 	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
 		response["user_code"] = userCode
@@ -616,25 +1036,162 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	if deviceFlow.ExpiresIn > 0 {
 		response["expires_in"] = deviceFlow.ExpiresIn
 	} else {
-		response["expires_in"] = int(xaiauth.MaxPollDuration / time.Second)
+		response["expires_in"] = int(metaauth.MaxPollDuration / time.Second)
 	}
+	bindOAuthSessionTarget(c, state, response)
+
+	go func() {
+		pollCtx, cancelPoll := context.WithCancel(ctx)
+		defer cancelPoll()
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "meta")
+
+		fmt.Println("Waiting for Meta authentication...")
+		bundle, errWaitForAuthorization := authSvc.WaitForAuthorization(pollCtx, deviceFlow)
+		if errWaitForAuthorization != nil {
+			if !IsOAuthSessionPending(state, "meta") {
+				return
+			}
+			log.Errorf("Meta authentication failed: %s", redactSessionProxyInString(errWaitForAuthorization.Error(), sessionProxyURL))
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization), sessionProxyURL))
+			return
+		}
+		if !IsOAuthSessionPending(state, "meta") {
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			log.Error("Meta token exchange returned empty access token")
+			SetOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+
+		record := buildMetaAuthRecord(bundle, tokenStorage)
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "meta", sessionProxyURL, record, "Failed to save token to file", false)
+		if !okSaved {
+			return
+		}
+
+		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
+		fmt.Println("You can now use Meta services through this CLI")
+	}()
+
 	c.JSON(200, response)
 }
 
+func buildMetaAuthRecord(bundle *metaauth.MetaAuthBundle, tokenStorage *metaauth.MetaTokenStorage) *coreauth.Auth {
+	fileName := metaauth.CredentialFileName(tokenStorage.Email, tokenStorage.DCAToken)
+	label := strings.TrimSpace(tokenStorage.Email)
+	if label == "" {
+		label = "Meta"
+	}
+
+	metadata := map[string]any{
+		"type":         "meta",
+		"access_token": tokenStorage.AccessToken,
+		"token_type":   tokenStorage.TokenType,
+		"expires_in":   tokenStorage.ExpiresIn,
+		"expired":      tokenStorage.Expired,
+		"last_refresh": tokenStorage.LastRefresh,
+		"base_url":     tokenStorage.BaseURL,
+		"auth_kind":    "oauth",
+	}
+	if tokenStorage.DCAExpired != "" {
+		metadata["dca_expired"] = tokenStorage.DCAExpired
+	}
+	if tokenStorage.DCAExpiresAt > 0 {
+		metadata["dca_expires_at"] = tokenStorage.DCAExpiresAt
+	}
+	if tokenStorage.APIKey != "" {
+		metadata["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		metadata["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		metadata["email"] = tokenStorage.Email
+	}
+	if tokenStorage.Name != "" {
+		metadata["name"] = tokenStorage.Name
+	}
+	if bundle != nil && bundle.MintedKey != nil {
+		metadata["subs_tier_name"] = bundle.MintedKey.SubsTierName
+		metadata["subs_tier_id"] = bundle.MintedKey.SubsTierID
+		metadata["is_subs_active"] = bundle.MintedKey.IsSubsActive
+		metadata["has_payment_method"] = bundle.MintedKey.HasPaymentMethod
+	}
+
+	attrs := map[string]string{
+		"auth_kind": "oauth",
+		"base_url":  tokenStorage.BaseURL,
+	}
+	if tokenStorage.APIKey != "" {
+		attrs["api_key"] = tokenStorage.APIKey
+	}
+	if tokenStorage.DCAToken != "" {
+		attrs["dca_token"] = tokenStorage.DCAToken
+	}
+	if tokenStorage.Email != "" {
+		attrs["email"] = tokenStorage.Email
+	}
+
+	return &coreauth.Auth{
+		ID:         fileName,
+		Provider:   "meta",
+		FileName:   fileName,
+		Label:      label,
+		Storage:    tokenStorage,
+		Metadata:   metadata,
+		Attributes: attrs,
+	}
+}
+
 func (h *Handler) RequestKimiToken(c *gin.Context) {
+	domain := kimi.KimiDefaultDomain
+	if qDomain := strings.TrimSpace(c.Query("domain")); qDomain != "" {
+		domain = qDomain
+	} else if qChan := strings.TrimSpace(c.Query("channel")); qChan != "" {
+		domain = qChan
+	} else if bodyDomain := oauthSessionDomainFromContext(c); bodyDomain != "" {
+		domain = bodyDomain
+	}
+	h.requestKimiTokenWithDomain(c, domain)
+}
+
+func (h *Handler) RequestKimiAIToken(c *gin.Context) {
+	h.requestKimiTokenWithDomain(c, kimi.KimiAIDomain)
+}
+
+func (h *Handler) requestKimiTokenWithDomain(c *gin.Context, domain string) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
 
-	fmt.Println("Initializing Kimi authentication...")
+	isAI := kimi.IsKimiAIDomain(domain)
+	displayName := "Kimi"
+	providerName := "kimi"
+	filePrefix := "kimi"
+	statePrefix := "kmi"
+	baseURL := kimi.KimiAPIBaseURL
+	if isAI {
+		displayName = "Kimi.ai"
+		providerName = "kimi-ai"
+		filePrefix = "kimi-ai"
+		statePrefix = "kmi-ai"
+		baseURL = kimi.KimiAIAPIBaseURL
+	}
 
-	state := fmt.Sprintf("kmi-%d", time.Now().UnixNano())
+	fmt.Printf("Initializing %s authentication...\n", displayName)
+
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
+	state := fmt.Sprintf("%s-%d", statePrefix, time.Now().UnixNano())
 	// Initialize Kimi auth service
-	kimiAuth := kimi.NewKimiAuth(h.cfg)
+	kimiAuth := newKimiOAuthService(cfg, domain)
 
 	// Generate authorization URL
 	deviceFlow, errStartDeviceFlow := kimiAuth.StartDeviceFlow(ctx)
 	if errStartDeviceFlow != nil {
-		log.Errorf("Failed to generate authorization URL: %v", errStartDeviceFlow)
+		log.Errorf("Failed to generate authorization URL: %s", redactSessionProxyInString(errStartDeviceFlow.Error(), sessionProxyURL))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
 		return
 	}
@@ -643,37 +1200,50 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		authURL = deviceFlow.VerificationURI
 	}
 
-	RegisterOAuthSession(state, "kimi")
+	RegisterOAuthSessionWithProxy(state, providerName, sessionProxyURL)
+	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
+	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
+		response["user_code"] = userCode
+	}
+	if deviceFlow.ExpiresIn > 0 {
+		response["expires_in"] = deviceFlow.ExpiresIn
+	}
+	bindOAuthSessionTarget(c, state, response)
 
 	go func() {
 		pollCtx, cancelPoll := context.WithCancel(ctx)
 		defer cancelPoll()
-		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, "kimi")
+		go watchOAuthSessionCancel(pollCtx, cancelPoll, state, providerName)
 
-		fmt.Println("Waiting for authentication...")
+		fmt.Printf("Waiting for %s authentication...\n", displayName)
 		authBundle, errWaitForAuthorization := kimiAuth.WaitForAuthorization(pollCtx, deviceFlow)
 		if errWaitForAuthorization != nil {
-			if !IsOAuthSessionPending(state, "kimi") {
+			if !IsOAuthSessionPending(state, providerName) {
 				return
 			}
-			SetOAuthSessionError(state, oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization))
-			fmt.Printf("Authentication failed: %v\n", errWaitForAuthorization)
+			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Authentication failed", errWaitForAuthorization), sessionProxyURL))
+			fmt.Printf("%s authentication failed: %s\n", displayName, redactSessionProxyInString(errWaitForAuthorization.Error(), sessionProxyURL))
 			return
 		}
-		if !IsOAuthSessionPending(state, "kimi") {
+		if !IsOAuthSessionPending(state, providerName) {
 			return
 		}
 
 		// Create token storage
 		tokenStorage := kimiAuth.CreateTokenStorage(authBundle)
+		if isAI {
+			tokenStorage.Type = providerName
+		}
 
 		metadata := map[string]any{
-			"type":          "kimi",
+			"type":          providerName,
 			"access_token":  authBundle.TokenData.AccessToken,
 			"refresh_token": authBundle.TokenData.RefreshToken,
 			"token_type":    authBundle.TokenData.TokenType,
 			"scope":         authBundle.TokenData.Scope,
 			"timestamp":     time.Now().UnixMilli(),
+			"domain":        domain,
+			"base_url":      baseURL,
 		}
 		if authBundle.TokenData.ExpiresAt > 0 {
 			expired := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
@@ -683,37 +1253,28 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 			metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
 		}
 
-		fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())
+		fileName := fmt.Sprintf("%s-%d.json", filePrefix, time.Now().UnixMilli())
 		record := &coreauth.Auth{
 			ID:       fileName,
-			Provider: "kimi",
+			Provider: providerName,
 			FileName: fileName,
-			Label:    "Kimi User",
+			Label:    fmt.Sprintf("%s User", displayName),
 			Storage:  tokenStorage,
 			Metadata: metadata,
+			Attributes: map[string]string{
+				"base_url": baseURL,
+				"domain":   domain,
+			},
 		}
-		savedPath, errSave := h.saveOAuthTokenRecord(ctx, state, "kimi", record)
-		if errors.Is(errSave, errOAuthSessionNotPending) {
-			return
-		}
-		if errSave != nil {
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, providerName, sessionProxyURL, record, "Failed to save authentication tokens", false)
+		if !okSaved {
 			return
 		}
 
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		fmt.Println("You can now use Kimi services through this CLI")
-		CompleteOAuthSession(state)
+		fmt.Printf("You can now use %s services through this CLI\n", displayName)
 	}()
 
-	response := gin.H{"status": "ok", "url": authURL, "state": state, "flow": "device"}
-	if userCode := strings.TrimSpace(deviceFlow.UserCode); userCode != "" {
-		response["user_code"] = userCode
-	}
-	if deviceFlow.ExpiresIn > 0 {
-		response["expires_in"] = deviceFlow.ExpiresIn
-	}
 	c.JSON(200, response)
 }
 
@@ -765,59 +1326,121 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	provider, status, isPlugin, metadata, completed, ok := GetOAuthSessionDetails(state)
+	session, ok := oauthSessions.Get(state)
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
 	}
-	if completed {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	if session.Completed {
+		h.writeCompletedOAuthStatus(c, state, session)
 		return
 	}
-	if status != "" {
-		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
+	if session.Status != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": session.Status})
 		return
 	}
+	if session.Committing || session.SIWCCommitting {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
+	provider := session.Provider
+	isPlugin := session.Source == oauthSessionSourcePlugin
+	metadata := session.Metadata
+	sessionProxyURL := strings.TrimSpace(session.ProxyURL)
 	h.mu.Lock()
 	host := h.pluginHost
 	h.mu.Unlock()
 	if isPlugin && host != nil && host.HasAuthProvider(provider) {
 		ctx := PopulateAuthContext(context.Background(), c)
+		if sessionProxyURL != "" {
+			ctx = pluginhost.WithOAuthProxyURL(ctx, sessionProxyURL)
+		}
 		resp, handled, errPoll := host.PollLogin(ctx, provider, state, metadata)
 		if handled {
 			if errPoll != nil {
-				message := strings.TrimSpace(errPoll.Error())
-				if message == "" {
-					message = "Authentication failed"
-				}
-				SetOAuthSessionError(state, message)
-				c.JSON(http.StatusOK, gin.H{"status": "error", "error": message})
+				message := redactSessionProxyInString(strings.TrimSpace(errPoll.Error()), sessionProxyURL)
+				writePluginPollFailureStatus(c, state, message)
 				return
 			}
 			switch resp.Status {
 			case "", pluginapi.AuthLoginStatusPending:
-				c.JSON(http.StatusOK, gin.H{"status": "wait"})
+				writeNonCommitPluginPollStatus(c, state, true)
 				return
 			case pluginapi.AuthLoginStatusError:
-				message := strings.TrimSpace(resp.Message)
-				if message == "" {
-					message = "Authentication failed"
-				}
-				SetOAuthSessionError(state, message)
-				c.JSON(http.StatusOK, gin.H{"status": "error", "error": message})
+				message := redactSessionProxyInString(strings.TrimSpace(resp.Message), sessionProxyURL)
+				writePluginPollFailureStatus(c, state, message)
 				return
 			case pluginapi.AuthLoginStatusSuccess:
-				records := pluginLoginPollAuths(host, resp)
+				if errGuard := claimOAuthSessionCommit(state, provider); errGuard != nil {
+					writeNonCommitPluginPollStatus(c, state, false)
+					return
+				}
+				records := pluginLoginPollAuthsWithProvider(host, provider, resp)
 				if len(records) == 0 {
-					SetOAuthSessionError(state, "Authentication failed")
+					FailOAuthSessionCommit(state, "Authentication failed")
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Authentication failed"})
 					return
 				}
-				if errSave := h.savePluginLoginRecords(ctx, state, provider, records); errSave != nil {
+				target, hasTarget := GetOAuthSessionTarget(state)
+				isTargeted := hasTarget && strings.TrimSpace(target.AuthID) != ""
+				if isTargeted {
+					if !applyPluginOAuthRecoveryTarget(target, provider, records) {
+						FailOAuthSessionCommit(state, "Authenticated account does not match target credential")
+						c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Authenticated account does not match target credential"})
+						return
+					}
+					ctx = withTargetedOAuthSave(ctx)
+				}
+				var hadPrevAuth bool
+				var prevVersion uint64
+				var prevEpoch uint64
+				if isTargeted && len(records) == 1 && records[0] != nil && h != nil && h.authManager != nil {
+					if existing, okExisting := h.authManager.GetByID(records[0].ID); okExisting && existing != nil {
+						hadPrevAuth = true
+						prevVersion = existing.CredentialVersion
+						prevEpoch = existing.RegistrationEpoch
+					}
+				}
+				for _, record := range records {
+					applySessionProxyToAuthRecord(record, sessionProxyURL)
+				}
+				if errSave := h.savePluginLoginRecords(ctx, records); errSave != nil {
 					log.WithError(errSave).WithField("provider", provider).Error("failed to save plugin auth tokens")
-					SetOAuthSessionError(state, "Failed to save authentication tokens")
+					FailOAuthSessionCommit(state, "Failed to save authentication tokens")
 					c.JSON(http.StatusOK, gin.H{"status": "error", "error": "Failed to save authentication tokens"})
 					return
+				}
+				if isTargeted && len(records) == 1 && records[0] != nil {
+					record := records[0]
+					savedGrantHash := authGrantFingerprint(record)
+					var adopted bool
+					var adoptedVersion uint64
+					var adoptedEpoch uint64
+					var adoptErr string
+					if h != nil && h.authManager != nil {
+						if runtimeAuth, okRuntime := h.authManager.GetByID(record.ID); okRuntime && runtimeAuth != nil {
+							if authGrantFingerprint(runtimeAuth) == savedGrantHash || runtimeAuth.AdoptedGrantHash == savedGrantHash {
+								adopted = true
+								adoptedVersion = runtimeAuth.CredentialVersion
+								adoptedEpoch = runtimeAuth.RegistrationEpoch
+							} else {
+								adoptErr = "Credential saved to storage, but runtime did not adopt the new credential version"
+							}
+						} else {
+							adoptErr = "Credential saved to storage, but was not registered in active runtime"
+						}
+					}
+					var verifyErr string
+					if adopted && target.VerifyAfterLogin && h != nil && h.authManager != nil {
+						if _, errVerify := h.authManager.VerifyInference(ctx, record.ID, target.VerifyModel); errVerify != nil {
+							verifyErr = coreauth.SanitizeRenewalMessage(errVerify.Error())
+						}
+					}
+					CompleteOAuthSessionWithOutcome(state, record.ID, savedGrantHash, true, adopted, hadPrevAuth, prevVersion, prevEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr)
+					if completedSession, okSession := oauthSessions.Get(state); okSession {
+						h.writeCompletedOAuthStatus(c, state, completedSession)
+						return
+					}
 				}
 				CompleteOAuthSession(state)
 				c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -831,7 +1454,106 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
 }
 
+func (h *Handler) writeCompletedOAuthStatus(c *gin.Context, state string, session oauthSession) {
+	resp := gin.H{"status": "ok"}
+	if session.AuthID != "" {
+		resp["auth_id"] = session.AuthID
+		resp["saved"] = session.Saved
+		var adoptedAuth *coreauth.Auth
+		var adoptErr string
+		if h != nil && h.authManager != nil {
+			if candidate, okAuth := h.authManager.GetByID(session.AuthID); okAuth && candidate != nil {
+				if session.SavedGrantHash != "" {
+					if authGrantFingerprint(candidate) == session.SavedGrantHash ||
+						candidate.AdoptedGrantHash == session.SavedGrantHash {
+						adoptedAuth = candidate
+						if !session.Adopted {
+							oauthSessions.MarkAdopted(state, candidate.CredentialVersion, candidate.RegistrationEpoch)
+							session.Adopted = true
+							session.AdoptedVersion = candidate.CredentialVersion
+							session.AdoptedEpoch = candidate.RegistrationEpoch
+							session.AdoptError = ""
+						}
+					} else if session.Adopted {
+						adoptErr = "Credential was replaced in active runtime after login"
+					}
+				} else if session.Adopted {
+					if (session.AdoptedVersion == 0 && session.AdoptedEpoch == 0) ||
+						(candidate.RegistrationEpoch == session.AdoptedEpoch && candidate.CredentialVersion == session.AdoptedVersion) {
+						adoptedAuth = candidate
+					}
+				}
+			}
+		}
+		if adoptErr == "" {
+			adoptErr = session.AdoptError
+		}
+		if adoptedAuth != nil {
+			nowUTC := time.Now().UTC()
+			resp["adopted"] = true
+			resp["recovery_stage"] = adoptedAuth.RecoveryStageAt(nowUTC)
+			resp["renewal_state"] = adoptedAuth.RenewalStateAt(nowUTC)
+			resp["requires_sign_in"] = adoptedAuth.RequiresSignIn
+			resp["inference_verified"] = adoptedAuth.InferenceVerified
+			resp["renewal_verified"] = adoptedAuth.RenewalVerified
+			resp["quota_blocked"] = adoptedAuth.RecoveryStageAt(nowUTC) == coreauth.RecoveryStageQuotaBlocked
+		} else if session.Saved {
+			resp["adopted"] = false
+			resp["recovery_stage"] = coreauth.RecoveryStageCredentialSaved
+			if adoptErr != "" {
+				resp["adoption_error"] = adoptErr
+			}
+		}
+		if session.VerifyError != "" {
+			resp["verification_error"] = session.VerifyError
+		}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func writePluginPollFailureStatus(c *gin.Context, state, message string) {
+	errStatus, completed, committing, ok := oauthSessions.FailPendingPoll(state, message)
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
+		return
+	}
+	if completed {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if committing {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "error", "error": errStatus})
+}
+
+func writeNonCommitPluginPollStatus(c *gin.Context, state string, allowPendingWait bool) {
+	session, ok := oauthSessions.Get(state)
+	if !ok {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
+		return
+	}
+	if session.Completed {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		return
+	}
+	if session.Status != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "error": session.Status})
+		return
+	}
+	if session.Committing || session.SIWCCommitting || allowPendingWait {
+		c.JSON(http.StatusOK, gin.H{"status": "wait"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
+}
+
 func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollResponse) []*coreauth.Auth {
+	return pluginLoginPollAuthsWithProvider(host, "", resp)
+}
+
+func pluginLoginPollAuthsWithProvider(host *pluginhost.Host, provider string, resp pluginapi.AuthLoginPollResponse) []*coreauth.Auth {
 	if host == nil {
 		return nil
 	}
@@ -840,7 +1562,42 @@ func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollRes
 		authDatas = []pluginapi.AuthData{resp.Auth}
 	}
 	records := make([]*coreauth.Auth, 0, len(authDatas))
+	trimmedSessionProvider := strings.ToLower(strings.TrimSpace(provider))
 	for _, authData := range authDatas {
+		if strings.TrimSpace(authData.Provider) == "" && trimmedSessionProvider != "" {
+			authData.Provider = trimmedSessionProvider
+		}
+		effectivePortal := trimmedSessionProvider
+		for _, key := range []string{"oauth_provider", "portal"} {
+			if authData.Attributes != nil {
+				if v := strings.ToLower(strings.TrimSpace(authData.Attributes[key])); v != "" {
+					effectivePortal = v
+					break
+				}
+			}
+			if authData.Metadata != nil {
+				if raw, ok := authData.Metadata[key].(string); ok {
+					if v := strings.ToLower(strings.TrimSpace(raw)); v != "" {
+						effectivePortal = v
+						break
+					}
+				}
+			}
+		}
+		if effectivePortal != "" && !strings.EqualFold(strings.TrimSpace(authData.Provider), effectivePortal) {
+			if authData.Metadata == nil {
+				authData.Metadata = make(map[string]any)
+			}
+			if _, exists := authData.Metadata["oauth_provider"]; !exists {
+				authData.Metadata["oauth_provider"] = effectivePortal
+			}
+			if authData.Attributes == nil {
+				authData.Attributes = make(map[string]string)
+			}
+			if strings.TrimSpace(authData.Attributes["oauth_provider"]) == "" {
+				authData.Attributes["oauth_provider"] = effectivePortal
+			}
+		}
 		record := host.AuthDataToCoreAuth(authData, "", "")
 		if record == nil {
 			return nil
@@ -850,39 +1607,481 @@ func pluginLoginPollAuths(host *pluginhost.Host, resp pluginapi.AuthLoginPollRes
 	return records
 }
 
-func (h *Handler) savePluginLoginRecords(ctx context.Context, state, provider string, records []*coreauth.Auth) error {
-	if errBegin := beginOAuthSessionSave(state, provider); errBegin != nil {
-		return errBegin
+var authIdentityAccountIDKeys = []string{"account_id", "account_uuid", "sub", "user_id", "user_name"}
+
+func authIdentityEmailAndAccountID(auth *coreauth.Auth) (email string, accountID string) {
+	if auth == nil {
+		return "", ""
 	}
-	savedPaths := make([]string, 0, len(records))
+	if auth.Metadata != nil {
+		for _, key := range authIdentityAccountIDKeys {
+			if raw, ok := auth.Metadata[key].(string); ok {
+				if trimmed := strings.TrimSpace(raw); trimmed != "" {
+					accountID = trimmed
+					break
+				}
+			}
+		}
+	}
+	if accountID == "" && auth.Attributes != nil {
+		for _, key := range authIdentityAccountIDKeys {
+			if trimmed := strings.TrimSpace(auth.Attributes[key]); trimmed != "" {
+				accountID = trimmed
+				break
+			}
+		}
+	}
+	email = strings.TrimSpace(authEmail(auth))
+	if auth.Storage != nil {
+		switch storage := auth.Storage.(type) {
+		case *codex.CodexTokenStorage:
+			if storage != nil {
+				if accountID == "" {
+					accountID = strings.TrimSpace(storage.AccountID)
+				}
+				if email == "" {
+					email = strings.TrimSpace(storage.Email)
+				}
+			}
+		case *claude.ClaudeTokenStorage:
+			if storage != nil {
+				if accountID == "" {
+					accountID = strings.TrimSpace(storage.AccountUUID)
+				}
+				if email == "" {
+					email = strings.TrimSpace(storage.Email)
+				}
+			}
+		case *xaiauth.TokenStorage:
+			if storage != nil {
+				if accountID == "" {
+					accountID = strings.TrimSpace(storage.Subject)
+				}
+				if email == "" {
+					email = strings.TrimSpace(storage.Email)
+				}
+			}
+		case *metaauth.MetaTokenStorage:
+			if storage != nil && email == "" {
+				email = strings.TrimSpace(storage.Email)
+			}
+		}
+	}
+	if (accountID == "" || email == "") && auth.Storage != nil {
+		if rawer, ok := auth.Storage.(interface{ RawJSON() []byte }); ok {
+			if raw := rawer.RawJSON(); len(raw) > 0 {
+				var rawMap map[string]any
+				if json.Unmarshal(raw, &rawMap) == nil {
+					if accountID == "" {
+						for _, key := range authIdentityAccountIDKeys {
+							if rawAcc, okAcc := rawMap[key].(string); okAcc {
+								if trimmed := strings.TrimSpace(rawAcc); trimmed != "" {
+									accountID = trimmed
+									break
+								}
+							}
+						}
+					}
+					if email == "" {
+						rawEmail, _ := rawMap["email"].(string)
+						email = strings.TrimSpace(rawEmail)
+					}
+				}
+			}
+		}
+	}
+	return email, accountID
+}
+
+func authIdentityOrganizationID(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if raw, ok := auth.Metadata["organization_uuid"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if trimmed := strings.TrimSpace(auth.Attributes["organization_uuid"]); trimmed != "" {
+			return trimmed
+		}
+	}
+	if storage, ok := auth.Storage.(*claude.ClaudeTokenStorage); ok && storage != nil {
+		if trimmed := strings.TrimSpace(storage.OrganizationUUID); trimmed != "" {
+			return trimmed
+		}
+	}
+	if auth.Storage != nil {
+		if rawer, ok := auth.Storage.(interface{ RawJSON() []byte }); ok {
+			if raw := rawer.RawJSON(); len(raw) > 0 {
+				var rawMap map[string]any
+				if json.Unmarshal(raw, &rawMap) == nil {
+					if rawOrg, okOrg := rawMap["organization_uuid"].(string); okOrg {
+						if trimmed := strings.TrimSpace(rawOrg); trimmed != "" {
+							return trimmed
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func applyPluginOAuthRecoveryTarget(target oauthRecoveryTarget, provider string, records []*coreauth.Auth) bool {
+	if len(records) != 1 || records[0] == nil {
+		return false
+	}
+	record := records[0]
+	if !applyOAuthRecoveryTargetToRecord(target, record) {
+		return false
+	}
+	if trimmedProvider := strings.ToLower(strings.TrimSpace(provider)); trimmedProvider != "" {
+		if record.Metadata == nil {
+			record.Metadata = make(map[string]any)
+		}
+		record.Metadata["oauth_provider"] = trimmedProvider
+		record.Attributes["oauth_provider"] = trimmedProvider
+		if setter, ok := record.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+			setter.SetMetadata(record.Metadata)
+		}
+	}
+	return true
+}
+
+type savedPluginRecordRollback struct {
+	savedPath          string
+	diskPath           string
+	existedOnDisk      bool
+	prevDiskBytes      []byte
+	savedDiskBytes     []byte
+	hadRuntimeAuth     bool
+	hadRecordIDAuth    bool
+	hadFileDerivedAuth bool
+	prevAuth           *coreauth.Auth
+	record             *coreauth.Auth
+}
+
+func (h *Handler) candidatePluginRecordPath(record *coreauth.Auth) string {
+	if h == nil || record == nil {
+		return ""
+	}
+	if record.Attributes != nil {
+		if p := strings.TrimSpace(record.Attributes[coreauth.AttributePath]); p != "" {
+			return p
+		}
+	}
+	name := firstNonEmpty(strings.TrimSpace(record.FileName), strings.TrimSpace(record.ID))
+	if name == "" {
+		return ""
+	}
+	if filepath.IsAbs(name) {
+		return name
+	}
+	if cfg := h.configSnapshot(); cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
+		return filepath.Join(cfg.AuthDir, name)
+	}
+	return ""
+}
+
+func (h *Handler) savePluginLoginRecords(ctx context.Context, records []*coreauth.Auth) error {
+	if h != nil {
+		h.pluginLoginSaveMu.Lock()
+		defer h.pluginLoginSaveMu.Unlock()
+	}
+	rollbacks := make([]savedPluginRecordRollback, 0, len(records))
 	for _, record := range records {
+		var rb savedPluginRecordRollback
+		candidatePath := h.candidatePluginRecordPath(record)
+		if candidatePath != "" {
+			prevBytes, errRead := os.ReadFile(candidatePath)
+			if errRead == nil {
+				rb.existedOnDisk = true
+				rb.prevDiskBytes = prevBytes
+			} else if !os.IsNotExist(errRead) {
+				h.rollbackSavedPluginLoginRecords(ctx, rollbacks)
+				return fmt.Errorf("read existing auth file %s: %w", candidatePath, errRead)
+			}
+		}
+		if h != nil && h.authManager != nil && record != nil {
+			if recID := strings.TrimSpace(record.ID); recID != "" {
+				if _, ok := h.authManager.GetByID(recID); ok {
+					rb.hadRecordIDAuth = true
+				}
+			}
+			if fileID := h.authIDForPath(candidatePath); fileID != "" {
+				if _, ok := h.authManager.GetByID(fileID); ok {
+					rb.hadFileDerivedAuth = true
+				}
+			}
+			for _, candidateID := range []string{strings.TrimSpace(record.ID), h.authIDForPath(candidatePath)} {
+				if candidateID == "" {
+					continue
+				}
+				if existing, ok := h.authManager.GetByID(candidateID); ok && existing != nil {
+					rb.hadRuntimeAuth = true
+					rb.prevAuth = existing.Clone()
+					break
+				}
+			}
+		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if strings.TrimSpace(savedPath) != "" {
-			savedPaths = append(savedPaths, savedPath)
+		rb.savedPath = strings.TrimSpace(savedPath)
+		rb.diskPath = firstNonEmpty(rb.savedPath, candidatePath)
+		rb.record = record
+		if record != nil && record.Storage != nil {
+			if rawer, ok := record.Storage.(interface{ RawJSON() []byte }); ok {
+				rb.savedDiskBytes = rawer.RawJSON()
+			}
+		}
+		if rb.savedPath != "" || rb.existedOnDisk || rb.hadRuntimeAuth {
+			rollbacks = append(rollbacks, rb)
 		}
 		if errSave != nil {
-			errRollback := h.rollbackSavedTokenRecords(ctx, savedPaths)
-			return errors.Join(errSave, errRollback)
+			h.rollbackSavedPluginLoginRecords(ctx, rollbacks)
+			return errSave
 		}
 	}
 	return nil
 }
 
-func (h *Handler) rollbackSavedTokenRecords(ctx context.Context, savedPaths []string) error {
-	var rollbackErr error
-	for i := len(savedPaths) - 1; i >= 0; i-- {
-		path := strings.TrimSpace(savedPaths[i])
-		if path == "" {
-			continue
-		}
-		if errDelete := h.deleteTokenRecord(ctx, path); errDelete != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("delete rolled-back plugin auth token %s: %w", path, errDelete))
-		}
-		if errRemove := h.removeAuthsForPath(ctx, path, path); errRemove != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("remove rolled-back plugin auth %s: %w", path, errRemove))
+func jsonPayloadsEqualOrBytesEqual(left, right []byte) bool {
+	if strings.TrimSpace(string(left)) == strings.TrimSpace(string(right)) {
+		return true
+	}
+	var leftVal, rightVal any
+	if json.Unmarshal(left, &leftVal) != nil || json.Unmarshal(right, &rightVal) != nil {
+		return false
+	}
+	return reflect.DeepEqual(leftVal, rightVal)
+}
+
+var errPluginRollbackSuperseded = errors.New("plugin login rollback superseded")
+
+func (h *Handler) restoreOverwrittenPluginRecord(ctx context.Context, rb savedPluginRecordRollback, diskPath string) {
+	if diskPath != "" && len(rb.prevDiskBytes) > 0 {
+		if errWrite := os.WriteFile(diskPath, rb.prevDiskBytes, 0o600); errWrite != nil {
+			log.WithError(errWrite).WithField("path", diskPath).Warn("failed to restore overwritten plugin auth token")
 		}
 	}
-	return rollbackErr
+	if h == nil || (rb.prevAuth == nil && len(rb.prevDiskBytes) == 0) {
+		return
+	}
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return
+	}
+	if _, isFileStore := store.(*sdkAuth.FileTokenStore); isFileStore && diskPath != "" && len(rb.prevDiskBytes) > 0 {
+		return
+	}
+	var diskMeta map[string]any
+	if len(rb.prevDiskBytes) > 0 {
+		_ = json.Unmarshal(rb.prevDiskBytes, &diskMeta)
+	}
+	var restoreRecord *coreauth.Auth
+	if rb.prevAuth != nil {
+		restoreRecord = rb.prevAuth.Clone()
+		if len(diskMeta) > 0 {
+			restoreRecord.Metadata = diskMeta
+		}
+	} else {
+		provider := ""
+		if diskMeta != nil {
+			provider, _ = diskMeta["type"].(string)
+		}
+		if provider == "" && rb.record != nil {
+			provider = rb.record.Provider
+		}
+		fileName := filepath.Base(diskPath)
+		id := h.authIDForPath(diskPath)
+		if rb.record != nil {
+			if fileName == "" || fileName == "." {
+				fileName = rb.record.FileName
+			}
+			if id == "" {
+				id = rb.record.ID
+			}
+		}
+		restoreRecord = &coreauth.Auth{
+			ID:       firstNonEmpty(id, fileName),
+			FileName: fileName,
+			Provider: provider,
+			Metadata: diskMeta,
+			Attributes: map[string]string{
+				coreauth.AttributePath: diskPath,
+			},
+		}
+	}
+	if len(diskMeta) > 0 {
+		if disabled, ok := diskMeta["disabled"].(bool); ok {
+			restoreRecord.Disabled = disabled
+			if disabled {
+				restoreRecord.Status = coreauth.StatusDisabled
+			} else if restoreRecord.Status == coreauth.StatusDisabled {
+				restoreRecord.Status = coreauth.StatusActive
+			}
+		}
+	}
+	if len(rb.prevDiskBytes) > 0 && h.pluginHost != nil {
+		if restored := h.pluginHost.AuthDataToCoreAuth(pluginapi.AuthData{
+			Provider:    restoreRecord.Provider,
+			ID:          restoreRecord.ID,
+			FileName:    restoreRecord.FileName,
+			Label:       restoreRecord.Label,
+			Prefix:      restoreRecord.Prefix,
+			ProxyURL:    restoreRecord.ProxyURL,
+			Disabled:    restoreRecord.Disabled,
+			StorageJSON: rb.prevDiskBytes,
+			Metadata:    restoreRecord.Metadata,
+			Attributes:  restoreRecord.Attributes,
+		}, diskPath, restoreRecord.FileName); restored != nil {
+			restoreRecord.Storage = restored.Storage
+		}
+	}
+	if _, errRestore := store.Save(ctx, restoreRecord); errRestore != nil {
+		log.WithError(errRestore).WithField("path", diskPath).Warn("failed to restore overwritten plugin auth token in store")
+	}
+}
+
+func (h *Handler) rollbackSavedPluginLoginRecords(ctx context.Context, rollbacks []savedPluginRecordRollback) {
+	for i := len(rollbacks) - 1; i >= 0; i-- {
+		rb := rollbacks[i]
+		diskPath := strings.TrimSpace(rb.diskPath)
+		savedPath := strings.TrimSpace(rb.savedPath)
+		if rb.hadRuntimeAuth && rb.prevAuth != nil && h != nil && h.authManager != nil {
+			_, _, errModify := h.authManager.Modify(coreauth.WithSkipPersist(ctx), rb.prevAuth.ID, 0, func(current *coreauth.Auth) error {
+				currFP := authGrantFingerprint(current)
+				if currFP != "" && currFP != authGrantFingerprint(rb.record) && currFP != authGrantFingerprint(rb.prevAuth) {
+					return errPluginRollbackSuperseded
+				}
+				if rb.existedOnDisk && diskPath != "" {
+					currentBytes, errRead := os.ReadFile(diskPath)
+					if errRead != nil {
+						return errPluginRollbackSuperseded
+					}
+					matchesSaved := len(rb.savedDiskBytes) == 0 || jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes)
+					if !matchesSaved && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.prevDiskBytes) {
+						return errPluginRollbackSuperseded
+					}
+					if matchesSaved {
+						h.restoreOverwrittenPluginRecord(ctx, rb, diskPath)
+					}
+				} else if savedPath != "" {
+					if diskPath != "" {
+						if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
+							return errPluginRollbackSuperseded
+						}
+					}
+					h.restoreOverwrittenPluginRecord(ctx, rb, diskPath)
+				}
+				*current = *rb.prevAuth.Clone()
+				return nil
+			})
+			if !errors.Is(errModify, errPluginRollbackSuperseded) {
+				removeNewID := func(extraID string) {
+					if extraID == "" || extraID == rb.prevAuth.ID {
+						return
+					}
+					_ = h.authManager.RemoveIf(ctx, extraID, func(current *coreauth.Auth) bool {
+						if current == nil {
+							return false
+						}
+						currFP := authGrantFingerprint(current)
+						return currFP == "" || currFP == authGrantFingerprint(rb.record)
+					})
+				}
+				if !rb.hadFileDerivedAuth {
+					removeNewID(h.authIDForPath(savedPath))
+				}
+				if !rb.hadRecordIDAuth && rb.record != nil {
+					removeNewID(strings.TrimSpace(rb.record.ID))
+				}
+			}
+			continue
+		}
+
+		if !rb.hadRuntimeAuth && h != nil && h.authManager != nil && rb.record != nil {
+			primaryID := firstNonEmpty(h.authIDForPath(savedPath), strings.TrimSpace(rb.record.ID))
+			if primaryID != "" {
+				superseded := false
+				diskHandled := false
+				removeMatching := func(current *coreauth.Auth) bool {
+					if current != nil {
+						currFP := authGrantFingerprint(current)
+						if currFP != "" && currFP != authGrantFingerprint(rb.record) {
+							superseded = true
+							return false
+						}
+					}
+					if !diskHandled {
+						if rb.existedOnDisk && diskPath != "" {
+							if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil {
+								matchesSaved := len(rb.savedDiskBytes) == 0 || jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes)
+								if !matchesSaved && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.prevDiskBytes) {
+									superseded = true
+									return false
+								}
+								if matchesSaved {
+									h.restoreOverwrittenPluginRecord(ctx, rb, diskPath)
+								}
+							}
+						} else if savedPath != "" {
+							if diskPath != "" {
+								if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
+									superseded = true
+									return false
+								}
+							}
+							if errDelete := h.deleteTokenRecord(ctx, savedPath); errDelete != nil {
+								log.WithError(errDelete).WithField("path", savedPath).Warn("failed to roll back plugin auth token")
+							}
+						}
+						diskHandled = true
+					}
+					return current != nil
+				}
+				_ = h.authManager.RemoveIf(ctx, primaryID, removeMatching)
+				if !superseded {
+					if altID := strings.TrimSpace(rb.record.ID); altID != "" && altID != primaryID {
+						_ = h.authManager.RemoveIf(ctx, altID, removeMatching)
+					}
+				}
+				continue
+			}
+		}
+
+		diskSuperseded := false
+		if rb.existedOnDisk && diskPath != "" {
+			currentBytes, errRead := os.ReadFile(diskPath)
+			if errRead == nil {
+				matchesSaved := len(rb.savedDiskBytes) == 0 || jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes)
+				if !matchesSaved {
+					if !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.prevDiskBytes) {
+						diskSuperseded = true
+					}
+				} else {
+					h.restoreOverwrittenPluginRecord(ctx, rb, diskPath)
+				}
+			}
+		} else if savedPath != "" {
+			if diskPath != "" {
+				if currentBytes, errRead := os.ReadFile(diskPath); errRead == nil && len(rb.savedDiskBytes) > 0 && !jsonPayloadsEqualOrBytesEqual(currentBytes, rb.savedDiskBytes) {
+					diskSuperseded = true
+				}
+			}
+			if !diskSuperseded {
+				if errDelete := h.deleteTokenRecord(ctx, savedPath); errDelete != nil {
+					log.WithError(errDelete).WithField("path", savedPath).Warn("failed to roll back plugin auth token")
+				}
+			}
+		}
+		if !diskSuperseded && !rb.hadRuntimeAuth && savedPath != "" {
+			h.removeAuthsForPath(ctx, savedPath, savedPath)
+		}
+	}
 }
 
 // PopulateAuthContext extracts request info and adds it to the context

@@ -20,6 +20,13 @@ import (
 // newResumptionTestCertificate mints a short-lived self-signed leaf for the
 // loopback TLS server used by the resumption test.
 func newResumptionTestCertificate(t *testing.T) gotls.Certificate {
+	return newResumptionTestCertificateAt(t, time.Now())
+}
+
+// newResumptionTestCertificateAt mints a test leaf valid around now. Tests
+// running inside synctest pass its fake epoch so certificate verification
+// sees the same clock as the handshake timers.
+func newResumptionTestCertificateAt(t *testing.T, now time.Time) gotls.Certificate {
 	t.Helper()
 	key, errKey := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if errKey != nil {
@@ -28,8 +35,8 @@ func newResumptionTestCertificate(t *testing.T) gotls.Certificate {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "api.anthropic.com"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
 		DNSNames:     []string{"api.anthropic.com"},
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},

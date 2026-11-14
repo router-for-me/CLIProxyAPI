@@ -16,7 +16,7 @@ func TestInteractionsTranslatorsDoNotImportGeminiTranslators(t *testing.T) {
 		"internal/translator/codex/interactions",
 		"internal/translator/antigravity/interactions",
 	}
-	forbidden := regexp.MustCompile(`"github\.com/router-for-me/CLIProxyAPI/v7/internal/translator/[^"]*/gemini[^"]*"`)
+	forbidden := regexp.MustCompile(`"github\.com/router-for-me/CLIProxyAPI/v8/internal/translator/[^"]*/gemini[^"]*"`)
 	var violations []string
 	for _, scanDir := range scanDirs {
 		root := filepath.Join(repoRoot, scanDir)

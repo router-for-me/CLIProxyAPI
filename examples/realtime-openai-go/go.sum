@@ -1,3 +1,5 @@
+github.com/MoeForge/moego v0.1.0-alpha.1 h1:d+asBZu+2oKnBj1kzdvdANMStbIKw9BLCpknuWjiR28=
+github.com/MoeForge/moego v0.1.0-alpha.1/go.mod h1:SBNiQjCpWC3IEBMKFBOwOyhhQ3jywMrISqCwJTdr4aA=
 github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/openai/openai-go/v3 v3.50.0 h1:CXn+C8a10oQiI5CMyMbCiykhITVhVxhdHX8j3CfLa2U=

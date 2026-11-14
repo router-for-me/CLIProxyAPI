@@ -9,15 +9,15 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	clipoauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	clipoauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
 )
@@ -111,6 +111,21 @@ func (e *OpenCodeExecutor) requestAuth(auth *clipoauth.Auth, opts cliproxyexecut
 		cloned.Attributes["header:"+openCodeSessionHeader] = sessionID
 	}
 	return cloned
+}
+
+// openCodeSetAuthHeader applies the configured authentication scheme. OpenCode's
+// messages gateway reads x-api-key; other gateways read a Bearer token.
+func openCodeSetAuthHeader(req *http.Request, auth *clipoauth.Auth, apiKey string) {
+	if req == nil || apiKey == "" {
+		return
+	}
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key") {
+		req.Header.Del("Authorization")
+		req.Header.Set("x-api-key", apiKey)
+		return
+	}
+	req.Header.Del("x-api-key")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 }
 
 func (e *OpenCodeExecutor) resolveRoute(modelID string) (protocol string, url string, err error) {
@@ -209,9 +224,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpoint(ctx context.Context, auth *clip
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	openCodeSetAuthHeader(httpReq, auth, apiKey)
 	httpReq.Header.Set("User-Agent", "cli-proxy-opencode")
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes, opts.Headers)
 
@@ -289,9 +302,7 @@ func (e *OpenCodeExecutor) executeOpenAIEndpointStream(ctx context.Context, auth
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	openCodeSetAuthHeader(httpReq, auth, apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	httpReq.Header.Set("User-Agent", "cli-proxy-opencode")
@@ -385,9 +396,7 @@ func (e *OpenCodeExecutor) PrepareRequest(req *http.Request, auth *clipoauth.Aut
 		return nil
 	}
 	token, _ := openCodeCreds(auth)
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	openCodeSetAuthHeader(req, auth, token)
 	return nil
 }
 

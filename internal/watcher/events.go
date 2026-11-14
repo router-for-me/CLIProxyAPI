@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -132,6 +132,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Handle auth directory changes incrementally (.json only)
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()
+	w.observeAuthFile(event.Name)
 
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		if w.shouldDebounceRemove(normalizedName, now) {
@@ -141,7 +142,22 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		// Atomic replace on some platforms may surface as Rename (or Remove) before the new file is ready.
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
+		statSucceeded := false
 		if _, statErr := os.Stat(event.Name); statErr == nil {
+			statSucceeded = true
+		} else if w.isKnownAuthFile(event.Name) {
+			// On macOS (and under disk I/O pressure), atomic replace (e.g. os.Rename from temp file)
+			// can trigger a NOTE_DELETE before the target inode is fully visible. Retry briefly
+			// before treating a known auth file as permanently removed.
+			for attempt := 0; attempt < 3; attempt++ {
+				time.Sleep(25 * time.Millisecond)
+				if _, retryErr := os.Stat(event.Name); retryErr == nil {
+					statSucceeded = true
+					break
+				}
+			}
+		}
+		if statSucceeded {
 			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
@@ -203,6 +219,28 @@ func (w *Watcher) handleKiroIDETokenChange(event fsnotify.Event) {
 	if w.reloadCallback != nil && cfg != nil {
 		log.Debugf("triggering server update callback after Kiro IDE token change")
 		w.reloadCallback(cfg)
+	}
+}
+
+// observeAuthFile invalidates in-flight scans even if hash or content deduplication
+// suppresses an update. It must not invalidate an otherwise valid queued auth event.
+func (w *Watcher) observeAuthFile(path string) {
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return
+	}
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	if w.fileObservations == nil {
+		w.fileObservations = make(map[string]uint64)
+	}
+	w.fileObservations[normalized]++
+	if w.activeAuthScans > 0 {
+		// A reload may cache a hash before publishing its auth. Force the event
+		// to parse it even if the scan finishes first, retaining the known path.
+		if _, known := w.lastAuthHashes[normalized]; known {
+			w.lastAuthHashes[normalized] = ""
+		}
 	}
 }
 

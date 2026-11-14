@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-func parseKiroResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
+func parseKiroResponsesSSEEvent(t *testing.T, chunk []byte) (string, ojson.Result) {
 	t.Helper()
 
 	var event string
@@ -27,7 +27,7 @@ func parseKiroResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Resul
 	if data == "" {
 		t.Fatalf("SSE chunk has no data line: %s", string(chunk))
 	}
-	return event, gjson.Parse(data)
+	return event, ojson.Parse(data)
 }
 
 func TestKiroResponsesTranslatorRegistrationAndRequestDelegation(t *testing.T) {
@@ -60,7 +60,7 @@ func TestKiroResponsesTranslatorRegistrationAndRequestDelegation(t *testing.T) {
 		raw,
 		true,
 	)
-	root := gjson.ParseBytes(out)
+	root := ojson.ParseBytes(out)
 
 	if got := root.Get("model").String(); got != "kiro-claude-sonnet-4-6" {
 		t.Fatalf("model = %q, want kiro-claude-sonnet-4-6. Output: %s", got, string(out))
@@ -114,7 +114,7 @@ func TestKiroResponsesStreamFinalizesMessageBeforeFunctionCall(t *testing.T) {
 	functionAddedPosition := -1
 	messageDoneCount := 0
 	functionDoneCount := 0
-	var completed gjson.Result
+	var completed ojson.Result
 	for position, output := range outputs {
 		event, data := parseKiroResponsesSSEEvent(t, output)
 		itemType := data.Get("item.type").String()
@@ -171,7 +171,7 @@ func TestKiroResponsesNonStreamAcceptsExecutorClaudeResponse(t *testing.T) {
 		},
 		"tool_use",
 	)
-	claudeRoot := gjson.ParseBytes(claudeResponse)
+	claudeRoot := ojson.ParseBytes(claudeResponse)
 
 	out := sdktranslator.TranslateNonStream(
 		context.Background(),
@@ -183,7 +183,7 @@ func TestKiroResponsesNonStreamAcceptsExecutorClaudeResponse(t *testing.T) {
 		claudeResponse,
 		nil,
 	)
-	root := gjson.ParseBytes(out)
+	root := ojson.ParseBytes(out)
 
 	if got, want := root.Get("id").String(), claudeRoot.Get("id").String(); got != want {
 		t.Fatalf("response id = %q, want executor id %q. Output: %s", got, want, string(out))

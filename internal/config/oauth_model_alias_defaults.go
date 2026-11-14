@@ -31,6 +31,8 @@ func defaultKiroAliases() []OAuthModelAlias {
 // GitHub Copilot Claude models. It exposes hyphen-style IDs used by clients.
 func defaultGitHubCopilotAliases() []OAuthModelAlias {
 	return []OAuthModelAlias{
+		// Opus 5.5
+		{Name: "claude-opus-5.5", Alias: "claude-opus-5-5", Fork: true},
 		{Name: "claude-haiku-4.5", Alias: "claude-haiku-4-5", Fork: true},
 		{Name: "claude-opus-4.1", Alias: "claude-opus-4-1", Fork: true},
 		{Name: "claude-opus-4.5", Alias: "claude-opus-4-5", Fork: true},

@@ -6,13 +6,15 @@ import (
 	"encoding/hex"
 	"strings"
 
-	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 type xaiReasoningReplayScope struct {
@@ -27,39 +29,51 @@ func (s xaiReasoningReplayScope) valid() bool {
 }
 
 func applyXAIReasoningReplayCacheRequired(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) ([]byte, xaiReasoningReplayScope, error) {
-	scope := xaiReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
+	doc := ojson.NewDoc(body)
+	scope, changed, err := applyXAIReasoningReplayCacheRequiredDoc(ctx, from, req, opts, doc)
+	if err != nil || !changed {
+		return body, scope, err
+	}
+	return doc.Bytes(), scope, nil
+}
+
+func applyXAIReasoningReplayCacheRequiredDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) (xaiReasoningReplayScope, bool, error) {
+	if doc == nil {
+		return xaiReasoningReplayScope{}, false, nil
+	}
+	scope := xaiReasoningReplayScopeFromRequestDoc(ctx, from, req, opts, doc)
 	if !scope.valid() {
-		return body, scope, nil
+		return scope, false, nil
 	}
 	items, ok, errReplay := getXAIReasoningReplayItemsRequired(ctx, scope.modelName, scope.sessionKey)
 	if errReplay != nil {
 		log.Warnf("xai reasoning replay cache read failed: %v", errReplay)
-		return body, scope, nil
+		return scope, false, nil
 	}
 	if !ok {
-		return body, scope, nil
+		return scope, false, nil
 	}
-	items = filterXAIReasoningReplayItemsForInput(body, items)
+	items = filterXAIReasoningReplayItemsForInputDoc(doc, items)
 	if len(items) == 0 {
-		return body, scope, nil
+		return scope, false, nil
 	}
-	updated, ok := insertCodexReasoningReplayItems(body, items)
-	if !ok {
-		return body, scope, nil
-	}
-	return updated, scope, nil
+	return scope, insertCodexReasoningReplayItemsDoc(doc, items), nil
 }
 
 func xaiReasoningReplayScopeFromRequest(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) xaiReasoningReplayScope {
+	return xaiReasoningReplayScopeFromRequestDoc(ctx, from, req, opts, ojson.NewDoc(body))
+}
+
+func xaiReasoningReplayScopeFromRequestDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, doc *ojson.Doc) xaiReasoningReplayScope {
 	if !xaiReasoningReplayEnabledForSource(from) {
 		return xaiReasoningReplayScope{}
 	}
 	// End-to-end WebSocket requests use upstream previous_response_id state.
 	// Replaying encrypted reasoning as input as well would duplicate the turn.
-	if cliproxyexecutor.DownstreamWebsocket(ctx) && strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()) != "" {
+	if cliproxyexecutor.DownstreamWebsocket(ctx) && strings.TrimSpace(ojson.GetBytesNoCopy(req.Payload, "previous_response_id").String()) != "" {
 		return xaiReasoningReplayScope{}
 	}
-	sessionKey := codexReasoningReplaySessionKey(ctx, from, req, opts, body)
+	sessionKey := codexReasoningReplaySessionKeyDoc(ctx, from, req, opts, doc)
 	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	return xaiReasoningReplayScope{
 		modelName:  thinking.ParseSuffix(req.Model).ModelName,
@@ -93,8 +107,17 @@ func xaiReasoningReplayEnabledForSource(from sdktranslator.Format) bool {
 		sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse)
 }
 
-func xaiInputHasReasoningEncryptedContent(inputItems []gjson.Result, encryptedContent string) bool {
-	if encryptedContent == "" {
+func canonicalXAIReasoningReplaySignatureKey(rawSignature string) string {
+	sig := signature.SignaturePayloadWithoutProviderPrefix(strings.TrimSpace(rawSignature))
+	if info, err := signature.InspectGrokEncryptedContent(sig); err == nil && info.RouterSuffix != "" {
+		return stripRouterSuffix(sig, info.RouterSuffix)
+	}
+	return sig
+}
+
+func xaiInputHasReasoningEncryptedContent(inputItems []ojson.Result, encryptedContent string) bool {
+	canonicalTarget := canonicalXAIReasoningReplaySignatureKey(encryptedContent)
+	if canonicalTarget == "" {
 		return false
 	}
 	for _, item := range inputItems {
@@ -102,10 +125,10 @@ func xaiInputHasReasoningEncryptedContent(inputItems []gjson.Result, encryptedCo
 			continue
 		}
 		inputEncryptedContent := item.Get("encrypted_content")
-		if inputEncryptedContent.Type != gjson.String {
+		if inputEncryptedContent.Type != ojson.String {
 			continue
 		}
-		if inputEncryptedContent.String() == encryptedContent {
+		if canonicalXAIReasoningReplaySignatureKey(inputEncryptedContent.String()) == canonicalTarget {
 			return true
 		}
 	}
@@ -113,7 +136,17 @@ func xaiInputHasReasoningEncryptedContent(inputItems []gjson.Result, encryptedCo
 }
 
 func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte {
-	input := gjson.GetBytes(body, "input")
+	return filterXAIReasoningReplayItemsForInputResult(ojson.GetBytesNoCopy(body, "input"), items)
+}
+
+func filterXAIReasoningReplayItemsForInputDoc(doc *ojson.Doc, items [][]byte) [][]byte {
+	if doc == nil {
+		return nil
+	}
+	return filterXAIReasoningReplayItemsForInputResult(doc.Get("input"), items)
+}
+
+func filterXAIReasoningReplayItemsForInputResult(input ojson.Result, items [][]byte) [][]byte {
 	if !input.IsArray() {
 		return nil
 	}
@@ -146,7 +179,7 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 
 	filtered := make([][]byte, 0, len(items))
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "reasoning":
 			if xaiInputHasReasoningEncryptedContent(inputItems, itemResult.Get("encrypted_content").String()) {
@@ -185,7 +218,7 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 	return filtered
 }
 
-func xaiInputLastAssistantMessage(inputItems []gjson.Result) (gjson.Result, bool) {
+func xaiInputLastAssistantMessage(inputItems []ojson.Result) (ojson.Result, bool) {
 	for i := len(inputItems) - 1; i >= 0; i-- {
 		inputItem := inputItems[i]
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
@@ -194,18 +227,18 @@ func xaiInputLastAssistantMessage(inputItems []gjson.Result) (gjson.Result, bool
 		}
 		return inputItem, true
 	}
-	return gjson.Result{}, false
+	return ojson.Result{}, false
 }
 
-func xaiReplayAssistantMessage(items [][]byte) (gjson.Result, bool) {
+func xaiReplayAssistantMessage(items [][]byte) (ojson.Result, bool) {
 	for _, item := range items {
-		itemResult := gjson.ParseBytes(item)
+		itemResult := util.ParseGJSONBytesNoCopy(item)
 		if strings.TrimSpace(itemResult.Get("type").String()) == "message" &&
 			strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
 			return itemResult, true
 		}
 	}
-	return gjson.Result{}, false
+	return ojson.Result{}, false
 }
 
 type xaiAssistantMessagePart struct {
@@ -213,7 +246,7 @@ type xaiAssistantMessagePart struct {
 	value    string
 }
 
-func xaiAssistantMessageContentEqual(left, right gjson.Result) bool {
+func xaiAssistantMessageContentEqual(left, right ojson.Result) bool {
 	leftParts, leftOK := xaiAssistantMessageParts(left)
 	rightParts, rightOK := xaiAssistantMessageParts(right)
 	if !leftOK || !rightOK || len(leftParts) != len(rightParts) {
@@ -227,8 +260,8 @@ func xaiAssistantMessageContentEqual(left, right gjson.Result) bool {
 	return true
 }
 
-func xaiAssistantMessageParts(content gjson.Result) ([]xaiAssistantMessagePart, bool) {
-	if content.Type == gjson.String {
+func xaiAssistantMessageParts(content ojson.Result) ([]xaiAssistantMessagePart, bool) {
+	if content.Type == ojson.String {
 		return []xaiAssistantMessagePart{{partType: "output_text", value: content.String()}}, true
 	}
 	if !content.IsArray() {
@@ -240,13 +273,13 @@ func xaiAssistantMessageParts(content gjson.Result) ([]xaiAssistantMessagePart, 
 		switch partType {
 		case "output_text":
 			text := part.Get("text")
-			if text.Type != gjson.String {
+			if text.Type != ojson.String {
 				return nil, false
 			}
 			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: text.String()})
 		case "refusal":
 			refusal := part.Get("refusal")
-			if refusal.Type != gjson.String {
+			if refusal.Type != ojson.String {
 				return nil, false
 			}
 			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: refusal.String()})
@@ -264,7 +297,7 @@ func cacheXAIReasoningReplayFromCompleted(ctx context.Context, scope xaiReasonin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	output := gjson.GetBytes(completedData, "response.output")
+	output := ojson.GetBytesNoCopy(completedData, "response.output")
 	if !output.IsArray() {
 		return
 	}

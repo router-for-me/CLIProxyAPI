@@ -11,12 +11,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor/proto"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type fakeCursorStream struct {
@@ -97,20 +97,20 @@ func TestCursorExecuteReturnsReasoningAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.reasoning_content").String(); got != "plan" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.reasoning_content").String(); got != "plan" {
 		t.Fatalf("reasoning_content = %q", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "answer" {
+	if got := ojson.GetBytes(resp.Payload, "choices.0.message.content").String(); got != "answer" {
 		t.Fatalf("content = %q", got)
 	}
-	if got := gjson.GetBytes(resp.Payload, "usage.completion_tokens").Int(); got != 7 {
+	if got := ojson.GetBytes(resp.Payload, "usage.completion_tokens").Int(); got != 7 {
 		t.Fatalf("completion_tokens = %d", got)
 	}
-	promptTokens := gjson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
+	promptTokens := ojson.GetBytes(resp.Payload, "usage.prompt_tokens").Int()
 	if promptTokens < 1 {
 		t.Fatalf("prompt_tokens = %d, want positive estimate", promptTokens)
 	}
-	if got := gjson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != promptTokens+7 {
+	if got := ojson.GetBytes(resp.Payload, "usage.total_tokens").Int(); got != promptTokens+7 {
 		t.Fatalf("total_tokens = %d, want %d", got, promptTokens+7)
 	}
 }
@@ -138,16 +138,16 @@ func TestCursorExecuteToolResultUsesColdContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(first.Payload, "choices.0.finish_reason").String(); got != "tool_calls" {
+	if got := ojson.GetBytes(first.Payload, "choices.0.finish_reason").String(); got != "tool_calls" {
 		t.Fatalf("first finish_reason = %q, want tool_calls", got)
 	}
-	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.id").String(); got != clientID {
+	if got := ojson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.id").String(); got != clientID {
 		t.Fatalf("tool call ID = %q, want %q", got, clientID)
 	}
-	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "read" {
+	if got := ojson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.name").String(); got != "read" {
 		t.Fatalf("tool name = %q, want read", got)
 	}
-	if got := gjson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"path":"README.md"}` {
+	if got := ojson.GetBytes(first.Payload, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"path":"README.md"}` {
 		t.Fatalf("tool arguments = %q", got)
 	}
 
@@ -156,10 +156,10 @@ func TestCursorExecuteToolResultUsesColdContinuation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(second.Payload, "choices.0.finish_reason").String(); got != "stop" {
+	if got := ojson.GetBytes(second.Payload, "choices.0.finish_reason").String(); got != "stop" {
 		t.Fatalf("second finish_reason = %q, want stop", got)
 	}
-	if got := gjson.GetBytes(second.Payload, "choices.0.message.content").String(); got != "after tool" {
+	if got := ojson.GetBytes(second.Payload, "choices.0.message.content").String(); got != "after tool" {
 		t.Fatalf("second content = %q, want after tool", got)
 	}
 	if processCount != 2 {
@@ -192,7 +192,7 @@ func TestCursorExecuteStreamPostChunkErrorIsTerminalError(t *testing.T) {
 	for chunk := range result.Chunks {
 		if len(chunk.Payload) > 0 {
 			sawPayload = true
-			if gjson.GetBytes(chunk.Payload, "choices.0.finish_reason").String() == "stop" {
+			if ojson.GetBytes(chunk.Payload, "choices.0.finish_reason").String() == "stop" {
 				sawStop = true
 			}
 		}

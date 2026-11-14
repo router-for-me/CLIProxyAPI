@@ -3,9 +3,9 @@ package cliproxy
 import (
 	"testing"
 
-	internalredisqueue "github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
-	internalusage "github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	internalredisqueue "github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v8/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestServiceApplyUsageStatisticsConfigHonorsConfig(t *testing.T) {

@@ -8,10 +8,85 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+func TestClaudeOAuthToolAliasRestoresContinuationWithoutDeclarations(t *testing.T) {
+	secret := "continuation-alias-caller"
+	createBody := []byte(`{"thread":{"type":"create"},"tools":[{"name":"Read","input_schema":{"type":"object"}}]}`)
+	executor := &ClaudeExecutor{}
+	_, reverseMap, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(createBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepare != nil {
+		t.Fatalf("prepare create request: %v", errPrepare)
+	}
+	alias := ""
+	for upstreamName := range reverseMap {
+		alias = upstreamName
+		break
+	}
+	if alias == "" {
+		t.Fatal("create request did not allocate an OAuth MCP alias")
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}]}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, reverseMap, "msg-one")
+	_, continuationReverseMap, errPrepareContinuation := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: secret})
+	if errPrepareContinuation != nil {
+		t.Fatalf("prepare continuation request: %v", errPrepareContinuation)
+	}
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"tool-two","name":%q,"input":{}}]}`, alias))
+	restored, errRestore := restoreClaudeOAuthToolNamesFromResponse(response, continuationReverseMap)
+	if errRestore != nil {
+		t.Fatalf("restore continuation tool name: %v", errRestore)
+	}
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "Read" {
+		t.Fatalf("continuation tool name = %q, want Read; response=%s", got, restored)
+	}
+}
+
+func TestClaudeOAuthToolAliasMissingContinuationStateIsRequestScopedNotFound(t *testing.T) {
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"missing-message"}}`)
+	_, _, errPrepare := (&ClaudeExecutor{}).prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "missing-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("prepare continuation request returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("continuation error status = %v, want 404", errPrepare)
+	}
+	requestErr, okRequest := errPrepare.(cliproxyexecutor.RequestScopedError)
+	if !okRequest || !requestErr.IsRequestScoped() {
+		t.Fatalf("continuation error is not request-scoped: %T", errPrepare)
+	}
+	responseErr, okResponse := errPrepare.(interface{ ResponseBody() []byte })
+	if !okResponse || len(responseErr.ResponseBody()) == 0 {
+		t.Fatalf("continuation error does not provide ResponseBody: %T", errPrepare)
+	}
+	if got := ojson.GetBytes(responseErr.ResponseBody(), "error.type").String(); got != "not_found_error" {
+		t.Fatalf("continuation error.type = %q, want not_found_error; body=%s", got, responseErr.ResponseBody())
+	}
+}
+
+func TestClaudeOAuthToolAliasEvictionReturnsThreadNotFound(t *testing.T) {
+	executor := &ClaudeExecutor{}
+	createBody := []byte(`{"thread":{"type":"create"}}`)
+	executor.rememberClaudeOAuthToolAliases(createBody, map[string]string{"alias": "Read"}, "first-message")
+	for i := 0; i < claudeOAuthToolAliasStateLimit; i++ {
+		executor.rememberClaudeOAuthToolAliases(createBody, nil, fmt.Sprintf("message-%d", i))
+	}
+
+	continuationBody := []byte(`{"thread":{"type":"continue","previous_message_id":"first-message"}}`)
+	_, _, errPrepare := executor.prepareClaudeOAuthToolNamesForRequest(continuationBody, claudeMCPAliasOptions{secret: "evicted-state-caller"})
+	if errPrepare == nil {
+		t.Fatal("evicted continuation returned nil error")
+	}
+	statusErr, okStatus := errPrepare.(interface{ StatusCode() int })
+	if !okStatus || statusErr.StatusCode() != 404 {
+		t.Fatalf("evicted continuation error status = %v, want 404", errPrepare)
+	}
+}
 
 func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 	secret := "differential-caller"
@@ -48,6 +123,10 @@ func TestRemapOAuthToolNamesWithBatchedEditsMatchesLegacyBytes(t *testing.T) {
 		{
 			name: "no edits",
 			body: []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"mcp__server__existing"}],"messages":[{"content":[{"type":"tool_reference","tool_name":"unknown"}]}]}`),
+		},
+		{
+			name: "mid-conversation tool changes",
+			body: []byte(`{"tools":[{"name":"read_file","input_schema":{"type":"object"}},{"name":"lookup_notes","input_schema":{"type":"object"},"defer_loading":true},{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}]},{"role":"system","content":[{"type":"text","text":"tools changed"},{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read_file"}},{"type":"tool_addition","tool":{"type":"tool_reference","name":"web_search"}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup_notes","input_schema":{"type":"object"}}}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"db_query","input_schema":{"type":"object"}}}},{"type":"tool_removal","tool":{"type":"mcp_tool_reference","server_name":"docs","name":"read_file"}},{"type":"tool_removal","tool":"read_file"}]}]}`),
 		},
 	}
 
@@ -99,8 +178,8 @@ func TestRemapOAuthToolNamesWithOptionsFallsBackForMalformedJSON(t *testing.T) {
 func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"glob","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "mangled-alias-caller"})
-	globAlias := gjson.GetBytes(remapped, "tools.0.name").String()
-	readAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	globAlias := ojson.GetBytes(remapped, "tools.0.name").String()
+	readAlias := ojson.GetBytes(remapped, "tools.1.name").String()
 	globParts, ok := parseClaudeMCPAlias(globAlias)
 	if !ok {
 		t.Fatalf("glob alias is invalid: %q", globAlias)
@@ -122,13 +201,13 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "glob" {
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "glob" {
 		t.Fatalf("repeated alias restored to %q, want glob", got)
 	}
-	if got := gjson.GetBytes(restored, "content.1.tool_name").String(); got != "read" {
+	if got := ojson.GetBytes(restored, "content.1.tool_name").String(); got != "read" {
 		t.Fatalf("mixed alias restored to %q, want read", got)
 	}
-	if got := gjson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "read" {
+	if got := ojson.GetBytes(restored, "content.2.content.0.tool_name").String(); got != "read" {
 		t.Fatalf("nested mixed alias restored to %q, want read", got)
 	}
 
@@ -158,7 +237,7 @@ func TestReverseRemapOAuthToolNamesRecoversMangledAliases(t *testing.T) {
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
-			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), test.fieldPath).String(); got != test.want {
+			if got := ojson.GetBytes(helps.JSONPayload(restoredLine), test.fieldPath).String(); got != test.want {
 				t.Fatalf("restored stream name = %q, want %q", got, test.want)
 			}
 		})
@@ -192,7 +271,7 @@ func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAliases(t *testing.T) {
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
-			if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+			if got := ojson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
 				t.Fatalf("repeated server alias restored to %q, want Bash", got)
 			}
 
@@ -201,7 +280,7 @@ func TestReverseRemapOAuthToolNamesRecoversRepeatedServerAliases(t *testing.T) {
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
-			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "Bash" {
+			if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "Bash" {
 				t.Fatalf("stream repeated server alias restored to %q, want Bash", got)
 			}
 		})
@@ -229,7 +308,7 @@ func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *te
 			if errReverse != nil {
 				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 			}
-			if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+			if got := ojson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
 				t.Fatalf("malformed tool ID alias restored to %q, want Bash", got)
 			}
 
@@ -238,7 +317,7 @@ func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *te
 			if errStream != nil {
 				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
 			}
-			if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "Bash" {
+			if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != "Bash" {
 				t.Fatalf("stream malformed tool ID alias restored to %q, want Bash", got)
 			}
 		})
@@ -248,8 +327,8 @@ func TestReverseRemapOAuthToolNamesRecoversMalformedToolIDBySemanticSuffix(t *te
 func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"Bash","input_schema":{"type":"object"}},{"name":"fetch_url","input_schema":{"type":"object"}}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "bip39-caller"})
-	bashAlias := gjson.GetBytes(remapped, "tools.0.name").String()
-	fetchAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	bashAlias := ojson.GetBytes(remapped, "tools.0.name").String()
+	fetchAlias := ojson.GetBytes(remapped, "tools.1.name").String()
 
 	if !helps.IsClaudeMCPToolName(bashAlias) {
 		t.Fatalf("generated bash alias is invalid: %q", bashAlias)
@@ -283,19 +362,19 @@ func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
 		t.Fatalf("exact alias restored to %q, want Bash", got)
 	}
-	if got := gjson.GetBytes(restored, "content.1.name").String(); got != "Bash" {
+	if got := ojson.GetBytes(restored, "content.1.name").String(); got != "Bash" {
 		t.Fatalf("repeated alias restored to %q, want Bash", got)
 	}
-	if got := gjson.GetBytes(restored, "content.2.tool_name").String(); got != "Bash" {
+	if got := ojson.GetBytes(restored, "content.2.tool_name").String(); got != "Bash" {
 		t.Fatalf("mangled toolID alias restored to %q, want Bash", got)
 	}
-	if got := gjson.GetBytes(restored, "content.3.name").String(); got != "Bash" {
+	if got := ojson.GetBytes(restored, "content.3.name").String(); got != "Bash" {
 		t.Fatalf("repeated toolID alias restored to %q, want Bash", got)
 	}
-	if got := gjson.GetBytes(restored, "content.4.name").String(); got != "Bash" {
+	if got := ojson.GetBytes(restored, "content.4.name").String(); got != "Bash" {
 		t.Fatalf("extra-word alias restored to %q, want Bash", got)
 	}
 }
@@ -303,8 +382,8 @@ func TestReverseRemapOAuthToolNamesWithBIP39Aliases(t *testing.T) {
 func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"tool.name"},{"name":"tool/name"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "ambiguous-alias-caller"})
-	firstAlias := gjson.GetBytes(remapped, "tools.0.name").String()
-	secondAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	firstAlias := ojson.GetBytes(remapped, "tools.0.name").String()
+	secondAlias := ojson.GetBytes(remapped, "tools.1.name").String()
 	firstParts, ok := parseClaudeMCPAlias(firstAlias)
 	if !ok {
 		t.Fatalf("first alias is invalid: %q", firstAlias)
@@ -336,11 +415,6 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			alias:     "mcp__" + firstParts.server + "__" + unknownToolID[:len(unknownToolID)-1] + "_" + firstParts.semantic,
 			wantError: "semantic suffix matches multiple declared tools",
 		},
-		{
-			name:      "unrecoverable semantic suffix",
-			alias:     "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool",
-			wantError: "no unique request-local match",
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -365,13 +439,34 @@ func TestReverseRemapOAuthToolNamesRejectsUnsafeMangledAliases(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("unrecoverable semantic suffix fails open", func(t *testing.T) {
+		unrecoverableAlias := "mcp__" + firstParts.server + "__" + unknownToolID + "_missing_tool"
+		response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, unrecoverableAlias))
+		restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+		if errReverse != nil {
+			t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
+		}
+		if got := ojson.GetBytes(restored, "content.0.name").String(); got != unrecoverableAlias {
+			t.Fatalf("unrecoverable alias = %q, want %q forwarded unchanged", got, unrecoverableAlias)
+		}
+
+		line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, unrecoverableAlias))
+		restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+		if errStream != nil {
+			t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
+		}
+		if !bytes.Equal(restoredLine, line) {
+			t.Fatalf("stream line = %s, want it forwarded unchanged", restoredLine)
+		}
+	})
 }
 
 func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"file"},{"name":"read_file"}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "overlapping-caller"})
-	fileAlias := gjson.GetBytes(remapped, "tools.0.name").String()
-	readFileAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	fileAlias := ojson.GetBytes(remapped, "tools.0.name").String()
+	readFileAlias := ojson.GetBytes(remapped, "tools.1.name").String()
 
 	if !helps.IsClaudeMCPToolName(fileAlias) {
 		t.Fatalf("fileAlias is invalid: %q", fileAlias)
@@ -390,7 +485,7 @@ func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
 		t.Fatalf("restored tool name = %q, want read_file", got)
 	}
 
@@ -400,7 +495,7 @@ func TestReverseRemapOAuthToolNames_OverlappingSemanticSuffix(t *testing.T) {
 	if errFile != nil {
 		t.Fatalf("reverseRemapOAuthToolNames(file) error = %v", errFile)
 	}
-	if got := gjson.GetBytes(restoredFile, "content.0.name").String(); got != "file" {
+	if got := ojson.GetBytes(restoredFile, "content.0.name").String(); got != "file" {
 		t.Fatalf("restored tool name = %q, want file", got)
 	}
 }
@@ -414,7 +509,7 @@ func TestReverseRemapOAuthToolNamesPreservesUnrelatedMCPName(t *testing.T) {
 	if errReverse != nil {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
 	}
-	if got := gjson.GetBytes(restored, "content.0.name").String(); got != "mcp__external__query" {
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != "mcp__external__query" {
 		t.Fatalf("unrelated MCP name = %q, want unchanged", got)
 	}
 }
@@ -445,13 +540,14 @@ func FuzzRemapOAuthToolNamesWithBatchedEditsMatchesLegacy(f *testing.F) {
 		[]byte(`{"tools":[{"name":"search_web"}]}`),
 		[]byte(`{"tools":[{"type":"custom","name":"读取文件"}],"tool_choice":{"type":"tool","name":"读取文件"},"messages":[{"content":[{"type":"tool_use","name":"读取文件"}]}]}`),
 		[]byte("{\n\"messages\":[{\"content\":[{\"type\":\"tool_reference\",\"tool_name\":\"a\\u005fb\"}]}],\"tools\":[{\"name\":\"a\\u005fb\"}]}"),
+		[]byte(`{"tools":[{"name":"lookup_notes"}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}},{"type":"tool_removal","tool":{"type":"tool_reference","name":"lookup_notes"}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup_notes"}}}]}]}`),
 	}
 	for _, seed := range seeds {
 		f.Add(seed, "fuzz-caller")
 	}
 
 	f.Fuzz(func(t *testing.T, body []byte, secret string) {
-		if len(body) > 1<<20 || !gjson.ValidBytes(body) {
+		if len(body) > 1<<20 || !ojson.ValidBytes(body) {
 			return
 		}
 		options := claudeMCPAliasOptions{secret: secret}
@@ -501,7 +597,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 		t.Fatal("read_file was not aliased, the collision scenario is not being exercised")
 	}
 	for index, name := range native {
-		if got := gjson.GetBytes(upstream, fmt.Sprintf("tools.%d.name", index+1)).String(); got != name {
+		if got := ojson.GetBytes(upstream, fmt.Sprintf("tools.%d.name", index+1)).String(); got != name {
 			t.Fatalf("caller MCP tool %d sent upstream as %q, want %q unchanged", index, got, name)
 		}
 	}
@@ -512,7 +608,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 		if err != nil {
 			t.Fatalf("caller MCP tool %q failed to restore: %v", name, err)
 		}
-		if got := gjson.GetBytes(restored, "content.0.name").String(); got != name {
+		if got := ojson.GetBytes(restored, "content.0.name").String(); got != name {
 			t.Fatalf("caller MCP tool %q restored as %q, want it passed through unchanged", name, got)
 		}
 
@@ -521,7 +617,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 		if errLine != nil {
 			t.Fatalf("caller MCP tool %q failed to restore from stream: %v", name, errLine)
 		}
-		if got := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != name {
+		if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != name {
 			t.Fatalf("caller MCP tool %q restored from stream as %q, want unchanged", name, got)
 		}
 	}
@@ -535,7 +631,7 @@ func TestReverseRemapPassesThroughCallerMCPToolsOnVirtualServerCollision(t *test
 		if err != nil {
 			t.Fatalf("proxied alias %q failed to restore: %v", drifted, err)
 		}
-		if got := gjson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
+		if got := ojson.GetBytes(restored, "content.0.name").String(); got != "read_file" {
 			t.Fatalf("proxied alias %q restored as %q, want %q", drifted, got, "read_file")
 		}
 	}
@@ -555,43 +651,45 @@ func TestRemapKeepsReverseMapEmptyWhenOnlyCallerMCPToolsArePresent(t *testing.T)
 	}
 }
 
-func TestReverseRemapOAuthToolNamesMarksTrailingMarkupFailureRequestScoped(t *testing.T) {
+// TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup verifies that an alias with
+// trailing prompt markup glued to it is forwarded verbatim instead of failing the
+// response or terminating the SSE stream.
+func TestReverseRemapOAuthToolNamesFailsOpenOnTrailingMarkup(t *testing.T) {
 	const alias = "mcp__hmzqrngkulqv__xuo7jlxlpzee_clear_thinking"
 	malformedAlias := alias + "</parameter>\n<parameter name=\"merge\""
 	reverseMap := map[string]string{alias: "clear_thinking"}
 
 	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, malformedAlias))
 	restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
-	if errReverse == nil {
-		t.Fatal("reverseRemapOAuthToolNames() error = nil, want fail-closed alias error")
+	if errReverse != nil {
+		t.Fatalf("reverseRemapOAuthToolNames() error = %v, want fail-open nil", errReverse)
 	}
 	if !bytes.Equal(restored, response) {
 		t.Fatalf("reverseRemapOAuthToolNames() returned modified response: %s", restored)
 	}
-	var requestErr cliproxyexecutor.RequestScopedError
-	if !errors.As(errReverse, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNames() error = %T %v, want request-scoped", errReverse, errReverse)
-	}
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, malformedAlias))
 	restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
-	if errStream == nil {
-		t.Fatal("reverseRemapOAuthToolNamesFromStreamLine() error = nil, want fail-closed alias error")
+	if errStream != nil {
+		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
 	}
 	if !bytes.Equal(restoredLine, line) {
 		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() returned modified line: %s", restoredLine)
 	}
-	requestErr = nil
-	if !errors.As(errStream, &requestErr) || !requestErr.IsRequestScoped() {
-		t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %T %v, want request-scoped", errStream, errStream)
+}
+
+func TestClaudeMCPAliasRestoreErrorStaysRequestScoped(t *testing.T) {
+	var requestErr cliproxyexecutor.RequestScopedError = claudeMCPAliasRestoreError{fmt.Errorf("probe")}
+	if !requestErr.IsRequestScoped() {
+		t.Fatal("claudeMCPAliasRestoreError.IsRequestScoped() = false, want true")
 	}
 }
 
 func TestReverseRemapOAuthToolNames_ToolSearchResult_NonStream(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"task_list","input_schema":{"type":"object"}},{"name":"fetch_url","input_schema":{"type":"object"}}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "tool-search-caller"})
-	taskAlias := gjson.GetBytes(remapped, "tools.0.name").String()
-	fetchAlias := gjson.GetBytes(remapped, "tools.1.name").String()
+	taskAlias := ojson.GetBytes(remapped, "tools.0.name").String()
+	fetchAlias := ojson.GetBytes(remapped, "tools.1.name").String()
 
 	if taskAlias == "task_list" || fetchAlias == "fetch_url" {
 		t.Fatalf("tools were not aliased: task=%q, fetch=%q", taskAlias, fetchAlias)
@@ -628,9 +726,9 @@ func TestReverseRemapOAuthToolNames_ToolSearchResult_NonStream(t *testing.T) {
 		t.Fatalf("reverseRemapOAuthToolNames() error = %v", err)
 	}
 
-	ref0 := gjson.GetBytes(restored, "content.0.content.tool_references.0.tool_name").String()
-	ref1 := gjson.GetBytes(restored, "content.0.content.tool_references.1.tool_name").String()
-	toolUseName := gjson.GetBytes(restored, "content.1.name").String()
+	ref0 := ojson.GetBytes(restored, "content.0.content.tool_references.0.tool_name").String()
+	ref1 := ojson.GetBytes(restored, "content.0.content.tool_references.1.tool_name").String()
+	toolUseName := ojson.GetBytes(restored, "content.1.name").String()
 
 	if ref0 != "task_list" {
 		t.Errorf("ref0 = %q, want task_list", ref0)
@@ -671,7 +769,7 @@ func TestReverseRemapOAuthToolNames_ToolSearchResult_NonStream(t *testing.T) {
 func TestReverseRemapOAuthToolNamesFromStreamLine_ToolSearchResult_Stream(t *testing.T) {
 	body := []byte(`{"tools":[{"name":"task_list","input_schema":{"type":"object"}}]}`)
 	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "tool-search-stream-caller"})
-	taskAlias := gjson.GetBytes(remapped, "tools.0.name").String()
+	taskAlias := ojson.GetBytes(remapped, "tools.0.name").String()
 
 	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_01","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":%q}]}}}`, taskAlias))
 
@@ -683,7 +781,7 @@ func TestReverseRemapOAuthToolNamesFromStreamLine_ToolSearchResult_Stream(t *tes
 	if !bytes.HasPrefix(restoredLine, []byte("data: ")) {
 		t.Fatalf("restoredLine lost data: prefix: %s", string(restoredLine))
 	}
-	gotToolName := gjson.GetBytes(helps.JSONPayload(restoredLine), "content_block.content.tool_references.0.tool_name").String()
+	gotToolName := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.content.tool_references.0.tool_name").String()
 	if gotToolName != "task_list" {
 		t.Fatalf("stream restored tool_name = %q, want task_list", gotToolName)
 	}
@@ -722,7 +820,7 @@ func TestRemapOAuthToolNames_ToolSearchResultInMessageHistory(t *testing.T) {
 	}
 
 	// Verify server tools were preserved
-	tools := gjson.GetBytes(remapped, "tools")
+	tools := ojson.GetBytes(remapped, "tools")
 	if tools.Get("1.type").String() != "advisor_20260301" || tools.Get("1.name").String() != "advisor" {
 		t.Fatalf("advisor server tool was altered: %s", tools.Get("1").Raw)
 	}
@@ -731,9 +829,149 @@ func TestRemapOAuthToolNames_ToolSearchResultInMessageHistory(t *testing.T) {
 	}
 
 	// Verify tool_search_tool_result in messages was remapped
-	gotHistoryToolName := gjson.GetBytes(remapped, "messages.0.content.0.content.tool_references.0.tool_name").String()
+	gotHistoryToolName := ojson.GetBytes(remapped, "messages.0.content.0.content.tool_references.0.tool_name").String()
 	if gotHistoryToolName != taskAlias {
 		t.Fatalf("history tool_name = %q, want aliased %q", gotHistoryToolName, taskAlias)
+	}
+}
+
+// TestRemapOAuthToolNames_MidConversationToolChanges covers tool_addition and
+// tool_removal blocks in role=system messages. Upstream resolves their tool
+// references against tools[], so a reference to a declared client tool must
+// carry the same MCP alias or the request fails with "references unknown
+// tool". Both remap paths must agree.
+func TestRemapOAuthToolNames_MidConversationToolChanges(t *testing.T) {
+	const tools = `[` +
+		`{"name":"read_file","description":"Read a file","input_schema":{"type":"object","properties":{}}},` +
+		`{"name":"lookup_notes","description":"Look up notes","input_schema":{"type":"object","properties":{}},"defer_loading":true},` +
+		`{"type":"web_search_20250305","name":"web_search"},` +
+		`{"name":"mcp__context7__query-docs","input_schema":{"type":"object"}}` +
+		`]`
+
+	type nameCheck struct {
+		path     string
+		original string
+		aliased  bool
+	}
+	tests := []struct {
+		name     string
+		messages string
+		checks   []nameCheck
+	}{
+		{
+			name:     "tool_addition reference to declared tool",
+			messages: `[{"role":"user","content":"Reply with exactly: ok"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}}]}]`,
+			checks:   []nameCheck{{path: "messages.1.content.0.tool.name", original: "lookup_notes", aliased: true}},
+		},
+		{
+			name:     "tool_removal reference to declared tool",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"read_file"}}]}]`,
+			checks:   []nameCheck{{path: "messages.1.content.0.tool.name", original: "read_file", aliased: true}},
+		},
+		{
+			name:     "mixed with text and tool_use history",
+			messages: `[{"role":"user","content":"hi"},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]},{"role":"system","content":[{"type":"text","text":"Tools changed."},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read_file"}},{"type":"tool_addition","tool":{"type":"tool_reference","name":"lookup_notes"}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.name", original: "read_file", aliased: true},
+				{path: "messages.3.content.0.text", original: "Tools changed."},
+				{path: "messages.3.content.1.tool.name", original: "read_file", aliased: true},
+				{path: "messages.3.content.2.tool.name", original: "lookup_notes", aliased: true},
+			},
+		},
+		{
+			name:     "undeclared server and caller MCP names unchanged",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"Bash"}},{"type":"tool_addition","tool":{"type":"tool_reference","name":"web_search"}},{"type":"tool_removal","tool":{"type":"tool_reference","name":"mcp__context7__query-docs"}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.tool.name", original: "Bash"},
+				{path: "messages.1.content.1.tool.name", original: "web_search"},
+				{path: "messages.1.content.2.tool.name", original: "mcp__context7__query-docs"},
+			},
+		},
+		{
+			name:     "MCP connector references unchanged",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"mcp_tool_reference","server_name":"docs","name":"read_file"}},{"type":"tool_removal","tool":{"type":"mcp_toolset_reference","server_name":"read_file"}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.tool.name", original: "read_file"},
+				{path: "messages.1.content.1.tool.server_name", original: "read_file"},
+			},
+		},
+		{
+			name:     "inline definition redefining declared tool",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"lookup_notes","description":"v2","input_schema":{"type":"object"}}}}]}]`,
+			checks:   []nameCheck{{path: "messages.1.content.0.tool.definition.name", original: "lookup_notes", aliased: true}},
+		},
+		{
+			name:     "inline definitions of undeclared or server tools unchanged",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"db_query","input_schema":{"type":"object"}}}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"web_search_20260209","name":"read_file"}}},{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"mcp_toolset","mcp_server_name":"calendar"}}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.0.tool.definition.name", original: "db_query"},
+				{path: "messages.1.content.1.tool.definition.name", original: "read_file"},
+				{path: "messages.1.content.2.tool.definition.mcp_server_name", original: "calendar"},
+			},
+		},
+		{
+			name:     "malformed tool changes ignored",
+			messages: `[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition"},{"type":"tool_addition","tool":"lookup_notes"},{"type":"tool_addition","tool":{"name":"lookup_notes"}},{"type":"tool_addition","tool":{"type":"tool_reference","tool_name":"lookup_notes"}},{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"name":"lookup_notes"}}},{"type":"tool_addition","tool":{"type":"tool_reference","name":""}}]}]`,
+			checks: []nameCheck{
+				{path: "messages.1.content.1.tool", original: "lookup_notes"},
+				{path: "messages.1.content.2.tool.name", original: "lookup_notes"},
+				{path: "messages.1.content.3.tool.tool_name", original: "lookup_notes"},
+				{path: "messages.1.content.4.tool.definition.name", original: "lookup_notes"},
+				{path: "messages.1.content.5.tool.name", original: ""},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := []byte(`{"model":"claude-opus-5-5","max_tokens":64,"tools":` + tools + `,"messages":` + test.messages + `}`)
+			options := claudeMCPAliasOptions{secret: "tool-change-caller"}
+			legacyBody, legacyReverseMap := remapOAuthToolNamesWithOptionsLegacy(body, options)
+			batchedBody, batchedReverseMap, ok := remapOAuthToolNamesWithBatchedEdits(body, options)
+			if !ok {
+				t.Fatal("batched remap unexpectedly rejected valid JSON offsets")
+			}
+			if !bytes.Equal(batchedBody, legacyBody) || !maps.Equal(batchedReverseMap, legacyReverseMap) {
+				t.Fatalf("batched result differs from legacy\n got: %s %v\nwant: %s %v", batchedBody, batchedReverseMap, legacyBody, legacyReverseMap)
+			}
+
+			for _, variant := range []struct {
+				name       string
+				body       []byte
+				reverseMap map[string]string
+			}{
+				{name: "batched", body: batchedBody, reverseMap: batchedReverseMap},
+				{name: "legacy", body: legacyBody, reverseMap: legacyReverseMap},
+			} {
+				declared := make(map[string]string)
+				ojson.GetBytes(variant.body, "tools").ForEach(func(index, tool ojson.Result) bool {
+					original := ojson.Get(tools, fmt.Sprintf("%d.name", index.Int())).String()
+					declared[original] = tool.Get("name").String()
+					return true
+				})
+				for _, check := range test.checks {
+					want := check.original
+					if check.aliased {
+						want = declared[check.original]
+						if want == check.original || !helps.IsClaudeMCPToolName(want) {
+							t.Fatalf("%s: tools[] name for %q = %q, want an MCP alias", variant.name, check.original, want)
+						}
+						if got := variant.reverseMap[want]; got != check.original {
+							t.Fatalf("%s: reverseMap[%q] = %q, want %q", variant.name, want, got, check.original)
+						}
+					}
+					if got := ojson.GetBytes(variant.body, check.path).String(); got != want {
+						t.Fatalf("%s: %s = %q, want %q", variant.name, check.path, got, want)
+					}
+				}
+				if got := ojson.GetBytes(variant.body, "tools.2.name").String(); got != "web_search" {
+					t.Fatalf("%s: server tool name = %q, want web_search", variant.name, got)
+				}
+				if got := ojson.GetBytes(variant.body, "tools.3.name").String(); got != "mcp__context7__query-docs" {
+					t.Fatalf("%s: caller MCP tool name = %q, want unchanged", variant.name, got)
+				}
+			}
+		})
 	}
 }
 
@@ -744,4 +982,182 @@ func reverseMapKeyFor(m map[string]string, val string) string {
 		}
 	}
 	return ""
+}
+
+func TestReverseRemapOAuthToolNamesRestoresHybridPassthroughMCPTools(t *testing.T) {
+	const virtual = "mcp__ripple_middle__"
+	reverseMap := map[string]string{
+		virtual + "blanket_Bash":       "Bash",
+		virtual + "brand_Read":         "Read",
+		"mcp__acme__link_pull_request": "mcp__acme__link_pull_request",
+		"mcp__acme__list_threads":      "mcp__acme__list_threads",
+	}
+
+	testCases := []struct {
+		name       string
+		hybridName string
+		wantName   string
+	}{
+		{
+			name:       "model replaced server with virtual prefix",
+			hybridName: "mcp__ripple_middle__link_pull_request",
+			wantName:   "mcp__acme__link_pull_request",
+		},
+		{
+			name:       "model prepended virtual prefix to full passthrough name",
+			hybridName: "mcp__ripple_middle__acme__link_pull_request",
+			wantName:   "mcp__acme__link_pull_request",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Non-stream response
+			resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, tc.hybridName))
+			restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+			if err != nil {
+				t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want %q", err, tc.wantName)
+			}
+			if got := ojson.GetBytes(restored, "content.0.name").String(); got != tc.wantName {
+				t.Fatalf("content.0.name = %q, want %q", got, tc.wantName)
+			}
+
+			// Streaming response
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, tc.hybridName))
+			restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want %q", errStream, tc.wantName)
+			}
+			if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != tc.wantName {
+				t.Fatalf("content_block.name = %q, want %q", got, tc.wantName)
+			}
+		})
+	}
+}
+
+func TestReverseRemapOAuthToolNamesHybridPassthroughPrecedenceAndAmbiguity(t *testing.T) {
+	const virtual = "mcp__ripple_middle__"
+
+	t.Run("client tool takes precedence over passthrough with same suffix", func(t *testing.T) {
+		reverseMap := map[string]string{
+			virtual + "blanket_Bash": "Bash",
+			"mcp__shell__Bash":       "mcp__shell__Bash",
+		}
+		// mcp__<virtual>__Bash is a semantic suffix match for Bash, should restore to Bash, NOT mcp__shell__Bash
+		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, virtual+"Bash"))
+		restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		if err != nil {
+			t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v", err)
+		}
+		if got := ojson.GetBytes(restored, "content.0.name").String(); got != "Bash" {
+			t.Fatalf("content.0.name = %q, want %q", got, "Bash")
+		}
+	})
+
+	t.Run("ambiguous passthrough tool rejected", func(t *testing.T) {
+		reverseMap := map[string]string{
+			virtual + "blanket_other": "other",
+			"mcp__srv1__query":        "mcp__srv1__query",
+			"mcp__srv2__query":        "mcp__srv2__query",
+		}
+		// mcp__<virtual>__query matches both srv1 and srv2, cannot disambiguate
+		resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, virtual+"query"))
+		_, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+		if err == nil {
+			t.Fatal("restoreClaudeOAuthToolNamesFromResponse() expected error for ambiguous passthrough, got nil")
+		}
+	})
+}
+
+func TestReverseRemapOAuthToolNames_UndeclaredToolFailsOpen(t *testing.T) {
+	// Under Claude OAuth cloaking, when the model generates an undeclared tool name
+	// under the request's virtual server prefix (e.g. hallucinated or misspelled tool),
+	// reverseRemapOAuthToolNames and reverseRemapOAuthToolNamesFromStreamLine must fail OPEN:
+	// forwarding the tool name unchanged without error so the stream is not aborted.
+	body := []byte(`{"tools":[{"name":"terminal","input_schema":{"type":"object"}}]}`)
+	remapped, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "undeclared-tool-caller"})
+	terminalAlias := ojson.GetBytes(remapped, "tools.0.name").String()
+	parts, ok := parseClaudeMCPAlias(terminalAlias)
+	if !ok {
+		t.Fatalf("parseClaudeMCPAlias(%q) failed", terminalAlias)
+	}
+
+	// Model hallucinated an undeclared tool name under the same virtual server
+	undeclaredToolName := "mcp__" + parts.server + "__tiny_terminap"
+
+	// 1. Non-stream response
+	resp := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, undeclaredToolName))
+	restored, err := restoreClaudeOAuthToolNamesFromResponse(resp, reverseMap)
+	if err != nil {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromResponse() error = %v, want fail-open nil", err)
+	}
+	if got := ojson.GetBytes(restored, "content.0.name").String(); got != undeclaredToolName {
+		t.Fatalf("restored tool name = %q, want %q forwarded unchanged", got, undeclaredToolName)
+	}
+
+	// 2. Stream SSE line
+	line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, undeclaredToolName))
+	restoredLine, errStream := restoreClaudeOAuthToolNamesFromStreamLine(line, reverseMap)
+	if errStream != nil {
+		t.Fatalf("restoreClaudeOAuthToolNamesFromStreamLine() error = %v, want fail-open nil", errStream)
+	}
+	if !bytes.Equal(restoredLine, line) {
+		t.Fatalf("restoredLine = %s, want %s forwarded unchanged", string(restoredLine), string(line))
+	}
+}
+
+// The model sometimes wraps a caller-owned MCP tool in the request's virtual
+// server, either by tool name (mcp__<virtual>__<tool>) or by its full name
+// (mcp__<virtual>__mcp__<server>__<tool>). Both must restore to the declared tool.
+func TestReverseRemapRestoresCallerMCPToolWrappedInVirtualServer(t *testing.T) {
+	const recall = "mcp__docs-search__search-pages"
+	body := []byte(`{"tools":[{"name":"Bash"},{"name":"` + recall + `"},{"name":"mcp__docs-search__search-issues"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "wrapped-passthrough-caller"})
+	var server string
+	for alias, original := range reverseMap {
+		if original == "Bash" {
+			server = claudeMCPAliasServer(alias)
+		}
+	}
+	if server == "" {
+		t.Fatalf("no virtual server allocated: %v", reverseMap)
+	}
+	for _, wrapped := range []string{
+		"mcp__" + server + "__search-pages",
+		"mcp__" + server + "__" + recall,
+	} {
+		t.Run(wrapped, func(t *testing.T) {
+			response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, wrapped))
+			restored, errReverse := reverseRemapOAuthToolNames(response, reverseMap)
+			if errReverse != nil {
+				t.Fatalf("reverseRemapOAuthToolNames() error = %v", errReverse)
+			}
+			if got := ojson.GetBytes(restored, "content.0.name").String(); got != recall {
+				t.Fatalf("wrapped caller MCP tool restored to %q, want %q", got, recall)
+			}
+			line := []byte(fmt.Sprintf(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}}`, wrapped))
+			restoredLine, errStream := reverseRemapOAuthToolNamesFromStreamLine(line, reverseMap)
+			if errStream != nil {
+				t.Fatalf("reverseRemapOAuthToolNamesFromStreamLine() error = %v", errStream)
+			}
+			if got := ojson.GetBytes(helps.JSONPayload(restoredLine), "content_block.name").String(); got != recall {
+				t.Fatalf("stream wrapped caller MCP tool restored to %q, want %q", got, recall)
+			}
+		})
+	}
+}
+
+func TestReverseRemapWrappedCallerMCPToolStaysAnErrorWhenAmbiguous(t *testing.T) {
+	body := []byte(`{"tools":[{"name":"Bash"},{"name":"mcp__a__query"},{"name":"mcp__b__query"}]}`)
+	_, reverseMap := remapOAuthToolNamesWithOptions(body, claudeMCPAliasOptions{secret: "wrapped-ambiguous-caller"})
+	var server string
+	for alias, original := range reverseMap {
+		if original == "Bash" {
+			server = claudeMCPAliasServer(alias)
+		}
+	}
+	response := []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","id":"toolu_1","name":%q,"input":{}}]}`, "mcp__"+server+"__query"))
+	if _, errReverse := reverseRemapOAuthToolNames(response, reverseMap); errReverse == nil || !strings.Contains(errReverse.Error(), "matches multiple declared tools") {
+		t.Fatalf("ambiguous wrapped tool error = %v, want matches multiple declared tools", errReverse)
+	}
 }

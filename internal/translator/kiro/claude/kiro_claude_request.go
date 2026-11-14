@@ -8,13 +8,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // remoteWebSearchDescription is a minimal fallback for when dynamic fetch from MCP tools/list hasn't completed yet.
@@ -121,11 +120,11 @@ type KiroToolUse struct {
 
 // ConvertClaudeRequestToKiro converts a Claude API request to Kiro format.
 // This is the main entry point for request translation.
-func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertClaudeRequestToKiro(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	// For Kiro, we pass through the Claude format since buildKiroPayload
 	// expects Claude format and does the conversion internally.
 	// The actual conversion happens in the executor when building the HTTP request.
-	return inputRawJSON
+	return inputRawJSON, nil
 }
 
 // BuildKiroPayload constructs the Kiro API request payload from Claude format.
@@ -144,12 +143,12 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	origin = normalizeOrigin(origin)
 	log.Debugf("kiro: normalized origin value: %s", origin)
 
-	messages := gjson.GetBytes(claudeBody, "messages")
+	messages := ojson.GetBytes(claudeBody, "messages")
 
 	// For chat-only mode, don't include tools
-	var tools gjson.Result
+	var tools ojson.Result
 	if !isChatOnly {
-		tools = gjson.GetBytes(claudeBody, "tools")
+		tools = ojson.GetBytes(claudeBody, "tools")
 	}
 
 	// Extract system prompt
@@ -167,16 +166,6 @@ func BuildKiroPayload(claudeBody []byte, modelID, profileArn, origin string, isA
 	// Check for thinking mode using the comprehensive IsThinkingEnabledWithHeaders function
 	// This supports Claude API format, OpenAI reasoning_effort, AMP/Cursor format, and Anthropic-Beta header
 	thinkingEnabled := IsThinkingEnabledWithHeaders(claudeBody, headers)
-
-	// Inject timestamp context
-	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
-	timestampContext := fmt.Sprintf("[Context: Current time is %s]", timestamp)
-	if systemPrompt != "" {
-		systemPrompt = timestampContext + "\n\n" + systemPrompt
-	} else {
-		systemPrompt = timestampContext
-	}
-	log.Debugf("kiro: injected timestamp context: %s", timestamp)
 
 	// Inject agentic optimization prompt for -agentic model variants
 	if isAgentic {
@@ -337,7 +326,7 @@ func normalizeOrigin(origin string) string {
 
 // extractMetadataFromMessages extracts metadata from messages[].additional_kwargs (LangChain format).
 // Searches from the last message backwards, returns empty string if not found.
-func extractMetadataFromMessages(messages gjson.Result, key string) string {
+func extractMetadataFromMessages(messages ojson.Result, key string) string {
 	arr := messages.Array()
 	for i := len(arr) - 1; i >= 0; i-- {
 		if val := arr[i].Get("additional_kwargs." + key); val.Exists() && val.String() != "" {
@@ -349,13 +338,13 @@ func extractMetadataFromMessages(messages gjson.Result, key string) string {
 
 // extractSystemPrompt extracts system prompt from Claude request
 func extractSystemPrompt(claudeBody []byte) string {
-	systemField := gjson.GetBytes(claudeBody, "system")
+	systemField := ojson.GetBytes(claudeBody, "system")
 	if systemField.IsArray() {
 		var sb strings.Builder
 		for _, block := range systemField.Array() {
 			if block.Get("type").String() == "text" {
 				sb.WriteString(block.Get("text").String())
-			} else if block.Type == gjson.String {
+			} else if block.Type == ojson.String {
 				sb.WriteString(block.String())
 			}
 		}
@@ -369,7 +358,7 @@ func checkThinkingMode(claudeBody []byte) (bool, int64) {
 	thinkingEnabled := false
 	var budgetTokens int64 = 24000
 
-	thinkingField := gjson.GetBytes(claudeBody, "thinking")
+	thinkingField := ojson.GetBytes(claudeBody, "thinking")
 	if thinkingField.Exists() {
 		thinkingType := thinkingField.Get("type").String()
 		if thinkingType == "enabled" {
@@ -449,7 +438,7 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 
 	// Check OpenAI format: reasoning_effort parameter
 	// Valid values: "low", "medium", "high", "auto" (not "none")
-	reasoningEffort := gjson.GetBytes(body, "reasoning_effort")
+	reasoningEffort := ojson.GetBytes(body, "reasoning_effort")
 	if reasoningEffort.Exists() {
 		effort := reasoningEffort.String()
 		if effort != "" && effort != "none" {
@@ -481,9 +470,9 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 
 	// Check OpenAI format: max_completion_tokens with reasoning (o1-style)
 	// Some clients use this to indicate reasoning mode
-	if gjson.GetBytes(body, "max_completion_tokens").Exists() {
+	if ojson.GetBytes(body, "max_completion_tokens").Exists() {
 		// If max_completion_tokens is set, check if model name suggests reasoning
-		model := gjson.GetBytes(body, "model").String()
+		model := ojson.GetBytes(body, "model").String()
 		if strings.Contains(strings.ToLower(model), "thinking") ||
 			strings.Contains(strings.ToLower(model), "reason") {
 			log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
@@ -493,7 +482,7 @@ func IsThinkingEnabledWithHeaders(body []byte, headers http.Header) bool {
 
 	// Check model name directly for thinking hints.
 	// This enables thinking variants even when clients don't send explicit thinking fields.
-	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	model := strings.TrimSpace(ojson.GetBytes(body, "model").String())
 	modelLower := strings.ToLower(model)
 	if strings.Contains(modelLower, "thinking") || strings.Contains(modelLower, "-reason") {
 		log.Debugf("kiro: thinking mode enabled via model name hint: %s", model)
@@ -580,7 +569,7 @@ func synthesizeToolSpecsFromHistory(history []KiroHistoryMessage) []KiroToolWrap
 }
 
 // convertClaudeToolsToKiro converts Claude tools to Kiro format
-func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
+func convertClaudeToolsToKiro(tools ojson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
 	if !tools.IsArray() {
 		return kiroTools
@@ -591,7 +580,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 		description := tool.Get("description").String()
 		inputSchemaResult := tool.Get("input_schema")
 		var inputSchema interface{}
-		if inputSchemaResult.Exists() && inputSchemaResult.Type != gjson.Null {
+		if inputSchemaResult.Exists() && inputSchemaResult.Type != ojson.Null {
 			inputSchema = inputSchemaResult.Value()
 		}
 		inputSchema = ensureKiroInputSchema(inputSchema)
@@ -649,7 +638,7 @@ func convertClaudeToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 // not affected. Claude system content can be either a string or an ordered
 // array of text blocks; joining blocks with newlines preserves their boundaries
 // when Kiro's string-only message representation is built later.
-func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
+func normalizeInArraySystemMessages(messages []ojson.Result) []ojson.Result {
 	for i, msg := range messages {
 		if msg.Get("role").String() != "system" {
 			continue
@@ -663,7 +652,7 @@ func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
 					textParts = append(textParts, part.Get("text").String())
 				}
 			}
-		} else if content.Type == gjson.String {
+		} else if content.Type == ojson.String {
 			textParts = append(textParts, content.String())
 		}
 
@@ -677,13 +666,13 @@ func normalizeInArraySystemMessages(messages []gjson.Result) []gjson.Result {
 		if err != nil {
 			continue
 		}
-		messages[i] = gjson.ParseBytes(converted)
+		messages[i] = ojson.ParseBytes(converted)
 	}
 	return messages
 }
 
 // processMessages processes Claude messages and builds Kiro history.
-func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
+func processMessages(messages ojson.Result, modelID, origin string) ([]KiroHistoryMessage, *KiroUserInputMessage, []KiroToolResult) {
 	var history []KiroHistoryMessage
 	var currentUserMsg *KiroUserInputMessage
 	var currentToolResults []KiroToolResult
@@ -703,7 +692,7 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 	// Prepend a placeholder user message so the history alternation is correct.
 	if len(messagesArray) > 0 && messagesArray[0].Get("role").String() == "assistant" {
 		placeholder := `{"role":"user","content":"[start]"}`
-		messagesArray = append([]gjson.Result{gjson.Parse(placeholder)}, messagesArray...)
+		messagesArray = append([]ojson.Result{ojson.Parse(placeholder)}, messagesArray...)
 		log.Infof("kiro: messages started with assistant role, prepended placeholder user message for Kiro API compatibility")
 	}
 
@@ -870,7 +859,7 @@ func deduplicateToolResults(toolResults []KiroToolResult) []KiroToolResult {
 // - {"type": "any"}: Must use at least one tool
 // - {"type": "tool", "name": "..."}: Must use specific tool
 func extractClaudeToolChoiceHint(claudeBody []byte) string {
-	toolChoice := gjson.GetBytes(claudeBody, "tool_choice")
+	toolChoice := ojson.GetBytes(claudeBody, "tool_choice")
 	if !toolChoice.Exists() {
 		return ""
 	}
@@ -893,7 +882,7 @@ func extractClaudeToolChoiceHint(claudeBody []byte) string {
 }
 
 // BuildUserMessageStruct builds a user message and extracts tool results
-func BuildUserMessageStruct(msg gjson.Result, modelID, origin string) (KiroUserInputMessage, []KiroToolResult) {
+func BuildUserMessageStruct(msg ojson.Result, modelID, origin string) (KiroUserInputMessage, []KiroToolResult) {
 	content := msg.Get("content")
 	var contentBuilder strings.Builder
 	var toolResults []KiroToolResult
@@ -944,11 +933,11 @@ func BuildUserMessageStruct(msg gjson.Result, modelID, origin string) (KiroUserI
 					for _, item := range resultContent.Array() {
 						if item.Get("type").String() == "text" {
 							textContents = append(textContents, KiroTextContent{Text: item.Get("text").String()})
-						} else if item.Type == gjson.String {
+						} else if item.Type == ojson.String {
 							textContents = append(textContents, KiroTextContent{Text: item.String()})
 						}
 					}
-				} else if resultContent.Type == gjson.String {
+				} else if resultContent.Type == ojson.String {
 					textContents = append(textContents, KiroTextContent{Text: resultContent.String()})
 				}
 
@@ -986,7 +975,7 @@ func BuildUserMessageStruct(msg gjson.Result, modelID, origin string) (KiroUserI
 }
 
 // BuildAssistantMessageStruct builds an assistant message with tool uses
-func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage {
+func BuildAssistantMessageStruct(msg ojson.Result) KiroAssistantResponseMessage {
 	content := msg.Get("content")
 	var contentBuilder strings.Builder
 	var toolUses []KiroToolUse
@@ -1005,7 +994,7 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 				var inputMap map[string]interface{}
 				if toolInput.IsObject() {
 					inputMap = make(map[string]interface{})
-					toolInput.ForEach(func(key, value gjson.Result) bool {
+					toolInput.ForEach(func(key, value ojson.Result) bool {
 						inputMap[key.String()] = value.Value()
 						return true
 					})

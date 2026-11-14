@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	zaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/zai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 

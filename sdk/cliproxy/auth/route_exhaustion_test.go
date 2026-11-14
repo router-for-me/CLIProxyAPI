@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	executionregistry "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	executionregistry "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type routeExhaustionTestExecutor struct {
@@ -321,7 +321,7 @@ func (d *routeExhaustionHomeDispatcher) RPopAuth(_ context.Context, _ string, _ 
 func TestRouteExhaustion_HomeMode(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
-	mgr.SetRetryConfig(3, 5*time.Second, 3)
+	mgr.SetRetryConfig(0, 5*time.Second, 3)
 
 	execClaude := newRouteExhaustionTestExecutor("claude")
 	execGemini := newRouteExhaustionTestExecutor("gemini")
@@ -431,9 +431,9 @@ func (d *routeExhaustionHomeNoModelDispatcher) RPopAuth(_ context.Context, _ str
 	return []byte(next), nil
 }
 
-// I. Home no-execution-models path: a dispatched auth blocked for its upstream model yields a
-// sanitized attempted-routes diagnostic (records the no_model outcome) instead of an empty error.
-func TestRouteExhaustion_HomeNoExecutionModelsDiagnostic(t *testing.T) {
+// Home dispatch owns availability decisions, including any cooldown state on its
+// credential. Real dispatched execution failures still produce sanitized routes.
+func TestRouteExhaustion_HomeDispatchedExecutionFailureDiagnostic(t *testing.T) {
 	mgr := NewManager(nil, nil, nil)
 	mgr.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
 	mgr.SetRetryConfig(3, 5*time.Second, 3)
@@ -444,6 +444,7 @@ func TestRouteExhaustion_HomeNoExecutionModelsDiagnostic(t *testing.T) {
 	authID := "home-no-model-auth"
 	fakeKey := "sk-home-no-model-secret-123"
 	credFile := "user-no-model@home-secret.com.json"
+	exec.failErrors[authID] = &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "dispatched upstream unavailable"}
 
 	payload := fmt.Sprintf(
 		`{"model":"upstream-blocked-1","provider":"claude","auth":{"id":%q,"provider":"claude","status":"active","attributes":{"api_key":%q,"credential_file":%q,"disable_cooling":"true"},"unavailable":true,"next_retry_after":"2030-01-02T03:04:05Z"}}`,
@@ -455,12 +456,12 @@ func TestRouteExhaustion_HomeNoExecutionModelsDiagnostic(t *testing.T) {
 
 	_, err := mgr.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3-5-sonnet"}, cliproxyexecutor.Options{})
 	if err == nil {
-		t.Fatalf("Execute() expected error on home no-execution-models route")
+		t.Fatalf("Execute() expected error after dispatched upstream failure")
 	}
 
 	summaryIdx := strings.Index(err.Error(), "attempted routes:")
 	if summaryIdx == -1 {
-		t.Fatalf("no-model home path missing attempted-routes diagnostic: %s", err.Error())
+		t.Fatalf("home dispatch failure missing attempted-routes diagnostic: %s", err.Error())
 	}
 	summaryPart := err.Error()[summaryIdx:]
 

@@ -34,7 +34,7 @@ func TestSanitizeOpenCodeKeysPreservesEntryWithoutBaseURL(t *testing.T) {
 }
 
 // TestSanitizeCodexKeysStillDropsEntryWithoutBaseURL is a regression guard: the
-// refactor that made OpenCode/Poolside preserve empty base-urls must NOT change
+// refactor that made OpenCode preserve empty base-urls must NOT change
 // Codex / XAI behavior (those still use the drop-empty-base-url path).
 func TestSanitizeCodexKeysStillDropsEntryWithoutBaseURL(t *testing.T) {
 	cfg := &Config{
@@ -45,30 +45,5 @@ func TestSanitizeCodexKeysStillDropsEntryWithoutBaseURL(t *testing.T) {
 	cfg.SanitizeCodexKeys()
 	if got := len(cfg.CodexKey); got != 0 {
 		t.Fatalf("CodexKey entries after sanitize = %d, want 0 (no-base-url codex dropped)", got)
-	}
-}
-
-// TestSanitizePoolsideKeysPreservesEntryWithoutBaseURL is the root-cause guard
-// for "Poolside keys silently dropped at config load". The Poolside executor
-// supplies a default base-url (https://inference.poolside.ai), so an empty
-// BaseURL is valid and must survive, exactly like OpenCode.
-func TestSanitizePoolsideKeysPreservesEntryWithoutBaseURL(t *testing.T) {
-	cfg := &Config{
-		PoolsideKey: []PoolsideKey{
-			{APIKey: "poolside-key", Prefix: " sp "},
-		},
-	}
-	cfg.SanitizePoolsideKeys()
-	if got := len(cfg.PoolsideKey); got != 1 {
-		t.Fatalf("PoolsideKey entries after sanitize = %d, want 1 (no-base-url must survive)", got)
-	}
-	if cfg.PoolsideKey[0].APIKey != "poolside-key" {
-		t.Errorf("APIKey = %q, want preserved", cfg.PoolsideKey[0].APIKey)
-	}
-	if cfg.PoolsideKey[0].Prefix != "sp" {
-		t.Errorf("Prefix = %q, want trimmed 'sp'", cfg.PoolsideKey[0].Prefix)
-	}
-	if cfg.PoolsideKey[0].BaseURL != "" {
-		t.Errorf("BaseURL = %q, want empty (executor defaults it at Execute time)", cfg.PoolsideKey[0].BaseURL)
 	}
 }

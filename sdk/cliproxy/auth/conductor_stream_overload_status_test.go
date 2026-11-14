@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // When every credential is exhausted by overload rejections the caller must receive a real

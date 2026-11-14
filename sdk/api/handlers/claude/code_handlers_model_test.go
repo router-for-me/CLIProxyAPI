@@ -5,11 +5,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestClaudeModelsResponseUsesConfiguredDisplayName(t *testing.T) {
@@ -112,7 +112,7 @@ func TestRewriteClaudeDDModelInBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := rewriteClaudeDDModelInBody([]byte(tt.body))
-			if model := gjson.GetBytes(got, "model").String(); model != tt.wantModel {
+			if model := ojson.GetBytesNoCopy(got, "model").String(); model != tt.wantModel {
 				t.Fatalf("model = %q, want %q; body=%s", model, tt.wantModel, string(got))
 			}
 		})

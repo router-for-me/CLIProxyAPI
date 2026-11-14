@@ -17,17 +17,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	cursorauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor"
-	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor"
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/cursor/proto"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 	"golang.org/x/net/http2"
 )
 
@@ -359,7 +359,7 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 			log.Debugf("cursor CountTokens: model=%s result=%s", req.Model, string(resp.Payload))
 		}
 	}()
-	model := gjson.GetBytes(req.Payload, "model").String()
+	model := ojson.GetBytes(req.Payload, "model").String()
 	if model == "" {
 		model = req.Model
 	}
@@ -372,7 +372,7 @@ func (e *CursorExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth, re
 
 	// Detect format: Claude (/v1/messages) vs OpenAI (/v1/chat/completions)
 	var count int64
-	if gjson.GetBytes(req.Payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
+	if ojson.GetBytes(req.Payload, "system").Exists() || opts.SourceFormat.String() == "claude" {
 		count, _ = countClaudeChatTokens(enc, req.Payload)
 	} else {
 		count, _ = countOpenAIChatTokens(enc, req.Payload)
@@ -420,6 +420,11 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		return resp, fmt.Errorf("cursor: access token not found")
 	}
 
+	upstreamModel, errResolve := helps.ResolveCursorRequestModel(auth.ID, req, opts, cursorModelsOrFallback)
+	if errResolve != nil {
+		return resp, errResolve
+	}
+
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	payload := req.Payload
@@ -448,7 +453,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		log.Debugf("cursor: non-stream request with %d turn(s), flattening into user text", len(parsed.Turns))
 		flattenConversationIntoUserText(parsed)
 	}
-	params := buildRunRequestParams(parsed, conversationID, req.Model)
+	params := buildRunRequestParams(parsed, conversationID, upstreamModel)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -579,6 +584,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		sessionID = extractClaudeCodeSessionId(opts.OriginalRequest)
 	}
 
+	upstreamModel, errResolve := helps.ResolveCursorRequestModel(auth.ID, req, opts, cursorModelsOrFallback)
+	if errResolve != nil {
+		return nil, errResolve
+	}
+
 	// Translate input to OpenAI format if needed
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -673,11 +683,11 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(parsed, conversationId, req.Model)
+	params := buildRunRequestParams(parsed, conversationId, upstreamModel)
 
 	if coldToolContinuation {
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId, req.Model)
+		params = buildRunRequestParams(parsed, conversationId, upstreamModel)
 	} else if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally.
 		log.Debugf("cursor: using saved checkpoint (%d bytes) for conv=%s auth=%s", len(saved.data), checkpointKey, authID)
@@ -698,13 +708,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(parsed, conversationId, req.Model)
+			params = buildRunRequestParams(parsed, conversationId, upstreamModel)
 		}
 	} else if len(parsed.Turns) > 0 {
 		// Cursor reliably reads UserText, while structured turns may be ignored.
 		log.Debugf("cursor: no checkpoint, flattening %d turns into user text", len(parsed.Turns))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId, req.Model)
+		params = buildRunRequestParams(parsed, conversationId, upstreamModel)
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -1598,8 +1608,8 @@ func processH2SessionFrames(
 
 type parsedOpenAIRequest struct {
 	Model        string
-	Messages     []gjson.Result
-	Tools        []gjson.Result
+	Messages     []ojson.Result
+	Tools        []ojson.Result
 	Stream       bool
 	SystemPrompt string
 	UserText     string
@@ -1615,11 +1625,11 @@ type toolResultInfo struct {
 
 func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	p := &parsedOpenAIRequest{
-		Model:  gjson.GetBytes(payload, "model").String(),
-		Stream: gjson.GetBytes(payload, "stream").Bool(),
+		Model:  ojson.GetBytes(payload, "model").String(),
+		Stream: ojson.GetBytes(payload, "stream").Bool(),
 	}
 
-	messages := gjson.GetBytes(payload, "messages").Array()
+	messages := ojson.GetBytes(payload, "messages").Array()
 	p.Messages = messages
 
 	// Extract system prompt
@@ -1686,7 +1696,7 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 	}
 
 	// Extract tools
-	p.Tools = gjson.GetBytes(payload, "tools").Array()
+	p.Tools = ojson.GetBytes(payload, "tools").Array()
 
 	return p
 }
@@ -1752,8 +1762,8 @@ func writeCursorTranscriptEntry(buf *strings.Builder, label, content string) {
 	buf.WriteString("\n\n")
 }
 
-func extractTextContent(content gjson.Result) string {
-	if content.Type == gjson.String {
+func extractTextContent(content ojson.Result) string {
+	if content.Type == ojson.String {
 		return content.String()
 	}
 	if content.IsArray() {
@@ -1768,7 +1778,7 @@ func extractTextContent(content gjson.Result) string {
 	return content.String()
 }
 
-func extractImages(content gjson.Result) []cursorproto.ImageData {
+func extractImages(content ojson.Result) []cursorproto.ImageData {
 	if !content.IsArray() {
 		return nil
 	}
@@ -1905,12 +1915,12 @@ func extractCCH(systemPrompt string) string {
 // extractClaudeCodeSessionId extracts session_id from Claude Code's metadata.user_id JSON.
 // Format: {"metadata":{"user_id":"{\"session_id\":\"xxx\",\"device_id\":\"yyy\"}"}}
 func extractClaudeCodeSessionId(payload []byte) string {
-	userIdStr := gjson.GetBytes(payload, "metadata.user_id").String()
+	userIdStr := ojson.GetBytes(payload, "metadata.user_id").String()
 	if userIdStr == "" {
 		return ""
 	}
 	// user_id is a JSON string that needs to be parsed again
-	sid := gjson.Get(userIdStr, "session_id").String()
+	sid := ojson.Get(userIdStr, "session_id").String()
 	return sid
 }
 
@@ -1940,7 +1950,7 @@ func deriveConversationId(apiKey, sessionId, systemPrompt string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", s[:8], s[8:12], s[12:16], s[16:20], s[20:32])
 }
 
-func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {
+func deriveSessionKey(clientKey string, model string, messages []ojson.Result) string {
 	var firstUserContent string
 	var systemContent string
 	for _, msg := range messages {

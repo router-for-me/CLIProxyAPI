@@ -7,6 +7,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,16 +17,18 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	codexconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/codex/openai/chat-completions"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	codexconverter "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/codex/openai/chat-completions"
+	responsesconverter "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // OpenAIAPIHandler contains the handlers for OpenAI API endpoints.
@@ -66,7 +69,17 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
 		clientVersion := c.Query("client_version")
-		c.JSON(http.StatusOK, h.codexClientModelsResponse(clientVersion))
+		body, errMarshal := codexmodels.MarshalCompact(h.codexClientModelsResponse(clientVersion))
+		if errMarshal != nil {
+			c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Failed to encode model list: %v", errMarshal),
+					Type:    "server_error",
+				},
+			})
+			return
+		}
+		h.WriteModelListResponse(c, h.HandlerType(), body)
 		return
 	}
 
@@ -94,7 +107,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		filteredModels[i] = filteredModel
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
 		"object": "list",
 		"data":   filteredModels,
 	})
@@ -110,7 +123,7 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -120,18 +133,23 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	stream := streamResult.Type == gjson.True
+	streamResult := ojson.GetBytesNoCopy(rawJSON, "stream")
+	stream := streamResult.Type == ojson.True
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName := ojson.GetBytes(rawJSON, "model").String()
 	if overrideEndpoint, ok := resolveEndpointOverride(modelName, openAIChatEndpoint); ok && overrideEndpoint == openAIResponsesEndpoint {
 		originalChat := rawJSON
 		if shouldTreatAsResponsesFormat(rawJSON) {
 			// Already responses-style payload; no conversion needed.
 		} else {
-			rawJSON = codexconverter.ConvertOpenAIRequestToCodex(modelName, rawJSON, stream)
+			var errTranslate error
+			rawJSON, errTranslate = codexconverter.ConvertOpenAIRequestToCodex(modelName, rawJSON, stream)
+			if errTranslate != nil {
+				h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: clienterror.HTTPStatusFromErrorOr(errTranslate, http.StatusBadRequest), Error: errTranslate})
+				return
+			}
 		}
-		stream = gjson.GetBytes(rawJSON, "stream").Bool()
+		stream = ojson.GetBytes(rawJSON, "stream").Bool()
 		if stream {
 			h.handleStreamingResponseViaResponses(c, rawJSON, originalChat)
 		} else {
@@ -143,9 +161,9 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
-		modelName := gjson.GetBytes(rawJSON, "model").String()
-		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
-		stream = gjson.GetBytes(rawJSON, "stream").Bool()
+		modelName := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "model").String())
+		rawJSON, _ = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
+		stream = ojson.GetBytesNoCopy(rawJSON, "stream").Bool()
 	}
 
 	if stream {
@@ -159,16 +177,12 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 // shouldTreatAsResponsesFormat detects OpenAI Responses-style payloads that are
 // accidentally sent to the Chat Completions endpoint.
 func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
-	if gjson.GetBytes(rawJSON, "messages").Exists() {
+	var fieldsBuf [3]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], rawJSON, "messages", "input", "instructions")
+	if fields[0].Exists() {
 		return false
 	}
-	if gjson.GetBytes(rawJSON, "input").Exists() {
-		return true
-	}
-	if gjson.GetBytes(rawJSON, "instructions").Exists() {
-		return true
-	}
-	return false
+	return fields[1].Exists() || fields[2].Exists()
 }
 
 // Completions handles the /v1/completions endpoint.
@@ -182,7 +196,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
 				Type:    "invalid_request_error",
@@ -192,8 +206,8 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 	}
 
 	// Check if the client requested a streaming response.
-	streamResult := gjson.GetBytes(rawJSON, "stream")
-	if streamResult.Type == gjson.True {
+	streamResult := ojson.GetBytesNoCopy(rawJSON, "stream")
+	if streamResult.Type == ojson.True {
 		h.handleCompletionsStreamingResponse(c, rawJSON)
 	} else {
 		h.handleCompletionsNonStreamingResponse(c, rawJSON)
@@ -210,7 +224,7 @@ func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
 // Returns:
 //   - []byte: The converted chat completions request
 func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 
 	// Extract prompt from completions request
 	prompt := root.Get("prompt").String()
@@ -219,58 +233,58 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 	}
 
 	// Create chat completions structure
-	out := []byte(`{"model":"","messages":[{"role":"user","content":""}]}`)
+	outDoc := ojson.NewDoc([]byte(`{"model":"","messages":[{"role":"user","content":""}]}`))
 
 	// Set model
 	if model := root.Get("model"); model.Exists() {
-		out, _ = sjson.SetBytes(out, "model", model.String())
+		_ = outDoc.Set("model", model.String())
 	}
 
 	// Set the prompt as user message content
-	out, _ = sjson.SetBytes(out, "messages.0.content", prompt)
+	_ = outDoc.Set("messages.0.content", prompt)
 
 	// Copy other parameters from completions to chat completions
 	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
+		_ = outDoc.Set("max_tokens", maxTokens.Int())
 	}
 
 	if temperature := root.Get("temperature"); temperature.Exists() {
-		out, _ = sjson.SetBytes(out, "temperature", temperature.Float())
+		_ = outDoc.Set("temperature", temperature.Float())
 	}
 
 	if topP := root.Get("top_p"); topP.Exists() {
-		out, _ = sjson.SetBytes(out, "top_p", topP.Float())
+		_ = outDoc.Set("top_p", topP.Float())
 	}
 
 	if frequencyPenalty := root.Get("frequency_penalty"); frequencyPenalty.Exists() {
-		out, _ = sjson.SetBytes(out, "frequency_penalty", frequencyPenalty.Float())
+		_ = outDoc.Set("frequency_penalty", frequencyPenalty.Float())
 	}
 
 	if presencePenalty := root.Get("presence_penalty"); presencePenalty.Exists() {
-		out, _ = sjson.SetBytes(out, "presence_penalty", presencePenalty.Float())
+		_ = outDoc.Set("presence_penalty", presencePenalty.Float())
 	}
 
 	if stop := root.Get("stop"); stop.Exists() {
-		out, _ = sjson.SetRawBytes(out, "stop", []byte(stop.Raw))
+		_ = outDoc.SetRawBytes("stop", []byte(stop.Raw))
 	}
 
 	if stream := root.Get("stream"); stream.Exists() {
-		out, _ = sjson.SetBytes(out, "stream", stream.Bool())
+		_ = outDoc.Set("stream", stream.Bool())
 	}
 
 	if logprobs := root.Get("logprobs"); logprobs.Exists() {
-		out, _ = sjson.SetBytes(out, "logprobs", logprobs.Bool())
+		_ = outDoc.Set("logprobs", logprobs.Bool())
 	}
 
 	if topLogprobs := root.Get("top_logprobs"); topLogprobs.Exists() {
-		out, _ = sjson.SetBytes(out, "top_logprobs", topLogprobs.Int())
+		_ = outDoc.Set("top_logprobs", topLogprobs.Int())
 	}
 
 	if echo := root.Get("echo"); echo.Exists() {
-		out, _ = sjson.SetBytes(out, "echo", echo.Bool())
+		_ = outDoc.Set("echo", echo.Bool())
 	}
 
-	return out
+	return outDoc.Bytes()
 }
 
 func convertResponsesObjectToChatCompletion(ctx context.Context, modelName string, originalChatJSON, responsesRequestJSON, responsesPayload []byte) []byte {
@@ -290,14 +304,14 @@ func convertResponsesObjectToChatCompletion(ctx context.Context, modelName strin
 }
 
 func wrapResponsesPayloadAsCompleted(payload []byte) []byte {
-	if gjson.GetBytes(payload, "type").Exists() {
+	if ojson.GetBytes(payload, "type").Exists() {
 		return payload
 	}
-	if gjson.GetBytes(payload, "object").String() != "response" {
+	if ojson.GetBytes(payload, "object").String() != "response" {
 		return payload
 	}
 	wrapped := `{"type":"response.completed","response":{}}`
-	wrapped, _ = sjson.SetRaw(wrapped, "response", string(payload))
+	wrapped, _ = ojson.SetRaw(wrapped, "response", string(payload))
 	return []byte(wrapped)
 }
 
@@ -353,32 +367,32 @@ func (h *OpenAIAPIHandler) forwardResponsesAsChatStream(c *gin.Context, flusher 
 // Returns:
 //   - []byte: The converted completions response
 func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 
 	// Base completions response structure
-	out := []byte(`{"id":"","object":"text_completion","created":0,"model":"","choices":[]}`)
+	outDoc := ojson.NewDoc([]byte(`{"id":"","object":"text_completion","created":0,"model":"","choices":[]}`))
 
 	// Copy basic fields
 	if id := root.Get("id"); id.Exists() {
-		out, _ = sjson.SetBytes(out, "id", id.String())
+		_ = outDoc.Set("id", id.String())
 	}
 
 	if created := root.Get("created"); created.Exists() {
-		out, _ = sjson.SetBytes(out, "created", created.Int())
+		_ = outDoc.Set("created", created.Int())
 	}
 
 	if model := root.Get("model"); model.Exists() {
-		out, _ = sjson.SetBytes(out, "model", model.String())
+		_ = outDoc.Set("model", model.String())
 	}
 
 	if usage := root.Get("usage"); usage.Exists() {
-		out, _ = sjson.SetRawBytes(out, "usage", []byte(usage.Raw))
+		_ = outDoc.SetRawBytes("usage", []byte(usage.Raw))
 	}
 
 	// Convert choices from chat completions to completions format
 	var choices []interface{}
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
+		chatChoices.ForEach(func(_, choice ojson.Result) bool {
 			completionsChoice := map[string]interface{}{
 				"index": choice.Get("index").Int(),
 			}
@@ -412,10 +426,10 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 
 	if len(choices) > 0 {
 		choicesJSON, _ := json.Marshal(choices)
-		out, _ = sjson.SetRawBytes(out, "choices", choicesJSON)
+		_ = outDoc.SetRawBytes("choices", choicesJSON)
 	}
 
-	return out
+	return outDoc.Bytes()
 }
 
 // convertChatCompletionsStreamChunkToCompletions converts a streaming chat completions chunk to completions format.
@@ -427,13 +441,13 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 // Returns:
 //   - []byte: The converted completions stream chunk, or nil if should be filtered out
 func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
-	root := gjson.ParseBytes(chunkData)
+	root := util.ParseGJSONBytesNoCopy(chunkData)
 
 	// Check if this chunk has any meaningful content
 	hasContent := false
 	hasUsage := root.Get("usage").Exists()
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
+		chatChoices.ForEach(func(_, choice ojson.Result) bool {
 			// Check if delta has content or finish_reason
 			if delta := choice.Get("delta"); delta.Exists() {
 				if content := delta.Get("content"); content.Exists() && content.String() != "" {
@@ -456,25 +470,25 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	}
 
 	// Base completions stream response structure
-	out := []byte(`{"id":"","object":"text_completion","created":0,"model":"","choices":[]}`)
+	outDoc := ojson.NewDoc([]byte(`{"id":"","object":"text_completion","created":0,"model":"","choices":[]}`))
 
 	// Copy basic fields
 	if id := root.Get("id"); id.Exists() {
-		out, _ = sjson.SetBytes(out, "id", id.String())
+		_ = outDoc.Set("id", id.String())
 	}
 
 	if created := root.Get("created"); created.Exists() {
-		out, _ = sjson.SetBytes(out, "created", created.Int())
+		_ = outDoc.Set("created", created.Int())
 	}
 
 	if model := root.Get("model"); model.Exists() {
-		out, _ = sjson.SetBytes(out, "model", model.String())
+		_ = outDoc.Set("model", model.String())
 	}
 
 	// Convert choices from chat completions delta to completions format
 	var choices []interface{}
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
+		chatChoices.ForEach(func(_, choice ojson.Result) bool {
 			completionsChoice := map[string]interface{}{
 				"index": choice.Get("index").Int(),
 			}
@@ -507,15 +521,15 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	if len(choices) > 0 {
 		choicesJSON, _ := json.Marshal(choices)
-		out, _ = sjson.SetRawBytes(out, "choices", choicesJSON)
+		_ = outDoc.SetRawBytes("choices", choicesJSON)
 	}
 
 	// Copy usage if present
 	if usage := root.Get("usage"); usage.Exists() {
-		out, _ = sjson.SetRawBytes(out, "usage", []byte(usage.Raw))
+		_ = outDoc.SetRawBytes("usage", []byte(usage.Raw))
 	}
 
-	return out
+	return outDoc.Bytes()
 }
 
 // handleNonStreamingResponse handles non-streaming chat completion responses
@@ -528,7 +542,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "model").String())
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
@@ -546,7 +560,7 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 func (h *OpenAIAPIHandler) handleNonStreamingResponseViaResponses(c *gin.Context, rawJSON []byte, originalChatJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName := ojson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	if errMsg != nil {
@@ -588,16 +602,40 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 		return
 	}
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName := strings.Clone(ojson.GetBytesNoCopy(rawJSON, "model").String())
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
-
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
+	var upstreamHeaders http.Header
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	writeKeepAlive := func() bool {
+		commitSSE()
+		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+		flusher.Flush()
+		return true
+	}
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	defer stopKeepAlive()
+
+	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
+		c, cliCtx, func(err error) { cliCancel(err) }, h.HandlerType(), modelName, rawJSON, h.GetAlt(c), keepAliveC, writeKeepAlive,
+	)
+	if !okBootstrap {
+		return
+	}
+	upstreamHeaders = resolvedHeaders
 
 	// Peek at the first chunk to determine success or failure before setting headers
 	for {
@@ -611,6 +649,14 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 				errChan = nil
 				continue
 			}
+			if committed {
+				stopKeepAlive()
+				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+				pendingErrors <- errMsg
+				close(pendingErrors)
+				h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, false)
+				return
+			}
 			// Upstream failed immediately. Return proper error status and JSON.
 			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
 			if errMsg != nil {
@@ -621,7 +667,15 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				stopKeepAlive()
 				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					if committed {
+						pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+						pendingErrors <- errMsg
+						close(pendingErrors)
+						h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, false)
+						return
+					}
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -631,8 +685,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 					return
 				}
 				// Stream closed without data? Send DONE or just headers.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				commitSSE()
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
 				cliCancel(nil)
@@ -640,15 +693,26 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			}
 
 			// Success! Commit to streaming headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			stopKeepAlive()
+			commitSSE()
 
+			termErr := chunkTerminalError(chunk)
+			if termErr != nil {
+				h.LoggingAPIResponseError(c, termErr)
+			}
+			initialHasFinishReason := termErr != nil || chunkHasFinishReason(chunk)
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 			flusher.Flush()
+			if termErr != nil {
+				cliCancel(termErr.Error)
+				return
+			}
 
 			// Continue streaming the rest
-			h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, initialHasFinishReason)
 			return
+		case <-keepAliveC:
+			writeKeepAlive()
 		}
 	}
 }
@@ -665,7 +729,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponseViaResponses(c *gin.Context, r
 		return
 	}
 
-	modelName := gjson.GetBytes(rawJSON, "model").String()
+	modelName := ojson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, OpenaiResponse, modelName, rawJSON, h.GetAlt(c))
 	var param any
@@ -738,7 +802,7 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
 
-	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
+	modelName := strings.Clone(ojson.GetBytesNoCopy(chatCompletionsJSON, "model").String())
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
@@ -777,16 +841,40 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 	// Convert completions request to chat completions format
 	chatCompletionsJSON := convertCompletionsRequestToChatCompletions(rawJSON)
 
-	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
+	modelName := strings.Clone(ojson.GetBytesNoCopy(chatCompletionsJSON, "model").String())
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
-
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
 	}
+	var upstreamHeaders http.Header
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	writeKeepAlive := func() bool {
+		commitSSE()
+		_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+		flusher.Flush()
+		return true
+	}
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	defer stopKeepAlive()
+
+	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
+		c, cliCtx, func(err error) { cliCancel(err) }, h.HandlerType(), modelName, chatCompletionsJSON, "", keepAliveC, writeKeepAlive,
+	)
+	if !okBootstrap {
+		return
+	}
+	upstreamHeaders = resolvedHeaders
 
 	// Peek at the first chunk
 	for {
@@ -800,7 +888,16 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 				errChan = nil
 				continue
 			}
-			h.WriteErrorResponse(c, sanitizeOpenAIErrorMessage(errMsg))
+			errMsg = sanitizeOpenAIErrorMessage(errMsg)
+			if committed {
+				stopKeepAlive()
+				pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+				pendingErrors <- errMsg
+				close(pendingErrors)
+				h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, false)
+				return
+			}
+			h.WriteErrorResponse(c, errMsg)
 			if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
@@ -809,7 +906,15 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			return
 		case chunk, ok := <-dataChan:
 			if !ok {
+				stopKeepAlive()
 				if errMsg, hasPendingError := handlers.PendingStreamError(errChan); hasPendingError {
+					if committed {
+						pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+						pendingErrors <- errMsg
+						close(pendingErrors)
+						h.handleStreamResult(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors, false)
+						return
+					}
 					h.WriteErrorResponse(c, errMsg)
 					if errMsg != nil {
 						cliCancel(errMsg.Error)
@@ -818,8 +923,7 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 					}
 					return
 				}
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+				commitSSE()
 				_, _ = fmt.Fprintf(c.Writer, "data: [DONE]\n\n")
 				flusher.Flush()
 				cliCancel(nil)
@@ -827,12 +931,22 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			}
 
 			// Success! Set headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			stopKeepAlive()
+			commitSSE()
+
+			if termErr := chunkTerminalError(chunk); termErr != nil {
+				h.LoggingAPIResponseError(c, termErr)
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+				flusher.Flush()
+				cliCancel(termErr.Error)
+				return
+			}
 
 			// Write the first chunk
 			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
+			var initialHasFinishReason bool
 			if converted != nil {
+				initialHasFinishReason = chunkHasFinishReason(converted)
 				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted))
 				flusher.Flush()
 			}
@@ -868,18 +982,83 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			h.handleStreamResult(c, flusher, func(err error) {
 				stop()
 				cliCancel(err)
-			}, convertedChan, errChan)
+			}, convertedChan, errChan, initialHasFinishReason)
 			return
+		case <-keepAliveC:
+			writeKeepAlive()
 		}
 	}
 }
-func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func chunkTerminalError(chunk []byte) *interfaces.ErrorMessage {
+	chunk = bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(chunk, []byte("data:")) {
+		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	var fieldsBuf [2]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], chunk, "choices", "error")
+	if fields[0].Exists() || !fields[1].IsObject() {
+		return nil
+	}
+	msg := fields[1].Get("message").String()
+	if msg == "" {
+		msg = string(chunk)
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      fmt.Errorf("%s", msg),
+	}
+}
+
+func chunkHasFinishReason(chunk []byte) bool {
+	chunk = bytes.TrimSpace(chunk)
+	if bytes.HasPrefix(chunk, []byte("data:")) {
+		chunk = bytes.TrimSpace(chunk[5:])
+	}
+	if chunkTerminalError(chunk) != nil {
+		return true
+	}
+	for _, choice := range ojson.GetBytesNoCopy(chunk, "choices").Array() {
+		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != ojson.Null && reason.String() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, initialHasFinishReason bool) {
+	sawFinishReason := initialHasFinishReason
+	loggedTerminalErr := false
+	var terminalChunkErr *interfaces.ErrorMessage
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
+			if termErr := chunkTerminalError(chunk); termErr != nil {
+				terminalChunkErr = termErr
+				sawFinishReason = true
+				if !loggedTerminalErr {
+					h.LoggingAPIResponseError(c, termErr)
+					loggedTerminalErr = true
+				}
+			} else if !sawFinishReason && chunkHasFinishReason(chunk) {
+				sawFinishReason = true
+			}
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+		},
+		ChunkError: func() *interfaces.ErrorMessage {
+			if terminalChunkErr != nil && !loggedTerminalErr {
+				h.LoggingAPIResponseError(c, terminalChunkErr)
+				loggedTerminalErr = true
+			}
+			return terminalChunkErr
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
+				return
+			}
+			if !loggedTerminalErr {
+				h.LoggingAPIResponseError(c, errMsg)
+				loggedTerminalErr = true
+			}
+			if terminalChunkErr != nil {
 				return
 			}
 			errMsg = sanitizeOpenAIErrorMessage(errMsg)
@@ -893,6 +1072,15 @@ func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flush
 			}
 			body := handlers.BuildErrorResponseBody(status, errText)
 			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+		},
+		CloseError: func() *interfaces.ErrorMessage {
+			if sawFinishReason {
+				return nil
+			}
+			return &interfaces.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      fmt.Errorf("upstream stream closed before any chunk carried finish_reason"),
+			}
 		},
 		WriteDone: func() {
 			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
@@ -946,25 +1134,42 @@ func sanitizeOpenAIStrictErrorMessage(errMsg *interfaces.ErrorMessage) *interfac
 	safe.Body = nil
 	if errMsg.Error != nil {
 		safe.Error = &openAIStreamSanitizedError{
-			message:     openAIStreamErrorText(errMsg.Error.Error(), status),
-			safeHeaders: coreauth.SafeResponseHeaders(errMsg.Error),
+			message:      openAIStreamErrorText(errMsg.Error.Error(), status),
+			safeHeaders:  coreauth.SafeResponseHeaders(errMsg.Error),
+			cause:        errMsg.Error,
+			terminalAuth: coreauth.IsTerminalAuthError(errMsg.Error),
 		}
 	}
 	return &safe
 }
 
 type openAIStreamSanitizedError struct {
-	message     string
-	safeHeaders http.Header
+	message      string
+	safeHeaders  http.Header
+	cause        error
+	terminalAuth bool
+}
+
+func (e *openAIStreamSanitizedError) IsTerminalAuth() bool {
+	if e == nil {
+		return false
+	}
+	return e.terminalAuth
 }
 
 func (e *openAIStreamSanitizedError) Error() string { return e.message }
 
 func (e *openAIStreamSanitizedError) SafeResponseHeaders() http.Header {
-	if e == nil || e.safeHeaders == nil {
+	if e == nil {
 		return nil
 	}
-	return e.safeHeaders.Clone()
+	if e.safeHeaders != nil {
+		return e.safeHeaders.Clone()
+	}
+	if e.cause != nil {
+		return coreauth.SafeResponseHeaders(e.cause)
+	}
+	return nil
 }
 
 // openAIStreamErrorText produces a client-safe error message. JSON error bodies
@@ -982,7 +1187,7 @@ func openAIStreamErrorText(text string, status int) string {
 }
 
 func sanitizeOpenAIStreamJSON(text string, status int) string {
-	root := gjson.Parse(text)
+	root := ojson.Parse(text)
 	errorNode := root.Get("error")
 	if !errorNode.Exists() || !errorNode.IsObject() {
 		errorNode = root.Get("response.error")
@@ -992,14 +1197,14 @@ func sanitizeOpenAIStreamJSON(text string, status int) string {
 		copied := false
 		for _, field := range []string{"type", "code", "message", "param"} {
 			value := errorNode.Get(field)
-			if !value.Exists() || value.Type == gjson.Null {
+			if !value.Exists() || value.Type == ojson.Null {
 				continue
 			}
 			limit := openAIStreamErrorFieldLimit
 			if field == "message" {
 				limit = openAIStreamErrorMessageLimit
 			}
-			safe, _ = sjson.SetBytes(safe, "error."+field, truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), limit))
+			safe, _ = ojson.SetBytes(safe, "error."+field, truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), limit))
 			copied = true
 		}
 		if copied {
@@ -1011,14 +1216,14 @@ func sanitizeOpenAIStreamJSON(text string, status int) string {
 	copied := false
 	for _, field := range []string{"code", "message", "param"} {
 		value := root.Get(field)
-		if !value.Exists() || value.Type == gjson.Null {
+		if !value.Exists() || value.Type == ojson.Null {
 			continue
 		}
 		limit := openAIStreamErrorFieldLimit
 		if field == "message" {
 			limit = openAIStreamErrorMessageLimit
 		}
-		safe, _ = sjson.SetBytes(safe, field, truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), limit))
+		safe, _ = ojson.SetBytes(safe, field, truncateOpenAIStreamErrorText(redactOpenAIStreamErrorText(value.String()), limit))
 		copied = true
 	}
 	if copied {

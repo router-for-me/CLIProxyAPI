@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/credentialweight"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"gopkg.in/yaml.v3"
 )
 
@@ -27,11 +27,13 @@ func validateCredentialWeightYAML(data []byte) error {
 	if len(document.Content) == 0 {
 		return nil
 	}
-	root := document.Content[0]
+	root, err := flattenV8(document.Content[0])
+	if err != nil {
+		return err
+	}
 	families := map[string]struct{}{
 		"gemini-api-key": {}, "interactions-api-key": {}, "claude-api-key": {},
-		"vertex-api-key": {}, "codex-api-key": {}, "xai-api-key": {},
-		"opencode-api-key": {}, "opencode-go-api-key": {}, "poolside-api-key": {},
+		"vertex-api-key": {}, "codex-api-key": {}, "xai-api-key": {}, "meta-api-key": {},
 	}
 	for index := 0; root != nil && root.Kind == yaml.MappingNode && index+1 < len(root.Content); index += 2 {
 		name := root.Content[index].Value
@@ -142,19 +144,9 @@ func (cfg *Config) ValidateCredentialWeights() error {
 			return fmt.Errorf("xai-api-key[%d].weight: %w", index, errValidate)
 		}
 	}
-	for index := range cfg.OpenCodeKey {
-		if errValidate := ValidateCredentialWeight(cfg.OpenCodeKey[index].Weight); errValidate != nil {
-			return fmt.Errorf("opencode-api-key[%d].weight: %w", index, errValidate)
-		}
-	}
-	for index := range cfg.OpenCodeGoKey {
-		if errValidate := ValidateCredentialWeight(cfg.OpenCodeGoKey[index].Weight); errValidate != nil {
-			return fmt.Errorf("opencode-go-api-key[%d].weight: %w", index, errValidate)
-		}
-	}
-	for index := range cfg.PoolsideKey {
-		if errValidate := ValidateCredentialWeight(cfg.PoolsideKey[index].Weight); errValidate != nil {
-			return fmt.Errorf("poolside-api-key[%d].weight: %w", index, errValidate)
+	for index := range cfg.MetaKey {
+		if errValidate := ValidateCredentialWeight(cfg.MetaKey[index].Weight); errValidate != nil {
+			return fmt.Errorf("meta-api-key[%d].weight: %w", index, errValidate)
 		}
 	}
 	for providerIndex := range cfg.OpenAICompatibility {

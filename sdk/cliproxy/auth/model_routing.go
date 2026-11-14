@@ -13,14 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelrouting"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	thinkingclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
-	thinkingcodex "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
-	thinkingopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	thinkingclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
+	thinkingcodex "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	thinkingopenai "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 

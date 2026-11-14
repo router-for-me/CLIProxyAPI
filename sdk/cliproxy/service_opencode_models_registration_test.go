@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	internalregistry "github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // modelIDSet collects the IDs of a model list into a set.
@@ -45,9 +45,7 @@ func TestRegisterConfigAPIKeyAuthsOpenCodeModels(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	service := &Service{cfg: cfg, coreManager: manager}
 
-	if errRegister := service.registerConfigAPIKeyAuths(context.Background(), cfg); errRegister != nil {
-		t.Fatalf("registerConfigAPIKeyAuths() error = %v", errRegister)
-	}
+	service.registerConfigAPIKeyAuths(context.Background(), cfg)
 
 	auths := manager.List()
 	if len(auths) != 1 {

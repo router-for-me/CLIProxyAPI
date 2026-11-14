@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
 // TokenStorage stores Z.AI / ZCode coding-plan credentials on disk.

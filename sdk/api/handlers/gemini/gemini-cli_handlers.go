@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // GeminiCLIAPIHandler contains the handlers for Gemini CLI API endpoints.
@@ -172,7 +172,7 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 		return
 	}
 
-	modelResult := gjson.GetBytes(rawJSON, "model")
+	modelResult := ojson.GetBytes(rawJSON, "model")
 	modelName := modelResult.String()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -186,7 +186,7 @@ func (h *GeminiCLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context
 // It sends a request to the backend client and proxies the entire response back to the client at once.
 func (h *GeminiCLIAPIHandler) handleInternalGenerateContent(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
-	modelResult := gjson.GetBytes(rawJSON, "model")
+	modelResult := ojson.GetBytes(rawJSON, "model")
 	modelName := modelResult.String()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())

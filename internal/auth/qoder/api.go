@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 const (
@@ -55,7 +55,15 @@ var ModelMap = map[string]string{
 func doRefreshToken(ctx context.Context, cfg *config.Config, storage *QoderTokenStorage, authFilePath string) error {
 	auth := NewQoderAuth(cfg)
 
-	tokenData, err := auth.RefreshTokens(ctx, storage.Token, storage.RefreshToken)
+	var (
+		tokenData *QoderTokenData
+		err       error
+	)
+	if storage.AuthMode == "job-token" {
+		tokenData, err = auth.RefreshJobToken(ctx, storage.RefreshToken)
+	} else {
+		tokenData, err = auth.RefreshTokens(ctx, storage.Token, storage.RefreshToken)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}

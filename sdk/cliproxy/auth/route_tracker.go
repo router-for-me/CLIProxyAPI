@@ -7,9 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
-
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
 
 const maxRouteAttemptsRecorded = 16
@@ -25,30 +22,10 @@ type routeAttemptTracker struct {
 	omitted  int
 }
 
-type routeExecutionState struct {
-	tracker                 *routeAttemptTracker
-	tried                   map[string]struct{}
-	callerExcluded          map[string]struct{}
-	modelRoutingAcquisition *modelRoutingAcquisitionScope
-}
-
 func newRouteAttemptTracker() *routeAttemptTracker {
 	return &routeAttemptTracker{
 		attempts: make([]routeAttempt, 0, 8),
 		seen:     make(map[routeAttempt]bool),
-	}
-}
-
-func newRouteExecutionState(opts cliproxyexecutor.Options, tracker *routeAttemptTracker) *routeExecutionState {
-	callerExcluded := extractExcludedAuthIDs(opts.Metadata)
-	tried := make(map[string]struct{}, len(callerExcluded))
-	for authID := range callerExcluded {
-		tried[authID] = struct{}{}
-	}
-	return &routeExecutionState{
-		tracker:        tracker,
-		tried:          tried,
-		callerExcluded: callerExcluded,
 	}
 }
 
@@ -147,7 +124,27 @@ func wrapRouteExhaustion(cause error, tracker *routeAttemptTracker) error {
 	if cause == nil {
 		return nil
 	}
+	summaryDebug := ""
+	if tracker != nil {
+		summaryDebug = tracker.Summary()
+	}
+	fmt.Printf("DEBUGWRAP trackerNil=%v attempts=%d summary=%q cause=%T %v\n", tracker == nil, func() int {
+		if tracker == nil {
+			return -1
+		}
+		return len(tracker.attempts)
+	}(), summaryDebug, cause, cause)
 	if tracker == nil {
+		return cause
+	}
+	var alreadyWrapped *routeExhaustionClonedError
+	if errors.As(cause, &alreadyWrapped) {
+		return cause
+	}
+	if strings.Contains(cause.Error(), "attempted routes:") {
+		return cause
+	}
+	if isUnauthorizedError(cause) || isRequestInvalidError(cause) || isRequestStopError(cause) || isStructuredJSON(cause.Error()) {
 		return cause
 	}
 	summary := tracker.Summary()
@@ -195,21 +192,17 @@ func (e *routeExhaustionClonedError) Unwrap() error {
 	return e.cause
 }
 
-// StatusCode preserves the routed cause's HTTP status for downstream handlers.
 func (e *routeExhaustionClonedError) StatusCode() int {
-	if e == nil {
+	if e == nil || e.cause == nil {
 		return 0
 	}
-	return statusCodeFromError(e.cause)
-}
-
-// RetryAfter preserves the routed cause's retry hint without exposing details
-// from any credential attempted before the final failure.
-func (e *routeExhaustionClonedError) RetryAfter() *time.Duration {
-	if e == nil {
-		return nil
+	type statusCoder interface {
+		StatusCode() int
 	}
-	return retryAfterFromError(e.cause)
+	if sc, ok := e.cause.(statusCoder); ok {
+		return sc.StatusCode()
+	}
+	return statusCodeFromError(e.cause)
 }
 
 // Headers forwards the wrapped cause's error headers if it exposes them, so

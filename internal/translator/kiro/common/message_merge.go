@@ -4,19 +4,19 @@ package common
 import (
 	"encoding/json"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // MergeAdjacentMessages merges adjacent messages with the same role.
 // This reduces API call complexity and improves compatibility.
 // Based on AIClient-2-API implementation.
 // NOTE: Tool messages are NOT merged because each has a unique tool_call_id that must be preserved.
-func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
+func MergeAdjacentMessages(messages []ojson.Result) []ojson.Result {
 	if len(messages) <= 1 {
 		return messages
 	}
 
-	var merged []gjson.Result
+	var merged []ojson.Result
 	for _, msg := range messages {
 		if len(merged) == 0 {
 			merged = append(merged, msg)
@@ -44,7 +44,7 @@ func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 
 			// Create a new merged message JSON.
 			mergedMsg := createMergedMessage(lastRole, mergedContent, mergedToolCalls)
-			merged[len(merged)-1] = gjson.Parse(mergedMsg)
+			merged[len(merged)-1] = ojson.Parse(mergedMsg)
 		} else {
 			merged = append(merged, msg)
 		}
@@ -55,7 +55,7 @@ func MergeAdjacentMessages(messages []gjson.Result) []gjson.Result {
 
 // mergeMessageContent merges the content of two messages with the same role.
 // Handles both string content and array content (with text, tool_use, tool_result blocks).
-func mergeMessageContent(msg1, msg2 gjson.Result) string {
+func mergeMessageContent(msg1, msg2 ojson.Result) string {
 	content1 := msg1.Get("content")
 	content2 := msg2.Get("content")
 
@@ -66,7 +66,7 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 		for _, block := range content1.Array() {
 			blocks1 = append(blocks1, blockToMap(block))
 		}
-	} else if content1.Type == gjson.String {
+	} else if content1.Type == ojson.String {
 		blocks1 = append(blocks1, map[string]interface{}{
 			"type": "text",
 			"text": content1.String(),
@@ -77,7 +77,7 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 		for _, block := range content2.Array() {
 			blocks2 = append(blocks2, blockToMap(block))
 		}
-	} else if content2.Type == gjson.String {
+	} else if content2.Type == ojson.String {
 		blocks2 = append(blocks2, map[string]interface{}{
 			"type": "text",
 			"text": content2.String(),
@@ -110,9 +110,9 @@ func mergeMessageContent(msg1, msg2 gjson.Result) string {
 }
 
 // blockToMap converts a gjson.Result block to a map[string]interface{}
-func blockToMap(block gjson.Result) map[string]interface{} {
+func blockToMap(block ojson.Result) map[string]interface{} {
 	result := make(map[string]interface{})
-	block.ForEach(func(key, value gjson.Result) bool {
+	block.ForEach(func(key, value ojson.Result) bool {
 		if value.IsObject() {
 			result[key.String()] = blockToMap(value)
 		} else if value.IsArray() {
@@ -148,7 +148,7 @@ func createMergedMessage(role string, content string, toolCalls []interface{}) s
 }
 
 // mergeToolCalls combines tool_calls from two assistant messages while preserving order.
-func mergeToolCalls(tc1, tc2 gjson.Result) []interface{} {
+func mergeToolCalls(tc1, tc2 ojson.Result) []interface{} {
 	var merged []interface{}
 
 	if tc1.IsArray() {

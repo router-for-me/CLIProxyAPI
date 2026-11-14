@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"net/url"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
@@ -34,6 +34,8 @@ const GenerateMetadataKey = "generate"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// SelectionIDMetadataKey stores the per-selection ID generated for a plugin scheduler pick.
+	SelectionIDMetadataKey = "selection_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
@@ -42,10 +44,42 @@ const (
 	SelectedAuthIndexMetadataKey = "selected_auth_index"
 	// SelectedAuthIndexCallbackMetadataKey carries an optional callback invoked with the selected auth index.
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
+	// FinalizedResponseFormatCallbackMetadataKey carries an optional callback invoked with the effective response_format after payload rules.
+	FinalizedResponseFormatCallbackMetadataKey = "finalized_response_format_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// DerivedSessionIDMetadataKey stores a stable session identity inferred from request context.
+	// It may be used to derive a provider session identity.
 	DerivedSessionIDMetadataKey = "derived_session_id"
+	// LCPAffinitySessionIDMetadataKey stores an LCP-only routing identity. Executors
+	// must not use it as a provider conversation or execution-session identity. The
+	// current phase also keeps it out of SessionTree topology until downstream wiring exists.
+	LCPAffinitySessionIDMetadataKey = "lcp_affinity_session_id"
+	// CanonicalSessionIDMetadataKey stores the single unified session identity reconciled
+	// across explicit harness headers, body fields, execution sessions, LCP inference,
+	// and fallback context derivation for unified debugging and cross-subsystem tracing.
+	CanonicalSessionIDMetadataKey = "canonical_session_id"
+	// ParentSessionIDMetadataKey stores the parent session identity for hierarchical sessions and forks.
+	// For top-level Merkle LCP forks, it represents the deterministic Merkle prefix hash at the divergence point.
+	ParentSessionIDMetadataKey = "parent_session_id"
+	// IsForkMetadataKey indicates whether the request represents a conversational branch or fork.
+	IsForkMetadataKey = "is_fork"
+	// IsCompactionMetadataKey indicates whether the request represents a context compaction continuation.
+	IsCompactionMetadataKey = "is_compaction"
+	// NodeKindMetadataKey indicates the session DAG topology kind ("compaction", "fork", or "trunk").
+	NodeKindMetadataKey = "node_kind"
+	// LCPTailFingerprintsMetadataKey stores the actual trailing turn fingerprints for context compaction matching.
+	LCPTailFingerprintsMetadataKey = "lcp_tail_fingerprints"
+	// LCPEnvironmentDigestMetadataKey stores the environment digest across all system and developer instructions.
+	LCPEnvironmentDigestMetadataKey = "lcp_environment_digest"
+	// LCPAccessGenerationMetadataKey stores the monotonic access generation when an LCP entry was touched or bound.
+	LCPAccessGenerationMetadataKey = "lcp_access_generation"
+	// LCPFingerprintMetadataKey stores bounded request-scoped turn fingerprints so
+	// SessionAffinitySelector.OnResult can avoid reparsing the original payload.
+	LCPFingerprintMetadataKey = "lcp_fingerprints"
+	// LCPMinPrefixLengthMetadataKey stores the minimum eligible prefix boundary for
+	// the bounded LCP fingerprint sequence.
+	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
 	// ExcludedAuthIDsMetadataKey carries the set of auth IDs that already failed
@@ -75,6 +109,9 @@ type Request struct {
 	Metadata map[string]any
 }
 
+// RequestBeforeAuthInterceptor rewrites a follow-up request on a bound session before after-auth interception.
+type RequestBeforeAuthInterceptor func(context.Context, RequestAfterAuthInterceptRequest) RequestAfterAuthInterceptResponse
+
 // RequestAfterAuthInterceptor rewrites a request after credential selection and before executor translation.
 type RequestAfterAuthInterceptor func(context.Context, RequestAfterAuthInterceptRequest) RequestAfterAuthInterceptResponse
 
@@ -92,7 +129,7 @@ type RequestAfterAuthInterceptRequest struct {
 	Stream bool
 	// Headers contains the current upstream request headers.
 	Headers http.Header
-	// Body contains the current request payload.
+	// Body contains the current request payload. Treat it as read-only; modifications must be returned in RequestAfterAuthInterceptResponse.Body.
 	Body []byte
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
@@ -100,6 +137,8 @@ type RequestAfterAuthInterceptRequest struct {
 
 // RequestAfterAuthInterceptResponse returns selected-auth request modifications.
 type RequestAfterAuthInterceptResponse struct {
+	// Path optionally overrides the inbound request path in Options.Metadata[RequestPathMetadataKey].
+	Path string
 	// Headers replaces matching current request headers and preserves headers not mentioned here.
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.
@@ -192,12 +231,20 @@ type Options struct {
 	ResponseFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+	// RequestBeforeAuthInterceptor runs before after-auth interception on bound follow-up turns.
+	RequestBeforeAuthInterceptor RequestBeforeAuthInterceptor
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 	// WebSocketResponseObserver receives upstream WebSocket response events during execution.
 	WebSocketResponseObserver WebSocketResponseObserver
 	// ExecutionLifecycle owns Home-dispatched execution resources. Executors must not add it to request metadata.
 	ExecutionLifecycle ExecutionLifecycle
+	// ProxyURL overrides the credential and global proxy for this execution only.
+	// Credential refresh and token exchange must ignore it.
+	ProxyURL string
+	// KeepTopLevelEffort tells SIWC request-body rules to keep the resolved
+	// top-level reasoning.effort when configuration_update items are collapsed.
+	KeepTopLevelEffort bool
 }
 
 // EnsureMetadata initializes and returns Metadata, ensuring it is non-nil.
@@ -220,13 +267,15 @@ func ResponseFormatOrSource(opts Options) sdktranslator.Format {
 type Response struct {
 	// Payload is the provider response in the executor format.
 	Payload []byte
+	// Incomplete reports that the upstream execution terminated in an incomplete state
+	// (e.g., response.incomplete) even if translated into a normal non-stream payload.
+	Incomplete bool
 	// Metadata exposes optional structured data for translators.
 	Metadata map[string]any
 	// Headers carries upstream HTTP response headers for passthrough to clients.
 	Headers http.Header
-	// DownstreamHeaders carries trusted headers created inside CLIProxy. They are
-	// distinct from upstream headers so disabled passthrough cannot erase local
-	// routing evidence and an upstream cannot forge that evidence.
+	// DownstreamHeaders carries trusted headers produced inside CLIProxy after
+	// the upstream response, such as route selection evidence.
 	DownstreamHeaders http.Header
 }
 
@@ -234,6 +283,9 @@ type Response struct {
 type StreamChunk struct {
 	// Payload is the raw provider chunk payload.
 	Payload []byte
+	// Incomplete reports that the upstream stream ended in an incomplete terminal state
+	// (e.g., response.incomplete) even if protocol translation mapped it to a normal chunk.
+	Incomplete bool
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
 }
@@ -243,13 +295,14 @@ type StreamChunk struct {
 type StreamResult struct {
 	// Headers carries upstream HTTP response headers from the initial connection.
 	Headers http.Header
-	// DownstreamHeaders carries trusted headers created inside CLIProxy.
+	// DownstreamHeaders carries trusted headers produced inside CLIProxy after
+	// the upstream response, such as route selection evidence.
 	DownstreamHeaders http.Header
+	// Complete is a trusted local lifecycle callback. Handlers call it exactly
+	// once when the stream terminates, forwarding the terminal error if any.
+	Complete func(error)
 	// Chunks is the channel of streaming payload units.
 	Chunks <-chan StreamChunk
-	// Complete is a trusted local lifecycle callback. Handlers call it exactly
-	// once after terminal SSE validation, passing nil only for a valid terminal.
-	Complete func(error)
 }
 
 // StatusError represents an error that carries an HTTP-like status code.
@@ -266,4 +319,23 @@ type StatusError interface {
 type RequestScopedError interface {
 	error
 	IsRequestScoped() bool
+}
+
+// StreamTruncatedError identifies a locally synthesized failure for an
+// accepted upstream stream that ended without its terminal frame. The
+// upstream generation was already submitted, so auth managers must not cool
+// the credential or replay the request on another credential because of it.
+type StreamTruncatedError interface {
+	error
+	IsStreamTruncated() bool
+}
+
+// TransientRateLimitError identifies a transient per-model capacity or
+// admission rejection (for example a Codex turn_rate_limit_exceeded 429).
+// The credential's plan quota is not exhausted, so auth managers must not
+// record quota exhaustion or advance the quota exponential backoff for it.
+// The rejecting model may still cool until any provider RetryAfter hint.
+type TransientRateLimitError interface {
+	error
+	IsTransientRateLimit() bool
 }

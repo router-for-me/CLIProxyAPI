@@ -9,12 +9,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ConvertGeminiRequestToGeminiCLI parses and transforms a Gemini CLI API request into Gemini API format.
@@ -33,32 +32,32 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Gemini API format
-func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []byte {
+func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 	template := []byte(`{"project":"","request":{},"model":""}`)
-	template, _ = sjson.SetRawBytes(template, "request", rawJSON)
-	template, _ = sjson.SetBytes(template, "model", gjson.GetBytes(template, "request.model").String())
-	template, _ = sjson.DeleteBytes(template, "request.model")
+	template, _ = ojson.SetRawBytes(template, "request", rawJSON)
+	template, _ = ojson.SetBytes(template, "model", ojson.GetBytes(template, "request.model").String())
+	template, _ = ojson.DeleteBytes(template, "request.model")
 
 	templateStr, errFixCLIToolResponse := fixCLIToolResponse(string(template))
 	if errFixCLIToolResponse != nil {
-		return []byte{}
+		return nil, errFixCLIToolResponse
 	}
 	template = []byte(templateStr)
 
-	systemInstructionResult := gjson.GetBytes(template, "request.system_instruction")
+	systemInstructionResult := ojson.GetBytes(template, "request.system_instruction")
 	if systemInstructionResult.Exists() {
-		template, _ = sjson.SetRawBytes(template, "request.systemInstruction", []byte(systemInstructionResult.Raw))
-		template, _ = sjson.DeleteBytes(template, "request.system_instruction")
+		template, _ = ojson.SetRawBytes(template, "request.systemInstruction", []byte(systemInstructionResult.Raw))
+		template, _ = ojson.DeleteBytes(template, "request.system_instruction")
 	}
 	rawJSON = template
 
 	// Normalize roles in request.contents: default to valid values if missing/invalid
-	contents := gjson.GetBytes(rawJSON, "request.contents")
+	contents := ojson.GetBytes(rawJSON, "request.contents")
 	if contents.Exists() {
 		prevRole := ""
 		idx := 0
-		contents.ForEach(func(_ gjson.Result, value gjson.Result) bool {
+		contents.ForEach(func(_ ojson.Result, value ojson.Result) bool {
 			role := value.Get("role").String()
 			valid := role == "user" || role == "model"
 			if role == "" || !valid {
@@ -71,7 +70,7 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 					newRole = "user"
 				}
 				path := fmt.Sprintf("request.contents.%d.role", idx)
-				rawJSON, _ = sjson.SetBytes(rawJSON, path, newRole)
+				rawJSON, _ = ojson.SetBytes(rawJSON, path, newRole)
 				role = newRole
 			}
 			prevRole = role
@@ -80,15 +79,15 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 		})
 	}
 
-	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
+	toolsResult := ojson.GetBytes(rawJSON, "request.tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
 		for i := 0; i < len(toolResults); i++ {
-			functionDeclarationsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i))
+			functionDeclarationsResult := ojson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i))
 			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
 				functionDeclarationsResults := functionDeclarationsResult.Array()
 				for j := 0; j < len(functionDeclarationsResults); j++ {
-					parametersResult := gjson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j))
+					parametersResult := ojson.GetBytes(rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j))
 					if parametersResult.Exists() {
 						strJson, _ := util.RenameKey(string(rawJSON), fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j), fmt.Sprintf("request.tools.%d.function_declarations.%d.parametersJsonSchema", i, j))
 						rawJSON = []byte(strJson)
@@ -104,20 +103,20 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 	// "required oneof field 'data' must have one initialized field"
 	filteredContents := []byte(`[]`)
 	hasFiltered := false
-	gjson.GetBytes(rawJSON, "request.contents").ForEach(func(_, content gjson.Result) bool {
+	ojson.GetBytes(rawJSON, "request.contents").ForEach(func(_, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() || len(parts.Array()) == 0 {
 			hasFiltered = true
 			return true
 		}
-		filteredContents, _ = sjson.SetRawBytes(filteredContents, "-1", []byte(content.Raw))
+		filteredContents, _ = ojson.SetRawBytes(filteredContents, "-1", []byte(content.Raw))
 		return true
 	})
 	if hasFiltered {
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", filteredContents)
+		rawJSON, _ = ojson.SetRawBytes(rawJSON, "request.contents", filteredContents)
 	}
 
-	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
+	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings"), nil
 }
 
 // FunctionCallGroup represents a group of function calls and their responses
@@ -129,9 +128,9 @@ type FunctionCallGroup struct {
 // backfillFunctionResponseName ensures that a functionResponse JSON object has a non-empty name,
 // falling back to fallbackName if the original is empty.
 func backfillFunctionResponseName(raw string, fallbackName string) string {
-	name := gjson.Get(raw, "functionResponse.name").String()
+	name := ojson.Get(raw, "functionResponse.name").String()
 	if strings.TrimSpace(name) == "" && fallbackName != "" {
-		rawBytes, _ := sjson.SetBytes([]byte(raw), "functionResponse.name", fallbackName)
+		rawBytes, _ := ojson.SetBytes([]byte(raw), "functionResponse.name", fallbackName)
 		raw = string(rawBytes)
 	}
 	return raw
@@ -151,7 +150,7 @@ func backfillFunctionResponseName(raw string, fallbackName string) string {
 //   - error: An error if the processing fails
 func fixCLIToolResponse(input string) (string, error) {
 	// Parse the input JSON to extract the conversation structure
-	parsed := gjson.Parse(input)
+	parsed := ojson.Parse(input)
 
 	// Extract the contents array which contains the conversation messages
 	contents := parsed.Get("request.contents")
@@ -163,17 +162,17 @@ func fixCLIToolResponse(input string) (string, error) {
 	// Initialize data structures for processing and grouping
 	contentsWrapper := []byte(`{"contents":[]}`)
 	var pendingGroups []*FunctionCallGroup // Groups awaiting completion with responses
-	var collectedResponses []gjson.Result  // Standalone responses to be matched
+	var collectedResponses []ojson.Result  // Standalone responses to be matched
 
 	// Process each content object in the conversation
 	// This iterates through messages and groups function calls with their responses
-	contents.ForEach(func(key, value gjson.Result) bool {
+	contents.ForEach(func(key, value ojson.Result) bool {
 		role := value.Get("role").String()
 		parts := value.Get("parts")
 
 		// Check if this content has function responses
-		var responsePartsInThisContent []gjson.Result
-		parts.ForEach(func(_, part gjson.Result) bool {
+		var responsePartsInThisContent []ojson.Result
+		parts.ForEach(func(_, part ojson.Result) bool {
 			if part.Get("functionResponse").Exists() {
 				responsePartsInThisContent = append(responsePartsInThisContent, part)
 			}
@@ -201,11 +200,11 @@ func fixCLIToolResponse(input string) (string, error) {
 						continue
 					}
 					raw := backfillFunctionResponseName(response.Raw, group.CallNames[ri])
-					functionResponseContent, _ = sjson.SetRawBytes(functionResponseContent, "parts.-1", []byte(raw))
+					functionResponseContent, _ = ojson.SetRawBytes(functionResponseContent, "parts.-1", []byte(raw))
 				}
 
-				if gjson.GetBytes(functionResponseContent, "parts.#").Int() > 0 {
-					contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", functionResponseContent)
+				if ojson.GetBytes(functionResponseContent, "parts.#").Int() > 0 {
+					contentsWrapper, _ = ojson.SetRawBytes(contentsWrapper, "contents.-1", functionResponseContent)
 				}
 			}
 
@@ -215,7 +214,7 @@ func fixCLIToolResponse(input string) (string, error) {
 		// If this is a model with function calls, create a new group
 		if role == "model" {
 			var callNames []string
-			parts.ForEach(func(_, part gjson.Result) bool {
+			parts.ForEach(func(_, part ojson.Result) bool {
 				if part.Get("functionCall").Exists() {
 					callNames = append(callNames, part.Get("functionCall.name").String())
 				}
@@ -228,7 +227,7 @@ func fixCLIToolResponse(input string) (string, error) {
 					log.Warnf("failed to parse model content")
 					return true
 				}
-				contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
+				contentsWrapper, _ = ojson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
 
 				// Create a new group for tracking responses
 				group := &FunctionCallGroup{
@@ -242,7 +241,7 @@ func fixCLIToolResponse(input string) (string, error) {
 					log.Warnf("failed to parse content")
 					return true
 				}
-				contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
+				contentsWrapper, _ = ojson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
 			}
 		} else {
 			// Non-model content (user, etc.)
@@ -250,7 +249,7 @@ func fixCLIToolResponse(input string) (string, error) {
 				log.Warnf("failed to parse content")
 				return true
 			}
-			contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
+			contentsWrapper, _ = ojson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
 		}
 
 		return true
@@ -269,18 +268,18 @@ func fixCLIToolResponse(input string) (string, error) {
 					continue
 				}
 				raw := backfillFunctionResponseName(response.Raw, group.CallNames[ri])
-				functionResponseContent, _ = sjson.SetRawBytes(functionResponseContent, "parts.-1", []byte(raw))
+				functionResponseContent, _ = ojson.SetRawBytes(functionResponseContent, "parts.-1", []byte(raw))
 			}
 
-			if gjson.GetBytes(functionResponseContent, "parts.#").Int() > 0 {
-				contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", functionResponseContent)
+			if ojson.GetBytes(functionResponseContent, "parts.#").Int() > 0 {
+				contentsWrapper, _ = ojson.SetRawBytes(contentsWrapper, "contents.-1", functionResponseContent)
 			}
 		}
 	}
 
 	// Update the original JSON with the new contents
 	result := []byte(input)
-	result, _ = sjson.SetRawBytes(result, "request.contents", []byte(gjson.GetBytes(contentsWrapper, "contents").Raw))
+	result, _ = ojson.SetRawBytes(result, "request.contents", []byte(ojson.GetBytes(contentsWrapper, "contents").Raw))
 
 	return string(result), nil
 }

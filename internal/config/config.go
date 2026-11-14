@@ -4,10 +4,22 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
-import "github.com/router-for-me/CLIProxyAPI/v7/internal/modelrouting"
+import "github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
+
+// ServerResponseCompression mirrors SDKConfig.ResponseCompression on the outer
+// Config so JSON and YAML round trips preserve server.response-compression.
+// The canonical storage remains SDKConfig.ResponseCompression; read the
+// effective value via EffectiveResponseCompression.
+type ServerResponseCompression = ResponseCompressionConfig
 
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
+	// ServerResponseCompression is the JSON-visible mirror of the downstream
+	// response compression settings (YAML: server.response-compression).
+	ServerResponseCompression ResponseCompressionConfig `yaml:"-" json:"response-compression"`
+	// Models selects optional catalog sources independently for each catalog.
+	Models ModelCatalogs `yaml:"models" json:"models"`
+
 	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.
 	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
@@ -15,11 +27,22 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// GitHubToken is the global token for GitHub requests, taking precedence over GITHUB_TOKEN.
+	GitHubToken string `yaml:"github-token" json:"-"`
+
+	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
+	// The server applies this list at startup; changing it requires a restart.
+	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
+
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
+
+	// SourceHash is runtime-only: the SHA-256 of the config file bytes this config was
+	// parsed from, or empty when the config was not loaded from a file.
+	SourceHash string `yaml:"-" json:"-"`
 
 	// CredentialConcurrency contains Home-authoritative credential lifecycle settings.
 	CredentialConcurrency CredentialConcurrencyConfig `yaml:"credential-concurrency" json:"credential-concurrency"`
@@ -41,6 +64,12 @@ type Config struct {
 
 	// Pprof config controls the optional pprof HTTP debug server.
 	Pprof PprofConfig `yaml:"pprof" json:"pprof"`
+
+	// Discovery configures local network mDNS / DNS-SD service advertising.
+	Discovery DiscoveryConfig `yaml:"discovery" json:"discovery"`
+
+	// KVStore configures the local bbolt key-value store.
+	KVStore KVStoreConfig `yaml:"kv-store" json:"kv-store"`
 
 	// CommercialMode disables high-overhead request logging and HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
@@ -70,11 +99,11 @@ type Config struct {
 	// SaveCooldownStatus persists runtime cooldown status next to auth files when true.
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
 
-	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors.
+	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors (408/500/502/503/504/520-526).
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
-	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh worker pool.
+	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
@@ -97,6 +126,9 @@ type Config struct {
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
+	// FallbackChain maps a route model or alias to an ordered cross-model fallback chain.
+	FallbackChain map[string]FallbackChainConfig `yaml:"fallback-chain,omitempty" json:"fallback-chain,omitempty"`
+
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
 
@@ -107,8 +139,18 @@ type Config struct {
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
 
+	// ProxyPoolPublisher identifies the runtime that published this snapshot, so a
+	// reload in one runtime never retires another runtime's snapshots.
+	ProxyPoolPublisher uint64 `yaml:"-" json:"-"`
+
+	// ProxyPoolGeneration fences obsolete runtime snapshots from the shared transport cache.
+	ProxyPoolGeneration uint64 `yaml:"-" json:"-"`
+
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
+
+	// Devin configures provider-wide Devin request behavior.
+	Devin DevinConfig `yaml:"devin" json:"devin"`
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
@@ -135,20 +177,17 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
-	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
-	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
-
 	// OpenCodeKey defines OpenCode API key configurations using the same structure as Codex API keys.
 	OpenCodeKey []OpenCodeKey `yaml:"opencode-api-key" json:"opencode-api-key"`
 
 	// OpenCodeGoKey defines OpenCode Go API key configurations using the same structure as Codex API keys.
 	OpenCodeGoKey []OpenCodeGoKey `yaml:"opencode-go-api-key" json:"opencode-go-api-key"`
 
-	// PoolsideKey defines Poolside API key configurations using the same structure as Codex API keys.
-	PoolsideKey []PoolsideKey `yaml:"poolside-api-key" json:"poolside-api-key"`
+	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
+	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
-	// Poolside configures provider-wide Poolside request behavior.
-	Poolside PoolsideConfig `yaml:"poolside" json:"poolside"`
+	// MetaKey defines Meta API key configurations using the same structure as Codex API keys.
+	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
 
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
@@ -159,6 +198,9 @@ type Config struct {
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
+
+	// Claude configures provider-wide Claude request behavior.
+	Claude ClaudeConfig `yaml:"claude" json:"claude"`
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
@@ -178,9 +220,6 @@ type Config struct {
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
-	// ModelRouting is the versioned AI Hub projection rendered exclusively by CCS.
-	ModelRouting *modelrouting.Config `yaml:"model-routing,omitempty" json:"model-routing,omitempty"`
-
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
@@ -193,17 +232,23 @@ type Config struct {
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// vertex, aistudio, antigravity, claude, codex, kimi, xai, zai.
+	// vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
-	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
+	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, meta-api-key, claude-api-key, openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// OAuthRequestScopedErrors defines per-provider request-scoped error rules applied to OAuth/file-backed auth entries.
-	// Supported channels include: vertex, aistudio, antigravity, claude, codex, kimi, xai, and OAuth plugin provider keys.
+	// Supported channels include: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and OAuth plugin provider keys.
 	//
 	// NOTE: This applies only to OAuth credentials and does not affect per-credential request-scoped-errors under *-api-key.
 	OAuthRequestScopedErrors map[string][]RequestScopedErrorRule `yaml:"oauth-request-scoped-errors,omitempty" json:"oauth-request-scoped-errors,omitempty"`
+
+	// OAuthSettings defines per-channel model settings (such as max-context-length) applied to OAuth/file-backed auth entries.
+	OAuthSettings map[string][]OAuthModelSetting `yaml:"oauth-settings,omitempty" json:"oauth-settings,omitempty"`
+
+	// ModelRouting is the versioned AI Hub projection rendered exclusively by CCS.
+	ModelRouting *modelrouting.Config `yaml:"model-routing,omitempty" json:"model-routing,omitempty"`
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`

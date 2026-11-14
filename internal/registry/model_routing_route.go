@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelrouting"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 )
 
 // CatalogDeclaration reports how a registered route declares catalog identity.

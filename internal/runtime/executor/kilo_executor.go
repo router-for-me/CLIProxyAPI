@@ -11,15 +11,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 // KiloExecutor handles requests to Kilo API.
@@ -390,10 +390,10 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 		return registry.GetKiloModels()
 	}
 
-	result := gjson.GetBytes(body, "data")
+	result := ojson.GetBytes(body, "data")
 	if !result.Exists() {
 		// Try root if data field is missing
-		result = gjson.ParseBytes(body)
+		result = ojson.ParseBytes(body)
 		if !result.IsArray() {
 			log.Debugf("kilo: response body: %s", string(body))
 			log.Warn("kilo: invalid API response format (expected array or data field with array)")
@@ -406,7 +406,7 @@ func FetchKiloModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.C
 	count := 0
 	totalCount := 0
 
-	result.ForEach(func(key, value gjson.Result) bool {
+	result.ForEach(func(key, value ojson.Result) bool {
 		totalCount++
 		id := value.Get("id").String()
 		pIdxResult := value.Get("preferredIndex")

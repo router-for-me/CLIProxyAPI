@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	qoderauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	qoderauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
 func main() {

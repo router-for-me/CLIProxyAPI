@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	zaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/zai"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // TestZAIExecutorCloneAuthWithBaseURLNoRace verifies that resolving the base URL

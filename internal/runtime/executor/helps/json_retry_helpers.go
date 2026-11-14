@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 // DeleteJSONField removes a top-level or nested JSON field from a payload.
@@ -16,16 +16,24 @@ func DeleteJSONField(body []byte, key string) []byte {
 	if key == "" || len(body) == 0 {
 		return body
 	}
-	updated, err := sjson.DeleteBytes(body, key)
+	updated, err := util.DeleteJSONBytesIfExists(body, key)
 	if err != nil {
 		return body
 	}
 	return updated
 }
 
+// DeleteJSONFieldDoc removes a top-level or nested JSON field from doc in place.
+func DeleteJSONFieldDoc(doc *ojson.Doc, key string) bool {
+	if key == "" || doc == nil || doc.Len() == 0 {
+		return false
+	}
+	return util.DeleteJSONDocIfExists(doc, key) == nil
+}
+
 // ParseRetryDelay extracts the retry delay from a Google API 429 error response.
 func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
-	details := gjson.GetBytes(errorBody, "error.details")
+	details := ojson.GetBytesNoCopy(errorBody, "error.details")
 	if details.Exists() && details.IsArray() {
 		for _, detail := range details.Array() {
 			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.RetryInfo" {
@@ -57,7 +65,7 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		}
 	}
 
-	message := gjson.GetBytes(errorBody, "error.message").String()
+	message := ojson.GetBytesNoCopy(errorBody, "error.message").String()
 	if message != "" {
 		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {

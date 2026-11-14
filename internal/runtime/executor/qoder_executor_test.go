@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/qoder"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/qoder"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // TestNewQoderExecutor tests the constructor
@@ -260,8 +260,11 @@ func TestExecuteStream_PublishesUsageRecordFromStreamUsage(t *testing.T) {
 		Storage:  storage,
 	}
 
-	plugin := &captureQoderUsagePlugin{records: make(chan usage.Record, 4)}
-	usage.RegisterNamedPlugin("test:qoder-stream-usage", plugin)
+	plugin := &captureQoderUsagePlugin{authID: authRecord.ID, records: make(chan usage.Record, 16)}
+	usage.RegisterNamedPlugin(t.Name(), plugin)
+	t.Cleanup(func() {
+		usage.RegisterNamedPlugin(t.Name(), noopClaudeUsagePlugin{})
+	})
 
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return qoderSSEHTTPResponse(req, http.StatusOK, qoderStreamBodyWithUsage(t, 3, 4, 7)), nil
@@ -459,11 +462,15 @@ func (f qoderRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 type captureQoderUsagePlugin struct {
+	authID  string
 	records chan usage.Record
 }
 
 func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
 	if p == nil {
+		return
+	}
+	if p.authID != "" && record.AuthID != p.authID {
 		return
 	}
 	select {
@@ -474,7 +481,7 @@ func (p *captureQoderUsagePlugin) HandleUsage(_ context.Context, record usage.Re
 
 func waitForQoderUsageRecord(t *testing.T, records <-chan usage.Record, authID, model string) usage.Record {
 	t.Helper()
-	timeout := time.After(5 * time.Second) // generous for CI scheduling jitter; correctness comes from matching the record, not the deadline
+	timeout := time.After(10 * time.Second) // generous for CI runner scheduling jitter
 	for {
 		select {
 		case record := <-records:
@@ -1099,5 +1106,250 @@ func TestValidateQoderModel(t *testing.T) {
 				t.Errorf("validateQoderModel(%q) = %q, want %q", tt.rawModel, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExecuteStream_UsesQoderVPCGateway(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Qoder.VPCEndpoint = "acme.vpc.qoder.com.cn"
+	executor := NewQoderExecutor(cfg)
+	authRecord := &cliproxyauth.Auth{
+		ID:       "qoder-vpc-auth",
+		Provider: "qoder",
+		Storage:  testQoderStorageWithModelConfig(),
+	}
+
+	var requestURL string
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requestURL = req.URL.String()
+		return qoderSSEHTTPResponse(req, http.StatusOK, "data: [DONE]\n\n"), nil
+	}))
+
+	result, err := executor.ExecuteStream(ctx, authRecord, cliproxyexecutor.Request{
+		Model:   "qoder/auto",
+		Payload: []byte(`{"model":"qoder/auto","messages":[{"role":"user","content":"hi"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for range result.Chunks {
+	}
+
+	wantURL := "https://acme-gateway.vpc.qoder.com.cn/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+	if requestURL != wantURL {
+		t.Fatalf("request URL = %q, want %q", requestURL, wantURL)
+	}
+}
+
+func TestFetchQoderModels_UsesCurrentCNSceneAndProtocol(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Qoder.VPCEndpoint = "acme.vpc.qoder.com.cn"
+	storage := &qoder.QoderTokenStorage{
+		Token:          "jt-test",
+		UserID:         "user-1",
+		MachineID:      "11111111-2222-3333-4444-555555555555",
+		OrganizationID: "org-1",
+	}
+	auth := &cliproxyauth.Auth{Provider: "qoder", Storage: storage}
+
+	var captured *http.Request
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", qoderRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		captured = req.Clone(req.Context())
+		body := `{"assistant":[{"key":"cn-model","display_name":"CN Model","is_reasoning":true,"max_input_tokens":200000}]}`
+		if req.URL.Path == "/api/v2/quota/usage" {
+			body = `{"userQuota":{"total":100,"used":1,"remaining":99,"percentage":0.01,"unit":"credits"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	}))
+
+	models := FetchQoderModels(ctx, auth, cfg)
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1: %+v", len(models), models)
+	}
+	if models[0].ID != "qoder/cn-model" {
+		t.Fatalf("model ID = %q, want qoder/cn-model", models[0].ID)
+	}
+	if _, ok := storage.GetModelConfig("cn-model"); !ok {
+		t.Fatal("assistant model config was not cached")
+	}
+	if captured == nil {
+		t.Fatal("model-list request was not captured")
+	}
+	wantURL := "https://acme-gateway.vpc.qoder.com.cn/algo/api/v2/model/list?Encode=1"
+	if captured.URL.String() != wantURL {
+		t.Fatalf("model-list URL = %q, want %q", captured.URL.String(), wantURL)
+	}
+	if captured.Header.Get("Cosy-Version") != qoder.QoderGatewayCosyVersion {
+		t.Fatalf("Cosy-Version = %q, want %q", captured.Header.Get("Cosy-Version"), qoder.QoderGatewayCosyVersion)
+	}
+	if captured.Header.Get("Cosy-Machineos") != qoder.QoderCNMachineOS {
+		t.Fatalf("Cosy-Machineos = %q, want %q", captured.Header.Get("Cosy-Machineos"), qoder.QoderCNMachineOS)
+	}
+	if captured.Header.Get("Cosy-Organization-Id") != "org-1" {
+		t.Fatalf("Cosy-Organization-Id = %q, want org-1", captured.Header.Get("Cosy-Organization-Id"))
+	}
+}
+
+func TestQoderModelListEntriesMergesEnterpriseScene(t *testing.T) {
+	entries := qoderModelListEntries([]byte(`{
+		"assistant": [{"key":"shared","display_name":"Shared"}],
+		"byok_enterprise": [
+			{"model_key":"enterprise-only","display_name":"Enterprise"},
+			{"key":"shared","display_name":"Duplicate"}
+		]
+	}`), true)
+	if !entries.Exists() || !entries.IsArray() {
+		t.Fatalf("entries = %v, want array", entries)
+	}
+	if got := len(entries.Array()); got != 2 {
+		t.Fatalf("entry count = %d, want 2", got)
+	}
+	if entries.Get("1.model_key").String() != "enterprise-only" {
+		t.Fatalf("enterprise entry = %v", entries.Get("1"))
+	}
+}
+
+func TestQoderModelListEntriesMergesWrappedEnterpriseScene(t *testing.T) {
+	entries := qoderModelListEntries([]byte(`{
+		"data": {
+			"assistant": [{"key":"shared"}],
+			"byok_enterprise": [{"model_key":"enterprise-only"}]
+		}
+	}`), true)
+	if got := len(entries.Array()); got != 2 {
+		t.Fatalf("entry count = %d, want 2", got)
+	}
+}
+
+// TestValidateQoderModel_StripsThinkingSuffix verifies that a thinking suffix
+// on the model name does not prevent the model key from resolving. Without the
+// strip, "qoder/ultimate(max)" fails with "unsupported qoder model".
+func TestValidateQoderModel_StripsThinkingSuffix(t *testing.T) {
+	storage := &qoder.QoderTokenStorage{}
+	storage.SetModelConfigs(map[string]json.RawMessage{
+		"ultimate": json.RawMessage(`{"key":"ultimate","is_reasoning":true}`),
+	})
+
+	cases := []struct {
+		name  string
+		model string
+	}{
+		{name: "plain", model: "qoder/ultimate"},
+		{name: "level suffix", model: "qoder/ultimate(max)"},
+		{name: "budget suffix", model: "qoder/ultimate(16384)"},
+		{name: "no provider prefix", model: "ultimate(low)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, err := validateQoderModel(tc.model, storage)
+			if err != nil {
+				t.Fatalf("validateQoderModel(%q) returned error: %v", tc.model, err)
+			}
+			if resolved != "ultimate" {
+				t.Fatalf("validateQoderModel(%q) = %q, want %q", tc.model, resolved, "ultimate")
+			}
+		})
+	}
+}
+
+// TestResolveQoderEffort covers the reconciliation between the canonical
+// reasoning_effort and the effort levels a model publishes.
+func TestResolveQoderEffort(t *testing.T) {
+	// Mirrors qoder/qmodel_38max, which offers low, medium and xhigh.
+	sparse := map[string]interface{}{
+		"thinking_config": map[string]interface{}{
+			"enabled": map[string]interface{}{
+				"efforts": map[string]interface{}{
+					"low":    map[string]interface{}{},
+					"medium": map[string]interface{}{},
+					"xhigh":  map[string]interface{}{},
+				},
+			},
+		},
+	}
+	// Mirrors qoder/efficient, which does not reason at all.
+	plain := map[string]interface{}{"is_reasoning": false}
+
+	cases := []struct {
+		name         string
+		request      map[string]interface{}
+		modelConfig  map[string]interface{}
+		wantEffort   string
+		wantDisabled bool
+	}{
+		{
+			name:        "absent stays absent",
+			request:     map[string]interface{}{},
+			modelConfig: sparse,
+		},
+		{
+			name:        "published level passes through",
+			request:     map[string]interface{}{"reasoning_effort": "medium"},
+			modelConfig: sparse,
+			wantEffort:  "medium",
+		},
+		{
+			name:        "unpublished level rounds up",
+			request:     map[string]interface{}{"reasoning_effort": "high"},
+			modelConfig: sparse,
+			wantEffort:  "xhigh",
+		},
+		{
+			name:        "above the published range falls back to the top",
+			request:     map[string]interface{}{"reasoning_effort": "max"},
+			modelConfig: sparse,
+			wantEffort:  "xhigh",
+		},
+		{
+			name:         "none disables thinking",
+			request:      map[string]interface{}{"reasoning_effort": "none"},
+			modelConfig:  sparse,
+			wantDisabled: true,
+		},
+		{
+			name:        "model without effort list is left alone",
+			request:     map[string]interface{}{"reasoning_effort": "high"},
+			modelConfig: plain,
+		},
+		{
+			name:        "case and padding are normalized",
+			request:     map[string]interface{}{"reasoning_effort": "  HIGH "},
+			modelConfig: sparse,
+			wantEffort:  "xhigh",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			effort, disabled := resolveQoderEffort(tc.request, tc.modelConfig)
+			if effort != tc.wantEffort {
+				t.Fatalf("effort = %q, want %q", effort, tc.wantEffort)
+			}
+			if disabled != tc.wantDisabled {
+				t.Fatalf("disabled = %t, want %t", disabled, tc.wantDisabled)
+			}
+		})
+	}
+}
+
+// TestQoderParameters verifies that the effort only appears when one was
+// resolved, so requests without a selection keep the previous wire shape.
+func TestQoderParameters(t *testing.T) {
+	withoutEffort := qoderParameters(4096, "")
+	if _, present := withoutEffort["reasoning_effort"]; present {
+		t.Fatal("reasoning_effort must be omitted when no effort was resolved")
+	}
+	if withoutEffort["max_tokens"] != 4096 {
+		t.Fatalf("max_tokens = %v, want 4096", withoutEffort["max_tokens"])
+	}
+
+	withEffort := qoderParameters(4096, "max")
+	if withEffort["reasoning_effort"] != "max" {
+		t.Fatalf("reasoning_effort = %v, want %q", withEffort["reasoning_effort"], "max")
 	}
 }

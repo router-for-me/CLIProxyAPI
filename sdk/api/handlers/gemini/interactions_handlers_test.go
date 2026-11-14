@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,16 +10,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 func TestParseInteractionsRequestTarget(t *testing.T) {
@@ -65,7 +67,7 @@ func TestPrepareInteractionsExecutionTargetNormalizesModelResourceName(t *testin
 	if model != "gemini-3.5-flash" {
 		t.Fatalf("model = %q, want gemini-3.5-flash", model)
 	}
-	if got := gjson.GetBytes(body, "model").String(); got != "gemini-3.5-flash" {
+	if got := ojson.GetBytesNoCopy(body, "model").String(); got != "gemini-3.5-flash" {
 		t.Fatalf("body model = %q, want gemini-3.5-flash. Body: %s", got, string(body))
 	}
 }
@@ -79,7 +81,7 @@ func TestPrepareInteractionsExecutionTargetPreservesBareModel(t *testing.T) {
 	if model != "gemini-3.5-flash" {
 		t.Fatalf("model = %q, want gemini-3.5-flash", model)
 	}
-	if got := gjson.GetBytes(body, "model").String(); got != "gemini-3.5-flash" {
+	if got := ojson.GetBytesNoCopy(body, "model").String(); got != "gemini-3.5-flash" {
 		t.Fatalf("body model = %q, want gemini-3.5-flash. Body: %s", got, string(body))
 	}
 }
@@ -99,7 +101,7 @@ func TestBuildInteractionsExecutionRequestUsesAgentAuthSelectionModel(t *testing
 	if req.Model != "agents/test-agent" {
 		t.Fatalf("Model = %q, want agents/test-agent", req.Model)
 	}
-	if got := gjson.GetBytes(req.Body, "agent").String(); got != "agents/test-agent" {
+	if got := ojson.GetBytesNoCopy(req.Body, "agent").String(); got != "agents/test-agent" {
 		t.Fatalf("body agent = %q, want agents/test-agent", got)
 	}
 }
@@ -222,10 +224,10 @@ func TestInteractionsAgentUsesNativeInteractionsEndpoint(t *testing.T) {
 	if gotPath != "/v1beta/interactions" {
 		t.Fatalf("path = %q, want /v1beta/interactions", gotPath)
 	}
-	if got := gjson.GetBytes(upstreamBody, "agent").String(); got != "agents/test-agent" {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "agent").String(); got != "agents/test-agent" {
 		t.Fatalf("upstream agent = %q, want agents/test-agent. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(rec.Body.Bytes(), "id").String(); got != "interaction_1" {
+	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "id").String(); got != "interaction_1" {
 		t.Fatalf("response id = %q, want interaction_1. Body: %s", got, rec.Body.String())
 	}
 }
@@ -283,20 +285,79 @@ func TestInteractionsAntigravityModelUsesTranslatorBridge(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if gjson.GetBytes(upstreamBody, "input").Exists() {
+	if ojson.GetBytesNoCopy(upstreamBody, "input").Exists() {
 		t.Fatalf("upstream body still contains raw interactions input: %s", string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0.text").String(); got != "hi" {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "request.contents.0.parts.0.text").String(); got != "hi" {
 		t.Fatalf("upstream request text = %q, want hi. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(upstreamBody, "request.generationConfig.topP").Float(); got != 0.8 {
+	if got := ojson.GetBytesNoCopy(upstreamBody, "request.generationConfig.topP").Float(); got != 0.8 {
 		t.Fatalf("upstream topP = %v, want 0.8. Body: %s", got, string(upstreamBody))
 	}
-	if got := gjson.GetBytes(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "translated-ok" {
+	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "translated-ok" {
 		t.Fatalf("response text = %q, want translated-ok. Body: %s", got, rec.Body.String())
 	}
-	if gjson.GetBytes(rec.Body.Bytes(), "response").Exists() {
+	if ojson.GetBytesNoCopy(rec.Body.Bytes(), "response").Exists() {
 		t.Fatalf("response still contains raw antigravity response wrapper: %s", rec.Body.String())
+	}
+}
+
+func TestInteractionsVertexModelUsesNativeInteractionsEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	model := "gemini-3.8-flash"
+	var gotPath string
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			http.Error(w, errRead.Error(), http.StatusBadRequest)
+			return
+		}
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"interaction_v1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"vertex-ok"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor.NewGeminiVertexExecutor(&config.Config{RequestRetry: 1}))
+	auth := &coreauth.Auth{
+		ID:       "interactions-vertex-auth",
+		Provider: "vertex",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":      "test-vertex-key",
+			"base_url":     server.URL,
+			"interactions": "true",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader(`{"model":"`+model+`","input":"hi vertex"}`))
+	h := NewGeminiAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+
+	h.Interactions(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.HasSuffix(gotPath, "interactions") {
+		t.Fatalf("upstream path = %q, want path ending with interactions", gotPath)
+	}
+	if got := ojson.GetBytesNoCopy(upstreamBody, "input").String(); got != "hi vertex" {
+		t.Fatalf("upstream input = %q, want hi vertex. Body: %s", got, string(upstreamBody))
+	}
+	if got := ojson.GetBytesNoCopy(rec.Body.Bytes(), "steps.0.content.0.text").String(); got != "vertex-ok" {
+		t.Fatalf("response text = %q, want vertex-ok. Body: %s", got, rec.Body.String())
 	}
 }
 
@@ -316,5 +377,62 @@ func TestForwardInteractionsStreamWrapsBareJSONAsSSEData(t *testing.T) {
 
 	if got := rec.Body.String(); got != "data: {\"type\":\"interaction.completed\"}\n\n" {
 		t.Fatalf("body = %q, want SSE data frame", got)
+	}
+}
+
+func TestInteractionsStreamSendKeepAliveBeforeFTWritesSSEErrorOnFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	exec := &preFTKeepAliveGeminiExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(exec)
+	model := "pre-ft-keepalive-interactions-model"
+	auth := &coreauth.Auth{ID: "pre-ft-keepalive-interactions-auth", Provider: exec.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Err: errors.New("interactions upstream failed after keepalive")}
+		close(chunks)
+	}()
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewGeminiAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1beta/interactions", h.Interactions)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/interactions", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 after keepalive commits SSE; body=%q", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, ": keep-alive\n\n") {
+		t.Fatalf("missing keep-alive comment: %q", body)
+	}
+	if !strings.Contains(body, "event: error\ndata: ") || !strings.Contains(body, "interactions upstream failed after keepalive") {
+		t.Fatalf("missing Interactions SSE JSON error event after keepalive: %q", body)
 	}
 }

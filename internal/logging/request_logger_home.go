@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 )
 
 type homeRequestLogClient interface {
@@ -107,16 +108,17 @@ type homeStreamingLogWriter struct {
 	chunkChan chan []byte
 	doneChan  chan struct{}
 
-	responseStatus   int
-	statusWritten    bool
-	responseHeaders  map[string][]string
-	responseBody     bytes.Buffer
-	apiRequest       []byte
-	apiResponse      []byte
-	apiWebsocketTime []byte
-	requestID        string
-	apiResponseTS    time.Time
-	firstChunkTS     time.Time
+	responseStatus    int
+	statusWritten     bool
+	responseHeaders   map[string][]string
+	responseBody      bytes.Buffer
+	apiRequest        []byte
+	apiResponse       []byte
+	apiWebsocketTime  []byte
+	apiResponseErrors []*interfaces.ErrorMessage
+	requestID         string
+	apiResponseTS     time.Time
+	firstChunkTS      time.Time
 }
 
 func newHomeStreamingLogWriter(url, method string, headers map[string][]string, body []byte, requestID string) *homeStreamingLogWriter {
@@ -203,6 +205,14 @@ func (w *homeStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline 
 	return nil
 }
 
+func (w *homeStreamingLogWriter) WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error {
+	if w == nil || len(errors) == 0 {
+		return nil
+	}
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), errors...)
+	return nil
+}
+
 func (w *homeStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if w == nil {
 		return
@@ -218,15 +228,15 @@ func (w *homeStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	client := currentHomeRequestLogClient()
-	if client == nil || !client.HeartbeatOK() {
-		return nil
-	}
-
 	if w.chunkChan != nil {
 		close(w.chunkChan)
 		<-w.doneChan
 		w.chunkChan = nil
+	}
+
+	client := currentHomeRequestLogClient()
+	if client == nil || !client.HeartbeatOK() {
+		return nil
 	}
 
 	responsePayload := w.responseBody.Bytes()
@@ -240,6 +250,9 @@ func (w *homeStreamingLogWriter) Close() error {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+		return errWrite
+	}
+	if errWrite := writeAPIErrorResponses(&buf, w.apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTS); errWrite != nil {

@@ -17,15 +17,14 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/homeplugins"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 )
 
 type blockingServiceCooldownStore struct {
@@ -59,7 +58,7 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	applyDone := make(chan error, 1)
+	applyDone := make(chan bool, 1)
 	go func() {
 		applyDone <- service.applyConfigUpdateWithAuthSynthesis(ctx, &config.Config{DisableCooling: true}, false)
 	}()
@@ -71,7 +70,7 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 
 	commitDone := make(chan struct{})
 	go func() {
-		_, _ = service.commitConfigUpdate(&config.Config{})
+		_ = service.commitConfigUpdate(&config.Config{})
 		close(commitDone)
 	}()
 	select {
@@ -82,9 +81,9 @@ func TestConfigCommitDoesNotHoldCommitMutexDuringCooldownPersistence(t *testing.
 
 	cancel()
 	select {
-	case errApply := <-applyDone:
-		if !errors.Is(errApply, context.Canceled) {
-			t.Fatalf("config runtime apply error = %v, want context.Canceled", errApply)
+	case applied := <-applyDone:
+		if applied {
+			t.Fatal("config runtime apply succeeded after cancellation")
 		}
 	case <-time.After(time.Second):
 		t.Fatal("config runtime apply did not honor cooldown persistence cancellation")
@@ -134,9 +133,11 @@ func TestServiceConcurrentReplacementWaitsForInFlightDrain(t *testing.T) {
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {
-		if _, errLate := registry.BeginDispatch(); errLate != nil {
+		late, errLate := registry.BeginDispatch()
+		if errLate != nil {
 			break
 		}
+		late.End()
 		if time.Now().After(deadline) {
 			t.Fatal("first replacement did not begin draining")
 		}
@@ -650,82 +651,25 @@ func TestHomeConfigWorkerShutdownCancelsBlockedRuntimeUpdatesBeforePublish(t *te
 	}
 }
 
-func TestHomeConfigWorkerCancelsBlockedAntigravityModelRefreshBeforePublish(t *testing.T) {
-	modelRefreshStarted := make(chan struct{})
-	releaseModelRefresh := make(chan struct{})
-	var releaseModelRefreshOnce sync.Once
-	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(modelRefreshStarted)
-		select {
-		case <-r.Context().Done():
-		case <-releaseModelRefresh:
-		}
-	}))
-	t.Cleanup(modelServer.Close)
-	t.Cleanup(func() { releaseModelRefreshOnce.Do(func() { close(releaseModelRefresh) }) })
-
-	client, _ := newHomePluginTaskTestClient(t, nil, 0)
-	baseCfg := &config.Config{}
-	baseCfg.Home.Enabled = true
+func TestHomeModelRegistrationSkipsAntigravityProbes(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); w.WriteHeader(500) }))
+	defer server.Close()
+	cfg := &config.Config{}
+	cfg.Home.Enabled = true
 	manager := coreauth.NewManager(nil, nil, nil)
-	auth := &coreauth.Auth{
-		ID:       "blocked-antigravity-refresh",
-		Provider: "antigravity",
-		Metadata: map[string]any{"access_token": "test-token"},
-		Attributes: map[string]string{
-			"base_url": modelServer.URL,
-		},
-	}
-	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-		t.Fatal(errRegister)
+	auth := antigravityTestAuth("home-no-probe", server.URL)
+	if _, err := manager.Register(t.Context(), auth); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
-
-	parentCtx, cancelParent := context.WithCancel(context.Background())
-	t.Cleanup(cancelParent)
-	homeCtx, cancelHome := context.WithCancel(parentCtx)
-	t.Cleanup(cancelHome)
-	lifetimeCtx, cancelLifetime := context.WithCancel(homeCtx)
-	t.Cleanup(cancelLifetime)
-	service := &Service{
-		cfg:            baseCfg,
-		coreManager:    manager,
-		pluginHost:     pluginhost.New(),
-		homeGeneration: 1,
-	}
-	queue := newHomeConfigWorkQueue()
-	queue.enqueue([]byte("routing:\n  strategy: fill-first\n"))
-	ready := make(chan struct{})
-	close(ready)
-	published := atomic.Bool{}
-	cancelBound := atomic.Int64{}
-	cancelBound.Store(int64(time.Second))
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		service.runHomeConfigWorker(lifetimeCtx, homeCtx, 1, client, executionregistry.New(), queue, ready, &published, &cancelBound)
-	}()
-
-	select {
-	case <-modelRefreshStarted:
-	case <-time.After(time.Second):
-		t.Fatal("Home config worker did not start Antigravity model refresh")
-	}
-	cancelLifetime()
-	select {
-	case <-workerDone:
-	case <-time.After(time.Second):
-		t.Fatal("Home config worker did not stop after model refresh cancellation")
-	}
-	if published.Load() {
-		t.Fatal("canceled model refresh published Home runtime")
-	}
-	service.homeMu.Lock()
-	publishedClient := service.homeClient
-	publishedRegistry := service.homeRegistry
-	service.homeMu.Unlock()
-	if publishedClient != nil || publishedRegistry != nil {
-		t.Fatal("canceled model refresh exposed Home runtime state")
+	service := &Service{cfg: cfg, coreManager: manager}
+	service.registerModelsForAuth(t.Context(), auth)
+	service.WaitAntigravityProbes()
+	service.refreshAntigravityModels(t.Context())
+	service.WaitAntigravityProbes()
+	if requests.Load() != 0 {
+		t.Fatal("Home mode launched standalone entitlement probe")
 	}
 }
 
@@ -1314,8 +1258,8 @@ func TestServiceKeepsRegistryAcrossHeartbeatFailoverAndExposesOnlyAfterNewACK(t 
 	close(loseFirst)
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
-		t.Fatal("second subscription did not start after heartbeat loss")
+	case <-time.After(3 * homeSubscriberRetryInitial):
+		t.Fatal("second subscription did not start after heartbeat loss and backoff")
 	}
 	service.homeMu.Lock()
 	exposedRegistry := service.homeRegistry
@@ -1400,12 +1344,12 @@ func TestServicePreservesActiveScopeDuringPreACKFailoverRetries(t *testing.T) {
 	}
 	firstPreAck := <-preAckAttempts
 	secondPreAck := <-preAckAttempts
-	if retryDelay := secondPreAck.Sub(firstPreAck); retryDelay < 75*time.Millisecond {
-		t.Fatalf("pre-ACK retry delay = %v, want at least 75ms", retryDelay)
+	if retryDelay := secondPreAck.Sub(firstPreAck); retryDelay < homeSubscriberRetryInitial {
+		t.Fatalf("pre-ACK retry delay = %v, want at least %s after the prior published failure", retryDelay, homeSubscriberRetryInitial)
 	}
 	select {
 	case <-finalSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(5 * homeSubscriberRetryInitial):
 		t.Fatal("subscriber did not retry after pre-ACK rejections")
 	}
 	service.homeMu.Lock()
@@ -1718,8 +1662,8 @@ func TestServiceAmbiguousDispatchDrainsRegistryBeforeRetry(t *testing.T) {
 	}
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
-		t.Fatal("subscriber did not retry after ambiguous dispatch drain")
+	case <-time.After(3 * homeSubscriberRetryInitial):
+		t.Fatal("subscriber did not retry after ambiguous dispatch drain and backoff")
 	}
 	service.homeMu.Lock()
 	exposedRegistry := service.homeRegistry
@@ -1783,8 +1727,8 @@ func TestServiceBacksOffAfterRepeatedPreAckFailures(t *testing.T) {
 
 	firstAttempt := <-attempts
 	secondAttempt := <-attempts
-	if retryDelay := secondAttempt.Sub(firstAttempt); retryDelay < 75*time.Millisecond {
-		t.Fatalf("pre-ACK retry delay = %v, want at least 75ms", retryDelay)
+	if retryDelay := secondAttempt.Sub(firstAttempt); retryDelay < homeSubscriberRetryInitial/2 {
+		t.Fatalf("pre-ACK retry delay = %v, want at least %s", retryDelay, homeSubscriberRetryInitial/2)
 	}
 	cancel()
 	select {
@@ -1862,8 +1806,8 @@ func TestServiceHeartbeatLossCancelsBlockedConfigFinalizationWithoutDrainingRegi
 	}
 	select {
 	case <-secondConfig:
-	case <-time.After(time.Second):
-		t.Fatal("subscriber did not retry after heartbeat loss")
+	case <-time.After(3 * homeSubscriberRetryInitial):
+		t.Fatal("subscriber did not retry after heartbeat loss and backoff")
 	}
 	service.homeMu.Lock()
 	currentRegistry := service.homeRegistry
@@ -2758,9 +2702,9 @@ func readRegistryTestRedisCommand(reader *bufio.Reader) ([]string, error) {
 
 func mustCommitConfig(t *testing.T, service *Service, cfg *config.Config) configCommit {
 	t.Helper()
-	commit, errCommit := service.commitConfigUpdate(cfg)
-	if errCommit != nil {
-		t.Fatalf("commitConfigUpdate() error = %v", errCommit)
+	commit := service.commitConfigUpdate(cfg)
+	if commit.cfg == nil {
+		t.Fatal("commitConfigUpdate() returned an empty commit")
 	}
 	return commit
 }
@@ -2774,10 +2718,10 @@ func TestServiceSkipsStaleLocalConfigRuntimeApply(t *testing.T) {
 	}
 	first := mustCommitConfig(t, service, &config.Config{Routing: internalconfig.RoutingConfig{Strategy: "fill-first"}})
 	second := mustCommitConfig(t, service, &config.Config{Routing: internalconfig.RoutingConfig{Strategy: "round-robin"}})
-	if errApply := service.applyConfigRuntime(context.Background(), second, false); errApply != nil {
-		t.Fatalf("newest config runtime apply error = %v", errApply)
+	if !service.applyConfigRuntime(context.Background(), second, false) {
+		t.Fatal("newest config runtime apply failed")
 	}
-	if errApply := service.applyConfigRuntime(context.Background(), first, false); errApply == nil {
+	if service.applyConfigRuntime(context.Background(), first, false) {
 		t.Fatal("stale config runtime apply succeeded")
 	}
 	if got, want := strings.Join(applied, ","), "round-robin"; got != want {
@@ -2797,10 +2741,10 @@ func TestServiceAppliesSameValueNewestSelectorCommit(t *testing.T) {
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 	older := mustCommitConfig(t, service, &config.Config{Routing: internalconfig.RoutingConfig{Strategy: "fill-first"}})
 	newer := mustCommitConfig(t, service, &config.Config{Routing: internalconfig.RoutingConfig{Strategy: "fill-first"}})
-	if errApply := service.applyConfigRuntime(context.Background(), newer, false); errApply != nil {
-		t.Fatalf("newest same-value config runtime apply error = %v", errApply)
+	if applied := service.applyConfigRuntime(context.Background(), newer, false); !applied {
+		t.Fatal("newest same-value config runtime apply error = false")
 	}
-	if errApply := service.applyConfigRuntime(context.Background(), older, false); errApply == nil {
+	if applied := service.applyConfigRuntime(context.Background(), older, false); applied {
 		t.Fatal("stale same-value config runtime apply succeeded")
 	}
 
@@ -2839,8 +2783,8 @@ func TestBuilderPreservesInitialSelectorForSameRouting(t *testing.T) {
 	}
 	defer initialAffinity.Stop()
 	commit := mustCommitConfig(t, service, cfg)
-	if errApply := service.applyConfigRuntime(context.Background(), commit, false); errApply != nil {
-		t.Fatalf("same-routing config runtime apply error = %v", errApply)
+	if applied := service.applyConfigRuntime(context.Background(), commit, false); !applied {
+		t.Fatal("same-routing config runtime apply error = false")
 	}
 	if got := service.coreManager.Selector(); got != initialSelector {
 		t.Fatalf("same-routing selector = %p, want initial selector %p", got, initialSelector)
@@ -2856,8 +2800,8 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 		SessionAffinity:    true,
 		SessionAffinityTTL: "1h",
 	}})
-	if errApply := service.applyConfigRuntime(context.Background(), initial, false); errApply != nil {
-		t.Fatalf("initial config runtime apply error = %v", errApply)
+	if applied := service.applyConfigRuntime(context.Background(), initial, false); !applied {
+		t.Fatal("initial config runtime apply error = false")
 	}
 	initialSelector := manager.Selector()
 	initialAffinity, ok := initialSelector.(*coreauth.SessionAffinitySelector)
@@ -2879,13 +2823,13 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 		},
 		UsageStatisticsEnabled: true,
 	})
-	if errApply := service.applyConfigRuntime(context.Background(), newer, false); errApply != nil {
-		t.Fatalf("newest same-routing config runtime apply error = %v", errApply)
+	if applied := service.applyConfigRuntime(context.Background(), newer, false); !applied {
+		t.Fatal("newest same-routing config runtime apply error = false")
 	}
 	if got := manager.Selector(); got != initialSelector {
 		t.Fatalf("same-routing selector = %p, want original %p", got, initialSelector)
 	}
-	if errApply := service.applyConfigRuntime(context.Background(), older, false); errApply == nil {
+	if applied := service.applyConfigRuntime(context.Background(), older, false); applied {
 		t.Fatal("stale same-routing config runtime apply succeeded")
 	}
 	if got := manager.Selector(); got != initialSelector {
@@ -2897,8 +2841,8 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 		SessionAffinity:    true,
 		SessionAffinityTTL: "1h",
 	}})
-	if errApply := service.applyConfigRuntime(context.Background(), changed, false); errApply != nil {
-		t.Fatalf("changed-routing config runtime apply error = %v", errApply)
+	if applied := service.applyConfigRuntime(context.Background(), changed, false); !applied {
+		t.Fatal("changed-routing config runtime apply error = false")
 	}
 	changedSelector := manager.Selector()
 	if changedSelector == initialSelector {
@@ -2918,11 +2862,118 @@ func TestServiceApplyConfigRuntimePreservesSelectorForUnchangedRouting(t *testin
 		},
 		UsageStatisticsEnabled: false,
 	})
-	if errApply := service.applyConfigRuntime(context.Background(), unrelated, false); errApply != nil {
-		t.Fatalf("unrelated config runtime apply error = %v", errApply)
+	if applied := service.applyConfigRuntime(context.Background(), unrelated, false); !applied {
+		t.Fatal("unrelated config runtime apply error = false")
 	}
 	if got := manager.Selector(); got != changedSelector {
 		t.Fatalf("unrelated-update selector = %p, want changed selector %p", got, changedSelector)
+	}
+}
+
+func TestServiceApplyConfigRuntimeSessionAffinitySubagentsChangeRecreatesSelector(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	subagentsEnabled := true
+	initial := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          true,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsEnabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), initial, false) {
+		t.Fatal("initial config runtime apply failed")
+	}
+	initialSelector := manager.Selector()
+
+	subagentsDisabled := false
+	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          true,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsDisabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), changed, false) {
+		t.Fatal("changed config runtime apply failed")
+	}
+	changedSelector := manager.Selector()
+	if changedSelector == initialSelector {
+		t.Fatal("changing SessionAffinitySubagents should recreate selector")
+	}
+}
+
+func TestServiceApplyConfigRuntimeSessionAffinityDisabledSubagentsChangeIsNoOp(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	subagentsEnabled := true
+	initial := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          false,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsEnabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), initial, false) {
+		t.Fatal("initial config runtime apply failed")
+	}
+	initialSelector := manager.Selector()
+
+	subagentsDisabled := false
+	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                 "round-robin",
+		SessionAffinity:          false,
+		SessionAffinityTTL:       "1h",
+		SessionAffinitySubagents: &subagentsDisabled,
+	}})
+	if !service.applyConfigRuntime(context.Background(), changed, false) {
+		t.Fatal("changed config runtime apply failed")
+	}
+	changedSelector := manager.Selector()
+	if changedSelector != initialSelector {
+		t.Fatal("toggling SessionAffinitySubagents when SessionAffinity is false must be a no-op")
+	}
+}
+
+func TestServiceApplyConfigRuntimeSessionAffinityRebindOnChangeRecreatesSelector(t *testing.T) {
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	initial := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "any",
+	}})
+	if !service.applyConfigRuntime(context.Background(), initial, false) {
+		t.Fatal("initial config runtime apply failed")
+	}
+	initialSelector := manager.Selector()
+
+	same := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "",
+	}})
+	if !service.applyConfigRuntime(context.Background(), same, false) {
+		t.Fatal("same config runtime apply failed")
+	}
+	if manager.Selector() != initialSelector {
+		t.Fatal("equivalent default SessionAffinityRebindOn should preserve selector")
+	}
+
+	changed := service.commitConfigUpdate(&config.Config{Routing: internalconfig.RoutingConfig{
+		Strategy:                "round-robin",
+		SessionAffinity:         true,
+		SessionAffinityTTL:      "1h",
+		SessionAffinityRebindOn: "quota",
+	}})
+	if !service.applyConfigRuntime(context.Background(), changed, false) {
+		t.Fatal("changed config runtime apply failed")
+	}
+	changedSelector := manager.Selector()
+	if changedSelector == initialSelector {
+		t.Fatal("changing SessionAffinityRebindOn should recreate selector")
 	}
 }
 

@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 )
 
 func TestExtractRequestBodyPrefersOverride(t *testing.T) {
@@ -177,6 +177,7 @@ func (l *testRequestLogger) IsEnabled() bool {
 
 type testStreamingLogWriter struct {
 	apiWebsocketTimeline []byte
+	apiResponseErrors    []*interfaces.ErrorMessage
 	closed               bool
 }
 
@@ -196,6 +197,11 @@ func (w *testStreamingLogWriter) WriteAPIResponse([]byte) error {
 
 func (w *testStreamingLogWriter) WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error {
 	w.apiWebsocketTimeline = bytes.Clone(apiWebsocketTimeline)
+	return nil
+}
+
+func (w *testStreamingLogWriter) WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error {
+	w.apiResponseErrors = append([]*interfaces.ErrorMessage(nil), errors...)
 	return nil
 }
 

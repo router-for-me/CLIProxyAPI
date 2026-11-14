@@ -3,7 +3,7 @@ package auth_test
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // TestSupportedCompletionFormatsRecognized covers representative wire formats

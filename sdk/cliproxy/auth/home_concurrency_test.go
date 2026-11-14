@@ -13,9 +13,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type fixtureHomeDispatcher struct {
@@ -24,6 +24,21 @@ type fixtureHomeDispatcher struct {
 	calls              int
 	closedForAmbiguity bool
 	onAbort            func()
+}
+
+func TestHomeModelVariantUnavailablePreservesRoutingSemantics(t *testing.T) {
+	err := decodeHomeDispatchError([]byte(`{"error":{"type":"model_variant_unavailable","message":"no advertised variant","retryable":true}}`))
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.StatusCode() != http.StatusBadRequest || !authErr.Retryable {
+		t.Fatalf("decoded variant error = %v", err)
+	}
+	if isRequestInvalidError(fmt.Errorf("dispatch: %w", err)) {
+		t.Fatal("account-specific absence stopped alternate routing")
+	}
+	result := resultErrorFromError(err)
+	if result.Code != ErrorCodeModelVariantUnavailable || !shouldSkipCredentialCooldown(result) {
+		t.Fatalf("variant absence lost its no-cooldown classification: %+v", result)
+	}
 }
 
 func (d *fixtureHomeDispatcher) HeartbeatOK() bool { return true }
@@ -391,6 +406,25 @@ func TestHomeNoCandidateErrorsMapToServiceUnavailable(t *testing.T) {
 			var authErr *Error
 			if !errors.As(errDispatch, &authErr) || authErr.Code != code || authErr.HTTPStatus != http.StatusServiceUnavailable {
 				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want 503", code, errDispatch)
+			}
+		})
+	}
+}
+
+func TestHomeUserBillingAndPeriodLimitErrors(t *testing.T) {
+	tests := []struct {
+		code       string
+		wantStatus int
+	}{
+		{code: "user_credits_insufficient", wantStatus: http.StatusPaymentRequired},
+		{code: "user_period_limit_exceeded", wantStatus: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			errDispatch := decodeHomeDispatchError([]byte(fmt.Sprintf(`{"error":{"type":%q,"message":"limit hit"}}`, tt.code)))
+			var authErr *Error
+			if !errors.As(errDispatch, &authErr) || authErr.Code != tt.code || authErr.HTTPStatus != tt.wantStatus {
+				t.Fatalf("decodeHomeDispatchError(%s) = %#v, want %d", tt.code, errDispatch, tt.wantStatus)
 			}
 		})
 	}

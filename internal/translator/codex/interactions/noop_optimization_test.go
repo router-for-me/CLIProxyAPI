@@ -3,13 +3,14 @@ package interactions
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestCleanedCodexToolParametersPreservesCanonicalSchema(t *testing.T) {
 	input := []byte(`{"type":"object","properties":{"value":{"type":"string"}},"additionalProperties":false}`)
 
-	output := []byte(cleanedCodexToolParameters(gjson.ParseBytes(input)))
+	output := []byte(cleanedCodexToolParameters(util.ParseGJSONBytesNoCopy(input)))
 
 	if string(output) != string(input) {
 		t.Fatalf("canonical schema changed:\n got: %s\nwant: %s", output, input)
@@ -18,7 +19,7 @@ func TestCleanedCodexToolParametersPreservesCanonicalSchema(t *testing.T) {
 
 func TestSetInteractionsCodexRawIfDifferentReusesMatchingValue(t *testing.T) {
 	input := []byte(`{"tool_choice":"auto","input":[]}`)
-	value := gjson.Parse(`"auto"`)
+	value := ojson.Parse(`"auto"`)
 
 	output := setInteractionsCodexRawIfDifferent(input, "tool_choice", value)
 

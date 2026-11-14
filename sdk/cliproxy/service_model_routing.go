@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelrouting"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelrouting"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )

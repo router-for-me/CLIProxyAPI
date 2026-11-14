@@ -3,9 +3,9 @@ package modelconfig
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
 
 // TestResolveModelInfoUnknownModelKeepsClientThinkingConfig pins the behaviour
@@ -41,10 +41,10 @@ func TestResolveModelInfoUnknownModelKeepsClientThinkingConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
 	}
-	if include := gjson.GetBytes(out, "generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+	if include := ojson.GetBytes(out, "generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
 		t.Fatalf("includeThoughts = %v (exists=%v), want true; body=%s", include.Bool(), include.Exists(), out)
 	}
-	if budget := gjson.GetBytes(out, "generationConfig.thinkingConfig.thinkingBudget"); !budget.Exists() || budget.Int() != 2048 {
+	if budget := ojson.GetBytes(out, "generationConfig.thinkingConfig.thinkingBudget"); !budget.Exists() || budget.Int() != 2048 {
 		t.Fatalf("thinkingBudget = %d (exists=%v), want 2048; body=%s", budget.Int(), budget.Exists(), out)
 	}
 }

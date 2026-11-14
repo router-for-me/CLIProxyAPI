@@ -17,18 +17,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/geminicli"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
@@ -590,7 +589,7 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			count := gjson.GetBytes(data, "totalTokens").Int()
+			count := ojson.GetBytes(data, "totalTokens").Int()
 			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, data)
 			return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
 		}
@@ -858,7 +857,7 @@ func setJSONField(body []byte, key, value string) []byte {
 	if key == "" {
 		return body
 	}
-	updated, err := sjson.SetBytes(body, key, value)
+	updated, err := ojson.SetBytes(body, key, value)
 	if err != nil {
 		return body
 	}
@@ -870,7 +869,7 @@ func deleteJSONField(body []byte, key string) []byte {
 	if key == "" || len(body) == 0 {
 		return body
 	}
-	updated, err := sjson.DeleteBytes(body, key)
+	updated, err := ojson.DeleteBytes(body, key)
 	if err != nil {
 		return body
 	}
@@ -881,14 +880,14 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	hasTools := gjson.GetBytes(body, "request.tools.0").Exists()
-	hasResponseSchema := gjson.GetBytes(body, "request.generationConfig.responseSchema").Exists()
-	hasResponseJSONSchema := gjson.GetBytes(body, "request.generationConfig.responseJsonSchema").Exists()
+	hasTools := ojson.GetBytes(body, "request.tools.0").Exists()
+	hasResponseSchema := ojson.GetBytes(body, "request.generationConfig.responseSchema").Exists()
+	hasResponseJSONSchema := ojson.GetBytes(body, "request.generationConfig.responseJsonSchema").Exists()
 	if !hasTools && !hasResponseSchema && !hasResponseJSONSchema {
 		return body
 	}
 
-	tools := gjson.GetBytes(body, "request.tools")
+	tools := ojson.GetBytes(body, "request.tools")
 	if tools.IsArray() {
 		for i, tool := range tools.Array() {
 			for _, declarationsKey := range []string{"function_declarations", "functionDeclarations"} {
@@ -904,7 +903,7 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 						}
 						cleaned := util.CleanJSONSchemaForGemini(params.Raw)
 						path := fmt.Sprintf("request.tools.%d.%s.%d.%s", i, declarationsKey, j, schemaKey)
-						updated, errSet := sjson.SetRawBytes(body, path, []byte(cleaned))
+						updated, errSet := ojson.SetRawBytes(body, path, []byte(cleaned))
 						if errSet != nil {
 							log.Errorf("gemini cli executor: failed to set cleaned schema at %s: %v", path, errSet)
 							continue
@@ -920,12 +919,12 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 		"request.generationConfig.responseSchema",
 		"request.generationConfig.responseJsonSchema",
 	} {
-		responseSchema := gjson.GetBytes(body, schemaPath)
+		responseSchema := ojson.GetBytes(body, schemaPath)
 		if !responseSchema.IsObject() {
 			continue
 		}
 		cleaned := util.CleanJSONSchemaForGemini(responseSchema.Raw)
-		updated, errSet := sjson.SetRawBytes(body, schemaPath, []byte(cleaned))
+		updated, errSet := ojson.SetRawBytes(body, schemaPath, []byte(cleaned))
 		if errSet != nil {
 			log.Errorf("gemini cli executor: failed to set cleaned response schema at %s: %v", schemaPath, errSet)
 			continue
@@ -938,9 +937,9 @@ func cleanGeminiCLIRequestSchemas(body []byte) []byte {
 
 func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 	if modelName == "gemini-2.5-flash-image-preview" {
-		aspectRatioResult := gjson.GetBytes(rawJSON, "request.generationConfig.imageConfig.aspectRatio")
+		aspectRatioResult := ojson.GetBytes(rawJSON, "request.generationConfig.imageConfig.aspectRatio")
 		if aspectRatioResult.Exists() {
-			contents := gjson.GetBytes(rawJSON, "request.contents")
+			contents := ojson.GetBytes(rawJSON, "request.contents")
 			contentArray := contents.Array()
 			if len(contentArray) > 0 {
 				hasInlineData := false
@@ -958,21 +957,21 @@ func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {
 				if !hasInlineData {
 					emptyImageBase64ed, _ := util.CreateWhiteImageBase64(aspectRatioResult.String())
 					emptyImagePart := []byte(`{"inlineData":{"mime_type":"image/png","data":""}}`)
-					emptyImagePart, _ = sjson.SetBytes(emptyImagePart, "inlineData.data", emptyImageBase64ed)
+					emptyImagePart, _ = ojson.SetBytes(emptyImagePart, "inlineData.data", emptyImageBase64ed)
 					newPartsJson := []byte(`[]`)
-					newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", []byte(`{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`))
-					newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", emptyImagePart)
+					newPartsJson, _ = ojson.SetRawBytes(newPartsJson, "-1", []byte(`{"text": "Based on the following requirements, create an image within the uploaded picture. The new content *MUST* completely cover the entire area of the original picture, maintaining its exact proportions, and *NO* blank areas should appear."}`))
+					newPartsJson, _ = ojson.SetRawBytes(newPartsJson, "-1", emptyImagePart)
 
 					parts := contentArray[0].Get("parts").Array()
 					for j := 0; j < len(parts); j++ {
-						newPartsJson, _ = sjson.SetRawBytes(newPartsJson, "-1", []byte(parts[j].Raw))
+						newPartsJson, _ = ojson.SetRawBytes(newPartsJson, "-1", []byte(parts[j].Raw))
 					}
 
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents.0.parts", newPartsJson)
-					rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.generationConfig.responseModalities", []byte(`["IMAGE", "TEXT"]`))
+					rawJSON, _ = ojson.SetRawBytes(rawJSON, "request.contents.0.parts", newPartsJson)
+					rawJSON, _ = ojson.SetRawBytes(rawJSON, "request.generationConfig.responseModalities", []byte(`["IMAGE", "TEXT"]`))
 				}
 			}
-			rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.generationConfig.imageConfig")
+			rawJSON, _ = ojson.DeleteBytes(rawJSON, "request.generationConfig.imageConfig")
 		}
 	}
 	return rawJSON
@@ -994,7 +993,7 @@ func newGeminiStatusErr(statusCode int, body []byte) statusErr {
 func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	// Try to parse the retryDelay from the error response
 	// Format: error.details[].retryDelay where @type == "type.googleapis.com/google.rpc.RetryInfo"
-	details := gjson.GetBytes(errorBody, "error.details")
+	details := ojson.GetBytes(errorBody, "error.details")
 	if details.Exists() && details.IsArray() {
 		for _, detail := range details.Array() {
 			typeVal := detail.Get("@type").String()
@@ -1027,7 +1026,7 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 	}
 
 	// Fallback: parse from error.message "Your quota will reset after Xs."
-	message := gjson.GetBytes(errorBody, "error.message").String()
+	message := ojson.GetBytes(errorBody, "error.message").String()
 	if message != "" {
 		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {

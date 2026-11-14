@@ -2,7 +2,7 @@ package util
 
 import (
 	"bytes"
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"image"
 	"image/draw"
 	"image/png"

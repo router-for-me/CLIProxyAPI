@@ -10,8 +10,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestRequestGitLabPATToken_SavesAuthRecord(t *testing.T) {
@@ -58,7 +59,7 @@ func TestRequestGitLabPATToken_SavesAuthRecord(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	store := &memoryAuthStore{}
+	store := sdkauth.NewFileTokenStore()
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, coreauth.NewManager(nil, nil, nil))
 	h.tokenStore = store
 
@@ -87,15 +88,14 @@ func TestRequestGitLabPATToken_SavesAuthRecord(t *testing.T) {
 		t.Fatalf("model_name = %#v, want claude-sonnet-4-5", got)
 	}
 
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if len(store.items) != 1 {
-		t.Fatalf("expected 1 saved auth record, got %d", len(store.items))
+	savedRecords, errList := store.List(t.Context())
+	if errList != nil {
+		t.Fatal(errList)
 	}
-	var saved *coreauth.Auth
-	for _, item := range store.items {
-		saved = item
+	if len(savedRecords) != 1 {
+		t.Fatalf("expected 1 saved auth record, got %d", len(savedRecords))
 	}
+	saved := savedRecords[0]
 	if saved == nil {
 		t.Fatal("expected saved auth record")
 	}

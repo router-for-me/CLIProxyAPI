@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
@@ -16,7 +16,7 @@ func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	if len(result1) != 1 {
 		t.Fatalf("expected 1 result from chunk1, got %d", len(result1))
 	}
-	fr1 := gjson.GetBytes(result1[0], "choices.0.finish_reason")
+	fr1 := ojson.GetBytes(result1[0], "choices.0.finish_reason")
 	if fr1.Exists() && fr1.String() != "" && fr1.Type.String() != "Null" {
 		t.Fatalf("expected null finish_reason on tool chunk, got %v", fr1.String())
 	}
@@ -29,11 +29,11 @@ func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	if len(result3) != 1 {
 		t.Fatalf("expected 1 result from chunk3, got %d", len(result3))
 	}
-	fr3 := gjson.GetBytes(result3[0], "choices.0.finish_reason").String()
+	fr3 := ojson.GetBytes(result3[0], "choices.0.finish_reason").String()
 	if fr3 != "tool_calls" {
 		t.Fatalf("expected finish_reason tool_calls, got %s", fr3)
 	}
-	nfr3 := gjson.GetBytes(result3[0], "choices.0.native_finish_reason").String()
+	nfr3 := ojson.GetBytes(result3[0], "choices.0.native_finish_reason").String()
 	if nfr3 != "stop" {
 		t.Fatalf("expected native_finish_reason stop, got %s", nfr3)
 	}

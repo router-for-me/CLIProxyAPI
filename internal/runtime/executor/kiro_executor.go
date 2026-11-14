@@ -21,16 +21,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
-	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/claude"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/common"
+	kiroopenai "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/kiro/openai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -1588,8 +1588,11 @@ var kiroVersionAliases = [...]struct {
 	// Claude families
 	{"claude-sonnet-4-5", "claude-sonnet-4.5"},
 	{"claude-sonnet-4-6", "claude-sonnet-4.6"},
+	{"claude-sonnet-5-5", "claude-sonnet-5.5"},
 	{"claude-opus-4-5", "claude-opus-4.5"},
 	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-opus-4-8", "claude-opus-4.8"},
+	{"claude-opus-5-5", "claude-opus-5.5"},
 	{"claude-haiku-4-5", "claude-haiku-4.5"},
 	// Other Kiro backend families
 	{"minimax-m2-1", "minimax-m2.1"},

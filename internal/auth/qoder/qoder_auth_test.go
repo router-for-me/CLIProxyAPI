@@ -2,6 +2,7 @@ package qoder
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // TestNewQoderAuth tests the constructor with proxy configuration
@@ -542,5 +543,210 @@ func TestFormatExpiresAt(t *testing.T) {
 	}
 	if !strings.Contains(result, "2026") {
 		t.Errorf("formatted expire %q does not contain 2026", result)
+	}
+}
+
+func TestExchangePersonalToken_UsesJobTokenProtocol(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != QoderJobTokenExchangePath {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body["personal_token"] != "pt-test" {
+			t.Fatalf("personal_token = %q", body["personal_token"])
+		}
+		if got := r.Header.Get("Cosy-Version"); got != QoderGatewayCosyVersion {
+			t.Fatalf("Cosy-Version = %q, want %q", got, QoderGatewayCosyVersion)
+		}
+		if got := r.Header.Get("Cosy-Machineos"); got != QoderCNMachineOS {
+			t.Fatalf("Cosy-Machineos = %q, want %q", got, QoderCNMachineOS)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"token":"jt-test","refresh_token":"jrt-test","expires_in":86400000}`)
+	}))
+	defer server.Close()
+
+	auth := NewQoderAuth(&config.Config{})
+	auth.httpClient = server.Client()
+	auth.endpoints.OpenAPIBase = server.URL
+	auth.endpoints.VPCInstance = "acme"
+
+	before := time.Now().Add(23 * time.Hour).UnixMilli()
+	tokenData, err := auth.ExchangePersonalToken(context.Background(), "pt-test")
+	if err != nil {
+		t.Fatalf("ExchangePersonalToken() error = %v", err)
+	}
+	if tokenData.AccessToken != "jt-test" || tokenData.RefreshToken != "jrt-test" {
+		t.Fatalf("tokenData = %+v", tokenData)
+	}
+	if tokenData.AuthMode != "job-token" {
+		t.Fatalf("AuthMode = %q, want job-token", tokenData.AuthMode)
+	}
+	if tokenData.ExpireTime <= before {
+		t.Fatalf("ExpireTime = %d, expected about one day from now", tokenData.ExpireTime)
+	}
+}
+
+func TestRefreshJobToken_UsesRefreshEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != QoderJobTokenRefreshPath {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body["refresh_token"] != "jrt-old" {
+			t.Fatalf("refresh_token = %q", body["refresh_token"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"token":"jt-new","refresh_token":"jrt-new","expires_in":3600}`)
+	}))
+	defer server.Close()
+
+	auth := NewQoderAuth(&config.Config{})
+	auth.httpClient = server.Client()
+	auth.endpoints.OpenAPIBase = server.URL
+	auth.endpoints.VPCInstance = "acme"
+
+	tokenData, err := auth.RefreshJobToken(context.Background(), "jrt-old")
+	if err != nil {
+		t.Fatalf("RefreshJobToken() error = %v", err)
+	}
+	if tokenData.AccessToken != "jt-new" || tokenData.RefreshToken != "jrt-new" {
+		t.Fatalf("tokenData = %+v", tokenData)
+	}
+	if tokenData.AuthMode != "job-token" {
+		t.Fatalf("AuthMode = %q, want job-token", tokenData.AuthMode)
+	}
+}
+
+func TestFetchUserInfoDetails_ExtractsNestedOrganization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/organizations/org-1/tags" {
+			if r.Header.Get("Cosy-Version") != QoderGatewayCosyVersion || r.Header.Get("Cosy-Machineos") != QoderCNMachineOS {
+				t.Fatalf("organization tags headers = %v", r.Header)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"tags":["tag-a"]}`)
+			return
+		}
+		if r.Header.Get("Cosy-Version") != QoderGatewayCosyVersion || r.Header.Get("Cosy-Machineos") != QoderCNMachineOS {
+			t.Fatalf("userinfo headers = %v", r.Header)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/v1/userinfo" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"id":"user-1","username":"user-name","email":"user@example.com","organization":{"id":"org-1","name":"Org One"}}`)
+	}))
+	defer server.Close()
+
+	auth := NewQoderAuth(&config.Config{})
+	auth.httpClient = server.Client()
+	auth.endpoints.OpenAPIBase = server.URL
+	auth.endpoints.VPCInstance = "acme"
+
+	details, err := auth.FetchUserInfoDetails(context.Background(), "jt-test")
+	if err != nil {
+		t.Fatalf("FetchUserInfoDetails() error = %v", err)
+	}
+	if details.UserID != "user-1" || details.OrganizationID != "org-1" || details.Name != "user-name" {
+		t.Fatalf("details = %+v", details)
+	}
+	if len(details.OrganizationTags) != 1 || details.OrganizationTags[0] != "tag-a" {
+		t.Fatalf("OrganizationTags = %+v", details.OrganizationTags)
+	}
+}
+
+func TestJobTokenExpiry_HandlesMillisecondDuration(t *testing.T) {
+	before := time.Now().Add(23 * time.Hour).UnixMilli()
+	got := parseJobTokenExpiresAt("", 86400000)
+	if got <= before {
+		t.Fatalf("parseJobTokenExpiresAt() = %d, expected about one day from now", got)
+	}
+}
+
+func TestParseExpiresAt_HandlesLongSecondDuration(t *testing.T) {
+	before := time.Now().Add(29 * 24 * time.Hour).UnixMilli()
+	got := parseExpiresAt("", 30*24*60*60)
+	if got <= before {
+		t.Fatalf("parseExpiresAt() = %d, expected about 30 days from now", got)
+	}
+}
+
+func TestParseExpiresAt_HandlesUnixSecondTimestamp(t *testing.T) {
+	got := parseExpiresAt("1781594470", 0)
+	if got != 1781594470000 {
+		t.Fatalf("parseExpiresAt() = %d, want %d", got, int64(1781594470000))
+	}
+}
+
+func TestJobTokenExpiryAliasesMatchOfficialCLIShape(t *testing.T) {
+	response := JobTokenResponse{
+		Token:                  "jt-test",
+		RefreshToken:           "jrt-test",
+		ExpireTimeCamel:        json.RawMessage(`1781594470`),
+		RefreshTokenExpireTime: json.RawMessage(`1813123200`),
+	}
+	if got := jobTokenExpireTime(response); got != 1781594470000 {
+		t.Fatalf("jobTokenExpireTime() = %d, want %d", got, int64(1781594470000))
+	}
+	if got := jobTokenRefreshTokenExpireTime(response); got != 1813123200000 {
+		t.Fatalf("jobTokenRefreshTokenExpireTime() = %d, want %d", got, int64(1813123200000))
+	}
+}
+
+func TestBuildAuthHeaders_EnterpriseVPCIdentity(t *testing.T) {
+	const machineID = "11111111-2222-3333-4444-555555555555"
+	headers, err := BuildAuthHeaders(nil, "https://acme-gateway.vpc.qoder.com.cn/algo/api/v2/model/list?Encode=1", CosyCredentials{
+		UserID:           "user-1",
+		AuthToken:        "jt-test",
+		MachineID:        machineID,
+		OrganizationID:   "org-1",
+		OrganizationTags: []string{"tag-a", "tag-b"},
+		EnterpriseVPC:    true,
+	})
+	if err != nil {
+		t.Fatalf("BuildAuthHeaders() error = %v", err)
+	}
+	if headers.CosyVersion != QoderGatewayCosyVersion {
+		t.Errorf("CosyVersion = %q, want %q", headers.CosyVersion, QoderGatewayCosyVersion)
+	}
+	if headers.CosyMachineOS != QoderCNMachineOS {
+		t.Errorf("CosyMachineOS = %q, want %q", headers.CosyMachineOS, QoderCNMachineOS)
+	}
+	if headers.CosyClientIP != machineID {
+		t.Errorf("CosyClientIP = %q, want %q", headers.CosyClientIP, machineID)
+	}
+	if headers.CosyOrganizationID != "org-1" || headers.CosyScene != "assistant" {
+		t.Errorf("enterprise headers = %+v", headers)
+	}
+	if headers.CosyOrgTags != "tag-a,tag-b" {
+		t.Errorf("CosyOrgTags = %q, want tag-a,tag-b", headers.CosyOrgTags)
+	}
+	if headers.CosyBusinessProduct != "cli" || headers.CosyBusinessType != "agent" {
+		t.Errorf("business headers = %+v", headers)
+	}
+}
+
+func TestBuildAuthHeaders_GlobalOmitsEnterpriseIdentity(t *testing.T) {
+	headers, err := BuildAuthHeaders(nil, QoderModelListURL, CosyCredentials{
+		UserID:           "user-1",
+		AuthToken:        "dt-test",
+		OrganizationID:   "org-1",
+		OrganizationTags: []string{"tag-a"},
+	})
+	if err != nil {
+		t.Fatalf("BuildAuthHeaders() error = %v", err)
+	}
+	if headers.CosyOrganizationID != "" || headers.CosyOrgTags != "" || headers.CosyScene != "" {
+		t.Fatalf("global headers contain enterprise identity: %+v", headers)
+	}
+	if headers.CosyVersion != QoderIDEVersion || headers.CosyMachineOS != QoderMachineOS {
+		t.Fatalf("global identity changed: %+v", headers)
 	}
 }

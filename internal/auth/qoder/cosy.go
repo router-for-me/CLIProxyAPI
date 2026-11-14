@@ -35,11 +35,13 @@ XcW+ML9FoCI6AOvOzwIDAQAB
 
 // UserInfo represents the encrypted user information payload
 type UserInfo struct {
-	UID                string `json:"uid"`
-	SecurityOAuthToken string `json:"security_oauth_token"`
-	Name               string `json:"name"`
-	AID                string `json:"aid"`
-	Email              string `json:"email"`
+	UID                string   `json:"uid"`
+	SecurityOAuthToken string   `json:"security_oauth_token"`
+	Name               string   `json:"name"`
+	AID                string   `json:"aid"`
+	Email              string   `json:"email"`
+	OrganizationID     string   `json:"organization_id,omitempty"`
+	OrganizationTags   []string `json:"organization_tags,omitempty"`
 }
 
 // CosyPayload represents the payload structure for COSY authentication
@@ -58,22 +60,25 @@ type CosyHeaders struct {
 	Authorization string
 
 	// Cosy-* headers
-	CosyKey            string
-	CosyUser           string
-	CosyDate           string
-	CosyVersion        string
-	CosyMachineID      string
-	CosyMachineToken   string
-	CosyMachineType    string
-	CosyMachineOS      string
-	CosyClientType     string
-	CosyClientIP       string
-	CosyBodyHash       string
-	CosyBodyLength     string
-	CosySigPath        string
-	CosyDataPolicy     string
-	CosyOrganizationID string
-	CosyOrgTags        string
+	CosyBusinessProduct string
+	CosyBusinessType    string
+	CosyKey             string
+	CosyUser            string
+	CosyDate            string
+	CosyVersion         string
+	CosyMachineID       string
+	CosyMachineToken    string
+	CosyMachineType     string
+	CosyMachineOS       string
+	CosyClientType      string
+	CosyClientIP        string
+	CosyBodyHash        string
+	CosyBodyLength      string
+	CosySigPath         string
+	CosyDataPolicy      string
+	CosyOrganizationID  string
+	CosyOrgTags         string
+	CosyScene           string
 
 	// X-* and Login-* auxiliary headers
 	XRequestID   string
@@ -87,6 +92,12 @@ func (h *CosyHeaders) Apply(req *http.Request) {
 		return
 	}
 	req.Header.Set("Authorization", h.Authorization)
+	if h.CosyBusinessProduct != "" {
+		req.Header.Set("Cosy-Business-Product", h.CosyBusinessProduct)
+	}
+	if h.CosyBusinessType != "" {
+		req.Header.Set("Cosy-Business-Type", h.CosyBusinessType)
+	}
 	req.Header.Set("Cosy-Key", h.CosyKey)
 	req.Header.Set("Cosy-User", h.CosyUser)
 	req.Header.Set("Cosy-Date", h.CosyDate)
@@ -103,6 +114,9 @@ func (h *CosyHeaders) Apply(req *http.Request) {
 	req.Header.Set("Cosy-Data-Policy", h.CosyDataPolicy)
 	req.Header.Set("Cosy-Organization-Id", h.CosyOrganizationID)
 	req.Header.Set("Cosy-Organization-Tags", h.CosyOrgTags)
+	if h.CosyScene != "" {
+		req.Header.Set("Cosy-Scene", h.CosyScene)
+	}
 	req.Header.Set("Login-Version", h.LoginVersion)
 	req.Header.Set("X-Request-Id", h.XRequestID)
 }
@@ -229,11 +243,14 @@ func bytesRepeat(b byte, count int) []byte {
 // Build it once per call from the live token storage and pass it into
 // BuildAuthHeaders.
 type CosyCredentials struct {
-	UserID    string
-	AuthToken string
-	Name      string
-	Email     string
-	MachineID string
+	UserID           string
+	AuthToken        string
+	Name             string
+	Email            string
+	MachineID        string
+	OrganizationID   string
+	OrganizationTags []string
+	EnterpriseVPC    bool
 }
 
 // FromStorage populates CosyCredentials from the persisted QoderTokenStorage.
@@ -246,6 +263,8 @@ func (c *CosyCredentials) FromStorage(s *QoderTokenStorage) {
 	c.Name = s.Name
 	c.Email = s.Email
 	c.MachineID = s.MachineID
+	c.OrganizationID = s.OrganizationID
+	c.OrganizationTags = append([]string(nil), s.OrganizationTags...)
 }
 
 // computeSigPath extracts the signing path from a request URL by:
@@ -281,13 +300,25 @@ func BuildAuthHeaders(body []byte, requestURL string, creds CosyCredentials) (*C
 		return nil, fmt.Errorf("cosy: auth token is empty")
 	}
 
-	cosyKey, infoB64, err := encryptUserInfo(&UserInfo{
+	cosyVersion := QoderIDEVersion
+	machineOS := QoderMachineOS
+	if creds.EnterpriseVPC {
+		cosyVersion = QoderGatewayCosyVersion
+		machineOS = QoderCNMachineOS
+	}
+
+	userInfo := &UserInfo{
 		UID:                creds.UserID,
 		SecurityOAuthToken: creds.AuthToken,
 		Name:               creds.Name,
 		AID:                "",
 		Email:              creds.Email,
-	})
+	}
+	if creds.EnterpriseVPC {
+		userInfo.OrganizationID = creds.OrganizationID
+		userInfo.OrganizationTags = creds.OrganizationTags
+	}
+	cosyKey, infoB64, err := encryptUserInfo(userInfo)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt user info: %w", err)
 	}
@@ -299,7 +330,7 @@ func BuildAuthHeaders(body []byte, requestURL string, creds CosyCredentials) (*C
 		Version:     "v1",
 		RequestID:   requestID,
 		Info:        infoB64,
-		CosyVersion: QoderIDEVersion,
+		CosyVersion: cosyVersion,
 		IdeVersion:  "",
 	})
 	if err != nil {
@@ -324,26 +355,45 @@ func BuildAuthHeaders(body []byte, requestURL string, creds CosyCredentials) (*C
 		machineID = generateMachineID()
 	}
 
+	clientIP := "127.0.0.1"
+	if creds.EnterpriseVPC {
+		// qoderclicn advertises the installation machine identifier in both
+		// fields for current CN gateway requests.
+		clientIP = machineID
+	}
+	businessProduct, businessType, organizationID, orgTags, scene := "", "", "", "", ""
+	if creds.EnterpriseVPC {
+		// qoderclicn sends organization tags as a comma-separated header value.
+		businessProduct = "cli"
+		businessType = "agent"
+		organizationID = creds.OrganizationID
+		orgTags = strings.Join(creds.OrganizationTags, ",")
+		scene = "assistant"
+	}
+
 	return &CosyHeaders{
-		Authorization:      fmt.Sprintf("Bearer COSY.%s.%s", payloadB64, sig),
-		CosyKey:            cosyKey,
-		CosyUser:           creds.UserID,
-		CosyDate:           timestamp,
-		CosyVersion:        QoderIDEVersion,
-		CosyMachineID:      machineID,
-		CosyMachineToken:   machineID,
-		CosyMachineType:    QoderMachineTypeMagic,
-		CosyMachineOS:      QoderMachineOS,
-		CosyClientType:     QoderClientType,
-		CosyClientIP:       "127.0.0.1",
-		CosyBodyHash:       bodyHash,
-		CosyBodyLength:     bodyLen,
-		CosySigPath:        sigPath,
-		CosyDataPolicy:     QoderDataPolicy,
-		CosyOrganizationID: "",
-		CosyOrgTags:        "",
-		LoginVersion:       QoderLoginVersion,
-		XRequestID:         uuid.New().String(),
+		Authorization:       fmt.Sprintf("Bearer COSY.%s.%s", payloadB64, sig),
+		CosyBusinessProduct: businessProduct,
+		CosyBusinessType:    businessType,
+		CosyKey:             cosyKey,
+		CosyUser:            creds.UserID,
+		CosyDate:            timestamp,
+		CosyVersion:         cosyVersion,
+		CosyMachineID:       machineID,
+		CosyMachineToken:    machineID,
+		CosyMachineType:     QoderMachineTypeMagic,
+		CosyMachineOS:       machineOS,
+		CosyClientType:      QoderClientType,
+		CosyClientIP:        clientIP,
+		CosyBodyHash:        bodyHash,
+		CosyBodyLength:      bodyLen,
+		CosySigPath:         sigPath,
+		CosyDataPolicy:      QoderDataPolicy,
+		CosyOrganizationID:  organizationID,
+		CosyOrgTags:         orgTags,
+		CosyScene:           scene,
+		LoginVersion:        QoderLoginVersion,
+		XRequestID:          uuid.New().String(),
 	}, nil
 }
 
@@ -377,6 +427,13 @@ func generateMachineID() string {
 	return uuid.New().String()
 }
 
+// NewMachineID returns a stable-in-process machine identifier for a newly
+// created Qoder credential. Existing credentials persist this value in their
+// auth file and reuse it for later requests.
+func NewMachineID() string {
+	return generateMachineID()
+}
+
 // formatExpiresAt converts milliseconds epoch to RFC3339 format
 func formatExpiresAt(expireMs int64) string {
 	return time.Unix(0, expireMs*int64(time.Millisecond)).Format(time.RFC3339)
@@ -396,8 +453,13 @@ func parseExpiresAt(s string, expiresInSeconds int64) int64 {
 		if t, err := time.Parse(time.RFC3339, s); err == nil {
 			return t.UnixMilli()
 		}
-		if ms, err := strconv.ParseInt(s, 10, 64); err == nil && ms > 0 {
-			return ms
+		if timestamp, err := strconv.ParseInt(s, 10, 64); err == nil && timestamp > 0 {
+			// Qoder's absolute expiry fields have appeared as both Unix seconds
+			// and Unix milliseconds across auth protocol revisions.
+			if timestamp < 100_000_000_000 {
+				return timestamp * 1000
+			}
+			return timestamp
 		}
 	}
 	if expiresInSeconds > 0 {

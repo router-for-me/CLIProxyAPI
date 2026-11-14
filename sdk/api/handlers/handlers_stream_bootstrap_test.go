@@ -13,15 +13,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type failOnceStreamExecutor struct {
@@ -617,6 +617,54 @@ func TestExecuteStreamWithAuthManager_CancelDuringSynchronousBootstrap(t *testin
 		}
 	case <-time.After(time.Second):
 		t.Fatal("bootstrap cancellation did not return")
+	}
+}
+
+func TestExecuteStreamWithPreFTKeepAlive_CancelWaitsForBootstrapGoroutine(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	started := make(chan struct{})
+	releaseExec := make(chan struct{})
+	execExited := false
+	executor := &bootstrapStreamExecutor{stream: func(ctx context.Context, _ int) (*coreexecutor.StreamResult, error) {
+		close(started)
+		<-ctx.Done()
+		<-releaseExec
+		execExited = true
+		return nil, ctx.Err()
+	}}
+	handler, _ := registerBootstrapExecutor(t, executor)
+
+	reqCtx, reqCancel := context.WithCancel(context.Background())
+	defer reqCancel()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
+
+	cliCtx, cliCancel := context.WithCancel(context.Background())
+	defer cliCancel()
+	tickChan := make(chan time.Time)
+
+	done := make(chan bool, 1)
+	go func() {
+		_, _, _, ok := handler.ExecuteStreamWithPreFTKeepAlive(
+			c, cliCtx, func(error) { cliCancel() }, "openai", "bootstrap-model", []byte("{\"model\":\"bootstrap-model\"}"), "", tickChan, func() bool { return true },
+		)
+		done <- ok
+	}()
+
+	<-started
+	reqCancel()
+	select {
+	case <-done:
+		t.Fatal("ExecuteStreamWithPreFTKeepAlive returned before bootstrap goroutine finished")
+	default:
+	}
+	close(releaseExec)
+	if ok := <-done; ok {
+		t.Fatal("ExecuteStreamWithPreFTKeepAlive ok = true, want false after cancel")
+	}
+	if !execExited {
+		t.Fatal("expected bootstrap executor goroutine to exit before return")
 	}
 }
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,6 +21,7 @@ func (s *Server) registerManagementRoutes() {
 
 	log.Info("management routes registered after secret key configuration")
 
+	s.registerManagementV8Routes()
 	s.engine.POST("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallback)
 	s.engine.GET("/v0/management/oauth-callback", s.managementAvailabilityMiddleware(), s.mgmt.GetOAuthCallback)
 
@@ -31,7 +32,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
-		mgmt.GET("/model-inventory", s.mgmt.GetModelInventory)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
@@ -43,6 +43,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/plugins/:id/config", s.mgmt.GetPluginConfig)
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
+		mgmt.GET("/plugins/:id/quota", s.mgmt.GetPluginQuota)
+		mgmt.POST("/plugins/:id/quota", s.mgmt.FetchPluginQuota)
+		mgmt.DELETE("/plugins/:id/quota", s.mgmt.ResetPluginQuota)
+		mgmt.POST("/plugins/:id/quota/reset", s.mgmt.ResetPluginQuota)
 
 		mgmt.GET("/debug", s.mgmt.GetDebug)
 		mgmt.PUT("/debug", s.mgmt.PutDebug)
@@ -80,6 +84,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
 		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
+
+		mgmt.GET("/quota/providers", s.mgmt.GetQuotaProviders)
+		mgmt.POST("/quota/fetch", s.mgmt.FetchCredentialQuota)
+		mgmt.POST("/quota/reset", s.mgmt.ResetCredentialQuota)
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
@@ -167,20 +175,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
-		mgmt.GET("/opencode-api-key", s.mgmt.GetOpenCodeKeys)
-		mgmt.PUT("/opencode-api-key", s.mgmt.PutOpenCodeKeys)
-		mgmt.PATCH("/opencode-api-key", s.mgmt.PatchOpenCodeKey)
-		mgmt.DELETE("/opencode-api-key", s.mgmt.DeleteOpenCodeKey)
-
-		mgmt.GET("/opencode-go-api-key", s.mgmt.GetOpenCodeGoKeys)
-		mgmt.PUT("/opencode-go-api-key", s.mgmt.PutOpenCodeGoKeys)
-		mgmt.PATCH("/opencode-go-api-key", s.mgmt.PatchOpenCodeGoKey)
-		mgmt.DELETE("/opencode-go-api-key", s.mgmt.DeleteOpenCodeGoKey)
-
-		mgmt.GET("/poolside-api-key", s.mgmt.GetPoolsideKeys)
-		mgmt.PUT("/poolside-api-key", s.mgmt.PutPoolsideKeys)
-		mgmt.PATCH("/poolside-api-key", s.mgmt.PatchPoolsideKey)
-		mgmt.DELETE("/poolside-api-key", s.mgmt.DeletePoolsideKey)
+		mgmt.GET("/meta-api-key", s.mgmt.GetMetaKeys)
+		mgmt.PUT("/meta-api-key", s.mgmt.PutMetaKeys)
+		mgmt.PATCH("/meta-api-key", s.mgmt.PatchMetaKey)
+		mgmt.DELETE("/meta-api-key", s.mgmt.DeleteMetaKey)
 
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
@@ -215,6 +213,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
+		mgmt.POST("/auth-files/refresh", s.mgmt.RefreshAuthFiles)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
@@ -224,15 +223,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kilo-auth-url", s.mgmt.RequestKiloToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/kimi-ai-auth-url", s.mgmt.RequestKimiAIToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
-		mgmt.GET("/zai-auth-url", s.mgmt.RequestZAIToken)
-		mgmt.GET("/bigmodel-auth-url", s.mgmt.RequestBigModelToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.GET("/kiro-auth-url", s.mgmt.RequestKiroToken)
 		mgmt.GET("/cursor-auth-url", s.mgmt.RequestCursorToken)
 		mgmt.GET("/github-auth-url", s.mgmt.RequestGitHubToken)
 		mgmt.GET("/qoder-auth-url", s.mgmt.RequestQoderToken)
+		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
+		mgmt.GET("/meta-auth-url", s.mgmt.RequestMetaToken)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 		mgmt.DELETE("/oauth-session", s.mgmt.CancelAuthSession)
 	}
@@ -248,11 +248,12 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) managementAvailable(c *gin.Context) bool {
-	if s == nil || s.cfg == nil {
+	cfg := s.getConfig()
+	if s == nil || cfg == nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return false
 	}
-	if s.cfg.Home.Enabled {
+	if cfg.Home.Enabled {
 		c.AbortWithStatus(http.StatusNotFound)
 		return false
 	}
@@ -333,7 +334,8 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 		}
 		return
 	}
-	if s.cfg == nil || s.cfg.Home.Enabled || s.pluginHost == nil {
+	cfg := s.getConfig()
+	if cfg == nil || cfg.Home.Enabled || s.pluginHost == nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -345,7 +347,7 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
-	cfg := s.cfg
+	cfg := s.getConfig()
 	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return

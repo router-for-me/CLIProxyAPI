@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // Regression tests mirrored from CLIProxyAPI PR #4881 follow-up

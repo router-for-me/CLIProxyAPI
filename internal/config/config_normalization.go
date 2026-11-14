@@ -2,9 +2,11 @@ package config
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
+	log "github.com/sirupsen/logrus"
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -33,6 +35,17 @@ func (cfg *Config) NormalizePluginsConfig() {
 	}
 }
 
+// NormalizeClaudeConfig applies default Claude provider configuration values.
+func (cfg *Config) NormalizeClaudeConfig() {
+	if cfg == nil {
+		return
+	}
+	if cfg.Claude.SessionDatePinDays == nil {
+		days := DefaultClaudeSessionDatePinDays
+		cfg.Claude.SessionDatePinDays = &days
+	}
+}
+
 // SanitizeCodexHeaderDefaults trims surrounding whitespace from the
 // configured Codex header fallback values.
 func (cfg *Config) SanitizeCodexHeaderDefaults() {
@@ -41,14 +54,28 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	cfg.Codex.SignInWithChatGPTIdentifier = strings.TrimSpace(cfg.Codex.SignInWithChatGPTIdentifier)
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
-// configured Claude fingerprint baseline values.
+// configured Claude fingerprint baseline values, normalizes the native
+// entrypoint and beta override lists, and resets an unknown client-request-id
+// mode to the default.
 func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	if cfg == nil {
 		return
 	}
+	cfg.ClaudeHeaderDefaults.NativeEntrypoints = normalizeClaudeEntrypointNames(cfg.ClaudeHeaderDefaults.NativeEntrypoints)
+	cfg.ClaudeHeaderDefaults.AnthropicBetaStrip = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaStrip)
+	cfg.ClaudeHeaderDefaults.AnthropicBetaAppend = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaAppend)
+	mode := strings.ToLower(strings.TrimSpace(cfg.ClaudeHeaderDefaults.ClientRequestID))
+	switch mode {
+	case "", ClaudeClientRequestIDOn, ClaudeClientRequestIDOff, ClaudeClientRequestIDPassthrough:
+	default:
+		log.Warnf("unrecognized claude header-defaults client-request-id %q (supported: on, off, passthrough); falling back to on", cfg.ClaudeHeaderDefaults.ClientRequestID)
+		mode = ""
+	}
+	cfg.ClaudeHeaderDefaults.ClientRequestID = mode
 	cfg.ClaudeHeaderDefaults.UserAgent = strings.TrimSpace(cfg.ClaudeHeaderDefaults.UserAgent)
 	cfg.ClaudeHeaderDefaults.PackageVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion)
 	cfg.ClaudeHeaderDefaults.RuntimeVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion)
@@ -56,6 +83,56 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
 	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
+}
+
+// normalizeClaudeEntrypointNames trims and lowercases entrypoint names,
+// dropping empty and duplicate entries while keeping the configured order.
+func normalizeClaudeEntrypointNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// normalizeClaudeBetaNames trims beta names and drops empty and duplicate
+// entries while keeping the configured order.
+func normalizeClaudeBetaNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
@@ -92,7 +169,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			out[channel] = nil
 			continue
 		}
-		seenEntry := make(map[string]struct{}, len(aliases))
+		seenAlias := make(map[string]struct{}, len(aliases))
 		clean := make([]OAuthModelAlias, 0, len(aliases))
 		for _, entry := range aliases {
 			name := strings.TrimSpace(entry.Name)
@@ -103,15 +180,18 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			// Ordered pools allow the same alias to map to multiple upstream
-			// models for sequential failover; only fully identical entries
-			// (same name+alias pair) are duplicates.
-			entryKey := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
-			if _, ok := seenEntry[entryKey]; ok {
+			pairKey := strings.ToLower(name) + "\x00" + strings.ToLower(alias)
+			if _, ok := seenAlias[pairKey]; ok {
 				continue
 			}
-			seenEntry[entryKey] = struct{}{}
+			seenAlias[pairKey] = struct{}{}
+			var openAPI *bool
+			if entry.OpenAPI != nil {
+				value := *entry.OpenAPI
+				openAPI = &value
+			}
 			clean = append(clean, OAuthModelAlias{
+				OpenAPI:      openAPI,
 				Name:         name,
 				Alias:        alias,
 				Fork:         entry.Fork,
@@ -124,6 +204,56 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeOAuthSettings normalizes and deduplicates global OAuth model settings.
+// It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
+// and ensures entries are unique within each channel.
+func (cfg *Config) SanitizeOAuthSettings() {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return
+	}
+	out := make(map[string][]OAuthModelSetting, len(cfg.OAuthSettings))
+	for rawChannel, settings := range cfg.OAuthSettings {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(settings) == 0 {
+			continue
+		}
+		seen := make(map[string]struct{}, len(settings))
+		reversed := make([]OAuthModelSetting, 0, len(settings))
+		for i := len(settings) - 1; i >= 0; i-- {
+			entry := settings[i]
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				continue
+			}
+			alias := strings.TrimSpace(entry.Alias)
+			key := strings.ToLower(name) + "->" + strings.ToLower(alias)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			var openAPI *bool
+			if entry.OpenAPI != nil {
+				value := *entry.OpenAPI
+				openAPI = &value
+			}
+			reversed = append(reversed, OAuthModelSetting{
+				OpenAPI:          openAPI,
+				Name:             name,
+				Alias:            alias,
+				MaxContextLength: entry.MaxContextLength,
+			})
+		}
+		if len(reversed) > 0 {
+			clean := make([]OAuthModelSetting, len(reversed))
+			for i := range reversed {
+				clean[len(reversed)-1-i] = reversed[i]
+			}
+			out[channel] = clean
+		}
+	}
+	cfg.OAuthSettings = out
 }
 
 // SanitizeOAuthRequestScopedErrors normalizes and validates global OAuth request-scoped error rules.
@@ -174,21 +304,65 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 	cfg.OAuthRequestScopedErrors = out
 }
 
-// SanitizeOpenAICompatibility normalizes OpenAI-compatibility provider entries.
-// Runtime validation rejects incomplete enabled entries before normalization;
-// this function must never erase invalid configuration silently.
+// SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
+// not actionable, specifically those missing a BaseURL. It trims whitespace before
+// evaluation and preserves the relative order of remaining entries.
 func (cfg *Config) SanitizeOpenAICompatibility() {
 	if cfg == nil || len(cfg.OpenAICompatibility) == 0 {
 		return
 	}
+	out := make([]OpenAICompatibility, 0, len(cfg.OpenAICompatibility))
 	for i := range cfg.OpenAICompatibility {
-		entry := &cfg.OpenAICompatibility[i]
-		entry.Name = strings.TrimSpace(entry.Name)
-		entry.Prefix = normalizeModelPrefix(entry.Prefix)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.RouteChannel = strings.TrimSpace(entry.RouteChannel)
-		entry.Headers = NormalizeHeaders(entry.Headers)
+		e := cfg.OpenAICompatibility[i]
+		e.Name = strings.TrimSpace(e.Name)
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.RouteChannel = strings.TrimSpace(e.RouteChannel)
+		if e.RouteChannel == "" {
+			e.RouteChannel = canonicalRouteChannel(e.Name)
+		}
+		for keyIndex := range e.APIKeyEntries {
+			if strings.TrimSpace(e.APIKeyEntries[keyIndex].QuotaDomain) == "" {
+				e.APIKeyEntries[keyIndex].QuotaDomain = e.RouteChannel
+			}
+		}
+		if len(e.Models) == 0 {
+			e.Models = []OpenAICompatibilityModel{{
+				Name:                   e.Name,
+				Alias:                  e.Name,
+				CatalogProviderID:      e.RouteChannel,
+				CatalogModelID:         e.Name,
+				CatalogRouteProviderID: e.RouteChannel,
+				CatalogRouteModelID:    e.Name,
+				Protocols:              []string{"openai_chat"},
+			}}
+		}
+		for modelIndex := range e.Models {
+			model := &e.Models[modelIndex]
+			if model.CatalogProviderID == "" {
+				model.CatalogProviderID = e.RouteChannel
+			}
+			if model.CatalogModelID == "" {
+				model.CatalogModelID = model.Name
+			}
+			if model.CatalogRouteProviderID == "" {
+				model.CatalogRouteProviderID = e.RouteChannel
+			}
+			if model.CatalogRouteModelID == "" {
+				model.CatalogRouteModelID = model.Name
+			}
+			if len(model.Protocols) == 0 {
+				model.Protocols = []string{"openai_chat"}
+			}
+		}
+		e.Headers = NormalizeHeaders(e.Headers)
+		if e.BaseURL == "" {
+			// Skip providers with no base-url; treated as removed
+			continue
+		}
+		out = append(out, e)
 	}
+	cfg.OpenAICompatibility = out
 }
 
 // SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
@@ -198,41 +372,6 @@ func (cfg *Config) SanitizeCodexKeys() {
 		return
 	}
 	cfg.CodexKey = sanitizeCodexKeyEntries(cfg.CodexKey)
-}
-
-// SanitizeOpenCodeKeys normalizes OpenCode (Zen) key entries. Unlike Codex,
-// OpenCode entries are NOT removed when BaseURL is empty: the OpenCode executor
-// applies a gateway default base-url (https://opencode.ai/zen), so an empty
-// BaseURL is valid and must survive config load. Dropping it here was the root
-// cause of OpenCode models being absent from /v1/models.
-func (cfg *Config) SanitizeOpenCodeKeys() {
-	if cfg == nil {
-		return
-	}
-	cfg.OpenCodeKey = normalizeCodexKeyEntries(cfg.OpenCodeKey, false)
-}
-
-// SanitizeOpenCodeGoKeys normalizes OpenCode Go key entries. It does not drop
-// entries without a BaseURL because the OpenCode Go executor defaults the
-// base-url to https://opencode.ai/zen/go. See SanitizeOpenCodeKeys.
-func (cfg *Config) SanitizeOpenCodeGoKeys() {
-	if cfg == nil {
-		return
-	}
-	cfg.OpenCodeGoKey = normalizeCodexKeyEntries(cfg.OpenCodeGoKey, false)
-}
-
-// SanitizePoolsideKeys normalizes Poolside key entries. Entries are NOT removed
-// when BaseURL is empty: the Poolside executor supplies a gateway default
-// base-url (https://inference.poolside.ai, the bare host — ClaudeExecutor
-// appends /v1/messages), so an empty BaseURL is valid and must survive config
-// load — same rule as OpenCode. Dropping it here was the root cause of Poolside
-// keys silently disappearing from the proxy.
-func (cfg *Config) SanitizePoolsideKeys() {
-	if cfg == nil {
-		return
-	}
-	cfg.PoolsideKey = normalizeCodexKeyEntries(cfg.PoolsideKey, false)
 }
 
 // SanitizeXAIKeys removes xAI API key entries missing a BaseURL.
@@ -247,6 +386,39 @@ func (cfg *Config) SanitizeXAIKeys() {
 	}
 }
 
+// SanitizeMetaKeys normalizes Meta API key entries, defaulting BaseURL to https://api.meta.ai/v1 if empty.
+func (cfg *Config) SanitizeMetaKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.MetaKey = sanitizeMetaKeyEntries(cfg.MetaKey)
+}
+
+func sanitizeMetaKeyEntries(entries []MetaKey) []MetaKey {
+	if len(entries) == 0 {
+		return entries
+	}
+	out := make([]MetaKey, 0, len(entries))
+	for i := range entries {
+		e := entries[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		// meta-api-key requires a valid API key. DCA tokens require OAuth storage (auths/*.json).
+		if e.APIKey == "" || strings.HasPrefix(e.APIKey, "dca:") {
+			continue
+		}
+		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		if e.BaseURL == "" {
+			e.BaseURL = "https://api.meta.ai/v1"
+		}
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		e.AlphaSearch = false
+		out = append(out, e)
+	}
+	return out
+}
+
 func normalizeCodexKeyEntries(entries []CodexKey, dropEmptyBaseURL bool) []CodexKey {
 	if len(entries) == 0 {
 		return entries
@@ -259,7 +431,6 @@ func normalizeCodexKeyEntries(entries []CodexKey, dropEmptyBaseURL bool) []Codex
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if dropEmptyBaseURL && e.BaseURL == "" {
-			// Skip providers with no base-url; treated as removed
 			continue
 		}
 		out = append(out, e)
@@ -267,12 +438,51 @@ func normalizeCodexKeyEntries(entries []CodexKey, dropEmptyBaseURL bool) []Codex
 	return out
 }
 
-// sanitizeCodexKeyEntries drops Codex-compatible entries missing a BaseURL
-// (Codex, Poolside, XAI). Providers whose executor supplies a default BaseURL
-// (e.g. OpenCode/OpenCodeGo) must call normalizeCodexKeyEntries with
-// dropEmptyBaseURL=false instead.
 func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	return normalizeCodexKeyEntries(entries, true)
+}
+
+// SanitizeOpenCodeKeys normalizes OpenCode (Zen) key entries. Entries are not
+// removed when BaseURL is empty: the OpenCode executor applies its gateway
+// default, so an empty BaseURL is valid and must survive config load.
+func (cfg *Config) SanitizeOpenCodeKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenCodeKey = normalizeCodexKeyEntries(cfg.OpenCodeKey, false)
+}
+
+// SanitizeOpenCodeGoKeys normalizes OpenCode Go key entries. Entries are not
+// removed when BaseURL is empty because the executor supplies the gateway default.
+func (cfg *Config) SanitizeOpenCodeGoKeys() {
+	if cfg == nil {
+		return
+	}
+	cfg.OpenCodeGoKey = normalizeCodexKeyEntries(cfg.OpenCodeGoKey, false)
+}
+
+// NormalizeCloakConfig trims strings and removes blank sensitive words.
+func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
+	if cloak == nil {
+		return nil
+	}
+	cloak.Mode = strings.TrimSpace(cloak.Mode)
+	if len(cloak.SensitiveWords) > 0 {
+		normalizedWords := make([]string, 0, len(cloak.SensitiveWords))
+		for _, w := range cloak.SensitiveWords {
+			if trimmed := strings.TrimSpace(w); trimmed != "" {
+				normalizedWords = append(normalizedWords, trimmed)
+			}
+		}
+		if len(normalizedWords) > 0 {
+			cloak.SensitiveWords = normalizedWords
+		} else {
+			cloak.SensitiveWords = nil
+		}
+	} else {
+		cloak.SensitiveWords = nil
+	}
+	return cloak
 }
 
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
@@ -285,6 +495,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.Cloak = NormalizeCloakConfig(entry.Cloak)
 		// Only a recognized value is rewritten. An unrecognized one is preserved as
 		// written so sanitizing a config file never destroys operator input; the
 		// request path falls back to the default profile and reports it once.
@@ -331,6 +542,28 @@ func formatGeminiKeyDedupID(entry GeminiKey) string {
 	b.WriteString(entry.Prefix)
 	b.WriteByte(0)
 	b.WriteString(FormatSortedHeaders(entry.Headers))
+	b.WriteByte(0)
+	b.WriteString(FormatConnectionPoolDedupID(entry.ConnectionPool))
+	return b.String()
+}
+
+// FormatConnectionPoolDedupID serializes a per-credential connection-pool override
+// deterministically for credential deduplication and auth-index mapping.
+func FormatConnectionPoolDedupID(pool *ProxyConnectionPoolConfig) string {
+	if pool == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("pool:")
+	if pool.Enabled != nil {
+		b.WriteString(strconv.FormatBool(*pool.Enabled))
+	}
+	b.WriteByte(0)
+	b.WriteString(strings.TrimSpace(pool.IdleConnTimeout))
+	b.WriteByte(0)
+	if pool.MaxIdleConnsPerHost != nil {
+		b.WriteString(strconv.Itoa(*pool.MaxIdleConnsPerHost))
+	}
 	return b.String()
 }
 
@@ -470,4 +703,22 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 		return nil
 	}
 	return out
+}
+
+// canonicalRouteChannel derives the default routing identity from a provider name.
+func canonicalRouteChannel(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	var builder strings.Builder
+	lastDash := false
+	for _, r := range name {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_':
+			builder.WriteRune(r)
+			lastDash = false
+		case !lastDash:
+			builder.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }

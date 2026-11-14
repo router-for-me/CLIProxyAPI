@@ -4,12 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
-func parseMessages(t *testing.T, raw string) []gjson.Result {
+func parseMessages(t *testing.T, raw string) []ojson.Result {
 	t.Helper()
-	parsed := gjson.Parse(raw)
+	parsed := ojson.Parse(raw)
 	if !parsed.IsArray() {
 		t.Fatalf("expected JSON array, got: %s", raw)
 	}

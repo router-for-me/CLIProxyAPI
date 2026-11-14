@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func withIsolatedCursorModelsCache(t *testing.T) {

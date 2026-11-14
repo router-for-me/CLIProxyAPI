@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type cooldownProviderTokenStore struct {
@@ -61,10 +61,7 @@ func TestResolveCooldownStateStoreUsesCapturedBackendProvider(t *testing.T) {
 	}
 
 	sdkAuth.RegisterTokenStore(&cooldownProviderTokenStore{cooldownStore: &serviceCooldownStateStore{}})
-	got, errResolve := service.resolveCooldownStateStore(cfg)
-	if errResolve != nil {
-		t.Fatalf("resolveCooldownStateStore() error = %v", errResolve)
-	}
+	got := service.resolveCooldownStateStore(cfg)
 	if got != providedStore {
 		t.Fatalf("resolveCooldownStateStore() = %T, want captured backend-provided store", got)
 	}

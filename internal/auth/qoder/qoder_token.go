@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
 
 // QoderTokenStorage stores OAuth2 token information for Qoder API authentication.
@@ -27,8 +27,13 @@ type QoderTokenStorage struct {
 	Email string `json:"email"`
 	// ExpireTime is the timestamp when the current access token expires (milliseconds epoch).
 	ExpireTime int64 `json:"expire_time"`
+	// RefreshTokenExpireTime is the timestamp when the refresh token expires.
+	RefreshTokenExpireTime int64 `json:"refresh_token_expire_time,omitempty"`
 	// Type indicates the authentication provider type, always "qoder" for this storage.
 	Type string `json:"type"`
+	// AuthMode identifies the upstream token protocol. Empty or device-token
+	// keeps the legacy browser flow; job-token uses PAT exchange and refresh.
+	AuthMode string `json:"auth_mode,omitempty"`
 	// LastRefresh is the timestamp of the last token refresh operation.
 	LastRefresh string `json:"last_refresh"`
 	// MachineID is the persistent machine identifier for this installation.
@@ -37,6 +42,11 @@ type QoderTokenStorage struct {
 	MachineToken string `json:"machine_token,omitempty"`
 	// MachineType is the type of machine registration.
 	MachineType string `json:"machine_type,omitempty"`
+	// OrganizationID is required by the current Qoder COSY gateway protocol
+	// for enterprise accounts.
+	OrganizationID string `json:"organization_id,omitempty"`
+	// OrganizationTags carries optional access tags returned by the account API.
+	OrganizationTags []string `json:"organization_tags,omitempty"`
 	// ModelConfigs caches the raw upstream model_config entries from the most
 	// recent /algo/api/v2/model/list response, keyed by model id (e.g.
 	// "dfmodel" -> {"key":"dfmodel","format":"openai","is_vl":true, ...}).
