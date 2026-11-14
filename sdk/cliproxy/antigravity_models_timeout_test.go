@@ -521,12 +521,15 @@ func registryGetAntigravityModels() []*ModelInfo {
 // immediately using the auth's proxy without waiting for model registration.
 func TestAntigravityColdStart_RefreshesExpiredTokenUsingAuthProxy(t *testing.T) {
 	var refreshReceivedProxy atomic.Value
-	var refreshCalls atomic.Int32
+	refreshed := make(chan struct{}, 1)
 
 	mockExecutor := &mockAntigravityRefreshExecutor{
 		onRefresh: func(auth *coreauth.Auth) {
-			refreshCalls.Add(1)
 			refreshReceivedProxy.Store(auth.ProxyURL)
+			select {
+			case refreshed <- struct{}{}:
+			default:
+			}
 		},
 	}
 
@@ -585,22 +588,38 @@ func TestAntigravityColdStart_RefreshesExpiredTokenUsingAuthProxy(t *testing.T) 
 	// Re-register mock so we capture the refresh call
 	svc.coreManager.RegisterExecutor(mockExecutor)
 
+	// The refresh result is saved in the background and can still be running when
+	// the test returns; persistence is not under test, so keep it off authDir.
+	svc.coreManager.SetStore(discardSaveStore{})
+
 	// 3. Start auto-refresh and verify executor receives refresh with proxy_url
 	svc.coreManager.StartAutoRefresh(ctx, 10*time.Millisecond)
 	defer svc.coreManager.StopAutoRefresh()
 
-	// Poll until refresh is called (should be immediate since expired)
-	for start := time.Now(); refreshCalls.Load() == 0 && time.Since(start) < 2*time.Second; {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if refreshCalls.Load() == 0 {
+	// Wait for the refresh (immediate, since the credential is expired). The timer
+	// only guards against a hang.
+	hangGuard := time.NewTimer(30 * time.Second)
+	defer hangGuard.Stop()
+	select {
+	case <-refreshed:
+	case <-hangGuard.C:
 		t.Fatal("expected auto-refresh loop to invoke executor for expired credential on cold start")
 	}
 	if gotProxy, _ := refreshReceivedProxy.Load().(string); gotProxy != "http://127.0.0.1:9876" {
 		t.Fatalf("expected executor to receive proxy http://127.0.0.1:9876, got %q", gotProxy)
 	}
 }
+
+// discardSaveStore drops saves so background refresh work cannot touch test files.
+type discardSaveStore struct{}
+
+func (discardSaveStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
+
+func (discardSaveStore) Save(_ context.Context, auth *coreauth.Auth) (string, error) {
+	return auth.ID, nil
+}
+
+func (discardSaveStore) Delete(context.Context, string) error { return nil }
 
 type mockAntigravityRefreshExecutor struct {
 	onRefresh func(*coreauth.Auth)
