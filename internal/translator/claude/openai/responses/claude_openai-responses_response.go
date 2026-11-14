@@ -72,6 +72,8 @@ type claudeToResponsesState struct {
 	WebSearchByToolID map[string]*claudeResponsesWebSearchItem
 	WebSearchItems    []*claudeResponsesWebSearchItem
 	StopReason        string
+	FallbackModel     string
+	Fallbacks         translatorcommon.ClaudeFallbackChain
 	// usage aggregation
 	Usage claudeResponsesUsageTokens
 }
@@ -941,6 +943,8 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.ReasoningIndex = -1
 			st.ReasoningItems = nil
 			st.StopReason = ""
+			st.FallbackModel = ""
+			st.Fallbacks.Reset()
 			st.ApplyPatchCalls = make(map[string]*translatorcommon.ApplyPatchCallState)
 			st.FuncItemAdded = make(map[int]bool)
 			st.FuncArgsSent = make(map[int]int)
@@ -967,8 +971,18 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			if requestModelName == "" {
 				requestModelName = modelName
 			}
+			upstreamModel := strings.TrimSpace(msg.Get("model").String())
+			if fromModel, toModel, ok := translatorcommon.ClaudePreTokenFallbackModels(originalRequestRawJSON, requestRawJSON, requestModelName, upstreamModel); ok {
+				st.FallbackModel = toModel
+				st.Fallbacks.RecordPreToken(fromModel, toModel, "", nil)
+				requestModelName = toModel
+			}
 			if requestModelName != "" {
 				_ = createdDoc.Set("response.model", requestModelName)
+			}
+			if latestFB := st.Fallbacks.Latest(); len(latestFB) > 0 {
+				_ = createdDoc.SetRawBytes("response.fallback", latestFB)
+				_ = createdDoc.SetRawBytes("response.fallbacks", st.Fallbacks.ArrayBytes())
 			}
 			out = append(out, emitEvent("response.created", createdDoc.Bytes()))
 			// response.in_progress
@@ -978,6 +992,10 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			_ = inprogDoc.Set("response.created_at", st.CreatedAt)
 			if requestModelName != "" {
 				_ = inprogDoc.Set("response.model", requestModelName)
+			}
+			if latestFB := st.Fallbacks.Latest(); len(latestFB) > 0 {
+				_ = inprogDoc.SetRawBytes("response.fallback", latestFB)
+				_ = inprogDoc.SetRawBytes("response.fallbacks", st.Fallbacks.ArrayBytes())
 			}
 			out = append(out, emitEvent("response.in_progress", inprogDoc.Bytes()))
 		}
@@ -1016,6 +1034,35 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			if !item.Emitted && item.Results != nil {
 				out = append(out, st.finalizeWebSearchWithStatus(item, "completed", nextSeq)...)
 			}
+		}
+
+		if typ == "fallback" {
+			toModel := strings.TrimSpace(cb.Get("to.model").String())
+			fromModel := strings.TrimSpace(cb.Get("from.model").String())
+			if toModel != "" {
+				st.FallbackModel = strings.Clone(toModel)
+			}
+			defaultFrom := fromModel
+			if defaultFrom == "" {
+				defaultFrom = st.RequestEcho.model
+			}
+			if defaultFrom == "" {
+				defaultFrom = modelName
+			}
+			boundaryIdx := st.NextOutputIndex
+			if fbBytes := st.Fallbacks.RecordBlock(cb, defaultFrom, st.FallbackModel, "output_index", &boundaryIdx); len(fbBytes) > 0 {
+				inprogDoc := ojson.NewDocString(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
+				_ = inprogDoc.Set("sequence_number", nextSeq())
+				_ = inprogDoc.Set("response.id", st.ResponseID)
+				_ = inprogDoc.Set("response.created_at", st.CreatedAt)
+				if st.FallbackModel != "" {
+					_ = inprogDoc.Set("response.model", st.FallbackModel)
+				}
+				_ = inprogDoc.SetRawBytes("response.fallback", fbBytes)
+				_ = inprogDoc.SetRawBytes("response.fallbacks", st.Fallbacks.ArrayBytes())
+				out = append(out, emitEvent("response.in_progress", inprogDoc.Bytes()))
+			}
+			return noSSEOutput(out)
 		}
 
 		if typ == "text" {
@@ -1218,9 +1265,27 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		return noSSEOutput(out)
 	case "message_delta":
-		st.Usage.Merge(root.Get("usage"))
+		usage := root.Get("usage")
+		st.Usage.Merge(usage)
 		if stopReason := root.Get("delta.stop_reason"); stopReason.Exists() {
 			st.StopReason = strings.Clone(stopReason.String())
+		}
+		defaultFrom := st.RequestEcho.model
+		if defaultFrom == "" {
+			defaultFrom = modelName
+		}
+		if iterModel, newHops := st.Fallbacks.RecordIterations(usage.Get("iterations"), defaultFrom, "", nil); iterModel != "" {
+			st.FallbackModel = iterModel
+			if len(newHops) > 0 {
+				inprogDoc := ojson.NewDocString(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
+				_ = inprogDoc.Set("sequence_number", nextSeq())
+				_ = inprogDoc.Set("response.id", st.ResponseID)
+				_ = inprogDoc.Set("response.created_at", st.CreatedAt)
+				_ = inprogDoc.Set("response.model", st.FallbackModel)
+				_ = inprogDoc.SetRawBytes("response.fallback", st.Fallbacks.Latest())
+				_ = inprogDoc.SetRawBytes("response.fallbacks", st.Fallbacks.ArrayBytes())
+				return [][]byte{emitEvent("response.in_progress", inprogDoc.Bytes())}
+			}
 		}
 		return [][]byte{}
 	case "message_stop":
@@ -1258,6 +1323,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		// Inject original request fields into response as per docs/response.completed.json
 		st.RequestEcho.applyDoc(completedDoc, "response.")
+		if st.FallbackModel != "" {
+			_ = completedDoc.Set("response.model", st.FallbackModel)
+		}
+		if latestFB := st.Fallbacks.Latest(); len(latestFB) > 0 {
+			_ = completedDoc.SetRawBytes("response.fallback", latestFB)
+			_ = completedDoc.SetRawBytes("response.fallbacks", st.Fallbacks.ArrayBytes())
+		}
 
 		// Build response.output from aggregated state
 		outputsWrapperDoc := ojson.NewDocString(`{"arr":[]}`)
@@ -1391,7 +1463,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 }
 
 // ConvertClaudeResponseToOpenAIResponsesNonStream aggregates Claude SSE into a single OpenAI Responses JSON.
-func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
+func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
 	rawJSON, nativeModel := translatorcommon.ClaudeMessagesJSONToSSE(rawJSON)
 	// Aggregate Claude SSE lines into a single OpenAI Responses JSON (non-stream)
 	// We follow the same aggregation logic as the streaming variant but produce
@@ -1428,10 +1500,12 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 
 	// Aggregation state
 	var (
-		responseID  string
-		createdAt   int64
-		stopReason  string
-		usageTokens claudeResponsesUsageTokens
+		responseID    string
+		createdAt     int64
+		stopReason    string
+		usageTokens   claudeResponsesUsageTokens
+		fallbackModel string
+		fallbacks     translatorcommon.ClaudeFallbackChain
 	)
 
 	type nonStreamOutputItem struct {
@@ -1486,6 +1560,14 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 				responseID = msg.Get("id").String()
 				createdAt = time.Now().Unix()
 				usageTokens.Merge(msg.Get("usage"))
+				defaultReqModel := st.RequestEcho.model
+				if defaultReqModel == "" {
+					defaultReqModel = modelName
+				}
+				if fromModel, toModel, ok := translatorcommon.ClaudePreTokenFallbackModels(originalRequestRawJSON, requestRawJSON, defaultReqModel, msg.Get("model").String()); ok {
+					fallbackModel = toModel
+					fallbacks.RecordPreToken(fromModel, toModel, "", nil)
+				}
 			}
 
 		case "content_block_start":
@@ -1499,6 +1581,21 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 				activeMessageItem = nil
 			}
 			switch typ {
+			case "fallback":
+				toModel := strings.TrimSpace(cb.Get("to.model").String())
+				fromModel := strings.TrimSpace(cb.Get("from.model").String())
+				if toModel != "" {
+					fallbackModel = strings.Clone(toModel)
+				}
+				defaultFrom := fromModel
+				if defaultFrom == "" {
+					defaultFrom = st.RequestEcho.model
+				}
+				if defaultFrom == "" {
+					defaultFrom = modelName
+				}
+				boundaryIdx := nextOutputIndex
+				fallbacks.RecordBlock(cb, defaultFrom, fallbackModel, "output_index", &boundaryIdx)
 			case "text":
 				item := activeMessageItem
 				if item == nil {
@@ -1648,9 +1745,17 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 			// Output items are finalized after all deltas have been aggregated.
 
 		case "message_delta":
-			usageTokens.Merge(root.Get("usage"))
+			usage := root.Get("usage")
+			usageTokens.Merge(usage)
 			if value := root.Get("delta.stop_reason"); value.Exists() {
 				stopReason = value.String()
+			}
+			defaultFrom := st.RequestEcho.model
+			if defaultFrom == "" {
+				defaultFrom = modelName
+			}
+			if iterModel, _ := fallbacks.RecordIterations(usage.Get("iterations"), defaultFrom, "", nil); iterModel != "" {
+				fallbackModel = iterModel
 			}
 		}
 	}
@@ -1674,6 +1779,13 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, _ stri
 	// behavior, including the existing SSE path.
 	if nativeModel != "" {
 		_ = outDoc.Set("model", nativeModel)
+	}
+	if fallbackModel != "" {
+		_ = outDoc.Set("model", fallbackModel)
+	}
+	if latestFB := fallbacks.Latest(); len(latestFB) > 0 {
+		_ = outDoc.SetRawBytes("fallback", latestFB)
+		_ = outDoc.SetRawBytes("fallbacks", fallbacks.ArrayBytes())
 	}
 
 	// Build output array in the order of the original content blocks.

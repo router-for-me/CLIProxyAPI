@@ -556,6 +556,10 @@ func loadConfigData(configFile string, data []byte, optional, persist bool) (*Co
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
+	// Sanitize Antigravity and Devin sensitive-word replacement maps.
+	cfg.SanitizeAntigravity()
+	cfg.SanitizeDevin()
+
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 

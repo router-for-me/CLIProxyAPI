@@ -82,7 +82,9 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 
 	strictMode = strings.EqualFold(lookupCloakAttr("cloak_strict_mode"), "true")
 
-	if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
+	if metaWords := claudeauth.ReadMetadataStringSlice(&auth.Metadata, "cloak_sensitive_words"); len(metaWords) > 0 {
+		sensitiveWords = metaWords
+	} else if wordsStr := lookupCloakAttr("cloak_sensitive_words"); wordsStr != "" {
 		sensitiveWords = strings.Split(wordsStr, ",")
 		for i := range sensitiveWords {
 			sensitiveWords[i] = strings.TrimSpace(sensitiveWords[i])
@@ -92,6 +94,44 @@ func getCloakConfigFromAuth(auth *cliproxyauth.Auth) (cloakMode string, strictMo
 	cacheUserID = strings.EqualFold(lookupCloakAttr("cloak_cache_user_id"), "true")
 
 	return cloakMode, strictMode, sensitiveWords, cacheUserID
+}
+
+func getCloakReplacementsFromAuth(auth *cliproxyauth.Auth) map[string]string {
+	if auth == nil {
+		return nil
+	}
+	parseJSONStringMap := func(raw string) map[string]string {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || !strings.HasPrefix(trimmed, "{") || !ojson.Valid(trimmed) {
+			return nil
+		}
+		parsed := ojson.Parse(trimmed)
+		if !parsed.IsObject() {
+			return nil
+		}
+		out := make(map[string]string)
+		parsed.ForEach(func(k, v ojson.Result) bool {
+			if v.Type == ojson.String {
+				out[k.String()] = v.String()
+			}
+			return true
+		})
+		return config.NormalizeSensitiveWordsReplace(out)
+	}
+	if auth.Attributes != nil {
+		if raw := auth.Attributes["cloak_sensitive_words_replace"]; strings.TrimSpace(raw) != "" {
+			if parsed := parseJSONStringMap(raw); len(parsed) > 0 {
+				return parsed
+			}
+		}
+	}
+	if fromMap := claudeauth.ReadMetadataStringMap(&auth.Metadata, "cloak_sensitive_words_replace"); len(fromMap) > 0 {
+		return config.NormalizeSensitiveWordsReplace(fromMap)
+	}
+	if raw := claudeauth.ReadMetadataString(&auth.Metadata, "cloak_sensitive_words_replace"); strings.TrimSpace(raw) != "" {
+		return parseJSONStringMap(raw)
+	}
+	return nil
 }
 
 // injectFakeUserID generates and injects a fake user ID into the request metadata.
@@ -2300,9 +2340,18 @@ type claudeWirePolicy struct {
 }
 
 type claudeCloakSettings struct {
-	strictMode     bool
-	sensitiveWords []string
-	cacheUserID    bool
+	strictMode            bool
+	sensitiveWords        []string
+	sensitiveWordsReplace map[string]string
+	cacheUserID           bool
+	serverSideFallback    bool
+}
+
+func (s claudeCloakSettings) buildSensitiveWordMatcher() *helps.SensitiveWordMatcher {
+	if len(s.sensitiveWords) == 0 && len(s.sensitiveWordsReplace) == 0 {
+		return nil
+	}
+	return helps.BuildSensitiveWordMatcherWithReplacements(s.sensitiveWords, s.sensitiveWordsReplace)
 }
 
 func isClaudeCodeIdentitySystemText(text string) bool {
@@ -2415,15 +2464,18 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	}
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
 	attrMode, attrStrict, attrWords, attrCache := getCloakConfigFromAuth(auth)
+	attrWordsReplace := getCloakReplacementsFromAuth(auth)
 
 	cloakMode := "auto"
 	if cfg != nil && cfg.DisableClaudeCloakMode {
 		cloakMode = "never"
 	}
 	settings := claudeCloakSettings{
-		strictMode:     attrStrict,
-		sensitiveWords: attrWords,
-		cacheUserID:    attrCache,
+		strictMode:            attrStrict,
+		sensitiveWords:        attrWords,
+		sensitiveWordsReplace: attrWordsReplace,
+		cacheUserID:           attrCache,
+		serverSideFallback:    cfg != nil && cfg.Claude.ServerSideFallback,
 	}
 	explicitMode := strings.ToLower(strings.TrimSpace(attrMode))
 	if attrMode != "" {
@@ -2440,13 +2492,16 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 		if len(cloakCfg.SensitiveWords) > 0 {
 			settings.sensitiveWords = cloakCfg.SensitiveWords
 		}
+		if len(cloakCfg.SensitiveWordsReplace) > 0 {
+			settings.sensitiveWordsReplace = cloakCfg.SensitiveWordsReplace
+		}
 		if cloakCfg.CacheUserID != nil {
 			settings.cacheUserID = *cloakCfg.CacheUserID
 		}
 	}
 
 	fp := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
-	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || attrCache
+	cloakConfigured := cloakCfg != nil || attrMode != "" || attrStrict || len(attrWords) > 0 || len(attrWordsReplace) > 0 || attrCache
 	trimmedMode := strings.ToLower(strings.TrimSpace(cloakMode))
 	uncloak := !fp.ProfileClaudeCodeCLI && (explicitMode == "never" || explicitMode == "uncloak")
 	explicitNever := trimmedMode == "never" && !uncloak
@@ -2602,14 +2657,13 @@ func applyCloakingInternalDoc(
 		turnOriginArgs...,
 	)
 
-	// In native Claude Code 2.1.258, claude-fable-5-1 requests carry:
-	// "fallbacks": [{"model": "claude-opus-5"}]
-	model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
-	if isClaudeOpus55Model(model) && !isProbeOrHelper && !doc.Get("fallbacks").Exists() {
-		_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
-	}
-	if isClaudeFable51Model(model) && !isProbeOrHelper {
-		if !doc.Get("fallbacks").Exists() {
+	// Inject cross-model server-side refusal fallbacks only when explicitly
+	// enabled via upstream.claude.server-side-fallback.
+	if settings.serverSideFallback && !isProbeOrHelper && !doc.Get("fallbacks").Exists() {
+		model := strings.ToLower(strings.TrimSpace(doc.Get("model").String()))
+		if isClaudeOpus55Model(model) {
+			_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
+		} else if isClaudeFable51Model(model) {
 			_ = doc.SetRawBytes("fallbacks", []byte(`[{"model":"claude-opus-5"}]`))
 		}
 	}
@@ -2633,10 +2687,11 @@ func applyCloakingInternalDoc(
 		}
 	}
 
-	// Apply sensitive word obfuscation
-	if obfuscateSensitiveWords && len(settings.sensitiveWords) > 0 {
-		matcher := helps.BuildSensitiveWordMatcher(settings.sensitiveWords)
-		helps.ObfuscateSensitiveWordsDoc(doc, matcher)
+	// Apply sensitive word obfuscation and replacements
+	if obfuscateSensitiveWords {
+		if matcher := settings.buildSensitiveWordMatcher(); matcher != nil {
+			helps.ObfuscateSensitiveWordsDoc(doc, matcher)
+		}
 	}
 
 	return true, true, nil

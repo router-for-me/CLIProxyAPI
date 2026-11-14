@@ -224,3 +224,101 @@ func TestClaudeCooldownMessagesRoute(t *testing.T) {
 		})
 	}
 }
+
+type cooldownClaudeTestExecutor struct {
+	preFTKeepAliveClaudeExecutor
+}
+
+func (*cooldownClaudeTestExecutor) Identifier() string { return "claude" }
+
+func TestClaudeCooldownMessagesRoute_PassthroughUnifiedRateLimitHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	chunks := make(chan coreexecutor.StreamChunk)
+	close(chunks)
+	executor := &cooldownClaudeTestExecutor{preFTKeepAliveClaudeExecutor: preFTKeepAliveClaudeExecutor{chunks: chunks}}
+	manager := coreauth.NewManager(nil, coreauth.NewSessionAffinitySelector(&coreauth.RoundRobinSelector{}), nil)
+	manager.RegisterExecutor(executor)
+	const model = "issue-7417-cooldown-route-model"
+	const authID = "issue-7417-cooldown-route-auth"
+	next := time.Now().Add(7823 * time.Second)
+	auth := &coreauth.Auth{
+		ID:             authID,
+		Provider:       executor.Identifier(),
+		Status:         coreauth.StatusActive,
+		Unavailable:    true,
+		NextRetryAfter: next,
+		Quota: coreauth.QuotaState{
+			Exceeded:      true,
+			Reason:        "credential_quota",
+			NextRecoverAt: next,
+			Signals: map[string]string{
+				"Anthropic-Ratelimit-Unified-Status":    "rejected",
+				"Anthropic-Ratelimit-Unified-5h-Status": "rejected",
+				"Anthropic-Ratelimit-Unified-Reset":     strconv.FormatInt(next.Add(-10*time.Second).Unix(), 10),
+			},
+		},
+		LastError: &coreauth.Error{Code: "rate_limit_error", Message: "upstream quota exceeded", HTTPStatus: http.StatusTooManyRequests},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authID, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(authID)
+	})
+
+	for _, passthrough := range []bool{false, true} {
+		for _, streaming := range []bool{false, true} {
+			name := "passthrough_" + strconv.FormatBool(passthrough) + "_stream_" + strconv.FormatBool(streaming)
+			t.Run(name, func(t *testing.T) {
+				handler := NewClaudeCodeAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: passthrough}, manager))
+				router := gin.New()
+				router.POST("/v1/messages", handler.ClaudeMessages)
+
+				requestBody := `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}],"stream":` + strconv.FormatBool(streaming) + `}`
+				request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(requestBody))
+				request.Header.Set("Content-Type", "application/json")
+				recorder := httptest.NewRecorder()
+
+				before := time.Now().Unix()
+				router.ServeHTTP(recorder, request)
+				after := time.Now().Unix()
+
+				if recorder.Code != http.StatusTooManyRequests {
+					t.Fatalf("status = %d, want 429; body=%s", recorder.Code, recorder.Body.String())
+				}
+				seconds, errSeconds := strconv.ParseInt(recorder.Header().Get("Retry-After"), 10, 64)
+				if errSeconds != nil || seconds <= 0 {
+					t.Fatalf("Retry-After = %q, want positive seconds", recorder.Header().Get("Retry-After"))
+				}
+
+				if !passthrough {
+					if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Status"); got != "" {
+						t.Fatalf("passthrough=false leaked Anthropic-Ratelimit-Unified-Status = %q", got)
+					}
+					return
+				}
+
+				if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Status"); got != "rejected" {
+					t.Fatalf("Anthropic-Ratelimit-Unified-Status = %q, want rejected", got)
+				}
+				if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Representative-Claim"); got != "five_hour" {
+					t.Fatalf("Anthropic-Ratelimit-Unified-Representative-Claim = %q, want five_hour", got)
+				}
+				if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-Overage-Status"); got != "rejected" {
+					t.Fatalf("Anthropic-Ratelimit-Unified-Overage-Status = %q, want rejected", got)
+				}
+				if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-5h-Status"); got != "rejected" {
+					t.Fatalf("Anthropic-Ratelimit-Unified-5h-Status = %q, want rejected", got)
+				}
+				resetAt, errReset := strconv.ParseInt(recorder.Header().Get("Anthropic-Ratelimit-Unified-Reset"), 10, 64)
+				if errReset != nil || resetAt < before+seconds || resetAt > after+seconds {
+					t.Fatalf("Anthropic-Ratelimit-Unified-Reset = %q, want unix epoch in [%d, %d]", recorder.Header().Get("Anthropic-Ratelimit-Unified-Reset"), before+seconds, after+seconds)
+				}
+				if got := recorder.Header().Get("Anthropic-Ratelimit-Unified-5h-Reset"); got != strconv.FormatInt(resetAt, 10) {
+					t.Fatalf("Anthropic-Ratelimit-Unified-5h-Reset = %q, want %d", got, resetAt)
+				}
+			})
+		}
+	}
+}
