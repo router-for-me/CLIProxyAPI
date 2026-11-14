@@ -378,6 +378,23 @@ func TestPluginStoreRequestURLRejectsCredentials(t *testing.T) {
 	}
 }
 
+func TestPluginStoreRequestURLRejectsSensitiveRegistryQuery(t *testing.T) {
+	errValidate := validatePluginStoreRequestURL(nil, "https://registry.example/store.json?token=long-lived-secret", RequestKindRegistry)
+	if errValidate == nil {
+		t.Fatal("validatePluginStoreRequestURL() error = nil, want sensitive registry query rejection")
+	}
+	if strings.Contains(errValidate.Error(), "long-lived-secret") {
+		t.Fatalf("validatePluginStoreRequestURL() error leaked query value: %v", errValidate)
+	}
+}
+
+func TestPluginStoreRequestURLAllowsSignedArtifactQuery(t *testing.T) {
+	errValidate := validatePluginStoreRequestURL(nil, "https://objects.githubusercontent.com/release.zip?token=temporary", RequestKindArtifact)
+	if errValidate != nil {
+		t.Fatalf("validatePluginStoreRequestURL() error = %v, want signed artifact query allowed", errValidate)
+	}
+}
+
 func TestResolvedAuthExpiryRejectsAuthenticatedRequest(t *testing.T) {
 	auth := []ResolvedAuthConfig{{
 		Match:   "https://downloads.example/private/",
