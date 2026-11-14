@@ -875,7 +875,7 @@ type HostAuthFileEntry struct {
 	Unavailable bool `json:"unavailable,omitempty"`
 	// RuntimeOnly reports whether the credential has no backing auth file.
 	RuntimeOnly bool `json:"runtime_only,omitempty"`
-	// Source reports whether the credential came from file or memory.
+	// Source reports whether the credential came from file, memory, or config.
 	Source string `json:"source,omitempty"`
 	// Path is the backing auth file path when available.
 	Path string `json:"path,omitempty"`
@@ -931,6 +931,14 @@ type HostAuthGetResponse struct {
 	Path string `json:"path,omitempty"`
 	// JSON contains the credential JSON payload.
 	JSON json.RawMessage `json:"json"`
+}
+
+// HostAuthListRequest asks the host to list credentials.
+type HostAuthListRequest struct {
+	// IncludeConfigAPIKeys also returns API-key credentials declared in the
+	// config file. Their entries have Source "config", no Path, and a masked
+	// Account. host.auth.get does not return JSON for them.
+	IncludeConfigAPIKeys bool `json:"include_config_api_keys,omitempty"`
 }
 
 // HostAuthGetRuntimeResponse returns runtime credential information by auth index.
