@@ -340,20 +340,30 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
-	// Only conflicting legacy fields are removed on load. A legacy-only document
-	// stays legacy until a v8 configuration write explicitly migrates it.
+	// Sanitize client API keys in memory.
+	cfg.SanitizeClientAPIKeys()
+
+	// Only conflicting legacy fields and unnormalized client keys are rewritten on load.
 	current, errRead := os.ReadFile(configFile)
 	if errRead != nil {
 		return nil, errRead
+	}
+	prefixed, keysChanged, errKeys := NormalizeClientAPIKeysYAML(current)
+	if errKeys != nil {
+		return nil, errKeys
+	}
+	if keysChanged {
+		current = prefixed
 	}
 	cleaned, changed, errLayout := NormalizeConfigLayout(current, false)
 	if errLayout != nil {
 		return nil, errLayout
 	}
-	if changed {
+	if keysChanged || changed {
 		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
 			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
 		}
+		data = cleaned
 	}
 
 	// Record the exact bytes this config was parsed from, so a consumer can tell

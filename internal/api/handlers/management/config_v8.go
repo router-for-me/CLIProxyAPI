@@ -171,6 +171,9 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		}
 	}
 	stripAPIKeysAuthIndexesFromRoot(root)
+	if accessKeys := configV8Node(root, []string{"access", "api-keys"}); accessKeys != nil {
+		config.NormalizeClientAPIKeysNode(accessKeys)
+	}
 	config.NormalizeCollectionNodeStyles(root)
 	data, err = yaml.Marshal(&doc)
 	if err != nil {

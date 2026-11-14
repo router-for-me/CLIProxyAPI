@@ -488,6 +488,7 @@ func run() (exitStatus int) {
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
+			_ = pgStoreInst.PersistConfig(context.Background())
 		}
 	} else if useObjectStore {
 		if objectStoreLocalPath == "" {
@@ -555,6 +556,7 @@ func run() (exitStatus int) {
 			}
 			cfg.AuthDir = objectStoreInst.AuthDir()
 			log.Infof("object-backed token store enabled, bucket: %s", objectStoreBucket)
+			_ = objectStoreInst.PersistConfig(context.Background())
 		}
 	} else if useGitStore {
 		if gitStoreLocalPath == "" {
@@ -599,6 +601,7 @@ func run() (exitStatus int) {
 		if err == nil {
 			cfg.AuthDir = gitStoreInst.AuthDir()
 			log.Infof("git-backed token store enabled, repository path: %s", gitStoreRoot)
+			_ = gitStoreInst.PersistConfig(context.Background())
 		}
 	} else if configPath != "" {
 		configFilePath = configPath
