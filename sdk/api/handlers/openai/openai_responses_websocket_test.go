@@ -5187,6 +5187,212 @@ func TestResponsesWebsocketMergesTranscriptForNonPassthroughUpstream(t *testing.
 	}
 }
 
+func TestResponsesWebsocketFullReplayIsNotMergedIntoPreviousTranscript(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &websocketCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID:         "auth-ws-replay",
+		Provider:   executor.Identifier(),
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Fatalf("close websocket: %v", errClose)
+		}
+	}()
+
+	// A client re-sends its first request unchanged (as pi does to keep the
+	// prompt cache warm). User messages carry no ids, so nothing is deduplicated.
+	first := `{"type":"response.create","model":"test-model","instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"long shared prefix"}]}]}`
+	for i, request := range []string{first, first} {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(request)); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", i+1, errWrite)
+		}
+		_, payload, errReadMessage := conn.ReadMessage()
+		if errReadMessage != nil {
+			t.Fatalf("read websocket message %d: %v", i+1, errReadMessage)
+		}
+		if got := ojson.GetBytesNoCopy(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("message %d payload type = %s, want %s", i+1, got, wsEventTypeCompleted)
+		}
+	}
+
+	if len(executor.payloads) != 2 {
+		t.Fatalf("upstream payload count = %d, want 2", len(executor.payloads))
+	}
+	firstInput := ojson.GetBytesNoCopy(executor.payloads[0], "input").Raw
+	secondInput := ojson.GetBytesNoCopy(executor.payloads[1], "input")
+	if len(secondInput.Array()) != 1 {
+		t.Fatalf("replayed request input len = %d, want 1 (not merged): %s", len(secondInput.Array()), executor.payloads[1])
+	}
+	if !sameJSONValue(firstInput, secondInput.Raw) {
+		t.Fatalf("replayed request input = %s, want %s", secondInput.Raw, firstInput)
+	}
+}
+
+func TestNormalizeSubsequentRequestFullReplayReplacesTranscript(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","instructions":"be brief","stream":true,"input":[
+		{"type":"message","role":"user","content":"hello"}
+	]}`)
+	lastResponseOutput := []byte(`[{"type":"message","role":"assistant","id":"out-1","content":"hi"}]`)
+
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantLen int
+	}{
+		{name: "identical replay", raw: `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"hello"}]}`, wantLen: 1},
+		{name: "replay with different whitespace", raw: `{"type":"response.create","model":"test-model","input":[ { "type" : "message", "role":"user", "content":"hello" } ]}`, wantLen: 1},
+		{name: "replay followed by a new item", raw: `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"user","content":"more"}]}`, wantLen: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			normalized, next, errMsg := normalizeResponsesWebsocketRequest([]byte(tc.raw), lastRequest, lastResponseOutput)
+			if errMsg != nil {
+				t.Fatalf("unexpected error: %v", errMsg.Error)
+			}
+			if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != tc.wantLen {
+				t.Fatalf("input len = %d, want %d (replacement, not merge): %s", got, tc.wantLen, normalized)
+			}
+			if got := ojson.GetBytesNoCopy(normalized, "model").String(); got != "test-model" {
+				t.Fatalf("model = %q, want test-model", got)
+			}
+			if got := ojson.GetBytesNoCopy(normalized, "instructions").String(); got != "be brief" {
+				t.Fatalf("instructions = %q, want kept from previous request", got)
+			}
+			if ojson.GetBytesNoCopy(normalized, "type").Exists() {
+				t.Fatalf("type must be removed: %s", normalized)
+			}
+			if !bytes.Equal(next, normalized) {
+				t.Fatalf("next request snapshot should match normalized replay")
+			}
+		})
+	}
+}
+
+func TestNormalizeSubsequentRequestEmptyInputReplay(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","instructions":"say hi","stream":true,"input":[]}`)
+	lastResponseOutput := []byte(`[{"type":"message","role":"assistant","id":"out-1","content":"hi"}]`)
+
+	// Resending the same instruction-only request is a replay: the previous output is not added.
+	normalized, _, errMsg := normalizeResponsesWebsocketRequest([]byte(`{"type":"response.create","model":"test-model","input":[]}`), lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 0 {
+		t.Fatalf("input len = %d, want 0 (replay of an empty input): %s", got, normalized)
+	}
+
+	// New items after an empty previous input are still an incremental turn.
+	normalized, _, errMsg = normalizeResponsesWebsocketRequest([]byte(`{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"more"}]}`), lastRequest, lastResponseOutput)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 2 {
+		t.Fatalf("input len = %d, want 2 (previous output + new item): %s", got, normalized)
+	}
+}
+
+func TestNormalizeSubsequentRequestReplayKeepsPendingToolCalls(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[{"type":"message","role":"user","content":"read a file"}]}`)
+	lastResponseOutput := []byte(`[{"type":"function_call","id":"fc-1","call_id":"call-1","name":"read","arguments":"{}"}]`)
+	pending := []string{"call-1"}
+
+	// The replay restates the previous input and answers the call without restating it.
+	raw := `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"},{"type":"function_call_output","call_id":"call-1","output":"data"}]}`
+	normalized, _, errMsg := normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	items := ojson.GetBytesNoCopy(normalized, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("input len = %d, want 3 (input, call, output): %s", len(items), normalized)
+	}
+	for i, want := range []string{"message", "function_call", "function_call_output"} {
+		if got := items[i].Get("type").String(); got != want {
+			t.Fatalf("item %d type = %s, want %s: %s", i, got, want, normalized)
+		}
+	}
+
+	// An exact resend of the previous request (no output yet) stays as sent: nothing is inserted.
+	raw = `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"}]}`
+	normalized, _, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 1 {
+		t.Fatalf("input len = %d, want 1 (resend kept as sent, no orphan call): %s", got, normalized)
+	}
+
+	// A replay that restates the call stays as sent.
+	raw = `{"type":"response.create","model":"test-model","input":[{"type":"message","role":"user","content":"read a file"},{"type":"function_call","call_id":"call-1","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"call-1","output":"data"}]}`
+	normalized, _, errMsg = normalizeResponsesWebsocketRequestWithIncrementalState([]byte(raw), lastRequest, lastResponseOutput, "", pending, false, false)
+	if errMsg != nil {
+		t.Fatalf("unexpected error: %v", errMsg.Error)
+	}
+	if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 3 {
+		t.Fatalf("input len = %d, want 3 (sent as is): %s", got, normalized)
+	}
+}
+
+func TestNormalizeSubsequentRequestPartialOverlapStillMerges(t *testing.T) {
+	lastRequest := []byte(`{"model":"test-model","stream":true,"input":[
+		{"type":"message","role":"user","content":"first"},
+		{"type":"message","role":"user","content":"second"}
+	]}`)
+	lastResponseOutput := []byte(`[{"type":"message","role":"assistant","id":"out-1","content":"ok"}]`)
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		// Only the first previous item repeats: an incremental append, not a replay.
+		{name: "prefix shorter than previous input", raw: `{"type":"response.create","input":[{"type":"message","role":"user","content":"first"}]}`},
+		// response.append is always incremental.
+		{name: "append with the same items", raw: `{"type":"response.append","model":"test-model","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
+		// A bare incremental create (no model) that repeats the previous id-less
+		// items is a new turn, not a replay: the prior response must be kept.
+		{name: "bare incremental create repeating the same items", raw: `{"type":"response.create","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
+		// A different model is not a replay of the previous request.
+		{name: "same items for a different model", raw: `{"type":"response.create","model":"other-model","input":[{"type":"message","role":"user","content":"first"},{"type":"message","role":"user","content":"second"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			normalized, _, errMsg := normalizeResponsesWebsocketRequest([]byte(tc.raw), lastRequest, lastResponseOutput)
+			if errMsg != nil {
+				t.Fatalf("unexpected error: %v", errMsg.Error)
+			}
+			nextLen := len(ojson.GetBytesNoCopy([]byte(tc.raw), "input").Array())
+			if got := len(ojson.GetBytesNoCopy(normalized, "input").Array()); got != 3+nextLen {
+				t.Fatalf("input len = %d, want %d (merged): %s", got, 3+nextLen, normalized)
+			}
+		})
+	}
+}
+
 func TestResponsesWebsocketUsesObservedCompactionResponseForReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
