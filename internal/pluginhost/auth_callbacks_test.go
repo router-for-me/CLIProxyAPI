@@ -1217,7 +1217,11 @@ func TestHostAuthListCallbackIncludesMaskedConfigAPIKeysOnRequest(t *testing.T) 
 	nextRetry := time.Now().Add(time.Minute).UTC().Truncate(time.Second)
 	auth := registerConfigAPIKeyAuth(t, host, nextRetry)
 
-	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthList, []byte(`{"include_config_api_keys":true}`))
+	req, errMarshal := json.Marshal(pluginapi.HostAuthListRequest{IncludeConfigAPIKeys: true})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthList, req)
 	if errCall != nil {
 		t.Fatalf("callFromPlugin() error = %v", errCall)
 	}
@@ -1252,7 +1256,11 @@ func TestHostAuthGetRuntimeCallbackReturnsConfigAPIKey(t *testing.T) {
 	host.SetAuthManager(coreauth.NewManager(nil, nil, nil))
 	auth := registerConfigAPIKeyAuth(t, host, time.Now().Add(time.Minute))
 
-	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetRuntime, []byte(`{"auth_index":"`+auth.Index+`"}`))
+	req, errMarshal := json.Marshal(pluginapi.HostAuthGetRequest{AuthIndex: auth.Index})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	rawResp, errCall := host.callFromPlugin(context.Background(), pluginabi.MethodHostAuthGetRuntime, req)
 	if errCall != nil {
 		t.Fatalf("callFromPlugin() error = %v", errCall)
 	}
