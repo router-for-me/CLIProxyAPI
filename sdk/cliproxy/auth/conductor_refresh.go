@@ -473,7 +473,7 @@ func authHasRefreshCredential(auth *Auth) bool {
 		(authMetadataString(auth, "dca_token") != "" || strings.TrimSpace(auth.Attributes["dca_token"]) != "")
 }
 
-// CredentialsChanged reports whether authentication credentials (tokens or API keys)
+// CredentialsChanged reports whether authentication credentials (tokens, cookies or API keys)
 // differ between two Auth records.
 func CredentialsChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
@@ -493,6 +493,9 @@ func CredentialsChanged(existing, incoming *Auth) bool {
 func secretGrantChanged(existing, incoming *Auth) bool {
 	if existing == nil || incoming == nil {
 		return false
+	}
+	if geminiAppCookiesChanged(existing, incoming) {
+		return true
 	}
 	if authAccessToken(existing) != authAccessToken(incoming) || authOuterAccessToken(existing) != authOuterAccessToken(incoming) {
 		return true

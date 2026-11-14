@@ -131,6 +131,8 @@ func run() (exitStatus int) {
 	var xaiLogin bool
 	var devinLogin bool
 	var metaLogin bool
+	var geminiAppImport string
+	var geminiAppAccount string
 	var discoverGateways bool
 	var discoverTimeout int
 	var discoverJSON bool
@@ -162,6 +164,8 @@ func run() (exitStatus int) {
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
+	flag.StringVar(&geminiAppImport, "gemini-app-import", "", "Import Gemini App browser cookies from a JSON file")
+	flag.StringVar(&geminiAppAccount, "gemini-app-account", "", "Stable account name for Gemini App imports; reuse it to replace expired cookies")
 	flag.BoolVar(&discoverGateways, "discover", false, "Discover local AI gateways and CPA instances on the LAN")
 	flag.IntVar(&discoverTimeout, "discover-timeout", 3, "Timeout in seconds for LAN discovery (default 3s)")
 	flag.BoolVar(&discoverJSON, "discover-json", false, "Output discovered gateways in JSON format")
@@ -675,7 +679,7 @@ func run() (exitStatus int) {
 		ProxyURL:     loginProxyURL,
 	}
 
-	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin || geminiAppImport != ""
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -755,6 +759,8 @@ func run() (exitStatus int) {
 		cmd.DoDevinLogin(cfg, options)
 	} else if metaLogin {
 		cmd.DoMetaLogin(cfg, options)
+	} else if geminiAppImport != "" {
+		cmd.DoGeminiAppImport(cfg, geminiAppImport, geminiAppAccount)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
