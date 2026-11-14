@@ -257,7 +257,7 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 		writeRealtimeError(c, http.StatusBadRequest, errLifetime.Error(), "invalid_request_error", "invalid_expires_after")
 		return
 	}
-	clientSession, upstreamSession, errSession := normalizeClientSecretSession(session)
+	clientSession, errSession := normalizeClientSecretSession(session)
 	if errSession != nil {
 		if errors.Is(errSession, errUnsupportedSessionType) {
 			writeRealtimeError(c, http.StatusNotImplemented, errSession.Error(), "not_supported_error", "realtime_capability_not_supported")
@@ -270,7 +270,7 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 	issuerProvider, _ := c.Get("accessProvider")
 	issuerPrincipalValue, _ := issuerPrincipal.(string)
 	issuerProviderValue, _ := issuerProvider.(string)
-	token, authorization, expiresAt, errCreate := h.clientSecrets.create(upstreamSession, lifetime, issuerPrincipalValue, issuerProviderValue)
+	token, authorization, expiresAt, errCreate := h.clientSecrets.create(clientSession, lifetime, issuerPrincipalValue, issuerProviderValue)
 	if errCreate != nil {
 		if errors.Is(errCreate, errClientSecretCapacity) {
 			c.Header("Retry-After", "1")
@@ -321,14 +321,14 @@ func clientSecretLifetime(expiresAfter *struct {
 	return time.Duration(expiresAfter.Seconds) * time.Second, nil
 }
 
-func normalizeClientSecretSession(session json.RawMessage) (json.RawMessage, json.RawMessage, error) {
+func normalizeClientSecretSession(session json.RawMessage) (json.RawMessage, error) {
 	trimmedSession := strings.TrimSpace(string(session))
 	if trimmedSession == "" || trimmedSession == "null" {
 		session = json.RawMessage(`{"type":"realtime","model":"gpt-realtime"}`)
 	}
 	var clientSession map[string]any
 	if errUnmarshal := json.Unmarshal(session, &clientSession); errUnmarshal != nil || clientSession == nil {
-		return nil, nil, errors.New("session must be a valid JSON object")
+		return nil, errors.New("session must be a valid JSON object")
 	}
 	sessionType, _ := clientSession["type"].(string)
 	if strings.TrimSpace(sessionType) == "" {
@@ -336,23 +336,17 @@ func normalizeClientSecretSession(session json.RawMessage) (json.RawMessage, jso
 		clientSession["type"] = sessionType
 	}
 	if sessionType != "realtime" {
-		return nil, nil, fmt.Errorf("%w by the Codex OAuth upstream: %q", errUnsupportedSessionType, sessionType)
+		return nil, fmt.Errorf("%w by the Codex OAuth upstream: %q", errUnsupportedSessionType, sessionType)
 	}
 	model, _ := clientSession["model"].(string)
 	if strings.TrimSpace(model) == "" {
-		model = "gpt-realtime"
-		clientSession["model"] = model
+		clientSession["model"] = "gpt-realtime"
 	}
-	clientEncoded, errMarshal := json.Marshal(clientSession)
+	encoded, errMarshal := json.Marshal(clientSession)
 	if errMarshal != nil {
-		return nil, nil, fmt.Errorf("encode Realtime session: %w", errMarshal)
+		return nil, fmt.Errorf("encode Realtime session: %w", errMarshal)
 	}
-	clientSession["model"] = codexRealtimeModel(model)
-	upstreamEncoded, errMarshal := json.Marshal(clientSession)
-	if errMarshal != nil {
-		return nil, nil, fmt.Errorf("encode Codex Realtime session: %w", errMarshal)
-	}
-	return clientEncoded, upstreamEncoded, nil
+	return encoded, nil
 }
 
 func realtimeSessionResponse(session json.RawMessage, sessionID string, expiresAt time.Time) (json.RawMessage, error) {
@@ -366,10 +360,18 @@ func realtimeSessionResponse(session json.RawMessage, sessionID string, expiresA
 	return json.Marshal(response)
 }
 
+// isStandardRealtimeModel reports whether the model names a standard GPT Realtime
+// model that must be served by the OpenAI Realtime upstream without substituting
+// the Codex Live (Quicksilver) model.
+func isStandardRealtimeModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	return lower == "gpt-realtime" || strings.HasPrefix(lower, "gpt-realtime-") ||
+		strings.Contains(lower, "realtime-preview")
+}
+
 func codexRealtimeModel(model string) string {
 	trimmed := strings.TrimSpace(model)
-	lower := strings.ToLower(trimmed)
-	if lower == "" || lower == "gpt-realtime" || strings.HasPrefix(lower, "gpt-realtime-") || strings.Contains(lower, "realtime-preview") {
+	if trimmed == "" || isStandardRealtimeModel(trimmed) {
 		return defaultLiveModel
 	}
 	return trimmed
