@@ -182,6 +182,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Claude.ServerSideFallback != newCfg.Claude.ServerSideFallback {
 		changes = append(changes, fmt.Sprintf("claude.server-side-fallback: %t -> %t", oldCfg.Claude.ServerSideFallback, newCfg.Claude.ServerSideFallback))
 	}
+	if !reflect.DeepEqual(oldCfg.Claude.ConnectionPool, newCfg.Claude.ConnectionPool) {
+		changes = append(changes, "claude.connection-pool: updated")
+	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(changes, fmt.Sprintf("xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch, newCfg.XAI.InjectXSearch))
 	}

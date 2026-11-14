@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
@@ -348,7 +349,8 @@ func claudeCodeDialer(proxyURL string) proxy.Dialer {
 }
 
 // pooledClaudeCodeTransport returns the credential-scoped Claude Code uTLS transport
-// when the credential opted into pooling, or nil so the caller keeps the historical
+// when the credential opted into pooling (its own connection-pool block, or
+// claude.connection-pool for a Claude credential), or nil so the caller keeps the historical
 // shared per-proxy transport. Per credential pooling matters here because this
 // transport is otherwise shared by every key that uses the same proxy, which mixes
 // distinct identities on one connection and ignores the key's pool settings.
@@ -378,8 +380,10 @@ func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509
 	// unpooled API keys never park idle connections that intermediate NATs or
 	// transparent proxies may silently drop, while keeping DisableKeepAlives false
 	// so net/http does not overwrite the native Connection: keep-alive wire header.
-	// Credentials that explicitly opt into connection-pool override MaxIdleConnsPerHost
-	// and IdleConnTimeout in pooledTransport.
+	// Credentials that explicitly opt into connection-pool (their own block, or
+	// claude.connection-pool for Claude credentials without one) get a
+	// credential-scoped copy with MaxIdleConnsPerHost and IdleConnTimeout set in
+	// pooledTransport.
 	transport := &http.Transport{
 		ForceAttemptHTTP2:   false,
 		MaxIdleConnsPerHost: -1,
@@ -434,24 +438,35 @@ func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509
 // ever takes one branch, and building both pools up front would spend two cache
 // slots per key (evicting live standard pools with unused Anthropic pools).
 type fallbackRoundTripper struct {
-	mu          sync.Mutex
-	anthropic   http.RoundTripper
-	anthropicFn func() http.RoundTripper
-	chrome      http.RoundTripper
-	fallback    http.RoundTripper
-	fallbackFn  func() http.RoundTripper
+	mu        sync.Mutex
+	anthropic http.RoundTripper
+	// anthropicFn returns the credential-scoped Claude Code transport, or nil to
+	// keep the shared one in anthropic.
+	anthropicFn     func() http.RoundTripper
+	anthropicScoped bool
+	chrome          http.RoundTripper
+	fallback        http.RoundTripper
+	fallbackFn      func() http.RoundTripper
 }
 
 func (f *fallbackRoundTripper) anthropicRoundTripper() http.RoundTripper {
+	rt, _ := f.anthropicRoundTripperScoped()
+	return rt
+}
+
+// anthropicRoundTripperScoped also reports whether the Anthropic branch uses a
+// credential-scoped transport.
+func (f *fallbackRoundTripper) anthropicRoundTripperScoped() (http.RoundTripper, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.anthropicFn != nil {
 		if rt := f.anthropicFn(); rt != nil {
 			f.anthropic = rt
+			f.anthropicScoped = true
 		}
 		f.anthropicFn = nil
 	}
-	return f.anthropic
+	return f.anthropic, f.anthropicScoped
 }
 
 func (f *fallbackRoundTripper) fallbackRoundTripper() http.RoundTripper {
@@ -466,14 +481,52 @@ func (f *fallbackRoundTripper) fallbackRoundTripper() http.RoundTripper {
 	return f.fallback
 }
 
+// RoundTrip records on every hop whether the chosen transport is credential-scoped,
+// so after a redirect the probe reflects the transport that served the final response.
 func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if IsAnthropicUpstreamURL(req.URL) {
-		return f.anthropicRoundTripper().RoundTrip(req)
+		rt, scoped := f.anthropicRoundTripperScoped()
+		setCredentialScopedConnection(req.Context(), scoped || isCredentialScopedRoundTripper(rt))
+		return rt.RoundTrip(req)
 	}
 	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
+		setCredentialScopedConnection(req.Context(), isCredentialScopedRoundTripper(f.chrome))
 		return f.chrome.RoundTrip(req)
 	}
-	return f.fallbackRoundTripper().RoundTrip(req)
+	rt := f.fallbackRoundTripper()
+	setCredentialScopedConnection(req.Context(), isCredentialScopedRoundTripper(rt))
+	return rt.RoundTrip(req)
+}
+
+// CredentialScopedRoundTripper marks a round tripper injected through the
+// cliproxy.roundtripper context value whose idle connections belong to a single
+// credential, so a caller may return its connections to the idle pool.
+type CredentialScopedRoundTripper interface {
+	http.RoundTripper
+	CredentialScoped()
+}
+
+func isCredentialScopedRoundTripper(rt http.RoundTripper) bool {
+	_, ok := rt.(CredentialScopedRoundTripper)
+	return ok
+}
+
+type credentialScopedProbeKey struct{}
+
+// WithCredentialScopedConnectionProbe returns a context whose requests report,
+// through scoped, whether NewUtlsHTTPClient sent the latest of them (the final hop
+// after redirects) over a transport whose idle connections belong to one
+// credential. Shared transports, such as the default Claude Code one or the
+// standard transport behind a custom base URL, report false.
+func WithCredentialScopedConnectionProbe(ctx context.Context) (probeCtx context.Context, scoped func() bool) {
+	flag := new(atomic.Bool)
+	return context.WithValue(ctx, credentialScopedProbeKey{}, flag), flag.Load
+}
+
+func setCredentialScopedConnection(ctx context.Context, scoped bool) {
+	if flag, ok := ctx.Value(credentialScopedProbeKey{}).(*atomic.Bool); ok {
+		flag.Store(scoped)
+	}
 }
 
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
@@ -521,7 +574,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			if transport := pooledClaudeCodeTransport(proxyURL, cfg, auth); transport != nil {
 				return transport
 			}
-			return anthropicRT
+			return nil
 		}
 	} else if ctxRoundTripper != nil {
 		chromeRT = ctxRoundTripper
@@ -539,7 +592,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 			if transport := pooledClaudeCodeTransport("", cfg, auth); transport != nil {
 				return transport
 			}
-			return anthropicRT
+			return nil
 		}
 	}
 

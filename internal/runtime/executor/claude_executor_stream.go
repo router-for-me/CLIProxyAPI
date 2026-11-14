@@ -267,7 +267,29 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, errMidSystem
 	}
 	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
+	// With connection reuse enabled, the upstream request follows downstream
+	// cancellation only until message_stop has been observed. After that it is
+	// detached, so the remaining body can be drained (and the connection pooled)
+	// even though the downstream handler cancels ctx as soon as Chunks closes.
+	// Without it, the request keeps ctx and the connection closes right after
+	// message_stop, which is the default short-lived Claude Code transport.
+	// Reuse also requires that the client actually sent the request over a
+	// credential-scoped transport: a custom base URL takes the shared standard
+	// transport, where a drained connection could serve another credential.
+	upstreamCtx, detachUpstream, releaseUpstream := ctx, func() bool { return false }, func() {}
+	credentialScoped := func() bool { return false }
+	if helps.ClaudeUpstreamConnectionReuse(e.cfg, auth) {
+		var probeCtx context.Context
+		probeCtx, credentialScoped = helps.WithCredentialScopedConnectionProbe(ctx)
+		upstreamCtx, detachUpstream, releaseUpstream = helps.NewDetachableContext(probeCtx)
+	}
+	streamStarted := false
+	defer func() {
+		if !streamStarted {
+			releaseUpstream()
+		}
+	}()
+	httpReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
 	if err != nil {
 		return nil, err
 	}
@@ -355,13 +377,38 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
 	}
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
+	streamStarted = true
+	reuseUpstream := credentialScoped()
+	if !reuseUpstream {
+		detachUpstream = func() bool { return false }
+	}
 	go func() {
-		defer close(out)
+		// detached is set once message_stop has been observed and the upstream
+		// request was detached from downstream cancellation in time.
+		detached := false
+		markUpstreamCompleted := func() {
+			// detach reports false on repeated calls, so a failed first
+			// attempt is never turned into a success later.
+			if !detached {
+				detached = detachUpstream()
+			}
+		}
 		defer func() {
+			// Runs after out is closed, so the drain never delays stream
+			// completion. Drain what is left of the upstream body (chunked
+			// terminator, gzip trailer) so net/http can return the connection to
+			// the pool instead of closing it. The drain is bounded to 64 KiB and
+			// ends when the upstream finishes the response or drops the
+			// connection; it is skipped unless the response completed.
+			if detached {
+				_, _ = io.Copy(io.Discard, io.LimitReader(httpResp.Body, 64<<10))
+			}
 			if errClose := decodedBody.Close(); errClose != nil {
 				log.Errorf("response body close error: %v", errClose)
 			}
+			releaseUpstream()
 		}()
+		defer close(out)
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
 		emitCancellation := func(cause error) bool {
@@ -413,6 +460,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					return true
 				}
 				observeClaudeSSEEvent(event.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+				if upstreamCompleted {
+					markUpstreamCompleted()
+				}
 				streamUsage.ObserveClaudeSSEEvent(event.Bytes())
 				cloned := bytes.Clone(event.Bytes())
 				event.Reset()
@@ -494,8 +544,23 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			eventBuf.WriteByte('\n')
 			if len(bytes.TrimSpace(line)) == 0 {
 				observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+				if upstreamCompleted {
+					markUpstreamCompleted()
+				}
 				streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
 				eventBuf.Reset()
+			}
+			// Translation runs per line, so the message_stop data line can already
+			// yield the terminal event (e.g. response.completed) and the client may
+			// cancel before the event's blank separator is read. Treat that line as
+			// completion and detach before it is translated, so the loop exits after
+			// delivering it instead of waiting for the separator; translators ignore
+			// non-data lines, and the buffered event is observed after the loop. Like
+			// the event observer, only valid JSON counts. Only connection reuse needs
+			// this, so the default path keeps waiting for the separator.
+			if payload := helps.JSONPayload(line); reuseUpstream && !upstreamCompleted && payload != nil && ojson.ValidBytes(payload) && ojson.GetBytesNoCopy(payload, "type").String() == "message_stop" {
+				upstreamCompleted = true
+				markUpstreamCompleted()
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			reporter.ObserveResponseModel(line)

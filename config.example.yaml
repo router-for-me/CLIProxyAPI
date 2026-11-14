@@ -276,7 +276,8 @@ requests:
   # Connection pooling has no global switch: it is enabled per api-key credential with
   # `connection-pool` on an api-keys entry (group level, overridable per key). See the
   # api-keys section below. OAuth credentials are never pooled by this setting;
-  # Antigravity keeps its own antigravity.connection-pool switch.
+  # Claude uses upstream.claude.connection-pool and Antigravity keeps its own
+  # antigravity.connection-pool switch.
 
   # Maximum time, in seconds, for upstream TLS handshakes made by the shared built-in
   # uTLS client. It applies to both the Claude Code Anthropic transport and the Chrome
@@ -522,6 +523,19 @@ upstream:
     # When a KV store (local bbolt or Home KV) is active, session date pins are persisted
     # permanently and session-date-pin-days is ignored.
     session-date-pin-days: 7
+
+    # Optional upstream connection reuse on the Claude Code transport for OAuth credentials
+    # and Claude API keys without their own connection-pool block. Off by default: every
+    # request opens a fresh connection and streamed connections close after message_stop.
+    # Writing the block opts in; pools stay per credential, and completed streams are
+    # drained so back-to-back requests reuse one connection. Keep idle-conn-timeout below
+    # the idle cutoff of NATs and transparent proxies on the path: some drop idle
+    # connections silently after 3-5 minutes. A zero idle-conn-timeout, a zero
+    # max-idle-conns-per-host, or enabled: false keeps the default short-lived connections.
+    # connection-pool:
+    #   enabled: true                # default true once the block is present
+    #   idle-conn-timeout: "90s"     # default 90s
+    #   max-idle-conns-per-host: 2   # default 2
 
     # When true, disable Claude request cloaking on OAuth and API-key CLI profiles (the Claude Code CLI disguise and
     # system prompt replacement), so the original system prompt is passed through to Claude as-is.

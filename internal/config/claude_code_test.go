@@ -207,3 +207,38 @@ func TestParseConfigBytesClaudeServerSideFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfigBytesClaudeConnectionPool(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		wantPool bool
+		wantIdle string
+	}{
+		{name: "absent by default", yaml: "port: 8317\n"},
+		{name: "legacy layout", yaml: "claude:\n  connection-pool:\n    idle-conn-timeout: 60s\n", wantPool: true, wantIdle: "60s"},
+		{name: "v8 empty block opts in", yaml: "config-version: 8\nupstream:\n  claude:\n    connection-pool: {}\n", wantPool: true},
+		{name: "v8 layout", yaml: "config-version: 8\nupstream:\n  claude:\n    connection-pool:\n      enabled: true\n      idle-conn-timeout: 90s\n", wantPool: true, wantIdle: "90s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.HasPrefix(tt.yaml, "config-version: 8") {
+				if errValidate := ValidateV8Config([]byte(tt.yaml)); errValidate != nil {
+					t.Fatalf("ValidateV8Config() error = %v", errValidate)
+				}
+			}
+			cfg, errParse := ParseConfigBytes([]byte(tt.yaml))
+			if errParse != nil {
+				t.Fatalf("ParseConfigBytes() error = %v", errParse)
+			}
+			pool := cfg.Claude.ConnectionPool
+			if (pool != nil) != tt.wantPool {
+				t.Fatalf("cfg.Claude.ConnectionPool = %+v, want present=%t", pool, tt.wantPool)
+			}
+			if pool != nil && pool.IdleConnTimeout != tt.wantIdle {
+				t.Fatalf("idle-conn-timeout = %q, want %q", pool.IdleConnTimeout, tt.wantIdle)
+			}
+		})
+	}
+}

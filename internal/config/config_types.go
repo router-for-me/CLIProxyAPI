@@ -136,6 +136,13 @@ type ClaudeConfig struct {
 	// KV) is active, session date pins are persisted permanently and
 	// session-date-pin-days is ignored.
 	SessionDatePinDays *int `yaml:"session-date-pin-days" json:"session-date-pin-days"`
+	// ConnectionPool opts Claude credentials into upstream connection reuse on the
+	// Claude Code transport. It applies to OAuth credentials and to Claude API keys
+	// without their own connection-pool block. Pools stay per credential. Writing
+	// the block is the opt-in; idle-conn-timeout defaults to 90s, and a zero idle
+	// timeout, zero max-idle-conns-per-host, or enabled: false keeps the default
+	// short-lived connections.
+	ConnectionPool *ProxyConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 }
 
 // DefaultClaudeSessionDatePinDays is the session date pin retention applied
@@ -220,8 +227,9 @@ type DevinConfig struct {
 // ProxyConnectionPoolConfig configures upstream connection reuse for one api-key
 // credential (group level or per key).
 //
-// Pools are per credential: two API keys never share a connection, and OAuth
-// credentials are not poolable at all (Antigravity keeps its own switch). The
+// Pools are per credential: two API keys never share a connection. OAuth
+// credentials pool only through provider switches (claude.connection-pool and
+// Antigravity's own antigravity.connection-pool). The
 // transport cache is bounded, so a deployment with very many keys degrades to the
 // historical one-transport-per-request behavior instead of growing without limit.
 type ProxyConnectionPoolConfig struct {
