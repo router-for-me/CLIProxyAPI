@@ -18,6 +18,9 @@ import (
 
 // SDKConfig represents the application's configuration, loaded from a YAML file.
 type SDKConfig struct {
+	// ClaudeAutoModeFollowSession routes recognized Claude Code classifier requests
+	// to the model most recently used by the same client's main conversation.
+	ClaudeAutoModeFollowSession bool `yaml:"claude-auto-mode-follow-session" json:"claude-auto-mode-follow-session"`
 	// MaxRequestBodyBytes limits the size (in bytes) of incoming HTTP request bodies.
 	// Values <= 0 disable the limit (default).
 	MaxRequestBodyBytes int64 `yaml:"max-request-body-bytes" json:"max-request-body-bytes"`
