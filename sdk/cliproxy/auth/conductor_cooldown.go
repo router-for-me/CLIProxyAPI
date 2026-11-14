@@ -2179,6 +2179,7 @@ func (m *Manager) updateSessionAffinity(result Result) {
 	}); ok && affinity != nil {
 		affinity.OnResult(result)
 	}
+	m.updateHomeResponseSessionAlias(result)
 }
 
 func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth *Auth, ephemeral bool) {
