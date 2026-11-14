@@ -29,7 +29,7 @@ compression:
   enabled: true
   shadow: false
   min-bytes: 10
-  cache-prefix: true
+  preserve-system-prompt: always
 `)
 	if got := unsupportedCompressionConfigKeys(&doc); len(got) != 0 {
 		t.Fatalf("unsupported keys = %v, want none", got)

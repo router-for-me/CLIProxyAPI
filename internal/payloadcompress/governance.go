@@ -161,9 +161,9 @@ var riskPatterns = []*regexp.Regexp{
 // applyHardBudget caps the body at maxTokens by dropping the lowest-saliency
 // line/sentence units inside each message. Messages themselves are never
 // removed, so tool-call/result structure stays valid (upstream hardBudget.ts).
-// protectUntil and protectSystem mirror the scanner's protections: messages at
-// or before the cache-prefix cut and preserved system prompts are left intact.
-func applyHardBudget(body string, maxTokens, protectUntil int, protectSystem bool) string {
+// protectSystem mirrors the scanner's protection: preserved system prompts are
+// left intact.
+func applyHardBudget(body string, maxTokens int, protectSystem bool) string {
 	if maxTokens <= 0 || body == "" {
 		return body
 	}
@@ -174,9 +174,6 @@ func applyHardBudget(body string, maxTokens, protectUntil int, protectSystem boo
 	}
 	array := msgs.Array()
 	protected := func(i int) bool {
-		if i <= protectUntil {
-			return true
-		}
 		if protectSystem {
 			role := doc.Get(fmt.Sprintf("messages.%d.role", i)).String()
 			if role == "system" || role == "developer" {

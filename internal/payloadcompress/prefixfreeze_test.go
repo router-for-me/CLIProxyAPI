@@ -22,6 +22,27 @@ func noisySystem() string {
 	return b.String()
 }
 
+// testCacheMarker is the client-owned breakpoint. It is stripped before wire
+// bytes are compared, because it moves between turns while the token stream it
+// annotates does not.
+const testCacheMarker = `,"cache_control":{"type":"ephemeral"}`
+
+func textMessage(role, text string, mark bool) []byte {
+	b := append([]byte(`{"role":"`), role...)
+	if role == "tool" {
+		// Plain string content: upstream lite only collapses string content.
+		b = append(b, `","content":`...)
+		b = appendJSONString(b, text)
+		return append(b, '}')
+	}
+	b = append(b, `","content":[{"type":"text","text":`...)
+	b = appendJSONString(b, text)
+	if mark {
+		b = append(b, testCacheMarker...)
+	}
+	return append(b, `}]}`...)
+}
+
 // systemPromptBody builds a chat body whose system prompt is the noisy one, with
 // an optional cache_control marker on the newest user turn.
 func systemPromptBody(marked bool) []byte {
@@ -37,7 +58,7 @@ func systemPromptBody(marked bool) []byte {
 func TestPreserveSystemPromptAlwaysLeavesSystemRaw(t *testing.T) {
 	resetPrefixFreeze()
 	for _, mode := range []string{"", PreserveSystemPromptAlways} {
-		cfg := cachePrefixTestConfig(CachePrefixCompress)
+		cfg := testConfig(EngineLite)
 		cfg.PreserveSystemPrompt = mode
 		cfg.Sanitize()
 		body := systemPromptBody(false)
@@ -53,7 +74,7 @@ func TestPreserveSystemPromptAlwaysLeavesSystemRaw(t *testing.T) {
 
 func TestPreserveSystemPromptWhenNoCacheRewritesSystemWithoutMarkers(t *testing.T) {
 	resetPrefixFreeze()
-	cfg := cachePrefixTestConfig(CachePrefixCompress)
+	cfg := testConfig(EngineLite)
 	cfg.PreserveSystemPrompt = PreserveSystemPromptWhenNoCache
 	cfg.Sanitize()
 	body := systemPromptBody(false)
@@ -68,7 +89,7 @@ func TestPreserveSystemPromptWhenNoCacheRewritesSystemWithoutMarkers(t *testing.
 
 func TestPreserveSystemPromptWhenNoCacheLeavesSystemRawWhenCached(t *testing.T) {
 	resetPrefixFreeze()
-	cfg := cachePrefixTestConfig(CachePrefixCompress)
+	cfg := testConfig(EngineLite)
 	cfg.PreserveSystemPrompt = PreserveSystemPromptWhenNoCache
 	cfg.Sanitize()
 	for _, marked := range []bool{true} {
@@ -86,7 +107,7 @@ func TestPreserveSystemPromptWhenNoCacheLeavesSystemRawWhenCached(t *testing.T) 
 
 func TestPreserveSystemPromptNeverRewritesSystemEvenWhenCached(t *testing.T) {
 	resetPrefixFreeze()
-	cfg := cachePrefixTestConfig(CachePrefixCompress)
+	cfg := testConfig(EngineLite)
 	cfg.PreserveSystemPrompt = PreserveSystemPromptNever
 	cfg.Sanitize()
 	out, _ := Apply(cfg, "claude-sonnet-4", systemPromptBody(true))
@@ -97,7 +118,7 @@ func TestPreserveSystemPromptNeverRewritesSystemEvenWhenCached(t *testing.T) {
 
 func TestPrefixFreezeFreezesAfterThreshold(t *testing.T) {
 	resetPrefixFreeze()
-	cfg := cachePrefixTestConfig(CachePrefixCompress)
+	cfg := testConfig(EngineLite)
 	cfg.PreserveSystemPrompt = PreserveSystemPromptWhenNoCache
 	cfg.PrefixFreeze = PrefixFreezeConfig{Enabled: true, Threshold: 3}
 	cfg.Sanitize()
@@ -140,11 +161,10 @@ func TestModelCachesPrefix(t *testing.T) {
 	}
 }
 
-func TestCompressionBlockParsesCacheProtectionKeys(t *testing.T) {
+func TestCompressionBlockParsesPreserveSystemPromptKey(t *testing.T) {
 	const raw = `
 compression:
   enabled: true
-  cache-prefix: preserve
   preserve-system-prompt: when-no-cache
   prefix-freeze:
     enabled: true
@@ -164,7 +184,7 @@ compression:
 	}
 	cfg := wrapper.Compression
 	cfg.Sanitize()
-	if cfg.CachePrefix != CachePrefixPreserve || cfg.PreserveSystemPrompt != PreserveSystemPromptWhenNoCache {
+	if cfg.PreserveSystemPrompt != PreserveSystemPromptWhenNoCache {
 		t.Fatalf("cache protection keys lost: %+v", cfg)
 	}
 	if !cfg.PrefixFreeze.Enabled || cfg.PrefixFreeze.Threshold != 5 {

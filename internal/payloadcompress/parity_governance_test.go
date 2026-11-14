@@ -134,7 +134,7 @@ func TestApplyHardBudgetTrimsInsideMessages(t *testing.T) {
 	if errJSON != nil {
 		t.Fatal(errJSON)
 	}
-	out := applyHardBudget(string(raw), 1000, -1, false)
+	out := applyHardBudget(string(raw), 1000, false)
 	if out == string(raw) {
 		t.Fatal("expected the body to be trimmed")
 	}
@@ -167,14 +167,14 @@ func TestApplyHardBudgetTrimsInsideMessages(t *testing.T) {
 
 func TestApplyHardBudgetNoop(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"user","content":"u"}]}`
-	if got := applyHardBudget(body, 1_000_000, -1, false); got != body {
+	if got := applyHardBudget(body, 1_000_000, false); got != body {
 		t.Fatalf("under-budget body changed: %q", got)
 	}
-	if got := applyHardBudget("{not json", 10, -1, false); got != "{not json" {
+	if got := applyHardBudget("{not json", 10, false); got != "{not json" {
 		t.Fatalf("invalid JSON changed: %q", got)
 	}
 	noMsgs := `{"model":"m"}`
-	if got := applyHardBudget(noMsgs, 1, -1, false); got != noMsgs {
+	if got := applyHardBudget(noMsgs, 1, false); got != noMsgs {
 		t.Fatalf("body without messages changed: %q", got)
 	}
 }
@@ -190,7 +190,7 @@ func TestApplyHardBudgetKeepsMessages(t *testing.T) {
 	if errJSON != nil {
 		t.Fatal(errJSON)
 	}
-	out := applyHardBudget(string(raw), 10, -1, false)
+	out := applyHardBudget(string(raw), 10, false)
 	if out == string(raw) {
 		t.Fatal("expected units to be dropped")
 	}
@@ -384,7 +384,7 @@ func TestHardBudgetSkipsProtectedMessages(t *testing.T) {
 	if errJSON != nil {
 		t.Fatal(errJSON)
 	}
-	out := applyHardBudget(string(raw), approxTokens(one)/2, -1, true)
+	out := applyHardBudget(string(raw), approxTokens(one)/2, true)
 	var parsed struct {
 		Messages []struct{ Content string }
 	}
@@ -396,26 +396,5 @@ func TestHardBudgetSkipsProtectedMessages(t *testing.T) {
 	}
 	if got := parsed.Messages[1].Content; len(got) >= len(one) {
 		t.Fatal("budget did not trim the unprotected message")
-	}
-
-	// The cache-prefix cut protects every message at or before it.
-	raw, errJSON = json.Marshal(map[string]any{
-		"messages": []map[string]string{
-			{"role": "user", "content": one},
-			{"role": "user", "content": one},
-		},
-	})
-	if errJSON != nil {
-		t.Fatal(errJSON)
-	}
-	out = applyHardBudget(string(raw), approxTokens(one)+10, 0, false)
-	if errJSON := json.Unmarshal([]byte(out), &parsed); errJSON != nil {
-		t.Fatal(errJSON)
-	}
-	if got := parsed.Messages[0].Content; got != one {
-		t.Fatal("budget rewrote the cache-protected prefix")
-	}
-	if got := parsed.Messages[1].Content; len(got) >= len(one) {
-		t.Fatal("budget did not trim the message after the cache cut")
 	}
 }

@@ -101,8 +101,8 @@ format, `"openai"`/`"claude"`) as the provider argument, so lane detection is
 unreachable without new plumbing. And the guard exists upstream because stacked
 lite/session-dedup can retroactively rewrite already-sent tool results, whereas
 the port's live zone is off by default and its engines hold a tested
-append-stability contract (`TestApplyIsAppendStable`) plus `cache-prefix:
-protect`. If an OpenCode lane is ever added, port this guard with it.
+append-stability contract (`TestApplyIsAppendStable`). If an OpenCode lane is
+ever added, port this guard with it.
 
 Two more cache-awareness verdicts from the same sweep, both ✅ correct to omit:
 
@@ -136,16 +136,16 @@ the budget ever moves inside the engines.
    yields identical bytes (measured 1.3 ms per 67 KB request, and
    `TestApplyIsAppendStable` pins byte-identical prefixes across turns). Upstream's
    32 MB total-byte budget is not mirrored: the 100-entry cap already bounds memory
-   for bodies this size. `cache-prefix` must be `rewrite`, because `protect` leaves
-   no transform to reuse. The session id is **not** upstream's
+   for bodies this size. The session id is **not** upstream's
    `x-omniroute-session-id` header: it is this proxy's native identity, resolved by
    `session.SessionIDFromMetadata` with the same precedence affinity routing uses
    (canonical, LCP affinity, execution, derived), so one conversation is one
    session for both. Upstream's own conversation fingerprint is therefore not
    ported, deliberately: two derivations would drift apart.
-2. **`cache-prefix: rewrite` is the default, not `protect`.** Upstream never skips
-   a message to protect a cache breakpoint. `protect` measured 0% on a realistic
-   Claude Code body because the breakpoint sits near the tail.
+2. **`cache-prefix` removed.** Upstream never skips a message to protect a cache
+   breakpoint, so the port's `rewrite`/`protect` knob had no counterpart, and
+   `protect` measured 0% on a realistic Claude Code body because the breakpoint
+   sits near the tail. Live zone now runs whatever the cache config says.
 3. **The scanner emits assistant prose as `kindAssistant`.** Session dedup and
    lite/headroom may rewrite it; RTK skips it. Tool-call arguments, thinking blocks,
    `tools[]`, `tool_choice`, and the `instructions` field are never emitted; tool-call
@@ -195,7 +195,6 @@ breakpoint at the tail, tool output is `go test ./...` noise with ANSI.
 | `rtk` minimal | 26.0% | 27.0% |
 | `rtk` + `caveman` (upstream seed) | 26.0% | 27.0% |
 | `caveman` alone | 0% | 0% |
-| `cache-prefix: preserve` | 0% (0 segments) | n/a |
 | 5-engine pipeline, max-tool-length 500 | 83.0% | not measured |
 
 Cost: 1306 µs, 1110 allocs per 67 KB request.

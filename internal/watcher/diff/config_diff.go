@@ -207,8 +207,8 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)
 	}
 	if !reflect.DeepEqual(oldCfg.Compression, newCfg.Compression) {
-		changes = append(changes, fmt.Sprintf("compression: enabled=%t shadow=%t cache-prefix=%s combos=%d",
-			newCfg.Compression.Enabled, newCfg.Compression.Shadow, newCfg.Compression.CachePrefix, len(newCfg.Compression.Combos)))
+		changes = append(changes, fmt.Sprintf("compression: enabled=%t shadow=%t combos=%d",
+			newCfg.Compression.Enabled, newCfg.Compression.Shadow, len(newCfg.Compression.Combos)))
 	}
 
 	// API keys (redacted) and counts

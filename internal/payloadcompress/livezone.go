@@ -82,7 +82,7 @@ func liveZoneReuse(cfg Config, model, sessionID string, body []byte, segs []segm
 // can reuse it. Nothing is stored in shadow mode, where the caller gets the raw
 // body back and the zone would describe a payload that was never sent.
 func liveZoneStore(cfg Config, model, sessionID string, body []byte, segs []segment, texts []string) {
-	if !cfg.LiveZone.Enabled || cfg.Shadow || sessionID == "" || cfg.CachePrefix != CachePrefixRewrite {
+	if !cfg.LiveZone.Enabled || cfg.Shadow || sessionID == "" {
 		return
 	}
 	if len(segs) == 0 || len(texts) != len(segs) {

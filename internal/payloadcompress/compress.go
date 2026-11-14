@@ -209,7 +209,6 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 
 	s := &scanner{
 		body:          body,
-		cachePrefix:   cfg.CachePrefix,
 		includeSystem: !preserveSystem,
 	}
 	if !s.scan() {
@@ -242,7 +241,7 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	// raises it past the prefix a previous request already compressed.
 	start := 0
 	var zone *liveZoneEntry
-	if sessionID != "" && cfg.LiveZone.Enabled && cfg.CachePrefix == CachePrefixRewrite {
+	if sessionID != "" && cfg.LiveZone.Enabled {
 		zone, start = liveZoneReuse(cfg, model, sessionID, body, s.segs)
 		if start > 0 {
 			for i := 0; i < start; i++ {
@@ -331,7 +330,7 @@ func applyCoreInner(cfg Config, model, provider, sessionID string, body []byte) 
 	// The budget is an independent post-pass: a config with only a budget and
 	// no engine-level change must still enforce it.
 	if cfg.HardBudgetTokens > 0 {
-		out = []byte(applyHardBudget(string(out), cfg.HardBudgetTokens, s.cacheCut, !s.includeSystem))
+		out = []byte(applyHardBudget(string(out), cfg.HardBudgetTokens, !s.includeSystem))
 	}
 	if liteBody {
 		out = applyLiteBodyAfterPreserve(preserveSystem, liteOpts, model, provider, out)

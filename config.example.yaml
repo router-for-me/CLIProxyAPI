@@ -308,14 +308,6 @@ requests:
   #   exclusions: []               # Model ids or "provider/model" values that bypass compression.
   #   hard-budget-tokens: 0        # 0 = off. Cap the token count after compression.
   #   quantum-lock: false          # Mask volatile spans in the first system message (caching providers only).
-  #   cache-prefix: rewrite       # rewrite (alias: compress; the default) | protect (alias: preserve). Rewrite rewrites the
-  #                               # whole body, including the provider-cached prefix: the bytes
-  #                               # shrink and stay identical turn over turn, so the provider caches
-  #                               # the smaller payload. Preserve is the conservative opt-out: it
-  #                               # leaves every message up to the LAST cache_control breakpoint
-  #                               # byte-identical, so a hit is guaranteed and the cached zone costs
-  #                               # full price. On a long cached session preserve can leave nothing
-  #                               # left to compress. See the payloadcompress doc.
   #                               # Keep min-bytes below your session's first request: the turn
   #                               # it is crossed is one cache miss, then the prefix is stable.
   #   preserve-system-prompt: always # always | when-no-cache | never. Always (the default) never
@@ -352,11 +344,10 @@ requests:
   #     enabled: false             #   default. Keys on the same session identity that
   #                                #   affinity routing uses (canonical, LCP, execution or
   #                                #   derived), so a request repeating that prefix skips the
-  #                                #   engines for the part already compressed. Needs
-  #                                #   cache-prefix: rewrite. Buys CPU, not tokens: the
-  #                                #   engines are already pure, so recompressing gives the
-  #                                #   same bytes. Useful mainly with session-affinity on,
-  #                                #   which is what guarantees a session keeps one identity.
+  #                                #   engines for the part already compressed. Buys CPU, not
+  #                                #   tokens: the engines are already pure, so recompressing
+  #                                #   gives the same bytes. Useful mainly with session-affinity
+  #                                #   on, which is what guarantees a session keeps one identity.
   #   default-combo: standard      # Used when no model-scoped combo matches.
   #   combos:
   #     - name: standard

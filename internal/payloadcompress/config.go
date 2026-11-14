@@ -103,15 +103,6 @@ type Config struct {
 	Shadow bool `yaml:"shadow" json:"shadow"`
 	// MinBytes skips payloads smaller than this many bytes.
 	MinBytes int `yaml:"min-bytes" json:"min-bytes"`
-	// CachePrefix decides whether the region the provider has already cached may
-	// be rewritten. "rewrite" (the default) rewrites it, relying on the pipeline
-	// being append-stable: once a session is above MinBytes the compressed bytes
-	// stay identical turn over turn, so the provider caches the smaller payload.
-	// This matches upstream, which never skips a message to protect a cache.
-	// "protect" leaves every item up to the last cache_control breakpoint
-	// byte-identical, so the hit is guaranteed and that region costs full price.
-	// "compress" and "preserve" are accepted as aliases of the two.
-	CachePrefix string `yaml:"cache-prefix" json:"cache-prefix"`
 	// PreserveSystemPrompt mirrors upstream's preserveSystemPromptMode:
 	// "always" (the default) never rewrites the system prompt, "when-no-cache"
 	// rewrites it only when nothing is cached, and "never" rewrites it even when
@@ -342,20 +333,6 @@ const (
 	EngineLLM            = "llm"
 )
 
-// CachePrefix modes name the only cache decision this package makes: whether the
-// region the provider has already cached may be rewritten. "rewrite" (the
-// default, and what upstream does) rewrites it, so the smaller bytes become the
-// new cached prefix after one miss. "protect" leaves it byte-identical, which
-// guarantees the hit but leaves that region at full price. The older names are
-// still accepted as aliases.
-const (
-	CachePrefixRewrite = "rewrite"
-	CachePrefixProtect = "protect"
-
-	CachePrefixCompress = CachePrefixRewrite
-	CachePrefixPreserve = CachePrefixProtect
-)
-
 // PreserveSystemPrompt modes, mirroring upstream preserveSystemPromptMode.
 const (
 	PreserveSystemPromptAlways      = "always"
@@ -547,15 +524,6 @@ func (c *Config) Sanitize() {
 		}
 	}
 	c.Exclusions = exclusions
-	switch strings.ToLower(strings.TrimSpace(c.CachePrefix)) {
-	case CachePrefixProtect, "preserve":
-		c.CachePrefix = CachePrefixProtect
-	case CachePrefixRewrite, "compress", "":
-		c.CachePrefix = CachePrefixRewrite
-	default:
-		log.Warnf("payloadcompress: unknown cache-prefix %q, falling back to rewrite", c.CachePrefix)
-		c.CachePrefix = CachePrefixRewrite
-	}
 	switch strings.ToLower(strings.TrimSpace(c.PreserveSystemPrompt)) {
 	case PreserveSystemPromptWhenNoCache:
 		c.PreserveSystemPrompt = PreserveSystemPromptWhenNoCache

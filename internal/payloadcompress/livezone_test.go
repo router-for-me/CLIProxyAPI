@@ -7,9 +7,12 @@ import (
 	"time"
 )
 
+// testModel is a model slug that lite rewrites for and that the cache-prefix
+// heuristic treats as a caching provider.
+const testModel = "claude-sonnet-4"
+
 func liveConfig() Config {
 	cfg := testConfig(EngineLite)
-	cfg.CachePrefix = CachePrefixRewrite
 	cfg.LiveZone = LiveZoneConfig{Enabled: true}
 	on, off := true, false
 	cfg.Combos[0].Pipeline[0].Options = StepOptions{CompressToolResults: &on, PreserveToolWhitespace: &off}
@@ -24,7 +27,7 @@ func liveNoisy() string {
 // liveBody builds a body with tools tool results. Growing the count keeps every
 // earlier byte identical, which is what a live-zone reuse has to detect.
 func liveBody(tools int) []byte {
-	b := []byte(`{"model":"` + cachePrefixTestModel + `","max_tokens":1024,` +
+	b := []byte(`{"model":"` + testModel + `","max_tokens":1024,` +
 		`"system":"You are a careful coding agent.","messages":[` +
 		`{"role":"user","content":"run the go tests and show me the output"}`)
 	for i := 0; i < tools; i++ {
@@ -40,14 +43,14 @@ func TestLiveZoneReusesTheCompressedPrefix(t *testing.T) {
 	cfg := liveConfig()
 	body := liveBody(2)
 
-	first, firstStats := ApplySession(cfg, cachePrefixTestModel, "s1", body)
+	first, firstStats := ApplySession(cfg, testModel, "s1", body)
 	if !firstStats.Applied || bytes.Equal(first, body) {
 		t.Fatalf("turn 1 must compress: %+v", firstStats)
 	}
 
 	// Repeating the request must return identical bytes while running no engine
 	// at all, which is what the empty Saved map reports.
-	second, secondStats := ApplySession(cfg, cachePrefixTestModel, "s1", body)
+	second, secondStats := ApplySession(cfg, testModel, "s1", body)
 	if !bytes.Equal(second, first) {
 		t.Fatal("a reused prefix must reproduce the previous output byte for byte")
 	}
@@ -60,7 +63,7 @@ func TestLiveZoneCompressesOnlyTheNewTail(t *testing.T) {
 	resetLiveZone()
 	t.Cleanup(resetLiveZone)
 	cfg := liveConfig()
-	model := cachePrefixTestModel
+	model := testModel
 
 	first, _ := ApplySession(cfg, model, "s1", liveBody(2))
 	second, secondStats := ApplySession(cfg, model, "s1", liveBody(3))
@@ -81,7 +84,7 @@ func TestLiveZoneDiscardsReuseAfterAPrefixEdit(t *testing.T) {
 	resetLiveZone()
 	t.Cleanup(resetLiveZone)
 	cfg := liveConfig()
-	model := cachePrefixTestModel
+	model := testModel
 	body := liveBody(2)
 	ApplySession(cfg, model, "s1", body)
 
@@ -96,9 +99,9 @@ func TestLiveZoneIgnoresShadowedResults(t *testing.T) {
 	t.Cleanup(resetLiveZone)
 	cfg := liveConfig()
 	cfg.Shadow = true
-	ApplySession(cfg, cachePrefixTestModel, "s1", liveBody(1))
+	ApplySession(cfg, testModel, "s1", liveBody(1))
 
-	if entry := liveZone.entries[liveZoneKey(cachePrefixTestModel, "s1")]; entry != nil {
+	if entry := liveZone.entries[liveZoneKey(testModel, "s1")]; entry != nil {
 		t.Fatal("shadow mode must not store a result the caller never received")
 	}
 }
@@ -107,7 +110,7 @@ func TestLiveZoneIgnoresExpiredEntries(t *testing.T) {
 	resetLiveZone()
 	t.Cleanup(resetLiveZone)
 	cfg := liveConfig()
-	model := cachePrefixTestModel
+	model := testModel
 	body := liveBody(1)
 	ApplySession(cfg, model, "s1", body)
 
@@ -134,12 +137,12 @@ func TestLiveZoneOffIsPlainApply(t *testing.T) {
 	cfg.LiveZone.Enabled = false
 	body := liveBody(2)
 
-	got, stats := ApplySession(cfg, cachePrefixTestModel, "s1", body)
-	want, wantStats := Apply(cfg, cachePrefixTestModel, body)
+	got, stats := ApplySession(cfg, testModel, "s1", body)
+	want, wantStats := Apply(cfg, testModel, body)
 	if !bytes.Equal(got, want) || stats.Applied != wantStats.Applied {
 		t.Fatal("with live zone off ApplySession must be exactly Apply")
 	}
-	if liveZone.entries[liveZoneKey(cachePrefixTestModel, "s1")] != nil {
+	if liveZone.entries[liveZoneKey(testModel, "s1")] != nil {
 		t.Fatal("live zone off must not populate the cache")
 	}
 }

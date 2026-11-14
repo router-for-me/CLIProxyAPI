@@ -2,7 +2,6 @@ package payloadcompress
 
 import (
 	"sort"
-	"strings"
 
 	"github.com/tidwall/gjson"
 )
@@ -53,9 +52,9 @@ type segment struct {
 // It only handles the shapes that carry bulk conversation text: chat messages
 // (`messages[]`), Responses items (`input[]`) and Gemini native contents
 // (`contents[]`). Assistant prose is returned as kindAssistant (dedup only);
-// tool call arguments and thinking blocks are never returned. The system prompt and the
-// provider-cached head are returned only when the config allows rewriting them,
-// so a transform cannot corrupt anything that must survive verbatim.
+// tool call arguments and thinking blocks are never returned. The system prompt is
+// returned only when the config allows rewriting it, so a transform cannot corrupt
+// anything that must survive verbatim.
 type scanner struct {
 	body []byte
 	segs []segment
@@ -76,21 +75,14 @@ type scanner struct {
 	// noAssistant records a payload with no assistant item. Upstream dedup treats
 	// that whole conversation as the current turn, so nothing is rewritten.
 	noAssistant bool
-	// cachePrefix decides how far the provider-cached head is protected; see
-	// Config.CachePrefix. The zero value preserves.
-	cachePrefix string
 	// includeSystem lifts the system-prompt exclusion; see
 	// Config.PreserveSystemPrompt.
 	includeSystem bool
-	// cacheCut is the last item index inside the provider-cached prefix, or -1.
-	// The hard-budget post-pass must not rewrite those items.
-	cacheCut int
 }
 
 // scan fills s.segs. It reports false when the payload has no recognizable
 // conversation shape.
 func (s *scanner) scan() bool {
-	s.cacheCut = -1
 	root := gjson.Parse(bodyString(s.body))
 
 	if input := root.Get("input"); input.Type == gjson.String {
@@ -110,22 +102,6 @@ func (s *scanner) scan() bool {
 		return false
 	}
 
-	cut := -1
-	if s.cachePrefix == CachePrefixPreserve {
-		// Everything up to the last cache_control breakpoint is a provider-cached
-		// prefix. Rewriting it would trade saved input tokens for a cache miss and
-		// seconds of time-to-first-token, so those items are left byte-identical.
-		idx := 0
-		items.ForEach(func(_, item gjson.Result) bool {
-			if strings.Contains(item.Raw, "cache_control") {
-				cut = idx
-			}
-			idx++
-			return true
-		})
-	}
-	s.cacheCut = cut
-
 	if s.includeSystem {
 		s.addSystem(root)
 	}
@@ -141,9 +117,7 @@ func (s *scanner) scan() bool {
 	items.ForEach(func(_, item gjson.Result) bool {
 		s.current = idx >= currentFrom
 		s.latestUser = earlierTurn && idx == lastUser
-		if idx > cut {
-			s.addItem(item)
-		}
+		s.addItem(item)
 		idx++
 		return true
 	})

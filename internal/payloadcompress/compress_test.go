@@ -112,28 +112,6 @@ func TestApplyIdempotent(t *testing.T) {
 	}
 }
 
-func TestApplyProtectsCachedPrefix(t *testing.T) {
-	cached := strings.Repeat("cached   prefix   with   noise   \n\n\n\n", 8)
-	fresh := strings.Repeat("fresh   block   with   noise   \n\n\n\n", 8)
-	body := []byte(`{"model":"m","messages":[` +
-		`{"role":"user","content":[{"type":"text","text":` + quote(cached) +
-		`},{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}]},` +
-		`{"role":"user","content":` + quote(fresh) + `}]}`)
-
-	cfg := testConfig(EngineLite)
-	cfg.CachePrefix = CachePrefixPreserve
-	out, stats := Apply(cfg, "m", body)
-	if !stats.Applied {
-		t.Fatal("expected compression")
-	}
-	if !strings.Contains(string(out), quote(cached)) {
-		t.Fatalf("cached prefix was rewritten:\n%s", out)
-	}
-	if strings.Contains(string(out), quote(fresh)) {
-		t.Fatalf("unprotected segment was not compressed:\n%s", out)
-	}
-}
-
 func TestApplySkipsSystemAndToolArgs(t *testing.T) {
 	noisy := "system   prompt   with   noise   \n\n\n\n"
 	args := `{"path":"a/b","body":"x   y\n\n\n\nz"}`
