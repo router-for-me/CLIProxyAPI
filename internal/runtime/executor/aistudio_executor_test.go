@@ -668,11 +668,15 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *tes
 			t.Fatalf("%s ExecuteStream() chunk.Err = nil, want 502 error propagated", mode)
 		}
 		streamText := combined.String()
-		if strings.Contains(streamText, `"stop_reason":"refusal"`) {
-			t.Fatalf("%s stream unexpectedly emitted stop_reason refusal:\n%s", mode, streamText)
+		if strings.TrimSpace(streamText) != "" {
+			t.Fatalf("%s stream unexpectedly emitted payload before bootstrap retryable error:\n%s", mode, streamText)
 		}
-		if !strings.Contains(streamText, "event: error\n") || !strings.Contains(streamText, `"type": "api_error"`) && !strings.Contains(streamText, `"type":"api_error"`) {
-			t.Fatalf("%s stream missing retryable api_error event:\n%s", mode, streamText)
+		streamStatus, okStreamStatus := streamErr.(interface{ StatusCode() int })
+		if !okStreamStatus || streamStatus.StatusCode() != http.StatusBadGateway {
+			t.Fatalf("%s ExecuteStream() chunk.Err = %T %v, want status 502", mode, streamErr, streamErr)
+		}
+		if got := ojson.Get(streamErr.Error(), "error.type").String(); got != "api_error" {
+			t.Fatalf("%s ExecuteStream() chunk.Err error.type = %q, want api_error; err=%s", mode, got, streamErr.Error())
 		}
 		assertMalformedFunctionCallFailedUsage(t, capture.records)
 	}

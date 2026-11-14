@@ -2247,3 +2247,207 @@ func TestMetaExecutor_ResponsesCompactionTriggerAndReplay_Issue6781(t *testing.T
 	}
 	assertStatusErr(t, errIncStream, http.StatusBadGateway)
 }
+
+func TestMetaExecutor_PromptCacheRetentionPassthrough_Issue7424(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			http.Error(w, "bad body", http.StatusBadRequest)
+			return
+		}
+		gotBody = bytes.Clone(body)
+		writeMetaResponsesOK(w, "ok")
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		Provider: "meta",
+		Attributes: map[string]string{
+			"api_key":  "meta-token",
+			"base_url": server.URL,
+		},
+	}
+
+	runBothModes := func(t *testing.T, exec *MetaExecutor, format, payload string) [][]byte {
+		t.Helper()
+		raw := []byte(payload)
+		var bodies [][]byte
+
+		gotBody = nil
+		_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-ember-1.0",
+			Payload: raw,
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FromString(format),
+			OriginalRequest: raw,
+		})
+		if errExec != nil {
+			t.Fatalf("Execute(%s) error = %v", format, errExec)
+		}
+		bodies = append(bodies, bytes.Clone(gotBody))
+
+		gotBody = nil
+		streamRes, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "muse-ember-1.0",
+			Payload: raw,
+		}, cliproxyexecutor.Options{
+			SourceFormat:    sdktranslator.FromString(format),
+			Stream:          true,
+			OriginalRequest: raw,
+		})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream(%s) error = %v", format, errStream)
+		}
+		for chunk := range streamRes.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("ExecuteStream(%s) chunk error = %v", format, chunk.Err)
+			}
+		}
+		bodies = append(bodies, bytes.Clone(gotBody))
+		return bodies
+	}
+
+	t.Run("omitted or blank values are not sent and never default to 24h", func(t *testing.T) {
+		exec := NewMetaExecutor(&config.Config{})
+		cases := []struct {
+			name    string
+			format  string
+			payload string
+		}{
+			{
+				name:    "responses omitted",
+				format:  "openai-response",
+				payload: `{"model":"muse-ember-1.0","input":"hello"}`,
+			},
+			{
+				name:    "responses null",
+				format:  "openai-response",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":null,"input":"hello"}`,
+			},
+			{
+				name:    "responses blank",
+				format:  "openai-response",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":"   ","input":"hello"}`,
+			},
+			{
+				name:    "chat completions omitted",
+				format:  "openai",
+				payload: `{"model":"muse-ember-1.0","messages":[{"role":"user","content":"hello"}]}`,
+			},
+			{
+				name:    "codex null",
+				format:  "codex",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":null,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`,
+			},
+			{
+				name:    "codex non-string",
+				format:  "codex",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":24,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				for idx, body := range runBothModes(t, exec, tc.format, tc.payload) {
+					if ojson.GetBytes(body, "prompt_cache_retention").Exists() {
+						t.Fatalf("mode %d unexpectedly sent prompt_cache_retention: %s", idx, body)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("explicit client prompt_cache_retention passes through", func(t *testing.T) {
+		exec := NewMetaExecutor(&config.Config{})
+		cases := []struct {
+			name    string
+			format  string
+			payload string
+			want    string
+		}{
+			{
+				name:    "responses 24h",
+				format:  "openai-response",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":"24h","input":"hello"}`,
+				want:    "24h",
+			},
+			{
+				name:    "responses in_memory",
+				format:  "openai-response",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":"in_memory","input":"hello"}`,
+				want:    "in_memory",
+			},
+			{
+				name:    "chat completions 24h",
+				format:  "openai",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":"24h","messages":[{"role":"user","content":"hello"}]}`,
+				want:    "24h",
+			},
+			{
+				name:    "codex 24h",
+				format:  "codex",
+				payload: `{"model":"muse-ember-1.0","prompt_cache_retention":"24h","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`,
+				want:    "24h",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				for idx, body := range runBothModes(t, exec, tc.format, tc.payload) {
+					if got := ojson.GetBytes(body, "prompt_cache_retention").String(); got != tc.want {
+						t.Fatalf("mode %d prompt_cache_retention = %q, want %q; body=%s", idx, got, tc.want, body)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("payload rules remain final semantic barrier", func(t *testing.T) {
+		defaultExec := NewMetaExecutor(&config.Config{
+			Payload: config.PayloadConfig{
+				Default: []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "muse-*", Protocol: "meta"}},
+					Params: map[string]any{"prompt_cache_retention": "24h"},
+				}},
+			},
+		})
+		for idx, body := range runBothModes(t, defaultExec, "openai-response", `{"model":"muse-ember-1.0","input":"hello"}`) {
+			if got := ojson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+				t.Fatalf("default rule on omitted field mode %d = %q, want 24h; body=%s", idx, got, body)
+			}
+		}
+		for idx, body := range runBothModes(t, defaultExec, "openai-response", `{"model":"muse-ember-1.0","prompt_cache_retention":"in_memory","input":"hello"}`) {
+			if got := ojson.GetBytes(body, "prompt_cache_retention").String(); got != "in_memory" {
+				t.Fatalf("default rule overwrote explicit client in_memory in mode %d: got %q; body=%s", idx, got, body)
+			}
+		}
+
+		overrideExec := NewMetaExecutor(&config.Config{
+			Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "muse-*", Protocol: "meta"}},
+					Params: map[string]any{"prompt_cache_retention": "24h"},
+				}},
+			},
+		})
+		for idx, body := range runBothModes(t, overrideExec, "openai-response", `{"model":"muse-ember-1.0","prompt_cache_retention":"in_memory","input":"hello"}`) {
+			if got := ojson.GetBytes(body, "prompt_cache_retention").String(); got != "24h" {
+				t.Fatalf("override rule mode %d = %q, want 24h; body=%s", idx, got, body)
+			}
+		}
+
+		filterExec := NewMetaExecutor(&config.Config{
+			Payload: config.PayloadConfig{
+				Filter: []config.PayloadFilterRule{{
+					Models: []config.PayloadModelRule{{Name: "muse-*", Protocol: "meta"}},
+					Params: []string{"prompt_cache_retention"},
+				}},
+			},
+		})
+		for idx, body := range runBothModes(t, filterExec, "openai-response", `{"model":"muse-ember-1.0","prompt_cache_retention":"24h","input":"hello"}`) {
+			if ojson.GetBytes(body, "prompt_cache_retention").Exists() {
+				t.Fatalf("filter rule failed to remove prompt_cache_retention in mode %d: %s", idx, body)
+			}
+		}
+	})
+}

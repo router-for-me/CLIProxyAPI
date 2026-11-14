@@ -1513,11 +1513,11 @@ func TestGeminiExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *testi
 		t.Fatalf("ExecuteStream() chunk.Err = %T %v, want status 502", streamErr, streamErr)
 	}
 	streamText := combined.String()
-	if strings.Contains(streamText, `"stop_reason":"refusal"`) {
-		t.Fatalf("stream unexpectedly emitted stop_reason refusal:\n%s", streamText)
+	if strings.TrimSpace(streamText) != "" {
+		t.Fatalf("stream unexpectedly emitted payload before bootstrap retryable error:\n%s", streamText)
 	}
-	if !strings.Contains(streamText, "event: error\n") || !strings.Contains(streamText, `"type":"api_error"`) {
-		t.Fatalf("stream missing retryable api_error event:\n%s", streamText)
+	if got := ojson.Get(streamErr.Error(), "error.type").String(); got != "api_error" {
+		t.Fatalf("ExecuteStream() chunk.Err error.type = %q, want api_error; err=%s", got, streamErr.Error())
 	}
 	assertMalformedFunctionCallFailedUsage(t, capture.records)
 }

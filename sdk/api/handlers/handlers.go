@@ -635,6 +635,14 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 
 	if requestCtx != nil {
 		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
+		parentCtx = logging.InheritDeferredCapture(parentCtx, requestCtx)
+	}
+	if c != nil && logging.DeferredAPICaptureFromContext(parentCtx) == nil && !logging.DeferredAPIRequestCaptureDisabled(parentCtx) {
+		if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
+			if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil {
+				parentCtx = logging.WithDeferredAPICapture(parentCtx, capture)
+			}
+		}
 	}
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {

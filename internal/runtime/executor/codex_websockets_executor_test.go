@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -3345,5 +3346,210 @@ func TestCodexWebsockets_SendErrorLogsSessionObject(t *testing.T) {
 	}
 	if !strings.Contains(logOutput, "reason=send_error") {
 		t.Fatalf("expected reason=send_error in log output, got: %s", logOutput)
+	}
+}
+
+func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+	for _, stream := range []bool{false, true} {
+		name := "execute"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			var dials atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if dials.Add(1) == 1 {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "11")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"message":"codex websocket reconnect forbidden"}}`))
+			}))
+			defer server.Close()
+
+			var writes atomic.Int32
+			testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+				if writes.Add(1) == 1 {
+					_ = conn.SetWriteDeadline(time.Now().Add(-time.Second))
+				}
+			}
+			defer func() { testWebsocketWritePayloadHook = nil }()
+
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			exec := NewCodexWebsocketsExecutor(&config.Config{
+				SDKConfig: config.SDKConfig{
+					DisableImageGeneration: config.DisableImageGenerationAll,
+				},
+			})
+			auth := &cliproxyauth.Auth{
+				ID:         "codex-ws-reconnect",
+				Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL},
+			}
+			req := cliproxyexecutor.Request{
+				Model:   "gpt-5.6-sol",
+				Payload: []byte(`{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"reconnect"}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "sess-codex-reconnect-" + name,
+				},
+			}
+
+			var errExec error
+			if stream {
+				_, errExec = exec.ExecuteStream(ctx, auth, req, opts)
+			} else {
+				_, errExec = exec.Execute(ctx, auth, req, opts)
+			}
+			if errExec == nil {
+				t.Fatal("expected reconnect upgrade rejection to fail")
+			}
+
+			value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !exists {
+				t.Fatal("deferred API response was not recorded on codex websocket reconnect rejection")
+			}
+			deferred, ok := value.(logging.DeferredAPIResponse)
+			if !ok || deferred == nil {
+				t.Fatalf("deferred API response = %#v, want logging.DeferredAPIResponse", value)
+			}
+			rendered := string(deferred.RenderAPIResponse())
+			for _, want := range []string{
+				"=== API RESPONSE 1 ===",
+				"Status: 101",
+				"Error: send:",
+				"=== API RESPONSE 2 ===",
+				"Status: 403",
+				"Retry-After: 11",
+				`{"error":{"message":"codex websocket reconnect forbidden"}}`,
+				"Error: dial_retry:",
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
+				}
+			}
+
+			var transportDials atomic.Int32
+			transportServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if transportDials.Add(1) == 1 {
+					conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+					if errUpgrade != nil {
+						return
+					}
+					defer func() { _ = conn.Close() }()
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				}
+				if hijacker, ok := w.(http.Hijacker); ok {
+					if rawConn, _, errHijack := hijacker.Hijack(); errHijack == nil {
+						_ = rawConn.Close()
+					}
+				}
+			}))
+			defer transportServer.Close()
+
+			writes.Store(0)
+			subGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			subCtx := context.WithValue(context.Background(), "gin", subGinCtx)
+			subAuth := &cliproxyauth.Auth{
+				ID:         "codex-ws-transport-" + name,
+				Attributes: map[string]string{"api_key": "sk-test", "base_url": transportServer.URL},
+			}
+			subOpts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+				Metadata: map[string]any{
+					cliproxyexecutor.ExecutionSessionMetadataKey: "sess-codex-transport-" + name,
+				},
+			}
+			if stream {
+				_, errExec = exec.ExecuteStream(subCtx, subAuth, req, subOpts)
+			} else {
+				_, errExec = exec.Execute(subCtx, subAuth, req, subOpts)
+			}
+			if errExec == nil {
+				t.Fatal("expected transport reconnect failure")
+			}
+			subVal, ok := subGinCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !ok {
+				t.Fatal("deferred API response missing on transport reconnect failure")
+			}
+			subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
+			for _, want := range []string{
+				"=== API RESPONSE 1 ===",
+				"Error: send:",
+				"=== API RESPONSE 2 ===",
+				"Error: dial_retry:",
+			} {
+				if !strings.Contains(subRendered, want) {
+					t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
+				}
+			}
+
+			initServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Error("hijacker unsupported")
+					return
+				}
+				rawConn, rawBuf, errHijack := hijacker.Hijack()
+				if errHijack != nil {
+					t.Errorf("hijack: %v", errHijack)
+					return
+				}
+				_, _ = rawBuf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: invalid\r\n\r\n")
+				_ = rawBuf.Flush()
+				_ = rawConn.Close()
+			}))
+			defer initServer.Close()
+
+			initGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			initCtx := context.WithValue(context.Background(), "gin", initGinCtx)
+			initAuth := &cliproxyauth.Auth{
+				ID:         "codex-ws-init-" + name,
+				Attributes: map[string]string{"api_key": "sk-test", "base_url": initServer.URL},
+			}
+			initOpts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatOpenAIResponse,
+				ResponseFormat: sdktranslator.FormatOpenAIResponse,
+			}
+			if stream {
+				_, errExec = exec.ExecuteStream(initCtx, initAuth, req, initOpts)
+			} else {
+				_, errExec = exec.Execute(initCtx, initAuth, req, initOpts)
+			}
+			if errExec == nil {
+				t.Fatal("expected initial invalid-101 handshake to fail")
+			}
+			initVal, ok := initGinCtx.Get(logging.DeferredAPIResponseContextKey)
+			if !ok {
+				t.Fatal("deferred API response missing on initial invalid-101 handshake")
+			}
+			initRendered := string(initVal.(logging.DeferredAPIResponse).RenderAPIResponse())
+			for _, want := range []string{"Status: 101", "Error: dial:"} {
+				if !strings.Contains(initRendered, want) {
+					t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
+				}
+			}
+		})
 	}
 }

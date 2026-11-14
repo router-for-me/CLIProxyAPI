@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -16,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -7502,195 +7505,111 @@ func TestNormalizeSubsequentRequestAssistantInputTriggersTranscriptReplacement(t
 	}
 }
 
-func TestForwardResponsesWebsocketEmitsPeriodicPingControlFrames(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
-	serverErrCh := make(chan error, 1)
-	data := make(chan []byte)
-	errCh := make(chan *interfaces.ErrorMessage)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
-		if err != nil {
-			serverErrCh <- err
-			return
-		}
-		defer func() { _ = conn.Close() }()
-
-		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-		ctx.Request = r
-
-		cfg := &sdkconfig.SDKConfig{
-			Streaming: sdkconfig.StreamingConfig{
-				KeepAliveSeconds: 1,
-			},
-		}
-		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(cfg, nil))
-
-		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
-			ctx,
-			newResponsesWebsocketWriter(conn),
-			func(...interface{}) {},
-			data,
-			errCh,
-			newInMemoryWebsocketTimelineLog(),
-			"session-keepalive-test",
-		)
-		if errMsg != nil {
-			serverErrCh <- fmt.Errorf("unexpected error message: %v", errMsg.Error)
-			return
-		}
-		if errForward != nil {
-			serverErrCh <- fmt.Errorf("unexpected forward error: %v", errForward)
-			return
-		}
-		serverErrCh <- nil
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer func() { _ = clientConn.Close() }()
-
-	pingReceived := make(chan struct{}, 1)
-	clientConn.SetPingHandler(func(appData string) error {
-		select {
-		case pingReceived <- struct{}{}:
-		default:
-		}
-		return clientConn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
-	})
-
-	clientDone := make(chan struct{})
-	go func() {
-		defer close(clientDone)
-		for {
-			_, _, errRead := clientConn.ReadMessage()
-			if errRead != nil {
-				return
-			}
-		}
-	}()
-
-	select {
-	case <-pingReceived:
-		// Received expected Ping control frame while upstream is waiting.
-	case <-time.After(1500 * time.Millisecond):
-		t.Fatal("expected websocket Ping control frame during upstream wait, got none")
-	}
-
-	// Unblock forwardResponsesWebsocket with terminal completion.
-	data <- []byte(`{"type":"response.done","response":{"id":"resp-ping-1","output":[]}}`)
-	close(data)
-	close(errCh)
-
-	select {
-	case serverErr := <-serverErrCh:
-		if serverErr != nil {
-			t.Fatalf("server error: %v", serverErr)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server timed out completing forwardResponsesWebsocket")
-	}
-
-	<-clientDone
+type websocketKeepAliveBootstrapExecutor struct {
+	websocketCaptureExecutor
+	started chan struct{}
+	release chan struct{}
 }
 
-func TestForwardResponsesWebsocketPingKeepAliveOptionsOverride(t *testing.T) {
+func (e *websocketKeepAliveBootstrapExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	close(e.started)
+	select {
+	case <-e.release:
+		return e.websocketCaptureExecutor.ExecuteStream(ctx, auth, req, opts)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestResponsesWebsocketPingsBeforeUpstreamStreamIsReady(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	executor := &websocketKeepAliveBootstrapExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "auth-ws-keepalive", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	const model = "ws-keepalive-test-model"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
 
-	serverErrCh := make(chan error, 1)
-	data := make(chan []byte)
-	errCh := make(chan *interfaces.ErrorMessage)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
-		if err != nil {
-			serverErrCh <- err
-			return
-		}
-		defer func() { _ = conn.Close() }()
-
-		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-		ctx.Request = r
-
-		interval := 20 * time.Millisecond
-		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
-
-		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
-			ctx,
-			newResponsesWebsocketWriter(conn),
-			func(...interface{}) {},
-			data,
-			errCh,
-			newInMemoryWebsocketTimelineLog(),
-			"session-keepalive-override",
-			responsesWebsocketForwardOptions{
-				keepAliveInterval: &interval,
-			},
-		)
-		if errMsg != nil {
-			serverErrCh <- fmt.Errorf("unexpected error message: %v", errMsg.Error)
-			return
-		}
-		if errForward != nil {
-			serverErrCh <- fmt.Errorf("unexpected forward error: %v", errForward)
-			return
-		}
-		serverErrCh <- nil
-	}))
+	cfg := &sdkconfig.SDKConfig{Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 1}}
+	h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(cfg, manager))
+	router := gin.New()
+	router.GET("/v1/responses", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
 	defer server.Close()
 
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial websocket: %v", err)
 	}
-	defer func() { _ = clientConn.Close() }()
+	defer func() { _ = conn.Close() }()
 
-	pingReceived := make(chan struct{}, 1)
-	clientConn.SetPingHandler(func(appData string) error {
+	pings := make(chan bool, 1)
+	pong := conn.PingHandler()
+	conn.SetPingHandler(func(payload string) error {
+		started := false
 		select {
-		case pingReceived <- struct{}{}:
+		case <-executor.started:
+			started = true
 		default:
 		}
-		return clientConn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		select {
+		case pings <- started:
+		default:
+		}
+		return pong(payload)
 	})
 
-	clientDone := make(chan struct{})
+	completed := make(chan error, 1)
 	go func() {
-		defer close(clientDone)
-		for {
-			_, _, errRead := clientConn.ReadMessage()
-			if errRead != nil {
-				return
-			}
+		_, payload, errRead := conn.ReadMessage()
+		if errRead == nil && ojson.GetBytesNoCopy(payload, "type").String() != wsEventTypeCompleted {
+			errRead = fmt.Errorf("expected response.completed, got %s", payload)
 		}
+		completed <- errRead
 	}()
 
 	select {
-	case <-pingReceived:
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("expected websocket Ping control frame via option override, got none")
+	case <-pings:
+	case errRead := <-completed:
+		t.Fatalf("websocket ended before the first turn: %v", errRead)
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected Ping after upgrade, before sending a turn")
 	}
-
-	data <- []byte(`{"type":"response.done","response":{"id":"resp-override","output":[]}}`)
-	close(data)
-	close(errCh)
-
-	select {
-	case serverErr := <-serverErrCh:
-		if serverErr != nil {
-			t.Fatalf("server error: %v", serverErr)
+	if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-keepalive-test-model","input":[]}`)); errWrite != nil {
+		t.Fatalf("write websocket request: %v", errWrite)
+	}
+	deadline := time.After(5 * time.Second)
+waitForBootstrapPing:
+	for {
+		select {
+		case started := <-pings:
+			if started {
+				break waitForBootstrapPing
+			}
+		case errRead := <-completed:
+			t.Fatalf("websocket ended before the upstream stream was released: %v", errRead)
+		case <-deadline:
+			t.Fatal("expected Ping while the upstream stream is blocked")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("server timed out completing forwardResponsesWebsocket")
 	}
 
-	<-clientDone
+	close(executor.release)
+	select {
+	case errRead := <-completed:
+		if errRead != nil {
+			t.Fatalf("read completed response: %v", errRead)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("expected response.completed after releasing the upstream stream")
+	}
 }
 
 func TestResponsesWebsocketWriterWritePing(t *testing.T) {
@@ -7709,6 +7628,23 @@ func TestResponsesWebsocketWriterWritePing(t *testing.T) {
 		defer func() { _ = conn.Close() }()
 
 		writer := newResponsesWebsocketWriter(conn)
+		// A background Ping must skip rather than block behind an active data write.
+		writer.writeMu.Lock()
+		pingDone := make(chan error, 1)
+		go func() { pingDone <- writer.writePing() }()
+		select {
+		case errPing := <-pingDone:
+			writer.writeMu.Unlock()
+			if errPing != nil {
+				t.Errorf("writePing() while data write active = %v, want nil", errPing)
+			}
+		case <-time.After(time.Second):
+			writer.writeMu.Unlock()
+			<-pingDone
+			t.Error("Ping waited for the data write mutex")
+			return
+		}
+
 		if errPing := writer.writePing(); errPing != nil {
 			t.Errorf("writePing() error = %v, want nil", errPing)
 		}
@@ -7751,81 +7687,275 @@ func TestResponsesWebsocketWriterWritePing(t *testing.T) {
 	}
 }
 
-func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+type blockingWebsocketWriteConn struct {
+	net.Conn
+	blockWrites atomic.Bool
+	writeBlock  chan struct{}
+	closed      chan struct{}
+	closeOnce   sync.Once
+}
 
-	serverErrCh := make(chan error, 1)
-	cancelledCh := make(chan error, 1)
-	data := make(chan []byte)
-	errCh := make(chan *interfaces.ErrorMessage)
+func newBlockingWebsocketWriteConn(conn net.Conn) *blockingWebsocketWriteConn {
+	return &blockingWebsocketWriteConn{
+		Conn:       conn,
+		writeBlock: make(chan struct{}, 1),
+		closed:     make(chan struct{}),
+	}
+}
 
+func (c *blockingWebsocketWriteConn) Write(b []byte) (int, error) {
+	if c.blockWrites.Load() {
+		select {
+		case c.writeBlock <- struct{}{}:
+		default:
+		}
+		<-c.closed
+		return 0, net.ErrClosed
+	}
+	return c.Conn.Write(b)
+}
+
+func (c *blockingWebsocketWriteConn) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.closed)
+	})
+	return c.Conn.Close()
+}
+
+type hijackableWebsocketResponseWriter struct {
+	header http.Header
+	conn   net.Conn
+}
+
+func newHijackableWebsocketResponseWriter(conn net.Conn) *hijackableWebsocketResponseWriter {
+	return &hijackableWebsocketResponseWriter{
+		header: make(http.Header),
+		conn:   conn,
+	}
+}
+
+func (w *hijackableWebsocketResponseWriter) Header() http.Header         { return w.header }
+func (w *hijackableWebsocketResponseWriter) Write(b []byte) (int, error) { return w.conn.Write(b) }
+func (w *hijackableWebsocketResponseWriter) WriteHeader(int)             {}
+func (w *hijackableWebsocketResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.conn, bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn)), nil
+}
+
+func TestResponsesWebsocketWriterCloseInterruptsBlockedPing(t *testing.T) {
+	cases := []struct {
+		name  string
+		close func(*responsesWebsocketWriter) error
+	}{
+		{
+			name: "closeForUpstreamError",
+			close: func(w *responsesWebsocketWriter) error {
+				matched, errClose := w.closeForUpstreamError(&websocket.CloseError{
+					Code: websocket.CloseMessageTooBig,
+					Text: "message too big",
+				})
+				if !matched && errClose == nil {
+					return errors.New("message-too-big error did not match")
+				}
+				return errClose
+			},
+		},
+		{
+			name: "closeWithPayload",
+			close: func(w *responsesWebsocketWriter) error {
+				_, errClose := w.closeWithPayload([]byte(`{"type":"error","status":400}`))
+				return errClose
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clientRaw, serverRaw := net.Pipe()
+			defer func() { _ = clientRaw.Close() }()
+			blockingServer := newBlockingWebsocketWriteConn(serverRaw)
+			defer func() { _ = blockingServer.Close() }()
+
+			serverConnCh := make(chan *websocket.Conn, 1)
+			serverErrCh := make(chan error, 1)
+			go func() {
+				req, errReq := http.NewRequest(http.MethodGet, "http://example.com/v1/responses", nil)
+				if errReq != nil {
+					serverErrCh <- errReq
+					return
+				}
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", "websocket")
+				req.Header.Set("Sec-WebSocket-Version", "13")
+				req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+				rw := newHijackableWebsocketResponseWriter(blockingServer)
+				conn, errUpgrade := responsesWebsocketUpgrader.Upgrade(rw, req, nil)
+				if errUpgrade != nil {
+					serverErrCh <- errUpgrade
+					return
+				}
+				serverConnCh <- conn
+			}()
+
+			// Drain the HTTP 101 Switching Protocols response on the client side of the pipe.
+			buf := make([]byte, 512)
+			if _, errRead := clientRaw.Read(buf); errRead != nil {
+				t.Fatalf("read upgrade response: %v", errRead)
+			}
+
+			var serverConn *websocket.Conn
+			select {
+			case serverConn = <-serverConnCh:
+			case errUpgrade := <-serverErrCh:
+				t.Fatalf("upgrade websocket: %v", errUpgrade)
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for websocket upgrade")
+			}
+
+			writer := newResponsesWebsocketWriter(serverConn)
+			blockingServer.blockWrites.Store(true)
+
+			pingDone := make(chan error, 1)
+			go func() {
+				pingDone <- writer.writePing()
+			}()
+
+			select {
+			case <-blockingServer.writeBlock:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for writePing to enter blocked network write")
+			}
+
+			closeDone := make(chan error, 1)
+			go func() {
+				closeDone <- tc.close(writer)
+			}()
+
+			select {
+			case errClose := <-closeDone:
+				if errClose != nil {
+					t.Fatalf("close returned error: %v", errClose)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("terminal close blocked behind stuck Ping write")
+			}
+
+			select {
+			case errPing := <-pingDone:
+				if !errors.Is(errPing, net.ErrClosed) {
+					t.Fatalf("writePing error = %v, want net.ErrClosed", errPing)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("writePing did not exit after connection close")
+			}
+		})
+	}
+}
+
+func TestResponsesWebsocketKeepAliveUpdatesInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		intervals := make(chan time.Duration, 1)
+		queueResponsesWebsocketKeepAliveInterval(intervals, time.Second)
+		queueResponsesWebsocketKeepAliveInterval(intervals, 20*time.Millisecond)
+
+		pings := 0
+		done := make(chan error, 1)
+		go func() {
+			done <- runResponsesWebsocketKeepAlive(ctx, intervals, func() error {
+				pings++
+				return nil
+			})
+		}()
+
+		synctest.Wait()
+		time.Sleep(20 * time.Millisecond)
+		synctest.Wait()
+		if pings != 1 {
+			t.Fatalf("pings after replacing pending interval = %d, want 1", pings)
+		}
+
+		queueResponsesWebsocketKeepAliveInterval(intervals, 10*time.Millisecond)
+		synctest.Wait()
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if pings != 2 {
+			t.Fatalf("pings after shortening interval = %d, want 2", pings)
+		}
+
+		queueResponsesWebsocketKeepAliveInterval(intervals, 0)
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if pings != 2 {
+			t.Fatalf("pings after disabling keepalive = %d, want 2", pings)
+		}
+
+		queueResponsesWebsocketKeepAliveInterval(intervals, 10*time.Millisecond)
+		synctest.Wait()
+		time.Sleep(10 * time.Millisecond)
+		synctest.Wait()
+		if pings != 3 {
+			t.Fatalf("pings after re-enabling keepalive = %d, want 3", pings)
+		}
+
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("keepalive did not shut down cleanly: %v", err)
+		}
+	})
+}
+
+func TestForwardResponsesWebsocketPreservesPingFailureCause(t *testing.T) {
+	requestCtx, cancelSocket := context.WithCancelCause(context.Background())
+	cancelSocket(net.ErrClosed)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil).WithContext(requestCtx)
+
+	var canceledWith error
+	_, _, _, _, err := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+		c, nil, func(args ...interface{}) {
+			canceledWith, _ = args[0].(error)
+		}, nil, nil, nil, "ping-write-failure",
+	)
+	if !errors.Is(err, net.ErrClosed) || !errors.Is(canceledWith, net.ErrClosed) {
+		t.Fatalf("forward error = %v, cancellation cause = %v, want closed connection", err, canceledWith)
+	}
+}
+
+func TestResponsesWebsocketKeepAliveCancelsOnPingFailure(t *testing.T) {
+	serverErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
 		if err != nil {
-			serverErrCh <- err
+			serverErr <- err
 			return
 		}
-		defer func() { _ = conn.Close() }()
+		_ = conn.Close()
 
-		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
-		ctx.Request = r
-
-		interval := 10 * time.Millisecond
-		h := NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
-
-		_, _, _, errMsg, errForward := h.forwardResponsesWebsocket(
-			ctx,
-			newResponsesWebsocketWriter(conn),
-			func(errs ...interface{}) {
-				if len(errs) > 0 {
-					if errVal, ok := errs[0].(error); ok {
-						cancelledCh <- errVal
-						return
-					}
-				}
-				cancelledCh <- nil
-			},
-			data,
-			errCh,
-			newInMemoryWebsocketTimelineLog(),
-			"session-ping-fail",
-			responsesWebsocketForwardOptions{
-				keepAliveInterval: &interval,
-			},
-		)
-		if errMsg != nil {
-			serverErrCh <- fmt.Errorf("unexpected error message: %v", errMsg.Error)
-			return
-		}
-		serverErrCh <- errForward
+		ctx, cancel := context.WithCancelCause(r.Context())
+		defer cancel(nil)
+		intervals := make(chan time.Duration, 1)
+		intervals <- 10 * time.Millisecond
+		newResponsesWebsocketWriter(conn).keepAlive(ctx, cancel, intervals)
+		serverErr <- context.Cause(ctx)
 	}))
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial websocket: %v", err)
 	}
-
-	// Close client connection immediately so the next server Ping write fails.
-	_ = clientConn.Close()
+	defer func() { _ = conn.Close() }()
 
 	select {
-	case serverErr := <-serverErrCh:
-		if serverErr == nil {
-			t.Fatal("expected error on server ping write failure, got nil")
+	case errKeepAlive := <-serverErr:
+		if !errors.Is(errKeepAlive, net.ErrClosed) {
+			t.Fatalf("keepalive cancellation cause = %v, want closed connection", errKeepAlive)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("server timed out awaiting ping write abort")
-	}
-
-	select {
-	case cancelErr := <-cancelledCh:
-		if cancelErr == nil {
-			t.Fatal("expected cancel callback to be invoked with ping error, got nil")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out awaiting cancel callback on ping write failure")
+		t.Fatal("timed out awaiting cancellation after Ping failed")
 	}
 }
 
