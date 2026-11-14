@@ -29,6 +29,7 @@ type rpcCapabilities struct {
 	FrontendAuthOmitBody              bool                         `json:"frontend_auth_omit_body,omitempty"`
 	Scheduler                         bool                         `json:"scheduler"`
 	SchedulerAcrossPriorities         bool                         `json:"scheduler_across_priorities,omitempty"`
+	SchedulerQuotaSignals             bool                         `json:"scheduler_quota_signals,omitempty"`
 	ModelRouter                       bool                         `json:"model_router"`
 	Executor                          bool                         `json:"executor"`
 	ExecutorModelScope                pluginapi.ExecutorModelScope `json:"executor_model_scope"`
@@ -224,6 +225,19 @@ func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
 	return false
 }
 
+func schedulerWantsQuotaSignals(caps pluginapi.Capabilities) bool {
+	if caps.Scheduler == nil {
+		return false
+	}
+	if caps.SchedulerQuotaSignals {
+		return true
+	}
+	if opt, ok := caps.Scheduler.(interface{ SchedulerWantsQuotaSignals() bool }); ok && opt != nil {
+		return opt.SchedulerWantsQuotaSignals()
+	}
+	return false
+}
+
 func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 	caps := plugin.Capabilities
 	return rpcCapabilities{
@@ -236,6 +250,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthOmitBody:              frontendAuthProviderWantsOmitBody(caps),
 		Scheduler:                         caps.Scheduler != nil,
 		SchedulerAcrossPriorities:         schedulerWantsAcrossPriorities(caps),
+		SchedulerQuotaSignals:             schedulerWantsQuotaSignals(caps),
 		ModelRouter:                       caps.ModelRouter != nil,
 		Executor:                          caps.Executor != nil,
 		ExecutorModelScope:                normalizedExecutorModelScope(caps),
