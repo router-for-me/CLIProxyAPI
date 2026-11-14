@@ -584,6 +584,10 @@ upstream:
     # When true, inject the native x_search tool when the request does not declare it.
     # The injected tool is also added to tool_choice.allowed_tools when applicable.
     inject-x-search: false
+    # When true, skip the Grok CLI version lookup against the npm registry and use the
+    # built-in fallback client version. Useful when outbound requests are restricted.
+    # Read at startup only.
+    disable-version-check: false
 
 # API-key upstreams are separate from access.api-keys (client authentication).
 # Each provider contains named groups: one base-url, shared settings, and a keys list.

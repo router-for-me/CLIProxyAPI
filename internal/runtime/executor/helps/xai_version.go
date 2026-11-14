@@ -70,6 +70,21 @@ func StartXAIVersionUpdater(ctx context.Context, proxyURL string) {
 	go runXAIVersionUpdater(runCtx)
 }
 
+// StopXAIVersionUpdater cancels any running Grok CLI version updater and resets the
+// cached client version to DefaultXAIFallbackClientVersion. It is used when the
+// version check is disabled, so a process that previously ran the updater does not
+// keep polling npm or advertising a fetched version.
+func StopXAIVersionUpdater() {
+	xaiClientVersionMu.Lock()
+	defer xaiClientVersionMu.Unlock()
+	if xaiUpdaterCancel != nil {
+		xaiUpdaterCancel()
+		xaiUpdaterCancel = nil
+	}
+	xaiVersionProxyURL = ""
+	cachedXAIClientVersion = DefaultXAIFallbackClientVersion
+}
+
 func runXAIVersionUpdater(ctx context.Context) {
 	refreshXAIClientVersion(ctx)
 

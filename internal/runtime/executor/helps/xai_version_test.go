@@ -291,6 +291,43 @@ func TestStartXAIVersionUpdaterRestartsWithNewContext(t *testing.T) {
 	}
 }
 
+func TestStopXAIVersionUpdaterCancelsAndRestoresFallback(t *testing.T) {
+	restoreVersion := SetXAIClientVersionForTest(DefaultXAIFallbackClientVersion)
+	defer restoreVersion()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"1.0.80"}`))
+	}))
+	defer server.Close()
+
+	restoreURL := OverrideXAINPMRegistryURLForTest(server.URL)
+	defer restoreURL()
+	notified := make(chan struct{}, 1)
+	restoreHook := SetXAIVersionRefreshedHookForTest(notified)
+	defer restoreHook()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	StartXAIVersionUpdater(ctx, "")
+	waitXAIVersionRefresh(t, notified)
+	if got := GetXAIClientVersion(); got != "1.0.80" {
+		t.Fatalf("GetXAIClientVersion() = %q, want 1.0.80 before stop", got)
+	}
+
+	StopXAIVersionUpdater()
+
+	if got := GetXAIClientVersion(); got != DefaultXAIFallbackClientVersion {
+		t.Fatalf("GetXAIClientVersion() = %q, want fallback %q after stop", got, DefaultXAIFallbackClientVersion)
+	}
+	xaiClientVersionMu.RLock()
+	running := xaiUpdaterCancel != nil
+	xaiClientVersionMu.RUnlock()
+	if running {
+		t.Fatal("updater cancel func still set after StopXAIVersionUpdater")
+	}
+}
+
 func waitXAIVersionRefresh(t *testing.T, notified <-chan struct{}) {
 	t.Helper()
 	select {
