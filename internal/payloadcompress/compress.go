@@ -519,6 +519,9 @@ func ApplyAll(cfg Config, model string, body []byte) ([]byte, Stats) {
 // the live zone can reuse the previous turn's compressed prefix.
 func ApplyAllSession(cfg Config, model, sessionID string, body []byte, provider ...string) ([]byte, Stats) {
 	out, stats := ApplySession(cfg, model, sessionID, body, provider...)
+	if combo := cfg.resolve(model); combo != nil && len(combo.OutputStyles) > 0 {
+		cfg.OutputStyles = combo.OutputStyles
+	}
 	styled, label := applyOutputStyles(cfg, out, body)
 	stats.Style = label
 	if label == "" || strings.HasPrefix(label, "skipped:") {

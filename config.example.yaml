@@ -370,6 +370,9 @@ requests:
   #         - engine: headroom      # Render homogeneous JSON record arrays as columns.
   #         - engine: rtk           # Collapse repeated command output lines, truncate long lines.
   #         - engine: lite
+  #       output-styles:         # Optional: replaces the global output-styles for this combo's models.
+  #         - id: less-code
+  #           level: full
   #     - name: prompts
   #       models: ["*"]
   #       pipeline:

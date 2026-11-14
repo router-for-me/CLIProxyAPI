@@ -186,6 +186,9 @@ type Combo struct {
 	Models []string `yaml:"models" json:"models"`
 	// Pipeline runs in order; each engine sees the previous engine's output.
 	Pipeline []Step `yaml:"pipeline" json:"pipeline"`
+	// OutputStyles, when set, replaces the global output-styles for models this
+	// combo matches.
+	OutputStyles []OutputStyle `yaml:"output-styles" json:"output-styles"`
 }
 
 // Step names one engine in a combo pipeline.
@@ -613,11 +616,12 @@ func (c *Config) Sanitize() {
 				Options: sanitizeStepOptions(options),
 			})
 		}
-		if len(steps) == 0 {
+		styles := sanitizeStyles(combo.OutputStyles)
+		if len(steps) == 0 && len(styles) == 0 {
 			continue
 		}
 		seen[name] = struct{}{}
-		combos = append(combos, Combo{Name: name, Models: combo.Models, Pipeline: steps})
+		combos = append(combos, Combo{Name: name, Models: combo.Models, Pipeline: steps, OutputStyles: styles})
 	}
 	c.Combos = combos
 	if len(c.Combos) == 0 && c.Enabled && !hadCombos {
@@ -630,9 +634,24 @@ func (c *Config) Sanitize() {
 	// skipped. This is the mapping of upstream 916a464 ("legacy stacked dispatch
 	// with zero enabled engines resolves to off").
 
-	styles := make([]OutputStyle, 0, len(c.OutputStyles))
-	seenStyle := make(map[string]struct{}, len(c.OutputStyles))
-	for _, style := range c.OutputStyles {
+	c.OutputStyles = sanitizeStyles(c.OutputStyles)
+
+	c.DefaultCombo = strings.ToLower(strings.TrimSpace(c.DefaultCombo))
+	if _, ok := seen[c.DefaultCombo]; ok {
+		return
+	}
+	if len(c.Combos) > 0 {
+		c.DefaultCombo = c.Combos[0].Name
+		return
+	}
+	c.DefaultCombo = defaultCombo
+}
+
+// sanitizeStyles drops unknown and duplicate styles and normalizes levels.
+func sanitizeStyles(in []OutputStyle) []OutputStyle {
+	styles := make([]OutputStyle, 0, len(in))
+	seenStyle := make(map[string]struct{}, len(in))
+	for _, style := range in {
 		id := strings.ToLower(strings.TrimSpace(style.ID))
 		if !knownStyle(id) {
 			log.Warnf("payloadcompress: unknown output style %q ignored", style.ID)
@@ -644,17 +663,7 @@ func (c *Config) Sanitize() {
 		seenStyle[id] = struct{}{}
 		styles = append(styles, OutputStyle{ID: id, Level: normalizeLevel(style.Level)})
 	}
-	c.OutputStyles = styles
-
-	c.DefaultCombo = strings.ToLower(strings.TrimSpace(c.DefaultCombo))
-	if _, ok := seen[c.DefaultCombo]; ok {
-		return
-	}
-	if len(c.Combos) > 0 {
-		c.DefaultCombo = c.Combos[0].Name
-		return
-	}
-	c.DefaultCombo = defaultCombo
+	return styles
 }
 
 // resolve picks the first model-scoped combo that matches, then the default

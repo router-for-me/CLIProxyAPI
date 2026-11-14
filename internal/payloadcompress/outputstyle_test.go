@@ -317,3 +317,32 @@ func TestOutputStyleShadowDoesNotInject(t *testing.T) {
 		t.Fatalf("shadow mode must still report: %+v", stats)
 	}
 }
+
+func TestOutputStyleComboOverridesGlobal(t *testing.T) {
+	cfg := styleConfig(OutputStyle{ID: "terse-prose", Level: "full"})
+	cfg.Combos = []Combo{
+		{Name: "code", Models: []string{"coder-*"}, Pipeline: []Step{{Engine: EngineLite}}, OutputStyles: []OutputStyle{{ID: "less-code", Level: "full"}}},
+		{Name: "standard", Models: []string{"*"}, Pipeline: []Step{{Engine: EngineLite}}},
+	}
+	cfg.DefaultCombo = "standard"
+	cfg.Sanitize()
+	body := []byte(`{"model":"m","messages":[{"role":"system","content":"be helpful"},{"role":"user","content":"hi"}]}`)
+
+	out, _ := ApplyAll(cfg, "coder-1", body)
+	system := gjson.GetBytes(out, "messages.0.content").String()
+	if strings.Contains(system, "terse like smart caveman") || !strings.Contains(system, outputStyleMarker) {
+		t.Fatalf("combo style should replace global style:\n%s", system)
+	}
+	out, _ = ApplyAll(cfg, "other", body)
+	if system = gjson.GetBytes(out, "messages.0.content").String(); !strings.Contains(system, "terse like smart caveman") {
+		t.Fatalf("global style missing for unmatched combo:\n%s", system)
+	}
+}
+
+func TestSanitizeKeepsStyleOnlyCombo(t *testing.T) {
+	cfg := Config{Combos: []Combo{{Name: "s", Models: []string{"*"}, OutputStyles: []OutputStyle{{ID: "ponytail"}, {ID: "bogus"}}}}}
+	cfg.Sanitize()
+	if len(cfg.Combos) != 1 || len(cfg.Combos[0].OutputStyles) != 1 {
+		t.Fatalf("style-only combo not kept: %+v", cfg.Combos)
+	}
+}

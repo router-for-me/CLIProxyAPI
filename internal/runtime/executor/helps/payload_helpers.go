@@ -44,7 +44,18 @@ func compressionFields(model string, stats payloadcompress.Stats) log.Fields {
 
 // compressionEnabled reports whether compression may rewrite the payload at all.
 func compressionEnabled(cfg *config.Config, root string) bool {
-	return cfg != nil && root == "" && (cfg.Compression.Enabled || len(cfg.Compression.OutputStyles) != 0)
+	if cfg == nil || root != "" {
+		return false
+	}
+	if cfg.Compression.Enabled || len(cfg.Compression.OutputStyles) != 0 {
+		return true
+	}
+	for _, combo := range cfg.Compression.Combos {
+		if len(combo.OutputStyles) != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // applyRequestCompression runs the configured compression combo over the final
