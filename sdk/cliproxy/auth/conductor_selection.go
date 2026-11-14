@@ -87,6 +87,7 @@ type authSelectionEligibility struct {
 	requiredKind     string
 	credentialPolicy string
 	disallowFreeAuth bool
+	ultrafast        bool
 }
 
 func withRequiredAuthKind(ctx context.Context, requiredKind string) context.Context {
@@ -106,7 +107,10 @@ func credentialPolicyFromContext(ctx context.Context) string {
 }
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
-	eligibility := authSelectionEligibility{disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata)}
+	eligibility := authSelectionEligibility{
+		disallowFreeAuth: disallowFreeAuthFromMetadata(opts.Metadata),
+		ultrafast:        requestsCodexUltrafast(opts),
+	}
 	if ctx != nil {
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
@@ -122,6 +126,9 @@ func (e authSelectionEligibility) allows(auth *Auth) bool {
 		return false
 	}
 	if e.credentialPolicy != "" && !credentialPolicyAllows(e.credentialPolicy, auth) {
+		return false
+	}
+	if e.ultrafast && !allowsCodexUltrafast(auth) {
 		return false
 	}
 	return !e.disallowFreeAuth || !isFreeCodexAuth(auth)
@@ -2881,6 +2888,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	clearSchedulerSelectionID(opts.Metadata)
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
+	}
+	if errTier := m.codexUltrafastUnavailableError(ctx, providers, model, opts); errTier != nil {
+		return nil, nil, "", errTier
 	}
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
