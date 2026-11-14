@@ -77,8 +77,21 @@ func TestResolveOpenCodeProtocol_UnknownModelErrors(t *testing.T) {
 }
 
 func TestResolveOpenCodeProtocol_FreeTierSuffix(t *testing.T) {
-	if got := ResolveOpenCodeProtocol("zen", "deepseek-v4-flash-free"); got != "chat" {
+	if got := ResolveOpenCodeProtocol("zen", "deepseek-v4.1-flash-free"); got != "chat" {
 		t.Fatalf("free model = %q, want chat", got)
+	}
+}
+
+func TestResolveOpenCodeProtocol_DoesNotGuessRetiredDeepSeekIDs(t *testing.T) {
+	for _, gateway := range []string{"zen", "go"} {
+		for _, model := range []string{"deepseek-v4-flash", "deepseek-v4-flash-free"} {
+			if got := ResolveOpenCodeProtocol(gateway, model); got != "" {
+				t.Fatalf("retired model %s on %s resolved to %s", model, gateway, got)
+			}
+		}
+		if got := ResolveOpenCodeProtocol(gateway, "deepseek-v4.1-flash"); got != "chat" {
+			t.Fatalf("current DeepSeek Flash on %s resolved to %s", gateway, got)
+		}
 	}
 }
 

@@ -44,7 +44,6 @@ var openCodeGoPrefixRules = []struct {
 	{"claude-", "messages"},
 	{"qwen3", "messages"},
 	{"minimax-", "messages"},
-	{"deepseek-", "chat"},
 	{"hy3", "chat"},
 	{"mimo-", "chat"},
 }
@@ -76,12 +75,6 @@ func ResolveOpenCodeProtocol(gateway, modelID string) string {
 		if strings.HasPrefix(model, r.prefix) {
 			return r.protocol
 		}
-	}
-
-	// Free-tier models on Zen are chat/completions only (not billed), so accept
-	// any free- family as chat rather than erroring.
-	if gw == "zen" && strings.HasSuffix(model, "-free") {
-		return "chat"
 	}
 
 	return ""

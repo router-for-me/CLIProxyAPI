@@ -378,3 +378,9 @@ registration. A stale candidate is classified as a credential failure
 before any upstream bytes are sent. Responses report
 `X-CLIProxy-Credential-Revision` from the credential actually handed to the
 executor.
+
+
+OpenCode DeepSeek Flash routes use the current gateway IDs published by
+the provider. An older name or a free-tier suffix is not enough to establish
+a route. An account-level balance or free-tier denial remains a failed probe;
+do not classify it as an invalid inference response.
