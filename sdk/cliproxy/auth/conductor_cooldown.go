@@ -1318,7 +1318,8 @@ func cooldownErrorEqual(a, b *Error) bool {
 	return a.Code == b.Code &&
 		a.Message == b.Message &&
 		a.Retryable == b.Retryable &&
-		a.HTTPStatus == b.HTTPStatus
+		a.HTTPStatus == b.HTTPStatus &&
+		maps.Equal(a.Metadata, b.Metadata)
 }
 
 func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bool) {
@@ -1467,6 +1468,23 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 	if result.AccessToken != "" && authMatchesTokenPartition(current, result.AccessToken) {
 		return false
 	}
+	if isTOSViolationResultError(result.Error) {
+		// A service-scoped TOS suspension applies to the account, so a plain OAuth
+		// access-token refresh (same credential, refresh token retained) must not
+		// discard the terminal signal. A genuine credential replacement under the
+		// same auth ID is a different account: an old request's TOS result must
+		// not disable the fresh credential. The access token alone cannot tell
+		// these apart, so exempt only when the refresh credential proves the same
+		// account (identical refresh token) or the result carries no account hint
+		// (internal/token-less paths where replacement cannot be detected).
+		if result.AccessToken == "" {
+			return false
+		}
+		refreshNow := authRefreshToken(current)
+		if refreshNow != "" && result.RefreshToken != "" && refreshNow == result.RefreshToken {
+			return false
+		}
+	}
 	staleVersion := result.CredentialVersion < current.CredentialVersion && (result.CredentialVersion > 0 || current.CredentialVersion > 1)
 	return staleVersion
 }
@@ -1584,17 +1602,21 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				resetModelState(state, now)
 				auth.credentialRetryAfter = time.Time{}
 				updateAggregatedAvailability(auth, now)
-				if !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
+				if !auth.Disabled && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
 					auth.LastError = nil
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
-			} else {
+			} else if !auth.Disabled {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
 			if modelKey != "" {
-				if !shouldSkipCredentialCooldown(result.Error) {
+				if auth.Disabled || auth.Status == StatusDisabled {
+					// A disabled credential (operator action or terminal TOS) is
+					// terminal until explicitly re-enabled; a late failure must not
+					// overwrite its disabled state or arm a new cooldown.
+				} else if !shouldSkipCredentialCooldown(result.Error) {
 					disableCooling := m.cooldownDisabledForAuth(auth)
 					if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 						disableCooling = false
@@ -1705,6 +1727,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 						state.NextRetryAfter = next
 						state.Unavailable = !next.IsZero()
+					} else if isTOSViolationResultError(result.Error) {
+						// Terminal TOS suspension: keep the model state blocked
+						// without a retry deadline; the auth-level terminal state
+						// is finalized below.
+						state.NextRetryAfter = time.Time{}
+						state.Unavailable = true
+						state.Status = StatusDisabled
+						state.StatusMessage = "tos_violation"
 					} else {
 						switch statusCode {
 						case 401, 402, 403:
@@ -1989,7 +2019,16 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						}
 					}
-					auth.Status = StatusError
+					if isTOSViolationResultError(result.Error) {
+						auth.StatusMessage = "tos_violation"
+						auth.Status = StatusDisabled
+						auth.Disabled = true
+						auth.Unavailable = true
+						auth.NextRetryAfter = time.Time{}
+						persistTOSAppealMetadata(auth, result.Error)
+					} else {
+						auth.Status = StatusError
+					}
 					updateAggregatedAvailability(auth, now)
 				}
 			} else {
@@ -1997,7 +2036,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
 					disableCooling = false
 				}
-				if !wasTerminalUnauthorized {
+				if auth.Disabled || auth.Status == StatusDisabled {
+					// A disabled credential (operator action or terminal TOS) is
+					// terminal until explicitly re-enabled; a late auth-level failure
+					// must not overwrite its disabled state or arm a new cooldown.
+				} else if !wasTerminalUnauthorized {
 					prevAuthCredActive := auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
 					prevAuthCredRecoverAt := auth.Quota.NextRecoverAt
 					prevAuthCredSignals := maps.Clone(auth.Quota.cooldownSignals)
@@ -2098,6 +2141,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
 			auth.NextRetryAfter = time.Time{}
+		} else if auth.Status == StatusDisabled {
+			// A terminal TOS_VIOLATION already deactivated the credential inside
+			// applyAuthFailureState; preserve that state instead of overwriting
+			// it with a generic error status.
 		} else if rejectsToken && authHasRefreshCredential(auth) {
 			if auth.NextRefreshAfter.IsZero() {
 				if !auth.LastRefreshedAt.IsZero() && now.Sub(auth.LastRefreshedAt) < refreshFailureBackoff {
@@ -2192,6 +2239,9 @@ func (m *Manager) recordExecutionResult(ctx context.Context, result Result, auth
 		}
 		if result.AccessToken == "" {
 			result.AccessToken = authAccessTokenForRequest(ctx, auth, result.Options.Headers)
+		}
+		if result.RefreshToken == "" {
+			result.RefreshToken = authRefreshToken(auth)
 		}
 	}
 	if !ephemeral {
@@ -2835,12 +2885,7 @@ func cloneError(err *Error) *Error {
 	if err == nil {
 		return nil
 	}
-	return &Error{
-		Code:       err.Code,
-		Message:    err.Message,
-		Retryable:  err.Retryable,
-		HTTPStatus: err.HTTPStatus,
-	}
+	return err.Clone()
 }
 
 func errorString(err error) string {
@@ -2940,6 +2985,15 @@ func resultErrorFromError(err error) *Error {
 	}
 	if resultErr.HTTPStatus == 0 {
 		resultErr.HTTPStatus = statusCodeFromError(err)
+	}
+	type tosMetadataProvider interface {
+		TOSAppealMetadata() map[string]string
+	}
+	var tmp tosMetadataProvider
+	if errors.As(err, &tmp) && tmp != nil {
+		if meta := tmp.TOSAppealMetadata(); len(meta) > 0 {
+			resultErr.Metadata = meta
+		}
 	}
 	switch {
 	case httptransport.IsOutcomeUnknown(err):
@@ -3458,7 +3512,8 @@ func retryAfterFromError(err error) *time.Duration {
 	// An expired trusted wrapper reports a negative remaining time; natural
 	// expiry is not an invalid provider hint, so fall through to the wrapped
 	// error's own hint instead of surfacing the negative value.
-	if _, isTrusted := rap.(*trustedRetryAfterError); isTrusted {
+	switch rap.(type) {
+	case *poolCooldownTerminalError, *trustedRetryAfterError:
 		if inner := errors.Unwrap(err); inner != nil {
 			return retryAfterFromError(inner)
 		}
@@ -3668,6 +3723,35 @@ func isCloudflareChallengeResultError(err *Error) bool {
 		return false
 	}
 	return isCloudflareChallengeErrorMessage(err.Message)
+}
+
+// isTOSViolationResultError reports whether the failure is a terminal Antigravity
+// Terms-of-Service suspension (403 PERMISSION_DENIED + ErrorInfo reason=
+// TOS_VIOLATION). The executor marks these via the tos_violation error code so
+// the credential is deactivated instead of cooled; sibling credentials are not
+// hammered during an automated sweep.
+func isTOSViolationResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(err.Code), "tos_violation")
+}
+
+// persistTOSAppealMetadata copies the appeal detail carried on a TOS_VIOLATION
+// result error onto the credential record so the management API can surface it
+// for the operator. It is a no-op for errors without appeal metadata.
+func persistTOSAppealMetadata(auth *Auth, err *Error) {
+	if auth == nil || err == nil || len(err.Metadata) == 0 {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	for key, value := range err.Metadata {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			auth.Metadata[key] = trimmed
+		}
+	}
 }
 
 func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
@@ -4111,11 +4195,27 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				auth.NextRetryAfter = now.Add(30 * time.Minute)
 			}
 		case 402, 403:
-			auth.StatusMessage = "payment_required"
-			if disableCooling {
+			if isTOSViolationResultError(resultErr) {
+				// Terminal credential suspension: deactivate so the credential is
+				// excluded from selection/rotation, but keep OAuth refresh intact
+				// (the suspension is service-scoped per issue #7515; the token and
+				// model catalog keep working) so operator tooling can verify
+				// account liveness. The appeal detail travels on the result error's
+				// Metadata and is persisted onto the credential record below.
+				auth.StatusMessage = "tos_violation"
+				auth.Status = StatusDisabled
+				auth.Disabled = true
+				auth.Unavailable = true
 				auth.NextRetryAfter = time.Time{}
+				auth.LastError = cloneError(resultErr)
+				persistTOSAppealMetadata(auth, resultErr)
 			} else {
-				auth.NextRetryAfter = now.Add(30 * time.Minute)
+				auth.StatusMessage = "payment_required"
+				if disableCooling {
+					auth.NextRetryAfter = time.Time{}
+				} else {
+					auth.NextRetryAfter = now.Add(30 * time.Minute)
+				}
 			}
 		case 404:
 			auth.StatusMessage = "not_found"

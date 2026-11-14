@@ -47,6 +47,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
+	if antigravityInTOSPause(e.cfg, auth) {
+		return nil, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+	}
 	ctx = context.WithValue(ctx, "alt", "")
 	if !antigravityCoolingDisabled(auth, e.cfg) {
 		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
@@ -191,6 +194,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
+		if httpResp.StatusCode == http.StatusForbidden {
+			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+		}
 		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 		return nil, err
 	}
@@ -321,6 +327,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				statusCode := int(errorResult.Get("code").Int())
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
+				}
+				if statusCode == http.StatusForbidden {
+					e.applyAntigravityTOSState(e.cfg, auth, payload)
 				}
 				streamErr = newAntigravityStatusErr(statusCode, payload)
 				stopDeliverySupport()
