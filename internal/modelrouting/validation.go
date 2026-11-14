@@ -134,7 +134,6 @@ func (cfg *Config) Validate() error {
 
 	models := make(map[string]DirectModel, len(cfg.DirectModels))
 	routes := make(map[string]DirectRoute)
-	selectors := make(map[string]string)
 	variants := make(map[string]struct{})
 	for index, model := range cfg.DirectModels {
 		path := fmt.Sprintf("model-routing.direct-models[%d]", index)
@@ -168,15 +167,10 @@ func (cfg *Config) Validate() error {
 			if err := validateRoute(routePath, model.ModelKey, route); err != nil {
 				return err
 			}
-			key := routeKeyID(route.RouteKey)
-			if _, duplicate := routes[key]; duplicate {
-				return fmt.Errorf("%s.route-key: duplicate RouteKey", routePath)
+			if _, duplicate := routes[route.RouteSelector]; duplicate {
+				return fmt.Errorf("%s.route-selector: duplicate execution selector", routePath)
 			}
-			if prior, duplicate := selectors[route.RouteSelector]; duplicate {
-				return fmt.Errorf("%s.route-selector: already bound to %s", routePath, prior)
-			}
-			selectors[route.RouteSelector] = routePath
-			routes[key] = route
+			routes[route.RouteSelector] = route
 		}
 	}
 
@@ -240,7 +234,7 @@ func (cfg *Config) Validate() error {
 				if err := validateCandidate(candidatePath, member.ModelKey, candidate, model, routes, variants); err != nil {
 					return err
 				}
-				candidateID := routeKeyID(candidate.RouteKey) + "\x00" + optionalString(candidate.VariantID)
+				candidateID := candidate.RouteSelector + "\x00" + optionalString(candidate.VariantID)
 				if _, duplicate := candidateKeys[candidateID]; duplicate {
 					return fmt.Errorf("%s: duplicate CandidateKey", candidatePath)
 				}
@@ -350,8 +344,8 @@ func validateCandidate(path string, parent ModelKey, candidate Candidate, model 
 	if !digestPattern.MatchString(candidate.RouteSelector) {
 		return fmt.Errorf("%s.route-selector: must be an opaque sha256 selector", path)
 	}
-	route, exists := routes[routeKeyID(candidate.RouteKey)]
-	if !exists || !route.Selectable || !route.Health.Selectable {
+	route, exists := routes[candidate.RouteSelector]
+	if !exists || route.RouteKey != candidate.RouteKey || !route.Selectable || !route.Health.Selectable {
 		return fmt.Errorf("%s.route-key: candidate does not reference a selectable direct route", path)
 	}
 	if candidate.RuntimeModelID != route.RuntimeModelID {
@@ -359,9 +353,6 @@ func validateCandidate(path string, parent ModelKey, candidate Candidate, model 
 	}
 	if candidate.CatalogRouteProviderID != route.CatalogRouteProviderID || candidate.CatalogRouteModelID != route.CatalogRouteModelID {
 		return fmt.Errorf("%s: candidate catalog route facts differ from its direct route", path)
-	}
-	if candidate.RouteSelector != route.RouteSelector {
-		return fmt.Errorf("%s.route-selector: differs from the referenced direct route", path)
 	}
 	if candidate.VariantID != nil {
 		if err := requireCanonical(path+".variant-id", *candidate.VariantID); err != nil {
@@ -676,10 +667,6 @@ func validateSortedStrings(path string, values []string, allowEmpty bool) error 
 
 func modelKeyID(key ModelKey) string {
 	return key.CatalogProviderID + "\x00" + key.CanonicalModelID
-}
-
-func routeKeyID(key RouteKey) string {
-	return modelKeyID(key.ModelKey) + "\x00" + key.RouteChannel
 }
 
 // SelectorForRoute returns the stable, secret-free selector bound to one route

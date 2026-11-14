@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
@@ -39,6 +41,83 @@ func NewOpenCodeExecutor(id string) *OpenCodeExecutor {
 		gateway = "go"
 	}
 	return &OpenCodeExecutor{id: id, gateway: gateway}
+}
+
+// FetchOpenCodeModels joins the gateway's explicit model identity to routes
+// whose wire protocol this executor supports. The public catalog does not
+// prove account availability; each credential still requires inference.
+func FetchOpenCodeModels(ctx context.Context, auth *clipoauth.Auth, cfg *config.Config, provider string) ([]*registry.ModelInfo, error) {
+	e := NewOpenCodeExecutor(provider)
+	routeAuth := e.cloneAuthWithBaseURL(auth)
+	if routeAuth == nil {
+		return nil, fmt.Errorf("OpenCode catalog requires route auth")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(routeAuth.Attributes["base_url"], "/")+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := newProxyAwareHTTPClient(ctx, cfg, routeAuth, 10*time.Second).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OpenCode catalog returned HTTP %d", resp.StatusCode)
+	}
+	const maxCatalogBytes = 8 << 20
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) > maxCatalogBytes {
+		return nil, fmt.Errorf("OpenCode catalog exceeds %d bytes", maxCatalogBytes)
+	}
+	var catalog struct {
+		Data []struct {
+			ID          string                     `json:"id"`
+			CanonicalID string                     `json:"canonical_id"`
+			API         map[string]json.RawMessage `json:"api"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(payload, &catalog); err != nil {
+		return nil, fmt.Errorf("decode OpenCode catalog: %w", err)
+	}
+	if len(catalog.Data) == 0 {
+		return nil, fmt.Errorf("OpenCode catalog contains no models")
+	}
+	byID := make(map[string]int, len(catalog.Data))
+	for i, row := range catalog.Data {
+		if _, exists := byID[row.ID]; exists || row.ID == "" {
+			return nil, fmt.Errorf("OpenCode catalog has missing or duplicate model identity")
+		}
+		byID[row.ID] = i
+	}
+	apiNames := map[string]string{"chat": "chat-completions", "messages": "messages", "responses": "responses", "gemini": "generate-content"}
+	models := registry.GetOpenCodeModels(e.gateway)
+	available := models[:0]
+	for _, model := range models {
+		index, ok := byID[model.ID]
+		if !ok {
+			continue
+		}
+		row := catalog.Data[index]
+		apiName := apiNames[registry.ResolveOpenCodeProtocol(e.gateway, model.ID)]
+		if _, supported := row.API[apiName]; !supported {
+			continue
+		}
+		if row.CanonicalID != "" && len(model.Protocols) > 0 {
+			owner, canonical, ok := strings.Cut(row.CanonicalID, "/")
+			if !ok || owner == "" || canonical == "" || strings.TrimSpace(row.CanonicalID) != row.CanonicalID {
+				return nil, fmt.Errorf("OpenCode catalog has invalid canonical identity for %q", model.ID)
+			}
+			model.CatalogProviderID = owner
+			model.CatalogModelID = canonical
+			model.CatalogRouteProviderID = provider
+			model.CatalogRouteModelID = model.ID
+		}
+		available = append(available, model)
+	}
+	return available, nil
 }
 
 func (e *OpenCodeExecutor) Identifier() string  { return e.id }

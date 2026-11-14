@@ -113,11 +113,15 @@ func mergeRegistryRoutes(projected, registryModels []modelrouting.InventoryModel
 	return merged
 }
 
-// sortInventoryModel orders one model's routes by channel and its variants by
-// identity, the order the inventory contract requires of every model.
+// sortInventoryModel orders concrete routes by channel and runtime ID and
+// variants by identity.
 func sortInventoryModel(model *modelrouting.InventoryModel) {
 	sort.Slice(model.Routes, func(i, j int) bool {
-		return model.Routes[i].RouteKey.RouteChannel < model.Routes[j].RouteKey.RouteChannel
+		left, right := model.Routes[i], model.Routes[j]
+		if left.RouteKey.RouteChannel != right.RouteKey.RouteChannel {
+			return left.RouteKey.RouteChannel < right.RouteKey.RouteChannel
+		}
+		return left.RuntimeModelID < right.RuntimeModelID
 	})
 	sort.Slice(model.Variants, func(i, j int) bool {
 		return model.Variants[i].VariantKey.VariantID < model.Variants[j].VariantKey.VariantID

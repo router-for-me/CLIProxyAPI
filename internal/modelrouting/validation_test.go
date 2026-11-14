@@ -310,3 +310,26 @@ func TestEmptyDirectModelsProjectionIsValid(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want empty direct-models projection to be valid", err)
 	}
 }
+
+func TestValidateDistinguishesSameChannelRoutesBySelector(t *testing.T) {
+	t.Parallel()
+	cfg := validConfig()
+	routes := cfg.DirectModels[0].Routes
+	candidates := cfg.Aliases[0].Members[0].Candidates
+	routes[1].RouteKey = routes[0].RouteKey
+	routes[1].RuntimeModelID += "-free"
+	routes[1].RouteSelector = SelectorForRoute(routes[1].RouteKey, routes[1].RuntimeModelID)
+	candidates[1].RouteKey = routes[1].RouteKey
+	candidates[1].RuntimeModelID = routes[1].RuntimeModelID
+	candidates[1].RouteSelector = routes[1].RouteSelector
+	refreshProjectionDigest(t, &cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("distinct runtime routes in one channel must validate: %v", err)
+	}
+
+	candidates[1].RouteSelector = candidates[0].RouteSelector
+	refreshProjectionDigest(t, &cfg)
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("a candidate must not borrow a sibling route's selector")
+	}
+}

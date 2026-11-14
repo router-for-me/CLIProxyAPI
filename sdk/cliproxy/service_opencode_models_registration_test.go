@@ -2,6 +2,8 @@ package cliproxy
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	internalregistry "github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -9,36 +11,20 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-// modelIDSet collects the IDs of a model list into a set.
-func modelIDSet(models []*internalregistry.ModelInfo) map[string]struct{} {
-	out := make(map[string]struct{}, len(models))
-	for _, m := range models {
-		if m != nil && m.ID != "" {
-			out[m.ID] = struct{}{}
-		}
-	}
-	return out
-}
-
-// TestRegisterConfigAPIKeyAuthsOpenCodeModels mirrors TestRegisterConfigAPIKeyAuthsCodexModelModes
-// for the native OpenCode (Zen) provider. It exercises the REAL dc8 startup path:
-// RegisterConfigAPIKeyAuths synthesizes the OpenCode key into an auth, routes it
-// through the native `case constant.OpenCode` switch (GetOpenCodeModels("zen")), and
-// registers the models into the global registry. /v1/models reads
-// GetAvailableModelInfos(), so the final assertion gates on the user-facing slice.
-//
-// On dc8 the opencs key survives sanitization (banner reports 1 OpenCode key) yet
-// /v1/models surfaces no opencs models; this test reproduces that contract in-process.
+// Exercise native configuration registration and the registry used by /v1/models.
 func TestRegisterConfigAPIKeyAuthsOpenCodeModels(t *testing.T) {
-	zenModels := internalregistry.GetOpenCodeModels("zen")
-	if len(zenModels) == 0 {
-		t.Fatal("expected non-empty OpenCode (zen) model catalog from registry")
-	}
-	wantIDs := modelIDSet(zenModels)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected catalog path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-luna","canonical_id":"openai/gpt-5.6-luna","api":{"responses":{}}}]}`))
+	}))
+	defer server.Close()
 
 	cfg := &config.Config{
 		OpenCodeKey: []config.OpenCodeKey{{
-			APIKey: "opencode-runtime-key",
+			APIKey:  "opencode-runtime-key",
+			BaseURL: server.URL,
 		}},
 	}
 	modelRegistry := internalregistry.GetGlobalRegistry()
@@ -53,14 +39,10 @@ func TestRegisterConfigAPIKeyAuthsOpenCodeModels(t *testing.T) {
 	}
 	t.Cleanup(func() { modelRegistry.UnregisterClient(auths[0].ID) })
 
-	gotIDs := modelIDSet(modelRegistry.GetModelsForClient(auths[0].ID))
-	if len(gotIDs) != len(wantIDs) {
-		t.Fatalf("registered opencode model IDs count = %d, want %d (ids=%v)", len(gotIDs), len(wantIDs), gotIDs)
-	}
-	for modelID := range wantIDs {
-		if _, ok := gotIDs[modelID]; !ok {
-			t.Errorf("missing registered OpenCode model %q (provider=%s, client=%s)", modelID, "opencode", auths[0].ID)
-		}
+	models := modelRegistry.GetModelsForClient(auths[0].ID)
+	if len(models) != 1 || models[0].ID != "gpt-5.6-luna" ||
+		models[0].CatalogProviderID != "openai" || models[0].CatalogModelID != "gpt-5.6-luna" {
+		t.Fatalf("expected the registered catalog identity, got %+v", models)
 	}
 
 	available := modelRegistry.GetAvailableModelInfos()
@@ -72,6 +54,6 @@ func TestRegisterConfigAPIKeyAuthsOpenCodeModels(t *testing.T) {
 		}
 	}
 	if !foundOpenCode {
-		t.Fatalf("OpenCode models registered for client %s (count=%d) but absent from GetAvailableModelInfos() source used by /v1/models", auths[0].ID, len(gotIDs))
+		t.Fatalf("OpenCode models registered for client %s (count=%d) but absent from GetAvailableModelInfos() source used by /v1/models", auths[0].ID, len(models))
 	}
 }

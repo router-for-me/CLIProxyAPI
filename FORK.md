@@ -29,3 +29,10 @@ after the matrix passes. Set `CLI_PROXY_IMAGE` to the qualified tag or digest
 when running Compose. Preserve
 historical tags and divergent refs. Only adopt a new artifact after verifying
 its published bytes and its behavior in the installed consumer.
+
+OpenCode Zen and Go registration takes exact canonical IDs from each gateway's
+public `/v1/models` catalog and confirms the configured wire protocol against
+the per-model `api` declaration. The gateway may label a Responses route
+`type: chat`; that label does not select the wire format. Catalog membership
+allows discovery only: AI Hub must still qualify the actual route and
+credential through inference before publication.

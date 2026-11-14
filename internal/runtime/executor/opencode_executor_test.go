@@ -367,3 +367,27 @@ func TestOpenCodeExecutor_PreservesNativeResponsesSSEFrames(t *testing.T) {
 		t.Fatalf("native Responses SSE framing changed: %q", received.String())
 	}
 }
+
+func TestOpenCodeCatalogUsesDeclaredCanonicalIDAndAPICapability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "" {
+			t.Errorf("unexpected public catalog request: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"data":[
+			{"id":"gpt-5.6-luna","canonical_id":"owner/exact-release","type":"chat","api":{"responses":{}}},
+			{"id":"glm-5.2","canonical_id":"owner/mismatched","api":{"responses":{}}}
+		]}`))
+	}))
+	defer server.Close()
+	auth := &clipoauth.Auth{Attributes: map[string]string{"base_url": server.URL, "api_key": "private"}}
+	models, err := FetchOpenCodeModels(context.Background(), auth, &config.Config{}, "opencode-go")
+	if err != nil || len(models) != 1 {
+		t.Fatalf("expected one executable model, got %v, %v", models, err)
+	}
+	model := models[0]
+	if model.ID != "gpt-5.6-luna" || model.CatalogProviderID != "owner" ||
+		model.CatalogModelID != "exact-release" || model.CatalogRouteProviderID != "opencode-go" ||
+		model.CatalogRouteModelID != model.ID {
+		t.Fatalf("model identity does not preserve the producer's declaration: %+v", model)
+	}
+}
