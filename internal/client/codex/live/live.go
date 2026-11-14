@@ -58,6 +58,8 @@ type Handler struct {
 	mediaRelayConfig     config.CodexLiveMediaRelayConfig
 	mediaRelayConfigured bool
 	mediaLimiter         *mediaSessionLimiter
+	unknownCallAuthMu    sync.Mutex
+	unknownCallAuthID    string
 }
 
 // NewHandler creates a Codex live session handler.
