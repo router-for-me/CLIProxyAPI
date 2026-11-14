@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"maps"
 	"math"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/MoeForge/moego/ojson"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // Policy metadata is a bounded JSON value tree. Bound both depth and the copied
@@ -147,9 +149,46 @@ func copyPolicyValue(value any, depth int, budget *int) (any, bool) {
 		out := make([]byte, len(value))
 		copy(out, value)
 		return out, true
+	case []internalconfig.RequestScopedErrorRule:
+		return copyPolicyErrorRules(value, depth, budget)
 	default:
 		return nil, false
 	}
+}
+
+func copyPolicyErrorRules(rules []internalconfig.RequestScopedErrorRule, depth int, budget *int) (any, bool) {
+	if rules == nil {
+		return []internalconfig.RequestScopedErrorRule(nil), true
+	}
+	// A rule adds an object and its fields below the outer slice. Reserve
+	// conservative fixed space for its keys, integer, and list containers
+	// before allocating the outer slice, including for entirely empty rules.
+	const ruleOverhead = 128
+	if len(rules) > *budget/ruleOverhead || (len(rules) > 0 && depth+2 > 64) {
+		return nil, false
+	}
+	*budget -= len(rules) * ruleOverhead
+	for _, rule := range rules {
+		chargePolicyString(rule.Action, budget)
+		if *budget < 0 {
+			return nil, false
+		}
+		for _, patterns := range [2][]string{rule.Match, rule.MatchRegexr} {
+			for _, pattern := range patterns {
+				chargePolicyString(pattern, budget)
+				if *budget < 0 {
+					return nil, false
+				}
+			}
+		}
+	}
+	out := make([]internalconfig.RequestScopedErrorRule, len(rules))
+	for i, rule := range rules {
+		out[i] = rule
+		out[i].Match = slices.Clone(rule.Match)
+		out[i].MatchRegexr = slices.Clone(rule.MatchRegexr)
+	}
+	return out, true
 }
 
 func chargePolicyString(value string, budget *int) {
