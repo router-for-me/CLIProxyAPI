@@ -237,38 +237,98 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	}
 
 	state := existingModelState(auth, targetKey)
-	isSuspended := auth.Disabled || auth.Status == StatusDisabled
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		isSuspended = true
-	}
-	isQuotaExceeded := false
-	var suspendReason string
-	if state != nil {
-		if state.Status == StatusDisabled || state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) {
+	authDisabled := auth.Disabled || auth.Status == StatusDisabled
+	stateDisabled := state != nil && state.Status == StatusDisabled
+	terminalUnauthorized := hasUnauthorizedAuthFailure(auth)
+	openEnded := authDisabled || stateDisabled || terminalUnauthorized
+	isSuspended := openEnded
+
+	var credQuotaUntil time.Time
+	credQuotaSuspended := false
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" {
+		if auth.Quota.NextRecoverAt.IsZero() {
 			isSuspended = true
+			credQuotaSuspended = true
+			openEnded = true
+		} else if auth.Quota.NextRecoverAt.After(now) {
+			isSuspended = true
+			credQuotaSuspended = true
+			credQuotaUntil = auth.Quota.NextRecoverAt
+		}
+	}
+
+	isQuotaExceeded := false
+	stateSuspended := false
+	var stateUntil time.Time
+	if state != nil {
+		if stateDisabled {
+			stateSuspended = true
+		} else if blocked, _, retryAfter := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now); blocked {
+			isSuspended = true
+			stateSuspended = true
+			if retryAfter.IsZero() {
+				openEnded = true
+			} else {
+				stateUntil = retryAfter
+			}
 		}
 		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			isQuotaExceeded = true
 		}
-		if isSuspended {
-			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
-		}
 	}
-	if len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) {
+
+	var authFallbackUntil time.Time
+	if len(auth.ModelStates) == 0 {
 		// With no per-model states, scheduling falls back to the credential-wide
 		// cooldown (isAuthBlockedForModel); the projection must agree with it.
 		// When states exist, unmatched models stay schedulable by design, so the
 		// credential-wide fields must not suspend them here either.
-		isSuspended = true
+		if blocked, _, retryAfter := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
+			isSuspended = true
+			if retryAfter.IsZero() {
+				openEnded = true
+			} else {
+				authFallbackUntil = retryAfter
+			}
+		}
 	}
-	if isSuspended && suspendReason == "" {
-		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+
+	var suspendReason string
+	var suspendUntil time.Time
+	if isSuspended {
+		switch {
+		case authDisabled || stateDisabled:
+			suspendReason = "disabled"
+		case terminalUnauthorized:
+			suspendReason = cooldownReason(auth.StatusMessage, QuotaState{}, auth.LastError)
+			if suspendReason == "" {
+				suspendReason = "unauthorized"
+			}
+		case stateSuspended:
+			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
+			suspendUntil = stateUntil
+			if credQuotaSuspended && (strings.EqualFold(suspendReason, "quota") || strings.EqualFold(suspendReason, "credential_quota")) && credQuotaUntil.After(suspendUntil) {
+				suspendUntil = credQuotaUntil
+			}
+		default:
+			suspendUntil = authFallbackUntil
+			if credQuotaUntil.After(suspendUntil) {
+				suspendUntil = credQuotaUntil
+			}
+		}
+		if suspendReason == "" {
+			suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+		}
+	}
+	if openEnded || !isSuspended {
+		suspendUntil = time.Time{}
 	}
 
 	return registry.ClientModelProjection{
 		ModelID:       targetModel,
 		Suspended:     isSuspended,
 		SuspendReason: suspendReason,
+		SuspendUntil:  suspendUntil,
 		QuotaExceeded: isQuotaExceeded,
 	}
 }

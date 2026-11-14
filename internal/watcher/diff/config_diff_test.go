@@ -469,7 +469,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			},
 		},
 		XAI:    config.XAIConfig{InjectXSearch: true},
-		Claude: config.ClaudeConfig{ToolSearch: true},
+		Claude: config.ClaudeConfig{ToolSearch: true, ServerSideFallback: true},
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
 			{APIKey: "c2"},
@@ -522,6 +522,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, `antigravity.connection-pool.idle-conn-timeout: "30s" -> "10s"`)
 	expectContains(t, details, "xai.inject-x-search: false -> true")
 	expectContains(t, details, "claude.tool-search: false -> true")
+	expectContains(t, details, "claude.server-side-fallback: false -> true")
 	expectContains(t, details, "api-keys count: 1 -> 2")
 	expectContains(t, details, "claude-api-key count: 1 -> 2")
 	expectContains(t, details, "codex-api-key count: 1 -> 2")
@@ -838,4 +839,71 @@ func TestBuildConfigChangeDetails_KVStore(t *testing.T) {
 	if unchanged := BuildConfigChangeDetails(newCfg, samePathTrimmed); len(unchanged) != 0 {
 		t.Fatalf("whitespace-only path difference produced changes: %v", unchanged)
 	}
+}
+
+func TestBuildConfigChangeDetails_SensitiveWordsReplace(t *testing.T) {
+	oldCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitiveWordsReplace: map[string]string{"Codex": "Assistant"},
+		},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "k1",
+			Cloak:  &config.CloakConfig{SensitiveWordsReplace: map[string]string{"a": "b"}},
+		}},
+	}
+	newCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitiveWordsReplace: map[string]string{"Codex": "Assistant", "GPT-5": "Model"},
+		},
+		Devin: config.DevinConfig{
+			SensitiveWordsReplace: map[string]string{"Claude Code": "Devin"},
+		},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "k1",
+			Cloak:  &config.CloakConfig{SensitiveWordsReplace: map[string]string{"a": "c"}},
+		}},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "antigravity.sensitive-words-replace: 1 -> 2")
+	expectContains(t, changes, "devin.sensitive-words-replace: 0 -> 1")
+	expectContains(t, changes, "claude[0].cloak.sensitive-words-replace: 1 -> 1")
+
+	emptyA := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{}}}}
+	emptyB := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitiveWordsReplace: map[string]string{}},
+		Devin:       config.DevinConfig{SensitiveWordsReplace: map[string]string{}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitiveWordsReplace: map[string]string{}}}},
+	}
+	if noDiff := BuildConfigChangeDetails(emptyA, emptyB); len(noDiff) != 0 {
+		t.Fatalf("expected no diff between nil and empty SensitiveWordsReplace maps, got %v", noDiff)
+	}
+
+	emptyValOld := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitiveWordsReplace: map[string]string{"Codex": ""}},
+		Devin:       config.DevinConfig{SensitiveWordsReplace: map[string]string{"Codex": ""}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitiveWordsReplace: map[string]string{"Codex": ""}}}},
+	}
+	emptyValNew := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitiveWordsReplace: map[string]string{"GPT-5": ""}},
+		Devin:       config.DevinConfig{SensitiveWordsReplace: map[string]string{"GPT-5": ""}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitiveWordsReplace: map[string]string{"GPT-5": ""}}}},
+	}
+	emptyValChanges := BuildConfigChangeDetails(emptyValOld, emptyValNew)
+	expectContains(t, emptyValChanges, "antigravity.sensitive-words-replace: 1 -> 1")
+	expectContains(t, emptyValChanges, "devin.sensitive-words-replace: 1 -> 1")
+	expectContains(t, emptyValChanges, "claude[0].cloak.sensitive-words-replace: 1 -> 1")
+
+	nilCloakOld := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "k1"}}}
+	addedCloakNew := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "k1",
+		Cloak:  &config.CloakConfig{SensitiveWords: []string{"API"}, SensitiveWordsReplace: map[string]string{"a": "b"}},
+	}}}
+	expectContains(t, BuildConfigChangeDetails(nilCloakOld, addedCloakNew), "claude[0].cloak: added")
+	expectContains(t, BuildConfigChangeDetails(addedCloakNew, nilCloakOld), "claude[0].cloak: removed")
+
+	sameLenWordsNew := &config.Config{ClaudeKey: []config.ClaudeKey{{
+		APIKey: "k1",
+		Cloak:  &config.CloakConfig{SensitiveWords: []string{"proxy"}, SensitiveWordsReplace: map[string]string{"a": "b"}},
+	}}}
+	expectContains(t, BuildConfigChangeDetails(addedCloakNew, sameLenWordsNew), "claude[0].cloak.sensitive-words: 1 -> 1")
 }

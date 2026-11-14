@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -146,7 +147,7 @@ func TestRefreshAuthStateSnapshotKeepsRequestRuntimeState(t *testing.T) {
 
 	got, _ := manager.GetByID(trafficAuthFile)
 	if got.Status != want.Status || got.StatusMessage != want.StatusMessage || got.Unavailable != want.Unavailable || !got.NextRetryAfter.Equal(want.NextRetryAfter) ||
-		got.LastError == nil || *got.LastError != *want.LastError || got.Failed != want.Failed {
+		got.LastError == nil || !trafficErrorsEqual(got.LastError, want.LastError) || got.Failed != want.Failed {
 		t.Fatalf("auth state = %q %q unavailable=%v retry=%v lastError=%v failed=%d, want %q %q unavailable=%v retry=%v lastError=%v failed=%d",
 			got.Status, got.StatusMessage, got.Unavailable, got.NextRetryAfter, got.LastError, got.Failed,
 			want.Status, want.StatusMessage, want.Unavailable, want.NextRetryAfter, want.LastError, want.Failed)
@@ -157,7 +158,7 @@ func TestRefreshAuthStateSnapshotKeepsRequestRuntimeState(t *testing.T) {
 	for model, wantState := range want.ModelStates {
 		gotState := got.ModelStates[model]
 		if gotState == nil || gotState.Status != wantState.Status || gotState.Unavailable != wantState.Unavailable ||
-			!gotState.NextRetryAfter.Equal(wantState.NextRetryAfter) || gotState.LastError == nil || *gotState.LastError != *wantState.LastError ||
+			!gotState.NextRetryAfter.Equal(wantState.NextRetryAfter) || gotState.LastError == nil || !trafficErrorsEqual(gotState.LastError, wantState.LastError) ||
 			gotState.Quota.Exceeded != wantState.Quota.Exceeded || !gotState.Quota.NextRecoverAt.Equal(wantState.Quota.NextRecoverAt) {
 			t.Fatalf("model state %s = %+v, want %+v", model, gotState, wantState)
 		}
@@ -344,4 +345,12 @@ func TestRefreshAuthStateRereadsAuthPersistedDuringScan(t *testing.T) {
 			requireNextScanKeeps(t, w)
 		})
 	}
+}
+
+func trafficErrorsEqual(a, b *coreauth.Error) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Code == b.Code && a.Message == b.Message && a.Retryable == b.Retryable &&
+		a.HTTPStatus == b.HTTPStatus && maps.Equal(a.Metadata, b.Metadata)
 }
