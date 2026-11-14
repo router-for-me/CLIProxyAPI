@@ -1248,6 +1248,11 @@ oauth:
 
     # Devin provider behavior.
     # devin:
+    #   # When true, scope daily/weekly usage quota cooldowns to the requested model rather than cooling
+    #   # down the entire credential. Devin keeps serving the models it does not meter (e.g. swe-2)
+    #   # after the quota is exhausted; each metered model still waits for the quota reset.
+    #   # Default: false
+    #   model-level-cooling: false
     #   sensitive-words:             # optional: words to remove matching lines in system prompts
     #     - "API"
     #     - "proxy"

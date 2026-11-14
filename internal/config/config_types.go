@@ -215,6 +215,12 @@ type DevinConfig struct {
 
 	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system prompts.
 	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// ModelLevelCooling scopes Devin daily/weekly usage quota cooldowns to the requested model
+	// rather than cooling down the entire credential. Devin keeps serving the models it does not
+	// meter (for example swe-2) after the usage quota is exhausted, so a credential-wide cooldown
+	// also blocks models that would still answer.
+	ModelLevelCooling bool `yaml:"model-level-cooling,omitempty" json:"model-level-cooling,omitempty"`
 }
 
 // ProxyConnectionPoolConfig configures upstream connection reuse for one api-key
