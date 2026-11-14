@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -2696,5 +2697,48 @@ func TestExtractExplicitSessionIDs_EnhancedHarnesses(t *testing.T) {
 	}
 	if subagentAuth.ID != parentAuth.ID {
 		t.Fatalf("subagent did not inherit parent task credential: got %s, want %s", subagentAuth.ID, parentAuth.ID)
+	}
+}
+
+func TestUsageLimitCooldownBody(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_800_000_000, 0)
+	// Stored upstream bodies arrive both bare and behind a status code prefix.
+	usageLimit := errors.New(`{"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached", "resets_in_seconds": 3600}}`)
+	prefixedUsageLimit := &Error{Code: "429", Message: `{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`}
+	rateLimit := &Error{Code: "429", Message: `{"error":{"type":"rate_limit_error","message":"Rate limit reached"}}`}
+
+	if _, ok := UsageLimitCooldownBody(newModelCooldownErrorWithCause("gpt-5", "codex", time.Minute, prefixedUsageLimit), now); !ok {
+		t.Fatal("prefixed usage-limit cause was not recognized")
+	}
+	body, ok := UsageLimitCooldownBody(fmt.Errorf("select: %w", newModelCooldownErrorWithCause("gpt-5", "codex", 90*time.Second+time.Millisecond, usageLimit)), now)
+	if !ok {
+		t.Fatal("usage-limit cooldown was not rewritten")
+	}
+	for path, want := range map[string]any{
+		"error.type":              "usage_limit_reached",
+		"error.code":              "model_cooldown",
+		"error.resets_in_seconds": int64(91),
+		"error.resets_at":         int64(1_800_000_091),
+	} {
+		got := ojson.Get(body, path).Value()
+		if number, isNumber := got.(float64); isNumber {
+			got = int64(number)
+		}
+		if got != want {
+			t.Fatalf("%s = %v, want %v (%s)", path, got, want, body)
+		}
+	}
+
+	for name, err := range map[string]error{
+		"backoff cooldown": newModelCooldownErrorWithCause("gpt-5", "codex", time.Minute, rateLimit),
+		"no cause":         NewModelCooldownError("gpt-5", "codex", time.Minute),
+		"no reset":         newModelCooldownErrorWithCause("gpt-5", "codex", 0, usageLimit),
+		"not a cooldown":   usageLimit,
+	} {
+		if body, ok := UsageLimitCooldownBody(err, now); ok {
+			t.Fatalf("%s rewritten to %s", name, body)
+		}
 	}
 }
