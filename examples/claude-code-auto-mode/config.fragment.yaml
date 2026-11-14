@@ -1,0 +1,34 @@
+# Optional fragment: merge into an existing config, retaining credentials,
+# routing, aliases and other payload rules. Assumes main work already uses High.
+config-version: 8
+
+multimedia:
+  # Keep an otherwise tool-free classifier request tool-free.
+  # Explicit image tools and image endpoints remain available.
+  disable-image-generation: "passthrough"
+
+requests:
+  payload:
+    override:
+      - models:
+          - name: "gpt-6.1-sol"
+            protocol: "codex"
+        params:
+          "reasoning.effort": "high"
+      # Last matching override wins. Recognize only the observed native
+      # stage-one envelope; other requests retain the baseline above.
+      - models:
+          - name: "gpt-6.1-sol"
+            protocol: "codex"
+            from-protocol: "claude"
+            match:
+              - "input.#": 2
+                "input.0.role": "developer"
+                "input.1.role": "user"
+                "input.1.content.0.text": "<transcript>\n"
+            exist:
+              - 'input.1.content.#(text%"*Stage 1 does NOT apply user intent or ALLOW exceptions*").text'
+            not-exist:
+              - "tools.0"
+        params:
+          "reasoning.effort": "medium"
