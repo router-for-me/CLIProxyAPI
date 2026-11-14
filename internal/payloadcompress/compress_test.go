@@ -161,7 +161,7 @@ func TestStatsStepsListsEveryStep(t *testing.T) {
 		EngineBytesIn:  map[string]int{"lite": 100, "rtk": 100},
 		EngineBytesOut: map[string]int{"lite": 40, "rtk": 40},
 	}
-	if got, want := stats.Steps(), "lite:100>40,rtk:100>40"; got != want {
+	if got, want := stats.Steps(), "lite:25>10,rtk:25>10"; got != want {
 		t.Fatalf("steps = %q, want %q", got, want)
 	}
 	if got := (Stats{}).Steps(); got != "" {
@@ -503,7 +503,7 @@ func TestStatsReport(t *testing.T) {
 		BytesOut: 320,
 		Saved:    map[string]int{"rtk": 300, "lite": 380},
 	}
-	if got := stats.Engines(); got != "lite=380,rtk=300" {
+	if got := stats.Engines(); got != "lite=95,rtk=75" {
 		t.Fatalf("engines = %q", got)
 	}
 	if got := stats.SavedPct(); got != 68 {

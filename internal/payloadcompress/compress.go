@@ -40,9 +40,28 @@ func (s Stats) EngineSaved(name string) int {
 	return s.EngineBytesIn[name] - s.EngineBytesOut[name]
 }
 
-// Engines renders the engines that actually saved bytes, as "lite=130,rtk=2610"
-// in name order. Engines that matched nothing are omitted, so the string answers
-// "what ran" rather than "what was configured".
+// tokenEstimate turns a byte count into a token estimate (roughly four bytes
+// per token), signed so an engine that grew the payload reports a negative
+// saving.
+func tokenEstimate(n int) int {
+	if n < 0 {
+		return -((-n + 3) / 4)
+	}
+	return (n + 3) / 4
+}
+
+// TokensIn estimates the input payload in tokens.
+func (s Stats) TokensIn() int { return tokenEstimate(s.BytesIn) }
+
+// TokensOut estimates the output payload in tokens.
+func (s Stats) TokensOut() int { return tokenEstimate(s.BytesOut) }
+
+// StyleTokens estimates the style prompt injection in tokens.
+func (s Stats) StyleTokens() int { return tokenEstimate(s.StyleBytes) }
+
+// Engines renders the engines that actually saved tokens, as
+// "lite=33,rtk=653" in name order. Engines that matched nothing are omitted,
+// so the string answers "what ran" rather than "what was configured".
 func (s Stats) Engines() string {
 	if len(s.Saved) == 0 {
 		return ""
@@ -59,14 +78,14 @@ func (s Stats) Engines() string {
 		}
 		b.WriteString(name)
 		b.WriteByte('=')
-		b.WriteString(strconv.Itoa(s.Saved[name]))
+		b.WriteString(strconv.Itoa(tokenEstimate(s.Saved[name])))
 	}
 	return b.String()
 }
 
-// Steps renders every pipeline step that ran as "lite:10240>8000" in name
-// order, so a step that ran and saved nothing stays visible instead of being
-// omitted the way Engines omits it.
+// Steps renders every pipeline step that ran as "lite:2560>2000" in token
+// estimates, in name order, so a step that ran and saved nothing stays visible
+// instead of being omitted the way Engines omits it.
 func (s Stats) Steps() string {
 	if len(s.EngineBytesIn) == 0 {
 		return ""
@@ -83,9 +102,9 @@ func (s Stats) Steps() string {
 		}
 		b.WriteString(name)
 		b.WriteByte(':')
-		b.WriteString(strconv.Itoa(s.EngineBytesIn[name]))
+		b.WriteString(strconv.Itoa(tokenEstimate(s.EngineBytesIn[name])))
 		b.WriteByte('>')
-		b.WriteString(strconv.Itoa(s.EngineBytesOut[name]))
+		b.WriteString(strconv.Itoa(tokenEstimate(s.EngineBytesOut[name])))
 	}
 	return b.String()
 }
@@ -114,12 +133,13 @@ func (s Stats) PassesString() string {
 	return b.String()
 }
 
-// SavedPct is the percentage of the payload removed, rounded down.
+// SavedPct is the percentage of the payload removed, rounded down, in tokens.
 func (s Stats) SavedPct() int {
-	if s.BytesIn <= 0 || s.BytesOut <= 0 {
+	in, out := s.TokensIn(), s.TokensOut()
+	if in <= 0 || out <= 0 {
 		return 0
 	}
-	return 100 * (s.BytesIn - s.BytesOut) / s.BytesIn
+	return 100 * (in - out) / in
 }
 
 // payloadEngine is a whole-body transform that runs before the segment scanner.
