@@ -771,12 +771,16 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}
 		if resp.Headers != nil {
 			for key, values := range resp.Headers {
-				c.Writer.Header()[key] = append([]string(nil), values...)
+				c.Writer.Header()[http.CanonicalHeaderKey(key)] = append([]string(nil), values...)
 			}
 		}
 	}
 
-	filteredBody, errFilter := FilterModelListResponseBody(c, body)
+	if ModelPolicyFromGin(c) != nil {
+		// Filtering may change the body or replace it with an error response.
+		c.Writer.Header().Del("Content-Length")
+	}
+	filteredBody, errFilter := FilterModelListResponseBody(c, body, sourceFormat)
 	if errFilter != nil {
 		lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusBadGateway, errFilter)
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": "Invalid model catalog", "type": "api_error"}})

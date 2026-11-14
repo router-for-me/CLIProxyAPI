@@ -1,14 +1,15 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -45,8 +46,10 @@ func FilterModelList(c *gin.Context, models []map[string]any) []map[string]any {
 // FilterModelListResponseBody re-filters a serialized model-list response after
 // plugin response interceptors have had an opportunity to replace its body.
 // Restricted requests fail closed when the interceptor returns a malformed catalog.
-func FilterModelListResponseBody(c *gin.Context, body []byte) ([]byte, error) {
-	if ModelPolicyFromGin(c) == nil {
+// The optional source format lets Claude catalogs match the decoded routing ID.
+func FilterModelListResponseBody(c *gin.Context, body []byte, sourceFormat ...string) ([]byte, error) {
+	policy := ModelPolicyFromGin(c)
+	if policy == nil {
 		return body, nil
 	}
 	if !ojson.ValidBytes(body) {
@@ -54,9 +57,10 @@ func FilterModelListResponseBody(c *gin.Context, body []byte) ([]byte, error) {
 	}
 
 	doc := ojson.NewDoc(body)
+	claudeCatalog := len(sourceFormat) > 0 && sourceFormat[0] == "claude"
 	foundList := false
 	for _, field := range []string{"data", "models"} {
-		result := ojson.GetBytesNoCopy(body, field)
+		result := doc.Get(field)
 		if !result.Exists() {
 			continue
 		}
@@ -64,44 +68,56 @@ func FilterModelListResponseBody(c *gin.Context, body []byte) ([]byte, error) {
 		if !result.IsArray() {
 			return nil, errors.New("model catalog field is not an array")
 		}
-		filtered := filterOJSONModelArray(c, result)
-		if err := doc.SetRawBytes(field, filtered); err != nil {
-			return nil, err
+		if errFilter := filterOJSONModelArray(doc, field, policy, claudeCatalog); errFilter != nil {
+			return nil, errFilter
 		}
 	}
 	if !foundList {
 		return nil, errors.New("model catalog has no data or models array")
 	}
+	if claudeCatalog && doc.Get("data").IsArray() {
+		models := doc.Get("data").Array()
+		firstID, lastID := "", ""
+		if len(models) > 0 {
+			firstID = models[0].Get("id").String()
+			lastID = models[len(models)-1].Get("id").String()
+		}
+		for _, boundary := range []struct{ field, value string }{{"first_id", firstID}, {"last_id", lastID}} {
+			if doc.Get(boundary.field).Exists() {
+				if errSet := doc.Set(boundary.field, boundary.value); errSet != nil {
+					return nil, errSet
+				}
+			}
+		}
+	}
 	return doc.Bytes(), nil
 }
 
-func filterOJSONModelArray(c *gin.Context, result ojson.Result) []byte {
-	var out bytes.Buffer
-	out.WriteByte('[')
-	first := true
-	for _, item := range result.Array() {
-		if !item.IsObject() {
-			continue
-		}
+func filterOJSONModelArray(doc *ojson.Doc, field string, policy *sdkaccess.ModelPolicy, claudeCatalog bool) error {
+	models := doc.Get(field).Array()
+	// Delete from the end so removal never shifts an index still to be checked.
+	for index := len(models) - 1; index >= 0; index-- {
+		item := models[index]
 		name := ""
-		for _, field := range []string{"id", "name", "slug"} {
-			value := item.Get(field)
-			if value.Type == ojson.String && value.Str != "" {
-				name = strings.TrimPrefix(value.Str, "models/")
-				break
+		if item.IsObject() {
+			for _, key := range []string{"id", "name", "slug"} {
+				value := item.Get(key)
+				if value.Type == ojson.String && value.Str != "" {
+					name = strings.TrimPrefix(value.Str, "models/")
+					break
+				}
 			}
 		}
-		if name == "" || !ModelPolicyFromGin(c).Allows(name) {
-			continue
+		if claudeCatalog {
+			name = claudemodels.ResolveClaudeModelIDPrefix(name)
 		}
-		if !first {
-			out.WriteByte(',')
+		if name == "" || !policy.Allows(name) {
+			if errDelete := doc.Delete(field + "." + strconv.Itoa(index)); errDelete != nil {
+				return errDelete
+			}
 		}
-		first = false
-		out.WriteString(item.Raw)
 	}
-	out.WriteByte(']')
-	return out.Bytes()
+	return nil
 }
 
 func listedModelName(model map[string]any) string {

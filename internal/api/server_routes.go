@@ -1177,6 +1177,9 @@ func (s *Server) handleHomeGeminiModel(c *gin.Context) {
 	action = strings.TrimSpace(action)
 	for _, entry := range entries {
 		if homeGeminiModelMatches(entry, action) {
+			if !handlers.ModelPolicyFromGin(c).Allows(strings.TrimPrefix(entry.id, "models/")) {
+				continue
+			}
 			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
 			return
 		}
