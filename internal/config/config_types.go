@@ -29,6 +29,16 @@ type RequestScopedErrorRule struct {
 type PluginsConfig struct {
 	// Enabled toggles dynamic plugin loading.
 	Enabled bool `yaml:"enabled" json:"enabled"`
+	// ABI selects the plugin loading mechanism.
+	//   "" or "c-abi" (default): the existing dlopen + c-shared path.
+	//   "go":                     Go native plugin (plugin.Open), required on
+	//                            musl hosts where c-shared Go plugins cannot load.
+	//
+	// Go's c-shared buildmode forces Initial-Exec TLS, which musl's dlopen
+	// rejects (musl 5c2f46a2; golang/go#48596, golang/go#54805). The Go
+	// native plugin mechanism has no such restriction.
+	// Unknown values fall back to the default rather than failing.
+	ABI string `yaml:"abi,omitempty" json:"abi,omitempty"`
 	// Dir is the plugin discovery directory.
 	Dir string `yaml:"dir" json:"dir"`
 	// StoreSources appends third-party plugin store registries to the built-in official source.
