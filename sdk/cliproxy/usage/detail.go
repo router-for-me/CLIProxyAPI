@@ -102,6 +102,8 @@ type CostDetails struct {
 	UpstreamInferenceCost            *float64 `json:"upstream_inference_cost,omitempty"`
 	UpstreamInferencePromptCost      *float64 `json:"upstream_inference_prompt_cost,omitempty"`
 	UpstreamInferenceCompletionsCost *float64 `json:"upstream_inference_completions_cost,omitempty"`
+	FinalCost                        *float64 `json:"final_cost,omitempty"`  // proxx: resolved USD cost
+	CostSource                       string   `json:"cost_source,omitempty"` // proxx: upstream|header|config|catalog|unknown
 }
 
 // Int64Ptr returns a pointer to v.
@@ -270,5 +272,7 @@ func (c *CostDetails) Clone() *CostDetails {
 		UpstreamInferenceCost:            cloneFloat64Ptr(c.UpstreamInferenceCost),
 		UpstreamInferencePromptCost:      cloneFloat64Ptr(c.UpstreamInferencePromptCost),
 		UpstreamInferenceCompletionsCost: cloneFloat64Ptr(c.UpstreamInferenceCompletionsCost),
+		FinalCost:                        cloneFloat64Ptr(c.FinalCost), // proxx
+		CostSource:                       c.CostSource,                 // proxx
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/pricing"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -102,6 +103,7 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 
 		filteredModels[i] = filteredModel
 	}
+	pricing.AttachPricing(filteredModels, "id") // proxx: per-model pricing object
 
 	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
 		"object": "list",

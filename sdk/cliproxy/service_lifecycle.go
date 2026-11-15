@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -55,6 +56,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	s.startModelCatalogUpdaters(ctx)
+	proxx.Start(ctx, s.currentConfig(), s.configPath) // proxx: pricing + usage aggregator
 
 	usage.StartDefault(ctx)
 	cfg := s.currentConfig()
@@ -401,6 +403,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		helps.RetireProxyPoolPublisher(s.proxyPoolPublisher)
 		usage.StopDefault()
+		proxx.Shutdown() // proxx: flush usage snapshot
 	})
 	return shutdownErr
 }

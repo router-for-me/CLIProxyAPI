@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/pricing"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
@@ -73,6 +74,7 @@ func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
 		}
 		normalizedModels = append(normalizedModels, normalizedModel)
 	}
+	pricing.AttachPricing(normalizedModels, "name") // proxx: per-model pricing object
 	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
 		"models": normalizedModels,
 	})
