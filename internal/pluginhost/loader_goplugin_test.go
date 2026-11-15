@@ -586,3 +586,94 @@ func TestGoPluginLoaderFallsBackToExecutableShadow(t *testing.T) {
 		t.Fatal("the fallback must use a different path than the local shadow copy")
 	}
 }
+
+// TestGoPluginLoaderFallbackStaysUsable verifies that a plugin that could
+// only be loaded from the executable fallback stays loadable. The local
+// shadow copy is recorded as unusable, not as a failed path, so a later load
+// of the same build goes straight to the fallback instead of being rejected.
+func TestGoPluginLoaderFallbackStaysUsable(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "probe.so")
+	if err := os.WriteFile(target, []byte("plugin"), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	localPath := canonicalizePluginPath(target)
+	var opened []string
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			return file.Path, func() {}, nil
+		},
+		open: func(path string) (*plugin.Plugin, error) {
+			opened = append(opened, path)
+			if path == localPath {
+				return nil, fmt.Errorf("permission denied")
+			}
+			return &plugin.Plugin{}, nil
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return plugin.Symbol(func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+				return &fakeGoPlugin{}, nil
+			}), nil
+		},
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		client, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{})
+		if err != nil {
+			t.Fatalf("attempt %d failed: %v", attempt+1, err)
+		}
+		if client == nil {
+			t.Fatalf("attempt %d returned no client", attempt+1)
+		}
+	}
+	// The second attempt must not have retried the unusable local copy.
+	localAttempts := 0
+	for _, path := range opened {
+		if path == localPath {
+			localAttempts++
+		}
+	}
+	if localAttempts != 1 {
+		t.Fatalf("the local shadow copy was opened %d times, want 1", localAttempts)
+	}
+}
+
+// TestGoPluginLoaderReportsFallbackFailure verifies that the error of a
+// failing executable fallback is reported instead of being swallowed behind
+// the primary failure of the local shadow copy.
+func TestGoPluginLoaderReportsFallbackFailure(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "probe.so")
+	if err := os.WriteFile(target, []byte("plugin"), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			return file.Path, func() {}, nil
+		},
+		open: func(string) (*plugin.Plugin, error) {
+			return nil, fmt.Errorf("plugin was built with a different version of package")
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			t.Fatal("lookup must not run after a failed open")
+			return nil, nil
+		},
+	}
+
+	_, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{})
+	if err == nil {
+		t.Fatal("expected the load to fail")
+	}
+	if !strings.Contains(err.Error(), "executable fallback failed as well") {
+		t.Fatalf("error %q does not mention the failed fallback", err)
+	}
+	if !strings.Contains(err.Error(), "different version of package") {
+		t.Fatalf("error %q does not carry the underlying plugin failure", err)
+	}
+}

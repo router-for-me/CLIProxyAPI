@@ -70,11 +70,61 @@ var goPluginFailedPaths sync.Map
 // path again.
 var goPluginOpenAttempts sync.Map
 
+// goPluginFallbackPaths remembers the load paths whose local shadow copy
+// could not be opened but that were loaded from the executable fallback.
+// Such a path stays usable: later loads go straight to the fallback instead
+// of being rejected as a failed path.
+var goPluginFallbackPaths sync.Map
+
 // goPluginOpenAttempt is a single plugin.Open attempt and its outcome.
 type goPluginOpenAttempt struct {
 	done   chan struct{}
 	plugin *plugin.Plugin
 	err    error
+}
+
+// openWithFallback opens the plugin from the local shadow copy and falls back
+// to the executable copy in the cache directory when the local copy cannot be
+// opened, for example because the plugin directory is mounted noexec.
+//
+// A panic raised by the plugin initializer is fatal: Go's plugin cache keeps
+// the path poisoned, so the path is recorded as failed and never opened
+// again. Any other failure may be caused by the shadow copy itself, so the
+// executable fallback is tried before the path is given up on.
+func (l goPluginLoader) openWithFallback(file pluginFile, open func(path string) (*plugin.Plugin, error), loadPath string, releaseGuard func()) (*plugin.Plugin, error) {
+	if _, needsFallback := goPluginFallbackPaths.Load(loadPath); needsFallback {
+		// The local copy was already found to be unusable, and the plugin was
+		// loaded successfully from the executable fallback before.
+		p, errFallback := l.openFallbackShadow(file, open, loadPath)
+		if errFallback != nil {
+			goPluginFailedPaths.Store(loadPath, struct{}{})
+			return nil, fmt.Errorf("the executable fallback failed: %w", errFallback)
+		}
+		return p, nil
+	}
+
+	p, err := openGoPluginSerialized(open, loadPath)
+	releaseGuard()
+	if err == nil {
+		return p, nil
+	}
+
+	var panicErr *goPluginPanicError
+	if errors.As(err, &panicErr) {
+		// openGoPluginSerialized already recorded the path as failed.
+		return nil, err
+	}
+
+	// The local shadow copy may live on a noexec mount, in which case the
+	// plugin cannot be loaded from it. The C ABI loader falls back to an
+	// executable copy in the cache directory; do the same here.
+	goPluginFallbackPaths.Store(loadPath, struct{}{})
+	fallbackPlugin, errFallback := l.openFallbackShadow(file, open, loadPath)
+	if errFallback != nil {
+		goPluginFailedPaths.Store(loadPath, struct{}{})
+		return nil, fmt.Errorf("%w (the executable fallback failed as well: %v)", err, errFallback)
+	}
+	return fallbackPlugin, nil
 }
 
 // openFallbackShadow loads the plugin from an executable copy in the cache
@@ -109,7 +159,12 @@ func openGoPluginSerialized(open func(path string) (*plugin.Plugin, error), load
 	}
 	att.plugin, att.err = openGoPluginGuarded(open, loadPath)
 	if att.err != nil {
-		goPluginFailedPaths.Store(loadPath, struct{}{})
+		var panicErr *goPluginPanicError
+		if errors.As(att.err, &panicErr) {
+			// A panicking initializer leaves Go's plugin cache poisoned for
+			// this path, so the path must never be opened again.
+			goPluginFailedPaths.Store(loadPath, struct{}{})
+		}
 	}
 	close(att.done)
 	goPluginOpenAttempts.Delete(loadPath)
@@ -200,19 +255,8 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 		releaseGuard()
 		return nil, fmt.Errorf("go plugin %s previously failed to initialize and cannot be retried in this process; fix the plugin and restart the host", file.Path)
 	}
-	p, err := openGoPluginSerialized(open, loadPath)
-	releaseGuard()
-	if err != nil {
-		var panicErr *goPluginPanicError
-		if !errors.As(err, &panicErr) {
-			// The local shadow copy may live on a noexec mount, in which case
-			// the plugin cannot be loaded from it. The C ABI loader falls back
-			// to an executable copy in the cache directory; do the same here.
-			if fallbackPlugin, fallbackErr := l.openFallbackShadow(file, open, loadPath); fallbackErr == nil {
-				p, err = fallbackPlugin, nil
-			}
-		}
-	}
+
+	p, err := l.openWithFallback(file, open, loadPath, releaseGuard)
 	if err != nil {
 		return nil, fmt.Errorf("go plugin open %s: %w (hint: build the plugin with -buildmode=plugin, and make sure the host and the plugin share the same Go toolchain, GOOS/GOARCH, build tags and dependency graph; building both inside one go.work is the supported layout)", file.Path, err)
 	}
