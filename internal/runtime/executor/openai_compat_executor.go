@@ -1281,6 +1281,7 @@ type statusErr struct {
 	retryAfter         *time.Duration
 	credentialScoped   bool
 	streamTruncated    bool
+	transientTransport bool
 	transientRateLimit bool
 	tosViolation       bool
 	tosAppealURL       string
@@ -1329,12 +1330,24 @@ func (e statusErr) TOSAppealMetadata() map[string]string {
 }
 
 // ErrorCode exposes the machine-readable classification for terminal TOS
-// violations so MarkResult can route them to the disabled credential path.
+// violations and non-cooling transient failures (such as zero-output abnormal
+// model terminations) so MarkResult can classify them accurately.
 func (e statusErr) ErrorCode() string {
 	if e.tosViolation {
 		return "tos_violation"
 	}
+	if e.transientTransport {
+		return cliproxyauth.ErrorCodeTransientTransport
+	}
 	return ""
+}
+
+func newGeminiZeroOutputStatusErr(msg string) statusErr {
+	return statusErr{
+		code:               http.StatusBadGateway,
+		msg:                msg,
+		transientTransport: true,
+	}
 }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute

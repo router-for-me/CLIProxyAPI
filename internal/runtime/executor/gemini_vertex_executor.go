@@ -581,7 +581,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, data, false); zeroOutput {
 			gemDetail := helps.ParseGeminiUsage(data)
 			helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
-			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			err = newGeminiZeroOutputStatusErr(zeroErrMsg)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
 			return cliproxyexecutor.Response{}, err
@@ -753,7 +753,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, data, false); zeroOutput {
 			gemDetail := helps.ParseGeminiUsage(data)
 			helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
-			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			err = newGeminiZeroOutputStatusErr(zeroErrMsg)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
 			return cliproxyexecutor.Response{}, err
@@ -929,7 +929,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		var param any
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 			return false
@@ -1291,7 +1291,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		var param any
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 			return false

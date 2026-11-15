@@ -264,7 +264,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, data, false); zeroOutput {
 			gemDetail := helps.ParseGeminiUsage(data)
 			helps.ApplyGeminiRequestImageConfig(&gemDetail, body)
-			err = statusErr{code: http.StatusBadGateway, msg: zeroErrMsg}
+			err = newGeminiZeroOutputStatusErr(zeroErrMsg)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
 			return cliproxyexecutor.Response{}, err
@@ -458,7 +458,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var pendingFilterMsg string
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 			return false

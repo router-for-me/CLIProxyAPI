@@ -278,7 +278,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(true, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
 			translatedClaudeErr = nil
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
 			stopDeliverySupport()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
