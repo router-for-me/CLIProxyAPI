@@ -180,6 +180,8 @@ func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
 		delta.Failures = 1
 	}
 	if cost != nil {
+		rounded := roundCost(*cost)
+		cost = &rounded
 		delta.CostUSD = *cost
 	} else if in+out > 0 {
 		delta.UnknownCostRequests = 1

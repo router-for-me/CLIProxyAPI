@@ -100,9 +100,19 @@ Limitations:
 - Image/video/audio and per-call tool pricing are not modeled (`input_audio`, web search, etc.).
 - Records whose token breakdown is unclassified/inconsistent (unknown provider semantics) get
   `unknown` unless the upstream reports a cost.
-- Alias pools that rename models (compat `alias` ≠ `name`) are priced by the served upstream name;
-  listings price the client-visible ID, so add a config entry for the alias if it differs.
+- Alias pools that rename models (compat `alias` ≠ `name`) are billed by the served upstream name.
+  Listings and `GET /proxx/pricing` resolve an `openai-compatibility` alias to its (first) upstream
+  name when the alias itself has no price (`internal/proxx/pricing/aliases.go`); aliases in other
+  API-key sections still need a config entry. Model groups (`proxx-group`) are not priced or listed there.
 - Retries/failovers publish one record per upstream attempt; each attempt is priced.
 - No `pricing` object yet in the Codex `/v1/models?client_version=` listing or the single-model
   Gemini `GET /v1beta/models/{model}`.
 - `GET /v8/management/proxx/pricing` also returns `disabled` (pricing disabled flag).
+
+### Integration e2e (2026-11-16)
+
+Merged backend + reskinned panel, one mock upstream, `auto = [m-bad (429), m-good (gpt-4o-mini), m-or]`:
+`auto` served by `m-good` after one 429 to `m-bad`; the next `auto` skipped `m-bad` (cooling) and went
+straight to `m-good`; `gpt-4o-mini` billed at catalog price ($0.000345 for 1000 uncached + 200 cached
+input and 300 output tokens); the OpenRouter-style member billed from upstream `usage.cost`; totals
+persisted across a SIGINT restart; the panel's Spend, Model groups and Pricing pages showed the live data.

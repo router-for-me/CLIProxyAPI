@@ -40,6 +40,7 @@ func Reload(cfg *config.Config) {
 		ctx = nil
 	}
 	groups.Apply(cfg)
+	pricing.SetAliases(cfg)
 	pricing.Configure(ctx, cfg.Proxx.Pricing)
 	if ctx != nil {
 		usagestats.Configure(ctx, cfg.Proxx.Usage, configPath)
