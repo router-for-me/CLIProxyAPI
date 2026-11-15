@@ -1300,14 +1300,63 @@ func clearSchedulerSelectionID(meta map[string]any) {
 	delete(meta, cliproxyexecutor.SelectionIDMetadataKey)
 }
 
-func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, error) {
+func excludedCandidateIDSet(excluded []string) map[string]struct{} {
+	if len(excluded) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(excluded))
+	for _, id := range excluded {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		set[trimmed] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+func mergeTriedAuthIDs(tried map[string]struct{}, excluded map[string]struct{}) map[string]struct{} {
+	if len(excluded) == 0 {
+		return tried
+	}
+	merged := make(map[string]struct{}, len(tried)+len(excluded))
+	for id := range tried {
+		merged[id] = struct{}{}
+	}
+	for id := range excluded {
+		merged[id] = struct{}{}
+	}
+	return merged
+}
+
+func filterAuthsExcluding(auths []*Auth, excluded map[string]struct{}) []*Auth {
+	if len(auths) == 0 || len(excluded) == 0 {
+		return auths
+	}
+	filtered := make([]*Auth, 0, len(auths))
+	for _, candidate := range auths {
+		if candidate == nil {
+			continue
+		}
+		if _, skip := excluded[candidate.ID]; skip {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered
+}
+
+func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginScheduler, provider string, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, candidates []*Auth) (*Auth, bool, map[string]struct{}, error) {
 	if scheduler == nil || len(candidates) == 0 {
 		clearSchedulerSelectionID(opts.Metadata)
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	if state, ok := scheduler.(pluginSchedulerState); ok && !state.HasScheduler() {
 		clearSchedulerSelectionID(opts.Metadata)
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
 	opts.EnsureMetadata()
 	selectionID := uuid.NewString()
@@ -1333,10 +1382,11 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 	}
 	resp, handled, errPick := scheduler.PickAuth(ctx, req)
 	if errPick != nil {
-		return nil, true, errPick
+		return nil, true, nil, errPick
 	}
+	excluded := excludedCandidateIDSet(resp.ExcludeCandidates)
 	if !handled || !resp.Handled {
-		return nil, false, nil
+		return nil, false, excluded, nil
 	}
 	if resp.Reject {
 		rejectCode := strings.TrimSpace(resp.RejectCode)
@@ -1347,22 +1397,23 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		if rejectMessage == "" {
 			rejectMessage = "scheduler rejected candidate selection"
 		}
-		return nil, true, wrapSchedulerRejectError(&Error{Code: rejectCode, Message: rejectMessage})
+		return nil, true, nil, wrapSchedulerRejectError(&Error{Code: rejectCode, Message: rejectMessage})
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
 		keepSelectionID = true
-		return selected, true, nil
+		return selected, true, nil, nil
 	}
 
 	strategy, okStrategy := builtinSchedulerStrategy(resp.DelegateBuiltin)
 	if !okStrategy {
-		return nil, false, nil
+		return nil, false, nil, nil
 	}
-	selected, handledBuiltin, errBuiltin := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, tried)
+	effectiveTried := mergeTriedAuthIDs(tried, excluded)
+	selected, handledBuiltin, errBuiltin := m.pickViaBuiltinScheduler(ctx, strategy, providerKey, providers, model, opts, effectiveTried)
 	if errBuiltin == nil && handledBuiltin && selected != nil {
 		keepSelectionID = true
 	}
-	return selected, handledBuiltin, errBuiltin
+	return selected, handledBuiltin, excluded, errBuiltin
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {
@@ -2342,12 +2393,41 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 	m.mu.RUnlock()
 
-	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
+	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, provider, []string{provider}, model, opts, tried, available)
+	effectiveTried := mergeTriedAuthIDs(tried, excluded)
 	if errPick != nil {
-		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
+		m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, effectiveTried, errPick)
 		return nil, nil, errPick
 	}
 	if !handled {
+		if len(excluded) > 0 {
+			candidates = filterAuthsExcluding(candidates, excluded)
+			accountingCandidates = filterAuthsExcluding(accountingCandidates, excluded)
+			affinityCandidates = filterAuthsExcluding(affinityCandidates, excluded)
+			if len(candidates) == 0 {
+				return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+			}
+			now = time.Now()
+			m.mu.RLock()
+			_, selectorAuths, errAvailable = m.availableAuthsForSelector(ctx, selector, candidates, provider, model, now, schedulerAcross, opts.Headers)
+			if errAvailable != nil {
+				m.mu.RUnlock()
+				m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, effectiveTried, errAvailable)
+				return nil, nil, errAvailable
+			}
+			if trackPinnedAccounting {
+				fullAvailable, _, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, provider, model, now, true, opts.Headers)
+				if errAccounting != nil {
+					m.mu.RUnlock()
+					return nil, nil, errAccounting
+				}
+				accountingAuths = fullAvailable
+			} else {
+				accountingAuths = nil
+			}
+			transientAuthIDs = m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
+			m.mu.RUnlock()
+		}
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		if accountingAuths != nil {
@@ -2365,7 +2445,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 			if isBuiltInSelector(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
-			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, tried, errPick)
+			m.warnLogAuthUnavailable(ctx, []string{provider}, model, opts, effectiveTried, errPick)
 			return nil, nil, errPick
 		}
 	}
@@ -2387,10 +2467,16 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 // SelectAuth selects one credential through the configured scheduling strategy.
 // It does not execute or alter the selected credential's result state.
 func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts cliproxyexecutor.Options) (*Auth, error) {
+	return m.SelectAuthExcluding(ctx, provider, model, opts, nil)
+}
+
+// SelectAuthExcluding selects one credential through the configured scheduling strategy
+// while excluding any credential IDs present in tried.
+func (m *Manager) SelectAuthExcluding(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
 	if m != nil && m.HomeEnabled() {
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
-	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, nil)
+	selected, _, errPick := m.pickNextLegacy(ctx, provider, model, opts, tried)
 	if errPick != nil {
 		return nil, unwrapExecutionBoundaryError(errPick)
 	}
@@ -2398,6 +2484,14 @@ func (m *Manager) SelectAuth(ctx context.Context, provider, model string, opts c
 		return nil, &Error{Code: "home_unavailable", Message: "legacy auth selection is unavailable while Home is enabled", HTTPStatus: http.StatusServiceUnavailable}
 	}
 	return selected, nil
+}
+
+// MaxRetryCredentials returns the configured per-request credential retry cap (0 means unlimited).
+func (m *Manager) MaxRetryCredentials() int {
+	if m == nil {
+		return 0
+	}
+	return int(m.maxRetryCredentials.Load())
 }
 
 // SelectAuthByKind selects one credential of the required kind through the
@@ -2797,12 +2891,41 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	transientAuthIDs := m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
 	m.mu.RUnlock()
 
-	selected, handled, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
+	selected, handled, excluded, errPick := m.pickViaPluginScheduler(ctx, pluginScheduler, "mixed", providers, model, opts, tried, available)
+	effectiveTried := mergeTriedAuthIDs(tried, excluded)
 	if errPick != nil {
-		m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
+		m.warnLogAuthUnavailable(ctx, providers, model, opts, effectiveTried, errPick)
 		return nil, nil, "", errPick
 	}
 	if !handled {
+		if len(excluded) > 0 {
+			candidates = filterAuthsExcluding(candidates, excluded)
+			accountingCandidates = filterAuthsExcluding(accountingCandidates, excluded)
+			affinityCandidates = filterAuthsExcluding(affinityCandidates, excluded)
+			if len(candidates) == 0 {
+				return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
+			}
+			now = time.Now()
+			m.mu.RLock()
+			_, selectorAuths, errAvailable = m.availableAuthsForSelector(ctx, selector, candidates, "mixed", model, now, schedulerAcross, opts.Headers)
+			if errAvailable != nil {
+				m.mu.RUnlock()
+				m.warnLogAuthUnavailable(ctx, providers, model, opts, effectiveTried, errAvailable)
+				return nil, nil, "", errAvailable
+			}
+			if trackPinnedAccounting {
+				fullAvailable, _, errAccounting := m.availableAuthsForSelector(ctx, selector, accountingCandidates, "mixed", model, now, true, opts.Headers)
+				if errAccounting != nil {
+					m.mu.RUnlock()
+					return nil, nil, "", errAccounting
+				}
+				accountingAuths = fullAvailable
+			} else {
+				accountingAuths = nil
+			}
+			transientAuthIDs = m.transientlyUnavailableSessionAffinityAuthIDs(ctx, selector, affinityCandidates, model, now, opts.Headers)
+			m.mu.RUnlock()
+		}
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		selectorCtx = withSessionAffinityTransientAuthIDs(selectorCtx, transientAuthIDs)
 		if accountingAuths != nil {
@@ -2838,7 +2961,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 			if isBuiltInSelector(selector) {
 				errPick = restoreModelCooldownErrorModel(errPick, model)
 			}
-			m.warnLogAuthUnavailable(ctx, providers, model, opts, tried, errPick)
+			m.warnLogAuthUnavailable(ctx, providers, model, opts, effectiveTried, errPick)
 			return nil, nil, "", errPick
 		}
 	}
@@ -2996,6 +3119,144 @@ func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time)
 		remaining = next.Sub(now).Round(time.Second).String()
 	}
 	return fmt.Sprintf("[%s, reason=%s, remaining=%s]", ident, reason, remaining)
+}
+
+func selectorExcludesZeroWeight(selector Selector) bool {
+	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
+		return true
+	}
+	if affinity, ok := selector.(*SessionAffinitySelector); ok && affinity != nil {
+		_, weighted := affinity.fallback.(*WeightedRoundRobinSelector)
+		return weighted
+	}
+	return false
+}
+
+// earliestPoolCooldownForModelAt scans the model's candidate credentials with
+// the same filters selection uses. It reports:
+//   - earliest: the earliest active timed cooldown recovery instant
+//   - hasUnblocked: true when at least one eligible candidate is still available
+//   - ok: true when no candidate is available and at least one is in a timed cooldown
+func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, now time.Time) (earliest time.Time, hasUnblocked bool, ok bool) {
+	if m == nil {
+		return time.Time{}, false, false
+	}
+	excludeZeroWeight := selectorExcludesZeroWeight(m.Selector())
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	eligibility := authSelectionEligibilityForRequest(ctx, opts)
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, p := range providers {
+		if norm := canonicalSchedulingProvider(p); norm != "" && norm != "mixed" {
+			providerSet[norm] = struct{}{}
+		}
+	}
+	registryRef := registry.GetGlobalRegistry()
+	trimmedModel := strings.TrimSpace(model)
+
+	totalCandidates := 0
+	cooling := 0
+	for _, candidate := range m.auths {
+		if candidate == nil || candidate.Disabled {
+			continue
+		}
+		if excludeZeroWeight && authWeight(candidate) <= 0 {
+			continue
+		}
+		rawProvider := executorKeyFromAuth(candidate)
+		providerKey := canonicalSchedulingProvider(rawProvider)
+		if providerKey == "" {
+			continue
+		}
+		if len(providerSet) > 0 {
+			if _, match := providerSet[providerKey]; !match {
+				continue
+			}
+		}
+		if _, hasExec := m.executorLocked(rawProvider); !hasExec {
+			if _, hasNormExec := m.executorLocked(providerKey); !hasNormExec {
+				continue
+			}
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if !eligibility.allows(candidate) {
+			continue
+		}
+		if trimmedModel != "" && !m.authSupportsRouteModel(registryRef, candidate, model) {
+			continue
+		}
+		totalCandidates++
+		checkModel := m.selectionModelForAuth(candidate, model)
+		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, opts.Headers)
+		if !blocked {
+			return time.Time{}, true, false
+		}
+		if reason == blockReasonCooldown {
+			cooling++
+		}
+		// Count every timed auto-recovery toward the pool's earliest reset,
+		// including transient non-cooldown blocks (e.g. a short capacity 429),
+		// matching how selection computes the earliest availability.
+		if reason != blockReasonDisabled && !next.IsZero() && next.After(now) {
+			if earliest.IsZero() || next.Before(earliest) {
+				earliest = next
+			}
+		}
+	}
+	if totalCandidates > 0 && cooling > 0 && !earliest.IsZero() {
+		return earliest, false, true
+	}
+	return time.Time{}, false, false
+}
+
+func observeSelectionCooldownDeadline(dst *time.Time, err error, now time.Time) {
+	if dst == nil || err == nil {
+		return
+	}
+	var cooldown *modelCooldownError
+	if !errors.As(err, &cooldown) || cooldown == nil || cooldown.resetIn <= 0 {
+		return
+	}
+	candidate := now.Add(cooldown.resetIn)
+	if dst.IsZero() || candidate.Before(*dst) {
+		*dst = candidate
+	}
+}
+
+func (m *Manager) annotatePoolCooldownTerminalError(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, lastErr error, selectionCooldownDeadline time.Time) error {
+	return m.annotatePoolCooldownTerminalErrorAt(ctx, providers, model, opts, lastErr, selectionCooldownDeadline, time.Now())
+}
+
+func (m *Manager) annotatePoolCooldownTerminalErrorAt(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, lastErr error, selectionCooldownDeadline time.Time, now time.Time) error {
+	if m == nil || lastErr == nil {
+		return lastErr
+	}
+	if statusCodeFromError(lastErr) != http.StatusTooManyRequests {
+		return lastErr
+	}
+	var marker interface{ IsModelCooldown() bool }
+	if errors.As(lastErr, &marker) && marker != nil && marker.IsModelCooldown() {
+		return lastErr
+	}
+	var existing *poolCooldownTerminalError
+	if errors.As(lastErr, &existing) && existing != nil {
+		return lastErr
+	}
+	deadline, hasUnblocked, ok := m.earliestPoolCooldownForModelAt(ctx, providers, model, opts, now)
+	if hasUnblocked {
+		return lastErr
+	}
+	if !ok && !selectionCooldownDeadline.IsZero() && selectionCooldownDeadline.After(now) {
+		deadline = selectionCooldownDeadline
+		ok = true
+	}
+	if !ok {
+		return lastErr
+	}
+	return &poolCooldownTerminalError{cause: lastErr, deadline: deadline}
 }
 
 func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, err error) {

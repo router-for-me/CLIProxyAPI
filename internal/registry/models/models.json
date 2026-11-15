@@ -1863,7 +1863,8 @@
         "levels": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ]
       },
       "supportedInputModalities": [
@@ -2727,6 +2728,109 @@
           "low",
           "medium",
           "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-argon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Argon",
+      "name": "models/gemini-4-argon",
+      "version": "3.0",
+      "description": "Gemini 4 Argon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-carbon",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Carbon",
+      "name": "models/gemini-4-carbon",
+      "version": "3.0",
+      "description": "Gemini 4 Carbon",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
+      "id": "gemini-4-hydrogen",
+      "object": "model",
+      "owned_by": "google",
+      "type": "gemini",
+      "display_name": "Gemini 4 Hydrogen",
+      "name": "models/gemini-4-hydrogen",
+      "version": "3.0",
+      "description": "Gemini 4 Hydrogen",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 128,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
         ]
       },
       "supportedInputModalities": [

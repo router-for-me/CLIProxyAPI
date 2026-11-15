@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // zeroWidthSpace is the Unicode zero-width space character used for obfuscation.
@@ -26,16 +28,42 @@ type sensitiveWordRule struct {
 	isReplacement bool
 }
 
+type compiledPatternRule struct {
+	regex       *regexp.Regexp
+	replacement string
+}
+
+type patternMatchSpan struct {
+	start       int
+	end         int
+	replacement string
+}
+
 // SensitiveWordMatcher holds the compiled regex and replacement state for matching sensitive words.
 type SensitiveWordMatcher struct {
 	regex             *regexp.Regexp
 	replaceFn         func(string) string
 	lookupReplacement func(string) (string, bool)
+	patternRules      []compiledPatternRule
+}
+
+func (m *SensitiveWordMatcher) hasRules() bool {
+	return m != nil && (m.regex != nil || len(m.patternRules) > 0)
 }
 
 // SensitiveWordConfigCacheKey builds a deterministic, collision-free cache key
 // for a (words, replacements) configuration pair.
 func SensitiveWordConfigCacheKey(words []string, replacements map[string]string) string {
+	return SensitiveWordConfigCacheKeyWithPatterns(words, replacements, nil)
+}
+
+// SensitiveWordConfigCacheKeyWithPatterns builds a deterministic, collision-free
+// cache key for (words, replacements, patterns).
+func SensitiveWordConfigCacheKeyWithPatterns(
+	words []string,
+	replacements map[string]string,
+	patterns []config.SensitivePatternRule,
+) string {
 	var b strings.Builder
 	b.WriteString("w:")
 	b.WriteString(strconv.Itoa(len(words)))
@@ -67,35 +95,93 @@ func SensitiveWordConfigCacheKey(words []string, replacements map[string]string)
 			b.WriteByte(';')
 		}
 	}
+	b.WriteString("|p:")
+	b.WriteString(strconv.Itoa(len(patterns)))
+	b.WriteByte(';')
+	for _, p := range patterns {
+		b.WriteString(strconv.Itoa(len(p.Pattern)))
+		b.WriteByte(':')
+		b.WriteString(p.Pattern)
+		b.WriteByte('=')
+		b.WriteString(strconv.Itoa(len(p.Replacement)))
+		b.WriteByte(':')
+		b.WriteString(p.Replacement)
+		b.WriteByte(';')
+	}
 	return b.String()
 }
 
 // BuildSensitiveWordMatcher compiles a regex from the word list using U+200B.
 // Words are sorted by length (longest first) for proper matching.
 func BuildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
-	return BuildSensitiveWordMatcherWithReplacements(words, nil)
+	return BuildSensitiveWordMatcherWithPatterns(words, nil, nil)
 }
 
 // BuildSensitiveWordMatcherWithReplacements compiles a matcher combining literal
 // replacements and U+200B sensitive-word obfuscation.
 func BuildSensitiveWordMatcherWithReplacements(words []string, replacements map[string]string) *SensitiveWordMatcher {
-	return buildSensitiveWordMatcher(words, replacements, obfuscateWord, zeroWidthSpace)
+	return BuildSensitiveWordMatcherWithPatterns(words, replacements, nil)
+}
+
+// BuildSensitiveWordMatcherWithPatterns compiles a matcher combining ordered RE2
+// regex replacements, literal replacements, and U+200B sensitive-word obfuscation.
+func BuildSensitiveWordMatcherWithPatterns(
+	words []string,
+	replacements map[string]string,
+	patterns []config.SensitivePatternRule,
+) *SensitiveWordMatcher {
+	return buildSensitiveWordMatcher(words, replacements, patterns, obfuscateWord, zeroWidthSpace)
 }
 
 // BuildAntigravitySensitiveWordMatcher compiles a matcher for Antigravity system
 // instructions combining literal replacements and per-subword U+034F obfuscation.
 func BuildAntigravitySensitiveWordMatcher(words []string, replacements map[string]string) *SensitiveWordMatcher {
-	return buildSensitiveWordMatcher(words, replacements, obfuscateAntigravityPhrase, combiningGraphemeJoiner)
+	return BuildAntigravitySensitiveWordMatcherWithPatterns(words, replacements, nil)
+}
+
+// BuildAntigravitySensitiveWordMatcherWithPatterns compiles a matcher for Antigravity
+// system instructions combining ordered RE2 regex replacements, literal replacements,
+// and per-subword U+034F obfuscation.
+func BuildAntigravitySensitiveWordMatcherWithPatterns(
+	words []string,
+	replacements map[string]string,
+	patterns []config.SensitivePatternRule,
+) *SensitiveWordMatcher {
+	return buildSensitiveWordMatcher(words, replacements, patterns, obfuscateAntigravityPhrase, combiningGraphemeJoiner)
 }
 
 func buildSensitiveWordMatcher(
 	words []string,
 	replacements map[string]string,
+	patterns []config.SensitivePatternRule,
 	obfuscateFn func(string) string,
 	marker string,
 ) *SensitiveWordMatcher {
-	if len(words) == 0 && len(replacements) == 0 {
+	if len(words) == 0 && len(replacements) == 0 && len(patterns) == 0 {
 		return nil
+	}
+
+	var compiledPatterns []compiledPatternRule
+	if len(patterns) > 0 {
+		compiledPatterns = make([]compiledPatternRule, 0, len(patterns))
+		for i, p := range patterns {
+			if strings.TrimSpace(p.Pattern) == "" {
+				continue
+			}
+			compiled, errCompile := regexp.Compile(p.Pattern)
+			if errCompile != nil {
+				log.WithFields(log.Fields{
+					"rule_index": i + 1,
+					"pattern":    p.Pattern,
+					"error":      errCompile,
+				}).Warn("sensitive-patterns-replace rule skipped: invalid regex")
+				continue
+			}
+			compiledPatterns = append(compiledPatterns, compiledPatternRule{
+				regex:       compiled,
+				replacement: p.Replacement,
+			})
+		}
 	}
 
 	var rules []sensitiveWordRule
@@ -161,46 +247,53 @@ func buildSensitiveWordMatcher(
 		})
 	}
 
-	if len(rules) == 0 {
+	if len(rules) == 0 && len(compiledPatterns) == 0 {
 		return nil
 	}
 
-	sortRulesLongestFirst(rules)
-	sortRulesLongestFirst(replacementRules)
-
-	escaped := make([]string, len(rules))
-	for i, r := range rules {
-		escaped[i] = regexp.QuoteMeta(r.target)
-	}
-
-	pattern := "(?i:" + strings.Join(escaped, "|") + ")"
-	re, errCompile := regexp.Compile(pattern)
-	if errCompile != nil {
-		return nil
-	}
-
+	var re *regexp.Regexp
 	var lookupReplacement func(string) (string, bool)
-	replaceFn := obfuscateFn
-	if len(exactReplacements) > 0 {
-		lookupReplacement = func(matched string) (string, bool) {
-			if repl, ok := exactReplacements[matched]; ok {
-				return repl, true
+	var replaceFn func(string) string
+	if len(rules) > 0 {
+		sortRulesLongestFirst(rules)
+		sortRulesLongestFirst(replacementRules)
+
+		escaped := make([]string, len(rules))
+		for i, r := range rules {
+			escaped[i] = regexp.QuoteMeta(r.target)
+		}
+
+		pattern := "(?i:" + strings.Join(escaped, "|") + ")"
+		compiledLiteral, errCompile := regexp.Compile(pattern)
+		if errCompile != nil {
+			if len(compiledPatterns) == 0 {
+				return nil
 			}
-			if repl, ok := lowerReplacements[strings.ToLower(matched)]; ok {
-				return repl, true
-			}
-			for _, r := range replacementRules {
-				if strings.EqualFold(matched, r.target) {
-					return r.replacement, true
+		} else {
+			re = compiledLiteral
+			replaceFn = obfuscateFn
+			if len(exactReplacements) > 0 {
+				lookupReplacement = func(matched string) (string, bool) {
+					if repl, ok := exactReplacements[matched]; ok {
+						return repl, true
+					}
+					if repl, ok := lowerReplacements[strings.ToLower(matched)]; ok {
+						return repl, true
+					}
+					for _, r := range replacementRules {
+						if strings.EqualFold(matched, r.target) {
+							return r.replacement, true
+						}
+					}
+					return "", false
+				}
+				replaceFn = func(matched string) string {
+					if repl, ok := lookupReplacement(matched); ok {
+						return repl
+					}
+					return obfuscateFn(matched)
 				}
 			}
-			return "", false
-		}
-		replaceFn = func(matched string) string {
-			if repl, ok := lookupReplacement(matched); ok {
-				return repl
-			}
-			return obfuscateFn(matched)
 		}
 	}
 
@@ -208,6 +301,7 @@ func buildSensitiveWordMatcher(
 		regex:             re,
 		replaceFn:         replaceFn,
 		lookupReplacement: lookupReplacement,
+		patternRules:      compiledPatterns,
 	}
 }
 
@@ -305,9 +399,143 @@ func obfuscateAntigravityPhrase(phrase string) string {
 	return string(r) + combiningGraphemeJoiner + phrase[size:]
 }
 
-// obfuscateText replaces or obfuscates all sensitive words in the text.
-func (m *SensitiveWordMatcher) obfuscateText(text string) string {
-	if m == nil || m.regex == nil {
+func (m *SensitiveWordMatcher) collectPatternSpans(text string) []patternMatchSpan {
+	if m == nil || len(m.patternRules) == 0 || text == "" {
+		return nil
+	}
+	var spans []patternMatchSpan
+	spansOverlap := func(aStart, aEnd, bStart, bEnd int) bool {
+		if aStart == aEnd {
+			return bStart <= aStart && aStart <= bEnd
+		}
+		if bStart == bEnd {
+			return aStart <= bStart && bStart <= aEnd
+		}
+		return aStart < bEnd && bStart < aEnd
+	}
+
+	for _, rule := range m.patternRules {
+		if rule.regex == nil {
+			continue
+		}
+		matches := rule.regex.FindAllStringSubmatchIndex(text, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		if len(spans) == 0 {
+			spans = make([]patternMatchSpan, 0, len(matches))
+			for _, submatch := range matches {
+				if len(submatch) < 2 {
+					continue
+				}
+				start, end := submatch[0], submatch[1]
+				repl := string(rule.regex.ExpandString(nil, rule.replacement, text, submatch))
+				if start == end && repl == "" {
+					continue
+				}
+				spans = append(spans, patternMatchSpan{
+					start:       start,
+					end:         end,
+					replacement: repl,
+				})
+			}
+			continue
+		}
+
+		var accepted []patternMatchSpan
+		var subsumed []bool
+		ci := 0
+		for _, submatch := range matches {
+			if len(submatch) < 2 {
+				continue
+			}
+			start, end := submatch[0], submatch[1]
+			repl := string(rule.regex.ExpandString(nil, rule.replacement, text, submatch))
+			if start == end && repl == "" {
+				continue
+			}
+
+			for ci < len(spans) {
+				c := spans[ci]
+				if c.end < start || (c.end == start && c.start < c.end && start < end) {
+					ci++
+					continue
+				}
+				break
+			}
+
+			conflict := false
+			var localSubsumed []int
+			for j := ci; j < len(spans); j++ {
+				if subsumed != nil && subsumed[j] {
+					continue
+				}
+				c := spans[j]
+				if c.start > end || (c.start == end && c.start < c.end && start < end) {
+					break
+				}
+				if !spansOverlap(start, end, c.start, c.end) {
+					continue
+				}
+				if repl == "" && c.replacement == "" && start <= c.start && c.end <= end {
+					localSubsumed = append(localSubsumed, j)
+					continue
+				}
+				conflict = true
+				break
+			}
+			if conflict {
+				continue
+			}
+			if len(localSubsumed) > 0 {
+				if subsumed == nil {
+					subsumed = make([]bool, len(spans))
+				}
+				for _, j := range localSubsumed {
+					subsumed[j] = true
+				}
+			}
+			accepted = append(accepted, patternMatchSpan{
+				start:       start,
+				end:         end,
+				replacement: repl,
+			})
+		}
+
+		if len(accepted) == 0 {
+			continue
+		}
+		merged := make([]patternMatchSpan, 0, len(spans)+len(accepted))
+		si, ai := 0, 0
+		for si < len(spans) && ai < len(accepted) {
+			if subsumed != nil && subsumed[si] {
+				si++
+				continue
+			}
+			if spans[si].start < accepted[ai].start || (spans[si].start == accepted[ai].start && spans[si].end <= accepted[ai].end) {
+				merged = append(merged, spans[si])
+				si++
+			} else {
+				merged = append(merged, accepted[ai])
+				ai++
+			}
+		}
+		for ; si < len(spans); si++ {
+			if subsumed != nil && subsumed[si] {
+				continue
+			}
+			merged = append(merged, spans[si])
+		}
+		for ; ai < len(accepted); ai++ {
+			merged = append(merged, accepted[ai])
+		}
+		spans = merged
+	}
+	return spans
+}
+
+func (m *SensitiveWordMatcher) obfuscateLiterals(text string) string {
+	if m == nil || m.regex == nil || text == "" {
 		return text
 	}
 	if m.replaceFn != nil {
@@ -316,85 +544,203 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 	return m.regex.ReplaceAllStringFunc(text, obfuscateWord)
 }
 
-// Matches reports whether the text contains any configured sensitive word or replacement target.
-func (m *SensitiveWordMatcher) Matches(text string) bool {
-	if m == nil || m.regex == nil {
-		return false
-	}
-	return m.regex.MatchString(text)
-}
-
-// SanitizeDevinText applies configured replacements and Devin line-level
-// sensitive-word filtering in a single non-cascading pass:
-//   - matches handled by sensitive-words-replace emit their literal replacement
-//     verbatim without re-scanning or triggering line deletion;
-//   - lines containing an unreplaced sensitive-words match are dropped.
-func (m *SensitiveWordMatcher) SanitizeDevinText(text string) string {
-	if m == nil || m.regex == nil || text == "" {
+// obfuscateText replaces or obfuscates all sensitive words in the text.
+func (m *SensitiveWordMatcher) obfuscateText(text string) string {
+	if !m.hasRules() || text == "" {
 		return text
 	}
-	indices := m.regex.FindAllStringIndex(text, -1)
-	if len(indices) == 0 {
-		return strings.TrimSpace(text)
+	spans := m.collectPatternSpans(text)
+	if len(spans) == 0 {
+		return m.obfuscateLiterals(text)
 	}
 
-	var keptLines []string
-	var currentLine strings.Builder
-	dropCurrentLine := false
-
-	flushLine := func() {
-		if !dropCurrentLine {
-			keptLines = append(keptLines, currentLine.String())
-		}
-		currentLine.Reset()
-		dropCurrentLine = false
-	}
-
-	appendLiteral := func(seg string) {
-		for {
-			nl := strings.IndexByte(seg, '\n')
-			if nl < 0 {
-				currentLine.WriteString(seg)
-				return
-			}
-			currentLine.WriteString(seg[:nl])
-			flushLine()
-			seg = seg[nl+1:]
-		}
-	}
-
+	var b strings.Builder
+	b.Grow(len(text))
 	last := 0
-	for _, pair := range indices {
-		start, end := pair[0], pair[1]
-		if start > last {
-			appendLiteral(text[last:start])
+	for _, span := range spans {
+		if span.start > last {
+			b.WriteString(m.obfuscateLiterals(text[last:span.start]))
 		}
-		matched := text[start:end]
-		if m.lookupReplacement != nil {
-			if repl, ok := m.lookupReplacement(matched); ok {
-				currentLine.WriteString(repl)
-				last = end
-				continue
-			}
-		}
-		dropCurrentLine = true
-		for {
-			nl := strings.IndexByte(matched, '\n')
-			if nl < 0 {
-				break
-			}
-			flushLine()
-			dropCurrentLine = true
-			matched = matched[nl+1:]
-		}
-		last = end
+		b.WriteString(span.replacement)
+		last = span.end
 	}
 	if last < len(text) {
-		appendLiteral(text[last:])
+		b.WriteString(m.obfuscateLiterals(text[last:]))
 	}
-	flushLine()
+	return b.String()
+}
 
-	return strings.TrimSpace(strings.Join(keptLines, "\n"))
+// Matches reports whether the text contains any configured sensitive word, literal replacement, or pattern rule match.
+func (m *SensitiveWordMatcher) Matches(text string) bool {
+	if !m.hasRules() {
+		return false
+	}
+	if m.regex != nil && m.regex.MatchString(text) {
+		return true
+	}
+	for _, rule := range m.patternRules {
+		if rule.regex != nil && rule.regex.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+// SanitizeDevinText applies configured pattern/literal replacements and Devin
+// line-level sensitive-word filtering in a single non-cascading pass:
+//   - matches handled by sensitive-patterns-replace or sensitive-words-replace emit
+//     their replacement verbatim without re-scanning or triggering line deletion;
+//   - original lines containing an unreplaced sensitive-words match are dropped.
+func (m *SensitiveWordMatcher) SanitizeDevinText(text string) string {
+	if !m.hasRules() || text == "" {
+		return text
+	}
+
+	type devinOpKind uint8
+	const (
+		opLiteralText devinOpKind = iota
+		opReplacement
+		opSensitiveWord
+	)
+	type devinOp struct {
+		start int
+		end   int
+		kind  devinOpKind
+		repl  string
+	}
+
+	var ops []devinOp
+	appendLiteralGapOps := func(gapStart, gapEnd int) {
+		if gapStart >= gapEnd {
+			return
+		}
+		if m.regex == nil {
+			ops = append(ops, devinOp{start: gapStart, end: gapEnd, kind: opLiteralText})
+			return
+		}
+		seg := text[gapStart:gapEnd]
+		indices := m.regex.FindAllStringIndex(seg, -1)
+		if len(indices) == 0 {
+			ops = append(ops, devinOp{start: gapStart, end: gapEnd, kind: opLiteralText})
+			return
+		}
+		last := 0
+		for _, pair := range indices {
+			s, e := pair[0], pair[1]
+			if s > last {
+				ops = append(ops, devinOp{start: gapStart + last, end: gapStart + s, kind: opLiteralText})
+			}
+			matched := seg[s:e]
+			if m.lookupReplacement != nil {
+				if repl, ok := m.lookupReplacement(matched); ok {
+					ops = append(ops, devinOp{start: gapStart + s, end: gapStart + e, kind: opReplacement, repl: repl})
+					last = e
+					continue
+				}
+			}
+			ops = append(ops, devinOp{start: gapStart + s, end: gapStart + e, kind: opSensitiveWord})
+			last = e
+		}
+		if last < len(seg) {
+			ops = append(ops, devinOp{start: gapStart + last, end: gapEnd, kind: opLiteralText})
+		}
+	}
+
+	spans := m.collectPatternSpans(text)
+	last := 0
+	for _, span := range spans {
+		if span.start > last {
+			appendLiteralGapOps(last, span.start)
+		}
+		ops = append(ops, devinOp{
+			start: span.start,
+			end:   span.end,
+			kind:  opReplacement,
+			repl:  span.replacement,
+		})
+		last = span.end
+	}
+	if last < len(text) {
+		appendLiteralGapOps(last, len(text))
+	}
+
+	// Build original line boundaries so replacement text never synthesizes fake
+	// newlines and line-drop state stays strictly anchored to original lines.
+	lineStarts := []int{0}
+	for i := 0; i < len(text); i++ {
+		if text[i] == '\n' {
+			lineStarts = append(lineStarts, i+1)
+		}
+	}
+	lineOf := func(pos int) int {
+		if pos <= 0 {
+			return 0
+		}
+		// Find largest line index whose start <= pos.
+		idx := sort.Search(len(lineStarts), func(i int) bool {
+			return lineStarts[i] > pos
+		})
+		return idx - 1
+	}
+
+	droppedLine := make([]bool, len(lineStarts))
+	for _, op := range ops {
+		if op.kind != opSensitiveWord || op.end <= op.start {
+			continue
+		}
+		firstLine := lineOf(op.start)
+		lastLine := lineOf(op.end - 1)
+		for l := firstLine; l <= lastLine; l++ {
+			droppedLine[l] = true
+		}
+	}
+
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, op := range ops {
+		switch op.kind {
+		case opSensitiveWord:
+			continue
+		case opReplacement:
+			if op.repl == "" {
+				continue
+			}
+			firstLine := lineOf(op.start)
+			lastLine := firstLine
+			if op.end > op.start {
+				lastLine = lineOf(op.end - 1)
+			}
+			dropped := false
+			for l := firstLine; l <= lastLine; l++ {
+				if droppedLine[l] {
+					dropped = true
+					break
+				}
+			}
+			if !dropped {
+				b.WriteString(op.repl)
+			}
+		case opLiteralText:
+			seg := text[op.start:op.end]
+			curLine := lineOf(op.start)
+			for len(seg) > 0 {
+				nl := strings.IndexByte(seg, '\n')
+				if nl < 0 {
+					if !droppedLine[curLine] {
+						b.WriteString(seg)
+					}
+					break
+				}
+				if !droppedLine[curLine] {
+					b.WriteString(seg[:nl+1])
+				}
+				seg = seg[nl+1:]
+				curLine++
+			}
+		}
+	}
+
+	return strings.TrimSpace(b.String())
 }
 
 // ObfuscateText replaces or obfuscates all sensitive words in the text.
@@ -405,7 +751,7 @@ func (m *SensitiveWordMatcher) ObfuscateText(text string) string {
 // ObfuscateSensitiveWords processes the payload and obfuscates sensitive words
 // in system blocks and message content.
 func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
-	if matcher == nil || matcher.regex == nil || len(payload) == 0 {
+	if !matcher.hasRules() || len(payload) == 0 {
 		return payload
 	}
 	doc := ojson.NewDoc(payload)
@@ -418,7 +764,7 @@ func ObfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []by
 // ObfuscateSensitiveWordsDoc processes doc in place and obfuscates sensitive words
 // in system blocks and message content.
 func ObfuscateSensitiveWordsDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) bool {
-	if matcher == nil || matcher.regex == nil || doc == nil || doc.Len() == 0 {
+	if !matcher.hasRules() || doc == nil || doc.Len() == 0 {
 		return false
 	}
 	modified := obfuscateSystemBlocksDoc(doc, matcher)
@@ -430,7 +776,7 @@ func ObfuscateSensitiveWordsDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) b
 
 // ObfuscateSensitiveWordsInSystemInstruction obfuscates sensitive words in an Antigravity system instruction.
 func ObfuscateSensitiveWordsInSystemInstruction(payload []byte, matcher *SensitiveWordMatcher) []byte {
-	if matcher == nil || matcher.regex == nil || len(payload) == 0 {
+	if !matcher.hasRules() || len(payload) == 0 {
 		return payload
 	}
 	doc := ojson.NewDoc(payload)
@@ -442,7 +788,7 @@ func ObfuscateSensitiveWordsInSystemInstruction(payload []byte, matcher *Sensiti
 
 // ObfuscateSensitiveWordsInSystemInstructionDoc obfuscates sensitive words in an Antigravity system instruction in place on doc.
 func ObfuscateSensitiveWordsInSystemInstructionDoc(doc *ojson.Doc, matcher *SensitiveWordMatcher) bool {
-	if matcher == nil || matcher.regex == nil || doc == nil || doc.Len() == 0 {
+	if !matcher.hasRules() || doc == nil || doc.Len() == 0 {
 		return false
 	}
 

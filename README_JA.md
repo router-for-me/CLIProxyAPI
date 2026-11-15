@@ -92,10 +92,6 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 <td>PatewayAI は、経験豊富な AI 開発者向けの API リレーサービスプロバイダーで、Claude および Codex シリーズのモデルを完全にサポートしています。すべてのモデルは高品質な公式チャネルから提供され、希釈や偽装は一切なく、課金明細も透明で確認可能です。エコノミーモードは公式価格のわずか5%から利用できます。<a href="https://pateway.ai/?ch=jjvdb">こちらのリンク</a>から登録するとトライアルクレジットを受け取れるほか、不定期のキャンペーンで無料クレジットを獲得できます。また、エンタープライズ級の同時接続、専用管理ダッシュボード、正式な契約書と請求書に対応し、双方に最大150米ドルが付与される紹介特典も提供しています。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi"><img src="./assets/modelflare.png" alt="Modelflare" width="150"></a></td>
-<td>Modelflare による本プロジェクトへのご支援に感謝します！Modelflare：フルスペックで安定、水増しなし。世界の SOTA モデルを低コストで利用できます。米国法人 Havenbyte LLC が運営し、GPT、Claude、Gemini、Grok などの主要モデルと一般的な互換プロトコルに対応しているほか、40 種類以上の画像・動画モデルもサポートしています。キャッシュ補償が大きな特長です：一部の OpenAI 価格優先・安定・プレミアムグループでは、1 日あたり 65%、75%、85% のキャッシュヒット率を保証し、対象リクエストが目標に達しなかった場合は差額を補償します。精算後に使用量ダッシュボードで確認できます。特別キャンペーン：1 回 US&#36;20 のチャージで価格倍率 0.015 倍の GPT 特別グループが、1 回 US&#36;50 のチャージで価格倍率 0.03 倍の Claude 特別グループが解放されます。<a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi">専用リンク</a>から登録してご参加ください。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://kedaya.ai/register?aff=824X8RAHCYXM"><img src="./assets/kedaya.jpg" alt="kedaya.ai" width="150"></a></td>
 <td>kedaya.ai は、安定性と効率性に優れた AI モデル API 中継サービスプロバイダーです。Claude、GPT、Gemini、Grok、Antigravity、DeepSeek などの主要モデルをカバーし、OpenAI（Responses を含む）、Anthropic、Gemini のネイティブプロトコルに対応しているため、CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI などのクライアントにシームレスに接続できます。OpenAI および Grok モデルの価格は、最安で公式価格の 0.1% から！専用リンク：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
 </tr>
@@ -166,7 +162,7 @@ CLIProxyAPI 向けのセルフホスト型管理コンソールと可観測性�
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
-Ant Design を採用した CLIProxyAPI v8+ 向けのモダンな管理コンソール。CPAMC に相当する主要な管理機能と、SQLite に永続化するリクエスト記録・使用量分析を統合し、OAuth アカウント、API プロバイダー、クライアントキー、クォータ、料金設定、CPA 運用を一つの画面で管理できます。リクエストごとのレイテンシ、最初のトークンまでの時間（TTFT）、トークン数、コストを追跡し、多条件フィルター、リアルタイムダッシュボード、トークンヒートマップを提供します。OpenRouter の価格同期、カスタム料金、リクエストごとの価格スナップショットで過去のコストを保持し、組み込み Agent と MCP ツールで分析と日常管理を支援します。
+CLIProxyAPI v8+ 向けの Web コンソールです。`shadcn/ui` を基盤に、モダンな UI/UX と滑らかなモーション、デスクトップ・モバイル両対応のレイアウトを備えています。プロバイダー、OAuth、ルーティング、組み込みプラグインを一元管理し、充実したリクエスト記録（レイテンシ、TTFT、トークン、障害診断、モデル置換検知）、リアルタイムルーティング、多次元の料金統計、クォータウィンドウのウォームアップと予測、Agent/MCP を提供。AES-GCM 暗号化と設定自動バックアップを備え、バイナリ直接実行、Docker デプロイ、OMC/CPA のワンクリック更新に対応しています。
 
 ## SDKドキュメント
 

@@ -56,6 +56,14 @@ type ExecutionSessionSharer interface {
 	SharesExecutionSessionsWith(other ProviderExecutor) bool
 }
 
+// ExecutorUnwrapper exposes the underlying executor for wrappers so reuse and
+// session-lifecycle decisions can consult the service-owned executor even when
+// a wrapper hides its concrete type. Wrappers should return their immediate
+// inner executor; the manager follows the chain.
+type ExecutorUnwrapper interface {
+	Unwrap() ProviderExecutor
+}
+
 // AuthExecutionSessionCloser allows executors to release execution sessions
 // associated with a removed credential without tearing down other credentials' sessions.
 type AuthExecutionSessionCloser interface {
@@ -91,6 +99,10 @@ type Result struct {
 	SkipQuotaObservation bool
 	// AccessToken captures the active access token under which the request was executed.
 	AccessToken string
+	// RefreshToken captures the refresh credential associated with the request,
+	// used to distinguish a same-account OAuth token rotation from a genuine
+	// credential replacement when evaluating result staleness.
+	RefreshToken string
 	// CredentialVersion captures the credential version under which the request was executed.
 	CredentialVersion uint64
 	// RegistrationEpoch captures the registration epoch under which the request was executed.
@@ -177,6 +189,7 @@ type Manager struct {
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor
+	executorRevisions         map[string]uint64
 	selector                  Selector
 	hook                      Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
@@ -263,6 +276,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		store:                 store,
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
+		executorRevisions:     make(map[string]uint64),
 		selector:              selector,
 		hook:                  hook,
 		auths:                 make(map[string]*Auth),

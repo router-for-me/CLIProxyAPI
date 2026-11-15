@@ -128,6 +128,14 @@ func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) (
 	return h.inner.ParseAuths(ctx, req)
 }
 
+// ParseAuthsWithDefaultAuthDir parses plugin auth records using defaultAuthDir when AuthData.ID is empty.
+func (h *Host) ParseAuthsWithDefaultAuthDir(ctx context.Context, req pluginapi.AuthParseRequest, defaultAuthDir string) ([]*coreauth.Auth, bool, error) {
+	if h == nil || h.inner == nil {
+		return nil, false, nil
+	}
+	return h.inner.ParseAuthsWithDefaultAuthDir(ctx, req, defaultAuthDir)
+}
+
 // ModelsForAuth lets plugin model providers discover auth-bound models.
 func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModelResult {
 	if h == nil || h.inner == nil {

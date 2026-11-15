@@ -112,6 +112,10 @@ func authIDForPath(path, authDir string) string {
 			}
 			if rel, errRel := filepath.Rel(cleanDir, cleanPath); isRelativeWithinAuthDir(rel, errRel) {
 				id = rel
+			} else if evalDir, evalPath := evalAuthPathSymlinks(cleanDir), evalAuthPathSymlinks(cleanPath); evalDir != "" && evalPath != "" {
+				if relEval, errRelEval := filepath.Rel(evalDir, evalPath); isRelativeWithinAuthDir(relEval, errRelEval) {
+					id = relEval
+				}
 			}
 		}
 	}
@@ -120,6 +124,20 @@ func authIDForPath(path, authDir string) string {
 		id = strings.ToLower(id)
 	}
 	return id
+}
+
+func evalAuthPathSymlinks(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if real, errEval := filepath.EvalSymlinks(path); errEval == nil && strings.TrimSpace(real) != "" {
+		return filepath.Clean(real)
+	}
+	if parent, errParent := filepath.EvalSymlinks(filepath.Dir(path)); errParent == nil && strings.TrimSpace(parent) != "" {
+		return filepath.Clean(filepath.Join(parent, filepath.Base(path)))
+	}
+	return filepath.Clean(path)
 }
 
 func isRelativeWithinAuthDir(rel string, errRel error) bool {
@@ -528,6 +546,28 @@ func extractRawJSONOAuthProviderHint(raw []byte) string {
 	return ""
 }
 
+type parseDefaultAuthDirContextKey struct{}
+
+// ParseAuthsWithDefaultAuthDir parses plugin auth records while using defaultAuthDir
+// as the fallback base directory when a plugin omits AuthData.ID, without altering req.Host.
+func (h *Host) ParseAuthsWithDefaultAuthDir(ctx context.Context, req pluginapi.AuthParseRequest, defaultAuthDir string) ([]*coreauth.Auth, bool, error) {
+	if trimmed := strings.TrimSpace(defaultAuthDir); trimmed != "" {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx = context.WithValue(ctx, parseDefaultAuthDirContextKey{}, trimmed)
+	}
+	return h.ParseAuths(ctx, req)
+}
+
+func parseDefaultAuthDirFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(parseDefaultAuthDirContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
 func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
 	if h == nil {
 		return nil, false, nil
@@ -613,9 +653,11 @@ func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabili
 		}
 	}()
 	portalIdentifier := h.resolveParsePortalIdentifier(record.id, provider, req.Provider, req.RawJSON, primaryIdentifier)
+	explicitReqAuthDir := strings.TrimSpace(req.Host.AuthDir)
 	if req.Host.AuthDir == "" {
 		req.Host = h.hostConfigSummary()
 	}
+	fallbackAuthDir := firstNonEmpty(explicitReqAuthDir, parseDefaultAuthDirFromContext(ctx), req.Host.AuthDir, h.hostConfigSummary().AuthDir)
 	req.Provider = normalizeProviderID(req.Provider)
 	if req.Provider == "" {
 		req.Provider = portalIdentifier
@@ -646,7 +688,7 @@ func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabili
 		if explicitHint != "" || multiEntry || normalizeProviderID(data.Provider) != effectivePortal {
 			stampAuthDataOAuthProvider(&data, effectivePortal)
 		}
-		parsed := h.AuthDataToCoreAuth(data, req.Path, req.FileName)
+		parsed := pluginAuthDataToCoreAuth(data, req.Path, req.FileName, fallbackAuthDir)
 		if parsed == nil {
 			return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
 		}
@@ -720,7 +762,24 @@ func pluginAuthParseResponseAuths(resp pluginapi.AuthParseResponse) []pluginapi.
 	if len(resp.Auths) > 0 {
 		return append([]pluginapi.AuthData(nil), resp.Auths...)
 	}
+	if !hasPluginAuthData(resp.Auth) {
+		return nil
+	}
 	return []pluginapi.AuthData{resp.Auth}
+}
+
+func hasPluginAuthData(data pluginapi.AuthData) bool {
+	return strings.TrimSpace(data.Provider) != "" ||
+		strings.TrimSpace(data.ID) != "" ||
+		strings.TrimSpace(data.FileName) != "" ||
+		strings.TrimSpace(data.Label) != "" ||
+		strings.TrimSpace(data.Prefix) != "" ||
+		strings.TrimSpace(data.ProxyURL) != "" ||
+		data.Disabled ||
+		len(bytes.TrimSpace(data.StorageJSON)) > 0 ||
+		len(data.Metadata) > 0 ||
+		len(data.Attributes) > 0 ||
+		!data.NextRefreshAfter.IsZero()
 }
 
 type oauthProxyURLContextKey struct{}

@@ -97,10 +97,6 @@ PackyCode provides special discounts for our software users: register using <a h
 <td>PatewayAI is an API relay service provider for experienced AI developers, with full support for the Claude and Codex model families. All models come from high-quality official channels, with no dilution or counterfeiting, and transparent, verifiable billing details. Economy mode starts at just 5% of the official price. Register through <a href="https://pateway.ai/?ch=jjvdb">this link</a> to receive trial credits and participate in occasional promotions for free credits. The platform also supports enterprise-grade concurrency, a dedicated management dashboard, formal contracts and invoices, and two-way referral rewards of up to &#36;150.</td>
 </tr>
 <tr>
-<td width="180"><a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi"><img src="./assets/modelflare.png" alt="Modelflare" width="150"></a></td>
-<td>Thanks to Modelflare for sponsoring this project! Modelflare: Full strength, stable, nothing watered down. Global SOTA models at a lower cost. Operated by US-based Havenbyte LLC, Modelflare supports GPT, Claude, Gemini, Grok, and other leading models through common compatible protocols, plus 40+ image and video models. Cache compensation is a highlight: selected OpenAI groups (price-first, stable, and premium) guarantee daily cache hit rates of 65%, 75%, or 85%, and if eligible requests fall short, Modelflare refunds the difference, visible on the usage dashboard after settlement. Special offers: a single top-up of US&#36;20 unlocks the GPT discount group at a 0.015x price multiplier, and a single top-up of US&#36;50 unlocks the Claude discount group at a 0.03x multiplier. Register via <a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi">this exclusive link</a> to get started.</td>
-</tr>
-<tr>
 <td width="180"><a href="https://kedaya.ai/register?aff=824X8RAHCYXM"><img src="./assets/kedaya.jpg" alt="kedaya.ai" width="150"></a></td>
 <td>kedaya.ai is a stable and efficient AI model API relay service provider, covering leading models including Claude, GPT, Gemini, Grok, Antigravity, and DeepSeek. It supports native OpenAI (including Responses), Anthropic, and Gemini protocols, enabling seamless integration with clients such as CLIProxyAPI, Claude Code, Codex, Gemini CLI, and Grok CLI. OpenAI and Grok model prices can be as low as 0.1% of official rates! <a href="https://kedaya.ai/register?aff=824X8RAHCYXM">Exclusive registration link</a>.</td>
 </tr>
@@ -177,7 +173,7 @@ A self-hosted CLIProxyAPI management console and observability dashboard, availa
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
-Modern Ant Design-based management console for CLIProxyAPI v8+, combining CPAMC-style administration with SQLite-backed request records and usage analytics. Covers OAuth accounts, API providers, client keys, quotas, pricing and CPA operations in one interface. Tracks request-level latency, TTFT, tokens and cost, with multi-dimensional filtering, live dashboards and token heatmaps. OpenRouter price sync, custom rates and per-request price snapshots keep historical costs stable; a built-in Agent and MCP tools support assisted investigation and management.
+Web console for CLIProxyAPI v8+, built on `shadcn/ui` with a modern UI/UX, fluid motion, and desktop and mobile layouts. Centralizes providers, OAuth, visual routing, and built-in plugins, with comprehensive request records (latency, TTFT, tokens, diagnostics, and model substitutions), live routing, multi-dimensional pricing analytics, quota window warmup and forecasting, and Agent/MCP tools. Protected by AES-GCM encryption and automatic config backups, supporting direct binary runs, Docker deployment, and one-click OMC/CPA updates.
 
 ## SDK Docs
 

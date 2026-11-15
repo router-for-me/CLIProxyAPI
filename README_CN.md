@@ -92,10 +92,6 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td>PatewayAI 是一家面向资深 AI 开发者的 API 中继服务商，完整支持 Claude 与 Codex 系列模型。所有模型均来自官方高质量渠道，绝无稀释、绝无伪造，计费明细透明可查。经济模式低至 0.5 折，通过<a href="https://pateway.ai/?ch=jjvdb">此链接</a>注册即可获得试用额度，还可参与不定时营销活动领取免费额度。平台同时支持企业级并发、专属管理后台、正式合同与发票，并提供最高 150 美元的双向推荐奖励。</td>
 </tr>
 <tr>
-<td width="180"><a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi"><img src="./assets/modelflare.png" alt="Modelflare" width="150"></a></td>
-<td>感谢 Modelflare 赞助本项目！Modelflare：满血稳定不掺水，低成本享受全球 SOTA 模型。站点由美国 LLC 主体 Havenbyte LLC 运营，支持 GPT、Claude、Gemini、Grok 等主流模型和常用兼容协议，还支持 40 多种图片和视频模型。缓存补偿是一大亮点：部分 OpenAI 价格优先、稳定和高级分组提供每日 65%、75%、85% 的缓存命中率保障，符合条件的请求没达到目标的，平台补偿差额，结算后可在用量看板查看。特惠活动：单笔充值 US&#36;20 即可解锁 0.015 倍价格倍率的 GPT 特惠分组，单笔充值 US&#36;50 即可解锁 0.03 倍价格倍率的 Claude 特惠分组。通过<a href="https://modelflare.dev/sign-up?utm_source=github&utm_campaign=cliproxyapi">专属链接</a>注册即可参与。</td>
-</tr>
-<tr>
 <td width="180"><a href="https://kedaya.ai/register?aff=824X8RAHCYXM"><img src="./assets/kedaya.jpg" alt="kedaya.ai" width="150"></a></td>
 <td>kedaya.ai 是一家稳定高效的 AI 模型 API 中转服务商，覆盖 Claude、GPT、Gemini、Grok、Antigravity、DeepSeek 等主流模型，兼容 OpenAI（含 Responses）、Anthropic、Gemini 原生协议，可无缝接入 CLIProxyAPI、Claude Code、Codex、Gemini CLI、Grok CLI 等客户端。OpenAI及Grok模型价格最低可达官方0.01折！专属入口：<a href="https://kedaya.ai/register?aff=824X8RAHCYXM">https://kedaya.ai/register?aff=824X8RAHCYXM</a></td>
 </tr>
@@ -171,7 +167,7 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
-基于 Ant Design 的现代 CLIProxyAPI v8+ 管理面板，将 CPAMC 核心管理能力与 SQLite 持久化请求记录、用量分析整合在一起。覆盖 OAuth 账号、API 提供商、客户端密钥、配额、定价与 CPA 运维；逐请求追踪延迟、首 Token 延迟（TTFT）、Token 用量和成本，支持多维筛选、实时仪表盘与 Token 热力图。支持 OpenRouter 价格同步、自定义定价和逐请求价格快照，保持历史成本稳定；内置 Agent 与 MCP 工具，辅助用量分析和日常管理。
+面向 CLIProxyAPI v8+ 的 Web 控制台，基于 `shadcn/ui` 构建，拥有现代化的 UI/UX、细腻的动效以及桌面与移动端适配。集中管理提供商、OAuth、路由与内置插件，提供完善的请求记录（延迟、TTFT、Token、故障诊断与模型替换）、实时路由、多维度的定价统计、额度窗口预热与预测及 Agent/MCP 工具。采用 AES-GCM 加密与配置自动备份，支持直接二进制运行、Docker 部署及一键更新 OMC/CPA。
 
 ## SDK 文档
 

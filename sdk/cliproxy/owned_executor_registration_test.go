@@ -116,3 +116,43 @@ func TestOwnedProviderExecutorRestoresNonComparableExistingValue(t *testing.T) {
 		})
 	}
 }
+
+func TestOwnedProviderExecutorCoexistsWithBuiltinWrapper(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	owner := &ownedTestExecutor{provider: ownedTestProvider}
+	wrappedOwner, wrappedClaude := 0, 0
+	service, errBuild := ownedTestBuilder(t, manager).
+		WithOwnedProviderExecutor(ownedTestProvider, owner).
+		WithExecutorWrapper(func(provider string, executor coreauth.ProviderExecutor) coreauth.ProviderExecutor {
+			if provider == ownedTestProvider {
+				wrappedOwner++
+			}
+			if provider == "claude" {
+				wrappedClaude++
+			}
+			return &issue7568Wrapper{inner: executor}
+		}).Build()
+	if errBuild != nil {
+		t.Fatal("owned and wrapped executor fixture build failed")
+	}
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	ownerRevision := manager.ExecutorRevision(ownedTestProvider)
+	for range 2 {
+		service.registerExecutorForAuth(&coreauth.Auth{ID: "owned-fixture-auth", Provider: ownedTestProvider}, true)
+		service.registerExecutorForAuth(&coreauth.Auth{ID: "wrapped-claude", Provider: "claude"}, true)
+		if got, ok := manager.Executor(ownedTestProvider); !ok || got != owner || manager.ExecutorRevision(ownedTestProvider) != ownerRevision {
+			t.Fatal("builtin wrapper changed or republished custom owner")
+		}
+		if got, _ := manager.Executor("claude"); got == nil {
+			t.Fatal("builtin wrapper lost native registration")
+		} else if _, ok := got.(*issue7568Wrapper); !ok {
+			t.Fatal("custom ownership bypassed builtin wrapper")
+		}
+	}
+	if wrappedOwner != 0 || wrappedClaude != 2 {
+		t.Fatal("owned and builtin wrapper boundaries changed")
+	}
+	if _, _, closes, _ := owner.counts(); closes != 0 {
+		t.Fatal("builtin rebinding retired custom owner sessions")
+	}
+}

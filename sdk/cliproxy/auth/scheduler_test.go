@@ -3642,3 +3642,345 @@ func (e *callbackSchedulerTestExecutor) Refresh(ctx context.Context, auth *Auth)
 	}
 	return auth, nil
 }
+
+func TestManagerPluginSchedulerExcludeCandidatesUnhandledPromotesLowerTier(t *testing.T) {
+	t.Run("mixed route promotes lower priority tier with round-robin", func(t *testing.T) {
+		manager := NewManager(nil, &RoundRobinSelector{}, nil)
+		manager.executors["antigravity"] = schedulerTestExecutor{}
+		manager.executors["claude"] = schedulerTestExecutor{}
+
+		for _, candidate := range []*Auth{
+			{ID: "ag-1", Provider: "antigravity", Attributes: map[string]string{"priority": "100"}},
+			{ID: "ag-2", Provider: "antigravity", Attributes: map[string]string{"priority": "100"}},
+			{ID: "claude-a", Provider: "claude", Attributes: map[string]string{"priority": "50"}},
+			{ID: "claude-b", Provider: "claude", Attributes: map[string]string{"priority": "50"}},
+		} {
+			if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+			}
+		}
+
+		manager.SetPluginScheduler(&fakePluginScheduler{
+			acrossPriorities: true,
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:           false,
+				ExcludeCandidates: []string{"ag-1", "ag-2"},
+			},
+			handled: false,
+		})
+
+		tried := map[string]struct{}{"unrelated": {}}
+		got1, _, provider1, err1 := manager.pickNextMixed(context.Background(), []string{"antigravity", "claude"}, "", cliproxyexecutor.Options{}, tried)
+		if err1 != nil {
+			t.Fatalf("pickNextMixed() #1 error = %v", err1)
+		}
+		if got1 == nil || provider1 != "claude" || got1.ID != "claude-a" {
+			t.Fatalf("pickNextMixed() #1 = (%v, %q), want (claude-a, claude)", got1, provider1)
+		}
+		if len(tried) != 1 {
+			t.Fatalf("caller tried map mutated: %v", tried)
+		}
+
+		got2, _, provider2, err2 := manager.pickNextMixed(context.Background(), []string{"antigravity", "claude"}, "", cliproxyexecutor.Options{}, tried)
+		if err2 != nil {
+			t.Fatalf("pickNextMixed() #2 error = %v", err2)
+		}
+		if got2 == nil || provider2 != "claude" || got2.ID != "claude-b" {
+			t.Fatalf("pickNextMixed() #2 = (%v, %q), want (claude-b, claude)", got2, provider2)
+		}
+	})
+
+	t.Run("single provider promotes lower priority tier", func(t *testing.T) {
+		manager := NewManager(nil, &FillFirstSelector{}, nil)
+		manager.executors["antigravity"] = schedulerTestExecutor{}
+
+		for _, candidate := range []*Auth{
+			{ID: "ag-high", Provider: "antigravity", Attributes: map[string]string{"priority": "100"}},
+			{ID: "ag-low", Provider: "antigravity", Attributes: map[string]string{"priority": "50"}},
+		} {
+			if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+				t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+			}
+		}
+
+		manager.SetPluginScheduler(&fakePluginScheduler{
+			acrossPriorities: true,
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:           false,
+				ExcludeCandidates: []string{"ag-high"},
+			},
+			handled: false,
+		})
+
+		got, _, errPick := manager.pickNext(context.Background(), "antigravity", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickNext() error = %v", errPick)
+		}
+		if got == nil || got.ID != "ag-low" {
+			t.Fatalf("pickNext() = %v, want ag-low", got)
+		}
+	})
+}
+
+func TestManagerPluginSchedulerExcludeCandidatesDelegateBuiltinPromotesLowerTier(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		delegate string
+	}{
+		{name: "round-robin", delegate: pluginapi.SchedulerBuiltinRoundRobin},
+		{name: "fill-first", delegate: pluginapi.SchedulerBuiltinFillFirst},
+	} {
+		t.Run(tc.name+"/mixed", func(t *testing.T) {
+			manager := NewManager(nil, &FillFirstSelector{}, nil)
+			manager.executors["antigravity"] = schedulerTestExecutor{}
+			manager.executors["claude"] = schedulerTestExecutor{}
+
+			for _, candidate := range []*Auth{
+				{ID: "ag-1", Provider: "antigravity", Attributes: map[string]string{"priority": "100"}},
+				{ID: "claude-a", Provider: "claude", Attributes: map[string]string{"priority": "50"}},
+			} {
+				if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+					t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+				}
+			}
+
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				acrossPriorities: true,
+				resp: pluginapi.SchedulerPickResponse{
+					Handled:           true,
+					DelegateBuiltin:   tc.delegate,
+					ExcludeCandidates: []string{"ag-1"},
+				},
+				handled: true,
+			})
+
+			tried := map[string]struct{}{}
+			got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"antigravity", "claude"}, "", cliproxyexecutor.Options{}, tried)
+			if errPick != nil {
+				t.Fatalf("pickNextMixed() error = %v", errPick)
+			}
+			if got == nil || provider != "claude" || got.ID != "claude-a" {
+				t.Fatalf("pickNextMixed() = (%v, %q), want (claude-a, claude)", got, provider)
+			}
+			if len(tried) != 0 {
+				t.Fatalf("caller tried map mutated: %v", tried)
+			}
+		})
+
+		t.Run(tc.name+"/single", func(t *testing.T) {
+			manager := NewManager(nil, &FillFirstSelector{}, nil)
+			manager.executors["antigravity"] = schedulerTestExecutor{}
+
+			for _, candidate := range []*Auth{
+				{ID: "ag-high", Provider: "antigravity", Attributes: map[string]string{"priority": "100"}},
+				{ID: "ag-low", Provider: "antigravity", Attributes: map[string]string{"priority": "50"}},
+			} {
+				if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+					t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+				}
+			}
+
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				acrossPriorities: true,
+				resp: pluginapi.SchedulerPickResponse{
+					Handled:           true,
+					DelegateBuiltin:   tc.delegate,
+					ExcludeCandidates: []string{"ag-high"},
+				},
+				handled: true,
+			})
+
+			got, _, errPick := manager.pickNext(context.Background(), "antigravity", "", cliproxyexecutor.Options{}, nil)
+			if errPick != nil {
+				t.Fatalf("pickNext() error = %v", errPick)
+			}
+			if got == nil || got.ID != "ag-low" {
+				t.Fatalf("pickNext() = %v, want ag-low", got)
+			}
+		})
+	}
+}
+
+func TestManagerPluginSchedulerExcludeCandidatesAllExcludedFailsCleanly(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resp    pluginapi.SchedulerPickResponse
+		handled bool
+	}{
+		{
+			name: "unhandled",
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:           false,
+				ExcludeCandidates: []string{"ag-1", "ag-2"},
+			},
+			handled: false,
+		},
+		{
+			name: "delegate_round_robin",
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:           true,
+				DelegateBuiltin:   pluginapi.SchedulerBuiltinRoundRobin,
+				ExcludeCandidates: []string{"ag-1", "ag-2"},
+			},
+			handled: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.executors["antigravity"] = schedulerTestExecutor{}
+			for _, id := range []string{"ag-1", "ag-2"} {
+				if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "antigravity"}); errRegister != nil {
+					t.Fatalf("Register(%s) error = %v", id, errRegister)
+				}
+			}
+
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				acrossPriorities: true,
+				resp:             tc.resp,
+				handled:          tc.handled,
+			})
+
+			gotSingle, _, errSingle := manager.pickNext(context.Background(), "antigravity", "", cliproxyexecutor.Options{}, nil)
+			if gotSingle != nil || !isAuthNotFoundError(errSingle) {
+				t.Fatalf("pickNext() = (%v, %v), want (nil, auth_not_found)", gotSingle, errSingle)
+			}
+
+			gotMixed, _, _, errMixed := manager.pickNextMixed(context.Background(), []string{"antigravity"}, "", cliproxyexecutor.Options{}, nil)
+			if gotMixed != nil || !isAuthNotFoundError(errMixed) {
+				t.Fatalf("pickNextMixed() = (%v, %v), want (nil, auth_not_found)", gotMixed, errMixed)
+			}
+		})
+	}
+}
+
+func TestManagerPluginSchedulerExcludeCandidatesRemainingInCooldownReturnsCooldownError(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		resp    pluginapi.SchedulerPickResponse
+		handled bool
+	}{
+		{
+			name: "unhandled",
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:           false,
+				ExcludeCandidates: []string{"ag-1"},
+			},
+			handled: false,
+		},
+		{
+			name: "delegate_round_robin",
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:           true,
+				DelegateBuiltin:   pluginapi.SchedulerBuiltinRoundRobin,
+				ExcludeCandidates: []string{"ag-1"},
+			},
+			handled: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient("ag-1", "antigravity", []*registry.ModelInfo{{ID: "shared-model"}})
+			reg.RegisterClient("claude-a", "claude", []*registry.ModelInfo{{ID: "shared-model"}})
+			t.Cleanup(func() {
+				reg.UnregisterClient("ag-1")
+				reg.UnregisterClient("claude-a")
+			})
+
+			manager := NewManager(nil, &RoundRobinSelector{}, nil)
+			manager.executors["antigravity"] = schedulerTestExecutor{}
+			manager.executors["claude"] = schedulerTestExecutor{}
+
+			ag := &Auth{
+				ID:         "ag-1",
+				Provider:   "antigravity",
+				Attributes: map[string]string{"priority": "100"},
+			}
+			claudeCooldown := &Auth{
+				ID:         "claude-a",
+				Provider:   "claude",
+				Attributes: map[string]string{"priority": "50"},
+				ModelStates: map[string]*ModelState{
+					"shared-model": {
+						Unavailable:    true,
+						NextRetryAfter: time.Now().Add(time.Minute),
+						Quota: QuotaState{
+							Exceeded:      true,
+							NextRecoverAt: time.Now().Add(time.Minute),
+						},
+					},
+				},
+			}
+			if _, errRegister := manager.Register(context.Background(), ag); errRegister != nil {
+				t.Fatalf("Register(ag-1) error = %v", errRegister)
+			}
+			if _, errRegister := manager.Register(context.Background(), claudeCooldown); errRegister != nil {
+				t.Fatalf("Register(claude-a) error = %v", errRegister)
+			}
+
+			manager.SetPluginScheduler(&fakePluginScheduler{
+				acrossPriorities: true,
+				resp:             tc.resp,
+				handled:          tc.handled,
+			})
+
+			got, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"antigravity", "claude"}, "shared-model", cliproxyexecutor.Options{}, nil)
+			if got != nil {
+				t.Fatalf("pickNextMixed() got = %v, want nil", got.ID)
+			}
+			if errPick == nil {
+				t.Fatal("pickNextMixed() error = nil, want cooldown error")
+			}
+			var cooldownErr *modelCooldownError
+			if !errors.As(errPick, &cooldownErr) {
+				t.Fatalf("pickNextMixed() error = %T (%v), want *modelCooldownError", errPick, errPick)
+			}
+		})
+	}
+}
+
+func TestManagerPluginSchedulerExcludeCandidatesSessionAffinitySkipsExcluded(t *testing.T) {
+	affinity := NewSessionAffinitySelector(&RoundRobinSelector{})
+	t.Cleanup(affinity.Stop)
+
+	manager := NewManager(nil, affinity, nil)
+	manager.executors["antigravity"] = schedulerTestExecutor{}
+	manager.executors["claude"] = schedulerTestExecutor{}
+
+	for _, candidate := range []*Auth{
+		{ID: "ag-1", Provider: "antigravity", Attributes: map[string]string{"priority": "100"}},
+		{ID: "claude-a", Provider: "claude", Attributes: map[string]string{"priority": "50"}},
+	} {
+		if _, errRegister := manager.Register(context.Background(), candidate); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", candidate.ID, errRegister)
+		}
+	}
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{"X-Session-Id": []string{"sess-exclude-test"}},
+	}
+
+	// Bind session affinity to ag-1 without plugin scheduler first.
+	bound, _, boundProvider, errBound := manager.pickNextMixed(context.Background(), []string{"antigravity", "claude"}, "", opts, nil)
+	if errBound != nil || bound == nil || bound.ID != "ag-1" || boundProvider != "antigravity" {
+		t.Fatalf("bound pick = (%v, %q, %v), want (ag-1, antigravity, nil)", bound, boundProvider, errBound)
+	}
+
+	// Enable plugin scheduler that excludes ag-1 and declines handling: must skip ag-1 and pick claude-a.
+	manager.SetPluginScheduler(&fakePluginScheduler{
+		acrossPriorities: true,
+		pick: func(_ context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:           false,
+				ExcludeCandidates: []string{"ag-1"},
+			}, false, nil
+		},
+	})
+
+	second, _, secondProvider, errSecond := manager.pickNextMixed(context.Background(), []string{"antigravity", "claude"}, "", opts, nil)
+	if errSecond != nil {
+		t.Fatalf("second pick error = %v", errSecond)
+	}
+	if second == nil || second.ID != "claude-a" || secondProvider != "claude" {
+		t.Fatalf("second pick = (%v, %q), want (claude-a, claude)", second, secondProvider)
+	}
+}
