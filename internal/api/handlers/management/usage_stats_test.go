@@ -40,6 +40,7 @@ func TestUsageStatsEndpointsReportDisabled(t *testing.T) {
 	h := &Handler{}
 	for name, handler := range map[string]gin.HandlerFunc{
 		"stats": h.GetUsageStats, "speed": h.GetUsageSpeed, "settings": h.GetUsageSettings, "put settings": h.PutUsageSettings,
+		"quota samples": h.GetUsageQuotaSamples,
 	} {
 		rec := serveUsageStats(t, handler, http.MethodGet, "/v8/management/observability/usage/stats", "{}")
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "usage_statistics_disabled") {
@@ -137,6 +138,57 @@ func TestUsageSettingsRoundTripAndValidation(t *testing.T) {
 		if rec := serveUsageStats(t, h.PutUsageSettings, http.MethodPut, "/v8/management/observability/usage/settings", invalid); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d body = %s, want 400", name, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestGetUsageQuotaSamplesReturnsSeriesWithCarryIn(t *testing.T) {
+	store := withUsageStatsStore(t)
+	at := time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC)
+	key := usagestats.QuotaSeriesKey{Provider: "claude", AuthIndex: "auth-1", Account: "me@example.com", Window: "5h"}
+	for _, sample := range []usagestats.QuotaSample{
+		{QuotaSeriesKey: key, QuotaPoint: usagestats.QuotaPoint{TimestampMs: at.Add(-time.Hour).UnixMilli(), UsedPercent: 30, ResetsAtMs: at.Add(time.Hour).UnixMilli()}},
+		{QuotaSeriesKey: key, QuotaPoint: usagestats.QuotaPoint{TimestampMs: at.UnixMilli(), UsedPercent: 31, ResetsAtMs: at.Add(time.Hour).UnixMilli()}},
+	} {
+		if errRecord := store.RecordQuotaSample(context.Background(), sample); errRecord != nil {
+			t.Fatalf("record quota sample: %v", errRecord)
+		}
+	}
+
+	target := "/v8/management/observability/usage/quota-samples?filter.window=5h&from=" + msString(at.Add(-time.Minute)) + "&to=" + msString(at.Add(time.Minute))
+	rec := serveUsageStats(t, (&Handler{}).GetUsageQuotaSamples, http.MethodGet, target, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		From     int64 `json:"from"`
+		BucketMs int64 `json:"bucket_ms"`
+		Series   []struct {
+			Provider  string                  `json:"provider"`
+			AuthIndex string                  `json:"auth_index"`
+			Account   string                  `json:"account"`
+			Window    string                  `json:"window"`
+			CarryIn   *usagestats.QuotaPoint  `json:"carry_in"`
+			Points    []usagestats.QuotaPoint `json:"points"`
+			Thinned   bool                    `json:"thinned"`
+		} `json:"series"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if payload.From != at.Add(-time.Minute).UnixMilli() || payload.BucketMs != 0 || len(payload.Series) != 1 {
+		t.Fatalf("payload = %s", rec.Body.String())
+	}
+	series := payload.Series[0]
+	if series.Provider != "claude" || series.AuthIndex != "auth-1" || series.Account != "me@example.com" || series.Window != "5h" || series.Thinned {
+		t.Fatalf("series = %+v", series)
+	}
+	if series.CarryIn == nil || series.CarryIn.UsedPercent != 30 || len(series.Points) != 1 || series.Points[0].UsedPercent != 31 {
+		t.Fatalf("carry_in = %+v points = %+v", series.CarryIn, series.Points)
+	}
+
+	bad := serveUsageStats(t, (&Handler{}).GetUsageQuotaSamples, http.MethodGet, "/v8/management/observability/usage/quota-samples?filter.model=x", "")
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("unknown filter: status = %d, want 400", bad.Code)
 	}
 }
 

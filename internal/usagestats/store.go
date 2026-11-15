@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	// Pure-Go SQLite driver, registered as "sqlite".
@@ -122,6 +123,17 @@ CREATE TABLE settings (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );`,
+	`CREATE TABLE quota_samples (
+	id           INTEGER PRIMARY KEY,
+	ts_ms        INTEGER NOT NULL,
+	provider     TEXT    NOT NULL,
+	auth_index   TEXT    NOT NULL,
+	account      TEXT    NOT NULL,
+	"window"     TEXT    NOT NULL,
+	used_percent REAL    NOT NULL,
+	resets_at_ms INTEGER NOT NULL
+);
+CREATE INDEX idx_quota_samples_series ON quota_samples (provider, auth_index, "window", ts_ms);`,
 }
 
 const insertSQL = `
@@ -138,6 +150,10 @@ type Store struct {
 	db     *sql.DB
 	insert *sql.Stmt
 	path   string
+
+	quotaMu sync.Mutex
+	// newestQuota caches the newest stored point of each quota series.
+	newestQuota map[QuotaSeriesKey]QuotaPoint
 }
 
 // Open opens (creating when needed) the usage database at path.
@@ -172,7 +188,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("usagestats: prepare insert: %w", errPrepare)
 	}
-	return &Store{db: db, insert: insert, path: path}, nil
+	return &Store{db: db, insert: insert, path: path, newestQuota: make(map[QuotaSeriesKey]QuotaPoint)}, nil
 }
 
 // restrictToOwner makes the database file readable by its owner only, creating

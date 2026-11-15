@@ -141,6 +141,31 @@ func (h *Handler) GetUsageSpeed(c *gin.Context) {
 	})
 }
 
+// GetUsageQuotaSamples returns the recorded quota history of each account
+// window in the range.
+func (h *Handler) GetUsageQuotaSamples(c *gin.Context) {
+	store := usageStatsStore(c)
+	if store == nil {
+		return
+	}
+	query, errQuery := parseUsageStatsQuery(c, time.Now())
+	if errQuery != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errQuery.Error()})
+		return
+	}
+	history, errHistory := store.QuotaSamples(c.Request.Context(), query)
+	if errHistory != nil {
+		writeUsageStatsError(c, errHistory)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"from":      query.From.UnixMilli(),
+		"to":        query.To.UnixMilli(),
+		"series":    history.Series,
+		"bucket_ms": history.BucketMs,
+	})
+}
+
 // GetUsageSettings returns the operator settings together with the built-in
 // price table they override.
 func (h *Handler) GetUsageSettings(c *gin.Context) {

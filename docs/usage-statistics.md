@@ -35,6 +35,9 @@ Rows go to a SQLite database at `<auth-dir>/usage.db`. Each row holds:
 
 No prompt or response content is stored, and no full API key.
 
+The same database also holds quota samples: how full each subscription
+window was each time an upstream reported it. See [Quota samples](#quota-samples).
+
 Rows are kept until you delete them, also after recording is turned off. To
 start over, stop the server and delete `usage.db` together with its `-wal` and
 `-shm` files. The database file is readable by its owner only.
@@ -81,6 +84,51 @@ each account, prorated to the days recorded in the selected range. Each account
 also lists the models it served, with every model's API-equivalent cost and its
 share of the account's total.
 
+## Quota samples
+
+Claude and Codex subscriptions report in every response how much of each
+usage window is used. The proxy keeps a history of those reports in the
+`quota_samples` table, one row each time a window's state changes:
+
+| Column | Meaning |
+| --- | --- |
+| `ts_ms` | When the upstream reported the state, in Unix milliseconds |
+| `provider` | `claude` or `codex` |
+| `auth_index` | The credential, the same value as `requests.auth_index` |
+| `account` | The account, masked by the same rule as `requests.account` |
+| `window` | The window id, described below |
+| `used_percent` | Used share of the window, 0 to 100 |
+| `resets_at_ms` | When the window resets, in Unix milliseconds, or 0 when unknown |
+
+Window ids are the same across providers where the windows match:
+
+| Provider | Headers | Window id |
+| --- | --- | --- |
+| Claude | `Anthropic-Ratelimit-Unified-<w>-Utilization` (a fraction) and `-<w>-Reset` (Unix seconds) | `<w>` in lowercase: `5h`, `7d`, `7d_oi`, `7d_<name>` |
+| Codex | `X-Codex-Primary-*` and `X-Codex-Secondary-*`: `Used-Percent`, `Window-Minutes`, `Reset-At` or `Reset-After-Seconds` | The window length: `5h` for 300 minutes, `7d` for 10080, otherwise `<n>d`, `<n>h`, or `<n>m`. `primary` or `secondary` when the length is missing. |
+
+Codex limits for a single model, such as `X-Codex-Bengalfox-*`, are not
+recorded.
+
+Rules for writing a sample:
+
+- `ts_ms` is the start of the request whose response reported the state. The
+  upstream takes the state when it admits the request, so the state leaves
+  out that request's own usage. The time to first token would be later: it can
+  include a model's thinking.
+- A sample is written only when `used_percent` changed, or `resets_at_ms`
+  moved by a minute or more, since the newest stored sample of the same
+  `(provider, auth_index, account, window)`. A Codex reset given as seconds
+  from now drifts by a second or two between responses, which is why small
+  moves are ignored.
+- A report older than the newest stored sample is dropped. It comes from a
+  long stream that finished after shorter requests had already reported a
+  newer state.
+- The newest sample of each series is kept in memory and read from the
+  database on first use, so a restart does not write duplicates.
+- Failed attempts, such as a 429, still carry the headers and are sampled.
+  Requests without a credential index are not.
+
 ## Management API
 
 All endpoints are under `/v8/management/observability/usage` and need the
@@ -93,6 +141,7 @@ recording is off.
 | `GET /speed` | Latency and first-token percentiles and output tokens per second |
 | `GET /settings` | Price overrides and plan prices, plus the built-in price table |
 | `PUT /settings` | Replace price overrides and plan prices |
+| `GET /quota-samples` | Quota window history per account, for burn-down charts |
 
 Query parameters for `/stats` and `/speed`:
 
@@ -113,3 +162,43 @@ Example:
 curl -H "Authorization: Bearer $MANAGEMENT_KEY" \
   "http://127.0.0.1:8317/v8/management/observability/usage/stats?group_by=day,project"
 ```
+
+### `GET /quota-samples`
+
+Takes `from`, `to`, and `filter.<dimension>` like `/stats`. The filter
+dimensions are `provider`, `auth_index`, `account`, and `window`. It returns
+one series per `(provider, auth_index, account, window)` that has a sample in
+the range or before it:
+
+```json
+{
+  "from": 1794700000000,
+  "to": 1794786400000,
+  "bucket_ms": 0,
+  "series": [
+    {
+      "provider": "claude",
+      "auth_index": "9d7cca53e8b86e21",
+      "account": "me@example.com",
+      "window": "7d",
+      "carry_in": {"ts_ms": 1794690000000, "used_percent": 41, "resets_at_ms": 1795066345000},
+      "points": [
+        {"ts_ms": 1794706348637, "used_percent": 42, "resets_at_ms": 1795066345000}
+      ],
+      "thinned": false
+    }
+  ]
+}
+```
+
+- `points` are the samples in `[from, to)`, oldest first. Two points can share
+  a `ts_ms`.
+- `carry_in` is the newest sample before `from`, or `null`. The window held
+  that state when the range began, so a chart can start at the left edge. A
+  series can have a `carry_in` and no points.
+- A series with more than 1000 points in the range is thinned: the range is
+  split into 500 buckets of `bucket_ms` each, and each bucket keeps its
+  highest and its last point. The highest point keeps the peak a window
+  reached before it reset. `thinned` is `true` on such a series, and
+  `bucket_ms` is 0 when no series was thinned.
+- Series are sorted by provider, auth index, account, and window.

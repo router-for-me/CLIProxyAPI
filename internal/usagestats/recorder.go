@@ -107,6 +107,11 @@ func (recorder) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if errInsert := store.Insert(storeCtx, row); errInsert != nil {
 		log.Warnf("usage statistics: %v", errInsert)
 	}
+	for _, sample := range quotaSamplesFromRow(row, record.ResponseHeaders) {
+		if errSample := store.RecordQuotaSample(storeCtx, sample); errSample != nil {
+			log.Warnf("usage statistics: %v", errSample)
+		}
+	}
 }
 
 // rowFromRecord flattens a usage record and its request context into a row.

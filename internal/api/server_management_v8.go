@@ -43,6 +43,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/observability/usage/queue", s.mgmt.GetUsageQueue)
 	v8.GET("/observability/usage/stats", s.mgmt.GetUsageStats)
 	v8.GET("/observability/usage/speed", s.mgmt.GetUsageSpeed)
+	v8.GET("/observability/usage/quota-samples", s.mgmt.GetUsageQuotaSamples)
 	v8.GET("/observability/usage/settings", s.mgmt.GetUsageSettings)
 	v8.PUT("/observability/usage/settings", s.mgmt.PutUsageSettings)
 	v8.GET("/observability/requests/in-flight", s.mgmt.GetInFlightRequests)

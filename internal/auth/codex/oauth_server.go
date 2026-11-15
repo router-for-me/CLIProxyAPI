@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,10 @@ type OAuthResult struct {
 	// Error contains any error message if the OAuth flow failed
 	Error string
 }
+
+// CallbackListenHost is the host the OAuth callback server binds. Empty binds
+// every interface.
+var CallbackListenHost = ""
 
 // NewOAuthServer creates a new OAuth callback server.
 // It initializes the server with the specified port and creates channels
@@ -86,7 +91,7 @@ func (s *OAuthServer) Start() error {
 	mux.HandleFunc("/success", s.handleSuccess)
 
 	s.server = &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.port),
+		Addr:         net.JoinHostPort(CallbackListenHost, strconv.Itoa(s.port)),
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -299,7 +304,7 @@ func (s *OAuthServer) sendResult(result *OAuthResult) {
 // Returns:
 //   - bool: True if the port is available, false otherwise
 func (s *OAuthServer) isPortAvailable() bool {
-	addr := fmt.Sprintf(":%d", s.port)
+	addr := net.JoinHostPort(CallbackListenHost, strconv.Itoa(s.port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return false

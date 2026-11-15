@@ -24,6 +24,9 @@ type siwcBindRoundTripper func(*http.Request) (*http.Response, error)
 func (f siwcBindRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func TestDoSIWCBindReusesSavedRegistration(t *testing.T) {
+	previousHost := codex.CallbackListenHost
+	codex.CallbackListenHost = "127.0.0.1"
+	t.Cleanup(func() { codex.CallbackListenHost = previousHost })
 	for _, tc := range []struct {
 		name, returned string
 		wantSuccess    bool
