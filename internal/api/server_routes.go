@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/pricing"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
@@ -1096,7 +1097,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	if isClaude {
 		cfg := s.getConfig()
 		disableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
-		s.writeModelListResponse(c, "claude", claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
+		s.writeModelListResponse(c, "claude", claudemodels.BuildResponse(pricing.AttachPricing(formatHomeClaudeModels(entries), "id"), disableCloaking)) // proxx: pricing
 		return
 	}
 
@@ -1114,6 +1115,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		}
 		filtered = append(filtered, model)
 	}
+	pricing.AttachPricing(filtered, "id") // proxx: per-model pricing object
 	s.writeModelListResponse(c, "openai", gin.H{
 		"object": "list",
 		"data":   filtered,
