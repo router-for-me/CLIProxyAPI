@@ -12,6 +12,16 @@ import (
 // WithAntigravityHTTPClientTrace traces each actual request, including redirects.
 // The client copy keeps the original pooled transport and client settings.
 func WithAntigravityHTTPClientTrace(client *http.Client, auth *cliproxyauth.Auth, operation string) *http.Client {
+	return withUpstreamHTTPClientTrace(client, "antigravity", auth, operation)
+}
+
+// WithAntigravityConnectionTrace reports upstream connection reuse only in debug mode.
+// It preserves existing trace hooks and never logs URLs, headers, or credential material.
+func WithAntigravityConnectionTrace(req *http.Request, auth *cliproxyauth.Auth, operation string) *http.Request {
+	return withUpstreamConnectionTrace(req, "antigravity", auth, operation)
+}
+
+func withUpstreamHTTPClientTrace(client *http.Client, provider string, auth *cliproxyauth.Auth, operation string) *http.Client {
 	if client == nil {
 		return nil
 	}
@@ -24,32 +34,31 @@ func WithAntigravityHTTPClientTrace(client *http.Client, auth *cliproxyauth.Auth
 	if auth != nil {
 		authIndex = auth.Index
 	}
-	clone.Transport = &antigravityConnectionTraceTransport{
-		base: base, auth: cliproxyauth.Auth{Index: authIndex}, operation: operation,
+	clone.Transport = &upstreamConnectionTraceTransport{
+		base: base, provider: provider, auth: cliproxyauth.Auth{Index: authIndex}, operation: operation,
 	}
 	return &clone
 }
 
-type antigravityConnectionTraceTransport struct {
+type upstreamConnectionTraceTransport struct {
 	base      http.RoundTripper
+	provider  string
 	auth      cliproxyauth.Auth
 	operation string
 }
 
-func (t *antigravityConnectionTraceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return t.base.RoundTrip(WithAntigravityConnectionTrace(req, &t.auth, t.operation))
+func (t *upstreamConnectionTraceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.base.RoundTrip(withUpstreamConnectionTrace(req, t.provider, &t.auth, t.operation))
 }
 
 // CloseIdleConnections preserves the underlying transport cleanup behavior.
-func (t *antigravityConnectionTraceTransport) CloseIdleConnections() {
+func (t *upstreamConnectionTraceTransport) CloseIdleConnections() {
 	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
 }
 
-// WithAntigravityConnectionTrace reports upstream connection reuse only in debug mode.
-// It preserves existing trace hooks and never logs URLs, headers, or credential material.
-func WithAntigravityConnectionTrace(req *http.Request, auth *cliproxyauth.Auth, operation string) *http.Request {
+func withUpstreamConnectionTrace(req *http.Request, provider string, auth *cliproxyauth.Auth, operation string) *http.Request {
 	if req == nil || req.URL == nil || !log.IsLevelEnabled(log.DebugLevel) {
 		return req
 	}
@@ -62,7 +71,7 @@ func WithAntigravityConnectionTrace(req *http.Request, auth *cliproxyauth.Auth, 
 	trace := &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			log.WithFields(log.Fields{
-				"provider":      "antigravity",
+				"provider":      provider,
 				"operation":     operation,
 				"upstream_host": host,
 				"auth_index":    authIndex,
@@ -70,7 +79,7 @@ func WithAntigravityConnectionTrace(req *http.Request, auth *cliproxyauth.Auth, 
 				"reused":        info.Reused,
 				"was_idle":      info.WasIdle,
 				"idle_time":     info.IdleTime.String(),
-			}).Debug("antigravity upstream connection acquired")
+			}).Debug(provider + " upstream connection acquired")
 		},
 	}
 	return req.WithContext(httptrace.WithClientTrace(req.Context(), trace))

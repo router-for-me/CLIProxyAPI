@@ -152,7 +152,7 @@ func TestAntigravityConnectionTrace(t *testing.T) {
 	}
 	defaultClient := &http.Client{}
 	tracedDefault := WithAntigravityHTTPClientTrace(defaultClient, nil, "project_discovery")
-	if tracedDefault.Transport.(*antigravityConnectionTraceTransport).base != http.DefaultTransport || defaultClient.Transport != nil {
+	if tracedDefault.Transport.(*upstreamConnectionTraceTransport).base != http.DefaultTransport || defaultClient.Transport != nil {
 		t.Fatal("default transport must be preserved")
 	}
 	hook.Reset()
