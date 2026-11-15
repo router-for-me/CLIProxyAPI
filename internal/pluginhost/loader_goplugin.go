@@ -61,6 +61,38 @@ func newGoPluginLoader() goPluginLoader {
 // build stays blocked, and a host restart is enough to pick up the fix.
 var goPluginFailedPaths sync.Map
 
+// goPluginOpenAttempts holds the in-flight plugin.Open attempts per load
+// path. Go's plugin package blocks a concurrent open of the same path until
+// the first attempt finishes, and a panicking initializer never finishes, so
+// concurrent callers have to share the first attempt instead of opening the
+// path again.
+var goPluginOpenAttempts sync.Map
+
+// goPluginOpenAttempt is a single plugin.Open attempt and its outcome.
+type goPluginOpenAttempt struct {
+	done   chan struct{}
+	plugin *plugin.Plugin
+	err    error
+}
+
+// openGoPluginSerialized opens the plugin at loadPath, making sure that only
+// one attempt per path is in flight. Concurrent callers wait for the first
+// attempt and observe its result, so a plugin whose initializer panics can
+// never leave another caller waiting on Go's plugin cache forever.
+func openGoPluginSerialized(open func(path string) (*plugin.Plugin, error), loadPath string) (*plugin.Plugin, error) {
+	attempt := &goPluginOpenAttempt{done: make(chan struct{})}
+	actual, loaded := goPluginOpenAttempts.LoadOrStore(loadPath, attempt)
+	att := actual.(*goPluginOpenAttempt)
+	if loaded {
+		<-att.done
+		return att.plugin, att.err
+	}
+	att.plugin, att.err = openGoPluginGuarded(open, loadPath)
+	close(att.done)
+	goPluginOpenAttempts.Delete(loadPath)
+	return att.plugin, att.err
+}
+
 // openGoPluginGuarded runs plugin.Open behind a recovery boundary.
 //
 // plugin.Open executes the plugin package initializer inside the host
@@ -117,7 +149,7 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 		releaseGuard()
 		return nil, fmt.Errorf("go plugin %s previously failed to initialize and cannot be retried in this process; fix the plugin and restart the host", file.Path)
 	}
-	p, err := openGoPluginGuarded(open, loadPath)
+	p, err := openGoPluginSerialized(open, loadPath)
 	releaseGuard()
 	if err != nil {
 		goPluginFailedPaths.Store(loadPath, struct{}{})

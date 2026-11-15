@@ -7,7 +7,9 @@ import (
 	"errors"
 	"plugin"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -427,4 +429,58 @@ func resetGoPluginFailures(t *testing.T) {
 	t.Helper()
 	goPluginFailedPaths.Clear()
 	t.Cleanup(func() { goPluginFailedPaths.Clear() })
+}
+
+// TestGoPluginLoaderConcurrentOpenDoesNotHang verifies that two concurrent
+// loads of the same plugin path do not leave one of them waiting forever.
+// Go's plugin cache blocks a concurrent open of the same path until the first
+// attempt finishes, and a panicking initializer never finishes, so the
+// second attempt has to share the first attempt instead of opening again.
+func TestGoPluginLoaderConcurrentOpenDoesNotHang(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	const sharedPath = "/nonexistent-concurrent.so"
+	entered := make(chan struct{})
+	var openCalls int32
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			return sharedPath, func() {}, nil
+		},
+		open: func(string) (*plugin.Plugin, error) {
+			if atomic.AddInt32(&openCalls, 1) == 1 {
+				// Keep the first attempt in flight long enough for the second
+				// one to overlap with it. The sleep only creates the overlap;
+				// the assertions rely on the reported error, not on timing.
+				close(entered)
+				time.Sleep(50 * time.Millisecond)
+			}
+			panic("init exploded")
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			t.Fatal("lookup must not run after a failed open")
+			return nil, nil
+		},
+	}
+
+	results := make(chan error, 2)
+	open := func() {
+		_, err := loader.Open(pluginFile{ID: "p", Path: sharedPath}, &Host{})
+		results <- err
+	}
+
+	go open()
+	<-entered
+	go open()
+
+	deadline := time.After(20 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-results:
+			if err == nil {
+				t.Fatal("expected every concurrent open to fail")
+			}
+		case <-deadline:
+			t.Fatal("a concurrent plugin open blocked instead of reporting the failure")
+		}
+	}
 }
