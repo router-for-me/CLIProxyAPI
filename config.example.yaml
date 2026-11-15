@@ -1379,6 +1379,29 @@ plugins:
       config-object:
         mode: "safe"
 
+# proxx (fork-only features; see docs/proxx/README.md). Everything below is optional.
+# proxx:
+#   pricing:
+#     disabled: false            # true: no per-request cost and no pricing in model listings
+#     catalog: ""                # "" = https://models.dev/api.json (embedded snapshot with --local-model),
+#                                # "embed", "disabled", an http(s) URL, or an absolute file path
+#     override-upstream: false   # true: configured/catalog prices beat upstream-reported cost
+#     cost-headers: ["x-litellm-response-cost"] # upstream response headers carrying a USD cost
+#     models:                    # USD per 1M tokens; unset fields fall back to the catalog
+#       - model: "my-local-model"
+#         input: 0.5
+#         output: 1.5
+#       - model: "gpt-5*"          # trailing * matches by prefix
+#         provider: "openrouter"   # optional: only for this provider key
+#         input: 1.25
+#         output: 10
+#         cache-read: 0.125
+#         override: true           # this entry beats upstream-reported cost
+#   usage:
+#     disabled: false            # independent of observability.usage.usage-statistics-enabled
+#     file: ""                   # default: proxx-usage.json next to this config file
+#     recent-limit: 500          # recent-request ring buffer size
+
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only
 # fields remain in their old locations until a successful v8 configuration write.
