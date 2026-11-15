@@ -17,6 +17,8 @@ type Config struct {
 	ServerResponseCompression ResponseCompressionConfig `yaml:"-" json:"response-compression"`
 	// Models selects optional catalog sources independently for each catalog.
 	Models ModelCatalogs `yaml:"models" json:"models"`
+	// Proxx holds fork-only features (model groups, pricing, usage). See docs/proxx.
+	Proxx ProxxConfig `yaml:"proxx" json:"proxx"`
 
 	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.

@@ -68,4 +68,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/plugins/:id/quota", s.mgmt.GetPluginQuota)
 	v8.POST("/plugins/:id/quota", s.mgmt.FetchPluginQuota)
 	v8.DELETE("/plugins/:id/quota", s.mgmt.ResetPluginQuota)
+
+	// proxx: fork-only management routes live in server_management_proxx.go.
+	s.registerProxxManagementRoutes(v8)
 }

@@ -4,6 +4,7 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
+- proxx fork: read `docs/proxx/README.md` (fork rules, hook points, flow) and `docs/proxx/decisions/` before changing fork features.
 
 ## Commands
 ```bash
