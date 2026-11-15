@@ -5,6 +5,9 @@ package pluginhost
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"plugin"
 	"strings"
 	"sync/atomic"
@@ -381,9 +384,13 @@ func TestGoPluginLoaderDoesNotRetryFailedPath(t *testing.T) {
 	}
 }
 
-// TestGoPluginLoaderRetriesDifferentBuild verifies that a fixed plugin is
-// picked up: the load path is content-addressed, so a different build has a
-// different path and is not blocked by the failure of the previous one.
+// TestGoPluginLoaderRetriesDifferentBuild verifies that a different build is
+// not blocked by the recorded failure of another one: the load path is
+// content-addressed, so a different build has a different path.
+//
+// It only asserts that the loader attempts the different path. Whether Go's
+// runtime accepts another plugin after an initializer panic is a property of
+// the runtime, not of this loader.
 func TestGoPluginLoaderRetriesDifferentBuild(t *testing.T) {
 	resetGoPluginFailures(t)
 	h := &Host{loading: map[string]*pluginLoadRequest{}}
@@ -391,6 +398,7 @@ func TestGoPluginLoaderRetriesDifferentBuild(t *testing.T) {
 
 	paths := []string{"/shadow/build-one.so", "/shadow/build-two.so"}
 	index := 0
+	var openCalls int32
 	loader := goPluginLoader{
 		shadow: func(file pluginFile) (string, func(), error) {
 			path := paths[index]
@@ -398,6 +406,7 @@ func TestGoPluginLoaderRetriesDifferentBuild(t *testing.T) {
 			return path, func() {}, nil
 		},
 		open: func(path string) (*plugin.Plugin, error) {
+			atomic.AddInt32(&openCalls, 1)
 			if path == paths[0] {
 				panic("init exploded")
 			}
@@ -413,12 +422,13 @@ func TestGoPluginLoaderRetriesDifferentBuild(t *testing.T) {
 	if _, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h); err == nil {
 		t.Fatal("expected the initializer panic to surface as an error")
 	}
-	client, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h)
-	if err != nil {
-		t.Fatalf("the fixed build must load again: %v", err)
+	before := atomic.LoadInt32(&openCalls)
+	_, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h)
+	if err != nil && strings.Contains(err.Error(), "cannot be retried") {
+		t.Fatalf("a different build must not be blocked by the recorded failure: %v", err)
 	}
-	if client == nil {
-		t.Fatal("expected a client for the fixed build")
+	if atomic.LoadInt32(&openCalls) != before+1 {
+		t.Fatal("a different build must be opened instead of being blocked by the recorded failure")
 	}
 }
 
@@ -482,5 +492,97 @@ func TestGoPluginLoaderConcurrentOpenDoesNotHang(t *testing.T) {
 		case <-deadline:
 			t.Fatal("a concurrent plugin open blocked instead of reporting the failure")
 		}
+	}
+}
+
+// TestGoPluginLoaderCanonicalizesFailurePath verifies that the failure record
+// is keyed by the canonical path. Go's plugin package canonicalizes the path
+// with realpath before it caches a plugin, so two spellings of the same file
+// refer to one cache entry and must also refer to one failure record.
+func TestGoPluginLoaderCanonicalizesFailurePath(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "probe.so")
+	if err := os.WriteFile(target, []byte("plugin"), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+	link := filepath.Join(dir, "link.so")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	openCalls := 0
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			return file.Path, func() {}, nil
+		},
+		open: func(string) (*plugin.Plugin, error) {
+			openCalls++
+			panic("init exploded")
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			t.Fatal("lookup must not run after a failed open")
+			return nil, nil
+		},
+	}
+
+	if _, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{}); err == nil {
+		t.Fatal("expected the initializer panic to surface as an error")
+	}
+	// The same file reached through a symlink must not be opened again: Go's
+	// plugin cache would hand out the poisoned entry.
+	if _, err := loader.Open(pluginFile{ID: "p", Path: link}, &Host{}); err == nil {
+		t.Fatal("expected the symlinked path to be blocked by the recorded failure")
+	}
+	if openCalls != 1 {
+		t.Fatalf("open was called %d times, want 1", openCalls)
+	}
+}
+
+// TestGoPluginLoaderFallsBackToExecutableShadow verifies that a plugin that
+// cannot be opened from the local shadow copy is retried from the executable
+// copy in the cache directory, the same way the C ABI loader does for plugin
+// directories mounted noexec.
+func TestGoPluginLoaderFallsBackToExecutableShadow(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "probe.so")
+	if err := os.WriteFile(target, []byte("plugin"), 0o600); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+
+	var opened []string
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			return file.Path, func() {}, nil
+		},
+		open: func(path string) (*plugin.Plugin, error) {
+			opened = append(opened, path)
+			if path == canonicalizePluginPath(target) {
+				return nil, fmt.Errorf("permission denied")
+			}
+			return &plugin.Plugin{}, nil
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return plugin.Symbol(func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+				return &fakeGoPlugin{}, nil
+			}), nil
+		},
+	}
+
+	client, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{})
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected a client")
+	}
+	if len(opened) < 2 {
+		t.Fatalf("the loader opened %d paths, want the local shadow and the executable fallback", len(opened))
+	}
+	if opened[0] == opened[1] {
+		t.Fatal("the fallback must use a different path than the local shadow copy")
 	}
 }
