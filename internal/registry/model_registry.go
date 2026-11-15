@@ -281,7 +281,9 @@ func (r *ModelRegistry) RegistrationEpoch() uint64 {
 	return r.registrationEpoch.Load()
 }
 
-// LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
+// LookupModelInfo looks up ModelInfo by checking dynamic registrations first
+// (strictly scoped to provider when non-empty, or global when empty) and then
+// falling back to channel-specific and global static definitions.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -295,6 +297,11 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return cloneModelInfo(info)
+	}
+	if p != "" {
+		if info := LookupStaticModelInfoByChannel(modelID, p); info != nil {
+			return cloneModelInfo(info)
+		}
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
 }
@@ -1941,22 +1948,25 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
-// GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
+// GetModelInfo returns dynamically registered ModelInfo. When provider is non-empty,
+// only active registrations for that provider are returned; when provider is empty,
+// it falls back to the global registration.
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	if reg, ok := r.models[modelID]; ok && reg != nil {
-		// Try provider specific definition first
-		if provider != "" && reg.InfoByProvider != nil {
+		if provider != "" {
 			if reg.Providers != nil {
-				if count, ok := reg.Providers[provider]; ok && count > 0 {
-					if info, ok := reg.InfoByProvider[provider]; ok && info != nil {
+				if count, okProv := reg.Providers[provider]; okProv && count > 0 && reg.InfoByProvider != nil {
+					if info, okInfo := reg.InfoByProvider[provider]; okInfo && info != nil {
 						return cloneModelInfo(info)
 					}
 				}
 			}
+			return nil
 		}
-		// Fallback to global info (last registered)
+		// Fallback to global info (last registered) when provider is unspecified.
 		return cloneModelInfo(reg.Info)
 	}
 	return nil
