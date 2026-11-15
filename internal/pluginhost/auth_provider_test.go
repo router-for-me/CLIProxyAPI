@@ -1361,3 +1361,102 @@ func (legacySingleAuthProvider) PollLogin(context.Context, pluginapi.AuthLoginPo
 func (legacySingleAuthProvider) RefreshAuth(context.Context, pluginapi.AuthRefreshRequest) (pluginapi.AuthRefreshResponse, error) {
 	return pluginapi.AuthRefreshResponse{}, nil
 }
+
+func TestParseAuthsPreservesHandledEmptyResponse(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "empty-auth-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "vendor",
+					parseAuth: func(_ context.Context, _ pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+						return pluginapi.AuthParseResponse{Handled: true}, nil
+					},
+				},
+			},
+		},
+	})
+
+	auths, handled, errParse := host.ParseAuths(context.Background(), pluginapi.AuthParseRequest{
+		Provider: "vendor",
+		Path:     "/tmp/auths/empty.json",
+		FileName: "empty.json",
+		RawJSON:  []byte(`{"type":"vendor"}`),
+	})
+	if errParse != nil {
+		t.Fatalf("ParseAuths() error = %v", errParse)
+	}
+	if !handled || len(auths) != 0 {
+		t.Fatalf("ParseAuths() handled=%t len=%d, want handled=true len=0", handled, len(auths))
+	}
+}
+
+func TestParseAuthRespectsExplicitZeroFieldsWhenHostAuthDirProvided(t *testing.T) {
+	var captured pluginapi.HostConfigSummary
+	host := newHostWithRecords(capabilityRecord{
+		id: "cfg-zero-plugin",
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: "vendor",
+					parseAuth: func(_ context.Context, req pluginapi.AuthParseRequest) (pluginapi.AuthParseResponse, error) {
+						captured = req.Host
+						return pluginapi.AuthParseResponse{
+							Handled: true,
+							Auth: pluginapi.AuthData{
+								Provider: "vendor",
+								ID:       "vendor:zero",
+							},
+						}, nil
+					},
+				},
+			},
+		},
+	})
+	host.runtimeConfig = &config.Config{
+		AuthDir: "/stale/auths",
+		SDKConfig: config.SDKConfig{
+			ProxyURL:         "http://stale-proxy:8080",
+			ForceModelPrefix: true,
+		},
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"vendor": {{Name: "vendor-pro", Alias: "vp"}},
+		},
+		OAuthExcludedModels: map[string][]string{
+			"vendor": {"vendor-hidden"},
+		},
+	}
+
+	explicitDir := t.TempDir()
+	_, handled, errParse := host.ParseAuth(context.Background(), pluginapi.AuthParseRequest{
+		Provider: "vendor",
+		Path:     explicitDir + "/cred.json",
+		FileName: "cred.json",
+		RawJSON:  []byte(`{"type":"vendor"}`),
+		Host: pluginapi.HostConfigSummary{
+			AuthDir:          explicitDir,
+			ProxyURL:         "",
+			ForceModelPrefix: false,
+			OAuthModelAlias:  nil,
+			ExcludedModels:   nil,
+		},
+	})
+	if errParse != nil || !handled {
+		t.Fatalf("ParseAuth() handled=%t err=%v, want handled=true err=nil", handled, errParse)
+	}
+	if captured.AuthDir != explicitDir {
+		t.Fatalf("Host.AuthDir = %q, want %q", captured.AuthDir, explicitDir)
+	}
+	if captured.ProxyURL != "" {
+		t.Fatalf("Host.ProxyURL = %q, want empty", captured.ProxyURL)
+	}
+	if captured.ForceModelPrefix {
+		t.Fatal("Host.ForceModelPrefix = true, want false")
+	}
+	if len(captured.OAuthModelAlias) != 0 {
+		t.Fatalf("Host.OAuthModelAlias = %#v, want empty", captured.OAuthModelAlias)
+	}
+	if len(captured.ExcludedModels) != 0 {
+		t.Fatalf("Host.ExcludedModels = %#v, want empty", captured.ExcludedModels)
+	}
+}

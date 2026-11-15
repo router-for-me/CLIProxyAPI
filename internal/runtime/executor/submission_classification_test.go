@@ -36,6 +36,10 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 		err      error
 		provider bool
 	}{
+		{"Gemini known zero output", newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage("gemini", "MALFORMED_FUNCTION_CALL"), "MALFORMED_FUNCTION_CALL"), true},
+		{"Gemini signature-only EOF", newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage("gemini", ""), ""), false},
+		{"Gemini translated malformed failure", newGeminiTranslatedClaudeErrorStatusErr(`{"type":"error","error":{"message":"MALFORMED_FUNCTION_CALL"}}`), false},
+		{"Gemini translated local failure", newGeminiTranslatedClaudeErrorStatusErr(`{"type":"error","error":{"message":"local failure"}}`), false},
 		{"local translation", statusErr{code: 502, msg: helps.ApplyPatchUpstreamErrorMessage}, false},
 		{"local error envelope", statusErr{code: 502, msg: `{"error":{"message":"local failure"}}`}, false},
 		{"Claude local validation", validateClaudeStreamingResponse([]byte("data: {\"type\":\"message_start\",\"message\":{}}\n\n")), false},

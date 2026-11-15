@@ -907,3 +907,41 @@ func TestBuildConfigChangeDetails_SensitiveWordsReplace(t *testing.T) {
 	}}}
 	expectContains(t, BuildConfigChangeDetails(addedCloakNew, sameLenWordsNew), "claude[0].cloak.sensitive-words: 1 -> 1")
 }
+
+func TestBuildConfigChangeDetails_SensitivePatternsReplace(t *testing.T) {
+	oldCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitivePatternsReplace: []config.SensitivePatternRule{{Pattern: "a", Replacement: ""}},
+		},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "k1",
+			Cloak:  &config.CloakConfig{SensitivePatternsReplace: []config.SensitivePatternRule{{Pattern: "c", Replacement: ""}}},
+		}},
+	}
+	newCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitivePatternsReplace: []config.SensitivePatternRule{{Pattern: "a", Replacement: ""}, {Pattern: "b", Replacement: "x"}},
+		},
+		Devin: config.DevinConfig{
+			SensitivePatternsReplace: []config.SensitivePatternRule{{Pattern: "d", Replacement: ""}},
+		},
+		ClaudeKey: []config.ClaudeKey{{
+			APIKey: "k1",
+			Cloak:  &config.CloakConfig{SensitivePatternsReplace: []config.SensitivePatternRule{{Pattern: "c", Replacement: "y"}}},
+		}},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "antigravity.sensitive-patterns-replace: 1 -> 2")
+	expectContains(t, changes, "devin.sensitive-patterns-replace: 0 -> 1")
+	expectContains(t, changes, "claude[0].cloak.sensitive-patterns-replace: 1 -> 1")
+
+	emptyA := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{}}}}
+	emptyB := &config.Config{
+		Antigravity: config.AntigravityConfig{SensitivePatternsReplace: []config.SensitivePatternRule{}},
+		Devin:       config.DevinConfig{SensitivePatternsReplace: []config.SensitivePatternRule{}},
+		ClaudeKey:   []config.ClaudeKey{{APIKey: "k1", Cloak: &config.CloakConfig{SensitivePatternsReplace: []config.SensitivePatternRule{}}}},
+	}
+	if noDiff := BuildConfigChangeDetails(emptyA, emptyB); len(noDiff) != 0 {
+		t.Fatalf("expected no diff between nil and empty SensitivePatternsReplace slices, got %v", noDiff)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -92,7 +94,7 @@ func setupSIWCFlow(t *testing.T, blocked bool) *siwcFixture {
 			}
 		})
 	}
-	h := &Handler{cfg: cfg, authManager: manager, siwcOAuthFactory: func(*config.Config) siwcOAuthService { return service }}
+	h := &Handler{cfg: cfg, authManager: manager, siwcOAuthFactory: func(*config.Config, string) siwcOAuthService { return service }}
 	router := gin.New()
 	router.POST("/bind", h.StartSIWCBind)
 	router.GET("/siwc-status", h.GetSIWCStatus)
@@ -812,4 +814,446 @@ func TestWriteAuthFileWaitsForCodexFileLock(t *testing.T) {
 			}
 		})
 	}
+}
+
+func startSIWCConnectCountingProxy(t *testing.T, hits *atomic.Int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, "proxy sentinel intercepted request", http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestSIWCBindUsesAccountProxyPrecedence(t *testing.T) {
+	t.Run("account_proxy_overrides_global_proxy", func(t *testing.T) {
+		store := newOAuthSessionStore(time.Minute)
+		replaceOAuthSessionStoreForTest(t, store)
+
+		var globalHits atomic.Int32
+		var accountHits atomic.Int32
+		globalProxy := startSIWCConnectCountingProxy(t, &globalHits)
+		accountProxy := startSIWCConnectCountingProxy(t, &accountHits)
+
+		dir := t.TempDir()
+		path := filepath.Join(dir, "codex.json")
+		metadata := map[string]any{
+			"type":          "codex",
+			"access_token":  "outer",
+			"refresh_token": "outer-refresh",
+			"account_id":    "account",
+			"proxy_url":     accountProxy.URL,
+		}
+		if errWrite := codex.WriteJSONFileAtomic(path, metadata); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+
+		cfg := &config.Config{AuthDir: dir}
+		cfg.ProxyURL = globalProxy.URL
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.SetConfig(cfg)
+		auth, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+			ID:         "codex.json",
+			FileName:   "codex.json",
+			Provider:   "codex",
+			ProxyURL:   accountProxy.URL,
+			Metadata:   metadata,
+			Attributes: map[string]string{"path": path},
+			Status:     coreauth.StatusActive,
+		})
+		if errRegister != nil {
+			t.Fatal(errRegister)
+		}
+
+		h := &Handler{cfg: cfg, authManager: manager}
+		router := gin.New()
+		router.POST("/bind", h.StartSIWCBind)
+		router.POST("/callback", h.PostOAuthCallbackV8)
+		router.GET("/status", h.GetAuthStatus)
+
+		wStart := siwcRequest(t, router, http.MethodPost, "/bind", map[string]any{"name": auth.FileName})
+		if wStart.Code != http.StatusOK {
+			t.Fatalf("start: %d %s", wStart.Code, wStart.Body.String())
+		}
+		state := ojson.GetBytes(wStart.Body.Bytes(), "state").String()
+		session, ok := store.Get(state)
+		if !ok || session.SIWC == nil {
+			t.Fatal("missing SIWC session")
+		}
+		t.Cleanup(func() { CancelOAuthSession(state) })
+
+		wCB := siwcRequest(t, router, http.MethodPost, "/callback", map[string]any{
+			"provider":     "codex",
+			"redirect_url": siwcCallbackURL(state),
+		})
+		if wCB.Code != http.StatusOK {
+			t.Fatalf("callback: %d %s", wCB.Code, wCB.Body.String())
+		}
+		waitSIWCExchange(t, session.SIWC)
+
+		if accountHits.Load() == 0 {
+			t.Fatalf("expected SIWC token exchange to use account proxy %s, got accountHits=%d globalHits=%d", accountProxy.URL, accountHits.Load(), globalHits.Load())
+		}
+		if globalHits.Load() != 0 {
+			t.Fatalf("expected global proxy not to be used when account proxy is set, got globalHits=%d", globalHits.Load())
+		}
+	})
+
+	t.Run("unreachable_account_proxy_fails_without_global_fallback", func(t *testing.T) {
+		for _, scheme := range []string{"http", "socks5h"} {
+			t.Run(scheme, func(t *testing.T) {
+				store := newOAuthSessionStore(time.Minute)
+				replaceOAuthSessionStoreForTest(t, store)
+
+				var globalHits atomic.Int32
+				globalProxy := startSIWCConnectCountingProxy(t, &globalHits)
+
+				ln, errListen := net.Listen("tcp", "127.0.0.1:0")
+				if errListen != nil {
+					t.Fatal(errListen)
+				}
+				deadProxyURL := scheme + "://" + ln.Addr().String()
+				_ = ln.Close()
+
+				dir := t.TempDir()
+				path := filepath.Join(dir, "codex.json")
+				metadata := map[string]any{
+					"type":          "codex",
+					"access_token":  "outer",
+					"refresh_token": "outer-refresh",
+					"account_id":    "account",
+					"proxy_url":     deadProxyURL,
+				}
+				if errWrite := codex.WriteJSONFileAtomic(path, metadata); errWrite != nil {
+					t.Fatal(errWrite)
+				}
+
+				cfg := &config.Config{AuthDir: dir}
+				cfg.ProxyURL = globalProxy.URL
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.SetConfig(cfg)
+				auth, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+					ID:         "codex.json",
+					FileName:   "codex.json",
+					Provider:   "codex",
+					ProxyURL:   deadProxyURL,
+					Metadata:   metadata,
+					Attributes: map[string]string{"path": path},
+					Status:     coreauth.StatusActive,
+				})
+				if errRegister != nil {
+					t.Fatal(errRegister)
+				}
+
+				h := &Handler{cfg: cfg, authManager: manager}
+				router := gin.New()
+				router.POST("/bind", h.StartSIWCBind)
+				router.POST("/callback", h.PostOAuthCallbackV8)
+				router.GET("/status", h.GetAuthStatus)
+
+				wStart := siwcRequest(t, router, http.MethodPost, "/bind", map[string]any{"name": auth.FileName})
+				if wStart.Code != http.StatusOK {
+					t.Fatalf("start: %d %s", wStart.Code, wStart.Body.String())
+				}
+				state := ojson.GetBytes(wStart.Body.Bytes(), "state").String()
+				session, ok := store.Get(state)
+				if !ok || session.SIWC == nil {
+					t.Fatal("missing SIWC session")
+				}
+				t.Cleanup(func() { CancelOAuthSession(state) })
+
+				wCB := siwcRequest(t, router, http.MethodPost, "/callback", map[string]any{
+					"provider":     "codex",
+					"redirect_url": siwcCallbackURL(state),
+				})
+				if wCB.Code != http.StatusOK {
+					t.Fatalf("callback: %d %s", wCB.Code, wCB.Body.String())
+				}
+				waitSIWCExchange(t, session.SIWC)
+
+				status := performOAuthStatusRequest(t, router, state)
+				if status.Status != "error" {
+					t.Fatalf("expected error status on unreachable %s account proxy, got %#v", scheme, status)
+				}
+				if globalHits.Load() != 0 {
+					t.Fatalf("expected no fallback to global proxy when %s account proxy fails, got globalHits=%d", scheme, globalHits.Load())
+				}
+			})
+		}
+	})
+}
+
+func TestSIWCBindProxyEndToEndAndValidation(t *testing.T) {
+	cases := []struct {
+		name               string
+		globalProxyMode    string
+		accountProxyMode   string
+		wantAccountHits    int32
+		wantGlobalHits     int32
+		wantDirectHits     int32
+		wantPreserveProxy  bool
+		wantNoDiskProxyKey bool
+	}{
+		{
+			name:              "account_proxy_without_global_proxy",
+			globalProxyMode:   "empty",
+			accountProxyMode:  "proxy",
+			wantAccountHits:   1,
+			wantGlobalHits:    0,
+			wantDirectHits:    0,
+			wantPreserveProxy: true,
+		},
+		{
+			name:              "account_proxy_overrides_different_global_proxy",
+			globalProxyMode:   "proxy",
+			accountProxyMode:  "proxy",
+			wantAccountHits:   1,
+			wantGlobalHits:    0,
+			wantDirectHits:    0,
+			wantPreserveProxy: true,
+		},
+		{
+			name:               "no_account_proxy_inherits_global_proxy",
+			globalProxyMode:    "proxy",
+			accountProxyMode:   "empty",
+			wantAccountHits:    0,
+			wantGlobalHits:     1,
+			wantDirectHits:     0,
+			wantNoDiskProxyKey: true,
+		},
+		{
+			name:              "disk_proxy_url_used_when_memory_proxy_empty",
+			globalProxyMode:   "proxy",
+			accountProxyMode:  "disk-only",
+			wantAccountHits:   1,
+			wantGlobalHits:    0,
+			wantDirectHits:    0,
+			wantPreserveProxy: true,
+		},
+		{
+			name:               "memory_proxy_fallback_when_disk_missing_proxy_url",
+			globalProxyMode:    "proxy",
+			accountProxyMode:   "memory-only",
+			wantAccountHits:    1,
+			wantGlobalHits:     0,
+			wantDirectHits:     0,
+			wantNoDiskProxyKey: true,
+		},
+		{
+			name:              "direct_account_proxy_bypasses_global_proxy",
+			globalProxyMode:   "proxy",
+			accountProxyMode:  "direct",
+			wantAccountHits:   0,
+			wantGlobalHits:    0,
+			wantDirectHits:    1,
+			wantPreserveProxy: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newOAuthSessionStore(time.Minute)
+			replaceOAuthSessionStoreForTest(t, store)
+
+			var directHits atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Via-Session-Proxy") != "1" {
+					directHits.Add(1)
+				}
+				doc := ojson.NewDocString("{}")
+				_ = doc.Set("access_token", "bound-siwc-access")
+				_ = doc.Set("refresh_token", "bound-siwc-refresh")
+				_ = doc.Set("id_token", "bound-siwc-id")
+				_ = doc.Set("expires_in", 3600)
+				_ = doc.Set("scope", codex.SIWCScope)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(doc.Bytes())
+			}))
+			t.Cleanup(upstream.Close)
+			t.Cleanup(codex.OverrideSIWCTokenEndpointURLForTest(upstream.URL))
+
+			var globalHits atomic.Int32
+			var globalProxyURL string
+			if tc.globalProxyMode == "proxy" {
+				gp := startForwardHTTPProxy(t, &globalHits, "", false)
+				t.Cleanup(gp.Close)
+				globalProxyURL = gp.URL
+			}
+
+			var accountHits atomic.Int32
+			var diskProxyURL string
+			var authProxyURL string
+			switch tc.accountProxyMode {
+			case "proxy":
+				ap := startForwardHTTPProxy(t, &accountHits, "", false)
+				t.Cleanup(ap.Close)
+				diskProxyURL = ap.URL
+				authProxyURL = ap.URL
+			case "disk-only":
+				ap := startForwardHTTPProxy(t, &accountHits, "", false)
+				t.Cleanup(ap.Close)
+				diskProxyURL = ap.URL
+			case "memory-only":
+				ap := startForwardHTTPProxy(t, &accountHits, "", false)
+				t.Cleanup(ap.Close)
+				authProxyURL = ap.URL
+			case "direct":
+				diskProxyURL = "direct"
+				authProxyURL = "direct"
+			}
+
+			dir := t.TempDir()
+			path := filepath.Join(dir, "codex.json")
+			metadata := map[string]any{
+				"type":          "codex",
+				"access_token":  "outer",
+				"refresh_token": "outer-refresh",
+				"account_id":    "account",
+				"note":          "keep-me",
+			}
+			if diskProxyURL != "" {
+				metadata["proxy_url"] = diskProxyURL
+			}
+			if errWrite := codex.WriteJSONFileAtomic(path, metadata); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+
+			cfg := &config.Config{AuthDir: dir}
+			cfg.ProxyURL = globalProxyURL
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			auth, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:         "codex.json",
+				FileName:   "codex.json",
+				Provider:   "codex",
+				ProxyURL:   authProxyURL,
+				Metadata:   metadata,
+				Attributes: map[string]string{"path": path},
+				Status:     coreauth.StatusActive,
+			})
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+
+			h := &Handler{cfg: cfg, authManager: manager}
+			router := gin.New()
+			router.POST("/bind", h.StartSIWCBind)
+			router.POST("/callback", h.PostOAuthCallbackV8)
+			router.GET("/status", h.GetAuthStatus)
+
+			wStart := siwcRequest(t, router, http.MethodPost, "/bind", map[string]any{"name": auth.FileName})
+			if wStart.Code != http.StatusOK {
+				t.Fatalf("start: %d %s", wStart.Code, wStart.Body.String())
+			}
+			state := ojson.GetBytes(wStart.Body.Bytes(), "state").String()
+			session, ok := store.Get(state)
+			if !ok || session.SIWC == nil {
+				t.Fatal("missing SIWC session")
+			}
+			t.Cleanup(func() { CancelOAuthSession(state) })
+
+			wCB := siwcRequest(t, router, http.MethodPost, "/callback", map[string]any{
+				"provider":     "codex",
+				"redirect_url": siwcCallbackURL(state),
+			})
+			if wCB.Code != http.StatusOK {
+				t.Fatalf("callback: %d %s", wCB.Code, wCB.Body.String())
+			}
+			waitSIWCExchange(t, session.SIWC)
+
+			status := performOAuthStatusRequest(t, router, state)
+			if status.Status != "ok" {
+				t.Fatalf("status = %#v, want ok", status)
+			}
+			if accountHits.Load() != tc.wantAccountHits {
+				t.Fatalf("accountHits = %d, want %d", accountHits.Load(), tc.wantAccountHits)
+			}
+			if globalHits.Load() != tc.wantGlobalHits {
+				t.Fatalf("globalHits = %d, want %d", globalHits.Load(), tc.wantGlobalHits)
+			}
+			if directHits.Load() != tc.wantDirectHits {
+				t.Fatalf("directHits = %d, want %d", directHits.Load(), tc.wantDirectHits)
+			}
+
+			got, okGot := manager.GetByID(auth.ID)
+			if !okGot || got == nil {
+				t.Fatal("missing auth after bind")
+			}
+			if got.Metadata["note"] != "keep-me" || got.Metadata["use_siwc"] != true {
+				t.Fatalf("unexpected memory metadata after bind: %#v", got.Metadata)
+			}
+			diskBytes, errRead := os.ReadFile(path)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			if !ojson.ValidBytes(diskBytes) {
+				t.Fatalf("invalid disk JSON: %s", string(diskBytes))
+			}
+			disk := ojson.ParseBytes(diskBytes)
+			if disk.Get("note").String() != "keep-me" || !disk.Get("use_siwc").Bool() {
+				t.Fatalf("unexpected disk metadata after bind: %s", string(diskBytes))
+			}
+			if tc.wantPreserveProxy {
+				if got.Metadata["proxy_url"] != diskProxyURL || disk.Get("proxy_url").String() != diskProxyURL {
+					t.Fatalf("proxy_url not preserved: meta=%v disk=%q want=%q", got.Metadata["proxy_url"], disk.Get("proxy_url").String(), diskProxyURL)
+				}
+				if authProxyURL != "" && got.ProxyURL != authProxyURL {
+					t.Fatalf("auth.ProxyURL not preserved: got=%q want=%q", got.ProxyURL, authProxyURL)
+				}
+			}
+			if tc.wantNoDiskProxyKey {
+				if disk.Get("proxy_url").Exists() {
+					t.Fatalf("unexpected proxy_url key written to disk: %s", disk.Get("proxy_url").Raw)
+				}
+				if authProxyURL != "" && got.ProxyURL != authProxyURL {
+					t.Fatalf("auth.ProxyURL not preserved: got=%q want=%q", got.ProxyURL, authProxyURL)
+				}
+			}
+		})
+	}
+
+	t.Run("rejects_invalid_account_proxy_url", func(t *testing.T) {
+		for _, badProxy := range []any{"://bad-proxy", "ftp://127.0.0.1:21", 12345} {
+			store := newOAuthSessionStore(time.Minute)
+			replaceOAuthSessionStoreForTest(t, store)
+
+			dir := t.TempDir()
+			path := filepath.Join(dir, "codex.json")
+			metadata := map[string]any{
+				"type":          "codex",
+				"access_token":  "outer",
+				"refresh_token": "outer-refresh",
+				"account_id":    "account",
+				"proxy_url":     badProxy,
+			}
+			if errWrite := codex.WriteJSONFileAtomic(path, metadata); errWrite != nil {
+				t.Fatal(errWrite)
+			}
+
+			cfg := &config.Config{AuthDir: dir}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			auth, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+				ID:         "codex.json",
+				FileName:   "codex.json",
+				Provider:   "codex",
+				Metadata:   metadata,
+				Attributes: map[string]string{"path": path},
+				Status:     coreauth.StatusActive,
+			})
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+
+			h := &Handler{cfg: cfg, authManager: manager}
+			router := gin.New()
+			router.POST("/bind", h.StartSIWCBind)
+
+			wStart := siwcRequest(t, router, http.MethodPost, "/bind", map[string]any{"name": auth.FileName})
+			if wStart.Code != http.StatusBadRequest {
+				t.Fatalf("bad proxy %v: status = %d, want 400; body = %s", badProxy, wStart.Code, wStart.Body.String())
+			}
+		}
+	})
 }

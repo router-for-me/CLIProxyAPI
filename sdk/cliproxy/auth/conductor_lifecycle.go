@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -32,21 +33,89 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// unwrapProviderExecutor follows ExecutorUnwrapper chains to the innermost
+// executor. A nil result or a cycle returns the last non-nil executor.
+// A visited bound prevents unbounded traversal on malformed chains.
+func unwrapProviderExecutor(executor ProviderExecutor) ProviderExecutor {
+	visited := make(map[ProviderExecutor]struct{})
+	for executor != nil {
+		// Only comparable values can be hashed; non-comparable innermost
+		// executors are returned directly to avoid a panic.
+		if !reflect.ValueOf(executor).Comparable() {
+			return executor
+		}
+		if _, seen := visited[executor]; seen {
+			return executor
+		}
+		visited[executor] = struct{}{}
+		unwrapper, ok := executor.(ExecutorUnwrapper)
+		if !ok || unwrapper == nil {
+			return executor
+		}
+		inner := unwrapper.Unwrap()
+		if inner == nil || sameExecutor(inner, executor) {
+			return executor
+		}
+		executor = inner
+	}
+	return nil
+}
+
+// sameExecutor reports whether two executors are the same published or owned
+// instance without panicking on non-comparable values.
+func sameExecutor(a, b ProviderExecutor) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !reflect.ValueOf(a).Comparable() || !reflect.ValueOf(b).Comparable() {
+		return false
+	}
+	return a == b
+}
+
+// ExecutorRevision returns the monotonic revision for a provider's executor
+// registration. Each RegisterExecutor and UnregisterExecutor advances it.
+func (m *Manager) ExecutorRevision(provider string) uint64 {
+	if m == nil {
+		return 0
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.executorRevisions[provider]
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
+	m.RegisterExecutorWithRevision(executor)
+}
+
+// RegisterExecutorWithRevision registers a provider executor and returns the
+// provider's executor revision captured under the same lock as publication,
+// so callers can correlate the revision with this exact registration.
+func (m *Manager) RegisterExecutorWithRevision(executor ProviderExecutor) uint64 {
 	if executor == nil {
-		return
+		return 0
 	}
 	provider := strings.TrimSpace(executor.Identifier())
 	if provider == "" {
-		return
+		return 0
 	}
 
 	var replaced ProviderExecutor
 	var toReschedule []string
+	var revision uint64
 	m.mu.Lock()
 	replaced = m.executors[provider]
 	m.executors[provider] = executor
+	if m.executorRevisions == nil {
+		m.executorRevisions = make(map[string]uint64)
+	}
+	m.executorRevisions[provider]++
+	revision = m.executorRevisions[provider]
 	for id, auth := range m.auths {
 		if auth != nil && strings.EqualFold(executorKeyFromAuth(auth), provider) {
 			toReschedule = append(toReschedule, id)
@@ -58,15 +127,33 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 		m.queueRefreshReschedule(id)
 	}
 
-	if replaced == nil || replaced == executor {
-		return
+	if replaced == nil || sameExecutor(replaced, executor) {
+		return revision
+	}
+	replacedOwned := unwrapProviderExecutor(replaced)
+	executorOwned := unwrapProviderExecutor(executor)
+	// Rewrapping the identical owned executor must not close its sessions.
+	if replacedOwned != nil && sameExecutor(replacedOwned, executorOwned) {
+		return revision
+	}
+	if replacedOwned != nil && executorOwned != nil && !sameExecutor(replacedOwned, executorOwned) {
+		if sharer, ok := replacedOwned.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executorOwned) {
+			return revision
+		}
 	}
 	if sharer, ok := replaced.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executor) {
-		return
+		return revision
 	}
 	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
 		closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+		return revision
 	}
+	if replacedOwned != nil && !sameExecutor(replacedOwned, replaced) {
+		if closer, ok := replacedOwned.(ExecutionSessionCloser); ok && closer != nil {
+			closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+		}
+	}
+	return revision
 }
 
 // UnregisterExecutor removes the executor associated with the provider key.
@@ -77,6 +164,10 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	}
 	m.mu.Lock()
 	delete(m.executors, provider)
+	if m.executorRevisions == nil {
+		m.executorRevisions = make(map[string]uint64)
+	}
+	m.executorRevisions[provider]++
 	m.mu.Unlock()
 }
 

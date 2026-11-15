@@ -1283,6 +1283,7 @@ type statusErr struct {
 	streamTruncated      bool
 	providerErrorPayload bool
 	transientRateLimit   bool
+	transientTransport   bool
 	tosViolation         bool
 	tosAppealURL         string
 	tosAppealURLText     string
@@ -1333,12 +1334,40 @@ func (e statusErr) TOSAppealMetadata() map[string]string {
 }
 
 // ErrorCode exposes the machine-readable classification for terminal TOS
-// violations so MarkResult can route them to the disabled credential path.
+// violations or transient non-credential failures so MarkResult routes them
+// to the appropriate credential state handler.
 func (e statusErr) ErrorCode() string {
 	if e.tosViolation {
 		return "tos_violation"
 	}
+	if e.transientTransport {
+		return cliproxyauth.ErrorCodeTransientTransport
+	}
 	return ""
+}
+
+// Zero output does not implicate credential health. Only a known abnormal
+// finish reason proves refusal; EOF without one must not permit replay.
+func newGeminiZeroOutputStatusErr(msg, finishReason string) statusErr {
+	return statusErr{
+		code:                 http.StatusBadGateway,
+		msg:                  msg,
+		transientTransport:   true,
+		providerErrorPayload: helps.IsGeminiZeroOutputAbnormalFinishReason(finishReason),
+	}
+}
+
+// newGeminiTranslatedClaudeErrorStatusErr preserves ErrorCodeTransientTransport
+// when a translated Claude error payload originates from zero-output
+// MALFORMED_FUNCTION_CALL (for instance when groundingChunks bypassed the
+// executor zero-output guard), while leaving all other errors coolable.
+func newGeminiTranslatedClaudeErrorStatusErr(msg string) statusErr {
+	if strings.EqualFold(strings.TrimSpace(ojson.Get(msg, "type").String()), "error") &&
+		strings.Contains(ojson.Get(msg, "error.message").String(), "MALFORMED_FUNCTION_CALL") {
+		// A translated error alone cannot prove the original provider refused generation.
+		return statusErr{code: http.StatusBadGateway, msg: msg, transientTransport: true}
+	}
+	return statusErr{code: http.StatusBadGateway, msg: msg}
 }
 
 const openAICompatTPMFallbackRetryAfter = time.Minute
