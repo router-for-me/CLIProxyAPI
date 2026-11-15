@@ -1,6 +1,7 @@
 package chat_completions
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -961,21 +962,44 @@ func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchema(t *testing.T) {
 	}`)
 
 	out, _ := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
-	system := ojson.GetBytesNoCopy(out, "system")
-	if !system.Exists() || !system.IsArray() || len(system.Array()) == 0 {
-		t.Fatalf("system blocks missing or empty. Output: %s", string(out))
+	schema := ojson.GetBytes(inputJSON, "response_format.json_schema.schema")
+	want := ojson.Parse(`{"type":"json_schema","schema":` + schema.Raw + `}`).Value()
+	if got := ojson.GetBytesNoCopy(out, "output_config.format").Value(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("output_config.format = %#v, want %#v. Output: %s", got, want, string(out))
 	}
+	if strings.Contains(ojson.GetBytesNoCopy(out, "system").Raw, "conforms strictly") {
+		t.Fatalf("schema instruction must not be sent beside output_config.format. Output: %s", string(out))
+	}
+}
 
-	foundSchemaInstruction := false
-	for _, block := range system.Array() {
-		text := block.Get("text").String()
-		if strings.Contains(text, "JSON") && strings.Contains(text, "facts") {
-			foundSchemaInstruction = true
-			break
-		}
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchemaKeepsEffort(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"reasoning_effort": "high",
+		"messages": [{"role": "user", "content": "Extract facts."}],
+		"response_format": {"type": "json_schema", "json_schema": {"name": "facts", "schema": {"type": "object", "properties": {"facts": {"type": "string"}}, "required": ["facts"]}}}
+	}`)
+	out, _ := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	if got := ojson.GetBytesNoCopy(out, "output_config.effort").String(); got != "high" {
+		t.Fatalf("output_config.effort = %q. Output: %s", got, string(out))
 	}
-	if !foundSchemaInstruction {
-		t.Fatalf("expected structured output instructions containing schema in system prompt. Output: %s", string(out))
+	if got := ojson.GetBytesNoCopy(out, "output_config.format.schema.required.0").String(); got != "facts" {
+		t.Fatalf("output_config.format missing beside effort. Output: %s", string(out))
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchemaWithoutSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Return JSON."}],
+		"response_format": {"type": "json_schema", "json_schema": {"name": "no_schema"}}
+	}`)
+	out, _ := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	if ojson.GetBytesNoCopy(out, "output_config.format").Exists() {
+		t.Fatalf("output_config.format without a schema. Output: %s", string(out))
+	}
+	if !strings.Contains(ojson.GetBytesNoCopy(out, "system").Raw, "valid JSON object") {
+		t.Fatalf("expected JSON object instruction in system prompt. Output: %s", string(out))
 	}
 }
 

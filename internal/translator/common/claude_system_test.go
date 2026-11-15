@@ -79,3 +79,35 @@ func TestSystemReminderText(t *testing.T) {
 		t.Fatalf("SystemReminderText(%q) = %q, want %q", text, got, want)
 	}
 }
+
+func TestBuildClaudeOutputFormat(t *testing.T) {
+	t.Run("chat completions json_schema passes the schema unchanged", func(t *testing.T) {
+		schema := `{"type":"object","properties":{"tags":{"type":"array","maxItems":3,"items":{"type":"string","pattern":"^[a-z]+$"}}},"required":["tags"],"additionalProperties":false}`
+		got, ok := BuildClaudeOutputFormat(ojson.Parse(`{"type":"json_schema","json_schema":{"name":"tags","strict":true,"schema":` + schema + `}}`))
+		if !ok || string(got) != `{"type":"json_schema","schema":`+schema+`}` {
+			t.Fatalf("got %s, %v", got, ok)
+		}
+	})
+
+	t.Run("responses json_schema passes the schema unchanged", func(t *testing.T) {
+		schema := `{"type":"object","properties":{"facts":{"type":"array","items":{"type":"string"}}},"required":["facts"]}`
+		got, ok := BuildClaudeOutputFormat(ojson.Parse(`{"type":"JSON_SCHEMA","name":"facts","strict":true,"schema":` + schema + `}`))
+		if !ok || string(got) != `{"type":"json_schema","schema":`+schema+`}` {
+			t.Fatalf("got %s, %v", got, ok)
+		}
+	})
+
+	for name, format := range map[string]string{
+		"missing":                              ``,
+		"text":                                 `{"type":"text"}`,
+		"json_object":                          `{"type":"json_object"}`,
+		"json_schema without schema":           `{"type":"json_schema","json_schema":{"name":"empty"}}`,
+		"json_schema with a non-object schema": `{"type":"json_schema","schema":"not a schema"}`,
+	} {
+		t.Run(name+" keeps the instruction path", func(t *testing.T) {
+			if got, ok := BuildClaudeOutputFormat(ojson.Parse(format)); ok || got != nil {
+				t.Fatalf("got %s, %v", got, ok)
+			}
+		})
+	}
+}

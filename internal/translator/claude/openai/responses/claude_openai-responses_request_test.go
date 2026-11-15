@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/MoeForge/moego/base64"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -2413,19 +2414,44 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 			}
 		}`)
 		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
-		system := ojson.GetBytesNoCopy(out, "system")
-		if !system.Exists() || len(system.Array()) == 0 {
-			t.Fatalf("system blocks missing. Output: %s", string(out))
+		schema := ojson.GetBytes(input, "text.format.schema")
+		want := ojson.Parse(`{"type":"json_schema","schema":` + schema.Raw + `}`).Value()
+		if got := ojson.GetBytesNoCopy(out, "output_config.format").Value(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("output_config.format = %#v, want %#v. Output: %s", got, want, string(out))
 		}
-		found := false
-		for _, block := range system.Array() {
-			if strings.Contains(block.Get("text").String(), "facts") {
-				found = true
-				break
-			}
+		if strings.Contains(ojson.GetBytesNoCopy(out, "system").Raw, "conforms strictly") {
+			t.Fatalf("schema instruction must not be sent beside output_config.format. Output: %s", string(out))
 		}
-		if !found {
-			t.Fatalf("expected structured schema instruction in system prompt. Output: %s", string(out))
+	})
+
+	t.Run("json_schema keeps output_config.effort", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"input": "Extract facts.",
+			"reasoning": {"effort": "high"},
+			"text": {"format": {"type": "json_schema", "name": "facts", "schema": {"type": "object", "properties": {"facts": {"type": "string"}}, "required": ["facts"]}}}
+		}`)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
+		if got := ojson.GetBytesNoCopy(out, "output_config.effort").String(); got != "high" {
+			t.Fatalf("output_config.effort = %q. Output: %s", got, string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "output_config.format.schema.required.0").String(); got != "facts" {
+			t.Fatalf("output_config.format missing beside effort. Output: %s", string(out))
+		}
+	})
+
+	t.Run("json_schema without a schema keeps the instruction", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4-6",
+			"input": "Return JSON.",
+			"text": {"format": {"type": "json_schema", "name": "no_schema"}}
+		}`)
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
+		if ojson.GetBytesNoCopy(out, "output_config.format").Exists() {
+			t.Fatalf("output_config.format without a schema. Output: %s", string(out))
+		}
+		if !strings.Contains(ojson.GetBytesNoCopy(out, "system").Raw, "valid JSON object") {
+			t.Fatalf("expected JSON object instruction in system prompt. Output: %s", string(out))
 		}
 	})
 
@@ -2454,6 +2480,9 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 		if !found {
 			t.Fatalf("expected JSON object instruction in system prompt. Output: %s", string(out))
 		}
+		if ojson.GetBytesNoCopy(out, "output_config.format").Exists() {
+			t.Fatalf("json_object must not become output_config.format. Output: %s", string(out))
+		}
 	})
 
 	t.Run("preserves_existing_instructions_and_precedence", func(t *testing.T) {
@@ -2475,26 +2504,20 @@ func TestConvertOpenAIResponsesRequestToClaude_TextFormatStructuredOutput(t *tes
 		}`)
 		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-4-6", input, false)
 		system := ojson.GetBytesNoCopy(out, "system")
-		if !system.Exists() || len(system.Array()) < 2 {
-			t.Fatalf("expected at least 2 system blocks. Output: %s", string(out))
-		}
 		hasInstructions := false
-		hasWinningSchema := false
 		hasFallbackObject := false
 		for _, block := range system.Array() {
 			text := block.Get("text").String()
 			if strings.Contains(text, "Be concise.") {
 				hasInstructions = true
 			}
-			if strings.Contains(text, "winning_schema") && strings.Contains(text, "Primary facts") && strings.Contains(text, "item") {
-				hasWinningSchema = true
-			}
 			if strings.Contains(text, "valid JSON object") {
 				hasFallbackObject = true
 			}
 		}
+		hasWinningSchema := ojson.GetBytesNoCopy(out, "output_config.format.schema.properties.item.type").String() == "string"
 		if !hasInstructions || !hasWinningSchema || hasFallbackObject {
-			t.Fatalf("expected instructions and winning schema without fallback. Output: %s", string(out))
+			t.Fatalf("expected instructions and the winning schema as output_config.format without fallback. Output: %s", string(out))
 		}
 	})
 }

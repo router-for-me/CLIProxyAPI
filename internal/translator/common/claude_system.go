@@ -62,6 +62,26 @@ func claudeSystemTextParts(content ojson.Result) []string {
 	return parts
 }
 
+// BuildClaudeOutputFormat converts a json_schema structured output setting (from
+// Chat Completions response_format or Responses text.format) into Claude's
+// output_config.format, which the Messages API enforces by constrained decoding.
+// The schema is passed unchanged. It reports false for other formats and for a
+// json_schema without a schema object; those keep the system prompt instruction
+// from BuildClaudeStructuredOutputInstruction.
+func BuildClaudeOutputFormat(format ojson.Result) ([]byte, bool) {
+	if !strings.EqualFold(strings.TrimSpace(format.Get("type").String()), "json_schema") {
+		return nil, false
+	}
+	schema := format.Get("json_schema.schema")
+	if !schema.Exists() {
+		schema = format.Get("schema")
+	}
+	if !schema.IsObject() {
+		return nil, false
+	}
+	return []byte(`{"type":"json_schema","schema":` + schema.Raw + `}`), true
+}
+
 // BuildClaudeStructuredOutputInstruction formats structured output settings
 // (from Chat Completions response_format or Responses text.format) as explicit
 // instructions to inject into Claude's system prompt.

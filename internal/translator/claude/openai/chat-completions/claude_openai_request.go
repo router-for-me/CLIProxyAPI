@@ -328,7 +328,9 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		messageBlocks = messageAccumulator.Messages()
 	}
 
-	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
+	if outputFormat, ok := common.BuildClaudeOutputFormat(root.Get("response_format")); ok {
+		_ = outDoc.SetRawBytes("output_config.format", outputFormat)
+	} else if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
 		systemBlock := []byte(`{"type":"text","text":""}`)
 		systemBlock, _ = ojson.SetBytes(systemBlock, "text", formatInstruction)
 		systemBlocks = append(systemBlocks, systemBlock)
