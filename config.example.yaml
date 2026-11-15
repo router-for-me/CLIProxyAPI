@@ -1380,6 +1380,12 @@ observability:
 plugins:
   enabled: false
   dir: "plugins"
+  # Plugin ABI selector. When empty (the default) plugins are loaded through the
+  # C ABI (c-shared) loader. Set to "go" to load Go-native plugins built with
+  # -buildmode=plugin instead; that path also works on musl-based systems,
+  # where dlopen refuses c-shared plugins because Go forces the Initial-Exec
+  # TLS model.
+  # abi: "go"
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:
   #   - "https://example.com/cliproxy-plugins/registry.json"
