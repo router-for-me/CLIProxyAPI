@@ -37,8 +37,9 @@ type GoPlugin interface {
 // the returned error instead of decoding an error envelope from the response
 // bytes.
 //
-// Callbacks are dispatched on the goroutine of the caller, and the host
-// serializes them per plugin instance.
+// Callbacks are dispatched on the goroutine of the caller. The host does not
+// serialize them per plugin instance, so a plugin that calls back from
+// several goroutines has to synchronize its own access to host state.
 type GoPluginCaller interface {
 	Call(ctx context.Context, method string, request []byte) ([]byte, error)
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"plugin"
+	"sync"
 
 	log "github.com/sirupsen/logrus"
 
@@ -44,6 +45,21 @@ func newGoPluginLoader() goPluginLoader {
 		shadow: acquireShadowPluginLoad,
 	}
 }
+
+// goPluginFailedPaths remembers the load paths of plugins that failed to
+// initialize.
+//
+// Go's plugin package stores a per-path placeholder before it runs the
+// plugin initializer and only closes that placeholder's loaded channel after
+// the initialization succeeded. A failed or panicking initialization leaves
+// a placeholder whose channel is never closed, so a second plugin.Open on the
+// same path blocks forever. Remembering the failed path keeps exactly that
+// broken build from being retried.
+//
+// The load path is content-addressed, so a plugin that is fixed gets a
+// different digest and therefore a different path: only the unchanged broken
+// build stays blocked, and a host restart is enough to pick up the fix.
+var goPluginFailedPaths sync.Map
 
 // openGoPluginGuarded runs plugin.Open behind a recovery boundary.
 //
@@ -97,16 +113,23 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 	if errShadow != nil {
 		return nil, errShadow
 	}
+	if _, failed := goPluginFailedPaths.Load(loadPath); failed {
+		releaseGuard()
+		return nil, fmt.Errorf("go plugin %s previously failed to initialize and cannot be retried in this process; fix the plugin and restart the host", file.Path)
+	}
 	p, err := openGoPluginGuarded(open, loadPath)
 	releaseGuard()
 	if err != nil {
+		goPluginFailedPaths.Store(loadPath, struct{}{})
 		return nil, fmt.Errorf("go plugin open %s: %w (hint: build the plugin with -buildmode=plugin, and make sure the host and the plugin share the same Go toolchain, GOOS/GOARCH, build tags and dependency graph; building both inside one go.work is the supported layout)", file.Path, err)
 	}
 	if p == nil {
+		goPluginFailedPaths.Store(loadPath, struct{}{})
 		return nil, fmt.Errorf("go plugin open %s returned no plugin handle", file.Path)
 	}
 	sym, err := lookup(p, "New")
 	if err != nil {
+		goPluginFailedPaths.Store(loadPath, struct{}{})
 		return nil, fmt.Errorf("go plugin %s has no New symbol: %w (hint: the plugin must export New(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error))", file.Path, err)
 	}
 

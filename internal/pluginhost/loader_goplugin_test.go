@@ -169,6 +169,7 @@ var errFactoryBoom = errors.New("boom")
 // initializer panics is reported as a load error instead of terminating the
 // host process.
 func TestGoPluginLoaderRecoversInitPanic(t *testing.T) {
+	resetGoPluginFailures(t)
 	h := &Host{loading: map[string]*pluginLoadRequest{}}
 	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
 
@@ -183,7 +184,7 @@ func TestGoPluginLoaderRecoversInitPanic(t *testing.T) {
 		},
 	}
 
-	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent.so"}, h)
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent-init-panic.so"}, h)
 	if err == nil {
 		t.Fatal("expected the initializer panic to surface as an error")
 	}
@@ -199,6 +200,7 @@ func TestGoPluginLoaderRecoversInitPanic(t *testing.T) {
 // factory is reported as a load error and does not leave a live callback
 // instance behind.
 func TestGoPluginLoaderRecoversFactoryPanic(t *testing.T) {
+	resetGoPluginFailures(t)
 	h := &Host{loading: map[string]*pluginLoadRequest{}}
 	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
 
@@ -213,7 +215,7 @@ func TestGoPluginLoaderRecoversFactoryPanic(t *testing.T) {
 		},
 	}
 
-	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent.so"}, h)
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent-factory-panic.so"}, h)
 	if err == nil {
 		t.Fatal("expected the factory panic to surface as an error")
 	}
@@ -306,6 +308,7 @@ func TestGoPluginLoaderOpensFromShadowPath(t *testing.T) {
 // nil plugin without an error is reported as a load failure instead of
 // producing a client that fails every later call.
 func TestGoPluginLoaderRejectsNilInstance(t *testing.T) {
+	resetGoPluginFailures(t)
 	h := &Host{loading: map[string]*pluginLoadRequest{}}
 	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
 
@@ -319,7 +322,7 @@ func TestGoPluginLoaderRejectsNilInstance(t *testing.T) {
 		},
 	}
 
-	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent.so"}, h)
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent-nil-instance.so"}, h)
 	if err == nil {
 		t.Fatal("expected a nil plugin instance to be rejected")
 	}
@@ -329,4 +332,99 @@ func TestGoPluginLoaderRejectsNilInstance(t *testing.T) {
 	if !strings.Contains(err.Error(), "no plugin instance") {
 		t.Fatalf("error %q does not explain the nil instance", err)
 	}
+}
+
+// TestGoPluginLoaderDoesNotRetryFailedPath verifies that a plugin whose
+// initialization failed is not opened again. Go's plugin package leaves a
+// per-path placeholder behind whose channel is never closed when the
+// initialization fails, so a second plugin.Open on the same path blocks
+// forever.
+func TestGoPluginLoaderDoesNotRetryFailedPath(t *testing.T) {
+	resetGoPluginFailures(t)
+	h := &Host{loading: map[string]*pluginLoadRequest{}}
+	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
+
+	const failedPath = "/nonexistent-retry.so"
+	openCalls := 0
+	loader := goPluginLoader{
+		shadow: passthroughShadow,
+		open: func(string) (*plugin.Plugin, error) {
+			openCalls++
+			panic("init exploded")
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			t.Fatal("lookup must not run after a failed open")
+			return nil, nil
+		},
+	}
+
+	if _, err := loader.Open(pluginFile{ID: "p", Path: failedPath}, h); err == nil {
+		t.Fatal("expected the initializer panic to surface as an error")
+	}
+	if openCalls != 1 {
+		t.Fatalf("open was called %d times, want 1", openCalls)
+	}
+
+	// A second attempt must fail immediately instead of hanging in
+	// plugin.Open, and it must not touch the plugin again.
+	_, err := loader.Open(pluginFile{ID: "p", Path: failedPath}, h)
+	if err == nil {
+		t.Fatal("expected the retry of a failed plugin path to fail")
+	}
+	if !strings.Contains(err.Error(), "cannot be retried") {
+		t.Fatalf("error %q does not explain that the path cannot be retried", err)
+	}
+	if openCalls != 1 {
+		t.Fatalf("open was called %d times after the retry, want 1", openCalls)
+	}
+}
+
+// TestGoPluginLoaderRetriesDifferentBuild verifies that a fixed plugin is
+// picked up: the load path is content-addressed, so a different build has a
+// different path and is not blocked by the failure of the previous one.
+func TestGoPluginLoaderRetriesDifferentBuild(t *testing.T) {
+	resetGoPluginFailures(t)
+	h := &Host{loading: map[string]*pluginLoadRequest{}}
+	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
+
+	paths := []string{"/shadow/build-one.so", "/shadow/build-two.so"}
+	index := 0
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			path := paths[index]
+			index++
+			return path, func() {}, nil
+		},
+		open: func(path string) (*plugin.Plugin, error) {
+			if path == paths[0] {
+				panic("init exploded")
+			}
+			return &plugin.Plugin{}, nil
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return plugin.Symbol(func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+				return &fakeGoPlugin{}, nil
+			}), nil
+		},
+	}
+
+	if _, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h); err == nil {
+		t.Fatal("expected the initializer panic to surface as an error")
+	}
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h)
+	if err != nil {
+		t.Fatalf("the fixed build must load again: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected a client for the fixed build")
+	}
+}
+
+// resetGoPluginFailures clears the process-wide record of failed plugin load
+// paths. The record mirrors Go's own per-path plugin cache, so it survives
+// across tests unless it is reset explicitly.
+func resetGoPluginFailures(t *testing.T) {
+	t.Helper()
+	goPluginFailedPaths.Clear()
+	t.Cleanup(func() { goPluginFailedPaths.Clear() })
 }
