@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"plugin"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -33,6 +35,36 @@ func newGoPluginLoader() goPluginLoader {
 	}
 }
 
+// openGoPluginGuarded runs plugin.Open behind a recovery boundary.
+//
+// plugin.Open executes the plugin package initializer inside the host
+// process. A panicking initializer would otherwise tear down the whole
+// server, because the loader runs in the goroutine started by
+// Host.startPluginLoad. The C ABI path has no equivalent risk because dlopen
+// never runs plugin Go code.
+func openGoPluginGuarded(open func(path string) (*plugin.Plugin, error), path string) (p *plugin.Plugin, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			p = nil
+			err = fmt.Errorf("panic during plugin initialization: %v", recovered)
+		}
+	}()
+	return open(path)
+}
+
+// callGoPluginFactoryGuarded runs the plugin factory behind a recovery
+// boundary so a panicking New() is reported as a load error instead of
+// terminating the host process.
+func callGoPluginFactoryGuarded(factory func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error), caller pluginapi.GoPluginCaller) (inst pluginapi.GoPlugin, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			inst = nil
+			err = fmt.Errorf("panic in plugin factory: %v", recovered)
+		}
+	}()
+	return factory(caller)
+}
+
 func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
 	open := l.open
 	if open == nil {
@@ -43,7 +75,7 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 		lookup = (*plugin.Plugin).Lookup
 	}
 
-	p, err := open(file.Path)
+	p, err := openGoPluginGuarded(open, file.Path)
 	if err != nil {
 		return nil, fmt.Errorf("go plugin open %s: %w (hint: host and plugin must share the same Go toolchain and dependency graph; build both within one go.work)", file.Path, err)
 	}
@@ -65,7 +97,7 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 	host.registerHostCallbackInstance(file.ID, instance)
 
 	caller := goPluginCaller{host: host, pluginID: file.ID, instance: instance}
-	inst, err := factory(caller)
+	inst, err := callGoPluginFactoryGuarded(factory, caller)
 	if err != nil {
 		// Mark the callback instance closed and release per-plugin HTTP/stream
 		// operations so a failed New() cannot leave a live callback owner that
@@ -100,12 +132,21 @@ func (c *goPluginClient) Call(ctx context.Context, method string, request []byte
 // Like the C ABI client, the host must not issue calls concurrently with
 // (or after) retirement; the plugin host serializes plugin lifecycle, so
 // the instance field is not guarded by a mutex here either.
+//
+// The plugin call is isolated: a plugin that panics while shutting down must
+// not take the host process down with it.
 func (c *goPluginClient) Shutdown() {
 	if c == nil || c.inst == nil {
 		return
 	}
-	c.inst.Shutdown()
+	inst := c.inst
 	c.inst = nil
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Errorf("pluginhost: plugin %s panicked during shutdown: %v", c.pluginID, recovered)
+		}
+	}()
+	inst.Shutdown()
 }
 
 // callbackInstance satisfies the optional interface in client_guard.go so

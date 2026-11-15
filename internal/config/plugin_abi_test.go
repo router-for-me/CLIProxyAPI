@@ -1,7 +1,7 @@
 package config
 
 import (
-	"encoding/json"
+	"reflect"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -30,19 +30,19 @@ func TestPluginsConfigABIField(t *testing.T) {
 		}
 	})
 
-	t.Run("json tag round trip", func(t *testing.T) {
-		cfg := Config{}
-		cfg.Plugins.ABI = "go"
-		raw, err := json.Marshal(cfg.Plugins)
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
+	t.Run("abi field carries the expected wire tags", func(t *testing.T) {
+		// The struct tags are asserted directly instead of round-tripping
+		// through a JSON library: the repository requires JSON handling to go
+		// through MoeForge/moego, and a tag check needs no JSON at all.
+		field, ok := reflect.TypeOf(PluginsConfig{}).FieldByName("ABI")
+		if !ok {
+			t.Fatal("PluginsConfig has no ABI field")
 		}
-		var decoded PluginsConfig
-		if err := json.Unmarshal(raw, &decoded); err != nil {
-			t.Fatalf("unmarshal: %v", err)
+		if got := field.Tag.Get("yaml"); got != "abi,omitempty" {
+			t.Fatalf("ABI yaml tag = %q, want %q", got, "abi,omitempty")
 		}
-		if decoded.ABI != "go" {
-			t.Fatalf("round-trip ABI = %q, want %q", decoded.ABI, "go")
+		if got := field.Tag.Get("json"); got != "abi,omitempty" {
+			t.Fatalf("ABI json tag = %q, want %q", got, "abi,omitempty")
 		}
 	})
 }

@@ -1,9 +1,12 @@
+//go:build cgo && (linux || darwin || freebsd)
+
 package pluginhost
 
 import (
 	"context"
 	"errors"
 	"plugin"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -165,3 +168,91 @@ func TestGoPluginLoaderNewErrorCleansUp(t *testing.T) {
 }
 
 var errFactoryBoom = errors.New("boom")
+
+// TestGoPluginLoaderRecoversInitPanic verifies that a plugin whose package
+// initializer panics is reported as a load error instead of terminating the
+// host process.
+func TestGoPluginLoaderRecoversInitPanic(t *testing.T) {
+	h := &Host{loading: map[string]*pluginLoadRequest{}}
+	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
+
+	loader := goPluginLoader{
+		open: func(string) (*plugin.Plugin, error) {
+			panic("init exploded")
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			t.Fatal("lookup must not run after a failed open")
+			return nil, nil
+		},
+	}
+
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent.so"}, h)
+	if err == nil {
+		t.Fatal("expected the initializer panic to surface as an error")
+	}
+	if client != nil {
+		t.Fatal("expected no client when the plugin initializer panics")
+	}
+	if !strings.Contains(err.Error(), "panic during plugin initialization") {
+		t.Fatalf("error %q does not mention the recovered panic", err)
+	}
+}
+
+// TestGoPluginLoaderRecoversFactoryPanic verifies that a panicking New()
+// factory is reported as a load error and does not leave a live callback
+// instance behind.
+func TestGoPluginLoaderRecoversFactoryPanic(t *testing.T) {
+	h := &Host{loading: map[string]*pluginLoadRequest{}}
+	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
+
+	panicking := func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+		panic("factory exploded")
+	}
+	loader := goPluginLoader{
+		open: func(string) (*plugin.Plugin, error) { return &plugin.Plugin{}, nil },
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return plugin.Symbol(panicking), nil
+		},
+	}
+
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent.so"}, h)
+	if err == nil {
+		t.Fatal("expected the factory panic to surface as an error")
+	}
+	if client != nil {
+		t.Fatal("expected no client when the plugin factory panics")
+	}
+	if !strings.Contains(err.Error(), "panic in plugin factory") {
+		t.Fatalf("error %q does not mention the recovered panic", err)
+	}
+	for instance := range h.loading["p"].callbackInstances {
+		if !instance.closed.Load() {
+			t.Fatal("callback instance must be marked closed after a factory panic")
+		}
+	}
+}
+
+// TestGoPluginClientShutdownRecoversPanic verifies that a plugin panicking
+// during shutdown cannot take the host process down, and that the client is
+// detached even when the panic happens.
+func TestGoPluginClientShutdownRecoversPanic(t *testing.T) {
+	c := &goPluginClient{
+		pluginID: "p",
+		inst:     panickingPlugin{},
+	}
+	c.Shutdown()
+	if c.inst != nil {
+		t.Fatal("client must be detached after shutdown")
+	}
+}
+
+// panickingPlugin panics when shut down.
+type panickingPlugin struct{}
+
+func (p panickingPlugin) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (p panickingPlugin) Shutdown() {
+	panic("shutdown exploded")
+}
