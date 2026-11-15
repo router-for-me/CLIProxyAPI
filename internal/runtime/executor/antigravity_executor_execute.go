@@ -217,7 +217,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bodyBytes, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, bodyBytes)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, converted); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)
@@ -555,7 +555,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, resp.Payload, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, aggregatedPayload)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, converted); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)

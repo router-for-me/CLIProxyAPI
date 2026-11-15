@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,10 @@ func roundTripUtlsConnection(req *http.Request, tlsConn *tls.UConn) (*http.Respo
 			break
 		}
 		closeConnection = h2Conn.Close
+		// ClientConn.RoundTrip bypasses Transport's connection-pool trace hook.
+		if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{Conn: tlsConn})
+		}
 		resp, err = h2Conn.RoundTrip(req)
 	case "", "http/1.1":
 		// Reuse the already-handshaken uTLS connection. A fresh, non-pooling

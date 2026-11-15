@@ -986,7 +986,7 @@ func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
 			requests:          4,
 			wantCalls:         4,
 			wantCooled:        0,
-			wantLastErrorText: "upstream stream closed before [DONE]",
+			wantLastErrorText: "upstream_outcome_unknown",
 			forbidAuthUnavail: true,
 		},
 		{
@@ -996,7 +996,7 @@ func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
 			requests:          1,
 			wantCalls:         1,
 			wantCooled:        0,
-			wantLastErrorText: "upstream stream closed before [DONE]",
+			wantLastErrorText: "upstream_outcome_unknown",
 			forbidAuthUnavail: true,
 		},
 		{
@@ -1071,6 +1071,12 @@ func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
 				cancel()
 				if observedErr == nil {
 					t.Fatalf("request %d succeeded unexpectedly", reqIdx+1)
+				}
+				if tc.status == http.StatusOK {
+					assertSubmissionUnknown(t, observedErr)
+					if calls.Load() != int32(reqIdx+1) {
+						t.Fatalf("request replayed: calls=%d requests=%d", calls.Load(), reqIdx+1)
+					}
 				}
 				lastObservedErr = observedErr
 			}

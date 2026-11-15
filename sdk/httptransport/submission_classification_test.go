@@ -21,6 +21,7 @@ func TestSubmissionAcceptedErrorsDefaultToUnknown(t *testing.T) {
 		err      error
 		provider bool
 	}{
+		{"unsent continuation", BeforeSubmission(errors.New("local rejection before frame write")), true},
 		{"local validation", errors.New("invalid response"), false},
 		{"local translation", errors.New("invalid tool arguments"), false},
 		{"local error-shaped JSON", errors.New(`{"error":{"message":"local translation failed"}}`), false},
@@ -55,6 +56,9 @@ func TestSubmissionAcceptedErrorsDefaultToUnknown(t *testing.T) {
 			}
 			if ClassifySubmissionError(ctx, parsedProviderFailure{errors.New("later refusal")}) != classified {
 				t.Fatal("provider payload cleared an already terminal attempt")
+			}
+			if ClassifySubmissionError(ctx, BeforeSubmission(errors.New("later local rejection"))) != classified {
+				t.Fatal("local rejection cleared an already terminal attempt")
 			}
 		})
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,7 +102,9 @@ func TestIssue6332AntigravityResponsesDelivery(t *testing.T) {
 			capture := &issue6332Capture{records: make(chan usage.Record, 8), authID: t.Name()}
 			usage.RegisterNamedPlugin(t.Name(), capture)
 			t.Cleanup(func() { usage.RegisterNamedPlugin(t.Name(), responsesUsageNop{}) })
+			var submissions atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				submissions.Add(1)
 				w.Header().Set("Content-Type", "text/event-stream")
 				finish := `,"finishReason":"STOP"`
 				if tc.readFailure {
@@ -169,7 +172,12 @@ func TestIssue6332AntigravityResponsesDelivery(t *testing.T) {
 						wantError = io.ErrShortWrite.Error()
 					}
 					if tc.readFailure {
-						wantError = io.ErrUnexpectedEOF.Error()
+						wantError = "upstream_outcome_unknown"
+					}
+				}
+				if tc.readFailure {
+					if submissions.Load() != 1 || ojson.Get(completion.Error, "error.retryable").Raw != "false" {
+						t.Fatalf("truncated generation replayed or lost terminal outcome: calls=%d error=%s", submissions.Load(), completion.Error)
 					}
 				}
 				if completion.Outcome != wantOutcome || !strings.Contains(completion.Error, wantError) || (wantError == "" && completion.Error != "") {

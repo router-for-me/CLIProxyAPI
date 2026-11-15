@@ -459,7 +459,9 @@ func TestApplyPatchRepairResponsesSourceTerminalNonStream(t *testing.T) {
 				continue
 			}
 			t.Run(provider+"/"+mode, func(t *testing.T) {
+				var submissions atomic.Int32
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					submissions.Add(1)
 					_, _ = io.WriteString(w, task6RepairSSE(task6RepairSource(mode)))
 				}))
 				defer server.Close()
@@ -470,9 +472,7 @@ func TestApplyPatchRepairResponsesSourceTerminalNonStream(t *testing.T) {
 				if len(response.Payload) != 0 {
 					t.Errorf("failed source returned payload: %s", response.Payload)
 				}
-				wantGatewayMsg := "Invalid apply_patch tool arguments received from upstream."
 				if provider == "xai" && mode == "empty" {
-					wantGatewayMsg = xaiEmptyStreamMessage
 					if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusBadGateway || errExecute.Error() != xaiEmptyStreamMessage {
 						t.Fatalf("expected xai empty stream 502, got %T %v", errExecute, errExecute)
 					}
@@ -482,9 +482,14 @@ func TestApplyPatchRepairResponsesSourceTerminalNonStream(t *testing.T) {
 				checkUsage()
 				auth.ID += "-gateway"
 				checkGatewayUsage := task6CaptureFailureUsage(t, auth.ID)
+				beforeGateway := submissions.Load()
 				result := task6Gateway(t, exec, auth, false)
-				if result.Code != http.StatusBadGateway || !strings.Contains(result.Body.String(), wantGatewayMsg) {
-					t.Errorf("non-stream gateway did not return clean 502: %d %s", result.Code, result.Body)
+				body := result.Body.String()
+				if result.Code != http.StatusBadGateway || ojson.Get(body, "error.code").String() != "upstream_outcome_unknown" || ojson.Get(body, "error.retryable").Raw != "false" || result.Header().Get("x-should-retry") != "false" {
+					t.Errorf("incomplete generation lost terminal unknown outcome: %d %s", result.Code, body)
+				}
+				if submissions.Load()-beforeGateway != 1 {
+					t.Fatalf("incomplete generation replayed: calls=%d", submissions.Load()-beforeGateway)
 				}
 				checkGatewayUsage()
 			})

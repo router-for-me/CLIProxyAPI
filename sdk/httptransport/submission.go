@@ -71,7 +71,8 @@ func IsOutcomeUnknown(err error) bool {
 }
 
 // ClassifySubmissionError treats every failure after acceptance as ambiguous
-// unless the executor positively parsed a provider error payload.
+// unless the executor positively parsed a provider refusal or proved the outcome
+// is known, including a local rejection before a new frame was submitted.
 func ClassifySubmissionError(ctx context.Context, err error) error {
 	return classifySubmissionError(ctx, err, false)
 }
@@ -96,12 +97,30 @@ func classifySubmissionError(ctx context.Context, err error, incomplete bool) er
 	if !state.accepted.Load() {
 		return err
 	}
+	var known interface{ IsSubmissionOutcomeKnown() bool }
+	if !incomplete && !state.redirected.Load() && errors.As(err, &known) && known.IsSubmissionOutcomeKnown() {
+		return err
+	}
 	var provider interface{ IsProviderErrorPayload() bool }
 	if !incomplete && !state.redirected.Load() && errors.As(err, &provider) && provider.IsProviderErrorPayload() {
 		return err
 	}
 	return state.fail(err)
 }
+
+// BeforeSubmission preserves a local rejection of a new frame even when the
+// connection previously carried a different, accepted generation.
+func BeforeSubmission(err error) error {
+	if err == nil {
+		return nil
+	}
+	return beforeSubmissionError{err}
+}
+
+type beforeSubmissionError struct{ error }
+
+func (e beforeSubmissionError) Unwrap() error                { return e.error }
+func (beforeSubmissionError) IsSubmissionOutcomeKnown() bool { return true }
 
 // WriteGeneration guards a non-HTTP generation frame. Once the writer runs,
 // an error cannot prove that no bytes left. Check pre-write failures before
@@ -168,16 +187,26 @@ func (s *submissionTransport) RoundTrip(req *http.Request) (*http.Response, erro
 			return s.next.RoundTrip(req)
 		}
 	}
-	var written, responseStarted atomic.Bool
+	var connected, written, responseStarted atomic.Bool
 	trace := &httptrace.ClientTrace{
-		// Even a partial body can be accepted by an upstream that replies early.
-		WroteHeaders: func() { written.Store(true) },
-		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			if info.Err == nil {
+		GetConn: func(string) { connected.Store(false) },
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+		// A proxy CONNECT can emit write traces before the generation connection is ready.
+		WroteHeaders: func() {
+			if connected.Load() {
 				written.Store(true)
 			}
 		},
-		GotFirstResponseByte: func() { responseStarted.Store(true) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if connected.Load() && info.Err == nil {
+				written.Store(true)
+			}
+		},
+		GotFirstResponseByte: func() {
+			if connected.Load() {
+				responseStarted.Store(true)
+			}
+		},
 	}
 	cloned := req.Clone(httptrace.WithClientTrace(req.Context(), trace))
 	// A replayable body lets net/http repeat a POST with an Idempotency-Key inside

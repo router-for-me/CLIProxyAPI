@@ -592,7 +592,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(ctx context.Context, au
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, data)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, out); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)
@@ -763,7 +763,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(ctx context.Context, auth *clip
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, data)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, out); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)
@@ -2032,7 +2032,7 @@ func (e *GeminiVertexExecutor) executeInteractions(ctx context.Context, auth *cl
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(sdktranslator.FormatInteractions, data)}
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
 	if targetFormat == sdktranslator.FormatOpenAIResponse {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	tls "github.com/refraction-networking/utls"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
 
 type alpnTestConn struct {
@@ -217,4 +218,31 @@ func TestUtlsHTTP1FailureDoesNotReplayPost(t *testing.T) {
 		t.Fatalf("request count = %d, want exactly one", requests.Load())
 	}
 	tracked.requireClosed(t)
+}
+
+func TestUtlsSubmissionFailureAfterReadyConnectionIsUnknown(t *testing.T) {
+	for _, protocol := range []string{"h2", "http/1.1", ""} {
+		t.Run(protocol, func(t *testing.T) {
+			var submissions atomic.Int32
+			tlsConn, tracked, serverURL := newALPNTestConnection(t, protocol, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+					return
+				}
+				submissions.Add(1)
+				panic(http.ErrAbortHandler)
+			}))
+			ctx := httptransport.WithSubmissionTracking(t.Context())
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, serverURL, strings.NewReader("offer"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := httptransport.GenerationTransport(ctx, roundTripperFunc(func(req *http.Request) (*http.Response, error) { return roundTripUtlsConnection(req, tlsConn) }))
+			_, err = transport.RoundTrip(req)
+			if submissions.Load() != 1 || !httptransport.IsOutcomeUnknown(err) {
+				t.Fatalf("submitted=%d err=%v, want one submission and unknown outcome", submissions.Load(), err)
+			}
+			tracked.requireClosed(t)
+		})
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
@@ -32,14 +33,17 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 		t.Fatal("OpenAI fixture did not reach its error parser")
 	}
 	for _, tc := range []struct {
-		name     string
-		err      error
-		provider bool
+		name  string
+		err   error
+		known bool
 	}{
 		{"Gemini known zero output", newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage("gemini", "MALFORMED_FUNCTION_CALL"), "MALFORMED_FUNCTION_CALL"), true},
 		{"Gemini signature-only EOF", newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage("gemini", ""), ""), false},
 		{"Gemini translated malformed failure", newGeminiTranslatedClaudeErrorStatusErr(`{"type":"error","error":{"message":"MALFORMED_FUNCTION_CALL"}}`), false},
 		{"Gemini translated local failure", newGeminiTranslatedClaudeErrorStatusErr(`{"type":"error","error":{"message":"local failure"}}`), false},
+		{"known completed local validation", statusErr{code: 502, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: true}, true},
+		{"known Devin zero-output EOS", newDevinEmptyCompletionError(), true},
+		{"Devin pre-output EOF without EOS", newDevinTransientStreamError("missing EOS", io.EOF), false},
 		{"local translation", statusErr{code: 502, msg: helps.ApplyPatchUpstreamErrorMessage}, false},
 		{"local error envelope", statusErr{code: 502, msg: `{"error":{"message":"local failure"}}`}, false},
 		{"Claude local validation", validateClaudeStreamingResponse([]byte("data: {\"type\":\"message_start\",\"message\":{}}\n\n")), false},
@@ -78,13 +82,20 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 				t.Fatal(errClose)
 			}
 			classified := httptransport.ClassifySubmissionError(ctx, tc.err)
-			if tc.provider {
+			if tc.known {
 				if classified != tc.err {
-					t.Fatalf("parsed provider error changed: %v", classified)
+					t.Fatalf("known outcome error changed: %v", classified)
 				}
 			} else if !httptransport.IsOutcomeUnknown(classified) {
 				t.Fatalf("local executor error escaped accepted default: %v", classified)
 			}
 		})
+	}
+}
+
+func assertSubmissionUnknown(t *testing.T, err error) {
+	t.Helper()
+	if err == nil || !httptransport.IsOutcomeUnknown(err) || !ojson.Valid(err.Error()) || ojson.Get(err.Error(), "error.code").String() != "upstream_outcome_unknown" || ojson.Get(err.Error(), "error.retryable").Raw != "false" {
+		t.Fatalf("error=%v, want terminal nonretryable unknown outcome", err)
 	}
 }

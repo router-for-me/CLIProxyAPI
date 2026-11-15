@@ -8554,8 +8554,15 @@ func TestXAIExecutorExecuteCustomApplyPatchEmptyAndIncompleteStreamsDoNotCooldow
 			if !errors.As(errFirst, &statusErrVal) || statusErrVal.StatusCode() != tc.wantStatus {
 				t.Fatalf("first error status = %v (%T), want %d", errFirst, errFirst, tc.wantStatus)
 			}
-			if !strings.Contains(errFirst.Error(), tc.wantMessage) {
-				t.Fatalf("first error = %q, want substring %q", errFirst.Error(), tc.wantMessage)
+			if tc.name == "raw_json_error_with_custom_apply_patch" {
+				if !strings.Contains(errFirst.Error(), tc.wantMessage) {
+					t.Fatalf("provider refusal changed: %v", errFirst)
+				}
+			} else {
+				assertSubmissionUnknown(t, errFirst)
+			}
+			if upstreamCalls.Load() != 1 {
+				t.Fatalf("first request replayed: calls=%d", upstreamCalls.Load())
 			}
 
 			if tc.name == "raw_json_error_with_custom_apply_patch" {
@@ -8573,6 +8580,9 @@ func TestXAIExecutorExecuteCustomApplyPatchEmptyAndIncompleteStreamsDoNotCooldow
 			}, opts)
 			if errSecond != nil {
 				t.Fatalf("subsequent manager.Execute() failed on uncooled credential: %v", errSecond)
+			}
+			if upstreamCalls.Load() != 2 {
+				t.Fatalf("independent follow-up request calls=%d, want 2", upstreamCalls.Load())
 			}
 			if got := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "recovered" {
 				t.Fatalf("subsequent response text = %q, want %q; payload=%s", got, "recovered", resp.Payload)

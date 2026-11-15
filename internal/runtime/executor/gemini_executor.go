@@ -281,7 +281,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, data)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, out); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)
@@ -808,7 +808,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(sdktranslator.FormatInteractions, data)}
 	}
 	reporter.Publish(ctx, helps.ParseInteractionsUsage(data))
 	if targetFormat == sdktranslator.FormatOpenAIResponse {

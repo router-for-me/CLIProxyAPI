@@ -19,14 +19,13 @@ import (
 	openaihandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-// TestCodexStreamDisconnectAfterHeadersFailsOver reproduces issue #6247:
-// When upstream A sends HTTP 200 headers and closes the connection before emitting
-// any SSE bytes, the gateway must fail over to credential B instead of aborting
-// with invalid_request_error.
-func TestCodexStreamDisconnectAfterHeadersFailsOver(t *testing.T) {
+// A generation accepted with HTTP 200 is ambiguous without a terminal response,
+// even when it emitted no SSE bytes. Credential B must not receive a replay.
+func TestCodexStreamDisconnectAfterHeadersDoesNotReplay(t *testing.T) {
 	for _, buffering := range []bool{false, true} {
 		name := "unbuffered"
 		if buffering {
@@ -109,31 +108,27 @@ func TestCodexStreamDisconnectAfterHeadersFailsOver(t *testing.T) {
 			}
 
 			streamResult, errStream := manager.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
-			if errStream != nil {
-				t.Fatalf("ExecuteStream failed instead of failing over: %v", errStream)
-			}
-			if streamResult == nil {
-				t.Fatal("expected non-nil streamResult after failover")
-			}
-
-			var streamBody string
-			for chunk := range streamResult.Chunks {
-				if chunk.Err != nil {
-					t.Fatalf("unexpected chunk error: %v", chunk.Err)
+			observedErr := errStream
+			if streamResult != nil {
+				for chunk := range streamResult.Chunks {
+					if chunk.Err != nil {
+						observedErr = chunk.Err
+					}
+					if strings.Contains(string(chunk.Payload), "MOCK_B") {
+						t.Fatal("ambiguous request was replayed on credential B")
+					}
 				}
-				streamBody += string(chunk.Payload)
 			}
-
-			if !strings.Contains(streamBody, "MOCK_B") || !strings.Contains(streamBody, "response.completed") {
-				t.Fatalf("stream body missing expected completion from B: %s", streamBody)
+			if !httptransport.IsOutcomeUnknown(observedErr) {
+				t.Fatalf("error=%v, want terminal unknown outcome", observedErr)
 			}
 
 			mu.Lock()
 			gotAttempts := append([]string(nil), attempts...)
 			mu.Unlock()
 
-			if len(gotAttempts) != 2 || gotAttempts[0] != "account-a" || gotAttempts[1] != "account-b" {
-				t.Fatalf("attempts = %v, want [account-a, account-b]", gotAttempts)
+			if len(gotAttempts) != 1 || gotAttempts[0] != "account-a" {
+				t.Fatalf("attempts = %v, want [account-a]", gotAttempts)
 			}
 		})
 	}
@@ -310,9 +305,9 @@ func TestCodexStreamDisconnectAfterOutputDoesNotFailOver(t *testing.T) {
 	}
 }
 
-// TestCodexStreamAbnormalDisconnectBeforeOutputFailsOver tests that abnormal connection
-// termination (e.g. TCP reset / connection close via Hijacker) before output also fails over.
-func TestCodexStreamAbnormalDisconnectBeforeOutputFailsOver(t *testing.T) {
+// An abnormal disconnect after HTTP 200 leaves the accepted generation ambiguous,
+// even before output. A second credential must not receive the request.
+func TestCodexStreamAbnormalDisconnectBeforeOutputDoesNotReplay(t *testing.T) {
 	const model = "gpt-6-astra"
 	var mu sync.Mutex
 	var attempts []string
@@ -391,30 +386,26 @@ func TestCodexStreamAbnormalDisconnectBeforeOutputFailsOver(t *testing.T) {
 	}
 
 	streamResult, errStream := manager.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
-	if errStream != nil {
-		t.Fatalf("ExecuteStream failed instead of failing over: %v", errStream)
-	}
-	if streamResult == nil {
-		t.Fatal("expected non-nil streamResult after failover")
-	}
-
-	var streamBody string
-	for chunk := range streamResult.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+	observedErr := errStream
+	if streamResult != nil {
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				observedErr = chunk.Err
+			}
+			if strings.Contains(string(chunk.Payload), "MOCK_B") {
+				t.Fatal("ambiguous request was replayed on credential B")
+			}
 		}
-		streamBody += string(chunk.Payload)
 	}
-
-	if !strings.Contains(streamBody, "response.completed") {
-		t.Fatalf("stream body missing expected completion from B: %s", streamBody)
+	if !httptransport.IsOutcomeUnknown(observedErr) {
+		t.Fatalf("error=%v, want terminal unknown outcome", observedErr)
 	}
 
 	mu.Lock()
 	gotAttempts := append([]string(nil), attempts...)
 	mu.Unlock()
 
-	if len(gotAttempts) != 2 || gotAttempts[0] != "account-a" || gotAttempts[1] != "account-b" {
-		t.Fatalf("attempts = %v, want [account-a, account-b]", gotAttempts)
+	if len(gotAttempts) != 1 || gotAttempts[0] != "account-a" {
+		t.Fatalf("attempts = %v, want [account-a]", gotAttempts)
 	}
 }

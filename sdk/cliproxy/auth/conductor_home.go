@@ -1529,7 +1529,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 					result.CredentialScope = true
 				}
 				m.MarkResult(creditsCtx, result)
-				if httptransport.IsOutcomeUnknown(errExec) {
+				if isRequestTerminatedError(errExec) || isRequestScopedError(errExec) {
 					return cliproxyexecutor.Response{}, false, errExec
 				}
 				if result.CredentialScope {
@@ -1586,7 +1586,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
-			if httptransport.IsOutcomeUnknown(errStream) {
+			if isRequestTerminatedError(errStream) || isRequestScopedError(errStream) {
 				return nil, false, errStream
 			}
 			continue

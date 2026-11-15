@@ -105,18 +105,8 @@ func TestHTTPSubmissionAntigravityCreditsTranslationIsTerminal(t *testing.T) {
 			if got := submissions.Load(); got != 1 {
 				t.Errorf("credits fallback submitted generation %d times after accepted translation failure, want 1", got)
 			}
-			if response.Code != http.StatusBadGateway {
-				t.Errorf("status=%d, want 502 for unknown generation outcome", response.Code)
-			}
-			if !ojson.Valid(wire) || ojson.Get(wire, "error.code").String() != "upstream_outcome_unknown" {
-				t.Errorf("credits fallback discarded unknown outcome: %s", wire)
-			}
-			retryable := ojson.Get(wire, "error.retryable")
-			if !retryable.Exists() || retryable.Bool() {
-				t.Errorf("unknown outcome must advertise retryable=false: %s", wire)
-			}
-			if got := response.Header().Get("x-should-retry"); got != "false" {
-				t.Errorf("x-should-retry=%q, want false", got)
+			if response.Code != http.StatusBadGateway || !ojson.Valid(wire) || ojson.Get(wire, "error.message").String() != "Invalid apply_patch tool arguments received from upstream." || ojson.Get(wire, "error.code").String() == "upstream_outcome_unknown" {
+				t.Errorf("completed credits generation lost its local validation failure: %s", wire)
 			}
 		})
 	}

@@ -18,6 +18,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -611,7 +612,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			prepared, errPrepare := e.prepareCodexWebsocketStream(streamCtx, auth, nextReq, nextOpts)
 			if errPrepare != nil {
-				fail(errPrepare)
+				fail(httptransport.BeforeSubmission(errPrepare))
 				return false
 			}
 			if prepared.wsURL != initial.wsURL {

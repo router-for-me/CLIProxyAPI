@@ -62,7 +62,7 @@ func TestHTTPSubmissionGeminiApplyPatchTranslationDoesNotReplay(t *testing.T) {
 	if got := submissions.Load(); got != 1 {
 		t.Errorf("accepted upstream POSTs=%d, want 1", got)
 	}
-	if response.Code != http.StatusBadGateway || ojson.Get(response.Body.String(), "error.code").String() != "upstream_outcome_unknown" || ojson.Get(response.Body.String(), "error.retryable").Raw != "false" || response.Header().Get("x-should-retry") != "false" {
-		t.Fatal("local translation failure lost the nonretryable unknown outcome")
+	if response.Code != http.StatusBadGateway || ojson.Get(response.Body.String(), "error.message").String() != "Invalid apply_patch tool arguments received from upstream." || ojson.Get(response.Body.String(), "error.code").String() == "upstream_outcome_unknown" {
+		t.Fatal("completed generation lost its sanitized local validation error")
 	}
 }

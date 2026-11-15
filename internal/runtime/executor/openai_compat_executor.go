@@ -251,7 +251,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, body, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, streamTruncated: len(body) == 0}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, body), streamTruncated: len(body) == 0}
 	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -1276,17 +1276,18 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
-	code                 int
-	msg                  string
-	retryAfter           *time.Duration
-	credentialScoped     bool
-	streamTruncated      bool
-	providerErrorPayload bool
-	transientRateLimit   bool
-	transientTransport   bool
-	tosViolation         bool
-	tosAppealURL         string
-	tosAppealURLText     string
+	code                   int
+	msg                    string
+	retryAfter             *time.Duration
+	credentialScoped       bool
+	streamTruncated        bool
+	providerErrorPayload   bool
+	submissionOutcomeKnown bool
+	transientRateLimit     bool
+	transientTransport     bool
+	tosViolation           bool
+	tosAppealURL           string
+	tosAppealURLText       string
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1310,6 +1311,12 @@ func (e statusErr) IsStreamTruncated() bool { return e.streamTruncated }
 
 // IsProviderErrorPayload distinguishes a parsed upstream refusal from local failures.
 func (e statusErr) IsProviderErrorPayload() bool { return e.providerErrorPayload }
+
+func (e statusErr) IsSubmissionOutcomeKnown() bool { return e.submissionOutcomeKnown }
+
+// A completed response with unusable local output belongs to this request.
+// Known empty provider completions still follow the transient failover policy.
+func (e statusErr) IsRequestScoped() bool { return e.submissionOutcomeKnown && !e.transientTransport }
 
 // IsTransientRateLimit marks a transient per-model capacity/admission 429
 // that must not be recorded as credential quota exhaustion.

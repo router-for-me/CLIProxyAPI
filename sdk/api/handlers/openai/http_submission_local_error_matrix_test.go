@@ -31,13 +31,14 @@ func TestHTTPSubmissionAcceptedLocalFailureMatrix(t *testing.T) {
 		payload   string
 		encoding  string
 		mediaType string
+		known     bool
 	}{
-		{"gemini_tool_translation", "gemini-2.5-flash", runtimeexecutor.NewGeminiExecutor(&config.Config{}), geminiBadTool, "", "application/json"},
-		{"vertex_tool_translation", "gemini-2.5-flash", runtimeexecutor.NewGeminiVertexExecutor(&config.Config{}), geminiBadTool, "", "application/json"},
-		{"antigravity_tool_translation", "gemini-2.5-flash", runtimeexecutor.NewAntigravityExecutor(&config.Config{}), `{"response":` + geminiBadTool + `}`, "", "application/json"},
-		{"openai_tool_translation", "local-error-openai", runtimeexecutor.NewOpenAICompatExecutor("local-error-openai", &config.Config{}), openaiBadTool, "", "application/json"},
-		{"claude_buffered_validation", "claude-opus-5", runtimeexecutor.NewClaudeExecutor(&config.Config{}), "data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", "", "text/event-stream"},
-		{"codex_response_decoder", "gpt-5.2-codex", runtimeexecutor.NewCodexExecutor(&config.Config{}), `{}`, "synthetic-unsupported", "application/json"},
+		{"gemini_tool_translation", "gemini-2.5-flash", runtimeexecutor.NewGeminiExecutor(&config.Config{}), geminiBadTool, "", "application/json", true},
+		{"vertex_tool_translation", "gemini-2.5-flash", runtimeexecutor.NewGeminiVertexExecutor(&config.Config{}), geminiBadTool, "", "application/json", true},
+		{"antigravity_tool_translation", "gemini-2.5-flash", runtimeexecutor.NewAntigravityExecutor(&config.Config{}), `{"response":` + geminiBadTool + `}`, "", "application/json", true},
+		{"openai_tool_translation", "local-error-openai", runtimeexecutor.NewOpenAICompatExecutor("local-error-openai", &config.Config{}), openaiBadTool, "", "application/json", true},
+		{"claude_buffered_validation", "claude-opus-5", runtimeexecutor.NewClaudeExecutor(&config.Config{}), "data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n", "", "text/event-stream", false},
+		{"codex_response_decoder", "gpt-5.2-codex", runtimeexecutor.NewCodexExecutor(&config.Config{}), `{}`, "synthetic-unsupported", "application/json", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var submissions atomic.Int32
@@ -83,6 +84,12 @@ func TestHTTPSubmissionAcceptedLocalFailureMatrix(t *testing.T) {
 			t.Logf("accepted=%d status=%d retry=%q body=%s", submissions.Load(), response.Code, response.Header().Get("x-should-retry"), response.Body.String())
 			if got := submissions.Load(); got != 1 {
 				t.Errorf("accepted upstream POSTs=%d, want 1", got)
+			}
+			if tc.known {
+				if response.Code != http.StatusBadGateway || ojson.Get(response.Body.String(), "error.message").String() != "Invalid apply_patch tool arguments received from upstream." || ojson.Get(response.Body.String(), "error.code").String() == "upstream_outcome_unknown" {
+					t.Fatal("completed generation lost its local validation error")
+				}
+				return
 			}
 			if response.Code != http.StatusBadGateway || ojson.Get(response.Body.String(), "error.code").String() != "upstream_outcome_unknown" || ojson.Get(response.Body.String(), "error.retryable").Raw != "false" || response.Header().Get("x-should-retry") != "false" {
 				t.Fatal("local executor failure lost the nonretryable unknown outcome")

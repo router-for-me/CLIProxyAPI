@@ -130,7 +130,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 		transformedEvents, errBridge := prepared.applyPatch.Transform(eventData)
 		if errBridge != nil {
-			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(prepared.to, eventData)}
 			upstreamUsage.PublishFailure(ctx, reporter, errBridge)
 			return cliproxyexecutor.Response{}, true, errBridge
 		}
@@ -151,7 +151,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 				var param any
 				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-					errTranslation := statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+					errTranslation := statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: true}
 					upstreamUsage.PublishFailure(ctx, reporter, errTranslation)
 					return cliproxyexecutor.Response{}, true, errTranslation
 				}
