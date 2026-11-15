@@ -95,6 +95,11 @@ func (c *goPluginClient) Call(ctx context.Context, method string, request []byte
 	return c.inst.Call(ctx, method, request)
 }
 
+// Shutdown releases the plugin-side resources and detaches the client.
+//
+// Like the C ABI client, the host must not issue calls concurrently with
+// (or after) retirement; the plugin host serializes plugin lifecycle, so
+// the instance field is not guarded by a mutex here either.
 func (c *goPluginClient) Shutdown() {
 	if c == nil || c.inst == nil {
 		return
