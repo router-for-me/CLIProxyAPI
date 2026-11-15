@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -95,5 +96,81 @@ func TestAPIKeyPoliciesAbsentKeepsLegacyBehavior(t *testing.T) {
 	}
 	if _, ok := cfg.FindAPIKeyPolicy("sk-aaa"); ok {
 		t.Fatal("key without policy must be unrestricted")
+	}
+}
+
+func TestMatchModelPattern(t *testing.T) {
+	cases := []struct {
+		pattern, model string
+		want           bool
+	}{
+		{"gpt-5*", "gpt-5.1-codex", true},
+		{"gpt-5*", "GPT-5", true},
+		{"gpt-5*", "gpt-4o", false},
+		{"claude-*-4*", "claude-sonnet-4-5", true},
+		{"*mini", "gpt-5-mini", true},
+		{"exact", "exact", true},
+		{"exact", "exact-2", false},
+		{"*", "anything", true},
+	}
+	for _, c := range cases {
+		if got := MatchModelPattern(c.pattern, c.model); got != c.want {
+			t.Errorf("MatchModelPattern(%q, %q) = %v, want %v", c.pattern, c.model, got, c.want)
+		}
+	}
+}
+
+func TestAPIKeyPolicyExpiry(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	if (APIKeyPolicy{}).ExpiredAt(now) {
+		t.Fatal("no expiry must not expire")
+	}
+	if !(APIKeyPolicy{ExpiresAt: "2026-11-15T11:59:59Z"}).ExpiredAt(now) {
+		t.Fatal("past timestamp must expire")
+	}
+	if (APIKeyPolicy{ExpiresAt: "2027-01-01T00:00:00Z"}).ExpiredAt(now) {
+		t.Fatal("future timestamp must not expire")
+	}
+	if !(APIKeyPolicy{ExpiresAt: "not-a-date"}).ExpiredAt(now) {
+		t.Fatal("invalid expiry must fail closed")
+	}
+	day := APIKeyPolicy{ExpiresAt: "2026-11-15"}
+	end, ok := day.ExpiresAtTime()
+	if !ok || end.Day() != 16 || end.Hour() != 0 {
+		t.Fatalf("date-only expiry = %v", end)
+	}
+}
+
+func TestPhase2FieldsParse(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte(`config-version: 8
+access:
+    api-keys: [sk-aaa]
+    api-key-policies:
+        - key: sk-aaa
+          allowed-models: ["gpt-5*", " claude-* "]
+          expires-at: "2027-01-01T00:00:00Z"
+          limits: {tokens-per-day: 2000000, cost-per-month: 50}
+    model-prices:
+        - {model: "gpt-5*", input: 1.25, output: 10}
+        - {model: "", input: 1}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := cfg.FindAPIKeyPolicy("sk-aaa")
+	if len(p.AllowedModels) != 2 || p.AllowedModels[1] != "claude-*" || p.Limits.TokensPerDay != 2000000 || p.Limits.CostPerMonth != 50 || p.ExpiresAt == "" {
+		t.Fatalf("policy = %+v", p)
+	}
+	if !p.AllowsModel("gpt-5.1") || p.AllowsModel("gemini-3-pro") {
+		t.Fatal("allowed-models matching wrong")
+	}
+	if len(cfg.ModelPrices) != 1 {
+		t.Fatalf("model prices = %+v", cfg.ModelPrices)
+	}
+	if price, ok := cfg.FindModelPrice("gpt-5.1"); !ok || price.Output != 10 {
+		t.Fatalf("price lookup = %+v %v", price, ok)
+	}
+	if err = ValidateV8Config([]byte("config-version: 8\naccess:\n    model-prices: [{model: x, input: 1}]\n")); err != nil {
+		t.Fatalf("v8 rejected model-prices: %v", err)
 	}
 }

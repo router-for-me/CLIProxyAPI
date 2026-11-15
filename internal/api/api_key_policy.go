@@ -1,9 +1,14 @@
 package api
 
 import (
+	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/apikeylimits"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -29,6 +34,24 @@ func applyAPIKeyPolicy(c *gin.Context, cfgFn apiKeyPolicyConfigFunc, principal, 
 	if policy.Disabled {
 		abortAPIKeyPolicy(c, http.StatusUnauthorized, "authentication_error", "api_key_disabled", "API key is disabled")
 		return false
+	}
+	if policy.ExpiredAt(time.Now()) {
+		abortAPIKeyPolicy(c, http.StatusUnauthorized, "authentication_error", "api_key_expired", "API key has expired")
+		return false
+	}
+	if exceeded, hit := apikeylimits.Default().Check(principal, policy.Limits); hit {
+		retryAfter := int(math.Ceil(time.Until(exceeded.ResetAt).Seconds()))
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		abortAPIKeyPolicy(c, http.StatusTooManyRequests, "rate_limit_error", "api_key_quota_exceeded",
+			fmt.Sprintf("API key %s %s limit reached; resets at %s", exceeded.Window, exceeded.Metric, exceeded.ResetAt.Format(time.RFC3339)))
+		return false
+	}
+	if len(policy.AllowedModels) > 0 {
+		c.Set(coreauth.AllowedModelsGinKey, policy.AllowedModels)
+		c.Request = c.Request.WithContext(coreauth.WithAllowedModels(c.Request.Context(), policy.AllowedModels))
 	}
 	allowed := coreauth.NewAllowedAuthSet(policy.AllowedAuths)
 	if allowed == nil {

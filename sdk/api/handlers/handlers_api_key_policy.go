@@ -14,17 +14,24 @@ func (h *BaseAPIHandler) FilterModelsForRequest(c *gin.Context, models []map[str
 	if h == nil || c == nil || c.Request == nil || len(models) == 0 {
 		return models
 	}
-	allowed := coreauth.AllowedAuthsFromContext(c.Request.Context())
+	ctx := c.Request.Context()
+	allowed := coreauth.AllowedAuthsFromContext(ctx)
 	if allowed == nil {
 		if raw, ok := c.Get(coreauth.AllowedAuthsGinKey); ok {
 			allowed, _ = raw.(map[string]struct{})
 		}
 	}
-	if allowed == nil {
+	patterns := coreauth.AllowedModelsFromContext(ctx)
+	if patterns == nil {
+		if raw, ok := c.Get(coreauth.AllowedModelsGinKey); ok {
+			patterns, _ = raw.([]string)
+		}
+	}
+	if allowed == nil && len(patterns) == 0 {
 		return models
 	}
 	var authIDs []string
-	if h.AuthManager != nil {
+	if allowed != nil && h.AuthManager != nil {
 		for _, auth := range h.AuthManager.List() {
 			if auth != nil && coreauth.AuthAllowedBy(allowed, auth) {
 				authIDs = append(authIDs, auth.ID)
@@ -38,6 +45,13 @@ func (h *BaseAPIHandler) FilterModelsForRequest(c *gin.Context, models []map[str
 		if id == "" {
 			name, _ := model["name"].(string)
 			id = strings.TrimPrefix(name, "models/")
+		}
+		if !coreauth.ModelAllowedBy(patterns, id) {
+			continue
+		}
+		if allowed == nil {
+			out = append(out, model)
+			continue
 		}
 		for _, authID := range authIDs {
 			if modelRegistry.ClientSupportsModel(authID, id) {

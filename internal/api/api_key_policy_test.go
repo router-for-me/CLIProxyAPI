@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/apikeylimits"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -211,5 +212,65 @@ func TestAPIKeyPolicyReloadTakesEffect(t *testing.T) {
 	}
 	if rr = env.do(t, http.MethodPost, "/v1/chat/completions", "key-disabled", `{"model":"`+env.modelOne+`","messages":[]}`); rr.Code == http.StatusUnauthorized {
 		t.Fatalf("policy removed by reload must re-enable key-disabled; body=%s", rr.Body.String())
+	}
+}
+
+func (env *policyTestEnv) setPolicies(t *testing.T, keys []string, policies ...proxyconfig.APIKeyPolicy) {
+	t.Helper()
+	updated := *env.server.getConfig()
+	updated.APIKeys = keys
+	updated.APIKeyPolicies = policies
+	env.server.UpdateClients(&updated)
+}
+
+func TestAPIKeyPolicyExpiredKeyIsRejected(t *testing.T) {
+	env := newPolicyTestEnv(t)
+	env.setPolicies(t, []string{"key-old", "key-new"},
+		proxyconfig.APIKeyPolicy{Key: "key-old", ExpiresAt: "2020-01-01T00:00:00Z"},
+		proxyconfig.APIKeyPolicy{Key: "key-new", ExpiresAt: "2999-01-01T00:00:00Z"},
+	)
+	body := `{"model":"` + env.modelOne + `","messages":[{"role":"user","content":"hi"}]}`
+	if rr := env.do(t, http.MethodPost, "/v1/chat/completions", "key-old", body); rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "api_key_expired") {
+		t.Fatalf("expired key: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr := env.do(t, http.MethodPost, "/v1/chat/completions", "key-new", body); rr.Code == http.StatusUnauthorized {
+		t.Fatalf("unexpired key rejected: %s", rr.Body.String())
+	}
+}
+
+func TestAPIKeyPolicyAllowedModels(t *testing.T) {
+	env := newPolicyTestEnv(t)
+	env.setPolicies(t, []string{"key-models"}, proxyconfig.APIKeyPolicy{Key: "key-models", AllowedModels: []string{"policy-model-shared-*"}})
+	// Check the catalog first: failed executions below put credentials into cooldown.
+	models := env.do(t, http.MethodGet, "/v1/models", "key-models", "").Body.String()
+	if !strings.Contains(models, env.modelOne) || strings.Contains(models, env.modelTwo) {
+		t.Fatalf("model list not filtered by allowed-models: %s", models)
+	}
+	rr := env.do(t, http.MethodPost, "/v1/chat/completions", "key-models", `{"model":"`+env.modelTwo+`","messages":[{"role":"user","content":"hi"}]}`)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "model_not_allowed") {
+		t.Fatalf("disallowed model: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := env.exec.snapshot(); len(got) != 0 {
+		t.Fatalf("disallowed model reached executor: %v", got)
+	}
+	if rr = env.do(t, http.MethodPost, "/v1/chat/completions", "key-models", `{"model":"`+env.modelOne+`","messages":[{"role":"user","content":"hi"}]}`); rr.Code != http.StatusTeapot {
+		t.Fatalf("allowed model: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAPIKeyPolicyQuotaExceeded(t *testing.T) {
+	env := newPolicyTestEnv(t)
+	key := "key-quota-" + t.Name()
+	env.setPolicies(t, []string{key}, proxyconfig.APIKeyPolicy{Key: key, Limits: proxyconfig.APIKeyLimits{TokensPerDay: 10}})
+	apikeylimits.Default().Add(key, 10, 0)
+	rr := env.do(t, http.MethodPost, "/v1/chat/completions", key, `{"model":"`+env.modelOne+`","messages":[]}`)
+	if rr.Code != http.StatusTooManyRequests || !strings.Contains(rr.Body.String(), "api_key_quota_exceeded") {
+		t.Fatalf("quota: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if ra := rr.Header().Get("Retry-After"); ra == "" || ra == "0" {
+		t.Fatalf("Retry-After = %q", ra)
+	}
+	if got := env.exec.snapshot(); len(got) != 0 {
+		t.Fatalf("over-quota key reached executor: %v", got)
 	}
 }
