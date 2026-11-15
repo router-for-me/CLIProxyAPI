@@ -8,4 +8,5 @@ import "github.com/gin-gonic/gin"
 func (s *Server) registerProxxManagementRoutes(v8 *gin.RouterGroup) {
 	proxx := v8.Group("/proxx")
 	s.registerProxxUsageRoutes(proxx) // usage + pricing (server_management_proxx_usage.go)
+	s.registerProxxGroupRoutes(proxx) // model groups (server_management_groups_proxx.go)
 }

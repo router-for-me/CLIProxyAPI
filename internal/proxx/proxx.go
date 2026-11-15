@@ -1,4 +1,4 @@
-// Package proxx wires the fork-only runtime features (pricing, usage aggregator) into the
+// Package proxx wires the fork-only runtime features (model groups, pricing, usage aggregator) into the
 // service lifecycle through three one-line hooks in sdk/cliproxy. See docs/proxx/README.md.
 package proxx
 
@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/groups"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/pricing"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/usagestats"
 )
@@ -26,7 +27,7 @@ func Start(ctx context.Context, cfg *config.Config, configPath string) {
 	Reload(cfg)
 }
 
-// Reload re-applies proxx.pricing and proxx.usage after a config change.
+// Reload re-applies proxx.model-groups, proxx.pricing and proxx.usage after a config change.
 // Before Start it only stores prices (no background loops are started).
 func Reload(cfg *config.Config) {
 	if cfg == nil {
@@ -38,6 +39,7 @@ func Reload(cfg *config.Config) {
 	if ctx != nil && ctx.Err() != nil {
 		ctx = nil
 	}
+	groups.Apply(cfg)
 	pricing.Configure(ctx, cfg.Proxx.Pricing)
 	if ctx != nil {
 		usagestats.Configure(ctx, cfg.Proxx.Usage, configPath)

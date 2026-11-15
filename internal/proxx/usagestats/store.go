@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -294,8 +295,12 @@ func (s *Store) Summary(from, to, groupBy string) Summary {
 		out.Totals.add(*t)
 	}
 	for key, t := range grouped {
+		t.CostUSD = roundCost(t.CostUSD)
 		out.Rows = append(out.Rows, Row{Key: key, Totals: *t})
 	}
+	// Bucket map order is random, so float sums differ in the last bits between calls;
+	// round to a fixed precision so reports are stable.
+	out.Totals.CostUSD = roundCost(out.Totals.CostUSD)
 	sort.Slice(out.Rows, func(i, j int) bool {
 		a, b := out.Rows[i], out.Rows[j]
 		if groupBy == "day" {
@@ -333,4 +338,9 @@ func (s *Store) Today() time.Time {
 	now := s.now
 	s.mu.Unlock()
 	return now().UTC()
+}
+
+// roundCost rounds a USD amount to 1e-10 (well below any real per-request cost).
+func roundCost(v float64) float64 {
+	return math.Round(v*1e10) / 1e10
 }

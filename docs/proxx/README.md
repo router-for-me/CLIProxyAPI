@@ -14,6 +14,8 @@ It adds three features on top of upstream while staying cheap to sync:
 
 Decisions live in [`decisions/`](decisions/) as numbered ADRs. Read them before changing a feature.
 
+Note: the root `.gitignore` ignores `docs/*`; add files here with `git add -f docs/proxx`.
+
 ## Repositories
 
 | Repo | Local path | Upstream remote |
@@ -52,13 +54,17 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `internal/api/server_management_v8.go` | `s.registerProxxManagementRoutes(v8)` | proxx management routes |
 | `sdk/cliproxy/usage/manager.go` | `applyCostHook(ctx, &record)` in `Publish` | per-request cost on every usage record (ADR 0004) |
 | `sdk/cliproxy/usage/detail.go` | `FinalCost`, `CostSource` fields + 2 lines in `CostDetails.Clone` | cost carried to all usage sinks (queue JSON `cost_details.final_cost/cost_source`) |
-| `sdk/cliproxy/service_lifecycle.go` | `proxx.Start(...)` in `Run`, `proxx.Shutdown()` in `Shutdown` (+ import) | start pricing catalog + usage aggregator; flush snapshot |
-| `sdk/cliproxy/service_config.go` | `proxx.Reload(newCfg)` in `commitConfigUpdate` (+ import) | hot reload of `proxx.pricing` / `proxx.usage` |
+| `sdk/cliproxy/service_lifecycle.go` | `proxx.Start(...)` in `Run`, `proxx.Shutdown()` in `Shutdown` (+ import) | load model groups, start pricing catalog + usage aggregator; flush snapshot |
+| `sdk/cliproxy/service_config.go` | `proxx.Reload(newCfg)` in `commitConfigUpdate` (+ import) | hot reload of `proxx.model-groups` / `proxx.pricing` / `proxx.usage` |
 | `sdk/api/handlers/openai/openai_handlers.go` | `pricing.AttachPricing(filteredModels, "id")` (+ import) | `pricing` object in OpenAI `/v1/models` |
 | `sdk/api/handlers/claude/code_handlers.go` | `pricing.AttachPricing(h.Models(), "id")` inside `ClaudeModels` (+ import) | `pricing` object in Claude `/v1/models` |
 | `sdk/api/handlers/gemini/gemini_handlers.go` | `pricing.AttachPricing(normalizedModels, "name")` (+ import) | `pricing` object in Gemini `/v1beta/models` |
 | `internal/api/server_routes.go` | `pricing.AttachPricing(...)` in `handleHomeModels` (2 lines + import) | `pricing` object in Home-mode listings |
 | `config.example.yaml` | commented `proxx:` example block | documentation only |
+| `sdk/api/handlers/handlers_routing.go` | `proxxgroups.RequestProviders(model)` in `getRequestDetailsWithOptions` | model groups bypass provider lookup and win over `auto` resolution |
+| `sdk/api/handlers/openai/openai_responses_websocket_session.go` | `proxxgroups.IsGroup(model)` in `responsesWebsocketResolvedModelName` | same for Responses websocket sessions |
+| `sdk/cliproxy/auth/conductor_execution.go` | `m.proxxExecuteGroup` / `proxxExecuteCountGroup` / `proxxExecuteStreamGroup` at the top of `Execute` / `ExecuteCount` / `ExecuteStream` | expand a group into member executions |
+| `sdk/cliproxy/auth/conductor_execution.go` | `maxWait = proxxGroupMaxWait(ctx, maxWait)` after `retrySettings()` (3x) | group members fail over instead of sleeping for a cooldown |
 
 Fork-owned files that other proxx features also touch: `internal/api/server_management_proxx.go`
 (one `s.registerProxx*Routes(proxx)` line per feature).
@@ -90,7 +96,11 @@ GitHub release of `remote-management.panel-github-repository`.
 
 Filled in as features land (see the ADRs for design):
 
-- Model groups: ADR 0003
+- Model groups: ADR 0003. Config `proxx.model-groups`; store `internal/proxx/groups`; failover
+  loop `sdk/cliproxy/auth/model_groups_proxx.go`; `GET /v8/management/proxx/groups`;
+  response header `X-Proxx-Served-Model`. E2E:
+  `PROXX_E2E=1 go test ./test/proxx/groups_e2e/ -run E2E -v -count=1` (builds the binary and runs it
+  against a mock OpenAI-compatible upstream; needs no provider keys).
 - Pricing and cost: ADR 0004
   - `internal/proxx/pricing` (catalog, lookup, cost, listings), embedded snapshot
     `internal/proxx/pricing/snapshot.json` (regenerate: `go run ./cmd/proxx_gen_pricing [-in api.json]`),
@@ -105,7 +115,8 @@ Filled in as features land (see the ADRs for design):
 ## Tests
 
 ```bash
-go test ./internal/proxx/...                                     # unit tests (pricing formula, lookup, aggregator)
+go test ./internal/proxx/...                                     # unit tests (pricing formula, lookup, aggregator, groups)
+PROXX_E2E=1 go test ./test/proxx/groups_e2e/ -run E2E -v -count=1  # e2e: model groups
 go test -tags proxxe2e -count=1 -v ./test/proxx/pricing_e2e/     # e2e: builds and runs the real binary
 ```
 
