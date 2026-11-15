@@ -32,7 +32,7 @@ func TestPrepareBackendModelMapOnlyChangesTopLevelModel(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(input))
 			clean, model, err := prepareBackendRequest(request, BackendOptions{
 				UseRequestModel: true, ModelMap: map[string]string{source: target},
-			})
+			}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +63,7 @@ func TestPrepareBackendModelMapIsExactAndOneHop(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			input := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, tc.source)
 			request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
-			clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true, ModelMap: tc.modelMap})
+			clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true, ModelMap: tc.modelMap}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -81,7 +81,7 @@ func TestPrepareBackendModelMapUnmappedPreservesBytes(t *testing.T) {
 	const input = "{\n  \"model\": \"claude\\u002dunmapped\", \"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\n  \"future_option\": 1.00, \"metadata\": {\"user_id\":\"native-identity\"}\n}\n"
 	for _, modelMap := range []map[string]string{nil, {}, {"claude-other": "claude-replacement"}} {
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
-		clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true, ModelMap: modelMap})
+		clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true, ModelMap: modelMap}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +98,7 @@ func TestPrepareBackendModelMapRejectsDuplicateModel(t *testing.T) {
 		`{"model":"source","model":"source","messages":[]}`,
 	} {
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
-		_, _, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true, ModelMap: map[string]string{"source": "target"}})
+		_, _, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true, ModelMap: map[string]string{"source": "target"}}, nil)
 		if err == nil {
 			t.Fatalf("accepted ambiguous mapped model: %s", input)
 		}

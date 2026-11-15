@@ -183,7 +183,7 @@ func (h *BaseAPIHandler) ExecuteProtocolWithAuthManager(ctx context.Context, req
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteProtocolWithAuthManager requires Stream=false")
 	}
 	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
-	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
+	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, h.protocolExecutionBody(ctx, req), req.Alt, allowImageModel, modelExecutionOptions{
 		Headers:            req.Headers,
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
@@ -206,7 +206,7 @@ func (h *BaseAPIHandler) CountProtocolWithAuthManager(ctx context.Context, req P
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("CountProtocolWithAuthManager requires Stream=false")
 	}
-	body, headers, errMsg := h.executeCountWithAuthManager(ctx, req.EntryProtocol, req.Model, cloneBytes(req.Body), req.Alt, modelExecutionOptions{
+	body, headers, errMsg := h.executeCountWithAuthManager(ctx, req.EntryProtocol, req.Model, h.protocolExecutionBody(ctx, req), req.Alt, modelExecutionOptions{
 		Headers:            req.Headers,
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
@@ -228,7 +228,7 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteProtocolStreamWithAuthManager requires Stream=true")
 	}
 	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
-	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
+	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, h.protocolExecutionBody(ctx, req), req.Alt, allowImageModel, modelExecutionOptions{
 		Headers:            req.Headers,
 		Query:              req.Query,
 		ForcedProvider:     req.ForcedProvider,
@@ -252,6 +252,30 @@ func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Contex
 		Headers:    cloneHeader(headers),
 		Chunks:     chunks,
 	}, nil
+}
+
+type borrowNativeClaudeBodyKey struct{}
+
+// WithBorrowedNativeClaudeBody opts the trusted proxy adapter into sharing an
+// immutable body for this request. The caller must retain it until execution
+// and all streaming have finished.
+func WithBorrowedNativeClaudeBody(ctx context.Context) context.Context {
+	return context.WithValue(ctx, borrowNativeClaudeBodyKey{}, true)
+}
+
+// The trusted native adapter retains the body's ownership until execution
+// completes. The Claude executor only reads it, then writes identity and
+// signature changes into a separate outbound body. Other callers still get a
+// defensive copy before the generic execution pipeline.
+func (h *BaseAPIHandler) protocolExecutionBody(ctx context.Context, req ProtocolExecutionRequest) []byte {
+	if ctx != nil && ctx.Value(borrowNativeClaudeBodyKey{}) == true &&
+		req.EntryProtocol == "claude" && req.ExitProtocol == "claude" && req.ForcedProvider == "claude" &&
+		h.interceptorHost() == nil && h.modelRouterHost() == nil {
+		if _, native := coreexecutor.NativeClaudeProtocolHeadersFromContext(ctx); native {
+			return req.Body
+		}
+	}
+	return cloneBytes(req.Body)
 }
 
 func modelExecutionModeError(message string) *interfaces.ErrorMessage {

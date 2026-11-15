@@ -1413,7 +1413,14 @@ func (s *backendSelector) Pick(ctx context.Context, provider, model string, opts
 	return nil, errors.New("selected inference account is unavailable; no fallback is configured")
 }
 
+// Keep the existing limits on control bodies and buffered responses. Anthropic's
+// Messages and Token Counting APIs allow 128 MB requests.
 const backendMaxBodyBytes = 32 << 20
+const backendMaxInferenceBodyBytes = 128_000_000
+const backendLargeUploadTimeout = 5 * time.Minute
+
+var errInferenceBodyTooLarge = errors.New("inference request exceeds the 128 MB limit")
+var errLargeInferenceBusy = errors.New("another large inference request is in progress; retry shortly")
 
 // BackendErrorStage is a fixed, privacy-safe diagnostic category, not an error
 // message. It never includes account details, URLs, headers, or provider bodies.
@@ -1558,7 +1565,29 @@ func classifyBackendError(err error) BackendErrorStage {
 
 func newBackendHandler(lifetime context.Context, opts BackendOptions, base *handlers.BaseAPIHandler) http.Handler {
 	router := gin.New()
+	largeRequest := make(chan struct{}, 1)
 	dispatch := func(c *gin.Context) {
+		// Keep the slot until the request has finished, including native
+		// metadata edits, CCH signing, failover and streaming.
+		var largeAdmitted, deadlineSet bool
+		readController := http.NewResponseController(c.Writer)
+		defer func() {
+			if largeAdmitted {
+				<-largeRequest
+			}
+		}()
+		admitLarge := func() bool {
+			select {
+			case largeRequest <- struct{}{}:
+				largeAdmitted = true
+				// Bound an abandoned upload without setting a deadline on
+				// ordinary requests or any upstream/streaming operation.
+				deadlineSet = readController.SetReadDeadline(time.Now().Add(backendLargeUploadTimeout)) == nil
+				return true
+			default:
+				return false
+			}
+		}
 		started := time.Now()
 		metered := newMeteredWriter(c.Writer)
 		c.Writer = metered
@@ -1580,10 +1609,27 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			backendError(c.Writer, http.StatusServiceUnavailable, "inference backend is closed")
 			return
 		}
-		raw, model, err := prepareBackendRequest(c.Request, opts)
+		raw, model, err := prepareBackendRequest(c.Request, opts, admitLarge)
+		if deadlineSet {
+			_ = readController.SetReadDeadline(time.Time{})
+		}
 		if err != nil {
 			observeBackendStage(ctx, BackendErrorRequest)
-			backendError(c.Writer, http.StatusBadRequest, "invalid inference request")
+			tooLarge := errors.Is(err, errInferenceBodyTooLarge)
+			largeBusy := errors.Is(err, errLargeInferenceBusy)
+			if c.Request.ProtoMajor == 1 && (tooLarge || largeBusy || largeAdmitted) {
+				// Do not block while HTTP/1.1 drains an unread rejected upload.
+				c.Writer.Header().Set("Connection", "close")
+			}
+			switch {
+			case tooLarge:
+				backendTypedError(c.Writer, http.StatusRequestEntityTooLarge, "request_too_large", err.Error())
+			case largeBusy:
+				c.Writer.Header().Set("Retry-After", "1")
+				backendTypedError(c.Writer, http.StatusServiceUnavailable, "overloaded_error", err.Error())
+			default:
+				backendError(c.Writer, http.StatusBadRequest, "invalid inference request")
+			}
 			return
 		}
 		// GetContextWithCancel in the general Claude handler starts from a
@@ -1593,6 +1639,9 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			ctx = handlers.WithPinnedAuthID(ctx, opts.AuthID)
 		}
 		ctx = context.WithValue(ctx, "gin", c)
+		if opts.UseRequestModel && len(raw) > backendMaxBodyBytes {
+			ctx = handlers.WithBorrowedNativeClaudeBody(ctx)
+		}
 		if c.Request.URL.Path == "/v1/messages/count_tokens" {
 			isCount = true
 			backendSetCountRequest(ctx)
@@ -1653,19 +1702,77 @@ func backendProtocolRequest(model string, raw []byte, stream bool) handlers.Prot
 	}
 }
 
-func prepareBackendRequest(request *http.Request, opts BackendOptions) ([]byte, string, error) {
+// A declared large body takes the slot before allocation and is read into an
+// exact-size buffer. Chunked bodies take the slot only if they cross 32 MiB;
+// their suffix is read directly into a bounded slice without growth copies.
+func readInferenceBody(request *http.Request, admitLarge func() bool) ([]byte, error) {
+	size := request.ContentLength
+	if size > backendMaxInferenceBodyBytes {
+		return nil, errInferenceBodyTooLarge
+	}
+	if size > backendMaxBodyBytes {
+		if admitLarge != nil && !admitLarge() {
+			return nil, errLargeInferenceBusy
+		}
+		raw := make([]byte, int(size))
+		if _, err := io.ReadFull(request.Body, raw); err != nil {
+			return nil, err
+		}
+		return raw, nil
+	}
+
+	prefix, err := io.ReadAll(io.LimitReader(request.Body, backendMaxBodyBytes+1))
+	if err != nil || len(prefix) <= backendMaxBodyBytes {
+		return prefix, err
+	}
+	if admitLarge != nil && !admitLarge() {
+		return nil, errLargeInferenceBusy
+	}
+	raw := make([]byte, backendMaxInferenceBodyBytes+1)
+	offset := copy(raw, prefix)
+	for offset < len(raw) {
+		n, errRead := request.Body.Read(raw[offset:])
+		offset += n
+		if offset == len(raw) {
+			return nil, errInferenceBodyTooLarge
+		}
+		if errRead == io.EOF {
+			return raw[:offset], nil
+		}
+		if errRead != nil {
+			return nil, errRead
+		}
+	}
+	return nil, errInferenceBodyTooLarge
+}
+
+func prepareBackendRequest(request *http.Request, opts BackendOptions, admitLarge func() bool) ([]byte, string, error) {
 	if encoding := request.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
 		return nil, "", errors.New("unsupported request encoding")
 	}
 	if request.Body == nil {
 		return nil, "", errors.New("missing request body")
 	}
-	raw, err := io.ReadAll(io.LimitReader(request.Body, backendMaxBodyBytes+1))
-	if err != nil || len(raw) > backendMaxBodyBytes {
-		return nil, "", errors.New("cannot read bounded inference body")
+	raw, err := readInferenceBody(request, admitLarge)
+	if err != nil {
+		return nil, "", err
 	}
+	largeNative := opts.UseRequestModel && len(raw) > backendMaxBodyBytes
 	var body map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &body); err != nil || body == nil {
+	if largeNative {
+		// Keep the large message list in its original buffer. The shared
+		// credential parser validates the object and returns borrowed fields.
+		body = make(map[string]json.RawMessage, 3)
+		for _, key := range []string{"stream", "model", "metadata"} {
+			value, present, errField := helps.UniqueClaudeJSONObjectMember(raw, key)
+			if errField != nil {
+				return nil, "", errField
+			}
+			if present {
+				body[key] = value
+			}
+		}
+	} else if err := json.Unmarshal(raw, &body); err != nil || body == nil {
 		return nil, "", errors.New("inference body must be a JSON object")
 	}
 	if stream, exists := body["stream"]; exists {
@@ -1686,7 +1793,11 @@ func prepareBackendRequest(request *http.Request, opts BackendOptions) ([]byte, 
 	if !opts.UseRequestModel {
 		body["model"], _ = json.Marshal(model)
 	}
-	if rawMetadata, exists := body["metadata"]; exists {
+	if rawMetadata, exists := body["metadata"]; exists && largeNative {
+		if len(rawMetadata) == 0 || rawMetadata[0] != '{' {
+			return nil, "", errors.New("metadata must be a JSON object")
+		}
+	} else if exists {
 		var metadata map[string]json.RawMessage
 		if err := json.Unmarshal(rawMetadata, &metadata); err != nil || metadata == nil {
 			return nil, "", errors.New("metadata must be a JSON object")
@@ -1720,8 +1831,10 @@ func prepareBackendRequest(request *http.Request, opts BackendOptions) ([]byte, 
 	clean := raw
 	if opts.UseRequestModel {
 		if target, mapped := opts.ModelMap[model]; mapped && target != model {
-			if errUnique := validateBackendMappedModel(raw); errUnique != nil {
-				return nil, "", errUnique
+			if !largeNative { // Large native model members are already checked for uniqueness.
+				if errUnique := validateBackendMappedModel(raw); errUnique != nil {
+					return nil, "", errUnique
+				}
 			}
 			if strings.TrimSpace(target) == "" {
 				return nil, "", errors.New("mapped model must be a non-empty string")
@@ -2086,7 +2199,11 @@ func writeBackendProtocolHeaders(dst, src http.Header) {
 }
 
 func backendError(w http.ResponseWriter, status int, message string) {
+	backendTypedError(w, status, "api_error", message)
+}
+
+func backendTypedError(w http.ResponseWriter, status int, kind, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":"api_error","message":%q}}`, message)
+	_, _ = fmt.Fprintf(w, `{"type":"error","error":{"type":%q,"message":%q}}`, kind, message)
 }

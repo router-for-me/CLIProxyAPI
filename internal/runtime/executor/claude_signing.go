@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"sort"
 	"strings"
@@ -218,25 +219,27 @@ func claudeCCHSigningEnabled(apiKey string, kind claudeCCHUpstreamKind, cliFinge
 // signAnthropicMessagesBody reproduces Claude Code 2.1.220's final-body CCH.
 // It changes only the five CCH digits in the outgoing body.
 func signAnthropicMessagesBody(body []byte) ([]byte, error) {
+	return signAnthropicMessagesBodyOwned(body, false)
+}
+
+func signAnthropicMessagesBodyOwned(body []byte, owned bool) ([]byte, error) {
 	cchOffset, ok := claudeBillingCCHDigitsOffset(body)
 	if !ok {
 		return body, nil
 	}
 
-	unsignedBody := bytes.Clone(body)
-	copy(unsignedBody[cchOffset:cchOffset+claudeCCHLength], claudeCCHZero)
-	normalizedBody, err := normalizeClaudeCCHInput(unsignedBody)
-	if err != nil {
-		return nil, fmt.Errorf("normalize Claude CCH input: %w", err)
+	if !owned {
+		body = bytes.Clone(body)
 	}
+	copy(body[cchOffset:cchOffset+claudeCCHLength], claudeCCHZero)
 
 	hasher := xxHash64.New(claudeCCHSeed)
-	if _, err = hasher.Write(normalizedBody); err != nil {
+	if err := writeNormalizedClaudeCCHInput(hasher, body); err != nil {
 		return nil, fmt.Errorf("hash Claude CCH input: %w", err)
 	}
 	cch := fmt.Sprintf("%05x", hasher.Sum64()&0xFFFFF)
-	copy(unsignedBody[cchOffset:cchOffset+claudeCCHLength], cch)
-	return unsignedBody, nil
+	copy(body[cchOffset:cchOffset+claudeCCHLength], cch)
+	return body, nil
 }
 
 func claudeBillingCCHDigitsOffset(body []byte) (int, bool) {
@@ -277,8 +280,18 @@ func isLowerHex(value []byte) bool {
 // normalizeClaudeCCHInput builds the hash view without reserializing JSON.
 // Model string values are emptied, while dispatch-only members are omitted.
 func normalizeClaudeCCHInput(body []byte) ([]byte, error) {
+	var normalized bytes.Buffer
+	if err := writeNormalizedClaudeCCHInput(&normalized, body); err != nil {
+		return nil, err
+	}
+	return normalized.Bytes(), nil
+}
+
+// Stream the retained JSON spans into the hasher instead of building a
+// second request-sized normalized buffer.
+func writeNormalizedClaudeCCHInput(w io.Writer, body []byte) error {
 	if !json.Valid(body) {
-		return nil, fmt.Errorf("invalid JSON body")
+		return fmt.Errorf("invalid JSON body")
 	}
 
 	scanner := claudeCCHJSONScanner{
@@ -286,27 +299,28 @@ func normalizeClaudeCCHInput(body []byte) ([]byte, error) {
 		edits: make([]claudeCCHNormalizationEdit, 0),
 	}
 	if err := scanner.parseValue(true); err != nil {
-		return nil, err
+		return err
 	}
 	scanner.skipWhitespace()
 	if scanner.pos != len(body) {
-		return nil, fmt.Errorf("unexpected JSON data at byte %d", scanner.pos)
+		return fmt.Errorf("unexpected JSON data at byte %d", scanner.pos)
 	}
 
 	sort.Slice(scanner.edits, func(i, j int) bool {
 		return scanner.edits[i].start < scanner.edits[j].start
 	})
-	normalized := make([]byte, 0, len(body))
 	last := 0
 	for _, edit := range scanner.edits {
 		if edit.start < last || edit.end > len(body) {
-			return nil, fmt.Errorf("overlapping CCH normalization edit at byte %d", edit.start)
+			return fmt.Errorf("overlapping CCH normalization edit at byte %d", edit.start)
 		}
-		normalized = append(normalized, body[last:edit.start]...)
+		if _, err := w.Write(body[last:edit.start]); err != nil {
+			return err
+		}
 		last = edit.end
 	}
-	normalized = append(normalized, body[last:]...)
-	return normalized, nil
+	_, err := w.Write(body[last:])
+	return err
 }
 
 func (scanner *claudeCCHJSONScanner) parseValue(collect bool) error {

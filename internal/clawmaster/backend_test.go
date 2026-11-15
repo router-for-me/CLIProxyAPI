@@ -33,7 +33,7 @@ func TestPrepareBackendRequest(t *testing.T) {
 	request.Header.Set("Anthropic-Version", "2023-06-01")
 	request.Header.Set("Anthropic-Beta", "test-beta")
 	request.Header.Set("User-Agent", "claude-cli/2.1.285 (external, cli)")
-	clean, model, err := prepareBackendRequest(request, BackendOptions{Model: "selected-model"})
+	clean, model, err := prepareBackendRequest(request, BackendOptions{Model: "selected-model"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,21 +71,21 @@ func TestPrepareBackendRequestRejectsMalformedInput(t *testing.T) {
 	for _, input := range []string{"", "null", "[]", "1", `{"x":`, `{"stream":"yes"}`, `{"stream":null}`, `{"metadata":[]}`, `{"metadata":null}`, `{"metadata":"identity"}`, `{}` + `{}`} {
 		t.Run(input, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
-			if _, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}); err == nil {
+			if _, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}, nil); err == nil {
 				t.Fatal("malformed input accepted")
 			}
 		})
 	}
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
 	r.Header.Set("Content-Encoding", "gzip")
-	if _, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}); err == nil {
+	if _, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}, nil); err == nil {
 		t.Fatal("encoded request accepted without decoding")
 	}
 }
 
 func TestPrepareBackendRequestDropsEmptyIdentityMetadata(t *testing.T) {
 	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"metadata":{"user_id":"private"}}`))
-	clean, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"})
+	clean, _, err := prepareBackendRequest(r, BackendOptions{Model: "model"}, nil)
 	if err != nil || strings.Contains(string(clean), "metadata") {
 		t.Fatalf("identity-only metadata survived: %s, %v", clean, err)
 	}
@@ -102,7 +102,7 @@ func TestPrepareBackendRequestPreservesNativeClaudeContent(t *testing.T) {
 		`  "thinking":{"type":"enabled","budget_tokens":1024}, "system":[{"type":"text","text":"native system","cache_control":{"type":"ephemeral"}}],` + "\n" +
 		`  "max_tokens":4096, "stream":true` + "\n}"
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(input))
-	clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true})
+	clean, model, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestPrepareBackendRequestRequiresNativeModel(t *testing.T) {
 		`{"model":"  "}`,
 	} {
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-		if _, _, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true}); err == nil {
+		if _, _, err := prepareBackendRequest(request, BackendOptions{UseRequestModel: true}, nil); err == nil {
 			t.Fatalf("invalid native model accepted: %s", body)
 		}
 	}

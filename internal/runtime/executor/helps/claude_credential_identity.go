@@ -265,14 +265,14 @@ func newClaudeCredentialMetadataRequestError(err error) error {
 // ValidateClaudeCredentialMetadataContainers rejects ambiguous identity members
 // before an API-key request removes them without rebuilding its JSON payload.
 func ValidateClaudeCredentialMetadataContainers(payload []byte) error {
-	metadata, metadataPresent, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata")
+	metadata, metadataPresent, errMetadata := UniqueClaudeJSONObjectMember(payload, "metadata")
 	if errMetadata != nil {
 		return newClaudeCredentialMetadataRequestError(fmt.Errorf("validate Claude credential metadata: %w", errMetadata))
 	}
 	if metadataPresent {
 		trimmedMetadata := bytes.TrimSpace(metadata)
 		if len(trimmedMetadata) >= 2 && trimmedMetadata[0] == '{' {
-			if _, _, errUserID := uniqueClaudeJSONObjectMember(trimmedMetadata, "user_id"); errUserID != nil {
+			if _, _, errUserID := UniqueClaudeJSONObjectMember(trimmedMetadata, "user_id"); errUserID != nil {
 				return newClaudeCredentialMetadataRequestError(fmt.Errorf("validate Claude credential metadata: metadata: %w", errUserID))
 			}
 		}
@@ -285,7 +285,7 @@ func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sess
 	if auth == nil {
 		return nil, "", fmt.Errorf("apply Claude credential metadata: auth is nil")
 	}
-	metadata, metadataPresent, errMetadata := uniqueClaudeJSONObjectMember(payload, "metadata")
+	metadata, metadataPresent, errMetadata := UniqueClaudeJSONObjectMember(payload, "metadata")
 	if errMetadata != nil {
 		return nil, "", newClaudeCredentialMetadataRequestError(fmt.Errorf("apply Claude credential metadata: %w", errMetadata))
 	}
@@ -293,7 +293,7 @@ func ApplyClaudeCredentialMetadata(payload []byte, auth *cliproxyauth.Auth, sess
 	if metadataPresent {
 		trimmedMetadata := bytes.TrimSpace(metadata)
 		if len(trimmedMetadata) >= 2 && trimmedMetadata[0] == '{' {
-			userID, userIDPresent, errUserID := uniqueClaudeJSONObjectMember(trimmedMetadata, "user_id")
+			userID, userIDPresent, errUserID := UniqueClaudeJSONObjectMember(trimmedMetadata, "user_id")
 			if errUserID != nil {
 				return nil, "", newClaudeCredentialMetadataRequestError(fmt.Errorf("apply Claude credential metadata: metadata: %w", errUserID))
 			}
@@ -332,7 +332,9 @@ type claudeJSONMember struct {
 	value json.RawMessage
 }
 
-func uniqueClaudeJSONObjectMember(raw []byte, target string) ([]byte, bool, error) {
+// UniqueClaudeJSONObjectMember returns the exact slice for one top-level member,
+// rejecting duplicate occurrences without copying other values in the object.
+func UniqueClaudeJSONObjectMember(raw []byte, target string) ([]byte, bool, error) {
 	raw = bytes.TrimSpace(raw)
 	if !json.Valid(raw) || len(raw) < 2 || raw[0] != '{' {
 		return nil, false, fmt.Errorf("request must be a JSON object")

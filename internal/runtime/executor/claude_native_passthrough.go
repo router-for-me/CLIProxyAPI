@@ -137,17 +137,23 @@ func (e *ClaudeExecutor) sendNativeClaudeRequest(ctx context.Context, auth *clip
 		// Preserve any unknown sibling fields so a future native protocol addition
 		// is not silently discarded; Anthropic remains the authority on whether it
 		// accepts those fields.
-		if gjson.GetBytes(payload, "metadata").Exists() {
-			var errDelete error
-			body, errDelete = sjson.DeleteBytes(payload, "metadata.user_id")
-			if errDelete != nil {
-				return nil, fmt.Errorf("remove native Claude credential identity: %w", errDelete)
-			}
-			remaining := gjson.GetBytes(body, "metadata")
-			if remaining.IsObject() && len(remaining.Map()) == 0 {
-				body, errDelete = sjson.DeleteBytes(body, "metadata")
+		metadata := gjson.GetBytes(payload, "metadata")
+		if metadata.IsObject() {
+			// Decide before editing: removing the last member and then its
+			// empty container would copy the entire request twice.
+			deletePath := "metadata"
+			metadata.ForEach(func(key, _ gjson.Result) bool {
+				if key.String() != "user_id" {
+					deletePath = "metadata.user_id"
+					return false
+				}
+				return true
+			})
+			if deletePath == "metadata" || metadata.Get("user_id").Exists() {
+				var errDelete error
+				body, errDelete = sjson.DeleteBytes(payload, deletePath)
 				if errDelete != nil {
-					return nil, fmt.Errorf("remove empty native Claude metadata: %w", errDelete)
+					return nil, fmt.Errorf("remove native Claude credential identity: %w", errDelete)
 				}
 			}
 		}
@@ -166,7 +172,10 @@ func (e *ClaudeExecutor) sendNativeClaudeRequest(ctx context.Context, auth *clip
 	}
 	// Any credential-bound edit changes the CCH input. This is a no-op when the
 	// body does not carry a native billing CCH (the measured count shape does not).
-	body, errCCH := signAnthropicMessagesBody(body)
+	// Only sign in place when a credential edit created an owned buffer.
+	// Keep the incoming bytes unchanged for selector fallback and retry.
+	owned := len(body) > 0 && len(payload) > 0 && &body[0] != &payload[0]
+	body, errCCH := signAnthropicMessagesBodyOwned(body, owned)
 	if errCCH != nil {
 		return nil, fmt.Errorf("re-sign native Claude CCH: %w", errCCH)
 	}
