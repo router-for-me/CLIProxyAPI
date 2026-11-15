@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"regexp"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 )
 

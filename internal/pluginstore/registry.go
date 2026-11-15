@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 const (
