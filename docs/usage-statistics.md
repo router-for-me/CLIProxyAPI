@@ -194,7 +194,7 @@ Window ids are the same across providers where the windows match:
 | Provider | Headers | Window id |
 | --- | --- | --- |
 | Claude | `Anthropic-Ratelimit-Unified-<w>-Utilization` (a fraction) and `-<w>-Reset` (Unix seconds) | `<w>` in lowercase: `5h`, `7d`, `7d_oi`, `7d_<name>` |
-| Codex | `X-Codex-Primary-*` and `X-Codex-Secondary-*`: `Used-Percent`, `Window-Minutes`, `Reset-At` or `Reset-After-Seconds` | The window length: `5h` for 300 minutes, `7d` for 10080, otherwise `<n>d`, `<n>h`, or `<n>m`. `primary` or `secondary` when the length is missing. |
+| Codex | `X-Codex-Primary-*` and `X-Codex-Secondary-*`: `Used-Percent`, `Window-Minutes`, `Reset-At` or `Reset-After-Seconds` | The window length: `5h` for 300 minutes, `7d` for 10080, otherwise `<n>d`, `<n>h`, or `<n>m`. A slot with no length is not recorded: an account with one limit reports its other slot empty. |
 
 Codex limits for a single model, such as `X-Codex-Bengalfox-*`, are not
 recorded.

@@ -111,12 +111,18 @@ func codexQuotaWindows(headers http.Header, observedAt time.Time) []quotaWindowS
 		if !ok {
 			continue
 		}
+		// An account with one limit still reports the other slot, at 0% with no
+		// length and a reset of now. That slot is not a window.
+		window, ok := codexWindowID(headers.Get(prefix + "Window-Minutes"))
+		if !ok {
+			continue
+		}
 		resetsAtMs := parseUnixSecondsMs(headers.Get(prefix + "Reset-At"))
 		if after, okAfter := parseQuotaNumber(headers.Get(prefix + "Reset-After-Seconds")); resetsAtMs == 0 && okAfter {
 			resetsAtMs = observedAt.UnixMilli() + int64(math.Round(after*1000))
 		}
 		windows = append(windows, quotaWindowState{
-			window:      codexWindowID(headers.Get(prefix+"Window-Minutes"), strings.ToLower(slot)),
+			window:      window,
 			usedPercent: roundPercent(used),
 			resetsAtMs:  resetsAtMs,
 		})
@@ -125,19 +131,19 @@ func codexQuotaWindows(headers http.Header, observedAt time.Time) []quotaWindowS
 }
 
 // codexWindowID names a window by its length, so a Codex weekly window and a
-// Claude weekly window share the id "7d". A window of unknown length keeps
-// the name of the header slot that reported it.
-func codexWindowID(rawMinutes, slot string) string {
+// Claude weekly window share the id "7d". It reports false for a slot with
+// no length.
+func codexWindowID(rawMinutes string) (string, bool) {
 	minutes, errParse := strconv.Atoi(strings.TrimSpace(rawMinutes))
 	switch {
 	case errParse != nil || minutes <= 0:
-		return slot
+		return "", false
 	case minutes%(24*60) == 0:
-		return strconv.Itoa(minutes/(24*60)) + "d"
+		return strconv.Itoa(minutes/(24*60)) + "d", true
 	case minutes%60 == 0:
-		return strconv.Itoa(minutes/60) + "h"
+		return strconv.Itoa(minutes/60) + "h", true
 	default:
-		return strconv.Itoa(minutes) + "m"
+		return strconv.Itoa(minutes) + "m", true
 	}
 }
 

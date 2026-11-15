@@ -229,10 +229,31 @@ func TestQuotaSamplesFromRowReadsCodexWindows(t *testing.T) {
 		}
 	}
 
-	for minutes, window := range map[string]string{"": "primary", "0": "primary", "60": "1h", "1440": "1d", "90": "90m"} {
+	for minutes, window := range map[string]string{"60": "1h", "1440": "1d", "90": "90m"} {
 		got := quotaSamplesFromRow(row, headerOf("X-Codex-Primary-Used-Percent", "1", "X-Codex-Primary-Window-Minutes", minutes))
 		if len(got) != 1 || got[0].Window != window || got[0].ResetsAtMs != 0 {
 			t.Errorf("window minutes %q: samples = %+v, want window %q with unknown reset", minutes, got, window)
+		}
+	}
+}
+
+func TestQuotaSamplesFromRowSkipsACodexSlotWithNoLength(t *testing.T) {
+	row := Row{Provider: "codex", AuthIndex: "auth-1", Timestamp: testDay}
+	// What an account with only a weekly limit sends.
+	got := quotaSamplesFromRow(row, headerOf(
+		"X-Codex-Primary-Used-Percent", "38",
+		"X-Codex-Primary-Window-Minutes", "10080",
+		"X-Codex-Primary-Reset-At", "1795290015",
+		"X-Codex-Secondary-Used-Percent", "0",
+		"X-Codex-Secondary-Reset-After-Seconds", "0",
+	))
+	if len(got) != 1 || got[0].Window != "7d" || got[0].UsedPercent != 38 {
+		t.Fatalf("samples = %+v, want the 7d window only", got)
+	}
+	for _, minutes := range []string{"", "0", "-5", "soon"} {
+		got := quotaSamplesFromRow(row, headerOf("X-Codex-Primary-Used-Percent", "1", "X-Codex-Primary-Window-Minutes", minutes))
+		if len(got) != 0 {
+			t.Errorf("window minutes %q: samples = %+v, want none", minutes, got)
 		}
 	}
 }
