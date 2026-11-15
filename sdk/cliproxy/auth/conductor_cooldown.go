@@ -2961,6 +2961,17 @@ func isStreamTruncatedResultError(err *Error) bool {
 	return err != nil && err.Code == streamTruncatedErrorCode
 }
 
+func isZeroOutputError(err error) bool {
+	if err == nil || isCredentialScopedError(err) {
+		return false
+	}
+	return strings.EqualFold(errorCodeFromError(err), zeroOutputErrorCode)
+}
+
+func isZeroOutputResultError(err *Error) bool {
+	return err != nil && strings.EqualFold(strings.TrimSpace(err.Code), zeroOutputErrorCode)
+}
+
 // ResultErrorFromError classifies an execution or transport error into an auth.Error
 // while preserving lifecycle and transient transport classifications so MarkResult
 // does not cool credentials on client cancellations or network drops.
@@ -3003,6 +3014,7 @@ func resultErrorFromError(err error) *Error {
 		case transientRateLimitErrorCode,
 			requestScopedErrorCode,
 			streamTruncatedErrorCode,
+			zeroOutputErrorCode,
 			connectionLifecycleErrorCode,
 			transientTransportErrorCode:
 			resultErr.Code = credentialQuotaErrorCode
@@ -3011,6 +3023,11 @@ func resultErrorFromError(err error) *Error {
 		// Preserve the local truncation classification alongside the public
 		// 502 status so MarkResult can skip credential cooldown.
 		resultErr.Code = streamTruncatedErrorCode
+	case isZeroOutputError(err):
+		// Preserve abnormal zero-output classification alongside the public
+		// 502 status so MarkResult skips credential cooldown without marking
+		// the failure as transient transport.
+		resultErr.Code = zeroOutputErrorCode
 	case isTransientRateLimitError(err):
 		// Preserve the transient capacity classification alongside the public
 		// 429 status so MarkResult cools only the reporting model until the
@@ -3051,7 +3068,7 @@ func shouldSkipCredentialCooldown(err *Error) bool {
 	if err != nil && err.Code == ErrorCodeForceCooldown {
 		return false
 	}
-	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err) || isTransientTransportResultError(err) || isStreamTruncatedResultError(err)
+	return isRequestScopedResultError(err) || isConnectionLifecycleResultError(err) || isTransientTransportResultError(err) || isStreamTruncatedResultError(err) || isZeroOutputResultError(err)
 }
 
 // isConnectionLifecycleError reports transport/session lifecycle failures that must

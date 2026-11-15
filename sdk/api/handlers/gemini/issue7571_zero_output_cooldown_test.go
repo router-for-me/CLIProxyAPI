@@ -57,7 +57,7 @@ func TestIssue7571_ZeroOutputMalformedFunctionCallRotatesWithoutCoolingUnrelated
 	cfg := &config.Config{DisableCooling: false}
 	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
 	manager.SetConfig(cfg)
-	manager.SetRetryConfig(0, 0, 0)
+	manager.SetRetryConfig(3, 30*time.Second, 0)
 	manager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 
 	model := "gemini-4-hydrogen-issue7571"

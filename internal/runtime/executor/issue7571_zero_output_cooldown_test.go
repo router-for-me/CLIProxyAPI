@@ -28,17 +28,17 @@ func assertIssue7571NoCredentialCooldown(t *testing.T, manager *cliproxyauth.Man
 		t.Fatalf("err = %T (%v), want StatusCode()=502", err, err)
 	}
 	codeGetter, okCode := err.(interface{ ErrorCode() string })
-	if !okCode || codeGetter.ErrorCode() != cliproxyauth.ErrorCodeTransientTransport {
+	if !okCode || codeGetter.ErrorCode() != cliproxyauth.ErrorCodeZeroOutput {
 		gotCode := ""
 		if okCode {
 			gotCode = codeGetter.ErrorCode()
 		}
-		t.Fatalf("ErrorCode() = %q (err=%T %v), want %q", gotCode, err, err, cliproxyauth.ErrorCodeTransientTransport)
+		t.Fatalf("ErrorCode() = %q (err=%T %v), want %q", gotCode, err, err, cliproxyauth.ErrorCodeZeroOutput)
 	}
 
 	rerr := cliproxyauth.ResultErrorFromError(err)
-	if rerr == nil || rerr.Code != cliproxyauth.ErrorCodeTransientTransport || rerr.HTTPStatus != http.StatusBadGateway {
-		t.Fatalf("ResultErrorFromError() = %+v, want code=%q status=502", rerr, cliproxyauth.ErrorCodeTransientTransport)
+	if rerr == nil || rerr.Code != cliproxyauth.ErrorCodeZeroOutput || rerr.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("ResultErrorFromError() = %+v, want code=%q status=502", rerr, cliproxyauth.ErrorCodeZeroOutput)
 	}
 
 	manager.MarkResult(context.Background(), cliproxyauth.Result{
@@ -61,7 +61,7 @@ func assertIssue7571NoCredentialCooldown(t *testing.T, manager *cliproxyauth.Man
 	}
 }
 
-func TestIssue7571_GeminiFamilyZeroOutputCarriesTransientTransportAndSkipsCooldown(t *testing.T) {
+func TestIssue7571_GeminiFamilyZeroOutputCarriesZeroOutputAndSkipsCooldown(t *testing.T) {
 	const model = "gemini-4-hydrogen"
 
 	agBody := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"c2ln","text":""}]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11},"modelVersion":"gemini-4-hydrogen"}}`

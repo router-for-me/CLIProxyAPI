@@ -38,6 +38,16 @@ const ErrorCodeStreamTruncated = "stream_truncated"
 
 const streamTruncatedErrorCode = ErrorCodeStreamTruncated
 
+// ErrorCodeZeroOutput marks upstream 200 responses that terminated abnormally
+// (for example Gemini MALFORMED_FUNCTION_CALL or UNEXPECTED_TOOL_CALL) without
+// producing answer content. The public status stays 502 and the initial round
+// may still rotate across healthy sibling credentials/providers, but attempted
+// credentials must not cool down and exhausted rounds must not trigger
+// additional request-retry sweeps.
+const ErrorCodeZeroOutput = "zero_output"
+
+const zeroOutputErrorCode = ErrorCodeZeroOutput
+
 // ErrorCodeTransientRateLimit marks a transient per-model capacity or
 // admission 429 (for example a Codex turn_rate_limit_exceeded rejection).
 // The public status stays 429, but the credential quota is not exhausted:

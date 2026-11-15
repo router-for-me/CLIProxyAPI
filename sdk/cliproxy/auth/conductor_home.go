@@ -290,7 +290,7 @@ func isSessionAffinityRetryError(err error) bool {
 }
 
 func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick error) bool {
-	if lastErr == nil || isRequestStopError(errPick) || isSessionAffinityRetryError(errPick) {
+	if lastErr == nil || isRequestStopError(errPick) || (isSessionAffinityRetryError(errPick) && !isZeroOutputError(lastErr)) {
 		return false
 	}
 	if !homeMode {

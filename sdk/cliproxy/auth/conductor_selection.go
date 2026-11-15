@@ -1964,7 +1964,7 @@ func isCredentialRetryRoundStatus(status int) bool {
 }
 
 func isRequestRetryRoundError(err error) bool {
-	if err == nil {
+	if err == nil || isZeroOutputError(err) {
 		return false
 	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)

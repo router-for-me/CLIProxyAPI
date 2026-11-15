@@ -132,7 +132,7 @@ func roundPickFailureError(lastErr, upstreamErr, errPick error) error {
 }
 
 func preferredExecutionAttemptError(fallback, upstream error) error {
-	if errors.Is(fallback, context.Canceled) || errors.Is(fallback, context.DeadlineExceeded) || isSessionAffinityRetryError(fallback) {
+	if errors.Is(fallback, context.Canceled) || errors.Is(fallback, context.DeadlineExceeded) || (isSessionAffinityRetryError(fallback) && !isZeroOutputError(upstream)) {
 		return fallback
 	}
 	if upstream == nil {
