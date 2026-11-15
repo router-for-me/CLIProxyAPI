@@ -26,10 +26,11 @@ Rows go to a SQLite database at `<auth-dir>/usage.db`. Each row holds:
 - Time, provider, model, endpoint, status code, latency, and time to first token.
 - Token counts in mutually exclusive buckets: uncached input, cache read, cache
   write (with the 5 minute and 1 hour split), output, and reasoning.
+- Why the response ended, as a stop reason. See [Turns and sessions](#turns-and-sessions).
 - The upstream account. OAuth accounts are stored by their email or project;
   API-key credentials are stored masked (`sk-a...0001`).
 - The client API key, masked.
-- Client IP, user agent, and session id.
+- Client IP, user agent, session id, and parent session id.
 - The working directory the coding agent declared, and the project derived
   from it.
 
@@ -84,6 +85,94 @@ each account, prorated to the days recorded in the selected range. Each account
 also lists the models it served, with every model's API-equivalent cost and its
 share of the account's total.
 
+## Turns and sessions
+
+A turn is one finished reply. A session is one conversation, which the Usage
+page calls a thread. Both are counted at query time from two stored columns,
+`stop_reason` and `session_id`.
+
+### Stop reason
+
+Each row stores why its response ended in `stop_reason`, in one vocabulary for
+every provider:
+
+| `stop_reason` | Meaning | A turn |
+| --- | --- | --- |
+| `end_turn` | The model finished its reply. | Yes |
+| `max_tokens` | The reply hit the output or context limit. | Yes |
+| `refusal` | The model or a content filter declined to answer. | Yes |
+| `tool_use` | The model stopped to ask the client to run a tool. | No |
+| `pause` | The upstream paused a long server-side turn for the client to continue. | No |
+| empty | Unknown. | No |
+
+The proxy translates each protocol's value once, when it parses the response:
+
+| Protocol | Upstream value | `stop_reason` |
+| --- | --- | --- |
+| Anthropic Messages | `end_turn`, `stop_sequence` | `end_turn` |
+| | `tool_use` | `tool_use` |
+| | `max_tokens`, `model_context_window_exceeded` | `max_tokens` |
+| | `refusal` | `refusal` |
+| | `pause_turn` | `pause` |
+| OpenAI Responses | `completed`, with an output item that asks the client to run a tool | `tool_use` |
+| | `completed`, with no such item | `end_turn` |
+| | `incomplete`, with reason `max_output_tokens` | `max_tokens` |
+| | `incomplete`, with reason `content_filter` | `refusal` |
+
+- Anthropic Messages reports `stop_reason` at the top of a response, and in
+  `delta` of the `message_delta` event of a stream.
+- OpenAI Responses has no stop reason, so the proxy reads `response.status` and
+  `response.incomplete_details.reason` of the terminal event. The items that ask
+  the client to run a tool are `function_call`, `custom_tool_call`,
+  `local_shell_call`, `shell_call`, `computer_call`, and `apply_patch_call`.
+  Server-side tools, such as web search, run inside the response and do not end
+  it.
+- Every other value is stored empty.
+
+The Claude executor, for OAuth and API keys, and the Codex executor, over HTTP
+and websocket, record a stop reason for streamed and non-streamed requests.
+Other executors that parse Anthropic Messages or OpenAI Responses with the same
+code, such as xAI, Kimi, Meta, and plugin executors, record one too, but only
+Claude and Codex are tested end to end. OpenAI Chat Completions
+(`finish_reason`), Gemini (`finishReason`), and every other protocol store an
+empty stop reason, so their requests count no turns.
+
+Rows recorded before this version have an empty stop reason. Turn counts start
+when the proxy starts recording stop reasons.
+
+### Turns
+
+`turns` counts the rows that did not fail and whose stop reason is `end_turn`,
+`max_tokens`, or `refusal`. A coding agent that runs three tools and then
+answers makes four requests and one turn.
+
+Each upstream attempt is its own row, so a request that the proxy retries
+leaves a failed row before the successful one. A failed row never counts as a
+turn, even when its response carried a stop reason, as a stream that broke off
+after `message_delta` does. A reply therefore counts once. The same rule leaves
+out a Claude refusal that carries `stop_details`, because the proxy returns it
+to the client as an error.
+
+### Sessions
+
+`sessions` counts distinct non-empty `session_id` values. The session id is the
+one the client declares, such as Claude Code's `X-Claude-Code-Session-Id` or
+Codex's `session_id`. A client that declares none gets an id derived from the
+conversation's leading instructions and first user message, so two
+conversations that start with the same text count as one session.
+
+A subagent has its own session id, and its main session is stored in
+`parent_session_id`. `sessions` counts subagents as sessions of their own.
+To count only main sessions, filter on `parent_session_id` with an empty value.
+Rows recorded before this version have no parent session id either, so that
+filter counts their subagent sessions as main sessions.
+
+Unlike every other measure, `sessions` is not a sum. One session can span
+models, days, and other groups, so the sessions of the groups add up to more
+than the sessions of the range. Never add `sessions` across groups. For the
+total of a range, request it without `group_by`, and for sessions per month,
+group by `month`.
+
 ## Quota samples
 
 Claude and Codex subscriptions report in every response how much of each
@@ -137,7 +226,7 @@ recording is off.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /stats` | Token, request, and cost totals grouped by `group_by` |
+| `GET /stats` | Request, turn, session, token, and cost totals grouped by `group_by` |
 | `GET /speed` | Latency and first-token percentiles and output tokens per second |
 | `GET /settings` | Price overrides and plan prices, plus the built-in price table |
 | `PUT /settings` | Replace price overrides and plan prices |
@@ -149,11 +238,12 @@ Query parameters for `/stats` and `/speed`:
 - `from`, `to`: Unix milliseconds. Default is the last 30 days.
 - `utc_offset_minutes`: minutes east of UTC, used to bucket days and hours in
   the viewer's calendar.
-- `group_by`: comma-separated dimensions. `/stats` accepts `day`, `hour`,
-  `model`, `alias`, `provider`, `account`, `auth_index`, `auth_type`,
+- `group_by`: comma-separated dimensions. `/stats` accepts `month`, `day`,
+  `hour`, `model`, `alias`, `provider`, `account`, `auth_index`, `auth_type`,
   `client_key`, `client_ip`, `user_agent`, `endpoint`, `project`, `session_id`,
-  `reasoning_effort`, `service_tier`, `status_code`, `stream`, and `failed`.
-  `/speed` accepts one of those, except `day` and `hour`.
+  `parent_session_id`, `stop_reason`, `reasoning_effort`, `service_tier`,
+  `status_code`, `stream`, and `failed`. `/speed` accepts one of those, except
+  `month`, `day`, and `hour`.
 - `filter.<dimension>=<value>`: keep only rows with that exact value.
 - `limit`: maximum number of groups (default 2000). The largest groups are kept.
 
@@ -163,6 +253,42 @@ Example:
 curl -H "Authorization: Bearer $MANAGEMENT_KEY" \
   "http://127.0.0.1:8317/v8/management/observability/usage/stats?group_by=day,project"
 ```
+
+### `GET /stats`
+
+Returns one entry in `groups` per combination of the `group_by` values, with
+those values in `dimensions`. Without `group_by`, it returns one group for the
+whole range. This group from the end-to-end test is the fake Claude account:
+
+```json
+{
+  "dimensions": {"provider": "claude"},
+  "requests": 7,
+  "failed": 1,
+  "turns": 3,
+  "sessions": 3,
+  "input_tokens": 7000,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 3750,
+  "cache_write_5m_tokens": 1350,
+  "cache_write_1h_tokens": 2400,
+  "output_tokens": 1400,
+  "reasoning_tokens": 0,
+  "unclassified_tokens": 0,
+  "total_tokens": 12150,
+  "web_search_requests": 0,
+  "cost_usd": 0.08195,
+  "unpriced_tokens": 0
+}
+```
+
+- `turns` and `sessions` are described in [Turns and sessions](#turns-and-sessions).
+  `sessions` is the one field that does not add up across groups.
+- `cache_write_5m_tokens` and `cache_write_1h_tokens` split
+  `cache_write_tokens` by how long the upstream keeps the cache. Only Anthropic
+  reports these two lifetimes. OpenAI Responses reports cache writes with no
+  lifetime or with 30 minute and 12 hour lifetimes, which are not stored, so
+  Codex cache writes count in `cache_write_tokens` alone.
 
 ### `GET /quota-samples`
 
@@ -226,9 +352,13 @@ filter dimensions, and returns one entry per series:
       "percent_used": 48,
       "requests": 277,
       "failed": 0,
+      "turns": 277,
+      "sessions": 3,
       "input_tokens": 2242000,
       "cache_read_tokens": 0,
       "cache_write_tokens": 0,
+      "cache_write_5m_tokens": 0,
+      "cache_write_1h_tokens": 0,
       "output_tokens": 45891600,
       "reasoning_tokens": 0,
       "unclassified_tokens": 0,
@@ -245,9 +375,13 @@ filter dimensions, and returns one entry per series:
           "percent_used": 20,
           "requests": 170,
           "failed": 0,
+          "turns": 170,
+          "sessions": 1,
           "input_tokens": 1700000,
           "cache_read_tokens": 0,
           "cache_write_tokens": 0,
+          "cache_write_5m_tokens": 0,
+          "cache_write_1h_tokens": 0,
           "output_tokens": 33660000,
           "reasoning_tokens": 0,
           "unclassified_tokens": 0,
@@ -280,7 +414,9 @@ How the numbers are built:
   Requests join a series by `auth_index`, and a request can have started
   before `from`.
 - The series fields sum the counted intervals: `intervals`, `percent_used`,
-  and the token and cost fields of `/stats`, priced with the same price table.
+  and the request, turn, token, and cost fields of `/stats`, priced with the
+  same price table. `sessions` counts the distinct sessions of the requests in
+  the counted intervals.
   `usd_per_percent` is `cost_usd / percent_used`, and
   `output_tokens_per_percent` is `(output_tokens + reasoning_tokens) /
   percent_used`. Both are `null` when `percent_used` is 0.

@@ -82,6 +82,10 @@ func TestAggregatePricesTokenBucketsIndependently(t *testing.T) {
 	if group.UnpricedTokens != 0 || len(aggregate.UnpricedModels) != 0 {
 		t.Fatalf("unpriced tokens = %d, models = %v, want none", group.UnpricedTokens, aggregate.UnpricedModels)
 	}
+	if group.CacheWriteTokens != 3_000_000 || group.CacheWrite5mTokens != 1_000_000 || group.CacheWrite1hTokens != 2_000_000 {
+		t.Fatalf("cache writes = %d (5m %d, 1h %d), want 3M split 1M and 2M",
+			group.CacheWriteTokens, group.CacheWrite5mTokens, group.CacheWrite1hTokens)
+	}
 }
 
 func TestAggregateFoldsModelsIntoRequestedGroups(t *testing.T) {
@@ -352,20 +356,23 @@ func TestRecorderPersistsUsageRecordWithoutSecrets(t *testing.T) {
 	})
 	ctx = internallogging.WithEndpoint(ctx, "POST /v1/messages")
 	const sessionID = "0196f4a2-7c1e-7c3a-9d5e-3f2a1b4c5d6e"
+	const parentSessionID = "0196f4a2-7c1e-7c3a-9d5e-000000000001"
 	record := coreusage.Record{
-		RequestID:   "exec-1",
-		Provider:    "claude",
-		Model:       "claude-opus-5-5",
-		AuthType:    "apikey",
-		Source:      "sk-ant-upstream-secret-key",
-		APIKey:      "sk-client-secret-key",
-		SessionID:   sessionID,
-		RequestedAt: testDay,
-		Latency:     1500 * time.Millisecond,
-		TTFT:        300 * time.Millisecond,
+		RequestID:       "exec-1",
+		Provider:        "claude",
+		Model:           "claude-opus-5-5",
+		AuthType:        "apikey",
+		Source:          "sk-ant-upstream-secret-key",
+		APIKey:          "sk-client-secret-key",
+		SessionID:       sessionID,
+		ParentSessionID: parentSessionID,
+		RequestedAt:     testDay,
+		Latency:         1500 * time.Millisecond,
+		TTFT:            300 * time.Millisecond,
 		Detail: coreusage.Detail{
 			TokenBreakdown:        coreusage.NewIndependentTokenBreakdown(100, 200, 300, 40, 10, 650),
 			CacheCreation1hTokens: coreusage.Int64Ptr(300),
+			StopReason:            coreusage.StopReasonEndTurn,
 		},
 	}
 	recorder{}.HandleUsage(ctx, record)
@@ -378,7 +385,7 @@ func TestRecorderPersistsUsageRecordWithoutSecrets(t *testing.T) {
 	store := Current()
 	aggregate, errAggregate := store.Aggregate(context.Background(), Query{
 		From: testDay, To: testDay.Add(time.Hour),
-		GroupBy: []string{"project", "account", "client_key", "session_id"},
+		GroupBy: []string{"project", "account", "client_key", "session_id", "parent_session_id", "stop_reason"},
 	})
 	if errAggregate != nil {
 		t.Fatalf("aggregate: %v", errAggregate)
@@ -388,18 +395,20 @@ func TestRecorderPersistsUsageRecordWithoutSecrets(t *testing.T) {
 	}
 	group := aggregate.Groups[0]
 	want := map[string]string{
-		"project":    "CLIProxyAPI",
-		"account":    "sk-a...-key",
-		"client_key": "sk-c...-key",
-		"session_id": sessionID,
+		"project":           "CLIProxyAPI",
+		"account":           "sk-a...-key",
+		"client_key":        "sk-c...-key",
+		"session_id":        sessionID,
+		"parent_session_id": parentSessionID,
+		"stop_reason":       "end_turn",
 	}
 	for name, value := range want {
 		if group.Dimensions[name] != value {
 			t.Errorf("%s = %q, want %q", name, group.Dimensions[name], value)
 		}
 	}
-	if group.Requests != 2 || group.InputTokens != 200 || group.CacheReadTokens != 400 ||
-		group.CacheWriteTokens != 600 || group.OutputTokens != 80 || group.ReasoningTokens != 20 || group.TotalTokens != 1300 {
+	if group.Requests != 2 || group.Turns != 2 || group.Sessions != 1 || group.InputTokens != 200 || group.CacheReadTokens != 400 ||
+		group.CacheWriteTokens != 600 || group.CacheWrite1hTokens != 600 || group.OutputTokens != 80 || group.ReasoningTokens != 20 || group.TotalTokens != 1300 {
 		t.Fatalf("metrics = %+v", group.Metrics)
 	}
 

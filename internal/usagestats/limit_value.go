@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -41,6 +42,8 @@ type LimitSpend struct {
 	// USDPerPercent and OutputTokensPerPercent are nil when no percent was used.
 	USDPerPercent          *float64 `json:"usd_per_percent"`
 	OutputTokensPerPercent *float64 `json:"output_tokens_per_percent"`
+
+	sessionIDs map[string]struct{}
 }
 
 // ModelLimitSpend is a model's spend over the intervals it dominated.
@@ -68,17 +71,12 @@ type LimitValueResult struct {
 	UnpricedModels []string `json:"unpriced_models"`
 }
 
-// tokenSum is the summed token buckets of requests of one model, ready to price.
-type tokenSum struct {
-	metrics      Metrics
-	cacheWrite1h int64
-}
-
 // completedRequest is a request reduced to what limit value needs.
 type completedRequest struct {
-	doneMs int64
-	model  string
-	tokenSum
+	doneMs    int64
+	model     string
+	sessionID string
+	metrics   Metrics
 }
 
 // LimitValue answers, for each quota window, what one percent of the limit
@@ -139,8 +137,9 @@ func (s *Store) completedRequests(ctx context.Context, byKey map[QuotaSeriesKey]
 		return byAuth, nil
 	}
 	rows, errQuery := s.db.QueryContext(ctx,
-		`SELECT auth_index, ts_ms + latency_ms, model, failed, input_tokens, cache_read_tokens, cache_write_tokens,
-		cache_write_1h_tokens, output_tokens, reasoning_tokens, unclassified_tokens, total_tokens, web_search_requests
+		`SELECT auth_index, ts_ms + latency_ms, model, session_id, failed, `+turnCondition+`, input_tokens,
+		cache_read_tokens, cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens, output_tokens,
+		reasoning_tokens, unclassified_tokens, total_tokens, web_search_requests
 		FROM requests WHERE ts_ms >= ? AND ts_ms <= ? AND ts_ms + latency_ms > ? AND ts_ms + latency_ms <= ?
 		AND auth_index IN (?`+strings.Repeat(",?", len(authIndexes)-1)+`)`,
 		append([]any{fromMs - maxRequestDuration.Milliseconds(), toMs, fromMs, toMs}, authIndexes...)...,
@@ -152,17 +151,13 @@ func (s *Store) completedRequests(ctx context.Context, byKey map[QuotaSeriesKey]
 	for rows.Next() {
 		var authIndex string
 		var request completedRequest
-		var failed bool
 		m := &request.metrics
-		if errScan := rows.Scan(&authIndex, &request.doneMs, &request.model, &failed, &m.InputTokens, &m.CacheReadTokens,
-			&m.CacheWriteTokens, &request.cacheWrite1h, &m.OutputTokens, &m.ReasoningTokens, &m.UnclassifiedTokens,
-			&m.TotalTokens, &m.WebSearchRequests); errScan != nil {
+		if errScan := rows.Scan(&authIndex, &request.doneMs, &request.model, &request.sessionID, &m.Failed, &m.Turns,
+			&m.InputTokens, &m.CacheReadTokens, &m.CacheWriteTokens, &m.CacheWrite5mTokens, &m.CacheWrite1hTokens,
+			&m.OutputTokens, &m.ReasoningTokens, &m.UnclassifiedTokens, &m.TotalTokens, &m.WebSearchRequests); errScan != nil {
 			return nil, fmt.Errorf("usagestats: scan request for limit value: %w", errScan)
 		}
 		m.Requests = 1
-		if failed {
-			m.Failed = 1
-		}
 		byAuth[authIndex] = append(byAuth[authIndex], request)
 	}
 	if errRows := rows.Err(); errRows != nil {
@@ -195,7 +190,8 @@ func limitValueOf(series *QuotaSeries, requests []completedRequest, prices *Pric
 		for next < len(requests) && requests[next].doneMs <= start.TimestampMs {
 			next++
 		}
-		byModelTokens := make(map[string]*tokenSum)
+		byModelTokens := make(map[string]*Metrics)
+		sessionIDs := make(map[string]struct{})
 		for ; next < len(requests) && requests[next].doneMs <= end.TimestampMs; next++ {
 			request := requests[next]
 			if value.ModelScope != "" && !modelInFamily(request.model, value.ModelScope) {
@@ -203,11 +199,13 @@ func limitValueOf(series *QuotaSeries, requests []completedRequest, prices *Pric
 			}
 			sum, ok := byModelTokens[request.model]
 			if !ok {
-				sum = &tokenSum{}
+				sum = &Metrics{}
 				byModelTokens[request.model] = sum
 			}
-			sum.metrics.add(request.metrics)
-			sum.cacheWrite1h += request.cacheWrite1h
+			sum.add(request.metrics)
+			if request.sessionID != "" {
+				sessionIDs[request.sessionID] = struct{}{}
+			}
 		}
 		percent := end.UsedPercent - start.UsedPercent
 		// A drop is a window reset or a redeemed reset grant, not usage. A rise
@@ -219,22 +217,22 @@ func limitValueOf(series *QuotaSeries, requests []completedRequest, prices *Pric
 		var interval Metrics
 		dominant, dominantCost := "", 0.0
 		for model, sum := range byModelTokens {
-			if !prices.priceMetrics(model, &sum.metrics, sum.cacheWrite1h) && sum.metrics.TotalTokens > 0 {
+			if !prices.priceMetrics(model, sum) && sum.TotalTokens > 0 {
 				unpriced[model] = struct{}{}
 			}
-			interval.add(sum.metrics)
-			if sum.metrics.CostUSD > dominantCost {
-				dominant, dominantCost = model, sum.metrics.CostUSD
+			interval.add(*sum)
+			if sum.CostUSD > dominantCost {
+				dominant, dominantCost = model, sum.CostUSD
 			}
 		}
-		value.LimitSpend.add(percent, interval)
+		value.LimitSpend.add(percent, interval, sessionIDs)
 		if dominant != "" && dominantCost >= pureIntervalShare*interval.CostUSD {
 			spend, ok := byModel[dominant]
 			if !ok {
 				spend = &LimitSpend{}
 				byModel[dominant] = spend
 			}
-			spend.add(percent, interval)
+			spend.add(percent, interval, sessionIDs)
 		}
 	}
 	value.LimitSpend.finish()
@@ -257,14 +255,20 @@ func spansReset(start, end QuotaPoint) bool {
 	return max(shift, -shift) >= quotaResetTolerance.Milliseconds()
 }
 
-func (l *LimitSpend) add(percent float64, interval Metrics) {
+func (l *LimitSpend) add(percent float64, interval Metrics, sessionIDs map[string]struct{}) {
 	l.Intervals++
 	l.PercentUsed += percent
 	l.Metrics.add(interval)
+	if l.sessionIDs == nil {
+		l.sessionIDs = make(map[string]struct{})
+	}
+	maps.Copy(l.sessionIDs, sessionIDs)
 }
 
-// finish rounds the summed percent and derives the per-percent ratios.
+// finish counts the sessions, rounds the summed percent, and derives the
+// per-percent ratios.
 func (l *LimitSpend) finish() {
+	l.Sessions = int64(len(l.sessionIDs))
 	l.PercentUsed = roundPercent(l.PercentUsed)
 	if l.PercentUsed <= 0 {
 		return

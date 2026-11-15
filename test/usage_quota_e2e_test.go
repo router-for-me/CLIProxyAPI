@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -38,7 +39,44 @@ var usageE2EPrices = map[string][2]float64{
 	"gpt-5.5":          {5, 30},
 }
 
-var usageE2ETokens = regexp.MustCompile(`in=(\d+) out=(\d+)`)
+var (
+	usageE2ETokens     = regexp.MustCompile(`in=(\d+) out=(\d+)`)
+	usageE2EStop       = regexp.MustCompile(`stop=(\w+)`)
+	usageE2ECacheWrite = regexp.MustCompile(`cw(5m|1h)?=(\d+)`)
+)
+
+// fakeReply is how the fake upstream ends one response, in the canonical stop
+// reason vocabulary, and the cache writes it reports.
+type fakeReply struct {
+	stop                 string
+	cacheWrite5m         int64
+	cacheWrite1h         int64
+	cacheWriteNoLifetime int64
+	overWebsocket        bool
+	truncated            bool
+}
+
+// parseFakeReply reads the reply plan from a prompt, such as
+// "stop=tool_use cw5m=100 cw1h=200". A Claude reply reports cw5m and cw1h,
+// and a Codex reply reports cw, which Responses gives without a lifetime.
+func parseFakeReply(body []byte) fakeReply {
+	reply := fakeReply{stop: "end_turn"}
+	if match := usageE2EStop.FindSubmatch(body); match != nil {
+		reply.stop = string(match[1])
+	}
+	for _, match := range usageE2ECacheWrite.FindAllSubmatch(body, -1) {
+		tokens, _ := strconv.ParseInt(string(match[2]), 10, 64)
+		switch string(match[1]) {
+		case "5m":
+			reply.cacheWrite5m = tokens
+		case "1h":
+			reply.cacheWrite1h = tokens
+		default:
+			reply.cacheWriteNoLifetime = tokens
+		}
+	}
+	return reply
+}
 
 // usageE2EStep is how long the fake upstream takes to its first byte and to
 // finish, and how long the client waits between requests. The proxy stores
@@ -67,8 +105,11 @@ type fakeQuotaUpstream struct {
 	windows map[string][]*fakeQuotaWindow
 	emitted map[string][]emittedQuotaState
 	costUSD map[string]float64
-	release chan struct{}
-	held    chan struct{}
+	replies map[string][]fakeReply
+	// truncatedOnce holds the prompts whose first stream was already cut short.
+	truncatedOnce map[string]bool
+	release       chan struct{}
+	held          chan struct{}
 }
 
 func newFakeQuotaUpstream(start time.Time) *fakeQuotaUpstream {
@@ -85,10 +126,12 @@ func newFakeQuotaUpstream(start time.Time) *fakeQuotaUpstream {
 				{id: "secondary", reportedFor: always, rates: map[string]float64{"gpt-5.5": 12}, resetsAt: start.Add(150 * time.Hour).Truncate(time.Second)},
 			},
 		},
-		emitted: map[string][]emittedQuotaState{},
-		costUSD: map[string]float64{},
-		release: make(chan struct{}),
-		held:    make(chan struct{}, 1),
+		emitted:       map[string][]emittedQuotaState{},
+		costUSD:       map[string]float64{},
+		replies:       map[string][]fakeReply{},
+		truncatedOnce: map[string]bool{},
+		release:       make(chan struct{}),
+		held:          make(chan struct{}, 1),
 	}
 }
 
@@ -120,12 +163,13 @@ func (f *fakeQuotaUpstream) reportState(provider, model string, headers http.Hea
 }
 
 // complete counts a finished request against every window its model moves.
-func (f *fakeQuotaUpstream) complete(provider, model string, input, output int64) {
+func (f *fakeQuotaUpstream) complete(provider, model string, input, output int64, reply fakeReply) {
 	price := usageE2EPrices[model]
 	cost := float64(input)*price[0]/1e6 + float64(output)*price[1]/1e6
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.costUSD[provider+"/"+model] += cost
+	f.replies[provider] = append(f.replies[provider], reply)
 	for _, window := range f.windows[provider] {
 		if rate, ok := window.rates[model]; ok {
 			window.used += cost / rate
@@ -145,6 +189,10 @@ func (f *fakeQuotaUpstream) resetWindow(provider, id string, next time.Duration)
 }
 
 func (f *fakeQuotaUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if websocket.IsWebSocketUpgrade(r) {
+		f.serveCodexWebsocket(w, r)
+		return
+	}
 	body, errRead := io.ReadAll(r.Body)
 	if errRead != nil {
 		http.Error(w, errRead.Error(), http.StatusBadRequest)
@@ -160,17 +208,24 @@ func (f *fakeQuotaUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	input, _ := strconv.ParseInt(string(match[1]), 10, 64)
 	output, _ := strconv.ParseInt(string(match[2]), 10, 64)
 	hold := bytes.Contains(body, []byte("hold-until-released"))
+	reply := parseFakeReply(body)
+	if bytes.Contains(body, []byte("truncate-once")) {
+		f.mu.Lock()
+		reply.truncated = !f.truncatedOnce[string(body)]
+		f.truncatedOnce[string(body)] = true
+		f.mu.Unlock()
+	}
 	if bytes.Contains(body, []byte("no-quota")) {
-		f.serveClaude(w, model, false, false, input, output, func() {})
+		f.serveClaude(w, model, false, false, input, output, reply, func() {})
 		return
 	}
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/v1/messages"):
 		f.reportState("claude", model, w.Header())
-		f.serveClaude(w, model, stream, hold, input, output, func() { f.complete("claude", model, input, output) })
+		f.serveClaude(w, model, stream, hold, input, output, reply, func() { f.complete("claude", model, input, output, reply) })
 	case strings.HasSuffix(r.URL.Path, "/responses"):
 		f.reportState("codex", model, w.Header())
-		f.serveCodex(w, model, stream, input, output, func() { f.complete("codex", model, input, output) })
+		f.serveCodex(w, model, stream, input, output, reply, func() { f.complete("codex", model, input, output, reply) })
 	default:
 		http.NotFound(w, r)
 	}
@@ -185,17 +240,19 @@ func writeSSE(w http.ResponseWriter, event, data string) {
 
 // serveClaude and serveCodex call done just before the response's last bytes,
 // so the next request a client sends after reading a response sees its usage.
-func (f *fakeQuotaUpstream) serveClaude(w http.ResponseWriter, model string, stream, hold bool, input, output int64, done func()) {
+func (f *fakeQuotaUpstream) serveClaude(w http.ResponseWriter, model string, stream, hold bool, input, output int64, reply fakeReply, done func()) {
 	time.Sleep(usageE2EStep)
 	defer time.Sleep(usageE2EStep)
+	cacheWrites := fmt.Sprintf(`"cache_creation_input_tokens":%d,"cache_creation":{"ephemeral_5m_input_tokens":%d,"ephemeral_1h_input_tokens":%d}`,
+		reply.cacheWrite5m+reply.cacheWrite1h, reply.cacheWrite5m, reply.cacheWrite1h)
 	if !stream {
 		w.Header().Set("Content-Type", "application/json")
 		done()
-		_, _ = fmt.Fprintf(w, `{"id":"msg_e2e","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":%d}}`, model, input, output)
+		_, _ = fmt.Fprintf(w, `{"id":"msg_e2e","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"ok"}],"stop_reason":%q,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":%d,%s}}`, model, reply.stop, input, output, cacheWrites)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	writeSSE(w, "message_start", fmt.Sprintf(`{"type":"message_start","message":{"id":"msg_e2e","type":"message","role":"assistant","model":%q,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":1}}}`, model, input))
+	writeSSE(w, "message_start", fmt.Sprintf(`{"type":"message_start","message":{"id":"msg_e2e","type":"message","role":"assistant","model":%q,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":1,%s}}}`, model, input, cacheWrites))
 	writeSSE(w, "content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`)
 	writeSSE(w, "content_block_delta", `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}`)
 	if hold {
@@ -203,27 +260,90 @@ func (f *fakeQuotaUpstream) serveClaude(w http.ResponseWriter, model string, str
 		<-f.release
 	}
 	writeSSE(w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
-	writeSSE(w, "message_delta", fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":%d}}`, output))
+	writeSSE(w, "message_delta", fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"output_tokens":%d}}`, reply.stop, output))
 	done()
-	writeSSE(w, "message_stop", `{"type":"message_stop"}`)
+	if !reply.truncated {
+		writeSSE(w, "message_stop", `{"type":"message_stop"}`)
+	}
 }
 
-func (f *fakeQuotaUpstream) serveCodex(w http.ResponseWriter, model string, stream bool, input, output int64, done func()) {
+// codexEvents returns the Responses events of one reply, the terminal event
+// last. A tool_use reply ends with a function call item and a max_tokens reply
+// with response.incomplete, as Responses has no stop reason.
+func codexEvents(model string, input, output int64, reply fakeReply) []string {
+	usage := fmt.Sprintf(`{"input_tokens":%d,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":%d},"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":%d}`,
+		input, reply.cacheWriteNoLifetime, output, input+output)
+	items := []string{`{"type":"message","id":"msg_e2e","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}`}
+	terminal, status := "response.completed", `"status":"completed"`
+	switch reply.stop {
+	case "tool_use":
+		items = append(items, `{"type":"function_call","id":"fc_e2e","call_id":"call_e2e","status":"completed","name":"shell","arguments":"{}"}`)
+	case "max_tokens":
+		terminal, status = "response.incomplete", `"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}`
+	}
+	events := []string{
+		fmt.Sprintf(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_e2e","object":"response","created_at":1,"status":"in_progress","model":%q,"output":[]}}`, model),
+		`{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_e2e","output_index":0,"content_index":0,"delta":"ok"}`,
+	}
+	for i, item := range items {
+		events = append(events, fmt.Sprintf(`{"type":"response.output_item.done","sequence_number":%d,"output_index":%d,"item":%s}`, 2+i, i, item))
+	}
+	completed := fmt.Sprintf(`{"id":"resp_e2e","object":"response","created_at":1,%s,"model":%q,"output":[%s],"usage":%s}`, status, model, strings.Join(items, ","), usage)
+	return append(events, fmt.Sprintf(`{"type":%q,"sequence_number":%d,"response":%s}`, terminal, 2+len(items), completed))
+}
+
+func (f *fakeQuotaUpstream) serveCodex(w http.ResponseWriter, model string, stream bool, input, output int64, reply fakeReply, done func()) {
 	time.Sleep(usageE2EStep)
 	defer time.Sleep(usageE2EStep)
-	usage := fmt.Sprintf(`{"input_tokens":%d,"input_tokens_details":{"cached_tokens":0},"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":%d}`, input, output, input+output)
-	completed := fmt.Sprintf(`{"id":"resp_e2e","object":"response","created_at":1,"status":"completed","model":%q,"output":[{"type":"message","id":"msg_e2e","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":%s}`, model, usage)
+	events := codexEvents(model, input, output, reply)
+	terminal := []byte(events[len(events)-1])
 	if !stream {
 		w.Header().Set("Content-Type", "application/json")
 		done()
-		_, _ = io.WriteString(w, completed)
+		_, _ = io.WriteString(w, ojson.GetBytes(terminal, "response").Raw)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	writeSSE(w, "response.created", fmt.Sprintf(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_e2e","object":"response","created_at":1,"status":"in_progress","model":%q,"output":[]}}`, model))
-	writeSSE(w, "response.output_text.delta", `{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_e2e","output_index":0,"content_index":0,"delta":"ok"}`)
+	for _, event := range events[:len(events)-1] {
+		writeSSE(w, ojson.GetBytes([]byte(event), "type").String(), event)
+	}
 	done()
-	writeSSE(w, "response.completed", fmt.Sprintf(`{"type":"response.completed","sequence_number":2,"response":%s}`, completed))
+	writeSSE(w, ojson.GetBytes(terminal, "type").String(), string(terminal))
+}
+
+// serveCodexWebsocket answers each response.create of one connection, as the
+// Responses websocket transport does. It reports no quota headers.
+func (f *fakeQuotaUpstream) serveCodexWebsocket(w http.ResponseWriter, r *http.Request) {
+	conn, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+	if errUpgrade != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	for {
+		_, message, errRead := conn.ReadMessage()
+		if errRead != nil {
+			return
+		}
+		match := usageE2ETokens.FindSubmatch(message)
+		if match == nil {
+			_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"missing token plan"}}`))
+			continue
+		}
+		input, _ := strconv.ParseInt(string(match[1]), 10, 64)
+		output, _ := strconv.ParseInt(string(match[2]), 10, 64)
+		model := ojson.GetBytes(message, "model").String()
+		reply := parseFakeReply(message)
+		reply.overWebsocket = true
+		events := codexEvents(model, input, output, reply)
+		for i, event := range events {
+			if i == len(events)-1 {
+				f.complete("codex", model, input, output, reply)
+			}
+			if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(event)); errWrite != nil {
+				return
+			}
+		}
+	}
 }
 
 // usageE2EServer is the proxy binary under test.
@@ -288,6 +408,7 @@ api-keys:
           alias: gpt-5.5
       keys:
         - api-key: "sk-e2e-fake-codex-key"
+          websockets: true
 `, port, usageE2EManagementKey, filepath.Join(dir, "auths"), usageE2EClientKey, upstreamURL, upstreamURL)
 	if errWrite := os.WriteFile(configPath, []byte(config), 0o600); errWrite != nil {
 		t.Fatalf("write config: %v", errWrite)
@@ -363,6 +484,11 @@ func (s *usageE2EServer) management(t *testing.T, path string, query url.Values,
 // send makes one client request through the proxy and drains the response.
 func (s *usageE2EServer) send(t *testing.T, provider, model string, stream bool, prompt string) {
 	t.Helper()
+	s.sendWithHeaders(t, provider, model, stream, prompt, nil)
+}
+
+func (s *usageE2EServer) sendWithHeaders(t *testing.T, provider, model string, stream bool, prompt string, headers http.Header) {
+	t.Helper()
 	time.Sleep(usageE2EStep)
 	path, body := "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":1024,"stream":%t,"messages":[{"role":"user","content":%q}]}`, model, stream, prompt)
 	if provider == "codex" {
@@ -372,6 +498,9 @@ func (s *usageE2EServer) send(t *testing.T, provider, model string, stream bool,
 	if errReq != nil {
 		t.Errorf("build request: %v", errReq)
 		return
+	}
+	for name, values := range headers {
+		req.Header[name] = values
 	}
 	req.Header.Set("Authorization", "Bearer "+usageE2EClientKey)
 	req.Header.Set("Content-Type", "application/json")

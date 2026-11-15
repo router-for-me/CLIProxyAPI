@@ -1644,6 +1644,7 @@ func ParseCodexUsageWithOutputItems(data []byte, itemsByIndex map[int64][]byte, 
 		detail.ImageCount = nil
 		detail.ImageDetails = nil
 	}
+	detail.StopReason = responsesStopReason(root, detail)
 	return detail, true
 }
 
@@ -2743,6 +2744,7 @@ func ParseClaudeUsage(data []byte) usage.Detail {
 	}
 	detail := parseClaudeUsageNode(usageNode)
 	applyClaudeContentBlocksUsage(&detail, root.Get("content"))
+	detail.StopReason = claudeStopReason(root)
 	return detail
 }
 
@@ -2759,7 +2761,9 @@ func ParseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
 	if !usageNode.Exists() {
 		return usage.Detail{}, false
 	}
-	return parseClaudeUsageNode(usageNode), true
+	detail := parseClaudeUsageNode(usageNode)
+	detail.StopReason = claudeStopReason(root)
+	return detail, true
 }
 
 func parseClaudeUsageNode(usageNode ojson.Result) usage.Detail {

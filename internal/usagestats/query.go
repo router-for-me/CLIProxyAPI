@@ -19,27 +19,34 @@ const DefaultGroupLimit = 2000
 // ErrInvalidQuery marks errors caused by a malformed query rather than storage.
 var ErrInvalidQuery = errors.New("invalid usage query")
 
+// turnCondition selects the rows whose reply finished without asking for a
+// tool: complete, cut off at a limit, or declined. Failed attempts are left
+// out, so a reply that finished on an attempt that was then retried counts once.
+const turnCondition = "failed = 0 AND stop_reason IN ('end_turn', 'max_tokens', 'refusal')"
+
 // dimensionColumns maps the dimensions a query may group or filter by to
-// their column. The time buckets "day" and "hour" are handled separately
-// because they depend on the caller's UTC offset.
+// their column. The time buckets "month", "day", and "hour" are handled
+// separately because they depend on the caller's UTC offset.
 var dimensionColumns = map[string]string{
-	"model":            "model",
-	"alias":            "alias",
-	"provider":         "provider",
-	"account":          "account",
-	"auth_index":       "auth_index",
-	"auth_type":        "auth_type",
-	"client_key":       "client_key",
-	"client_ip":        "client_ip",
-	"user_agent":       "user_agent",
-	"endpoint":         "endpoint",
-	"project":          "project",
-	"session_id":       "session_id",
-	"reasoning_effort": "reasoning_effort",
-	"service_tier":     "service_tier",
-	"status_code":      "status_code",
-	"stream":           "stream",
-	"failed":           "failed",
+	"model":             "model",
+	"alias":             "alias",
+	"provider":          "provider",
+	"account":           "account",
+	"auth_index":        "auth_index",
+	"auth_type":         "auth_type",
+	"client_key":        "client_key",
+	"client_ip":         "client_ip",
+	"user_agent":        "user_agent",
+	"endpoint":          "endpoint",
+	"project":           "project",
+	"session_id":        "session_id",
+	"parent_session_id": "parent_session_id",
+	"stop_reason":       "stop_reason",
+	"reasoning_effort":  "reasoning_effort",
+	"service_tier":      "service_tier",
+	"status_code":       "status_code",
+	"stream":            "stream",
+	"failed":            "failed",
 }
 
 // Query selects and groups usage rows.
@@ -50,7 +57,7 @@ type Query struct {
 	// UTCOffset shifts timestamps before bucketing into days or hours, so
 	// buckets follow the viewer's calendar rather than UTC.
 	UTCOffset time.Duration
-	// GroupBy lists dimensions; "day" and "hour" are also accepted.
+	// GroupBy lists dimensions; "month", "day", and "hour" are also accepted.
 	GroupBy []string
 	// Filters restrict rows to exact dimension values.
 	Filters map[string]string
@@ -61,11 +68,20 @@ type Query struct {
 // Metrics are the summed measures of a group of rows. Token buckets are
 // mutually exclusive, so TotalTokens is their sum.
 type Metrics struct {
-	Requests           int64 `json:"requests"`
-	Failed             int64 `json:"failed"`
-	InputTokens        int64 `json:"input_tokens"`
-	CacheReadTokens    int64 `json:"cache_read_tokens"`
-	CacheWriteTokens   int64 `json:"cache_write_tokens"`
+	Requests int64 `json:"requests"`
+	Failed   int64 `json:"failed"`
+	// Turns counts the rows that match turnCondition.
+	Turns int64 `json:"turns"`
+	// Sessions counts distinct session ids. It is the one measure that is not
+	// a sum: a session can span groups, so group values do not add up.
+	Sessions         int64 `json:"sessions"`
+	InputTokens      int64 `json:"input_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	// CacheWrite5mTokens and CacheWrite1hTokens split CacheWriteTokens by
+	// cache lifetime. They add up to less when an upstream reports no split.
+	CacheWrite5mTokens int64 `json:"cache_write_5m_tokens"`
+	CacheWrite1hTokens int64 `json:"cache_write_1h_tokens"`
 	OutputTokens       int64 `json:"output_tokens"`
 	ReasoningTokens    int64 `json:"reasoning_tokens"`
 	UnclassifiedTokens int64 `json:"unclassified_tokens"`
@@ -99,6 +115,8 @@ func dimensionExpr(name string, offset time.Duration) (string, error) {
 	// Bound parameters cannot be reused across SELECT and GROUP BY positions.
 	shifted := fmt.Sprintf("(ts_ms + %d) / 1000", offset.Milliseconds())
 	switch name {
+	case "month":
+		return "strftime('%Y-%m', " + shifted + ", 'unixepoch')", nil
 	case "day":
 		return "strftime('%Y-%m-%d', " + shifted + ", 'unixepoch')", nil
 	case "hour":
@@ -160,9 +178,9 @@ func (s *Store) Aggregate(ctx context.Context, q Query) (Aggregate, error) {
 		positions[i] = fmt.Sprint(i + 1)
 	}
 	statement := "SELECT " + strings.Join(exprs, ", ") + `,
-		COUNT(*), SUM(failed), SUM(input_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens),
-		SUM(cache_write_1h_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(unclassified_tokens),
-		SUM(total_tokens), SUM(web_search_requests)
+		COUNT(*), SUM(failed), SUM(` + turnCondition + `), SUM(input_tokens), SUM(cache_read_tokens),
+		SUM(cache_write_tokens), SUM(cache_write_5m_tokens), SUM(cache_write_1h_tokens), SUM(output_tokens),
+		SUM(reasoning_tokens), SUM(unclassified_tokens), SUM(total_tokens), SUM(web_search_requests)
 		FROM requests WHERE ` + where + " GROUP BY " + strings.Join(positions, ", ")
 
 	prices, errPrices := s.priceTable(ctx)
@@ -180,18 +198,18 @@ func (s *Store) Aggregate(ctx context.Context, q Query) (Aggregate, error) {
 	values := make([]string, len(exprs))
 	for rows.Next() {
 		var m Metrics
-		var cacheWrite1h int64
-		dest := make([]any, 0, len(exprs)+11)
+		dest := make([]any, 0, len(exprs)+13)
 		for i := range values {
 			dest = append(dest, &values[i])
 		}
-		dest = append(dest, &m.Requests, &m.Failed, &m.InputTokens, &m.CacheReadTokens, &m.CacheWriteTokens,
-			&cacheWrite1h, &m.OutputTokens, &m.ReasoningTokens, &m.UnclassifiedTokens, &m.TotalTokens, &m.WebSearchRequests)
+		dest = append(dest, &m.Requests, &m.Failed, &m.Turns, &m.InputTokens, &m.CacheReadTokens, &m.CacheWriteTokens,
+			&m.CacheWrite5mTokens, &m.CacheWrite1hTokens, &m.OutputTokens, &m.ReasoningTokens, &m.UnclassifiedTokens,
+			&m.TotalTokens, &m.WebSearchRequests)
 		if errScan := rows.Scan(dest...); errScan != nil {
 			return result, fmt.Errorf("usagestats: scan aggregate row: %w", errScan)
 		}
 		model := values[len(values)-1]
-		if !prices.priceMetrics(model, &m, cacheWrite1h) && m.TotalTokens > 0 {
+		if !prices.priceMetrics(model, &m) && m.TotalTokens > 0 {
 			unpriced[model] = struct{}{}
 		}
 
@@ -209,6 +227,13 @@ func (s *Store) Aggregate(ctx context.Context, q Query) (Aggregate, error) {
 	}
 	if errRows := rows.Err(); errRows != nil {
 		return result, fmt.Errorf("usagestats: read aggregate rows: %w", errRows)
+	}
+	sessions, errSessions := s.countSessions(ctx, exprs[:len(q.GroupBy)], where, args)
+	if errSessions != nil {
+		return result, errSessions
+	}
+	for key, group := range groups {
+		group.Sessions = sessions[key]
 	}
 
 	keys := make([]string, 0, len(groups))
@@ -236,12 +261,53 @@ func (s *Store) Aggregate(ctx context.Context, q Query) (Aggregate, error) {
 	return result, nil
 }
 
+// countSessions counts distinct sessions per group of the dimension
+// expressions, keyed like Aggregate's groups. It runs apart from the main
+// query, which also groups by model, because one session can use several models.
+func (s *Store) countSessions(ctx context.Context, exprs []string, where string, args []any) (map[string]int64, error) {
+	statement := "SELECT " + strings.Join(append(slices.Clone(exprs), "COUNT(DISTINCT session_id)"), ", ") +
+		" FROM requests WHERE " + where + " AND session_id != ''"
+	if len(exprs) > 0 {
+		positions := make([]string, len(exprs))
+		for i := range exprs {
+			positions[i] = fmt.Sprint(i + 1)
+		}
+		statement += " GROUP BY " + strings.Join(positions, ", ")
+	}
+	rows, errQuery := s.db.QueryContext(ctx, statement, args...)
+	if errQuery != nil {
+		return nil, fmt.Errorf("usagestats: count sessions: %w", errQuery)
+	}
+	defer closeRows(rows)
+	counts := make(map[string]int64)
+	values := make([]string, len(exprs))
+	for rows.Next() {
+		var count int64
+		dest := make([]any, 0, len(exprs)+1)
+		for i := range values {
+			dest = append(dest, &values[i])
+		}
+		if errScan := rows.Scan(append(dest, &count)...); errScan != nil {
+			return nil, fmt.Errorf("usagestats: scan session count: %w", errScan)
+		}
+		counts[strings.Join(values, "\x00")] = count
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return nil, fmt.Errorf("usagestats: read session counts: %w", errRows)
+	}
+	return counts, nil
+}
+
+// add sums every measure except Sessions, which does not add up.
 func (m *Metrics) add(other Metrics) {
 	m.Requests += other.Requests
 	m.Failed += other.Failed
+	m.Turns += other.Turns
 	m.InputTokens += other.InputTokens
 	m.CacheReadTokens += other.CacheReadTokens
 	m.CacheWriteTokens += other.CacheWriteTokens
+	m.CacheWrite5mTokens += other.CacheWrite5mTokens
+	m.CacheWrite1hTokens += other.CacheWrite1hTokens
 	m.OutputTokens += other.OutputTokens
 	m.ReasoningTokens += other.ReasoningTokens
 	m.UnclassifiedTokens += other.UnclassifiedTokens

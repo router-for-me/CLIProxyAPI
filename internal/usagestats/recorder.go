@@ -141,9 +141,9 @@ func rowFromRecord(ctx context.Context, record coreusage.Record) Row {
 		}
 	}
 
-	sessionID := strings.TrimSpace(record.SessionID)
-	if sessionID == "" {
-		sessionID = strings.TrimSpace(meta.SessionID)
+	sessionID, parentSessionID := record.SessionID, record.ParentSessionID
+	if strings.TrimSpace(sessionID) == "" {
+		sessionID, parentSessionID = meta.SessionID, meta.ParentSessionID
 	}
 
 	clientIP := strings.TrimSpace(meta.ResolvedClientIP)
@@ -190,6 +190,8 @@ func rowFromRecord(ctx context.Context, record coreusage.Record) Row {
 		StatusCode:      statusCode,
 		LatencyMs:       record.Latency.Milliseconds(),
 		TTFTMs:          record.TTFT.Milliseconds(),
+		ParentSessionID: coresession.NormalizeToCanonicalUUID(parentSessionID),
+		StopReason:      detail.StopReason,
 
 		InputTokens:        tokens.Input.UncachedTokens,
 		CacheReadTokens:    tokens.Input.CacheReadTokens,

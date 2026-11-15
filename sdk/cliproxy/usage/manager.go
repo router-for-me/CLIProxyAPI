@@ -115,6 +115,7 @@ type Detail struct {
 	TotalTokens         int64
 	TokenBreakdown      TokenBreakdown
 	ResponseServiceTier string
+	StopReason          StopReason
 
 	CacheCreation5mTokens    *int64
 	CacheCreation30mTokens   *int64

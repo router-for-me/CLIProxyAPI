@@ -129,6 +129,7 @@ func parseClaudePayloadUsage(payload []byte) usage.Detail {
 	}
 	detail := parseClaudeUsageNode(usageNode)
 	applyClaudeContentBlocksUsage(&detail, root.Get("content"))
+	detail.StopReason = claudeStopReason(root)
 	return detail
 }
 
@@ -183,6 +184,9 @@ func MergeStreamUsageDetail(existing, update usage.Detail) usage.Detail {
 	}
 	if merged.ResponseServiceTier == "" {
 		merged.ResponseServiceTier = existing.ResponseServiceTier
+	}
+	if merged.StopReason == "" {
+		merged.StopReason = existing.StopReason
 	}
 
 	outputExcludesReasoning, knownOutput := detailOutputExcludesReasoning(update)

@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	// Pure-Go SQLite driver, registered as "sqlite".
 	_ "modernc.org/sqlite"
 )
@@ -57,6 +58,8 @@ type Row struct {
 	FailCode        string
 	LatencyMs       int64
 	TTFTMs          int64
+	ParentSessionID string
+	StopReason      coreusage.StopReason
 
 	InputTokens        int64 // uncached input
 	CacheReadTokens    int64
@@ -134,6 +137,8 @@ CREATE TABLE settings (
 	resets_at_ms INTEGER NOT NULL
 );
 CREATE INDEX idx_quota_samples_series ON quota_samples (provider, auth_index, "window", ts_ms);`,
+	`ALTER TABLE requests ADD COLUMN stop_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE requests ADD COLUMN parent_session_id TEXT NOT NULL DEFAULT '';`,
 }
 
 const insertSQL = `
@@ -142,8 +147,9 @@ INSERT INTO requests (
 	endpoint, auth_index, auth_type, account, client_key, client_ip, user_agent, working_dir, project,
 	reasoning_effort, service_tier, stream, generate, failed, status_code, fail_code, latency_ms, ttft_ms,
 	input_tokens, cache_read_tokens, cache_write_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
-	output_tokens, reasoning_tokens, unclassified_tokens, total_tokens, web_search_requests, upstream_cost_usd
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+	output_tokens, reasoning_tokens, unclassified_tokens, total_tokens, web_search_requests, upstream_cost_usd,
+	stop_reason, parent_session_id
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 // Store is a SQLite-backed usage store. It is safe for concurrent use.
 type Store struct {
@@ -282,6 +288,7 @@ func (s *Store) Insert(ctx context.Context, row Row) error {
 		row.Stream, row.Generate, row.Failed, row.StatusCode, row.FailCode, row.LatencyMs, row.TTFTMs,
 		row.InputTokens, row.CacheReadTokens, row.CacheWriteTokens, row.CacheWrite5mTokens, row.CacheWrite1hTokens,
 		row.OutputTokens, row.ReasoningTokens, row.UnclassifiedTokens, row.TotalTokens, row.WebSearchRequests, cost,
+		string(row.StopReason), row.ParentSessionID,
 	)
 	if errExec != nil {
 		return fmt.Errorf("usagestats: insert row: %w", errExec)
