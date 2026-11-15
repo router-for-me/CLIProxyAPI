@@ -52,3 +52,23 @@ func TestClaudeExecutor_ResponsesOutputSchemaReachesOutputConfigFormat(t *testin
 		}
 	}
 }
+
+// A model without native structured outputs keeps the schema instruction and
+// gets no output_config.format.
+func TestClaudeExecutor_ResponsesOutputSchemaOnOlderModelKeepsInstruction(t *testing.T) {
+	const model = "claude-sonnet-4-20250514"
+	const schema = `{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}`
+	payload := []byte(`{"model":"` + model + `","input":[{"role":"user","content":[{"type":"input_text","text":"Suggest a recipe."}]}],"text":{"format":{"type":"json_schema","name":"output_schema","strict":true,"schema":` + schema + `}}}`)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-structured"}}
+	for _, method := range []string{"Execute", "ExecuteStream", "CountTokens"} {
+		t.Run(method, func(t *testing.T) {
+			body, _ := captureClaudeIssue7000(t, NewClaudeExecutor(&config.Config{}), auth, cliproxyexecutor.Request{Model: model, Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, method)
+			if ojson.GetBytes(body, "output_config.format").Exists() {
+				t.Fatalf("output_config.format sent to a model without native structured outputs: %s", body)
+			}
+			if !strings.Contains(string(body), "conforms strictly") {
+				t.Errorf("schema instruction missing: %s", body)
+			}
+		})
+	}
+}

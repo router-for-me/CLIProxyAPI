@@ -80,20 +80,20 @@ func TestSystemReminderText(t *testing.T) {
 	}
 }
 
-func TestBuildClaudeOutputFormat(t *testing.T) {
-	t.Run("chat completions json_schema passes the schema unchanged", func(t *testing.T) {
+func TestClaudeOutputFormatSchema(t *testing.T) {
+	t.Run("chat completions json_schema returns the schema unchanged", func(t *testing.T) {
 		schema := `{"type":"object","properties":{"tags":{"type":"array","maxItems":3,"items":{"type":"string","pattern":"^[a-z]+$"}}},"required":["tags"],"additionalProperties":false}`
-		got, ok := BuildClaudeOutputFormat(ojson.Parse(`{"type":"json_schema","json_schema":{"name":"tags","strict":true,"schema":` + schema + `}}`))
-		if !ok || string(got) != `{"type":"json_schema","schema":`+schema+`}` {
-			t.Fatalf("got %s, %v", got, ok)
+		got, ok := ClaudeOutputFormatSchema("claude-sonnet-5-5", ojson.Parse(`{"type":"json_schema","json_schema":{"name":"tags","strict":true,"schema":`+schema+`}}`))
+		if !ok || got.Raw != schema {
+			t.Fatalf("got %s, %v", got.Raw, ok)
 		}
 	})
 
-	t.Run("responses json_schema passes the schema unchanged", func(t *testing.T) {
-		schema := `{"type":"object","properties":{"facts":{"type":"array","items":{"type":"string"}}},"required":["facts"]}`
-		got, ok := BuildClaudeOutputFormat(ojson.Parse(`{"type":"JSON_SCHEMA","name":"facts","strict":true,"schema":` + schema + `}`))
-		if !ok || string(got) != `{"type":"json_schema","schema":`+schema+`}` {
-			t.Fatalf("got %s, %v", got, ok)
+	t.Run("responses json_schema returns the schema unchanged", func(t *testing.T) {
+		schema := `{ "required": ["facts"], "type": "object",  "properties": {"facts": {"type": "array", "items": {"type": "string"}}}}`
+		got, ok := ClaudeOutputFormatSchema("claude-sonnet-5-5", ojson.Parse(`{"type":"JSON_SCHEMA","name":"facts","strict":true,"schema":`+schema+`}`))
+		if !ok || got.Raw != schema {
+			t.Fatalf("got %s, %v", got.Raw, ok)
 		}
 	})
 
@@ -105,9 +105,70 @@ func TestBuildClaudeOutputFormat(t *testing.T) {
 		"json_schema with a non-object schema": `{"type":"json_schema","schema":"not a schema"}`,
 	} {
 		t.Run(name+" keeps the instruction path", func(t *testing.T) {
-			if got, ok := BuildClaudeOutputFormat(ojson.Parse(format)); ok || got != nil {
-				t.Fatalf("got %s, %v", got, ok)
+			if got, ok := ClaudeOutputFormatSchema("claude-sonnet-5-5", ojson.Parse(format)); ok || got.Exists() {
+				t.Fatalf("got %s, %v", got.Raw, ok)
 			}
 		})
 	}
+}
+
+func TestClaudeOutputFormatSchemaModels(t *testing.T) {
+	format := ojson.Parse(`{"type":"json_schema","name":"facts","schema":{"type":"object","properties":{"facts":{"type":"string"}}}}`)
+	for model, native := range map[string]bool{
+		"claude-3-5-haiku-20241022":           false,
+		"claude-3-7-sonnet-20250219":          false,
+		"claude-3-7-sonnet-20250219-thinking": false,
+		"claude-sonnet-4-20250514":            false,
+		"claude-sonnet-4-0":                   false,
+		"claude-sonnet-4":                     false,
+		"claude-opus-4-20250514":              false,
+		"claude-opus-4-0":                     false,
+		"claude-opus-4":                       false,
+		"claude-opus-4-1-20250805":            false,
+		"claude-opus-4-1":                     false,
+		"Claude-Sonnet-4-20250514(high)":      false,
+		"claude-opus-4-1[1m]":                 false,
+		"claude-sonnet-4-5-20250929":          true,
+		"claude-sonnet-4-5":                   true,
+		"claude-sonnet-4-6":                   true,
+		"claude-opus-4-5-20251101":            true,
+		"claude-opus-4-6":                     true,
+		"claude-opus-4-7":                     true,
+		"claude-opus-4-8":                     true,
+		"claude-haiku-4-5-20251001":           true,
+		"claude-sonnet-5-5":                   true,
+		"claude-opus-5-5(high)":               true,
+		"claude-fable-5-2":                    true,
+		"an-unknown-model":                    true,
+	} {
+		t.Run(model, func(t *testing.T) {
+			if _, ok := ClaudeOutputFormatSchema(model, format); ok != native {
+				t.Fatalf("native output format = %v, want %v", ok, native)
+			}
+		})
+	}
+}
+
+func TestBuildClaudeOutputFormatDescription(t *testing.T) {
+	schema := `{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}`
+	for name, format := range map[string]string{
+		"chat completions": `{"type":"json_schema","json_schema":{"name":"recipe","description":"A dish for two.","schema":` + schema + `}}`,
+		"responses":        `{"type":"json_schema","name":"recipe","description":"A dish for two.","schema":` + schema + `}`,
+	} {
+		t.Run(name+" carries the name and description without the schema", func(t *testing.T) {
+			got := BuildClaudeOutputFormatDescription(ojson.Parse(format))
+			if !strings.Contains(got, "Schema Name: recipe") || !strings.Contains(got, "Schema Description: A dish for two.") {
+				t.Fatalf("got %q", got)
+			}
+			if strings.Contains(got, `"properties"`) || strings.Contains(got, "conforms strictly") {
+				t.Fatalf("the schema must not be repeated in the instruction: %q", got)
+			}
+		})
+	}
+
+	t.Run("no description gives no instruction", func(t *testing.T) {
+		if got := BuildClaudeOutputFormatDescription(ojson.Parse(`{"type":"json_schema","name":"recipe","schema":` + schema + `}`)); got != "" {
+			t.Fatalf("got %q", got)
+		}
+	})
 }

@@ -666,9 +666,13 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 	if !formatResult.Exists() {
 		formatResult = root.Get("response_format")
 	}
-	if outputFormat, ok := common.BuildClaudeOutputFormat(formatResult); ok {
-		_ = outDoc.SetRawBytes("output_config.format", outputFormat)
-	} else if formatInstruction := common.BuildClaudeStructuredOutputInstruction(formatResult); formatInstruction != "" {
+	formatInstruction := common.BuildClaudeStructuredOutputInstruction(formatResult)
+	if schema, ok := common.ClaudeOutputFormatSchema(modelName, formatResult); ok {
+		_ = outDoc.Set("output_config.format.type", "json_schema")
+		_ = outDoc.SetRaw("output_config.format.schema", schema.Raw)
+		formatInstruction = common.BuildClaudeOutputFormatDescription(formatResult)
+	}
+	if formatInstruction != "" {
 		appendSystemText(formatInstruction)
 	}
 	if len(unmappedItemTypes) > 0 {

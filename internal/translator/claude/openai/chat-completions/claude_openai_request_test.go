@@ -1,7 +1,6 @@
 package chat_completions
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -963,12 +962,77 @@ func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchema(t *testing.T) {
 
 	out, _ := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
 	schema := ojson.GetBytes(inputJSON, "response_format.json_schema.schema")
-	want := ojson.Parse(`{"type":"json_schema","schema":` + schema.Raw + `}`).Value()
-	if got := ojson.GetBytesNoCopy(out, "output_config.format").Value(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("output_config.format = %#v, want %#v. Output: %s", got, want, string(out))
+	if got := ojson.GetBytesNoCopy(out, "output_config.format.type").String(); got != "json_schema" {
+		t.Fatalf("output_config.format.type = %q. Output: %s", got, string(out))
 	}
-	if strings.Contains(ojson.GetBytesNoCopy(out, "system").Raw, "conforms strictly") {
-		t.Fatalf("schema instruction must not be sent beside output_config.format. Output: %s", string(out))
+	if got := ojson.GetBytesNoCopy(out, "output_config.format.schema").Raw; got != schema.Raw {
+		t.Fatalf("output_config.format.schema = %s, want the schema byte for byte: %s", got, schema.Raw)
+	}
+	if keys := ojson.GetBytesNoCopy(out, "output_config.format").Map(); len(keys) != 2 {
+		t.Fatalf("output_config.format must hold only type and schema. Output: %s", string(out))
+	}
+	if ojson.GetBytesNoCopy(out, "system").Exists() {
+		t.Fatalf("no system instruction without a description. Output: %s", string(out))
+	}
+}
+
+var claudeStructuredOutputModels = []struct {
+	model  string
+	native bool
+}{
+	{"claude-sonnet-4-20250514", false},
+	{"claude-opus-4-20250514", false},
+	{"claude-opus-4-1-20250805", false},
+	{"claude-3-7-sonnet-20250219", false},
+	{"claude-3-5-haiku-20241022", false},
+	{"claude-sonnet-4-5-20250929", true},
+	{"claude-opus-4-5-20251101", true},
+	{"claude-haiku-4-5-20251001", true},
+	{"claude-sonnet-5-5", true},
+	{"an-unknown-model", true},
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchemaByModel(t *testing.T) {
+	for _, tc := range claudeStructuredOutputModels {
+		t.Run(tc.model, func(t *testing.T) {
+			inputJSON := []byte(`{"model":"` + tc.model + `","messages":[{"role":"user","content":"Hi."}],` +
+				`"response_format":{"type":"json_schema","json_schema":{"name":"facts","schema":{"type":"object","properties":{"facts":{"type":"string"}},"required":["facts"]}}}}`)
+			out, _ := ConvertOpenAIRequestToClaude(tc.model, inputJSON, false)
+			hasFormat := ojson.GetBytesNoCopy(out, "output_config.format").Exists()
+			hasInstruction := strings.Contains(ojson.GetBytesNoCopy(out, "system").Raw, "conforms strictly")
+			if hasFormat != tc.native || hasInstruction == tc.native {
+				t.Fatalf("output_config.format = %v, instruction = %v, want native = %v. Output: %s", hasFormat, hasInstruction, tc.native, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchemaKeepsKeyOrder(t *testing.T) {
+	schema := `{"required":["b","a"],"properties":{"b":{"type":"string"},"a":{"type":"integer"}},"type":"object"}`
+	inputJSON := []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Hi."}],` +
+		`"response_format":{"type":"json_schema","json_schema":{"name":"order","schema":` + schema + `}}}`)
+	out, _ := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	if got := ojson.GetBytesNoCopy(out, "output_config.format.schema").Raw; got != schema {
+		t.Fatalf("output_config.format.schema = %s, want %s", got, schema)
+	}
+}
+
+func TestConvertOpenAIRequestToClaude_ResponseFormatJSONSchemaKeepsDescription(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-6",
+		"messages": [{"role": "user", "content": "Suggest a recipe."}],
+		"response_format": {"type": "json_schema", "json_schema": {"name": "recipe", "description": "A dish for two, ready in 20 minutes.", "schema": {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}}}
+	}`)
+	out, _ := ConvertOpenAIRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+	if !ojson.GetBytesNoCopy(out, "output_config.format.schema").IsObject() {
+		t.Fatalf("output_config.format missing. Output: %s", string(out))
+	}
+	system := ojson.GetBytesNoCopy(out, "system").Raw
+	if !strings.Contains(system, "A dish for two, ready in 20 minutes.") || !strings.Contains(system, "Schema Name: recipe") {
+		t.Fatalf("the format's name and description must reach Claude. Output: %s", string(out))
+	}
+	if strings.Contains(system, "conforms strictly") || strings.Contains(system, `\"properties\"`) {
+		t.Fatalf("the schema must not be repeated as text. Output: %s", string(out))
 	}
 }
 
