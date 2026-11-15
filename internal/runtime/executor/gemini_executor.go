@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -250,7 +251,7 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClear != nil {
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newGeminiStatusErr(httpResp.StatusCode, httpResp.Header, b)
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -414,7 +415,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, b); errClear != nil {
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newGeminiStatusErr(httpResp.StatusCode, httpResp.Header, b)
 		return nil, err
 	}
 	replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, replayRequestPayload)
@@ -798,7 +799,7 @@ func (e *GeminiExecutor) executeInteractions(ctx context.Context, auth *cliproxy
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		err = newGeminiStatusErr(httpResp.StatusCode, httpResp.Header, data)
 		return resp, err
 	}
 	continuation.Observe(data)
@@ -886,7 +887,9 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		}
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(data)}
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		err = newGeminiStatusErr(httpResp.StatusCode, httpResp.Header, data)
+		return nil, err
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -1090,7 +1093,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", resp.StatusCode, helps.SummarizeErrorBody(resp.Header.Get("Content-Type"), data))
-		return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: string(data)}
+		return cliproxyexecutor.Response{}, newGeminiStatusErr(resp.StatusCode, resp.Header, data)
 	}
 
 	count := ojson.GetBytesNoCopy(data, "totalTokens").Int()
@@ -1362,6 +1365,14 @@ func fixGeminiImageAspectRatioDoc(modelName string, doc *ojson.Doc) bool {
 	}
 	_ = doc.Delete("generationConfig.imageConfig")
 	return true
+}
+
+func newGeminiStatusErr(statusCode int, headers http.Header, body []byte) statusErr {
+	return statusErr{
+		code:       statusCode,
+		msg:        string(body),
+		retryAfter: helps.ParseGoogleRetryAfter(statusCode, headers, body, time.Now()),
+	}
 }
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
