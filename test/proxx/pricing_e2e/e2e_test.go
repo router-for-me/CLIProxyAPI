@@ -48,6 +48,13 @@ func mockUpstream() *httptest.Server {
 		model := ojson.GetBytes(body, "model").String()
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/chat/completions") && ojson.GetBytes(body, "stream").Bool():
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,"+
+				"\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n", model)
+			fmt.Fprintf(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":%q,"+
+				"\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{%s,\"cost\":0.0321}}\n\n", model, openAIUsage)
+			fmt.Fprint(w, "data: [DONE]\n\n")
 		case strings.HasSuffix(r.URL.Path, "/chat/completions"):
 			extra := ""
 			switch model {
@@ -72,7 +79,7 @@ func mockUpstream() *httptest.Server {
 	}))
 }
 
-func configYAML(port int, upstream, dir string, reloaded bool) string {
+func configYAML(port int, upstream, dir string, reloaded bool, recentLimit int) string {
 	mockConfigInput := "1"
 	extra := ""
 	override := "false"
@@ -121,6 +128,7 @@ api-keys:
         - name: mock-config
         - name: mock-override
         - name: gpt-4o-mini
+        - name: mock-stream
 proxx:
   pricing:
     override-upstream: %s
@@ -135,8 +143,8 @@ proxx:
         output: 20
         override: true%s
   usage:
-    recent-limit: 100
-`, port, filepath.Join(dir, "auths"), mgmtKey, clientKey, upstream, upstream, override, mockConfigInput, extra)
+    recent-limit: %d
+`, port, filepath.Join(dir, "auths"), mgmtKey, clientKey, upstream, upstream, override, mockConfigInput, extra, recentLimit)
 }
 
 type proc struct {
@@ -215,6 +223,7 @@ func (p *proc) chat(t *testing.T, model string) {
 
 type recentItem struct {
 	Model      string   `json:"model"`
+	Stream     bool     `json:"stream"`
 	Provider   string   `json:"provider"`
 	APIKey     string   `json:"api_key"`
 	CostUSD    *float64 `json:"cost_usd"`
@@ -318,7 +327,7 @@ func TestPricingUsageE2E(t *testing.T) {
 	defer up.Close()
 	port := freePort(t)
 	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte(configYAML(port, up.URL, dir, false)), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(configYAML(port, up.URL, dir, false, 100)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -335,7 +344,17 @@ func TestPricingUsageE2E(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("claude messages: %d %s\nlog:\n%s", code, body, p.log.String())
 	}
-	items := p.waitRecent(t, 8)
+	code, body = p.do(t, "POST", "/v1/chat/completions", `{"model":"mock-stream","stream":true,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if code != 200 || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("stream: %d %s", code, body)
+	}
+	items := p.waitRecent(t, 9)
+	expectCost(t, items, "mock-stream", "upstream", f(0.0321))
+	for _, it := range items {
+		if it.Model == "mock-stream" && !it.Stream {
+			t.Errorf("mock-stream recent item not marked stream: %+v", it)
+		}
+	}
 	expectCost(t, items, "mock-cost", "upstream", f(0.0123))
 	expectCost(t, items, "mock-ticks", "upstream", f(0.456))
 	expectCost(t, items, "mock-header", "header", f(0.0789))
@@ -380,10 +399,10 @@ func TestPricingUsageE2E(t *testing.T) {
 
 	// 3. Management endpoints.
 	code, body = p.do(t, "GET", "/v8/management/proxx/usage/summary?group_by=model", "", nil)
-	if code != 200 || ojson.Get(body, "totals.requests").Int() != 8 || ojson.Get(body, "totals.unknown_cost_requests").Int() != 1 {
+	if code != 200 || ojson.Get(body, "totals.requests").Int() != 9 || ojson.Get(body, "totals.unknown_cost_requests").Int() != 1 {
 		t.Fatalf("summary: %d %s", code, body)
 	}
-	wantTotal := 0.0123 + 0.456 + 0.0789 + 0.0016 + 0.021 + 0.00039 + 0.0021
+	wantTotal := 0.0321 + 0.0123 + 0.456 + 0.0789 + 0.0016 + 0.021 + 0.00039 + 0.0021
 	if got := ojson.Get(body, "totals.cost_usd").Float(); math.Abs(got-wantTotal) > 1e-9 {
 		t.Errorf("summary cost_usd = %v, want %v", got, wantTotal)
 	}
@@ -416,13 +435,13 @@ func TestPricingUsageE2E(t *testing.T) {
 	}
 	p = start(t, bin, cfgPath, port)
 	_, after := p.do(t, "GET", "/v8/management/proxx/usage/summary", "", nil)
-	if ojson.Get(before, "totals").Raw != ojson.Get(after, "totals").Raw || len(p.recent(t)) != 8 {
+	if ojson.Get(before, "totals").Raw != ojson.Get(after, "totals").Raw || len(p.recent(t)) != 9 {
 		t.Fatalf("totals changed across restart:\nbefore %s\nafter  %s", before, after)
 	}
 	t.Logf("persisted across restart: %s", ojson.Get(after, "totals").Raw)
 
 	// 5. Hot reload: new mock-config price, override-upstream, and a config price for mock-ticks.
-	if err := os.WriteFile(cfgPath, []byte(configYAML(port, up.URL, dir, true)), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(configYAML(port, up.URL, dir, true, 100)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -438,7 +457,7 @@ func TestPricingUsageE2E(t *testing.T) {
 	}
 	p.chat(t, "mock-config")
 	p.chat(t, "mock-ticks")
-	items = p.waitRecent(t, 10)
+	items = p.waitRecent(t, 11)
 	expectCost(t, items, "mock-config", "config", f(1800.0/1e6))
 	// override-upstream: the config price beats the reported 0.456 USD ticks cost.
 	expectCost(t, items, "mock-ticks", "config", f(1600.0/1e6))
@@ -446,7 +465,20 @@ func TestPricingUsageE2E(t *testing.T) {
 		t.Errorf("override_upstream not reloaded: %.300s", body)
 	}
 
-	// 6. Reset.
+	// 6. Hot reload of proxx.usage: recent-limit shrinks the ring buffer.
+	if err := os.WriteFile(cfgPath, []byte(configYAML(port, up.URL, dir, true, 3)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(30 * time.Second)
+	for len(p.recent(t)) > 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("recent-limit reload not applied; log:\n%s", p.log.String())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Logf("recent-limit reload applied: %d items", len(p.recent(t)))
+
+	// 7. Reset.
 	if code, _ := p.do(t, "DELETE", "/v8/management/proxx/usage", "", nil); code != 200 {
 		t.Fatalf("reset status %d", code)
 	}

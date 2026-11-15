@@ -276,15 +276,32 @@ func buildProviderOrder(c *Catalog) []string {
 	return append(order, rest...)
 }
 
-// lookup resolves the price for model (falling back to responseModel) served by provider.
-// alias is matched against config entries only, never against the catalog.
-func lookup(entries []configEntry, c *Catalog, provider, model, alias string) (Match, bool) {
-	if e, ok := lookupConfig(entries, provider, model, alias); ok {
+// lookup resolves the price for model served by provider: config entries, then catalog.
+func lookup(entries []configEntry, c *Catalog, provider, model string) (Match, bool) {
+	if e, ok := lookupConfig(entries, provider, model); ok {
 		base, _ := lookupCatalog(c, provider, model)
 		return Match{Price: e.price.mergeOver(base), Source: SourceConfig, Override: e.override}, true
 	}
 	if price, ok := lookupCatalog(c, provider, model); ok {
 		return Match{Price: price, Source: SourceCatalog}, true
+	}
+	return Match{}, false
+}
+
+// lookupAliasExact matches the client alias against exact (non-prefix) config entries only.
+// It is the last resort, so an alias pool never prices the served model at the alias price.
+func lookupAliasExact(entries []configEntry, provider, alias string) (Match, bool) {
+	key := basicModelID(alias)
+	if key == "" {
+		return Match{}, false
+	}
+	for _, restricted := range []bool{true, false} {
+		for _, e := range entries {
+			if e.prefix || (e.provider != "") != restricted || e.model != key || !providerMatches(e.provider, provider) {
+				continue
+			}
+			return Match{Price: e.price, Source: SourceConfig, Override: e.override}, true
+		}
 	}
 	return Match{}, false
 }

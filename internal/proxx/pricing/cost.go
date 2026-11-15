@@ -54,14 +54,20 @@ func (st *state) resolveCost(record *usage.Record, c *Catalog) (*float64, string
 	return nil, SourceUnknown
 }
 
-// lookupRecord prices the model that actually served the request: record.Model first,
-// then the upstream-reported response model. Alias only matches config entries.
+// lookupRecord prices the model that actually served the request: record.Model first
+// (config, then catalog), then the upstream-reported response model, and only then an exact
+// config entry for the client alias. The alias never reaches the catalog or prefix entries.
 func (st *state) lookupRecord(record *usage.Record, c *Catalog) (Match, bool) {
-	if match, ok := lookup(st.entries, c, record.Provider, record.Model, record.Alias); ok {
+	if match, ok := lookup(st.entries, c, record.Provider, record.Model); ok {
 		return match, true
 	}
 	if rm := strings.TrimSpace(record.ResponseModel); rm != "" && !strings.EqualFold(rm, record.Model) {
-		return lookup(st.entries, c, record.Provider, rm, "")
+		if match, ok := lookup(st.entries, c, record.Provider, rm); ok {
+			return match, true
+		}
+	}
+	if alias := strings.TrimSpace(record.Alias); alias != "" && !strings.EqualFold(alias, record.Model) {
+		return lookupAliasExact(st.entries, record.Provider, alias)
 	}
 	return Match{}, false
 }

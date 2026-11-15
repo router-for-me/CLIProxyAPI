@@ -49,7 +49,7 @@ func AttachPricing(models []map[string]any, idKey string) []map[string]any {
 		if id == "" {
 			continue
 		}
-		if m, ok := lookup(st.entries, c, modelProvider(id), id, ""); ok {
+		if m, ok := lookup(st.entries, c, modelProvider(id), id); ok {
 			model["pricing"] = listingObject(m)
 		}
 	}
@@ -84,7 +84,7 @@ func RegistryPrices() []ModelPrice {
 		provider := modelProvider(id)
 		row := ModelPrice{Model: id, Provider: provider, Source: SourceUnknown}
 		if st != nil && !st.disabled {
-			if m, ok := lookup(st.entries, c, provider, id, ""); ok {
+			if m, ok := lookup(st.entries, c, provider, id); ok {
 				row.Input, row.Output, row.CacheRead, row.CacheWrite = m.Price.Input, m.Price.Output, m.Price.CacheRead, m.Price.CacheWrite
 				row.Source = m.Source
 			}

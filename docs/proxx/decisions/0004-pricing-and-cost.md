@@ -63,7 +63,7 @@ What was built:
   embeds `CostDetails`, so `cost_details.final_cost` and `cost_source` appear there automatically.
 
 Lookup order (`lookup`): config entries (exact before `*` prefix; provider-restricted before
-unrestricted; longest prefix wins; matched against the served model, then the client alias) →
+unrestricted; longest prefix wins; matched against the served model) →
 catalog under the mapped provider (`claude`→`anthropic`; `gemini`/`vertex`/`aistudio`/`gemini-cli`/
 `antigravity`→`google`; `codex*`/`openai`→`openai`; `kimi*`→`moonshotai`; `xai`; compat names such as
 `openrouter`/`groq` map to the same models.dev ID) → `vendor/model` under the vendor → the same ID
@@ -71,7 +71,10 @@ under any provider (first-party order: anthropic, openai, google, xai, deepseek,
 groq, openrouter, then alphabetical) → `:free` = explicit 0 → normalized IDs (strip `models/`,
 `(thinking)`, `:tag`, date suffixes, `-thinking/-high/-xhigh/-medium/-low/-minimal/-preview/-latest`)
 matched against the catalog and a normalized catalog index. Config fields left unset fall back to the
-catalog price of the same model. The record's `Model` is priced first, then `ResponseModel`.
+catalog price of the same model. The record's `Model` is resolved fully (config, then catalog) first,
+then `ResponseModel`; only if both are unknown does an **exact** config entry for the client alias
+apply. The alias never reaches prefix entries or the catalog, so an alias pool (alias `claude-opus-x`
+served by `deepseek-v3.1`) is never billed at the alias's price.
 
 Cost formula: built on `usage.TokenBreakdown` (calling `EnsureTokenBreakdownForProvider` when the
 record has none), whose buckets are mutually exclusive after per-provider normalization:
@@ -100,3 +103,6 @@ Limitations:
 - Alias pools that rename models (compat `alias` ≠ `name`) are priced by the served upstream name;
   listings price the client-visible ID, so add a config entry for the alias if it differs.
 - Retries/failovers publish one record per upstream attempt; each attempt is priced.
+- No `pricing` object yet in the Codex `/v1/models?client_version=` listing or the single-model
+  Gemini `GET /v1beta/models/{model}`.
+- `GET /v8/management/proxx/pricing` also returns `disabled` (pricing disabled flag).

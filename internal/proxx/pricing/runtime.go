@@ -144,5 +144,5 @@ func Lookup(provider, model string) (Match, bool) {
 	if st == nil || st.disabled {
 		return Match{}, false
 	}
-	return lookup(st.entries, currentCatalog(), provider, model, "")
+	return lookup(st.entries, currentCatalog(), provider, model)
 }

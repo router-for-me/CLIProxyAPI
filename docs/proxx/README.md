@@ -112,6 +112,7 @@ go test -tags proxxe2e -count=1 -v ./test/proxx/pricing_e2e/     # e2e: builds a
 The e2e test builds `./cmd/server`, starts it with `--local-model` and a temp `config-version: 8`
 config (test client key only), points an `openai-compatibility` entry named `openrouter` and an
 `api-keys.claude` group at an in-process mock upstream, and checks cost source and amount for upstream
-`usage.cost`, `cost_in_usd_ticks`, a cost header, config, per-model override, catalog, unknown, and the
-Claude cache formula; `pricing` objects in OpenAI/Claude/Gemini listings; the management endpoints;
-snapshot persistence across a SIGINT restart; and hot reload of a price and `override-upstream`.
+`usage.cost` (non-stream and stream), `cost_in_usd_ticks`, a cost header, config, per-model override,
+catalog, unknown, and the Claude cache formula; `pricing` objects in OpenAI/Claude/Gemini listings; the management endpoints;
+snapshot persistence across a SIGINT restart; and hot reload of a price, `override-upstream` and
+`proxx.usage.recent-limit`.

@@ -56,19 +56,18 @@ func TestLookupProviderMapping(t *testing.T) {
 		input           float64
 	}{
 		{"claude", "claude-sonnet-4-5-20250929", 3},
-		{"claude", "claude-sonnet-4-5", 3},                            // date-insensitive
-		{"claude", "claude-opus-5-thinking", 5},                       // variant suffix
-		{"antigravity", "claude-opus-5", 5},                           // any-provider fallback
-		{"gemini", "models/gemini-2.5-pro", 1.25},                     // models/ prefix
-		{"vertex", "gemini-2.5-pro(high)", 1.25},                      // thinking suffix
-		{"codex", "gpt-5", 2.5},                                       // codex → openai
-		{"openrouter", "openai/gpt-5", 2.6},                           // compat name → same models.dev ID
-		{"groq", "llama-3.3-70b-versatile", 0.59},                     // compat groq
-		{"some-compat", "openai/gpt-4o-mini", 0.15},                   // vendor/model → vendor catalog
-		{"some-compat", "only-here", 9},                               // last resort: any provider
-		{"openrouter", "meta-llama/llama-3.3-70b-instruct:free", 0.1}, // exact first? no → see free test
+		{"claude", "claude-sonnet-4-5", 3},          // date-insensitive
+		{"claude", "claude-opus-5-thinking", 5},     // variant suffix
+		{"antigravity", "claude-opus-5", 5},         // any-provider fallback
+		{"gemini", "models/gemini-2.5-pro", 1.25},   // models/ prefix
+		{"vertex", "gemini-2.5-pro(high)", 1.25},    // thinking suffix
+		{"codex", "gpt-5", 2.5},                     // codex → openai
+		{"openrouter", "openai/gpt-5", 2.6},         // compat name → same models.dev ID
+		{"groq", "llama-3.3-70b-versatile", 0.59},   // compat groq
+		{"some-compat", "openai/gpt-4o-mini", 0.15}, // vendor/model → vendor catalog
+		{"some-compat", "only-here", 9},             // last resort: any provider
 	}
-	for _, tc := range cases[:len(cases)-1] {
+	for _, tc := range cases {
 		m, ok := Lookup(tc.provider, tc.model)
 		if !ok || m.Price.Input == nil || *m.Price.Input != tc.input || m.Source != SourceCatalog {
 			t.Errorf("Lookup(%q,%q) = %+v ok=%v, want input %v", tc.provider, tc.model, m, ok, tc.input)
@@ -231,5 +230,34 @@ func TestEmbeddedSnapshotParses(t *testing.T) {
 	}
 	if _, ok := lookupCatalog(c, "claude", "claude-sonnet-4-5-20250929"); !ok {
 		t.Fatal("snapshot misses a registry Claude model")
+	}
+}
+
+func TestAliasNeverPricesServedModel(t *testing.T) {
+	// Alias pool: alias "claude-opus-pool" is served by gpt-4o-mini. A prefix entry that
+	// matches the alias must not price the served model.
+	setup(t, config.ProxxPricingConfig{Models: []config.ProxxModelPrice{
+		{Model: "claude-opus-*", Input: f(100), Output: f(100)},
+		{Model: "my-alias", Input: f(1), Output: f(1)},
+	}})
+	rec := openAIRecord()
+	rec.Model, rec.Alias = "gpt-4o-mini", "claude-opus-pool"
+	ApplyCost(nil, &rec)
+	if rec.Detail.CostDetails.CostSource != SourceCatalog {
+		t.Fatalf("alias prefix priced the served model: %+v", rec.Detail.CostDetails)
+	}
+	// Unknown served model: an exact alias config entry is the last resort.
+	rec = openAIRecord()
+	rec.Model, rec.Alias = "mystery-model", "my-alias"
+	ApplyCost(nil, &rec)
+	if rec.Detail.CostDetails.CostSource != SourceConfig {
+		t.Fatalf("exact alias entry not used: %+v", rec.Detail.CostDetails)
+	}
+	// A prefix entry never matches through the alias.
+	rec = openAIRecord()
+	rec.Model, rec.Alias = "mystery-model", "claude-opus-pool"
+	ApplyCost(nil, &rec)
+	if rec.Detail.CostDetails.CostSource != SourceUnknown {
+		t.Fatalf("prefix entry matched through alias: %+v", rec.Detail.CostDetails)
 	}
 }
