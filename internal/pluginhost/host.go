@@ -21,10 +21,14 @@ import (
 )
 
 type loadedPlugin struct {
-	id               string
-	path             string
-	version          string
-	name             string
+	id      string
+	path    string
+	version string
+	name    string
+	// abiMode records the plugin ABI that was in effect when the plugin was
+	// loaded, so a later plugins.abi change can be reported instead of
+	// silently leaving the already-loaded plugin on the previous loader.
+	abiMode          string
 	configYAML       []byte
 	plugin           pluginapi.Plugin
 	registered       bool
@@ -286,12 +290,23 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		if !item.Enabled {
 			continue
 		}
+		// Read the configured ABI before taking the lock: pluginABIMode()
+		// acquires h.mu itself.
+		currentABIMode := h.pluginABIMode()
 		h.mu.Lock()
 		lp := h.loaded[file.ID]
 		var replaced *loadedPlugin
 		if lp != nil && cleanPluginPath(lp.path) != cleanPluginPath(file.Path) {
 			replaced = lp
 			lp = nil
+		}
+		if lp != nil {
+			// The loader is selected when a plugin is opened, so switching
+			// plugins.abi does not move an already-loaded plugin to another
+			// loader. Report it instead of letting the change look applied.
+			if currentABIMode != lp.abiMode {
+				log.Warnf("pluginhost: plugins.abi changed from %q to %q while plugin %s was loaded; restart the host to apply the new ABI to it", lp.abiMode, currentABIMode, file.ID)
+			}
 		}
 		_, disabled := h.fused[file.ID]
 		h.mu.Unlock()
@@ -549,6 +564,7 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 			id:               file.ID,
 			path:             file.Path,
 			version:          file.Version,
+			abiMode:          h.pluginABIMode(),
 			client:           guardedClient,
 			callbackInstance: pluginCallbackInstance(guardedClient),
 		}

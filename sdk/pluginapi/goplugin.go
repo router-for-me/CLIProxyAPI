@@ -31,6 +31,14 @@ type GoPlugin interface {
 // back into the host (for example HTTP transport, auth storage, logging).
 // It is the Go-native counterpart of the C ABI's host_api.call function
 // pointer and routes through the same host callback dispatch.
+//
+// The error contract differs from the C ABI: a failing host callback is
+// reported as a Go error, not as an RPC error envelope. Plugins must check
+// the returned error instead of decoding an error envelope from the response
+// bytes.
+//
+// Callbacks are dispatched on the goroutine of the caller, and the host
+// serializes them per plugin instance.
 type GoPluginCaller interface {
 	Call(ctx context.Context, method string, request []byte) ([]byte, error)
 }

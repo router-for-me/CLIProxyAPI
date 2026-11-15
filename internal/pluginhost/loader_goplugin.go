@@ -22,16 +22,26 @@ import (
 // The host and the plugin must be built with the same Go toolchain and an
 // identical dependency graph (a go.work containing both is the supported
 // layout); otherwise plugin.Open fails with a package-version mismatch.
+//
+// Unlike the C ABI loader, a Go-native plugin is loaded into the host
+// process: plugin.Open runs the plugin package initializer in-process, so a
+// plugin that crashes the Go runtime (for example an illegal instruction)
+// takes the host down with it. Panics raised by the initializer, by the New
+// factory and by Shutdown are recovered and reported as ordinary errors.
 type goPluginLoader struct {
 	// open is indirected so tests can inject failures without a real .so.
 	open   func(path string) (*plugin.Plugin, error)
 	lookup func(p *plugin.Plugin, symbol string) (plugin.Symbol, error)
+	// shadow resolves the content-addressed path a plugin is opened from.
+	// It is indirected for the same reason as open.
+	shadow func(file pluginFile) (string, func(), error)
 }
 
 func newGoPluginLoader() goPluginLoader {
 	return goPluginLoader{
 		open:   plugin.Open,
 		lookup: (*plugin.Plugin).Lookup,
+		shadow: acquireShadowPluginLoad,
 	}
 }
 
@@ -74,14 +84,30 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 	if lookup == nil {
 		lookup = (*plugin.Plugin).Lookup
 	}
+	shadow := l.shadow
+	if shadow == nil {
+		shadow = acquireShadowPluginLoad
+	}
 
-	p, err := openGoPluginGuarded(open, file.Path)
+	// Go's plugin package caches by path, so the plugin is opened from the
+	// same content-addressed shadow copy the C ABI loader uses. Every distinct
+	// plugin build therefore gets its own path and its own plugin image, and
+	// the original artifact stays replaceable.
+	loadPath, releaseGuard, errShadow := shadow(file)
+	if errShadow != nil {
+		return nil, errShadow
+	}
+	p, err := openGoPluginGuarded(open, loadPath)
+	releaseGuard()
 	if err != nil {
-		return nil, fmt.Errorf("go plugin open %s: %w (hint: host and plugin must share the same Go toolchain and dependency graph; build both within one go.work)", file.Path, err)
+		return nil, fmt.Errorf("go plugin open %s: %w (hint: build the plugin with -buildmode=plugin, and make sure the host and the plugin share the same Go toolchain, GOOS/GOARCH, build tags and dependency graph; building both inside one go.work is the supported layout)", file.Path, err)
+	}
+	if p == nil {
+		return nil, fmt.Errorf("go plugin open %s returned no plugin handle", file.Path)
 	}
 	sym, err := lookup(p, "New")
 	if err != nil {
-		return nil, fmt.Errorf("go plugin %s has no New symbol: %w", file.Path, err)
+		return nil, fmt.Errorf("go plugin %s has no New symbol: %w (hint: the plugin must export New(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error))", file.Path, err)
 	}
 
 	// Assert the *unnamed* structural function type, not the named
@@ -104,6 +130,10 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 		// later callback-ID resolution would treat as the current plugin.
 		host.closeHostHTTPCallbackInstance(file.ID, instance)
 		return nil, fmt.Errorf("go plugin %s New failed: %w", file.Path, err)
+	}
+	if inst == nil {
+		host.closeHostHTTPCallbackInstance(file.ID, instance)
+		return nil, fmt.Errorf("go plugin %s New returned no plugin instance", file.Path)
 	}
 
 	return &goPluginClient{inst: inst, pluginID: file.ID, instance: instance}, nil

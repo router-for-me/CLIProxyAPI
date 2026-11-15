@@ -50,19 +50,14 @@ func TestGoPluginClientExposesCallbackInstance(t *testing.T) {
 	inst := &hostCallbackInstance{}
 	c := &goPluginClient{instance: inst}
 
-	var hook interface{ callbackInstance() *hostCallbackInstance }
-	if !implementsCallbackInstance(c) {
+	// Compile-time proof that the optional hook is implemented.
+	var hook interface{ callbackInstance() *hostCallbackInstance } = c
+	if hook == nil {
 		t.Fatal("goPluginClient must implement the optional callbackInstance() hook")
 	}
-	_ = hook
 	if got := c.callbackInstance(); got != inst {
 		t.Fatalf("callbackInstance() = %p, want %p", got, inst)
 	}
-}
-
-func implementsCallbackInstance(c *goPluginClient) bool {
-	var _ interface{ callbackInstance() *hostCallbackInstance } = c
-	return true
 }
 
 func TestGoPluginClientNilSafe(t *testing.T) {
@@ -129,8 +124,8 @@ func TestABISwitchCaseInsensitive(t *testing.T) {
 	}
 }
 
-// fakeGoPluginFactory returns a controllable result so the loader's
-// open/lookup seams can be exercised without a real on-disk .so.
+// TestGoPluginLoaderNewErrorCleansUp exercises the loader's open/lookup seams
+// without a real on-disk .so.
 func TestGoPluginLoaderNewErrorCleansUp(t *testing.T) {
 	// Review Focus: a plugin whose New factory errors must not leave a
 	// callback instance that later callback-ID resolution treats as a live
@@ -143,7 +138,8 @@ func TestGoPluginLoaderNewErrorCleansUp(t *testing.T) {
 		return nil, errFactoryBoom
 	}
 	loader := goPluginLoader{
-		open: func(string) (*plugin.Plugin, error) { return &plugin.Plugin{}, nil },
+		shadow: passthroughShadow,
+		open:   func(string) (*plugin.Plugin, error) { return &plugin.Plugin{}, nil },
 		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
 			return plugin.Symbol(failing), nil
 		},
@@ -177,6 +173,7 @@ func TestGoPluginLoaderRecoversInitPanic(t *testing.T) {
 	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
 
 	loader := goPluginLoader{
+		shadow: passthroughShadow,
 		open: func(string) (*plugin.Plugin, error) {
 			panic("init exploded")
 		},
@@ -209,7 +206,8 @@ func TestGoPluginLoaderRecoversFactoryPanic(t *testing.T) {
 		panic("factory exploded")
 	}
 	loader := goPluginLoader{
-		open: func(string) (*plugin.Plugin, error) { return &plugin.Plugin{}, nil },
+		shadow: passthroughShadow,
+		open:   func(string) (*plugin.Plugin, error) { return &plugin.Plugin{}, nil },
 		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
 			return plugin.Symbol(panicking), nil
 		},
@@ -255,4 +253,80 @@ func (p panickingPlugin) Call(ctx context.Context, method string, request []byte
 
 func (p panickingPlugin) Shutdown() {
 	panic("shutdown exploded")
+}
+
+// passthroughShadow keeps the loader tests free of real shadow copies: the
+// path is passed through unchanged and the release guard is a no-op.
+func passthroughShadow(file pluginFile) (string, func(), error) {
+	return file.Path, func() {}, nil
+}
+
+// TestGoPluginLoaderOpensFromShadowPath verifies that the plugin is opened
+// from the content-addressed shadow copy instead of the original artifact.
+// Go's plugin package caches by path, so opening the original file would
+// make a rebuilt plugin silently keep running the previous build.
+func TestGoPluginLoaderOpensFromShadowPath(t *testing.T) {
+	h := &Host{loading: map[string]*pluginLoadRequest{}}
+	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
+
+	const shadowPath = "/tmp/cliproxy-plugin-deadbeef.so"
+	openedPath := ""
+	released := false
+	loader := goPluginLoader{
+		shadow: func(file pluginFile) (string, func(), error) {
+			return shadowPath, func() { released = true }, nil
+		},
+		open: func(path string) (*plugin.Plugin, error) {
+			openedPath = path
+			return &plugin.Plugin{}, nil
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return plugin.Symbol(func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+				return &fakeGoPlugin{}, nil
+			}), nil
+		},
+	}
+
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/data/cpa/plugins/linux/arm64/probe.so"}, h)
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	if client == nil {
+		t.Fatal("expected a client")
+	}
+	if openedPath != shadowPath {
+		t.Fatalf("plugin opened from %q, want the shadow path %q", openedPath, shadowPath)
+	}
+	if !released {
+		t.Fatal("the shadow release guard must be released after the load attempt")
+	}
+}
+
+// TestGoPluginLoaderRejectsNilInstance verifies that a factory returning a
+// nil plugin without an error is reported as a load failure instead of
+// producing a client that fails every later call.
+func TestGoPluginLoaderRejectsNilInstance(t *testing.T) {
+	h := &Host{loading: map[string]*pluginLoadRequest{}}
+	h.loading["p"] = &pluginLoadRequest{callbackInstances: map[*hostCallbackInstance]struct{}{}}
+
+	loader := goPluginLoader{
+		shadow: passthroughShadow,
+		open:   func(string) (*plugin.Plugin, error) { return &plugin.Plugin{}, nil },
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return plugin.Symbol(func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+				return nil, nil
+			}), nil
+		},
+	}
+
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/nonexistent.so"}, h)
+	if err == nil {
+		t.Fatal("expected a nil plugin instance to be rejected")
+	}
+	if client != nil {
+		t.Fatal("expected no client when the factory returns no instance")
+	}
+	if !strings.Contains(err.Error(), "no plugin instance") {
+		t.Fatalf("error %q does not explain the nil instance", err)
+	}
 }
