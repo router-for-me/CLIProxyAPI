@@ -474,6 +474,22 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	}
 }
 
+// pluginABIMode returns the configured plugin loading mechanism. The empty
+// string means the default C ABI (c-shared) path; "go" selects Go-native
+// plugin loading. It is safe to call before a config has been applied.
+func (h *Host) pluginABIMode() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	cfg := h.runtimeConfig
+	h.mu.Unlock()
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Plugins.ABI)
+}
+
 func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
 	if h == nil || instance == nil {
 		return
