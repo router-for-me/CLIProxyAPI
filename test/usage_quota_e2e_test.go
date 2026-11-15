@@ -40,6 +40,12 @@ var usageE2EPrices = map[string][2]float64{
 
 var usageE2ETokens = regexp.MustCompile(`in=(\d+) out=(\d+)`)
 
+// usageE2EStep is how long the fake upstream takes to its first byte and to
+// finish, and how long the client waits between requests. The proxy stores
+// times in milliseconds, so steps within one millisecond would make the order
+// of a completion and the next sample ambiguous.
+const usageE2EStep = 3 * time.Millisecond
+
 // fakeQuotaWindow is a quota window the fake upstream meters. A request moves
 // it by its list-price cost divided by the model's rate, when it completes.
 type fakeQuotaWindow struct {
@@ -75,7 +81,7 @@ func newFakeQuotaUpstream(start time.Time) *fakeQuotaUpstream {
 				{id: "7d_oi", reportedFor: func(model string) bool { return strings.Contains(model, "fable") }, rates: map[string]float64{"claude-fable-5-1": 7}, resetsAt: start.Add(100 * time.Hour).Truncate(time.Second)},
 			},
 			"codex": {
-				{id: "primary", reportedFor: always, rates: map[string]float64{"gpt-5.5": 1.5}, resetsAt: start.Add(5 * time.Hour).Truncate(time.Second)},
+				{id: "primary", reportedFor: always, rates: map[string]float64{"gpt-5.5": 3}, resetsAt: start.Add(5 * time.Hour).Truncate(time.Second)},
 				{id: "secondary", reportedFor: always, rates: map[string]float64{"gpt-5.5": 12}, resetsAt: start.Add(150 * time.Hour).Truncate(time.Second)},
 			},
 		},
@@ -155,18 +161,16 @@ func (f *fakeQuotaUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	output, _ := strconv.ParseInt(string(match[2]), 10, 64)
 	hold := bytes.Contains(body, []byte("hold-until-released"))
 	if bytes.Contains(body, []byte("no-quota")) {
-		f.serveClaude(w, model, false, false, input, output)
+		f.serveClaude(w, model, false, false, input, output, func() {})
 		return
 	}
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/v1/messages"):
 		f.reportState("claude", model, w.Header())
-		f.serveClaude(w, model, stream, hold, input, output)
-		f.complete("claude", model, input, output)
+		f.serveClaude(w, model, stream, hold, input, output, func() { f.complete("claude", model, input, output) })
 	case strings.HasSuffix(r.URL.Path, "/responses"):
 		f.reportState("codex", model, w.Header())
-		f.serveCodex(w, model, stream, input, output)
-		f.complete("codex", model, input, output)
+		f.serveCodex(w, model, stream, input, output, func() { f.complete("codex", model, input, output) })
 	default:
 		http.NotFound(w, r)
 	}
@@ -179,9 +183,14 @@ func writeSSE(w http.ResponseWriter, event, data string) {
 	}
 }
 
-func (f *fakeQuotaUpstream) serveClaude(w http.ResponseWriter, model string, stream, hold bool, input, output int64) {
+// serveClaude and serveCodex call done just before the response's last bytes,
+// so the next request a client sends after reading a response sees its usage.
+func (f *fakeQuotaUpstream) serveClaude(w http.ResponseWriter, model string, stream, hold bool, input, output int64, done func()) {
+	time.Sleep(usageE2EStep)
+	defer time.Sleep(usageE2EStep)
 	if !stream {
 		w.Header().Set("Content-Type", "application/json")
+		done()
 		_, _ = fmt.Fprintf(w, `{"id":"msg_e2e","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":%d,"output_tokens":%d}}`, model, input, output)
 		return
 	}
@@ -195,20 +204,25 @@ func (f *fakeQuotaUpstream) serveClaude(w http.ResponseWriter, model string, str
 	}
 	writeSSE(w, "content_block_stop", `{"type":"content_block_stop","index":0}`)
 	writeSSE(w, "message_delta", fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":%d}}`, output))
+	done()
 	writeSSE(w, "message_stop", `{"type":"message_stop"}`)
 }
 
-func (f *fakeQuotaUpstream) serveCodex(w http.ResponseWriter, model string, stream bool, input, output int64) {
+func (f *fakeQuotaUpstream) serveCodex(w http.ResponseWriter, model string, stream bool, input, output int64, done func()) {
+	time.Sleep(usageE2EStep)
+	defer time.Sleep(usageE2EStep)
 	usage := fmt.Sprintf(`{"input_tokens":%d,"input_tokens_details":{"cached_tokens":0},"output_tokens":%d,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":%d}`, input, output, input+output)
 	completed := fmt.Sprintf(`{"id":"resp_e2e","object":"response","created_at":1,"status":"completed","model":%q,"output":[{"type":"message","id":"msg_e2e","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":%s}`, model, usage)
 	if !stream {
 		w.Header().Set("Content-Type", "application/json")
+		done()
 		_, _ = io.WriteString(w, completed)
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	writeSSE(w, "response.created", fmt.Sprintf(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_e2e","object":"response","created_at":1,"status":"in_progress","model":%q,"output":[]}}`, model))
 	writeSSE(w, "response.output_text.delta", `{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_e2e","output_index":0,"content_index":0,"delta":"ok"}`)
+	done()
 	writeSSE(w, "response.completed", fmt.Sprintf(`{"type":"response.completed","sequence_number":2,"response":%s}`, completed))
 }
 
@@ -349,6 +363,7 @@ func (s *usageE2EServer) management(t *testing.T, path string, query url.Values,
 // send makes one client request through the proxy and drains the response.
 func (s *usageE2EServer) send(t *testing.T, provider, model string, stream bool, prompt string) {
 	t.Helper()
+	time.Sleep(usageE2EStep)
 	path, body := "/v1/messages", fmt.Sprintf(`{"model":%q,"max_tokens":1024,"stream":%t,"messages":[{"role":"user","content":%q}]}`, model, stream, prompt)
 	if provider == "codex" {
 		path, body = "/v1/responses", fmt.Sprintf(`{"model":%q,"stream":%t,"input":%q}`, model, stream, prompt)
@@ -454,7 +469,7 @@ func TestUsageQuotaEndToEnd(t *testing.T) {
 		proxy.send(t, "claude", model, i%5 != 4, prompt)
 		requests++
 	}
-	for i := range 85 {
+	for i := range 170 {
 		sendClaude(opus, opusPrompt, i)
 	}
 	fake.resetWindow("claude", "5h", 5*time.Hour)
@@ -468,7 +483,7 @@ func TestUsageQuotaEndToEnd(t *testing.T) {
 	}()
 	<-fake.held
 	requests++
-	for i := range 35 {
+	for i := range 70 {
 		sendClaude(fable, fablePrompt, i)
 	}
 	close(fake.release)
@@ -481,7 +496,7 @@ func TestUsageQuotaEndToEnd(t *testing.T) {
 		}
 	}
 	// Every Codex request costs $3.00 at list prices.
-	for i := range 30 {
+	for i := range 60 {
 		proxy.send(t, "codex", "gpt-5.5", i%3 != 2, "in=6000 out=99000")
 		requests++
 	}
@@ -548,4 +563,55 @@ func TestUsageQuotaEndToEnd(t *testing.T) {
 		t.Logf("%s: upstream reported %d responses, %d distinct states; stored %d points from %.0f%% to %.0f%%",
 			key, len(states), len(want), len(series.Points), series.Points[0].UsedPercent, series.Points[len(series.Points)-1].UsedPercent)
 	}
+
+	_, body = proxy.management(t, "/limit-value", rangeQuery, true)
+	var value struct {
+		Series []struct {
+			Provider   string `json:"provider"`
+			Window     string `json:"window"`
+			ModelScope string `json:"model_scope"`
+			usageE2ESpend
+			Models []struct {
+				Model string `json:"model"`
+				usageE2ESpend
+			} `json:"models"`
+		} `json:"series"`
+	}
+	if errDecode := json.Unmarshal(body, &value); errDecode != nil {
+		t.Fatalf("decode limit value: %v", errDecode)
+	}
+	spends := map[string]usageE2ESpend{}
+	for _, series := range value.Series {
+		key := series.Provider + "/" + series.Window
+		spends[key] = series.usageE2ESpend
+		for _, model := range series.Models {
+			spends[key+" "+model.Model] = model.usageE2ESpend
+		}
+		if want := map[string]string{"claude/7d_oi": "fable"}[key]; series.ModelScope != want {
+			t.Errorf("%s model_scope = %q, want %q", key, series.ModelScope, want)
+		}
+	}
+	// The fake's rates are the truth. Each request is at most 0.3% of a Claude
+	// window and every checked figure rests on at least 15 percent of evidence,
+	// so 1% quantization leaves under 2% of error.
+	const tolerance = 0.02
+	for key, truth := range map[string]float64{
+		"claude/5h": 8, "claude/7d_oi": 7, "claude/7d_oi " + fable: 7, "claude/7d " + opus: 34, "claude/7d " + fable: 14,
+		"codex/5h": 3, "codex/7d": 12,
+	} {
+		spend, ok := spends[key]
+		if !ok || spend.USDPerPercent == nil || math.Abs(*spend.USDPerPercent-truth) > tolerance*truth {
+			t.Errorf("%s: limit value = %+v, want $%.2f per percent within %.0f%%", key, spend, truth, tolerance*100)
+			continue
+		}
+		t.Logf("%s: $%.3f per percent over %d intervals and %.0f%% (truth $%.2f, error %+.2f%%)",
+			key, *spend.USDPerPercent, spend.Intervals, spend.PercentUsed, truth, (*spend.USDPerPercent/truth-1)*100)
+	}
+}
+
+type usageE2ESpend struct {
+	Intervals     int64    `json:"intervals"`
+	PercentUsed   float64  `json:"percent_used"`
+	CostUSD       float64  `json:"cost_usd"`
+	USDPerPercent *float64 `json:"usd_per_percent"`
 }

@@ -191,14 +191,8 @@ func (s *Store) Aggregate(ctx context.Context, q Query) (Aggregate, error) {
 			return result, fmt.Errorf("usagestats: scan aggregate row: %w", errScan)
 		}
 		model := values[len(values)-1]
-		if price, ok := prices.Lookup(model); ok {
-			m.CostUSD = price.cost(m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens, cacheWrite1h, m.OutputTokens+m.ReasoningTokens)
-			m.UnpricedTokens = m.UnclassifiedTokens
-		} else {
-			m.UnpricedTokens = m.TotalTokens
-			if m.TotalTokens > 0 {
-				unpriced[model] = struct{}{}
-			}
+		if !prices.priceMetrics(model, &m, cacheWrite1h) && m.TotalTokens > 0 {
+			unpriced[model] = struct{}{}
 		}
 
 		dims := values[:len(q.GroupBy)]

@@ -166,6 +166,31 @@ func (h *Handler) GetUsageQuotaSamples(c *gin.Context) {
 	})
 }
 
+// GetUsageLimitValue returns, for each account quota window, what one percent
+// of the limit bought at API list prices.
+func (h *Handler) GetUsageLimitValue(c *gin.Context) {
+	store := usageStatsStore(c)
+	if store == nil {
+		return
+	}
+	query, errQuery := parseUsageStatsQuery(c, time.Now())
+	if errQuery != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errQuery.Error()})
+		return
+	}
+	value, errValue := store.LimitValue(c.Request.Context(), query)
+	if errValue != nil {
+		writeUsageStatsError(c, errValue)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"from":            query.From.UnixMilli(),
+		"to":              query.To.UnixMilli(),
+		"series":          value.Series,
+		"unpriced_models": value.UnpricedModels,
+	})
+}
+
 // GetUsageSettings returns the operator settings together with the built-in
 // price table they override.
 func (h *Handler) GetUsageSettings(c *gin.Context) {

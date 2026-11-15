@@ -134,6 +134,19 @@ func (p Price) cost(input, cacheRead, cacheWrite, cacheWrite1h, output int64) fl
 	return total / 1e6
 }
 
+// priceMetrics fills in the cost of m, the summed token buckets of one model's
+// rows, and reports whether the model has a price.
+func (t *PriceTable) priceMetrics(model string, m *Metrics, cacheWrite1h int64) bool {
+	price, ok := t.Lookup(model)
+	if !ok {
+		m.UnpricedTokens = m.TotalTokens
+		return false
+	}
+	m.CostUSD = price.cost(m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens, cacheWrite1h, m.OutputTokens+m.ReasoningTokens)
+	m.UnpricedTokens = m.UnclassifiedTokens
+	return true
+}
+
 // Validate reports whether the settings are well formed.
 func (s Settings) Validate() error {
 	seen := make(map[string]string, len(s.ModelPrices))

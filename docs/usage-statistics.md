@@ -142,6 +142,7 @@ recording is off.
 | `GET /settings` | Price overrides and plan prices, plus the built-in price table |
 | `PUT /settings` | Replace price overrides and plan prices |
 | `GET /quota-samples` | Quota window history per account, for burn-down charts |
+| `GET /limit-value` | API-equivalent cost of one percent of each quota window |
 
 Query parameters for `/stats` and `/speed`:
 
@@ -202,3 +203,137 @@ the range or before it:
   reached before it reset. `thinned` is `true` on such a series, and
   `bucket_ms` is 0 when no series was thinned.
 - Series are sorted by provider, auth index, account, and window.
+
+### `GET /limit-value`
+
+Answers "what did 1% of this limit buy" for each quota window. It takes
+`from`, `to`, and `filter.<dimension>` like `/quota-samples`, with the same
+filter dimensions, and returns one entry per series:
+
+```json
+{
+  "from": 1794707338923,
+  "to": 1794707464790,
+  "unpriced_models": [],
+  "series": [
+    {
+      "provider": "claude",
+      "auth_index": "0682b3e397dccf1e",
+      "account": "sk-a...-key",
+      "window": "7d",
+      "model_scope": "",
+      "intervals": 47,
+      "percent_used": 48,
+      "requests": 277,
+      "failed": 0,
+      "input_tokens": 2242000,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "output_tokens": 45891600,
+      "reasoning_tokens": 0,
+      "unclassified_tokens": 0,
+      "total_tokens": 48133600,
+      "web_search_requests": 0,
+      "cost_usd": 1138,
+      "unpriced_tokens": 0,
+      "usd_per_percent": 23.708333333333332,
+      "output_tokens_per_percent": 956075,
+      "models": [
+        {
+          "model": "claude-opus-5-5",
+          "intervals": 20,
+          "percent_used": 20,
+          "requests": 170,
+          "failed": 0,
+          "input_tokens": 1700000,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 33660000,
+          "reasoning_tokens": 0,
+          "unclassified_tokens": 0,
+          "total_tokens": 35360000,
+          "web_search_requests": 0,
+          "cost_usd": 680,
+          "unpriced_tokens": 0,
+          "usd_per_percent": 34,
+          "output_tokens_per_percent": 1683000
+        }
+      ]
+    }
+  ]
+}
+```
+
+The example is the end-to-end test's fake Claude account, cut to one model.
+
+How the numbers are built:
+
+- An interval is the span between two consecutive samples of one series. The
+  range holds the intervals whose later sample is in `[from, to)`, so the
+  first interval can start at the `carry_in` sample before `from`.
+- Only intervals in which `used_percent` rose count. A drop is a window reset
+  or a redeemed reset grant, and the requests in it are left out. So is an
+  interval whose two samples report resets more than a minute apart, even
+  when the percent rose: its samples belong to two windows.
+- A request belongs to the interval that contains its completion time,
+  `ts_ms + latency_ms`, counting the interval's later sample as inside it.
+  Requests join a series by `auth_index`, and a request can have started
+  before `from`.
+- The series fields sum the counted intervals: `intervals`, `percent_used`,
+  and the token and cost fields of `/stats`, priced with the same price table.
+  `usd_per_percent` is `cost_usd / percent_used`, and
+  `output_tokens_per_percent` is `(output_tokens + reasoning_tokens) /
+  percent_used`. Both are `null` when `percent_used` is 0.
+- `models` holds a model only from the intervals in which it carried at least
+  90% of the interval's cost. Such an interval adds all of its requests, so up
+  to 10% of a model's cost can come from other models. Use `intervals` and
+  `percent_used` to judge how much evidence a figure rests on. Mixed intervals
+  count only in the series totals.
+- A window that only moves with one model family is charged only with that
+  family's requests, by `model_scope`:
+
+| Window | `model_scope` | Why |
+| --- | --- | --- |
+| Claude `7d_oi` | `fable` | Anthropic reports the Fable weekly limit under the `seven_day_overage_included` claim. While it is exhausted, Opus requests on the same account still succeed (upstream issue #7197). |
+| Claude `7d_<x>`, any other suffix | `x` | The suffix names the family, as `7d_sonnet` and `7d_opus` do. A suffix that is not a family matches no model, so the series shows intervals with no cost. |
+| Every other window | `""` | The window is charged with every model of the credential. A Codex model with its own limit, such as GPT-5.3-Codex-Spark, may not move the main Codex windows; that limit is not recorded. |
+
+A model is in a family when the family is one of the parts of its name
+between dashes, dots, or slashes: `claude-fable-5-1` is in `fable`.
+
+### Accuracy of `usd_per_percent`
+
+The figures recover a known price per percent within 1% in a simulated
+account (`TestLimitValueRecoversKnownDollarsPerPercent`) and within 0.8% in an
+end-to-end run of the server against a fake upstream
+(`TestUsageQuotaEndToEnd`, run with `CLIPROXY_E2E=1`). These limit them on a
+real account:
+
+- **Quantization.** Claude reports utilization to 1% and Codex reports whole
+  percents. Within a run of rising intervals the rounding cancels out, and
+  what is left is the rounding at each end of the run, up to one reporting
+  step each: a first sample taken just under a step makes a small request
+  look like a whole percent. The error is about one step divided by
+  `percent_used`, so a figure over 20% of evidence is good to a few percent
+  and a figure over 2% is not.
+- **Usage the proxy does not see.** Requests made outside the proxy, such as
+  claude.ai or a client signed in directly, raise the percent with no cost,
+  which makes the figures too low. So do gaps in recording.
+- **List prices.** Cost is the API-equivalent cost at list prices, with the
+  limits described under [Cost](#cost). Tokens of unpriced models add no
+  cost; the models are listed in `unpriced_models`.
+- **When the state is taken.** A sample is stamped with the start of the
+  request that reported it, on the inference that the upstream takes the
+  state when it admits a request. Requests that complete between a request's
+  start and its admission upstream land one interval late.
+- **Millisecond timestamps.** Request and sample times are stored in
+  milliseconds. A request that completes within about 2 ms of another
+  request's start on the same account can land one interval early. Real
+  upstream latencies make this rare; with sub-millisecond responses it
+  dominates.
+- **Window scope.** The `7d_oi` to Fable mapping comes from observed headers,
+  not from an Anthropic contract. If a window moves with models outside its
+  scope, its figure is too high.
+- **Model weights.** A model's figure comes only from intervals it dominated,
+  so it rests on fewer intervals than the series total, and a model that is
+  always mixed with others gets no figure.

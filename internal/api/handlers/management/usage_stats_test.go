@@ -40,7 +40,7 @@ func TestUsageStatsEndpointsReportDisabled(t *testing.T) {
 	h := &Handler{}
 	for name, handler := range map[string]gin.HandlerFunc{
 		"stats": h.GetUsageStats, "speed": h.GetUsageSpeed, "settings": h.GetUsageSettings, "put settings": h.PutUsageSettings,
-		"quota samples": h.GetUsageQuotaSamples,
+		"quota samples": h.GetUsageQuotaSamples, "limit value": h.GetUsageLimitValue,
 	} {
 		rec := serveUsageStats(t, handler, http.MethodGet, "/v8/management/observability/usage/stats", "{}")
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "usage_statistics_disabled") {
@@ -189,6 +189,68 @@ func TestGetUsageQuotaSamplesReturnsSeriesWithCarryIn(t *testing.T) {
 	bad := serveUsageStats(t, (&Handler{}).GetUsageQuotaSamples, http.MethodGet, "/v8/management/observability/usage/quota-samples?filter.model=x", "")
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("unknown filter: status = %d, want 400", bad.Code)
+	}
+}
+
+func TestGetUsageLimitValueChargesRisingIntervals(t *testing.T) {
+	store := withUsageStatsStore(t)
+	at := time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC)
+	key := usagestats.QuotaSeriesKey{Provider: "claude", AuthIndex: "auth-1", Account: "me@example.com", Window: "7d"}
+	for i, percent := range []float64{10, 12} {
+		sample := usagestats.QuotaSample{QuotaSeriesKey: key, QuotaPoint: usagestats.QuotaPoint{TimestampMs: at.Add(time.Duration(i) * time.Hour).UnixMilli(), UsedPercent: percent}}
+		if errRecord := store.RecordQuotaSample(context.Background(), sample); errRecord != nil {
+			t.Fatalf("record quota sample: %v", errRecord)
+		}
+	}
+	// Two opus requests complete inside the rise: $8 of output at $20 per million.
+	for _, row := range []usagestats.Row{
+		{Timestamp: at.Add(10 * time.Minute), LatencyMs: 1000, Model: "claude-opus-5-5", AuthIndex: "auth-1", OutputTokens: 200_000, TotalTokens: 200_000},
+		{Timestamp: at.Add(20 * time.Minute), LatencyMs: 1000, Model: "claude-opus-5-5", AuthIndex: "auth-1", OutputTokens: 200_000, TotalTokens: 200_000},
+		{Timestamp: at.Add(30 * time.Minute), LatencyMs: 1000, Model: "claude-opus-5-5", AuthIndex: "auth-2", OutputTokens: 200_000, TotalTokens: 200_000},
+	} {
+		if errInsert := store.Insert(context.Background(), row); errInsert != nil {
+			t.Fatalf("insert row: %v", errInsert)
+		}
+	}
+
+	target := "/v8/management/observability/usage/limit-value?from=" + msString(at.Add(-time.Minute)) + "&to=" + msString(at.Add(2*time.Hour))
+	rec := serveUsageStats(t, (&Handler{}).GetUsageLimitValue, http.MethodGet, target, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	type spend struct {
+		Intervals              int64    `json:"intervals"`
+		PercentUsed            float64  `json:"percent_used"`
+		Requests               int64    `json:"requests"`
+		CostUSD                float64  `json:"cost_usd"`
+		USDPerPercent          *float64 `json:"usd_per_percent"`
+		OutputTokensPerPercent *float64 `json:"output_tokens_per_percent"`
+	}
+	var payload struct {
+		Series []struct {
+			Window     string `json:"window"`
+			ModelScope string `json:"model_scope"`
+			spend
+			Models []struct {
+				Model string `json:"model"`
+				spend
+			} `json:"models"`
+		} `json:"series"`
+		UnpricedModels []string `json:"unpriced_models"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &payload); errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if len(payload.Series) != 1 || payload.UnpricedModels == nil {
+		t.Fatalf("payload = %s", rec.Body.String())
+	}
+	series := payload.Series[0]
+	if series.Window != "7d" || series.ModelScope != "" || series.Intervals != 1 || series.PercentUsed != 2 || series.Requests != 2 ||
+		series.CostUSD != 8 || series.USDPerPercent == nil || *series.USDPerPercent != 4 || series.OutputTokensPerPercent == nil || *series.OutputTokensPerPercent != 200_000 {
+		t.Fatalf("series = %s", rec.Body.String())
+	}
+	if len(series.Models) != 1 || series.Models[0].Model != "claude-opus-5-5" || series.Models[0].USDPerPercent == nil || *series.Models[0].USDPerPercent != 4 {
+		t.Fatalf("models = %s", rec.Body.String())
 	}
 }
 
