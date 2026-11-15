@@ -14,7 +14,7 @@ It adds three features on top of upstream while staying cheap to sync:
 
 Decisions live in [`decisions/`](decisions/) as numbered ADRs. Read them before changing a feature.
 
-Note: the root `.gitignore` ignores `docs/*`; add files here with `git add -f docs/proxx`.
+Note: the root `.gitignore` ignores `docs/*` but un-ignores `docs/proxx/` (hook below).
 
 ## Repositories
 
@@ -25,6 +25,12 @@ Note: the root `.gitignore` ignores `docs/*`; add files here with `git add -f do
 
 Note: `../CLIProxyAPI` on this machine is an unrelated upstream checkout. The panel's own
 AGENTS.md says to read backend contracts from `../CLIProxyAPI`; for proxx work use `../proxx`.
+
+## Quick start
+
+- Build: `go build -o proxx ./cmd/server`
+- Example config for a bot on free APIs with an `auto` model: [`examples/free-auto.yaml`](examples/free-auto.yaml)
+- Known pre-existing upstream test failure (not proxx): `internal/pluginhost` `TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader` (fails on unmodified upstream main, Nov 2026).
 
 ## Syncing with upstream
 
@@ -61,6 +67,8 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `sdk/api/handlers/gemini/gemini_handlers.go` | `pricing.AttachPricing(normalizedModels, "name")` (+ import) | `pricing` object in Gemini `/v1beta/models` |
 | `internal/api/server_routes.go` | `pricing.AttachPricing(...)` in `handleHomeModels` (2 lines + import) | `pricing` object in Home-mode listings |
 | `config.example.yaml` | commented `proxx:` example block | documentation only |
+| `.gitignore` | `!docs/proxx/` after `docs/*` | track fork docs |
+| `README.md` | one proxx header line at the top | branding (ADR 0001) |
 | `sdk/api/handlers/handlers_routing.go` | `proxxgroups.RequestProviders(model)` in `getRequestDetailsWithOptions` | model groups bypass provider lookup and win over `auto` resolution |
 | `sdk/api/handlers/openai/openai_responses_websocket_session.go` | `proxxgroups.IsGroup(model)` in `responsesWebsocketResolvedModelName` | same for Responses websocket sessions |
 | `sdk/cliproxy/auth/conductor_execution.go` | `m.proxxExecuteGroup` / `proxxExecuteCountGroup` / `proxxExecuteStreamGroup` at the top of `Execute` / `ExecuteCount` / `ExecuteStream` | expand a group into member executions |

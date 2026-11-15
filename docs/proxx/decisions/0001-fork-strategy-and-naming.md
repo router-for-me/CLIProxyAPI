@@ -11,8 +11,13 @@ active and touches most files. The owner also wants the product named "proxx" in
 
 - **Keep the Go module path** `github.com/router-for-me/CLIProxyAPI/v8`. Renaming it rewrites the
   import block of nearly every `.go` file, so every upstream merge would conflict everywhere.
-- Rename only what users see: the README/docs branding, the built binary name (`go build -o proxx`),
-  the panel title, and the default panel repository in our docs and example config.
+- Rename only what users see, with the smallest possible footprint in upstream files:
+  - one header line at the top of `README.md` (upstream's most-edited doc, so nothing more);
+  - build the binary as `proxx` (`go build -o proxx ./cmd/server`); no change to upstream build scripts;
+  - the management panel (`iamkunal9/proxx-panel`) is fully branded "proxx".
+- `DefaultPanelGitHubRepository` stays upstream's until `proxx-panel` has a published release; until
+  then point `remote-management.panel-github-repository` at `https://github.com/iamkunal9/proxx-panel`
+  in config. Changing the default first would break panel downloads for anyone running defaults.
 - Fork features go in new files and new packages. Upstream files get one-line hooks marked
   `proxx:` and listed in `docs/proxx/README.md`.
 - All fork config sits under one `proxx:` root; all fork management routes under `/v8/management/proxx`.

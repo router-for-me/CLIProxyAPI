@@ -26,3 +26,18 @@ func TestLookupListingResolvesCompatAlias(t *testing.T) {
 		t.Fatal("alias to an unpriced model must stay unknown")
 	}
 }
+
+// Usage records and the registry carry compat providers as "openai-compatible-<name>";
+// a config entry restricted to the bare name must still match them.
+func TestConfigProviderMatchesRuntimeCompatKey(t *testing.T) {
+	setup(t, config.ProxxPricingConfig{Models: []config.ProxxModelPrice{
+		{Model: "or-model", Provider: "openrouter", Input: f(1), Output: f(1), Override: true},
+	}})
+	m, ok := Lookup("openai-compatible-openrouter", "or-model")
+	if !ok || m.Source != SourceConfig || m.Price.Input == nil || *m.Price.Input != 1 {
+		t.Fatalf("provider-restricted entry must match runtime compat key, got %+v ok=%v", m, ok)
+	}
+	if _, ok := Lookup("openai-compatible-groq", "or-model"); ok {
+		t.Fatal("entry restricted to openrouter must not match groq")
+	}
+}
