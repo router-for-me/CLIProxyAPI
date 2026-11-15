@@ -538,11 +538,11 @@ type proxyTestAntigravityOAuthService struct {
 	baseURL string
 }
 
-func (s *proxyTestAntigravityOAuthService) BuildAuthURL(state, _ string) string {
+func (s *proxyTestAntigravityOAuthService) BuildAuthURL(state, _, _ string) string {
 	return s.baseURL + "/auth?state=" + state
 }
 
-func (s *proxyTestAntigravityOAuthService) ExchangeCodeForTokens(ctx context.Context, code, _ string) (*antigravity.TokenResponse, error) {
+func (s *proxyTestAntigravityOAuthService) ExchangeCodeForTokens(ctx context.Context, code, _, _ string) (*antigravity.TokenResponse, error) {
 	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/token", strings.NewReader("code="+url.QueryEscape(code)))
 	if errReq != nil {
 		return nil, errReq

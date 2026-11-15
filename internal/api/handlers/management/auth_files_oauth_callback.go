@@ -26,6 +26,18 @@ type callbackForwarder struct {
 	done     chan struct{}
 }
 
+// pickLoopbackPort reserves a random loopback port and releases it for the
+// callback forwarder. Mirrors the official client's random callback port.
+func pickLoopbackPort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port, nil
+}
+
 func isWebUIRequest(c *gin.Context) bool {
 	if c == nil {
 		return false

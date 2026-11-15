@@ -16,7 +16,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestBuildAuthURLIncludesAICodeScope(t *testing.T) {
-	parsedURL, err := url.Parse(NewAntigravityAuth(nil, nil).BuildAuthURL("state", "http://localhost/callback"))
+	parsedURL, err := url.Parse(NewAntigravityAuth(nil, nil).BuildAuthURL("state", "http://localhost/callback", "challenge"))
 	if err != nil {
 		t.Fatalf("parse auth URL: %v", err)
 	}
@@ -135,17 +135,17 @@ func assertOnboardUserHeaders(t *testing.T, req *http.Request) {
 	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
 		t.Fatalf("Authorization = %q", got)
 	}
-	if got := req.Header.Get("Accept"); got != "*/*" {
-		t.Fatalf("Accept = %q", got)
+	if got := req.Header.Get("Accept"); got != "" {
+		t.Fatalf("Accept = %q, want omitted", got)
 	}
-	if got := req.Header.Get("X-Goog-Api-Client"); got != "gl-node/22.21.1" {
-		t.Fatalf("X-Goog-Api-Client = %q", got)
+	if got := req.Header.Get("X-Goog-Api-Client"); got != "" {
+		t.Fatalf("X-Goog-Api-Client = %q, want empty", got)
 	}
 	userAgent := req.Header.Get("User-Agent")
 	if !strings.HasPrefix(userAgent, "antigravity/hub/") {
 		t.Fatalf("User-Agent = %q", userAgent)
 	}
-	if !strings.Contains(userAgent, "google-api-nodejs-client/10.3.0") {
+	if strings.Contains(userAgent, "google-api-nodejs-client/") {
 		t.Fatalf("User-Agent = %q", userAgent)
 	}
 }

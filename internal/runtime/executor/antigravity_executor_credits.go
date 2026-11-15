@@ -602,11 +602,15 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	}
 
 	userAgent := resolveLoadCodeAssistUserAgent(auth)
-	loadReqBody, errMarshal := json.Marshal(map[string]any{
+	loadReq := map[string]any{
 		"metadata": map[string]string{
 			"ideType": "ANTIGRAVITY",
 		},
-	})
+	}
+	if projectID := antigravityProjectIDFromAuth(auth); projectID != "" {
+		loadReq["cloudaicompanionProject"] = projectID
+	}
+	loadReqBody, errMarshal := json.Marshal(loadReq)
 	if errMarshal != nil {
 		log.Debugf("antigravity executor: marshal loadCodeAssist request error: %v", errMarshal)
 		return
