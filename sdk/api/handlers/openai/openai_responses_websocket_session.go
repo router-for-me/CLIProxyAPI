@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	proxxgroups "github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/groups"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -161,6 +162,9 @@ func responsesWebsocketPinnedAuthMatchesModel(auth *coreauth.Auth, modelName str
 }
 
 func responsesWebsocketResolvedModelName(modelName string) string {
+	if proxxgroups.IsGroup(modelName) { // proxx: model groups win over "auto" resolution
+		return modelName
+	}
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
 		resolvedBase := util.ResolveAutoModel(initialSuffix.ModelName)

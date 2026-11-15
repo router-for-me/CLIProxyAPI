@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	proxxgroups "github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/groups"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -55,6 +56,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}()
 
 	s.startModelCatalogUpdaters(ctx)
+	proxxgroups.Apply(s.currentConfig()) // proxx: load model groups
 
 	usage.StartDefault(ctx)
 	cfg := s.currentConfig()

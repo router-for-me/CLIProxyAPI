@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	proxxgroups "github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/groups"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -178,6 +179,7 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 	s.cancelStaleAntigravityProbes("")
 	s.configSequence++
 	registry.UpdateModelCatalogSources(newCfg.Models, newCfg.Home.Enabled)
+	proxxgroups.Apply(newCfg) // proxx: reload model groups
 	return configCommit{cfg: newCfg, sequence: s.configSequence}
 }
 

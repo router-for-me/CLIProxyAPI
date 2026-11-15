@@ -1379,6 +1379,21 @@ plugins:
       config-object:
         mode: "safe"
 
+# proxx fork features (docs/proxx). Model groups are virtual models that try real models
+# (registry IDs or configured aliases, from any provider) in order, skip members whose
+# credentials are cooling down, and fail over on 429/5xx/auth/context-length errors.
+# The serving member is reported in the X-Proxx-Served-Model response header.
+# proxx:
+#   model-groups:
+#     - name: auto              # a group named "auto" replaces upstream's newest-model "auto"
+#       strategy: ordered       # ordered (default) | round-robin (rotate the first member per request)
+#       models:
+#         - gemini-2.5-flash
+#         - kimi-k2             # e.g. an openai-compatibility alias
+#     - name: free
+#       hidden: true            # routable but not listed in /v1/models
+#       models: [kimi-k2, gemini-2.5-flash]
+
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only
 # fields remain in their old locations until a successful v8 configuration write.

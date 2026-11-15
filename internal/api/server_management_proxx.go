@@ -7,4 +7,5 @@ import "github.com/gin-gonic/gin"
 // proxx endpoints here so upstream merges never conflict on the route table.
 func (s *Server) registerProxxManagementRoutes(v8 *gin.RouterGroup) {
 	_ = v8.Group("/proxx")
+	s.registerProxxGroupRoutes(v8.Group("/proxx"))
 }
