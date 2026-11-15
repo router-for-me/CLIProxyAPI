@@ -47,6 +47,7 @@ func (h *BaseAPIHandler) HasAlternativeExecutionTarget(ctx context.Context, hand
 	providers = adjustExecutionProvidersForEntryProtocol(handlerType, providers)
 	reqMeta := requestExecutionMetadata(ctx)
 	delete(reqMeta, coreexecutor.PinnedAuthMetadataKey)
+	delete(reqMeta, coreexecutor.ExcludedAuthIDsMetadataKey)
 	delete(reqMeta, coreexecutor.ExecutionSessionMetadataKey)
 	delete(reqMeta, coreexecutor.SelectedAuthCallbackMetadataKey)
 	delete(reqMeta, coreexecutor.FinalizedResponseFormatCallbackMetadataKey)
