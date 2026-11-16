@@ -6,7 +6,7 @@
 services:
   fleet-controller:
     container_name: fleet-controller
-    image: ghcr.io/ryanzigler/cliproxyapi:v8.0.75-fleet.1
+    image: ghcr.io/ryanzigler/cliproxyapi:v8.0.75-fleet.2
     restart: unless-stopped
     init: true
     # DSM's Docker can't publish to the NAS loopback; Tailscale Serve proxies
