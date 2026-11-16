@@ -411,6 +411,9 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 					}
 				}
 			}
+			// Codex compatibility (#7270/#7384): reconcile only untouched automatic
+			// image tools against the configured reasoning and route. Preserve explicit
+			// tool edits and selection, and never evaluate payload rules a second time.
 			if autoInjectedToolIdx >= 0 && !(userWroteToolChoice && docToolChoiceSelectsImageGeneration(doc, toolChoicePath)) {
 				if codexConfiguredPayloadIncompatibleWithAutoImageGenDoc(doc, root, model, auth, headers) {
 					if retractAutoInjectedImageGenerationToolAtIndexDoc(doc, toolsPath, autoInjectedToolIdx, originalHadEmptyTools) {
