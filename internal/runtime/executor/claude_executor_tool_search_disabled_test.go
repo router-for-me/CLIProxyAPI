@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/MoeForge/moego/regexp"
 	"github.com/gin-gonic/gin"

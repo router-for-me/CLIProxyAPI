@@ -3,11 +3,11 @@ package auth
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 

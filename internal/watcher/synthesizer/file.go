@@ -2,7 +2,6 @@ package synthesizer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"

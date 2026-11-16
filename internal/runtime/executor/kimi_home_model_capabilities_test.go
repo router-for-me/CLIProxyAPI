@@ -2,13 +2,13 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"

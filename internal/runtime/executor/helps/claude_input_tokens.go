@@ -3,11 +3,11 @@ package helps
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
 	"github.com/tiktoken-go/tokenizer"

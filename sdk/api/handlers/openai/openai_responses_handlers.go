@@ -9,13 +9,13 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/MoeForge/moego/regexp"
 	"github.com/gin-gonic/gin"

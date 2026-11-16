@@ -3,8 +3,8 @@ package helps
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 )

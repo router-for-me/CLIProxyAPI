@@ -1,9 +1,9 @@
 package pluginhost
 
 import (
-	"encoding/json"
 	"net/http"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 

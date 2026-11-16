@@ -2,12 +2,13 @@ package pluginapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type compileTimePlugin struct{}

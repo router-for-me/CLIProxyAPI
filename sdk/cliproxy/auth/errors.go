@@ -1,12 +1,13 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ErrorCodeRequestScoped identifies failures tied to the current request rather

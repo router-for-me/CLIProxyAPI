@@ -1,13 +1,13 @@
 package handlers
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"

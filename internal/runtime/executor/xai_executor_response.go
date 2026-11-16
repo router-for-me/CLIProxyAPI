@@ -2,7 +2,6 @@ package executor
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
