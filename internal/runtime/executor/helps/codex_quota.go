@@ -370,10 +370,6 @@ func anchorCodexQuotaResetHeaders(headers http.Header, observedAt time.Time) htt
 	cloned := false
 	for _, window := range []string{"Primary", "Secondary"} {
 		prefix := "X-Codex-" + window
-		minutes, err := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Window-Minutes")), 10, 64)
-		if err != nil || (minutes != 10080 && minutes != 300) {
-			continue
-		}
 		absolute, errAbsolute := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Reset-At")), 10, 64)
 		if errAbsolute == nil && absolute > 0 && absolute <= 253402300799 {
 			continue

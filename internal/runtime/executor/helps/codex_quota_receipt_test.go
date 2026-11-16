@@ -115,3 +115,20 @@ func TestCodexResetReceiptValidationAndRawLog(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexResetReceiptPartialErrorHeaders(t *testing.T) {
+	receipt := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	recordAPIResponseMetadataAt(ctx, nil, 200, http.Header{
+		"X-Codex-Primary-Window-Minutes": {"10080"},
+		"X-Codex-Primary-Reset-At":       {strconv.FormatInt(receipt.Add(time.Hour).Unix(), 10)},
+	}, receipt)
+	// Error headers can update one field while the prior window duration remains
+	// in the request holder. Anchor this update before merging the observations.
+	appendCodexAPIWebsocketResponseAt(ctx, nil, []byte(`{"type":"error","status_code":429,"headers":{"X-Codex-Primary-Reset-After-Seconds":"60"}}`), receipt.Add(2*time.Minute))
+	got := internallogging.GetResponseHeaders(ctx)
+	want := strconv.FormatInt(receipt.Add(3*time.Minute).Unix(), 10)
+	if got.Get("X-Codex-Primary-Reset-At") != want || got.Get("X-Codex-Primary-Window-Minutes") != "10080" {
+		t.Fatalf("partial error retained or rebased the old deadline: %#v, want reset-at %s", got, want)
+	}
+}
