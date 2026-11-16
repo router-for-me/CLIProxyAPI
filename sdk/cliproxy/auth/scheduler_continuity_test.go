@@ -31,10 +31,14 @@ type continuity429Executor struct {
 	mu     sync.Mutex
 	calls  int
 	status int
+	local  bool
 }
 
 func (e *continuity429Executor) Identifier() string { return "codex" }
-func (e *continuity429Executor) Execute(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *continuity429Executor) Execute(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if !e.local {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.calls++
@@ -43,7 +47,10 @@ func (e *continuity429Executor) Execute(_ context.Context, _ *Auth, _ cliproxyex
 	}
 	return cliproxyexecutor.Response{Payload: []byte("recovered")}, nil
 }
-func (e *continuity429Executor) ExecuteStream(_ context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *continuity429Executor) ExecuteStream(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if !e.local {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.calls++

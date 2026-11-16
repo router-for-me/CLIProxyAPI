@@ -609,8 +609,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 		bootstrapRetries++
 		retryCtx := ctx
-		if executionErrorMessage(bootstrapStreamErr).StatusCode == http.StatusTooManyRequests {
-			retryCtx = coreauth.WithContinuityRejected429(ctx)
+		if h.AuthManager.HasSchedulerContinuity() && coreauth.ConfirmedUpstreamQuotaRejection(bootstrapStreamErr) {
+			retryCtx = coreauth.WithContinuityRejected429(ctx, bootstrapStreamErr)
 		}
 		retryResult, retryErr := h.AuthManager.ExecuteStream(retryCtx, providers, req, opts)
 		if retryErr != nil {

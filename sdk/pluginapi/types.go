@@ -586,6 +586,14 @@ type ModelRouter interface {
 	RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error)
 }
 
+// Continuity reasons positively classify a known five-hour restriction.
+const (
+	// ContinuityReasonFiveHourExhausted confirms a current five-hour restriction.
+	ContinuityReasonFiveHourExhausted = "five_hour_exhausted"
+	// ContinuityReasonFiveHourRecheck requests fresh evidence after known exhaustion.
+	ContinuityReasonFiveHourRecheck = "five_hour_recheck"
+)
+
 // SchedulerContinuity provides an immediate, side-effect-safe pre-admission decision.
 type SchedulerContinuity interface {
 	Continuity(context.Context, SchedulerContinuityRequest) (SchedulerContinuityResponse, error)

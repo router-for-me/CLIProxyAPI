@@ -684,7 +684,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	var upstreamErr error
 	continuityReplaySafe := retryRound == 0
 	recoverConfirmedQuota := func() (bool, error) {
-		if homeMode || !continuityReplaySafe || lastErr == nil || statusCodeFromError(lastErr) != http.StatusTooManyRequests {
+		if homeMode || !continuityReplaySafe || !ConfirmedUpstreamQuotaRejection(lastErr) {
 			return false, nil
 		}
 		ready, err := m.waitAfterConfirmed429(ctx, providers, routeModel, opts)
@@ -1168,7 +1168,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var roundTiming homeRetryRoundTiming
 	continuityReplaySafe := retryRound == 0
 	recoverConfirmedQuota := func() (bool, error) {
-		if homeMode || !continuityReplaySafe || lastErr == nil || statusCodeFromError(lastErr) != http.StatusTooManyRequests {
+		if homeMode || !continuityReplaySafe || !ConfirmedUpstreamQuotaRejection(lastErr) {
 			return false, nil
 		}
 		ready, err := m.waitAfterConfirmed429(ctx, providers, routeModel, opts)

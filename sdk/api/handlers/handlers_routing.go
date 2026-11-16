@@ -97,20 +97,12 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 	return out
 }
 
-// CanWaitForCodexContinuity leaves unrelated model routes on their existing
-// synchronous execution path. The manager still performs authoritative checks.
-func (h *BaseAPIHandler) CanWaitForCodexContinuity(modelName string) bool {
+// CanWaitForCodexContinuity installs a notifier whenever the optional capability
+// is available. Model-router plugins resolve the authoritative provider later;
+// only an actual Codex wait starts transport keepalives.
+func (h *BaseAPIHandler) CanWaitForCodexContinuity(_ string) bool {
 	if h == nil || h.AuthManager == nil || h.AuthManager.HomeEnabled() || !h.AuthManager.HasSchedulerContinuity() {
 		return false
-	}
-	providers, _, err := h.getRequestDetails(modelName)
-	if err != nil || len(providers) == 0 {
-		return false
-	}
-	for _, provider := range providers {
-		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
-			return false
-		}
 	}
 	return true
 }

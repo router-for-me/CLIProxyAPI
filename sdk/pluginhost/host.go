@@ -222,6 +222,19 @@ func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
 
+// HasSchedulerContinuity reports the active scheduler's optional capability.
+func (h *Host) HasSchedulerContinuity() bool {
+	return h != nil && h.inner != nil && h.inner.HasSchedulerContinuity()
+}
+
+// SchedulerContinuity forwards a nonblocking pre-admission decision.
+func (h *Host) SchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	if h == nil || h.inner == nil {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	return h.inner.SchedulerContinuity(ctx, req)
+}
+
 // SchedulerWantsAcrossPriorities reports whether the active scheduler opted into receiving
 // candidates across all priority tiers.
 func (h *Host) SchedulerWantsAcrossPriorities() bool {

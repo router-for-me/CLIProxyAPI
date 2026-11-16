@@ -24,6 +24,12 @@ clamped to 1 second through 5 minutes. The first wait establishes a request-wide
 deadline. A later response may shorten that deadline but cannot extend it.
 Cancellation ends the wait without sending another upstream attempt.
 
+For post-429 recovery, `reason` must be one of the exported classification constants
+`pluginapi.ContinuityReasonFiveHourExhausted` (`five_hour_exhausted`) or
+`pluginapi.ContinuityReasonFiveHourRecheck` (`five_hour_recheck`). These values
+positively classify an observed five-hour restriction. Other reasons may describe
+pre-admission policy waits, but do not authorize replay of a rejected request.
+
 The candidate set honors disabled credentials, request eligibility, model support,
 and pinned credential identity. Current native quota cooldowns remain visible so
 the scheduler can recheck them; unrelated authentication or overload failures do

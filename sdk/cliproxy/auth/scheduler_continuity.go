@@ -46,10 +46,21 @@ func WithContinuityBudget(ctx context.Context) context.Context {
 }
 
 type continuityRejected429Key struct{}
+type continuityRejectedCauseKey struct{}
 
 // WithContinuityRejected429 records a definite rejected attempt before output.
-func WithContinuityRejected429(ctx context.Context) context.Context {
-	return context.WithValue(ctx, continuityRejected429Key{}, true)
+func WithContinuityRejected429(ctx context.Context, cause ...error) context.Context {
+	ctx = context.WithValue(ctx, continuityRejected429Key{}, true)
+	if len(cause) > 0 && cause[0] != nil {
+		ctx = context.WithValue(ctx, continuityRejectedCauseKey{}, cause[0])
+	}
+	return ctx
+}
+
+// ConfirmedUpstreamQuotaRejection distinguishes an attempted upstream 429 from
+// a local executor rejection before any transport was attempted.
+func ConfirmedUpstreamQuotaRejection(err error) bool {
+	return err != nil && hasUpstreamExecutionAttempt(err) && statusCodeFromError(err) == 429
 }
 
 // WithContinuityWaitNotifier reports entry into an actual pre-admission wait.
@@ -90,7 +101,14 @@ func (m *Manager) waitForSchedulerContinuity(ctx context.Context, providers []st
 	}
 	previous, _ := ctx.Value(continuityRejected429Key{}).(bool)
 	if previous {
-		return m.waitAfterConfirmed429(ctx, providers, model, opts)
+		ready, err := m.waitAfterConfirmed429(ctx, providers, model, opts)
+		if err != nil || ready {
+			return ready, err
+		}
+		if cause, ok := ctx.Value(continuityRejectedCauseKey{}).(error); ok {
+			return false, cause
+		}
+		return false, &Error{Code: "scheduler_continuity_replay_declined", Message: "scheduler did not confirm quota recovery for the rejected attempt", HTTPStatus: 429}
 	}
 	_, waited, err := runContinuityGate(ctx, budget, func() (pluginapi.SchedulerContinuityResponse, bool, error) {
 		return m.schedulerContinuityDecision(ctx, providers, model, opts, false)
@@ -211,7 +229,7 @@ func (m *Manager) schedulerContinuityDecision(ctx context.Context, providers []s
 		// Preserve only native quota cooldowns for reassessment. Disabled,
 		// unauthorized, expired, overload and other failures remain native errors.
 		selectionModel := m.selectionModelForAuth(candidate, model)
-		blocked, reason, _ := isAuthBlockedForModel(candidate, selectionModel, time.Now())
+		blocked, reason, _ := isAuthBlockedForModelForRequest(ctx, candidate, selectionModel, time.Now(), opts.Headers)
 		if blocked && reason != blockReasonCooldown {
 			continue
 		}
@@ -270,7 +288,7 @@ func (m *Manager) waitAfterConfirmed429(ctx context.Context, providers []string,
 		if !handled || resp.Action == "disabled" {
 			return false, nil
 		}
-		if resp.Action == "wait" && (resp.Reason == "five_hour_exhausted" || resp.Reason == "five_hour_recheck") {
+		if resp.Action == "wait" && (resp.Reason == pluginapi.ContinuityReasonFiveHourExhausted || resp.Reason == pluginapi.ContinuityReasonFiveHourRecheck) {
 			budget, _ := ctx.Value(continuityBudgetKey{}).(*continuityBudget)
 			if budget == nil {
 				budget = &continuityBudget{}
