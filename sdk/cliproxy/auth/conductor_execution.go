@@ -215,11 +215,19 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if errThread != nil {
 		return cliproxyexecutor.Response{}, errThread
 	}
+	// A request-stop or terminated error is a request fault; its marker is
+	// unwrapped before return, so remember it for the thread replay check.
+	requestFault := false
 	if threadPinned {
-		defer func() { errResult = claudeThreadReplayError(errResult) }()
+		defer func() {
+			if !requestFault {
+				errResult = claudeThreadReplayError(errResult)
+			}
+		}()
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
+		requestFault = isRequestTerminatedError(errHome) || isRequestStopError(errHome)
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
 
@@ -238,6 +246,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return resp, nil
 		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+			requestFault = true
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isSchedulerRejectError(errExec) {
@@ -379,8 +388,13 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if errThread != nil {
 		return nil, errThread
 	}
+	requestFault := false
 	if threadPinned {
-		defer func() { err = claudeThreadReplayError(err) }()
+		defer func() {
+			if !requestFault {
+				err = claudeThreadReplayError(err)
+			}
+		}()
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -422,6 +436,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		retryRoundPending = false
 		retryRoundWaited = false
 		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
+			requestFault = true
 			return nil, unwrapExecutionBoundaryError(errStream)
 		}
 		if isSchedulerRejectError(errStream) {

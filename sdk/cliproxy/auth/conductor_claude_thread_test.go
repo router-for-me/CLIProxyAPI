@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -205,6 +206,8 @@ func TestIsClaudeThreadOwnerUnavailable(t *testing.T) {
 		{name: "canceled", err: context.Canceled, want: false},
 		{name: "server error", err: &Error{HTTPStatus: http.StatusInternalServerError}, want: false},
 		{name: "request scoped 429", err: &requestScopedStatusError{status: http.StatusTooManyRequests}, want: false},
+		{name: "home concurrency busy", err: NewHomeConcurrencyBusyError("owner at concurrency limit", 2*time.Second), want: false},
+		{name: "transient rate limit", err: &Error{Code: ErrorCodeTransientRateLimit, HTTPStatus: http.StatusTooManyRequests}, want: false},
 		{name: "plain", err: errors.New("boom"), want: false},
 	}
 	for _, c := range cases {
@@ -212,4 +215,76 @@ func TestIsClaudeThreadOwnerUnavailable(t *testing.T) {
 			t.Errorf("%s: isClaudeThreadOwnerUnavailable = %v, want %v", c.name, got, c.want)
 		}
 	}
+}
+
+// A configured request-scoped stop rule marks the owner's error as a request
+// fault; the replay rewrite must not override it after the marker is unwrapped.
+func TestClaudeThreadContinuationHonorsRequestScopedStopRule(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	newManager := func(t *testing.T) (*Manager, string, string) {
+		m := NewManager(nil, nil, nil)
+		ownerID, otherID, model := t.Name()+"-owner", t.Name()+"-other", "claude-thread-stop-model"
+		reg := registry.GetGlobalRegistry()
+		for _, auth := range []*Auth{
+			{ID: ownerID, Provider: "claude", Status: StatusActive, Metadata: map[string]any{
+				"request_scoped_errors": []internalconfig.RequestScopedErrorRule{
+					{Status: http.StatusForbidden, Match: []string{"blocked by policy"}, Action: "stop"},
+				},
+			}},
+			{ID: otherID, Provider: "claude", Status: StatusActive},
+		} {
+			reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+			authID := auth.ID
+			t.Cleanup(func() { reg.UnregisterClient(authID) })
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register %s: %v", auth.ID, errRegister)
+			}
+		}
+		return m, ownerID, model
+	}
+	continuation := func(t *testing.T, ownerID, model string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+		messageID := "msg_" + t.Name()
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+		req := cliproxyexecutor.Request{
+			Model:   model,
+			Payload: []byte(`{"model":"` + model + `","thread":{"type":"continue","previous_message_id":"` + messageID + `"},"messages":[]}`),
+		}
+		cliproxysession.RememberClaudeThreadAuth(cliproxysession.ClaudeThreadCallerScope("", opts.Metadata, req.Metadata), messageID, ownerID)
+		return req, opts
+	}
+	policyErr := customStatusError{code: http.StatusForbidden, msg: "permission_error: blocked by policy"}
+
+	t.Run("execute", func(t *testing.T) {
+		m, ownerID, model := newManager(t)
+		m.RegisterExecutor(&mockCustomErrorExecutor{
+			identifier: "claude",
+			executeFn: func(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+				cliproxyexecutor.MarkUpstreamAttempt(ctx)
+				return cliproxyexecutor.Response{}, policyErr
+			},
+		})
+		req, opts := continuation(t, ownerID, model)
+		_, errExecute := m.Execute(context.Background(), []string{"claude"}, req, opts)
+		if _, ok := errExecute.(customStatusError); !ok {
+			t.Fatalf("Execute() error = %T/%v, want the original request-stop error", errExecute, errExecute)
+		}
+	})
+	t.Run("stream", func(t *testing.T) {
+		m, ownerID, model := newManager(t)
+		m.RegisterExecutor(&customStreamMockExecutor{
+			identifier: "claude",
+			streamFn: func(ctx context.Context, _ *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+				cliproxyexecutor.MarkUpstreamAttempt(ctx)
+				return nil, policyErr
+			},
+		})
+		req, opts := continuation(t, ownerID, model)
+		_, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, req, opts)
+		if _, ok := errStream.(customStatusError); !ok {
+			t.Fatalf("ExecuteStream() error = %T/%v, want the original request-stop error", errStream, errStream)
+		}
+	})
 }

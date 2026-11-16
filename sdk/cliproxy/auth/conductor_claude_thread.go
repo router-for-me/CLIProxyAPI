@@ -76,10 +76,17 @@ func claudeThreadReplayError(err error) error {
 
 // isClaudeThreadOwnerUnavailable reports failures that rotate credentials for
 // ordinary requests: the owner is missing, disabled, cooling down, out of quota,
-// or rejected its token. Request faults and transient upstream errors (5xx,
-// overload) keep their status, so the client retries the same thread.
+// or rejected its token. Request faults and short-lived failures (5xx, overload,
+// transient rate limits, Home concurrency admission) keep their status and
+// retry hints, so the client retries the same warm thread.
 func isClaudeThreadOwnerUnavailable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if homeBusy, ok := errors.AsType[*HomeConcurrencyBusyError](err); ok && homeBusy != nil {
+		return false
+	}
+	if isTransientRateLimitError(err) {
 		return false
 	}
 	if isCredentialScopedError(err) || isAuthUnavailableError(err) || isInvalidGrantError(err) || isCreditBalanceTooLowError(err) {
