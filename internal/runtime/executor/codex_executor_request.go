@@ -315,7 +315,7 @@ func decodeCodexUpstreamResponse(resp *http.Response) error {
 }
 
 // doCodexRequest retries a rejected zstd body once without rerunning payload rules.
-func doCodexRequest(client *http.Client, req *http.Request, upstreamBody []byte, prepareHeaders func(*http.Request), responseReady func(*http.Response)) (*http.Response, error) {
+func doCodexRequest(client *http.Client, req *http.Request, upstreamBody []byte, prepareHeaders func(*http.Request), responseReady func(*http.Response), cfg *config.Config) (*http.Response, error) {
 	alignCodexContentEncoding(req)
 	compressed := req.Header.Get("Content-Encoding") == "zstd"
 	resp, errDo := client.Do(req)
@@ -325,10 +325,14 @@ func doCodexRequest(client *http.Client, req *http.Request, upstreamBody []byte,
 	if responseReady != nil {
 		responseReady(resp)
 	}
+	retryPlain := compressed && (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnsupportedMediaType)
+	if !retryPlain {
+		helps.RecordAPIResponseMetadata(req.Context(), cfg, resp.StatusCode, resp.Header)
+	}
 	if errDecode := decodeCodexUpstreamResponse(resp); errDecode != nil {
 		return nil, errDecode
 	}
-	if !compressed || (resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnsupportedMediaType) {
+	if !retryPlain {
 		return resp, nil
 	}
 	if errClose := resp.Body.Close(); errClose != nil {
@@ -349,6 +353,7 @@ func doCodexRequest(client *http.Client, req *http.Request, upstreamBody []byte,
 	if responseReady != nil {
 		responseReady(resp)
 	}
+	helps.RecordAPIResponseMetadata(req.Context(), cfg, resp.StatusCode, resp.Header)
 	if errDecode := decodeCodexUpstreamResponse(resp); errDecode != nil {
 		return nil, errDecode
 	}

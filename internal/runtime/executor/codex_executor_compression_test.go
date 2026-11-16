@@ -418,7 +418,7 @@ func TestCodexExecutor_CompressionFallbackRetryLimit(t *testing.T) {
 				}
 				return &http.Response{StatusCode: tt.status, Header: make(http.Header), Body: &codexCompressionCloseBody{Reader: strings.NewReader("rejected"), closed: &closed}}, nil
 			})}
-			resp, errDo := doCodexRequest(client, req, plain, func(request *http.Request) {}, nil)
+			resp, errDo := doCodexRequest(client, req, plain, func(request *http.Request) {}, nil, nil)
 			if errDo != nil {
 				t.Fatal(errDo)
 			}
