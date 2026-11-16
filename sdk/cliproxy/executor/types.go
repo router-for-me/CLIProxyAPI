@@ -15,6 +15,12 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// RequestIDMetadataKey stores the host request lifecycle identifier in Options.Metadata.
+const RequestIDMetadataKey = "request_id"
+
+// TraceIDMetadataKey stores the inbound request trace identifier in Options.Metadata.
+const TraceIDMetadataKey = "trace_id"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 

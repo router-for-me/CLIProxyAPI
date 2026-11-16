@@ -52,6 +52,17 @@ func (p *xaiPreparedRequest) ensureDoc() *ojson.Doc {
 	return p.doc
 }
 
+// normalizeXAIWebsocketRequestDoc prepares business fields before payload rules.
+func normalizeXAIWebsocketRequestDoc(doc *ojson.Doc) {
+	_ = doc.Delete("stream")
+	_ = doc.Delete("stream_options")
+	_ = doc.Delete("background")
+	_ = doc.Set("store", true)
+	if strings.TrimSpace(doc.Get("previous_response_id").String()) != "" {
+		_ = doc.Delete("instructions")
+	}
+}
+
 type xaiNamespaceToolRef struct {
 	namespace    string
 	name         string
