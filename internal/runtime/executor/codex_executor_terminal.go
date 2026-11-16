@@ -375,11 +375,12 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	// A usage_limit_reached body reset describes quota recovery and wins over
-	// the generic Retry-After header. Every other 429 honours the upstream
-	// header so per-turn admission limits cool until their real deadline.
+	// the generic Retry-After header. Other 429s and recoverable transient
+	// upstream errors honour the upstream header so capacity rejections cool
+	// until their real deadline.
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
-	} else if errCode == http.StatusTooManyRequests {
+	} else if shouldParseCodexRetryAfterHeader(errCode) {
 		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
@@ -752,7 +753,16 @@ func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 // change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
 // scoped to this path means disabling the feature restores the previous behaviour exactly.
 func newCodexBootstrapOverloadErr(body []byte) statusErr {
-	return newCodexStatusErr(http.StatusServiceUnavailable, body)
+	return newCodexStatusErrWithHeaders(http.StatusServiceUnavailable, parseCodexWebsocketErrorHeaders(body), body)
+}
+
+func newCodexBootstrapOverloadErrWithRetryAfter(body []byte, preferredRetryAfter *time.Duration) statusErr {
+	err := newCodexStatusErr(http.StatusServiceUnavailable, body)
+	if preferredRetryAfter != nil {
+		delay := *preferredRetryAfter
+		err.retryAfter = &delay
+	}
+	return err
 }
 
 // isCodexOverloadBootstrapFailure reports whether a terminal failure delivered inside an HTTP 200
