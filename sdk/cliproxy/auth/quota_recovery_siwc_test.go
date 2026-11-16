@@ -208,3 +208,123 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestQuotaRecoveryClaudeIdentityHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		headers          map[string]string
+		recover, dynamic bool
+	}{
+		{name: "ordinary", recover: true},
+		{name: "different_bearer", headers: map[string]string{"Authorization": "Bearer other-token"}},
+		{name: "dynamic_bearer", headers: map[string]string{"Authorization": "$X-Identity"}, dynamic: true},
+		{name: "competing_api_key", headers: map[string]string{"x-api-key": "other-key"}},
+		{name: "dynamic_api_key", headers: map[string]string{"x-api-key": "$X-Identity"}, dynamic: true},
+		{name: "matching_bearer", headers: map[string]string{"Authorization": "Bearer outer-token"}, recover: true},
+		{name: "unrelated_header", headers: map[string]string{"X-Test": "preserved"}, recover: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := &config.Config{}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetConfig(cfg)
+			manager.SetRetryConfig(0, 0, 0)
+			inferenceCalls, usageCalls := 0, 0
+			inference := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				inferenceCalls++
+				wantBearer := "Bearer outer-token"
+				if v := tc.headers["Authorization"]; v != "" {
+					wantBearer = v
+				}
+				if tc.name == "dynamic_bearer" {
+					wantBearer = "Bearer other-token"
+				}
+				wantKey := tc.headers["x-api-key"]
+				if tc.name == "dynamic_api_key" {
+					wantKey = "other-key"
+				}
+				if r.Header.Get("Authorization") != wantBearer || r.Header.Get("x-api-key") != wantKey {
+					t.Errorf("executor did not apply configured identity headers: bearer=%q key=%q", r.Header.Get("Authorization"), r.Header.Get("x-api-key"))
+				}
+				if tc.headers["X-Test"] != "" && r.Header.Get("X-Test") != "preserved" {
+					t.Error("executor lost unrelated header")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(429)
+				_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"weekly usage limit reached"}}`)
+			}))
+			defer inference.Close()
+			usage := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				usageCalls++
+				if r.URL.Path != "/api/oauth/usage" || r.Header.Get("Authorization") != "Bearer outer-token" || r.Header.Get("x-api-key") != "" {
+					t.Error("canonical probe changed selected outer identity")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"five_hour":{"utilization":0},"seven_day":{"utilization":1}}`)
+			}))
+			defer usage.Close()
+			previous := http.DefaultTransport
+			transport := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+				if address != inference.Listener.Addr().String() {
+					address = usage.Listener.Addr().String()
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, address)
+			}}
+			http.DefaultTransport = transport
+			defer func() { http.DefaultTransport = previous; transport.CloseIdleConnections() }()
+			input := &coreauth.Auth{ID: "claude-identity", Provider: "claude", Status: coreauth.StatusActive, Attributes: map[string]string{"base_url": inference.URL}, Metadata: map[string]any{"access_token": "outer-token", "headers": tc.headers}}
+			coreauth.ApplyCustomHeadersFromMetadata(input)
+			auth, err := manager.Register(ctx, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const model = "claude-sonnet-4-5"
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+			defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			manager.RegisterExecutor(runtimeexecutor.NewClaudeExecutor(cfg))
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+			if tc.dynamic {
+				identity := "Bearer other-token"
+				if tc.name == "dynamic_api_key" {
+					identity = "other-key"
+				}
+				opts.Headers = http.Header{"X-Identity": []string{identity}}
+			}
+			_, err = manager.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"test"}]}`)}, opts)
+			if err == nil || inferenceCalls != 1 {
+				t.Fatalf("actual executor did not record subscription failure: calls=%d err=%v", inferenceCalls, err)
+			}
+			failed, _ := manager.GetByID(auth.ID)
+			if !failed.Quota.Exceeded || !failed.Unavailable || failed.LastError == nil || failed.LastError.HTTPStatus != 429 {
+				t.Fatalf("failure did not establish cooldown: %+v", failed)
+			}
+			if got := coreauth.QuotaRecoveryCandidate(failed); got != tc.recover {
+				t.Errorf("candidate trusted unobserved inference identity: got=%t want=%t", got, tc.recover)
+			}
+			doc := ojson.NewDocString(`{}`)
+			for key, value := range map[string]any{"authIndex": failed.EnsureIndex(), "method": "GET", "url": "https://api.anthropic.com/api/oauth/usage", "header": map[string]string{"Authorization": "Bearer $TOKEN$"}} {
+				if err := doc.Set(key, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := management.NewHandler(cfg, "", manager)
+			router := gin.New()
+			router.POST("/v8/management/requests/api-call", handler.APICallV8)
+			request := httptest.NewRequest(http.MethodPost, "/v8/management/requests/api-call", strings.NewReader(doc.String()))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != 200 || usageCalls != 1 {
+				t.Fatalf("canonical forwarding failed: status=%d calls=%d body=%s", response.Code, usageCalls, response.Body.String())
+			}
+			after, _ := manager.GetByID(auth.ID)
+			if tc.recover {
+				if after.Quota.Exceeded || after.Unavailable {
+					t.Fatal("matching identity failed to recover")
+				}
+			} else if !after.Quota.Exceeded || !after.Unavailable || after.LastError == nil || !after.NextRetryAfter.Equal(failed.NextRetryAfter) {
+				t.Fatal("outer usage cleared another inference identity's cooldown")
+			}
+		})
+	}
+}

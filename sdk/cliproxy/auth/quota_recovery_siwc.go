@@ -10,14 +10,15 @@ import (
 // use the nested SIWC partition or configured identity headers instead. The
 // auth-wide cooldown does not retain which identity produced the failure.
 func quotaRecoverySIWCAccountMatches(auth *Auth) bool {
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+	if provider != "codex" && provider != "claude" {
 		return true
 	}
 	account, _ := auth.Metadata["account_id"].(string)
 	account = strings.TrimSpace(account)
 	token, _ := auth.Metadata["access_token"].(string)
 	token = strings.TrimSpace(token)
-	if IsCodexUseSIWC(auth) {
+	if provider == "codex" && IsCodexUseSIWC(auth) {
 		if account == "" {
 			return false
 		}
@@ -46,7 +47,11 @@ func quotaRecoverySIWCAccountMatches(auth *Auth) bool {
 				return false
 			}
 		case "chatgpt-account-id":
-			if value != account {
+			if provider == "codex" && value != account {
+				return false
+			}
+		case "x-api-key":
+			if provider == "claude" {
 				return false
 			}
 		}
