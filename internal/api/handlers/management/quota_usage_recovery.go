@@ -2,8 +2,8 @@ package management
 
 import (
 	"bytes"
-	"encoding/json"
-	"regexp"
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 	"strings"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
