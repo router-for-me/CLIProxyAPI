@@ -125,3 +125,29 @@ func TestQuotaRecoveryCodexOnlySubscriptionFailures(t *testing.T) {
 	}
 }
 
+func TestQuotaRecoveryPreservesIndependentModelShadow(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	m := NewManager(nil, nil, nil)
+	a, err := m.Register(context.Background(), &Auth{ID: t.Name(), Provider: "codex", Status: StatusActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := "gpt-6.1-sol"
+	retry := time.Minute
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: 404, Message: "model not found"}, RetryAfter: &retry})
+	retry = time.Hour
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"usage_limit_reached"}}`}, RetryAfter: &retry, CredentialScope: true})
+	before, _ := m.GetByID(a.ID)
+	state := before.ModelStates[model]
+	if state == nil || state.credentialQuotaShadow == nil || state.credentialQuotaShadow.LastError.HTTPStatus != 404 || !state.NextRetryAfter.After(state.credentialQuotaShadow.NextRetryAfter) {
+		t.Fatalf("fixture did not retain independent404 under longer quota: %+v", state)
+	}
+	if QuotaRecoveryCandidate(before) {
+		t.Fatal("independent404 admitted as subscription quota")
+	}
+	got, _, err := m.ResetQuotaIfUnchanged(context.Background(), before)
+	after, _ := m.GetByID(a.ID)
+	if err != nil || got != nil || !reflect.DeepEqual(before, after) {
+		t.Fatal("quota recovery cleared independent model restriction")
+	}
+}

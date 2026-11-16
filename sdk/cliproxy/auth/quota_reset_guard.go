@@ -34,6 +34,11 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 		if state == nil {
 			continue
 		}
+		// A subscription refresh cannot release an independent model failure
+		// hidden beneath a later credential-wide quota restriction.
+		if isModelStateActiveCooldown(state.credentialQuotaShadow, time.Now()) {
+			return false
+		}
 		modelKnown, modelSafe := quotaRecoveryState(auth.Provider, state.Status, state.StatusMessage, state.Unavailable, state.NextRetryAfter, state.Quota, state.LastError)
 		if !modelSafe {
 			return false
