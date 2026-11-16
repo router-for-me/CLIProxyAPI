@@ -17,10 +17,13 @@ func quotaUsageHasCapacity(provider string, body []byte, auth *coreauth.Auth) bo
 	}
 	switch provider {
 	case "claude":
-		for _, key := range []string{"five_hour", "seven_day"} {
-			if !quotaPercentCapacity(payload[key], "utilization") {
-				return false
-			}
+		if !quotaPercentCapacity(payload["seven_day"], "utilization") {
+			return false
+		}
+		// Explicit null reports a weekly-only plan; omission is not capacity evidence.
+		fiveHour := bytes.TrimSpace(payload["five_hour"])
+		if string(fiveHour) != "null" && !quotaPercentCapacity(fiveHour, "utilization") {
+			return false
 		}
 		for _, key := range []string{"seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet", "seven_day_cowork", "iguana_necktie"} {
 			if raw := payload[key]; len(raw) > 0 && string(raw) != "null" && !quotaPercentCapacity(raw, "utilization") {

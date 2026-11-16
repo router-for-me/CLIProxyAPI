@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,6 +20,10 @@ import (
 )
 
 func TestQuotaUsageAPICallRecovery(t *testing.T) {
+	weeklyOnlyUsage, err := os.ReadFile("testdata/claude-weekly-only-usage.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 	claudeUsage := `{"five_hour":{"utilization":20},"seven_day":{"utilization":10}}`
 	codexUsage := `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":20},"secondary_window":{"used_percent":10}}}`
 	for _, tc := range []struct {
@@ -29,6 +34,8 @@ func TestQuotaUsageAPICallRecovery(t *testing.T) {
 		mutate                        func(*coreauth.Auth)
 	}{
 		{name: "claude capacity", provider: "claude", recover: true},
+		{name: "claude weekly-only capacity", provider: "claude", response: string(weeklyOnlyUsage), recover: true},
+		{name: "legacy weekly-only unchanged", provider: "claude", response: string(weeklyOnlyUsage), legacy: true},
 		{name: "codex capacity", provider: "codex", response: codexUsage, recover: true},
 		{name: "legacy unchanged", provider: "claude", legacy: true},
 		{name: "exhausted", provider: "claude", response: `{"five_hour":{"utilization":100},"seven_day":{"utilization":10}}`},

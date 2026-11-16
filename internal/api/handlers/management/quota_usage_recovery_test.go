@@ -1,6 +1,8 @@
 package management
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -79,6 +81,50 @@ func TestQuotaVersionFirstClaudeModels(t *testing.T) {
 			body := []byte(`{"five_hour":{"utilization":1},"seven_day":{"utilization":2},"limits":[{"kind":"weekly_scoped","percent":3,"scope":{"model":{"id":"` + tt.model + `"}}}]}`)
 			if got := quotaUsageHasCapacity("claude", body, auth); got != tt.want {
 				t.Fatalf("capacity=%v want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestQuotaClaudeWeeklyOnlyCapacity(t *testing.T) {
+	fixture, err := os.ReadFile("testdata/claude-weekly-only-usage.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, old, replacement string
+		want                   bool
+	}{
+		{name: "provider weekly-only response", want: true},
+		{name: "whitespace around null", old: `"five_hour": null`, replacement: `"five_hour":  null `, want: true},
+		{name: "missing session window", old: `"five_hour": null,`, replacement: ``},
+		{name: "malformed session window", old: `"five_hour": null`, replacement: `"five_hour": {}`},
+		{name: "session percent null", old: `"five_hour": null`, replacement: `"five_hour": {"utilization":null}`},
+		{name: "session exhausted", old: `"five_hour": null`, replacement: `"five_hour": {"utilization":100}`},
+		{name: "session negative", old: `"five_hour": null`, replacement: `"five_hour": {"utilization":-1}`},
+		{name: "session string", old: `"five_hour": null`, replacement: `"five_hour": "null"`},
+		{name: "weekly window null", old: `"seven_day": {`, replacement: `"seven_day": null, "ignored_weekly": {`},
+		{name: "weekly window missing", old: `"seven_day": {`, replacement: `"ignored_weekly": {`},
+		{name: "weekly null", old: `"utilization": 0.0`, replacement: `"utilization": null`},
+		{name: "weekly exhausted", old: `"utilization": 0.0`, replacement: `"utilization": 100`},
+		{name: "weekly missing percent", old: `"utilization": 0.0,`, replacement: ``},
+		{name: "weekly negative", old: `"utilization": 0.0`, replacement: `"utilization": -1`},
+		{name: "scoped legacy exhausted", old: `"seven_day_opus": null`, replacement: `"seven_day_opus": {"utilization":100}`},
+		{name: "weekly limit exhausted", old: `"percent": 0`, replacement: `"percent": 100`},
+		{name: "unknown scoped model", old: `"display_name": "Fable"`, replacement: `"display_name": "Unknown"`},
+		{name: "session limit exhausted", old: `"limits": [`, replacement: `"limits": [{"kind":"session","percent":100},`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := string(fixture)
+			if tc.old != "" {
+				body = strings.Replace(body, tc.old, tc.replacement, 1)
+				if body == string(fixture) {
+					t.Fatal("fixture mutation did not match")
+				}
+			}
+			auth := &coreauth.Auth{ModelStates: map[string]*coreauth.ModelState{"claude-opus-5-5": {Unavailable: true}}}
+			if got := quotaUsageHasCapacity("claude", []byte(body), auth); got != tc.want {
+				t.Fatalf("capacity=%v, want %v", got, tc.want)
 			}
 		})
 	}

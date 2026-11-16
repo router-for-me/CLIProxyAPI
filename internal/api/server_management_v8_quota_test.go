@@ -23,7 +23,19 @@ import (
 )
 
 func TestManagementV8QuotaUsageRoute(t *testing.T) {
-	const usage = `{"five_hour":{"utilization":20},"seven_day":{"utilization":10}}`
+	testManagementV8QuotaUsageRoute(t, `{"five_hour":{"utilization":20},"seven_day":{"utilization":10}}`)
+}
+
+func TestManagementV8WeeklyOnlyQuotaUsageRoute(t *testing.T) {
+	usage, err := os.ReadFile(filepath.Join("handlers", "management", "testdata", "claude-weekly-only-usage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	testManagementV8QuotaUsageRoute(t, string(usage))
+}
+
+func testManagementV8QuotaUsageRoute(t *testing.T, usage string) {
+	t.Helper()
 	var calls atomic.Int32
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
