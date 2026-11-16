@@ -22,6 +22,7 @@ type fileMeta struct {
 	stream         bool
 	requestedModel string
 	servedHeader   string
+	requestID      string
 	authProvider   string
 	attempts       int
 	tokens         tokenSet
@@ -30,7 +31,13 @@ type fileMeta struct {
 var (
 	bodyModelRe   = regexp.MustCompile(`"model"\s*:\s*"([^"]{1,256})"`)
 	geminiModelRe = regexp.MustCompile(`/models/([^/:?]+)`)
+	uuidSuffixRe  = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
+
+// traceRequestID extracts the full request id that ends the X-Cpa-Trace-Id header.
+func traceRequestID(trace string) string {
+	return strings.ToLower(uuidSuffixRe.FindString(strings.TrimSpace(trace)))
+}
 
 func isSSE(h headerList) bool {
 	return strings.Contains(strings.ToLower(h.get("Content-Type")), "text/event-stream")
@@ -117,6 +124,7 @@ func readMetaReader(r io.Reader) (fileMeta, error) {
 		meta.stream = true
 	}
 	meta.servedHeader = p.respHeaders.get("X-Proxx-Served-Model")
+	meta.requestID = traceRequestID(p.respHeaders.get("X-Cpa-Trace-Id"))
 	meta.authProvider = authProvider(p.lastAuth())
 	meta.attempts = p.attemptCount()
 	if !sse && !plain.truncated {

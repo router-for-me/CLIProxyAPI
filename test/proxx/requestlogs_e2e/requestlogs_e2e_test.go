@@ -464,6 +464,31 @@ func TestE2ERequestLogs(t *testing.T) {
 		}
 	})
 
+	t.Run("unlimited cap survives v8 config writes", func(t *testing.T) {
+		res := p.mgmt(http.MethodPut, "/v8/management/config/proxx/request-logs/max-total-size-mb", 0)
+		if res.Status != http.StatusOK {
+			t.Fatalf("set cap 0 via v8 config: %d %s", res.Status, res.Body)
+		}
+		waitFor(t, 15*time.Second, "max_total_size_bytes=0", func() bool { return p.list("").MaxTotalSizeBytes == 0 })
+		// Another v8 config write must keep the explicit 0 (unset would mean 10 GB).
+		if res = p.mgmt(http.MethodPut, "/v8/management/config/observability/logs/request-log", true); res.Status != http.StatusOK {
+			t.Fatalf("v8 write: %d %s", res.Status, res.Body)
+		}
+		data, err := os.ReadFile(p.cfgPath)
+		if err != nil || !strings.Contains(string(data), "max-total-size-mb: 0") {
+			t.Fatalf("config lost max-total-size-mb: 0 (err=%v):\n%s", err, data)
+		}
+		time.Sleep(2 * time.Second) // let any reload triggered by the write land
+		if got := p.list("").MaxTotalSizeBytes; got != 0 {
+			t.Fatalf("max_total_size_bytes after v8 write = %d", got)
+		}
+		get := p.mgmt(http.MethodGet, "/v8/management/config/proxx/request-logs/max-total-size-mb", nil)
+		if get.Status != http.StatusOK || strings.TrimSpace(string(get.Body)) == "" {
+			t.Fatalf("get cap: %d %s", get.Status, get.Body)
+		}
+		t.Logf("GET cap -> %s", get.Body)
+	})
+
 	t.Run("delete", func(t *testing.T) {
 		// Make sure there are at least two files, then delete one and then all.
 		for i := 0; i < 2; i++ {

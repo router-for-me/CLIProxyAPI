@@ -31,18 +31,20 @@ type requestUsage struct {
 	costSource string
 }
 
-// usageIndex maps the short request id (the id in log file names) to aggregated usage.
-// Usage records carry the inbound gin request id as TraceID (usage.Manager.Publish falls back
-// to logging.GetRequestID), so no hook is needed.
+// usageIndex maps the full inbound request id to aggregated usage. Usage records carry the gin
+// request id as TraceID (usage.Manager.Publish falls back to logging.GetRequestID), so no hook is
+// needed. Files are matched by the full id from their X-Cpa-Trace-Id response header, and by the
+// short id in the file name (latest request with that short id) when the header is missing.
 type usageIndex struct {
-	mu    sync.Mutex
-	byID  map[string]*requestUsage
-	order []string
-	next  int
+	mu      sync.Mutex
+	byID    map[string]*requestUsage
+	byShort map[string]string
+	order   []string
+	next    int
 }
 
 func newUsageIndex() *usageIndex {
-	return &usageIndex{byID: map[string]*requestUsage{}}
+	return &usageIndex{byID: map[string]*requestUsage{}, byShort: map[string]string{}}
 }
 
 // HandleUsage implements usage.Plugin. It only touches memory.
@@ -50,10 +52,11 @@ func (u *usageIndex) HandleUsage(_ context.Context, record usage.Record) {
 	if u == nil {
 		return
 	}
-	id := logging.ShortRequestID(record.TraceID)
+	id := strings.TrimSpace(record.TraceID)
 	if id == "" {
 		return
 	}
+	short := logging.ShortRequestID(id)
 	in, out, cached, reasoning := usagestats.TokenCounts(record.Detail)
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -64,10 +67,15 @@ func (u *usageIndex) HandleUsage(_ context.Context, record usage.Record) {
 		if len(u.order) < usageCapacity {
 			u.order = append(u.order, id)
 		} else {
-			delete(u.byID, u.order[u.next])
+			evicted := u.order[u.next]
+			delete(u.byID, evicted)
+			if s := logging.ShortRequestID(evicted); u.byShort[s] == evicted {
+				delete(u.byShort, s)
+			}
 			u.order[u.next] = id
 			u.next = (u.next + 1) % usageCapacity
 		}
+		u.byShort[short] = id
 	}
 	agg.records++
 	agg.in += in
@@ -96,12 +104,17 @@ func (u *usageIndex) HandleUsage(_ context.Context, record usage.Record) {
 	}
 }
 
-func (u *usageIndex) get(id string) (requestUsage, bool) {
+// get looks up usage by full request id, else by short id.
+func (u *usageIndex) get(fullID, shortID string) (requestUsage, bool) {
 	if u == nil {
 		return requestUsage{}, false
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
+	id := fullID
+	if id == "" {
+		id = u.byShort[shortID]
+	}
 	agg, ok := u.byID[id]
 	if !ok {
 		return requestUsage{}, false

@@ -203,6 +203,9 @@ func (s *Store) refreshLocked() []Row {
 		if !e.parsed || e.size != info.Size() || !e.mtime.Equal(info.ModTime()) {
 			e.size, e.mtime = info.Size(), info.ModTime()
 			meta, errMeta := readMetaFile(filepath.Join(s.dir, name), e.size)
+			if logging.ShortRequestID(meta.requestID) != e.id {
+				meta.requestID = ""
+			}
 			e.meta, e.parsed = meta, errMeta == nil
 		}
 		if e.meta.valid && e.size > 0 && now.Sub(e.mtime) >= settleDelay {
@@ -312,6 +315,7 @@ func readMetaLarge(path string, size int64) (fileMeta, error) {
 	if errTail == nil {
 		meta.status = tailMeta.status
 		meta.servedHeader = tailMeta.servedHeader
+		meta.requestID = tailMeta.requestID
 		meta.stream = meta.stream || tailMeta.stream
 		meta.tokens = tailMeta.tokens
 	}
@@ -347,7 +351,7 @@ func (s *Store) rowOf(e *entry) Row {
 		row.Group = m.requestedModel
 	}
 	row.Provider = m.authProvider
-	if agg, ok := s.usage.get(e.id); ok {
+	if agg, ok := s.usage.get(m.requestID, e.id); ok {
 		if agg.provider != "" {
 			row.Provider = agg.provider
 		}

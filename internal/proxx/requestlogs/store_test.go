@@ -262,3 +262,103 @@ func TestDeleteAndDeleteAll(t *testing.T) {
 		t.Fatal("delete all removed main.log")
 	}
 }
+
+func TestUsageJoinPrefersFullRequestID(t *testing.T) {
+	dir := t.TempDir()
+	// The fixture's X-Cpa-Trace-Id ends in the full request id 01a1e31d-9191-74e2-8fbc-148299c2cb23.
+	fixtureCopy(t, dir, "failover.log", "v1-chat-completions-2026-11-16T121848-99c2cb23.log", baseTime)
+	s := newTestStore(dir, 0)
+	s.usage.HandleUsage(context.Background(), usage.Record{TraceID: "01a1e31d-9191-74e2-8fbc-148299c2cb23", Provider: "real", Detail: usage.Detail{InputTokens: 3}})
+	// A different request whose short id collides is published later.
+	s.usage.HandleUsage(context.Background(), usage.Record{TraceID: "ffffffff-0000-74e2-8fbc-148299c2cb23", Provider: "decoy", Detail: usage.Detail{InputTokens: 99}})
+	p, _ := s.List(Query{})
+	if r := p.Items[0]; r.Provider != "real" || i64(r.InputTokens) != 3 {
+		t.Fatalf("joined the colliding request: %+v", r)
+	}
+}
+
+func TestWebsocketTranscript(t *testing.T) {
+	content := strings.Join([]string{
+		"=== REQUEST INFO ===",
+		"Version: dev",
+		"URL: /v1/responses",
+		"Method: GET",
+		"Downstream Transport: websocket",
+		"Upstream Transport: websocket+http",
+		"Timestamp: 2026-11-16T12:00:00Z",
+		"", "",
+		"=== HEADERS ===",
+		"Upgrade: websocket",
+		"Authorization: Bearer te...ey",
+		"", "",
+		"=== WEBSOCKET TIMELINE ===",
+		"Timestamp: 2026-11-16T12:00:00.1Z",
+		"Event: websocket.request",
+		`{"type":"response.create","model":"gpt-5"}`,
+		"",
+		"Timestamp: 2026-11-16T12:00:01Z",
+		"Event: websocket.response",
+		`{"type":"response.completed"}`,
+		"", "",
+		"=== API WEBSOCKET TIMELINE ===",
+		"Timestamp: 2026-11-16T12:00:00.2Z",
+		"Event: api.websocket.request",
+		"Upstream URL: wss://example.test/v1/responses",
+		"Auth: provider=codex, auth_id=x, type=oauth",
+		"Headers:",
+		"Authorization: Bearer sk-...xx",
+		"",
+		"Body:",
+		`{"type":"response.create"}`,
+		"",
+		"Timestamp: 2026-11-16T12:00:00.3Z",
+		"Event: api.websocket.handshake",
+		"Status: 101",
+		"Headers:",
+		"Upgrade: websocket",
+		"", "",
+		"=== API REQUEST 1 ===",
+		"Timestamp: 2026-11-16T12:00:00.2Z",
+		"Upstream URL: https://example.test/v1/responses",
+		"HTTP Method: POST",
+		"",
+		"Headers:",
+		"Content-Type: application/json",
+		"",
+		"Body:",
+		`{"model":"gpt-5"}`,
+		"", "",
+		"=== API RESPONSE 1 ===",
+		"Timestamp: 2026-11-16T12:00:00.4Z",
+		"",
+		"Status: 200",
+		"Headers:",
+		"Content-Type: application/json",
+		"",
+		"Body:",
+		`{"ok":true}`,
+		"", "",
+	}, "\n")
+	dir := t.TempDir()
+	path := writeTemp(t, dir, "v1-responses-2026-11-16T120000-0000beef.log", content)
+	mt := baseTime.Add(time.Second)
+	_ = os.Chtimes(path, mt, mt)
+	s := newTestStore(dir, 0)
+	p, _ := s.List(Query{})
+	if len(p.Items) != 1 || p.Items[0].Status != 0 || p.Items[0].Error || p.Items[0].Path != "/v1/responses" || p.Items[0].Attempts != 1 {
+		t.Fatalf("websocket row = %+v", p.Items)
+	}
+	d, err := s.Detail("0000beef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.WebsocketTimeline, "websocket.request") || !strings.HasSuffix(d.WebsocketTimeline, `{"type":"response.completed"}`) {
+		t.Fatalf("websocket_timeline = %q", d.WebsocketTimeline)
+	}
+	if !strings.Contains(d.APIWebsocketTimeline, "api.websocket.handshake") || !strings.Contains(d.APIWebsocketTimeline, "Status: 101") {
+		t.Fatalf("api_websocket_timeline = %q", d.APIWebsocketTimeline)
+	}
+	if len(d.Attempts) != 1 || *d.Attempts[0].Status != 200 || d.Attempts[0].Body != `{"model":"gpt-5"}` || d.Response.Status != 0 || d.Response.SSEEvents != nil {
+		t.Fatalf("attempts/response = %+v %+v", d.Attempts, d.Response)
+	}
+}

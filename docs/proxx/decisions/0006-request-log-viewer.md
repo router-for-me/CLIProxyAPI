@@ -27,6 +27,8 @@ a single file by id, and that's all. Nothing bounds the total size.
   `PUT /v8/management/config/observability/logs/request-log` with a raw JSON body `true` or `false`
   (`GET` reads it). The endpoint is not duplicated here. The list response reports the effective state as
   `request_log_enabled`.
+- The cap is changed the same way: `PUT /v8/management/config/proxx/request-logs/max-total-size-mb`
+  with a raw integer body. An explicit `0` survives later v8 config writes, and the e2e checks this.
 
 ## API (JSON keys snake_case)
 
@@ -66,7 +68,8 @@ Field semantics (interpretations the panel relies on):
 - `duration_ms` is the file mtime minus the request timestamp. The logger writes the file when the
   request finishes, so this is wall-clock request time, including the time to stream the response.
 - `requested_model` is the top-level `model` in the request body. Gemini paths
-  (`/models/<model>:...`) are the fallback.
+  (`/models/<model>:...`) are the fallback. It is empty for websocket transcripts, which have no
+  request body.
 - `served_model`:
   1. `X-Proxx-Served-Model` (the model-group member's client-visible name), else
   2. the usage record's served model (the upstream model ID, e.g. `up-ok` for alias `model-ok`).
@@ -122,9 +125,12 @@ Detail:
     header-like lines therefore does not split the file.
 - Usage join:
   - The named usage plugin `proxx-request-logs` keeps the last 20000 requests in memory, keyed by
-    `ShortRequestID(record.TraceID)`.
+    the full `record.TraceID`.
   - `usage.Manager.Publish` sets `TraceID` from `logging.GetRequestID(ctx)`, the gin request id that
     also names the file. No hook was needed.
+  - A file is matched by the full id at the end of its `X-Cpa-Trace-Id` response header. Without that
+    header (websocket transcripts), it falls back to the short id from the file name, using the latest
+    request with that short id. Keying by the 32-bit short id alone would merge colliding requests.
   - The join happens when a row is built, never in the parse cache, so records that arrive after the
     file are still picked up.
 - Live tail:
@@ -153,6 +159,8 @@ Detail:
 - Joined usage (provider, served upstream model, tokens summed over attempts, cost) is in memory only.
   After a restart, older rows fall back to file-derived fields, and their cost is null.
 - `q` scans file contents, so on a large directory a search with a rare term reads many files.
+- Websocket transcripts have no request body or final `RESPONSE`, so `requested_model` is empty and
+  `status` is 0. The timelines are returned raw.
 - The unnumbered error-path `API RESPONSE` is dropped when numbered responses exist (it duplicates them).
 - Upstream `Error:` lines that follow a response body inside an `API RESPONSE n` section stay in
   `response_body`.
@@ -167,7 +175,8 @@ Detail:
   written by the binary: OpenAI non-stream, OpenAI stream, model-group failover (429 → 200) and a 400
   `error-` file. They also use synthesized Claude, Gemini and Responses streams. Coverage:
   - parsing and assembly, header-like lines in bodies, and 2 MB truncation;
-  - keyset paging stability, every filter, and the usage join;
+  - keyset paging stability, every filter, and the usage join (including short-id collisions);
+  - a websocket transcript (timelines, status 0, attempts);
   - retention: oldest first, app logs untouched;
   - stream completion with an injected clock, no sleeps;
   - delete and delete-all, and path traversal.
@@ -183,4 +192,5 @@ Detail:
   - that the live SSE stream delivers rows (including one for a request sent while it is open);
   - toggling `request-log` through the v8 config endpoint;
   - retention after a hot reload to `max-total-size-mb: 1`, which keeps the newest files;
+  - setting the cap to `0` through the v8 config endpoint, and that the value survives another v8 write;
   - delete and delete-all.
