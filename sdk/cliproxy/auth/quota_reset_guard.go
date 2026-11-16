@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
@@ -66,6 +67,9 @@ func quotaRecoveryState(provider string, status Status, message string, unavaila
 	if known && strings.EqualFold(provider, "codex") && lastError != nil && !quotaCodexSubscriptionError(lastError) {
 		return false, false
 	}
+	if known && strings.EqualFold(provider, "claude") && lastError != nil && quotaClaudePerMinuteError(lastError) {
+		return false, false
+	}
 	if !retry.IsZero() && (!known || quota.NextRecoverAt.IsZero() || retry.After(quota.NextRecoverAt)) {
 		return false, false
 	}
@@ -104,4 +108,25 @@ func quotaCodexSubscriptionError(err *Error) bool {
 		}
 	}
 	return false
+}
+
+// Claude's explicit per-minute throttles are independent of subscription windows.
+func quotaClaudePerMinuteError(err *Error) bool {
+	var envelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(err.Message), &envelope) != nil || envelope.Error.Type != "rate_limit_error" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(envelope.Error.Message)) {
+	case "this request would exceed the requests per minute rate limit. please try again later.",
+		"this request would exceed the input tokens per minute rate limit. please try again later.",
+		"this request would exceed the output tokens per minute rate limit. please try again later.":
+		return true
+	default:
+		return false
+	}
 }
