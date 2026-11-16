@@ -199,7 +199,7 @@ func isOpenAIImageExecutionOptions(opts cliproxyexecutor.Options) bool {
 	return strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), "openai-image")
 }
 
-func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (response cliproxyexecutor.Response, errResult error) {
 	scope := m.beginInFlight("")
 	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
@@ -211,9 +211,12 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	opts, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
+	opts, threadPinned, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return cliproxyexecutor.Response{}, errThread
+	}
+	if threadPinned {
+		defer func() { errResult = claudeThreadReplayError(errResult) }()
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
@@ -372,9 +375,12 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	opts, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
+	opts, threadPinned, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return nil, errThread
+	}
+	if threadPinned {
+		defer func() { err = claudeThreadReplayError(err) }()
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -458,6 +464,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		if !m.HomeEnabled() {
 			lastErr = m.annotatePoolCooldownTerminalError(ctx, normalized, retryModel, opts, lastErr, selectionCooldownDeadline)
+		}
+		if threadPinned {
+			lastErr = claudeThreadReplayError(lastErr)
 		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
