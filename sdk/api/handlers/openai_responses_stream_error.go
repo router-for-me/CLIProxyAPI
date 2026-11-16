@@ -1,29 +1,16 @@
 package handlers
 
 import (
-	"bytes"
-	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 )
 
 type openAIResponsesStreamErrorChunk struct {
 	Type           string         `json:"type"`
 	Error          map[string]any `json:"error"`
 	SequenceNumber int            `json:"sequence_number"`
-}
-
-type openAIResponsesStreamFailedChunk struct {
-	Type           string                              `json:"type"`
-	SequenceNumber int                                 `json:"sequence_number"`
-	Response       openAIResponsesStreamFailedResponse `json:"response"`
-}
-
-type openAIResponsesStreamFailedResponse struct {
-	Status string         `json:"status"`
-	Error  map[string]any `json:"error"`
 }
 
 // openAIResponsesStreamErrorClass pairs the OpenAI error code and the OpenAI
@@ -81,15 +68,29 @@ func openAIResponsesStreamErrorType(status int) string {
 	return openAIResponsesStreamErrorClassFor(status).errorType
 }
 
-func unmarshalJSONWithNumber(data []byte, v any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	return dec.Decode(v)
-}
-
 // BuildOpenAIResponsesStreamErrorChunk builds an OpenAI Responses streaming error chunk.
 // It matches the official responses streaming event shape where the error details are nested.
 func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNumber int) []byte {
+	doc := ojson.NewDocString(`{"type":"error","error":{},"sequence_number":0}`)
+	populateOpenAIResponsesStreamErrorChunkDoc(doc, "error", status, errText, sequenceNumber)
+	if data := doc.Bytes(); len(data) > 0 {
+		return data
+	}
+	return []byte(`{"type":"error","error":{"type":"server_error","code":"internal_server_error","message":"internal error","param":null},"sequence_number":0}`)
+}
+
+// BuildOpenAIResponsesStreamFailedChunk builds the terminal Responses event used by official Codex clients.
+// It is intentionally separate from BuildOpenAIResponsesStreamErrorChunk so existing clients keep the legacy shape.
+func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceNumber int) []byte {
+	doc := ojson.NewDocString(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{}}}`)
+	populateOpenAIResponsesStreamErrorChunkDoc(doc, "response.error", status, errText, sequenceNumber)
+	if data := doc.Bytes(); len(data) > 0 {
+		return data
+	}
+	return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"type":"server_error","code":"internal_server_error","message":"internal error"}}}`)
+}
+
+func populateOpenAIResponsesStreamErrorChunkDoc(doc *ojson.Doc, errorPath string, status int, errText string, sequenceNumber int) {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
@@ -103,152 +104,114 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	}
 
 	code := openAIResponsesStreamErrorCode(status)
-
-	trimmed := strings.TrimSpace(errText)
-	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		var payload map[string]any
-		if errUnmarshal := unmarshalJSONWithNumber([]byte(trimmed), &payload); errUnmarshal == nil {
-			if v, ok := payload["sequence_number"]; ok {
-				switch n := v.(type) {
-				case json.Number:
-					if seqInt, err := n.Int64(); err == nil {
-						sequenceNumber = int(seqInt)
-					}
-				case float64:
-					sequenceNumber = int(n)
-				}
-			}
-		}
-	}
-
 	if strings.TrimSpace(code) == "" {
 		code = "unknown_error"
 	}
 
-	errorDetail := openAIResponsesStreamErrorDetail(status, errText, code, message)
+	errorType := openAIResponsesStreamErrorType(status)
+	var paramRaw string
+	hasParam := false
 
-	data, errMarshal := json.Marshal(openAIResponsesStreamErrorChunk{
-		Type:           "error",
-		Error:          errorDetail,
-		SequenceNumber: sequenceNumber,
-	})
-	if errMarshal == nil {
-		return data
+	trimmed := strings.TrimSpace(errText)
+	if trimmed != "" && ojson.Valid(trimmed) {
+		root := ojson.Parse(trimmed)
+		if root.IsObject() {
+			if seqNode := root.Get("sequence_number"); seqNode.Type == ojson.Number {
+				sequenceNumber = int(seqNode.Int())
+			}
+			_ = doc.Set("sequence_number", sequenceNumber)
+
+			hasScalarMessage := false
+			for _, path := range []string{"error", "response.error", "body.error"} {
+				errNode := root.Get(path)
+				if !errNode.Exists() || errNode.Type == ojson.Null {
+					continue
+				}
+				if errNode.IsObject() {
+					_ = doc.SetRaw(errorPath, errNode.Raw)
+					applyOpenAIResponsesNestedErrorCodeDoc(doc, errorPath)
+					return
+				}
+				if errNode.Type == ojson.String && !hasScalarMessage {
+					if scalar := strings.TrimSpace(errNode.String()); scalar != "" {
+						message = scalar
+					} else {
+						message = http.StatusText(status)
+					}
+					hasScalarMessage = true
+				}
+			}
+
+			if msgNode := root.Get("message"); msgNode.Type == ojson.String && strings.TrimSpace(msgNode.String()) != "" {
+				message = strings.TrimSpace(msgNode.String())
+			}
+			hasTopLevelCode := false
+			if codeNode := root.Get("code"); codeNode.Exists() && codeNode.Type != ojson.Null {
+				if c := strings.TrimSpace(codeNode.String()); c != "" {
+					code = c
+					hasTopLevelCode = true
+				}
+			}
+			if hasTopLevelCode && !hasScalarMessage && strings.TrimSpace(root.Get("message").String()) == "" {
+				fallback := openAIResponsesPolicyFallbackMessage(code)
+				if fallback == "" {
+					fallback = code
+				}
+				message = fallback
+			}
+			if typeNode := root.Get("type"); typeNode.Type == ojson.String {
+				if t := strings.TrimSpace(typeNode.String()); t != "" && t != "error" && t != "response.failed" && t != "response.error" {
+					errorType = t
+				}
+			}
+			if paramNode := root.Get("param"); paramNode.Exists() {
+				paramRaw = paramNode.Raw
+				hasParam = true
+			}
+		}
 	}
 
-	// Extremely defensive fallback.
-	fallbackDetail := map[string]any{
-		"type":    "server_error",
-		"code":    "internal_server_error",
-		"message": message,
-		"param":   nil,
+	_ = doc.Set("sequence_number", sequenceNumber)
+	_ = doc.SetRaw(errorPath, `{"type":"","code":"","message":"","param":null}`)
+	_ = doc.Set(errorPath+".type", errorType)
+	_ = doc.Set(errorPath+".code", code)
+	_ = doc.Set(errorPath+".message", message)
+	if hasParam {
+		_ = doc.SetRaw(errorPath+".param", paramRaw)
 	}
-	data, _ = json.Marshal(openAIResponsesStreamErrorChunk{
-		Type:           "error",
-		Error:          fallbackDetail,
-		SequenceNumber: sequenceNumber,
-	})
-	if len(data) > 0 {
-		return data
-	}
-	return []byte(`{"type":"error","error":{"type":"server_error","code":"internal_server_error","message":"internal error","param":null},"sequence_number":0}`)
 }
 
-func applyOpenAIResponsesNestedErrorCode(errorDetail map[string]any) map[string]any {
-	if existing, ok := errorDetail["code"]; ok && existing != nil && strings.TrimSpace(fmt.Sprint(existing)) != "" {
-		return errorDetail
+func openAIResponsesPolicyFallbackMessage(code string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "bio_policy":
+		return "This content was flagged for possible biological risk."
+	case "cyber_policy", "cyber_policy_violation":
+		return "This request has been flagged for possible cybersecurity risk."
+	case "misalignment_policy_violation":
+		return "This request was blocked due to a misalignment policy violation."
+	case "invalid_prompt":
+		return "Invalid request."
+	default:
+		return ""
+	}
+}
+
+func applyOpenAIResponsesNestedErrorCodeDoc(doc *ojson.Doc, errorPath string) {
+	if codeNode := doc.Get(errorPath + ".code"); codeNode.Exists() && codeNode.Type != ojson.Null {
+		if code := strings.TrimSpace(codeNode.String()); code != "" {
+			if strings.TrimSpace(doc.Get(errorPath+".message").String()) == "" {
+				fallback := openAIResponsesPolicyFallbackMessage(code)
+				if fallback == "" {
+					fallback = code
+				}
+				_ = doc.Set(errorPath+".message", fallback)
+			}
+			return
+		}
 	}
 	// Anthropic reports input overflow by message only; Responses clients key on this code.
-	if m, _ := errorDetail["message"].(string); errorDetail["type"] == "invalid_request_error" && strings.HasPrefix(m, "prompt is too long") {
-		errorDetail["code"] = "context_length_exceeded"
+	if doc.Get(errorPath+".type").String() == "invalid_request_error" &&
+		strings.HasPrefix(doc.Get(errorPath+".message").String(), "prompt is too long") {
+		_ = doc.Set(errorPath+".code", "context_length_exceeded")
 	}
-	return errorDetail
-}
-
-func openAIResponsesStreamErrorDetail(status int, errText, code, message string) map[string]any {
-	var payload map[string]any
-	trimmed := strings.TrimSpace(errText)
-	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		if errUnmarshal := unmarshalJSONWithNumber([]byte(trimmed), &payload); errUnmarshal == nil {
-			if errorDetail, ok := payload["error"].(map[string]any); ok {
-				return applyOpenAIResponsesNestedErrorCode(errorDetail)
-			}
-			if response, ok := payload["response"].(map[string]any); ok {
-				if errorDetail, ok := response["error"].(map[string]any); ok {
-					return applyOpenAIResponsesNestedErrorCode(errorDetail)
-				}
-			}
-			if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
-				message = strings.TrimSpace(m)
-			}
-			if v, ok := payload["code"]; ok && v != nil {
-				if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-					code = strings.TrimSpace(c)
-				} else {
-					code = strings.TrimSpace(fmt.Sprint(v))
-				}
-			}
-		}
-	}
-
-	errorType := openAIResponsesStreamErrorType(status)
-	detail := map[string]any{
-		"type":    errorType,
-		"code":    code,
-		"message": message,
-		"param":   nil,
-	}
-	if payload != nil {
-		if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) != "" && strings.TrimSpace(t) != "error" {
-			detail["type"] = strings.TrimSpace(t)
-		}
-		if paramVal, exists := payload["param"]; exists {
-			detail["param"] = paramVal
-		}
-	}
-	return detail
-}
-
-func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
-	return openAIResponsesStreamErrorDetail(status, errText, code, message)
-}
-
-// BuildOpenAIResponsesStreamFailedChunk builds the terminal Responses event used by official Codex clients.
-// It is intentionally separate from BuildOpenAIResponsesStreamErrorChunk so existing clients keep the legacy shape.
-func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceNumber int) []byte {
-	if status <= 0 {
-		status = http.StatusInternalServerError
-	}
-	if sequenceNumber < 0 {
-		sequenceNumber = 0
-	}
-
-	errorChunkBytes := BuildOpenAIResponsesStreamErrorChunk(status, errText, sequenceNumber)
-	var errorChunk openAIResponsesStreamErrorChunk
-	_ = unmarshalJSONWithNumber(errorChunkBytes, &errorChunk)
-	sequenceNumber = errorChunk.SequenceNumber
-
-	errorDetail := errorChunk.Error
-	if errorDetail == nil {
-		code := openAIResponsesStreamErrorCode(status)
-		message := strings.TrimSpace(errText)
-		if message == "" {
-			message = http.StatusText(status)
-		}
-		errorDetail = openAIResponsesStreamErrorDetail(status, errText, code, message)
-	}
-
-	data, errMarshal := json.Marshal(openAIResponsesStreamFailedChunk{
-		Type:           "response.failed",
-		SequenceNumber: sequenceNumber,
-		Response: openAIResponsesStreamFailedResponse{
-			Status: "failed",
-			Error:  errorDetail,
-		},
-	})
-	if errMarshal == nil {
-		return data
-	}
-
-	return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"type":"server_error","code":"internal_server_error","message":"internal error"}}}`)
 }
