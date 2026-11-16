@@ -192,7 +192,19 @@ func (s *authScheduler) setSelector(selector Selector) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	previousStrategy := s.strategy
 	s.strategy = selectorStrategy(selector)
+	if s.strategy == schedulerStrategyGreedy && previousStrategy != schedulerStrategyGreedy {
+		now := time.Now()
+		for _, provider := range s.providers {
+			if provider == nil {
+				continue
+			}
+			for _, meta := range provider.auths {
+				provider.upsertAuthForModelsLocked(meta, nil, true, now)
+			}
+		}
+	}
 	s.weightedSelector = UnwrapWeightedRoundRobinSelector(selector)
 	clear(s.mixedCursors)
 	clear(s.mixedWeightedStates)

@@ -19,14 +19,20 @@ type QuotaResetSchedule struct {
 }
 
 func quotaScheduleIdentityMatches(a, b *Auth) bool {
-	for _, key := range []string{"account_id", "email", "sub"} {
+	keys := []string{"account_id", "email", "sub"}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") {
+		keys = append(keys, "account_uuid", "organization_uuid")
+	}
+	hasIdentity := false
+	for _, key := range keys {
 		left, _ := a.Metadata[key].(string)
 		right, _ := b.Metadata[key].(string)
 		if left != right {
 			return false
 		}
+		hasIdentity = hasIdentity || strings.TrimSpace(left) != ""
 	}
-	return true
+	return hasIdentity || !CredentialsChanged(a, b)
 }
 
 // EffectiveQuotaResetSchedule merges the newest available provider observation.
