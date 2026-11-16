@@ -57,6 +57,9 @@ func routingUsageSchedule(provider string, body []byte, observedAt time.Time) (c
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "claude":
 		for _, key := range []string{"seven_day", "five_hour"} {
+			if key == "five_hour" && string(bytes.TrimSpace(payload[key])) == "null" {
+				continue
+			}
 			var window struct {
 				ResetAt     string   `json:"resets_at"`
 				Utilization *float64 `json:"utilization"`
