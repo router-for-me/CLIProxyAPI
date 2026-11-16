@@ -29,6 +29,19 @@ server:
   # Server port
   port: 8317
 
+  # Optional Unix domain socket path. When set, the API server (same routes, auth, and
+  # management API) listens on this socket INSTEAD of host:port, so no TCP port is opened.
+  # A stale socket file from an earlier run is removed at startup; any other file type at
+  # this path is never removed and makes startup fail. The socket is removed on clean shutdown.
+  # Socket clients have no IP address: they are NOT treated as localhost, so the management
+  # API over the socket requires management.allow-remote: true.
+  # The TUI, the OAuth callback forwarder, and LAN discovery still assume host:port.
+  # Restart after changing unix-socket or unix-socket-mode.
+  # unix-socket: "/run/cliproxy/api.sock"
+
+  # Octal file mode for the socket (default "0600", owner only). Use "0660" to allow a group.
+  # unix-socket-mode: "0660"
+
   # Maximum allowed size (in bytes) for incoming HTTP request bodies.
   # Requests exceeding this limit are rejected with HTTP 413 Payload Too Large.
   # Default is 0 (disabled / no limit).

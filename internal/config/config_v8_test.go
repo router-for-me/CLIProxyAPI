@@ -126,6 +126,27 @@ func TestV8ShutdownTimeoutParse(t *testing.T) {
 	}
 }
 
+func TestV8UnixSocketParse(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, wantPath, wantMode string
+	}{
+		{"v8 nested", "server:\n  unix-socket: /run/cliproxy/api.sock\n  unix-socket-mode: 0660\n", "/run/cliproxy/api.sock", "0660"},
+		{"v8 quoted mode", "server:\n  unix-socket: /run/a.sock\n  unix-socket-mode: \"0640\"\n", "/run/a.sock", "0640"},
+		{"legacy top-level", "unix-socket: /run/b.sock\n", "/run/b.sock", ""},
+		{"absent", "server:\n  port: 8317\n", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseConfigBytes([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.UnixSocket != tc.wantPath || cfg.UnixSocketMode != tc.wantMode {
+				t.Fatalf("UnixSocket = %q, UnixSocketMode = %q; want %q, %q", cfg.UnixSocket, cfg.UnixSocketMode, tc.wantPath, tc.wantMode)
+			}
+		})
+	}
+}
+
 func TestV8PresencePrecedenceAndCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw string
