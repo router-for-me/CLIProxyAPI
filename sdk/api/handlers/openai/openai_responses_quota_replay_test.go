@@ -25,6 +25,9 @@ func TestForwardResponsesWebsocketDuplexQuotaConsultsReplayGuard(t *testing.T) {
 		{"quota_with_alternative", `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"exhausted"}}`, true, true},
 		{"quota_without_alternative", `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"exhausted"}}`, true, false},
 		{"cooldown_with_alternative", `{"type":"error","status":429,"error":{"code":"model_cooldown","message":"cooldown"}}`, true, true},
+		{"response_failed_with_alternative", `{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","status_code":429,"message":"exhausted"}}}`, true, true},
+		{"response_failed_without_alternative", `{"type":"response.failed","response":{"error":{"type":"usage_limit_reached","status_code":429,"message":"exhausted"}}}`, true, false},
+		{"response_failed_request_error", `{"type":"response.failed","response":{"error":{"type":"invalid_request_error","status_code":400,"message":"invalid"}}}`, false, false},
 		{"request_error", `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"invalid"}}`, false, false},
 		{"client_access_limit", `{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"client limit"}}`, false, false},
 	} {
@@ -50,6 +53,9 @@ func TestForwardResponsesWebsocketDuplexQuotaConsultsReplayGuard(t *testing.T) {
 					newResponsesWebsocketWriter(conn), func(...interface{}) {}, data, errs, newInMemoryWebsocketTimelineLog(), "quota-test",
 					responsesWebsocketForwardOptions{duplexStream: func() bool { return true }, suppressError: func(msg *interfaces.ErrorMessage) bool {
 						consulted = true
+						if responsesWebsocketErrorStatus(msg) != http.StatusTooManyRequests {
+							return false
+						}
 						return tc.alternative
 					}})
 				if consulted != tc.quota {

@@ -260,6 +260,9 @@ func responsesWebsocketErrorMessageFromPayload(payload []byte) *interfaces.Error
 		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
 	}
 	if status <= 0 {
+		status = int(ojson.GetBytesNoCopy(payload, "response.error.status_code").Int())
+	}
+	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
 
