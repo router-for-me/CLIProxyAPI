@@ -84,6 +84,14 @@ func mergeQuotaResetSchedule(previous, observed QuotaResetSchedule) QuotaResetSc
 	if previous.ObservedAt.After(observed.ObservedAt) {
 		observed.ObservedAt = previous.ObservedAt
 	}
+	// Uniform-age schedules retain their existing value representation. Only
+	// windows older than the aggregate observation need a separate timestamp.
+	if observed.weeklyObservedAt.Equal(observed.ObservedAt) {
+		observed.weeklyObservedAt = time.Time{}
+	}
+	if observed.fiveHourObservedAt.Equal(observed.ObservedAt) {
+		observed.fiveHourObservedAt = time.Time{}
+	}
 	return observed
 }
 
