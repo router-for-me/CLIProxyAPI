@@ -198,4 +198,89 @@ func TestCodexTypelessErrorsPreserveCredentialStatus(t *testing.T) {
 			t.Fatalf("nested websocket headers lost: %#v", nestedErr)
 		}
 	}
+
+	for _, tc := range []struct {
+		name      string
+		payload   string
+		wantRetry time.Duration
+		wantReqID string
+		wantTrans bool
+	}{
+		{
+			name:      "typeless rate_limit_error without numeric status",
+			payload:   `{"error":{"type":"rate_limit_error","message":"Too many requests"},"headers":{"retry-after":"11","x-request-id":"req-inferred-type"}}`,
+			wantRetry: 11 * time.Second,
+			wantReqID: "req-inferred-type",
+		},
+		{
+			name:      "typeless rate_limit_exceeded code without numeric status",
+			payload:   `{"error":{"code":"rate_limit_exceeded","message":"Rate limit exceeded"},"headers":{"retry-after":"13","x-request-id":"req-inferred-code"}}`,
+			wantRetry: 13 * time.Second,
+			wantReqID: "req-inferred-code",
+		},
+		{
+			name:      "typeless nested body turn_rate_limit_exceeded without numeric status",
+			payload:   `{"body":{"error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"Codex is at capacity"},"headers":{"retry-after":"17","x-request-id":"req-inferred-turn"}}}`,
+			wantRetry: 17 * time.Second,
+			wantReqID: "req-inferred-turn",
+			wantTrans: true,
+		},
+		{
+			name:      "top-level rate_limit_exceeded without numeric status",
+			payload:   `{"code":"rate_limit_exceeded","message":"Rate limit exceeded","headers":{"retry-after":"19","x-request-id":"req-inferred-top"}}`,
+			wantRetry: 19 * time.Second,
+			wantReqID: "req-inferred-top",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inferredErr, okInferred := parseCodexWebsocketError([]byte(tc.payload))
+			if !okInferred || statusCodeFromTestError(t, inferredErr) != http.StatusTooManyRequests {
+				t.Fatalf("inferred websocket 429 = %v (ok=%v)", inferredErr, okInferred)
+			}
+			if clienterror.IsRequestFault(http.StatusTooManyRequests, inferredErr) {
+				t.Fatalf("inferred 429 became a request fault: %v", inferredErr)
+			}
+			retry := inferredErr.(interface{ RetryAfter() *time.Duration }).RetryAfter()
+			if retry == nil || *retry != tc.wantRetry {
+				t.Fatalf("inferred retry-after = %v, want %v", retry, tc.wantRetry)
+			}
+			if gotReqID := inferredErr.(interface{ Headers() http.Header }).Headers().Get("X-Request-Id"); gotReqID != tc.wantReqID {
+				t.Fatalf("request id = %q, want %q", gotReqID, tc.wantReqID)
+			}
+			if transient, okTrans := inferredErr.(interface{ IsTransientRateLimit() bool }); !okTrans || transient.IsTransientRateLimit() != tc.wantTrans {
+				t.Fatalf("transient = %v (ok=%v), want %v", transient, okTrans, tc.wantTrans)
+			}
+
+			server := codexWebsocketServer(t, tc.payload)
+			defer server.Close()
+			req, opts := codexWebsocketRequest()
+			_, streamErr := NewCodexWebsocketsExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+			if statusCodeFromTestError(t, streamErr) != http.StatusTooManyRequests {
+				t.Fatalf("stream status = %v, want 429", streamErr)
+			}
+			streamRetry := streamErr.(interface{ RetryAfter() *time.Duration }).RetryAfter()
+			if streamRetry == nil || *streamRetry != tc.wantRetry {
+				t.Fatalf("stream retry-after = %v, want %v", streamRetry, tc.wantRetry)
+			}
+		})
+	}
+
+	responseFailedPayload := `{"type":"response.failed","headers":{"retry-after":"23"},"response":{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit exceeded"}}}`
+	failedErr, _, okFailed := codexTerminalFailureErr([]byte(responseFailedPayload))
+	if !okFailed || statusCodeFromTestError(t, failedErr) != http.StatusTooManyRequests {
+		t.Fatalf("response.failed 429 = %v (ok=%v)", failedErr, okFailed)
+	}
+	if failedRetry := failedErr.RetryAfter(); failedRetry == nil || *failedRetry != 23*time.Second {
+		t.Fatalf("response.failed retry-after = %v, want 23s", failedRetry)
+	}
+	failedServer := codexWebsocketServer(t, codexCreatedEvent, responseFailedPayload)
+	defer failedServer.Close()
+	req, opts := codexWebsocketRequest()
+	_, failedStreamErr := NewCodexWebsocketsExecutor(codexBufferingConfig(true)).ExecuteStream(context.Background(), codexTestAuth(failedServer.URL), req, opts)
+	if statusCodeFromTestError(t, failedStreamErr) != http.StatusTooManyRequests {
+		t.Fatalf("response.failed bootstrap status = %v, want 429", failedStreamErr)
+	}
+	if failedBootstrapRetry := failedStreamErr.(interface{ RetryAfter() *time.Duration }).RetryAfter(); failedBootstrapRetry == nil || *failedBootstrapRetry != 23*time.Second {
+		t.Fatalf("response.failed bootstrap retry-after = %v, want 23s", failedBootstrapRetry)
+	}
 }
