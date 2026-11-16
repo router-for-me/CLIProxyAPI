@@ -221,11 +221,20 @@ describe('cooldown section rendering', () => {
   });
 
   test('keeps the reset action contextual and exposes pending state', () => {
+    // The hint lives only in a title attribute, where React escapes quotes and apostrophes.
+    const attr = (text: string) =>
+      text
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#x27;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
     expect(render(snapshot)).not.toContain(i18n.t('auth_files.cooldown_reset_button'));
 
     const available = render(snapshot, { onReset: () => {} });
     expect(available).toContain(i18n.t('auth_files.cooldown_reset_button'));
-    expect(available).toContain(i18n.t('auth_files.cooldown_reset_hint'));
+    expect(available).toContain(`title="${attr(i18n.t('auth_files.cooldown_reset_hint'))}"`);
     expect(available).not.toContain('disabled=""');
 
     const pending = render(snapshot, { onReset: () => {}, resetting: true });

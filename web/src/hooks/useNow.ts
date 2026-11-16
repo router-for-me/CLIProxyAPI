@@ -11,9 +11,8 @@ const noopSubscribe = () => () => {};
  * Frozen snapshot for the disabled path and for SSR.
  *
  * Captured once at module load rather than per call: `useSyncExternalStore`
- * requires a stable snapshot, and `renderToStaticMarkup` (used by
- * tests/quotaTimelineRendering.test.ts) calls `getServerSnapshot`, so this
- * cannot be `Date.now`.
+ * requires a stable snapshot, and `renderToStaticMarkup` (used by the
+ * static-render tests) calls `getServerSnapshot`, so this cannot be `Date.now`.
  */
 const FROZEN_NOW = Date.now();
 const frozenSnapshot = () => FROZEN_NOW;

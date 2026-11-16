@@ -39,7 +39,7 @@ export const readServerQuotaWindows = (file: AuthFileItem): ServerQuotaWindow[] 
 };
 
 /** Go encodes an unknown time as year 1; treat anything before 2000 as unknown. */
-const resetAtMs = (value: string): number | null => {
+export const resetAtMs = (value: string): number | null => {
   const ms = Date.parse(value);
   return Number.isFinite(ms) && ms > Date.UTC(2000, 0, 1) ? ms : null;
 };

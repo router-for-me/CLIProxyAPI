@@ -8,14 +8,6 @@
  *
  * Pure and React-free: `nowMs` is passed in, the quota state is read
  * structurally, and nothing here imports the store.
- *
- * Related but deliberately separate from `buildTimelineLane` in
- * quotaTimelineModel.ts. That reads the same five shapes to pick *one* window
- * per credential — the longest that fits the visible span, because a fortnight
- * drawn from 5-hour windows is 67 unreadable slivers. This wants *every*
- * instant and the *soonest* of them. Same inputs, opposite selection rules;
- * merging them would mean one function with a mode flag and two sets of pinned
- * tests fighting each other.
  */
 
 import { parseIsoToMs } from '@/utils/quota';

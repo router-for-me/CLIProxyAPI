@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { IconRefreshCw } from '@/components/ui/icons';
+import { IconEye, IconEyeOff, IconRefreshCw } from '@/components/ui/icons';
 import { useCountUp } from '@/hooks/motion';
 import styles from './QuotaHeader.module.scss';
 
@@ -9,22 +9,33 @@ export type QuotaHeaderProps = {
   attentionCount: number;
   refreshing: boolean;
   disableControls: boolean;
+  showEmails: boolean;
   onRefreshAll: () => void;
+  onToggleEmails: () => void;
 };
 
 /**
- * 额度页头部：标题领衔 + ▍mono 遥测 meta 行 + 墨色药丸「刷新全部」。
- * 与凭证库头部同语汇（无 eyebrow —— ▍游标挂在 meta 行开头）。
+ * Quota page header: the title and the credential meta on one baseline, with
+ * "Show emails" and "Refresh all credentials" right-aligned.
  *
- * 入场：三处 `data-reveal` 交给页面壳的 useRevealGroup 统一编排
- * （标题 0ms → meta 70ms → 动作 140ms → tabs 210ms）。
+ * Entrance: the `data-reveal` elements are sequenced by the page's useRevealGroup
+ * (title 0ms → meta 70ms → actions 140ms → tabs 210ms).
  */
 export function QuotaHeader(props: QuotaHeaderProps) {
-  const { totalCount, loadedCount, attentionCount, refreshing, disableControls, onRefreshAll } =
-    props;
+  const {
+    totalCount,
+    loadedCount,
+    attentionCount,
+    refreshing,
+    disableControls,
+    showEmails,
+    onRefreshAll,
+    onToggleEmails,
+  } = props;
   const { t } = useTranslation();
-  // 批量结果陆续落地时，「已加载」是页面上唯一滚动的数字
+  // While batch results land, the loaded count is the only number on the page that ticks
   const displayLoadedCount = useCountUp(loadedCount);
+  const EmailsIcon = showEmails ? IconEyeOff : IconEye;
 
   return (
     <header className={styles.header}>
@@ -33,20 +44,12 @@ export function QuotaHeader(props: QuotaHeaderProps) {
           {t('quota_management.title')}
         </h1>
         <p className={styles.meta} data-reveal>
-          <span className={styles.metaTotal}>
-            {t('quota_management.meta_credentials', { count: totalCount })}
-          </span>
-          <span className={styles.metaDot} aria-hidden="true">
-            ·
-          </span>
-          <span className={loadedCount > 0 ? styles.metaLoaded : styles.metaMuted}>
-            {t('quota_management.meta_loaded', { count: displayLoadedCount })}
-          </span>
+          <span>{t('quota_management.meta_credentials', { count: totalCount })}</span>
+          <span aria-hidden="true">·</span>
+          <span>{t('quota_management.meta_loaded', { count: displayLoadedCount })}</span>
           {attentionCount > 0 && (
             <>
-              <span className={styles.metaDot} aria-hidden="true">
-                ·
-              </span>
+              <span aria-hidden="true">·</span>
               <span className={styles.metaAttention}>
                 {t('quota_management.meta_attention', { count: attentionCount })}
               </span>
@@ -55,13 +58,26 @@ export function QuotaHeader(props: QuotaHeaderProps) {
         </p>
       </div>
       <div className={styles.actions} data-reveal>
+        {/* The label names the action, so no aria-pressed: "Hide emails, pressed" would invert the state */}
         <button
           type="button"
-          className={styles.primaryAction}
+          className={`${styles.action} ${styles.emailsAction}`}
+          onClick={onToggleEmails}
+        >
+          <EmailsIcon size={16} aria-hidden="true" />
+          {t(showEmails ? 'quota_management.hide_emails' : 'quota_management.show_emails')}
+        </button>
+        <button
+          type="button"
+          className={`${styles.action} ${styles.refreshAction}`}
           onClick={onRefreshAll}
           disabled={disableControls || refreshing}
         >
-          <IconRefreshCw size={14} className={refreshing ? styles.spinning : undefined} />
+          <IconRefreshCw
+            size={16}
+            aria-hidden="true"
+            className={refreshing ? styles.spinning : undefined}
+          />
           {t('quota_management.refresh_all_credentials')}
         </button>
       </div>

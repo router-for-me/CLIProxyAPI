@@ -49,6 +49,7 @@
 }
 
 .root input:checked + .track .thumb {
+  background: var(--primary-contrast);
   transform: translateX(20px);
 }
 

@@ -12,6 +12,7 @@ export * from './logs';
 export * from './version';
 export * from './models';
 export * from './metaQuota';
+export * from './quotaHistory';
 export * from './plugins';
 export * from './transformers';
 export * from './vertex';

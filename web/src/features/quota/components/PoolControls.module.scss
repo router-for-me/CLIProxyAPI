@@ -1,0 +1,132 @@
+@use '../../../styles/mixins' as *;
+
+.row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.label,
+.rangeText {
+  color: var(--text-tertiary);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.futureSelect > button {
+  height: 36px;
+  padding: 0 12px;
+  border-color: transparent;
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+
+  &:hover {
+    border-color: transparent;
+  }
+}
+
+.toggle,
+.today,
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  border: 0;
+  border-radius: var(--radius-md);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-hover) var(--ease-out-strong),
+    color var(--dur-hover) var(--ease-out-strong);
+
+  &:focus-visible {
+    outline: 2px solid var(--focus-ring-color);
+    outline-offset: 1px;
+  }
+
+  &:disabled {
+    color: var(--text-quaternary);
+    cursor: not-allowed;
+  }
+}
+
+.toggle {
+  padding: 0 14px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+
+  &[aria-pressed='true'] {
+    background: var(--bg-selected);
+    color: var(--text-primary);
+  }
+}
+
+.range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.rangeText {
+  margin-right: 12px;
+}
+
+.iconButton {
+  width: 32px;
+  padding: 0;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.today {
+  padding: 0 16px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .toggle:not([aria-pressed='true']):not(:disabled):hover,
+  .iconButton:not(:disabled):hover {
+    color: var(--text-primary);
+  }
+
+  .today:not(:disabled):hover {
+    background: var(--bg-hover);
+  }
+}
+
+@media (max-width: $breakpoint-tablet) {
+  .range {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+}
+
+@include mobile {
+  .pair {
+    flex-basis: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle,
+  .today,
+  .iconButton {
+    transition: none;
+  }
+}

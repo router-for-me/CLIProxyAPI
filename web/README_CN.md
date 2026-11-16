@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="./logo.jpg" alt="CLI Proxy API" width="144">
+<img src="./logo.svg" alt="prox" width="144">
 
-# CLI Proxy API 管理中心
+# prox
 
 **运行状态，一目了然。服务配置，尽在掌握。**
 

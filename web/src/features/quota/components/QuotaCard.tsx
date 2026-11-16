@@ -1,10 +1,14 @@
 /**
- * 额度卡片：头部（提供商图标 + mono 文件名）+ 四态 body + 动作 footer。
+ * Quota card: header (provider icon + mono file name), a four-state body and an action footer.
  *
- * - idle：整个 body 是一个点击加载按钮（打开页面会自动查询；此态仅在查询前短暂出现）；
- * - loading：双幽灵行骨架（aria-busy，文字等价视觉隐藏）；
- * - error：失败色条 + footer 刷新即重试；
- * - success：provider Body（穿 QuotaBody.module.scss 全页外衣）。
+ * - idle: the whole body is a click-to-load button (the page queries on open, so this state
+ *   only shows briefly before the query);
+ * - loading: a two-row ghost skeleton (aria-busy, with a visually hidden text equivalent);
+ * - error: a failure strip; the footer refresh retries;
+ * - success: the provider Body (styled by QuotaBody.module.scss).
+ *
+ * With `maskName` the account name is replaced by a blurred placeholder and never reaches the
+ * DOM, including the file-name tooltip and the Claude reset confirmation.
  */
 
 import { useState, type CSSProperties } from 'react';
@@ -19,6 +23,8 @@ import {
   getTypeLabel,
   isThemeSurfaceIconProvider,
 } from '@/features/authFiles/constants';
+import { MaskedName } from '@/features/quota/components/MaskedName';
+import { maskedLabel } from '@/features/quota/maskedLabel';
 import { bindQuotaClasses } from '../types';
 import { QUOTA_ADAPTERS, type QuotaCardState } from '../providers';
 import { isQuotaRefreshDisabled, type QuotaFileEntry } from '../logic';
@@ -27,7 +33,7 @@ import { ClaudeResetGrantDetails } from '../providers/claude/ClaudeResetGrantDet
 import bodyStyles from './QuotaBody.module.scss';
 import styles from './QuotaCard.module.scss';
 
-/** 额度页全页外衣：QuotaBody 模块绑定成类型化契约（缺键在模块初始化即抛）。 */
+/** Quota page body styles, bound to a typed contract (a missing key throws at module init). */
 const quotaClasses = bindQuotaClasses(bodyStyles, 'QuotaBody.module.scss');
 
 export type QuotaCardProps = {
@@ -36,8 +42,10 @@ export type QuotaCardProps = {
   resolvedTheme: ResolvedTheme;
   canRefresh: boolean;
   resetting: boolean;
-  /** 首屏级联入场延迟；null = 不入场（切 tab / 翻页 / 刷新新挂载的卡片）。 */
+  /** First-render cascade delay; null = no entrance (cards mounted by a tab switch, page or refresh). */
   entranceDelayMs?: number | null;
+  maskName?: boolean;
+  ordinal?: number;
   onRefresh: () => void;
   onReset: () => void;
 };
@@ -50,6 +58,8 @@ export function QuotaCard(props: QuotaCardProps) {
     canRefresh,
     resetting,
     entranceDelayMs,
+    maskName = false,
+    ordinal = 1,
     onRefresh,
     onReset,
   } = props;
@@ -58,7 +68,8 @@ export function QuotaCard(props: QuotaCardProps) {
   const file = entry.file;
   const displayName = getQuotaDisplayName(file);
 
-  // 挂载时捕获一次延迟：后续 props 变 null 不影响本卡（React 19 禁渲染期读 ref）
+  // Capture the delay once at mount: a later null prop does not affect this card (React 19
+  // forbids reading refs during render)
   const [mountEntranceDelayMs] = useState<number | null>(entranceDelayMs ?? null);
   const entranceStyle =
     mountEntranceDelayMs === null
@@ -72,7 +83,8 @@ export function QuotaCard(props: QuotaCardProps) {
     entry.type === 'claude' && status !== 'idle',
     !canRefresh || loading || resetting,
     quota,
-    onRefresh
+    onRefresh,
+    maskName ? maskedLabel(t, ordinal) : undefined
   );
   const iconSrc = getAuthFileIcon(entry.type, resolvedTheme);
   const typeLabel = getTypeLabel(t, entry.type);
@@ -108,9 +120,13 @@ export function QuotaCard(props: QuotaCardProps) {
             <span className={styles.iconFallback}>{typeLabel.slice(0, 1).toUpperCase()}</span>
           )}
         </span>
-        <span className={styles.fileName} title={file.name}>
-          {displayName}
-        </span>
+        {maskName ? (
+          <MaskedName label={displayName} masked ordinal={ordinal} />
+        ) : (
+          <span className={styles.fileName} title={file.name}>
+            {displayName}
+          </span>
+        )}
       </header>
 
       <div className={styles.body}>

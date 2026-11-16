@@ -1,6 +1,6 @@
 /**
- * Plan labels shared by the provider card bodies and the ledger rows, so the
- * two views can never disagree about what a credential's plan is called.
+ * Plan labels shared by the provider card bodies, so every card names a
+ * credential's plan the same way.
  */
 
 import type { TFunction } from 'i18next';

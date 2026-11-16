@@ -1,18 +1,18 @@
 @use '../../styles/mixins' as *;
 
 /* ============================================================
- * 额度页壳层：纯布局，视觉细节都在各组件的 colocated 模块里。
+ * Quota page shell: layout only; visual details live in each component's colocated module.
  * ============================================================ */
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 18px;
   width: 100%;
   min-width: 0;
 }
 
-/* ---------- 工作区（tabs + 网格 + 分页） ---------- */
+/* ---------- Workbench (tabs, pool controls, pool cards, accounts) ---------- */
 
 .workbench {
   display: flex;
@@ -21,7 +21,7 @@
   min-width: 0;
 }
 
-/* 提供商导航独占一行，保留原生横向滚动。 */
+/* The provider tabs take a row of their own and keep native horizontal scrolling. */
 
 .tabsRow {
   display: flex;
@@ -119,26 +119,6 @@
   }
 }
 
-.viewSelect {
-  flex: 0 0 auto;
-  min-width: 150px;
-
-  button[aria-haspopup='listbox'] {
-    height: 38px;
-    border-radius: 10px;
-    border-color: var(--border-color);
-    background: transparent;
-    box-shadow: none;
-    color: var(--text-primary);
-
-    &:focus-visible,
-    &[aria-expanded='true'] {
-      outline: 2px solid var(--primary-color);
-      outline-offset: 2px;
-    }
-  }
-}
-
 .sort {
   flex: 0 0 auto;
   min-width: 148px;
@@ -203,9 +183,24 @@
   overflow-wrap: anywhere;
 }
 
-/* ---------- 卡片网格 ----------
- * 列宽由 CSS 决定（不再用 JS 测量）：额度卡承载水位条，取 340px 下限，
- * 与认证文件页配额模式（.gridQuota）同一档。 */
+/* ---------- Pool cards and the accounts grid ----------
+ * Grid column width is set by CSS (no JS measuring): quota cards carry meter bars, so the
+ * minimum is 340px, the same step as the Auth Files quota mode (.gridQuota). */
+
+.pools {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  margin-top: 4px;
+}
 
 .grid {
   display: grid;
@@ -214,7 +209,7 @@
   align-items: stretch;
 }
 
-/* ---------- 分页 ---------- */
+/* ---------- Pagination ---------- */
 
 .pagination {
   display: flex;
@@ -231,10 +226,4 @@
   letter-spacing: 0.02em;
   color: var(--text-tertiary);
   white-space: nowrap;
-}
-
-@include mobile {
-  .page {
-    gap: 16px;
-  }
 }

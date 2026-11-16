@@ -10,7 +10,7 @@ import { useAuthStore, useLanguageStore, useNotificationStore } from '@/stores';
 import { detectApiBaseFromLocation, normalizeApiBase } from '@/utils/connection';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
-import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
+import { PROX_LOGO_DATA_URI } from '@/assets/proxLogo';
 import type { ApiError } from '@/types';
 import { LegacyBackendError } from '@/services/api/legacyBackendProbe';
 import styles from './LoginPage.module.scss';
@@ -202,39 +202,37 @@ export function LoginPage() {
     return <Navigate to={redirect} replace />;
   }
 
-  // 显示启动动画（自动登录中或自动登录成功）
+  // Show the splash while auto-login is running or has succeeded
   const showSplash = autoLoading || autoLoginSuccess;
+  const splashSubtitle = t('splash.subtitle');
 
   return (
     <div className={styles.container}>
-      {/* 左侧品牌展示区 */}
+      {/* Brand panel (left) */}
       <div className={styles.brandPanel}>
         <div className={styles.brandContent}>
-          <span className={styles.brandWord}>CLI</span>
-          <span className={styles.brandWord}>PROXY</span>
-          <span className={styles.brandWord}>API</span>
+          <span className={styles.brandWordmark}>prox</span>
         </div>
       </div>
 
-      {/* 右侧功能交互区 */}
+      {/* Interaction panel (right) */}
       <div className={styles.formPanel}>
         {showSplash ? (
-          /* 启动动画 */
+          /* Splash animation */
           <div className={styles.splashContent}>
-            <img src={INLINE_LOGO_JPEG} alt="CPAMC" className={styles.splashLogo} />
+            <img src={PROX_LOGO_DATA_URI} alt="" className={styles.splashLogo} />
             <h1 className={styles.splashTitle}>{t('splash.title')}</h1>
-            <p className={styles.splashSubtitle}>{t('splash.subtitle')}</p>
+            {splashSubtitle && <p className={styles.splashSubtitle}>{splashSubtitle}</p>}
             <div className={styles.splashLoader}>
               <div className={styles.splashLoaderBar} />
             </div>
           </div>
         ) : (
-          /* 登录表单 */
+          /* Login form */
           <div className={styles.formContent}>
-            {/* Logo */}
-            <img src={INLINE_LOGO_JPEG} alt="Logo" className={styles.logo} />
+            <img src={PROX_LOGO_DATA_URI} alt="prox" className={styles.logo} />
 
-            {/* 登录表单卡片 */}
+            {/* Login form card */}
             <div className={styles.loginCard}>
               <div className={styles.loginHeader}>
                 <div className={styles.titleRow}>

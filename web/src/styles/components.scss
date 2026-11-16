@@ -17,7 +17,7 @@
 
   &.btn-primary {
     background-color: var(--primary-color);
-    color: var(--primary-contrast, #fff);
+    color: var(--primary-contrast);
     border-color: var(--primary-color);
 
     &:hover {
@@ -70,17 +70,6 @@
   &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
-  }
-}
-
-[data-theme='dark'] {
-  .btn {
-    color: #fff;
-  }
-
-  .btn.btn-secondary,
-  .btn.btn-ghost {
-    color: #fff;
   }
 }
 
@@ -159,7 +148,7 @@ textarea {
   border: 1px solid var(--border-color);
   margin-bottom: $spacing-md;
 
-  // 确保后续内容换行显示
+  // Push the following content onto its own line
   + * {
     display: block;
   }
@@ -270,7 +259,7 @@ textarea {
   display: flex;
   flex-direction: column;
   position: relative;
-  // 关闭按钮中心位置: right 12px + 16px = 28px, top 12px + 16px = 28px
+  // Close button center: right 12px + 16px = 28px, top 12px + 16px = 28px
   transform-origin: calc(100% - 28px) 28px;
 
   &.modal-entering {

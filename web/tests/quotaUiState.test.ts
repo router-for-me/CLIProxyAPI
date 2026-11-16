@@ -1,9 +1,9 @@
 /**
  * Session-scoped quota page preferences.
  *
- * The merge-on-write case is the one that matters: the tab strip and the sort
- * control each write a single field and know nothing about the other, so a
- * whole-object write would make changing a tab silently reset the sort.
+ * The merge-on-write case is the one that matters: every control writes a single
+ * field and knows nothing about the others, so a whole-object write would make
+ * changing a tab silently reset the sort or the pool view.
  */
 
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
@@ -11,25 +11,37 @@ import { readQuotaUiState, writeQuotaUiState } from '@/features/quota/uiState';
 
 const KEY = 'quotaPage.uiState';
 
-/** Test files share one process — leaving a fake `window` behind would leak. */
+const EMPTY_STATE = {
+  accounts: undefined,
+  burnWindow: undefined,
+  futureUsage: undefined,
+  metric: undefined,
+  showEmails: undefined,
+  sortMode: undefined,
+  tab: undefined,
+};
+
+/** Test files share one process, so a fake `window` left behind would leak. */
 const originalWindow = (globalThis as { window?: unknown }).window;
 
 /** bun's global has no sessionStorage; a Map-backed stub is enough here. */
-function installSessionStorage() {
+const installSessionStorage = () => {
   const store = new Map<string, string>();
   const storage = {
-    getItem: (key: string) => store.get(key) ?? null,
-    setItem: (key: string, value: string) => void store.set(key, value),
-    removeItem: (key: string) => void store.delete(key),
     clear: () => store.clear(),
+    getItem: (key: string) => store.get(key) ?? null,
     key: (index: number) => [...store.keys()][index] ?? null,
     get length() {
       return store.size;
     },
+    removeItem: (key: string) => void store.delete(key),
+    setItem: (key: string, value: string) => void store.set(key, value),
   };
+
   (globalThis as unknown as { window: unknown }).window = { sessionStorage: storage };
+
   return storage;
-}
+};
 
 let storage: ReturnType<typeof installSessionStorage>;
 
@@ -46,46 +58,102 @@ afterAll(() => {
 });
 
 describe('quota ui state', () => {
-  test('round-trips both preferences', () => {
-    writeQuotaUiState({ tab: 'codex', sortMode: 'soonest' });
-    expect(readQuotaUiState()).toEqual({ tab: 'codex', sortMode: 'soonest' });
+  test('round-trips every preference', () => {
+    const state = {
+      accounts: true,
+      burnWindow: 6,
+      futureUsage: 'half',
+      metric: 'drain',
+      showEmails: true,
+      sortMode: 'soonest',
+      tab: 'codex',
+    } as const;
+
+    writeQuotaUiState(state);
+
+    expect(readQuotaUiState()).toEqual(state);
+  });
+
+  test('round-trips false booleans', () => {
+    writeQuotaUiState({ accounts: false, showEmails: false });
+
+    expect(readQuotaUiState()).toEqual({ ...EMPTY_STATE, accounts: false, showEmails: false });
   });
 
   test('retains the Devin tab across visits', () => {
-    writeQuotaUiState({ tab: 'devin', sortMode: 'soonest' });
-    expect(readQuotaUiState()).toEqual({ tab: 'devin', sortMode: 'soonest' });
+    writeQuotaUiState({ sortMode: 'soonest', tab: 'devin' });
+
+    expect(readQuotaUiState()).toMatchObject({ sortMode: 'soonest', tab: 'devin' });
   });
 
-  test('writing one preference preserves the other', () => {
+  test('writing one preference preserves the others', () => {
     writeQuotaUiState({ sortMode: 'soonest' });
+    writeQuotaUiState({ burnWindow: 1 });
+    writeQuotaUiState({ showEmails: true });
     writeQuotaUiState({ tab: 'kimi' });
 
-    expect(readQuotaUiState()).toEqual({ tab: 'kimi', sortMode: 'soonest' });
+    expect(readQuotaUiState()).toEqual({
+      ...EMPTY_STATE,
+      burnWindow: 1,
+      showEmails: true,
+      sortMode: 'soonest',
+      tab: 'kimi',
+    });
   });
 
   test('rejects values that are not part of the current contract', () => {
-    storage.setItem(KEY, JSON.stringify({ tab: 'not-a-tab', sortMode: 'by-vibes' }));
-    expect(readQuotaUiState()).toEqual({ tab: undefined, sortMode: undefined });
+    storage.setItem(
+      KEY,
+      JSON.stringify({
+        accounts: 'yes',
+        futureUsage: 'triple',
+        metric: 'grid',
+        showEmails: 1,
+        sortMode: 'by-vibes',
+        tab: 'not-a-tab',
+      })
+    );
+
+    expect(readQuotaUiState()).toEqual(EMPTY_STATE);
   });
 
-  test('round-trips the ledger view alongside the others', () => {
-    writeQuotaUiState({ tab: 'claude' });
-    writeQuotaUiState({ viewMode: 'cards' });
-    expect(readQuotaUiState()).toEqual({ tab: 'claude', viewMode: 'cards' });
+  test('accepts only the numeric burn windows 1, 3 and 6', () => {
+    for (const burnWindow of [1, 3, 6]) {
+      storage.setItem(KEY, JSON.stringify({ burnWindow }));
+
+      expect(readQuotaUiState()?.burnWindow).toBe(burnWindow);
+    }
+
+    for (const burnWindow of [2, '3', null, 0]) {
+      storage.setItem(KEY, JSON.stringify({ burnWindow }));
+
+      expect(readQuotaUiState()?.burnWindow).toBeUndefined();
+    }
   });
 
-  test('rejects an unknown view mode', () => {
-    storage.setItem(KEY, JSON.stringify({ viewMode: 'grid' }));
-    expect(readQuotaUiState()).toEqual({ viewMode: undefined });
+  test('ignores a stored view mode from the removed ledger view', () => {
+    storage.setItem(KEY, JSON.stringify({ tab: 'claude', viewMode: 'cards' }));
+
+    expect(readQuotaUiState()).toEqual({ ...EMPTY_STATE, tab: 'claude' });
+
+    writeQuotaUiState({ metric: 'remaining' });
+
+    expect(storage.getItem(KEY)).not.toContain('viewMode');
   });
 
   test('survives absent, malformed, and non-object payloads', () => {
     expect(readQuotaUiState()).toBeNull();
 
     storage.setItem(KEY, '{not json');
+
     expect(readQuotaUiState()).toBeNull();
 
     storage.setItem(KEY, '"a string"');
+
+    expect(readQuotaUiState()).toBeNull();
+
+    storage.setItem(KEY, 'null');
+
     expect(readQuotaUiState()).toBeNull();
   });
 });

@@ -1,0 +1,222 @@
+.figure {
+  position: relative;
+  margin: 10px 0 0;
+  min-width: 0;
+}
+
+.plot {
+  position: relative;
+  border-radius: var(--radius-sm);
+
+  &:focus-visible {
+    outline: 2px solid var(--focus-ring-color);
+    outline-offset: 2px;
+  }
+}
+
+.svg {
+  display: block;
+  overflow: visible;
+}
+
+.stopRecorded,
+.stopProjected {
+  stop-color: var(--series);
+}
+
+.stopRecorded {
+  stop-opacity: var(--viz-area-recorded-opacity);
+}
+
+.stopProjected {
+  stop-opacity: var(--viz-area-projected-opacity);
+}
+
+.stopEnd {
+  stop-color: var(--series);
+  stop-opacity: 0;
+}
+
+.dayGrid line,
+.grid,
+.axis,
+.nowLine {
+  fill: none;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.dayGrid line {
+  stroke: var(--viz-grid-day);
+}
+
+.grid {
+  stroke: var(--viz-grid);
+}
+
+.axis {
+  stroke: var(--viz-axis);
+}
+
+.nowLine {
+  stroke: var(--viz-now);
+}
+
+.axisText,
+.stepLabel,
+.emptyLabel {
+  fill: var(--text-tertiary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stepLabel,
+.emptyLabel {
+  paint-order: stroke;
+  stroke: var(--bg-primary);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.emptyLabel {
+  fill: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.line {
+  fill: none;
+  stroke: var(--series);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.reveal {
+  animation: pool-chart-reveal 600ms var(--ease-out-strong) both;
+}
+
+@keyframes pool-chart-reveal {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+
+  to {
+    clip-path: inset(0);
+  }
+}
+
+.emptyMarker {
+  fill: var(--bg-primary);
+  stroke: var(--text-primary);
+  stroke-width: 2;
+}
+
+.nowDot {
+  fill: var(--series);
+  stroke: var(--bg-primary);
+  stroke-width: 3;
+}
+
+.crosshair {
+  stroke: var(--series);
+  stroke-width: 1;
+  opacity: var(--viz-crosshair-opacity);
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+.cursorDot {
+  fill: var(--series);
+  pointer-events: none;
+}
+
+.hitArea {
+  fill: transparent;
+  touch-action: pan-y;
+}
+
+.tooltip {
+  position: absolute;
+  top: 0;
+  right: 14px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-selected);
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity var(--dur-hover) var(--ease-out-strong);
+}
+
+@starting-style {
+  .tooltip {
+    opacity: 0;
+  }
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.legendLabel {
+  margin-right: 38px;
+  color: var(--text-secondary);
+}
+
+.legendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-tertiary);
+}
+
+.swatchRecorded,
+.swatchProjected,
+.swatchPartial {
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.swatchRecorded {
+  background: var(--series);
+}
+
+.swatchProjected {
+  background: repeating-linear-gradient(90deg, var(--series) 0 4px, transparent 4px 7px);
+}
+
+.swatchPartial {
+  background: var(--series);
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    animation: none;
+  }
+
+  .tooltip {
+    transition: none;
+  }
+}

@@ -1,38 +1,44 @@
 /**
- * 主题样式
+ * Theme tokens
  */
 
-// 浅色主题（默认）
+// Light theme (default): neutral grey
 :root {
-  // 极简暖灰：浅色模式
-  --bg-secondary: #faf9f5; // 页面背景（纸感）
-  --bg-primary: #f0eee8; // 容器/卡片背景
-  --bg-tertiary: #e9e6df; // hover/次级背景
-  --bg-hover: var(--bg-tertiary);
-  --bg-quinary: #f6f4ee;
-  --bg-error-light: rgba(198, 87, 70, 0.1);
-  --floating-surface: #fffdf9;
-  --floating-shadow: 0 12px 26px rgba(0, 0, 0, 0.14);
+  color-scheme: light;
 
-  --text-primary: #2d2a26;
-  --text-secondary: #6d6760;
-  --text-tertiary: #a29c95;
-  --text-quaternary: #c0bab3;
+  --bg-secondary: #f5f5f5; // page, body, sidebar
+  --bg-primary: #ffffff; // cards, control tracks
+  --bg-tertiary: #ebebeb; // secondary buttons, hover wells
+  --bg-hover: #e5e5e5;
+  --bg-selected: #e5e5e5; // active nav, tab and segment
+  --bg-quinary: #fafafa;
+  --bg-error-light: rgba(198, 87, 70, 0.1);
+  --floating-surface: #ffffff;
+  --floating-shadow: 0 12px 28px rgba(0, 0, 0, 0.12);
+
+  --text-primary: #0a0a0a;
+  --text-secondary: #525252;
+  --text-tertiary: #6b6b6b;
+  --text-quaternary: #a3a3a3;
   --text-muted: var(--text-tertiary);
 
-  --border-color: #e3e1db; // 边框/分割线
+  --border-color: #e5e5e5;
   --border-secondary: var(--border-color);
-  --border-primary: #d5d2cb;
-  --border-hover: #cecac4;
+  --border-primary: #d4d4d4;
+  --border-hover: #c4c4c4;
 
-  --primary-color: #8b8680; // 行动色（主色）
-  --primary-hover: #7f7a74;
-  --primary-active: #726d67;
+  --primary-color: #171717;
+  --primary-hover: #262626;
+  --primary-active: #000000;
   --primary-contrast: #ffffff;
+  --primary-gradient: linear-gradient(180deg, #2b2b2b 0%, #0f0f0f 100%);
+  --secondary-gradient: linear-gradient(180deg, #ffffff 0%, #f2f2f2 100%);
+  --focus-ring-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+  --accent-color: var(--primary-color);
 
   --success-color: #10b981;
   --quota-medium-color: #e0aa14;
-  --warning-color: #c65746; // 错误/警告色
+  --warning-color: #c65746;
   --error-color: #c65746;
   --danger-color: var(--error-color);
   --info-color: var(--primary-color);
@@ -49,12 +55,13 @@
   --failure-badge-text: #8a3a30;
   --failure-badge-border: rgba(198, 87, 70, 0.35);
 
-  --count-badge-bg: rgba(139, 134, 128, 0.18);
-  --count-badge-text: var(--primary-active);
+  --count-badge-bg: transparent;
+  --count-badge-text: var(--text-tertiary);
 
-  --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.08);
+  --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
   --shadow-lg: 0 10px 18px -3px rgb(0 0 0 / 0.1);
 
+  --radius-sm: 6px;
   --radius-md: 8px;
 
   // Workbench tokens (Home parity)
@@ -80,44 +87,61 @@
   --glass-bg-secondary: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
   --glass-border: color-mix(in srgb, var(--border-color) 60%, transparent);
 
-  // 可视化配色：与语义色同源；深色模式下重新取步阶（见 [data-theme='dark']）。
-  // 规则：翡翠绿只表达「活的流量」。
+  // Data visualization. Success/failure share their hue with the semantic colors and are
+  // re-stepped for dark (see [data-theme='dark']); emerald only ever means live traffic.
   --viz-success: #10b981;
   --viz-failure: #c65746;
+  --viz-claude: #c8553a;
+  --viz-codex: #2f6fdb;
+  --viz-grid: rgba(0, 0, 0, 0.06);
+  --viz-grid-day: rgba(0, 0, 0, 0.04);
+  --viz-axis: rgba(0, 0, 0, 0.14);
+  --viz-now: rgba(0, 0, 0, 0.35);
+  --viz-area-recorded-opacity: 0.16;
+  --viz-area-projected-opacity: 0.06;
+  --viz-crosshair-opacity: 0.45;
 
-  // 动效词汇表：内置 ease 太弱，交互反馈统一用强减速曲线。
-  // 按压 160ms / 悬停 200ms，UI 动效不超过 300ms。
+  // Motion vocabulary: the built-in ease is too weak, so interaction feedback uses a strong
+  // ease-out. Press 160ms / hover 200ms; UI motion stays under 300ms.
   --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
   --dur-press: 160ms;
   --dur-hover: 200ms;
 }
 
-// 纯白主题
+// White theme. Declares every themed token, even where it repeats :root, so the three
+// blocks can be read side by side.
 [data-theme='white'] {
+  color-scheme: light;
+
   --bg-secondary: #ffffff;
-  --bg-primary: #ffffff;
-  --bg-tertiary: #f6f6f6;
-  --bg-hover: var(--bg-tertiary);
-  --bg-quinary: #ffffff;
+  --bg-primary: #f5f5f5;
+  --bg-tertiary: #ebebeb;
+  --bg-hover: #e6e6e6;
+  --bg-selected: #e3e3e3;
+  --bg-quinary: #fafafa;
   --bg-error-light: rgba(198, 87, 70, 0.08);
   --floating-surface: #ffffff;
-  --floating-shadow: 0 12px 26px rgba(0, 0, 0, 0.12);
+  --floating-shadow: 0 12px 28px rgba(0, 0, 0, 0.1);
 
-  --text-primary: #2d2a26;
-  --text-secondary: #6d6760;
-  --text-tertiary: #a29c95;
-  --text-quaternary: #c0bab3;
+  --text-primary: #0a0a0a;
+  --text-secondary: #525252;
+  --text-tertiary: #6b6b6b;
+  --text-quaternary: #a3a3a3;
   --text-muted: var(--text-tertiary);
 
-  --border-color: #e5e5e5;
+  --border-color: #e8e8e8;
   --border-secondary: var(--border-color);
   --border-primary: #d9d9d9;
-  --border-hover: #cccccc;
+  --border-hover: #c9c9c9;
 
-  --primary-color: #8b8680;
-  --primary-hover: #7f7a74;
-  --primary-active: #726d67;
+  --primary-color: #171717;
+  --primary-hover: #262626;
+  --primary-active: #000000;
   --primary-contrast: #ffffff;
+  --primary-gradient: linear-gradient(180deg, #2b2b2b 0%, #0f0f0f 100%);
+  --secondary-gradient: linear-gradient(180deg, #f7f7f7 0%, #efefef 100%);
+  --focus-ring-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+  --accent-color: var(--primary-color);
 
   --success-color: #10b981;
   --quota-medium-color: #e0aa14;
@@ -138,12 +162,13 @@
   --failure-badge-text: #8a3a30;
   --failure-badge-border: rgba(198, 87, 70, 0.35);
 
-  --count-badge-bg: rgba(139, 134, 128, 0.18);
-  --count-badge-text: var(--primary-active);
+  --count-badge-bg: transparent;
+  --count-badge-text: var(--text-tertiary);
 
-  --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.08);
-  --shadow-lg: 0 10px 18px -3px rgb(0 0 0 / 0.1);
+  --shadow: 0 0 #0000;
+  --shadow-lg: 0 10px 18px -3px rgb(0 0 0 / 0.08);
 
+  --radius-sm: 6px;
   --radius-md: 8px;
 
   // Workbench tokens (Home parity)
@@ -160,35 +185,51 @@
   --muted-bg: var(--bg-tertiary);
   --muted-foreground: var(--text-secondary);
   --accent-bg: var(--bg-tertiary);
+
+  --viz-claude: #c8553a;
+  --viz-codex: #2f6fdb;
+  --viz-grid: rgba(0, 0, 0, 0.06);
+  --viz-grid-day: rgba(0, 0, 0, 0.04);
+  --viz-axis: rgba(0, 0, 0, 0.14);
+  --viz-now: rgba(0, 0, 0, 0.35);
+  --viz-area-recorded-opacity: 0.16;
+  --viz-area-projected-opacity: 0.06;
+  --viz-crosshair-opacity: 0.45;
 }
 
-// 深色主题（#191919）
+// Dark theme: neutral near-black, sampled from the prox mock
 [data-theme='dark'] {
-  // 极简暖灰：深色模式（提升对比度与层级）
-  --bg-secondary: #151412; // 页面背景
-  --bg-primary: #1d1b18; // 容器/卡片背景
-  --bg-tertiary: #262320; // hover/次级背景
-  --bg-hover: #2e2a26;
-  --bg-quinary: #191714;
-  --bg-error-light: rgba(198, 87, 70, 0.18);
-  --floating-surface: #2a2723;
-  --floating-shadow: 0 14px 30px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
 
-  --text-primary: #f6f4f1;
-  --text-secondary: #c9c3bb;
-  --text-tertiary: #9c958d;
-  --text-quaternary: #6f6962;
+  --bg-secondary: #000000; // page, body, sidebar
+  --bg-primary: #0e0e0e; // cards, control tracks
+  --bg-tertiary: #171717; // secondary buttons, hover wells
+  --bg-hover: #1a1a1a;
+  --bg-selected: #1f1f1f; // active nav, tab and segment
+  --bg-quinary: #0a0a0a;
+  --bg-error-light: rgba(198, 87, 70, 0.18);
+  --floating-surface: #1f1f1f;
+  --floating-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+
+  --text-primary: #ffffff;
+  --text-secondary: #b7b7b7;
+  --text-tertiary: #8f8f8f;
+  --text-quaternary: #5b5b5b;
   --text-muted: var(--text-tertiary);
 
-  --border-color: #3a3530;
+  --border-color: #1f1f1f;
   --border-secondary: var(--border-color);
-  --border-primary: #4a453f;
-  --border-hover: #5a544d;
+  --border-primary: #2a2a2a;
+  --border-hover: #383838;
 
-  --primary-color: #8b8680;
-  --primary-hover: #9a948e;
-  --primary-active: #a6a099;
-  --primary-contrast: #ffffff;
+  --primary-color: #e6e6e6;
+  --primary-hover: #f5f5f5;
+  --primary-active: #ffffff;
+  --primary-contrast: #000000;
+  --primary-gradient: linear-gradient(180deg, #c7c7c7 0%, #e6e6e6 45%, #f6f6f6 100%);
+  --secondary-gradient: linear-gradient(180deg, #121212 0%, #161616 100%);
+  --focus-ring-color: color-mix(in srgb, var(--primary-color) 45%, transparent);
+  --accent-color: var(--primary-color);
 
   --success-color: #10b981;
   --quota-medium-color: #ffd862;
@@ -209,12 +250,13 @@
   --failure-badge-text: #f1b0a6;
   --failure-badge-border: rgba(198, 87, 70, 0.5);
 
-  --count-badge-bg: rgba(139, 134, 128, 0.28);
-  --count-badge-text: var(--primary-active);
+  --count-badge-bg: transparent;
+  --count-badge-text: var(--text-tertiary);
 
-  --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
+  --shadow: 0 0 #0000;
+  --shadow-lg: 0 10px 24px -6px rgb(0 0 0 / 0.6);
 
+  --radius-sm: 6px;
   --radius-md: 8px;
 
   // Workbench tokens (Home parity, deeper amber for dark)
@@ -234,10 +276,20 @@
 
   --glass-border: color-mix(in srgb, var(--border-color) 55%, transparent);
 
-  // 深色卡面上 #10b981 亮度超出 OKLCH 0.48–0.67 区间，且与失败色的色盲分离度不足，
-  // 因此深色单独降一档。三套主题均已通过对比度/色盲/亮度校验。
+  // On dark cards #10b981 falls outside the OKLCH 0.48-0.67 lightness band and separates too
+  // little from the failure color for color-blind viewers, so dark steps both down once.
+  // All three themes pass the contrast, color-blindness and lightness checks.
   --viz-success: #0fae78;
   --viz-failure: #cf4b3a;
+  --viz-claude: #f38d73;
+  --viz-codex: #7eacf9;
+  --viz-grid: rgba(255, 255, 255, 0.04);
+  --viz-grid-day: rgba(255, 255, 255, 0.025);
+  --viz-axis: rgba(255, 255, 255, 0.09);
+  --viz-now: rgba(255, 255, 255, 0.33);
+  --viz-area-recorded-opacity: 0.19;
+  --viz-area-projected-opacity: 0.07;
+  --viz-crosshair-opacity: 0.4;
 }
 
 @media (max-width: 768px),

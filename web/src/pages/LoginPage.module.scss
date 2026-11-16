@@ -1,13 +1,13 @@
 @use '../styles/variables.scss' as *;
 
-// 主容器 - 左右分栏布局
+// Main container: two-column layout
 .container {
   min-height: 100vh;
   display: flex;
   background: var(--bg-secondary);
 }
 
-// 左侧品牌展示区
+// Brand panel (left)
 .brandPanel {
   flex: 1;
   display: flex;
@@ -19,69 +19,45 @@
   position: relative;
   overflow: hidden;
 
-  // 移动端隐藏
+  // Hidden on mobile
   @media (max-width: $breakpoint-mobile) {
     display: none;
   }
 }
 
-// 品牌文字容器
+// Wordmark container
 .brandContent {
   position: relative;
   z-index: 1;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  justify-content: center;
   width: 100%;
-  padding: 0;
-  gap: 0;
 }
 
-// 品牌大字淡入动画
 @keyframes brandFadeIn {
   from {
     opacity: 0;
     transform: translateY(-10px);
   }
   to {
-    opacity: var(--target-opacity, 0.9);
+    opacity: 1;
     transform: translateY(0);
   }
 }
 
-// 品牌大字
-.brandWord {
-  font-size: 14vw;
-  font-weight: 900;
-  color: rgba(255, 255, 255, 0.9);
+.brandWordmark {
+  font-size: 96px;
+  font-weight: 800;
+  color: #fff;
   letter-spacing: -0.02em;
-  line-height: 0.85;
-  text-transform: uppercase;
+  line-height: 1;
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
-  text-align: right;
-  padding-right: 0;
   opacity: 0;
-  animation: brandFadeIn 0.8s ease-out forwards;
-
-  // 不同字有不同的透明度和延迟，从上到下依次显现
-  &:nth-child(1) {
-    --target-opacity: 0.95;
-    animation-delay: 0.1s;
-  }
-
-  &:nth-child(2) {
-    --target-opacity: 0.7;
-    animation-delay: 0.35s;
-  }
-
-  &:nth-child(3) {
-    --target-opacity: 0.45;
-    animation-delay: 0.6s;
-  }
+  animation: brandFadeIn 0.8s ease-out 0.1s forwards;
 }
 
-// 右侧功能交互区
+// Right-hand interaction panel
 .formPanel {
   flex: 1;
   display: flex;
@@ -98,7 +74,7 @@
   }
 }
 
-// 右侧内容容器
+// Right-hand content container
 .formContent {
   width: 100%;
   max-width: 420px;
@@ -108,17 +84,16 @@
   gap: $spacing-xl;
 }
 
-// Logo
 .logo {
   width: 80px;
   height: 80px;
-  border-radius: $radius-lg;
-  object-fit: cover;
-  box-shadow: var(--shadow-lg);
-  border: 3px solid var(--border-color);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  object-fit: contain;
 }
 
-// 登录表单卡片
+// Login form card
 .loginCard {
   width: 100%;
   background: var(--bg-primary);
@@ -138,7 +113,7 @@
   }
 }
 
-// 登录头部
+// Login header
 .loginHeader {
   display: flex;
   flex-direction: column;
@@ -146,7 +121,7 @@
   text-align: center;
 }
 
-// 标题行
+// Title row
 .titleRow {
   display: flex;
   align-items: center;
@@ -155,26 +130,26 @@
   flex-wrap: wrap;
 }
 
-// 标题
+// Title
 .title {
   font-size: 22px;
   font-weight: 800;
   color: var(--text-primary);
 }
 
-// 副标题
+// Subtitle
 .subtitle {
   color: var(--text-secondary);
   font-size: 14px;
 }
 
-// 语言下拉选择
+// Language dropdown
 .languageSelect {
   min-width: 108px;
   flex: 0 0 auto;
 }
 
-// 连接信息框
+// Connection info box
 .connectionBox {
   background: var(--bg-secondary);
   border: 1px dashed var(--border-color);
@@ -201,7 +176,7 @@
   }
 }
 
-// 复选框行
+// Checkbox row
 .toggleAdvanced {
   display: flex;
   justify-content: flex-start;
@@ -214,7 +189,7 @@
   font-weight: 500;
 }
 
-// 错误提示框
+// Error message box
 .errorBox {
   background: rgba($error-color, 0.1);
   border: 1px solid rgba($error-color, 0.4);
@@ -224,9 +199,9 @@
   font-size: 14px;
 }
 
-// ========== 启动动画（右侧） ==========
+// ========== Splash animation (right) ==========
 
-// 启动动画进入效果
+// Splash entrance effect
 @keyframes splashEnter {
   from {
     opacity: 0;
@@ -238,7 +213,7 @@
   }
 }
 
-// Logo 脉冲效果
+// Logo pulse effect
 @keyframes splashLogoPulse {
   0%,
   100% {
@@ -249,7 +224,7 @@
   }
 }
 
-// 加载条动画
+// Loading bar animation
 @keyframes splashLoading {
   0% {
     transform: scaleX(0);
@@ -268,7 +243,7 @@
   }
 }
 
-// 启动动画内容容器
+// Splash content container
 .splashContent {
   display: flex;
   flex-direction: column;
@@ -277,16 +252,18 @@
   animation: splashEnter 0.6s ease-out;
 }
 
-// 启动动画 Logo
+// Splash logo
 .splashLogo {
   height: 80px;
   width: auto;
-  border-radius: $radius-lg;
-  box-shadow: $shadow-lg;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  object-fit: contain;
   animation: splashLogoPulse 1.5s ease-in-out infinite;
 }
 
-// 启动动画标题
+// Splash title
 .splashTitle {
   font-size: 28px;
   font-weight: 800;
@@ -295,7 +272,7 @@
   letter-spacing: -0.5px;
 }
 
-// 启动动画副标题
+// Splash subtitle
 .splashSubtitle {
   font-size: 16px;
   font-weight: 500;
@@ -304,7 +281,7 @@
   margin-top: -8px;
 }
 
-// 启动动画加载条容器
+// Splash loading bar container
 .splashLoader {
   width: 120px;
   height: 3px;
@@ -314,7 +291,7 @@
   margin-top: $spacing-md;
 }
 
-// 启动动画加载条
+// Splash loading bar
 .splashLoaderBar {
   width: 100%;
   height: 100%;

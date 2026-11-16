@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { buildTimelineLane } from '@/features/quota/quotaTimelineModel';
 import { buildKimiQuotaRows } from '@/utils/quota';
 
 describe('Kimi quota ordering', () => {
-  test('shows the 5-hour limit before the weekly limit and exposes it to the timeline', () => {
+  test('shows the 5-hour limit before the weekly limit', () => {
     const rows = buildKimiQuotaRows({
       usage: {
         used: '1',
@@ -33,16 +32,6 @@ describe('Kimi quota ordering', () => {
     expect(rows[0]?.periodHours).toBe(5);
     expect(rows[1]?.labelKey).toBe('kimi_quota.weekly_limit');
     expect(rows[1]?.periodHours).toBe(168);
-
-    const lane = buildTimelineLane({
-      name: 'kimi.json',
-      displayName: 'Kimi',
-      provider: 'kimi',
-      quota: { status: 'success', rows },
-      maxPeriodHours: 5,
-    });
-    expect(lane.anchorMs).toBe(rows[0]?.resetAtMs);
-    expect(lane.periodHours).toBe(5);
   });
 });
 
