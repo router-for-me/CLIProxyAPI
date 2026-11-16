@@ -8,11 +8,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 // CooldownStateRecord is a persisted runtime cooldown snapshot for one auth/model pair.
