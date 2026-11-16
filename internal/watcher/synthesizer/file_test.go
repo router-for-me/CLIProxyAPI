@@ -1244,3 +1244,59 @@ func TestFileSynthesizerRecordsIncompleteFiles(t *testing.T) {
 		}
 	})
 }
+
+func TestPluginFileAuthKeepsCredentialKind(t *testing.T) {
+	cases := []struct {
+		name     string
+		auth     *coreauth.Auth
+		excluded string
+		wantKind string
+	}{
+		{
+			name:     "api key with own exclusions",
+			auth:     &coreauth.Auth{ID: "plugin.json", Provider: "example-plugin", Metadata: map[string]any{"auth_kind": "apikey"}, Attributes: map[string]string{"auth_kind": "apikey", "api_key": "test-key"}},
+			excluded: `,"excluded_models":["per-account"]`,
+			wantKind: coreauth.AuthKindAPIKey,
+		},
+		{
+			name:     "api key without own exclusions",
+			auth:     &coreauth.Auth{ID: "plugin.json", Provider: "example-plugin", Attributes: map[string]string{"api_key": "test-key"}},
+			wantKind: coreauth.AuthKindAPIKey,
+		},
+		{
+			name:     "unknown kind falls back to oauth",
+			auth:     &coreauth.Auth{ID: "plugin.json", Provider: "example-plugin"},
+			wantKind: coreauth.AuthKindOAuth,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tempDir := t.TempDir()
+			raw := []byte(`{"type":"example-plugin"` + tc.excluded + `}`)
+			ctx := &SynthesisContext{
+				Config:  &config.Config{OAuthExcludedModels: map[string][]string{"example-plugin": {"oauth-only"}}},
+				AuthDir: tempDir,
+				Now:     time.Now(),
+				PluginAuthParser: multiAuthParserFunc(func(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+					return []*coreauth.Auth{tc.auth}, true, nil
+				}),
+			}
+			auths, err := SynthesizeAuthFile(ctx, filepath.Join(tempDir, "plugin.json"), raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("auths = %d, want 1", len(auths))
+			}
+			if got := auths[0].AuthKind(); got != tc.wantKind {
+				t.Fatalf("AuthKind() = %q, want %q", got, tc.wantKind)
+			}
+			if got := auths[0].Attributes["auth_kind"]; got != tc.wantKind {
+				t.Fatalf("auth_kind attribute = %q, want %q", got, tc.wantKind)
+			}
+			if tc.excluded != "" && auths[0].Attributes["excluded_models"] != "per-account" {
+				t.Fatalf("excluded_models = %q, want per-account", auths[0].Attributes["excluded_models"])
+			}
+		})
+	}
+}
