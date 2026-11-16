@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestInteractionsApplyPatchNamedLateIdentity(t *testing.T) {
@@ -40,7 +40,7 @@ func TestInteractionsApplyPatchNamedLateIdentity(t *testing.T) {
 				}
 				step["id"], step["call_id"] = "item_2", "call_2"
 				step["arguments"] = map[string]any{"input": patchText}
-				var events []gjson.Result
+				var events []ojson.Result
 				if boundary == "stop" {
 					events = append(events, patchSend(&param, patchStep("step.stop", step))...)
 				}
@@ -146,6 +146,9 @@ func TestInteractionsApplyPatchTerminalIdentityFallback(t *testing.T) {
 				}
 				if events := patchSend(&param, patchStep("step.start", step)); len(events) != 0 {
 					t.Fatalf("early fallback: %v", events)
+				}
+				if first == "neither" {
+					id = "item_" + param.(*interactionsToResponsesStreamState).ItemIDPrefix + "_2"
 				}
 				if events := patchSend(&param, []byte(`{"event_type":"step.delta","index":2,"delta":{"type":"arguments_delta","arguments":"{\"input\":\"pq\"}"}}`)); len(events) != 0 {
 					t.Fatalf("early delta: %v", events)

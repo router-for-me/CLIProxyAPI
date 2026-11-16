@@ -18,6 +18,15 @@ func (h *Host) QuotaProviders(ctx context.Context) []RegisteredQuotaProviderInfo
 	return h.inner.QuotaProviders(ctx)
 }
 
+// QuotaProviderPluginIDs maps normalized provider keys to the selected active quota plugin.
+// Selection preserves host precedence and excludes plugins fused during capability discovery.
+func (h *Host) QuotaProviderPluginIDs(ctx context.Context) map[string]string {
+	if h == nil || h.inner == nil {
+		return nil
+	}
+	return h.inner.QuotaProviderPluginIDs(ctx)
+}
+
 // HasQuotaProviderContext reports whether a provider handles credential quotas.
 func (h *Host) HasQuotaProviderContext(ctx context.Context, provider string) bool {
 	return h != nil && h.inner != nil && h.inner.HasQuotaProviderContext(ctx, provider)

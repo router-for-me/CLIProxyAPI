@@ -39,6 +39,7 @@ func doKimiLoginWithProvider(cfg *config.Config, options *LoginOptions, provider
 		NoBrowser: options.NoBrowser,
 		Metadata:  map[string]string{},
 		Prompt:    options.Prompt,
+		ProxyURL:  options.ProxyURL,
 	}
 
 	record, savedPath, err := manager.Login(context.Background(), provider, cfg, authOpts)

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -23,7 +24,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // task6RepairSource completes tool input without implicitly completing the response.
@@ -129,7 +129,7 @@ func task6RepairChunkType(payload []byte) string {
 	if bytes.HasPrefix(payload, []byte("data:")) {
 		payload = bytes.TrimSpace(payload[5:])
 	}
-	return gjson.GetBytes(payload, "type").String()
+	return ojson.GetBytes(payload, "type").String()
 }
 
 func task6RepairReadStream(t *testing.T, stream *cliproxyexecutor.StreamResult, failure bool) {
@@ -258,7 +258,7 @@ func TestApplyPatchRepairXAIWebsocketPersistentFailureRetry(t *testing.T) {
 						// Inject only the optional translator failure; retain the real executor/socket.
 						sdktranslator.Register(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatCodex, nil, sdktranslator.ResponseTransform{Stream: func(ctx context.Context, model string, original, effective, event []byte, param *any) [][]byte {
 							payload := bytes.TrimSpace(bytes.TrimPrefix(event, []byte("data: ")))
-							if gjson.GetBytes(payload, "type").String() == "repair.invalid" || (gjson.GetBytes(payload, "type").String() == "response.completed" && gjson.GetBytes(payload, "response.id").String() == "repair-invalid") {
+							if ojson.GetBytes(payload, "type").String() == "repair.invalid" || (ojson.GetBytes(payload, "type").String() == "response.completed" && ojson.GetBytes(payload, "response.id").String() == "repair-invalid") {
 								state := &translatorcommon.ApplyPatchErrorState{}
 								state.SetToolInputError(errors.New("RAW_SECRET"))
 								*param = state
@@ -470,12 +470,20 @@ func TestApplyPatchRepairResponsesSourceTerminalNonStream(t *testing.T) {
 				if len(response.Payload) != 0 {
 					t.Errorf("failed source returned payload: %s", response.Payload)
 				}
-				assertTask6PatchError(t, errExecute)
+				wantGatewayMsg := "Invalid apply_patch tool arguments received from upstream."
+				if provider == "xai" && mode == "empty" {
+					wantGatewayMsg = xaiEmptyStreamMessage
+					if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusBadGateway || errExecute.Error() != xaiEmptyStreamMessage {
+						t.Fatalf("expected xai empty stream 502, got %T %v", errExecute, errExecute)
+					}
+				} else {
+					assertTask6PatchError(t, errExecute)
+				}
 				checkUsage()
 				auth.ID += "-gateway"
 				checkGatewayUsage := task6CaptureFailureUsage(t, auth.ID)
 				result := task6Gateway(t, exec, auth, false)
-				if result.Code != http.StatusBadGateway || !strings.Contains(result.Body.String(), "Invalid apply_patch tool arguments received from upstream.") {
+				if result.Code != http.StatusBadGateway || !strings.Contains(result.Body.String(), wantGatewayMsg) {
 					t.Errorf("non-stream gateway did not return clean 502: %d %s", result.Code, result.Body)
 				}
 				checkGatewayUsage()
@@ -535,7 +543,7 @@ func TestApplyPatchRepairXAIWebsocketCompactionUsage(t *testing.T) {
 				opts.Stream = false
 				var response cliproxyexecutor.Response
 				response, errExecute = exec.XAIExecutor.Execute(t.Context(), auth, req, opts)
-				if output := gjson.GetBytes(response.Payload, "output"); !output.IsArray() || len(output.Array()) != 0 {
+				if output := ojson.GetBytes(response.Payload, "output"); !output.IsArray() || len(output.Array()) != 0 {
 					t.Errorf("ordinary HTTP compact output changed: %s", response.Payload)
 				}
 			} else {
@@ -550,11 +558,11 @@ func TestApplyPatchRepairXAIWebsocketCompactionUsage(t *testing.T) {
 						if chunk.Err != nil {
 							t.Errorf("compact stream chunk error: %v", chunk.Err)
 						}
-						if gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+						if ojson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
 							completed = chunk.Payload
 						}
 					}
-					if tc.wantStatus != 0 || gjson.GetBytes(completed, "response.output.0.encrypted_content").String() != "opaque-state" {
+					if tc.wantStatus != 0 || ojson.GetBytes(completed, "response.output.0.encrypted_content").String() != "opaque-state" {
 						t.Errorf("unexpected compact success: %s", completed)
 					}
 				}
@@ -614,6 +622,10 @@ func TestApplyPatchRepairOrdinaryEmptyHTTPPassthrough(t *testing.T) {
 			if provider == "kimi" {
 				if errExecute != nil || len(response.Payload) != 0 {
 					t.Fatalf("ordinary Kimi response changed: %s %v", response.Payload, errExecute)
+				}
+			} else if provider == "xai" {
+				if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusBadGateway || errExecute.Error() != xaiEmptyStreamMessage {
+					t.Fatalf("ordinary xAI empty stream changed: %v", errExecute)
 				}
 			} else if status, okStatus := errExecute.(interface{ StatusCode() int }); !okStatus || status.StatusCode() != http.StatusRequestTimeout {
 				t.Fatalf("ordinary disconnect changed: %v", errExecute)

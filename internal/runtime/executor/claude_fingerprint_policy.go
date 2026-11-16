@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/ojson"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -99,6 +100,12 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 	authIsOAuth := isClaudeOAuthToken(apiKey)
 	profile := claudeFingerprintProfileFromConfig(cfg, auth)
 	profileClaudeCodeCLI := authIsOAuth || profile == claudeFingerprintProfileClaudeCodeCLI
+	// header-defaults.inject-diagnostics=false opts out of the injected
+	// diagnostics field, and with it the body-derived cache-diagnosis beta.
+	injectDiagnostics := profileClaudeCodeCLI
+	if cfg != nil && cfg.ClaudeHeaderDefaults.InjectDiagnostics != nil && !*cfg.ClaudeHeaderDefaults.InjectDiagnostics {
+		injectDiagnostics = false
+	}
 
 	return claudeFingerprintPolicy{
 		AuthIsOAuthToken:     authIsOAuth,
@@ -107,7 +114,7 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 		ApplyCLIIdentity:     profileClaudeCodeCLI,
 		SynthesizeIdentity:   profileClaudeCodeCLI && !authIsOAuth,
 		MCPAlias:             profileClaudeCodeCLI,
-		InjectDiagnostics:    profileClaudeCodeCLI,
+		InjectDiagnostics:    injectDiagnostics,
 		OAuthCancellation:    authIsOAuth,
 	}
 }
@@ -125,17 +132,24 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 // providers such as Kimi seed from the stable auth identity, so an access-token
 // rotation does not rotate the device fingerprint.
 func applyClaudeCLIIdentity(body []byte, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize bool) ([]byte, error) {
+	doc := ojson.NewDoc(body)
+	if errApply := applyClaudeCLIIdentityDoc(doc, auth, apiKey, upstreamURL, sessionID, synthesize); errApply != nil {
+		return nil, errApply
+	}
+	return doc.Bytes(), nil
+}
+
+func applyClaudeCLIIdentityDoc(doc *ojson.Doc, auth *cliproxyauth.Auth, apiKey, upstreamURL, sessionID string, synthesize bool) error {
 	identitySeed := apiKey
 	if isKimiMessagesUpstream(auth, upstreamURL) {
 		identitySeed = helps.ClaudeCLIAuthIdentitySeed(auth)
 	}
 	identityAuth, errIdentity := helps.PrepareClaudeCLIFingerprintAuth(auth, identitySeed, synthesize)
 	if errIdentity != nil {
-		return nil, fmt.Errorf("ensure Claude CLI fingerprint identity: %w", errIdentity)
+		return fmt.Errorf("ensure Claude CLI fingerprint identity: %w", errIdentity)
 	}
-	updated, _, errApply := helps.ApplyClaudeCredentialMetadata(body, identityAuth, sessionID)
-	if errApply != nil {
-		return nil, fmt.Errorf("apply Claude credential metadata: %w", errApply)
+	if _, errApply := helps.ApplyClaudeCredentialMetadataDoc(doc, identityAuth, sessionID); errApply != nil {
+		return fmt.Errorf("apply Claude credential metadata: %w", errApply)
 	}
-	return updated, nil
+	return nil
 }

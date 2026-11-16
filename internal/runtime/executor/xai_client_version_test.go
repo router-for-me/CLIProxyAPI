@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -72,5 +73,27 @@ func TestXAIChatProxyCustomHeadersOverridePinnedVersion(t *testing.T) {
 
 	if got := req.Header.Get(xaiClientVersionHeader); got != "9.9.9" {
 		t.Fatalf("%s = %q, want the per-auth custom header to override the pin", xaiClientVersionHeader, got)
+	}
+}
+
+func TestXAIChatProxyIdentityHeadersFollowDynamicVersion(t *testing.T) {
+	restore := helps.SetXAIClientVersionForTest("1.2.34")
+	defer restore()
+
+	auth := &cliproxyauth.Auth{
+		Provider:   "xai",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	req, err := http.NewRequest(http.MethodPost, xaiChatBaseURL(auth)+"/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyXAIChatHeaders(req, auth, "token", false, "")
+
+	if got := req.Header.Get(xaiClientVersionHeader); got != "1.2.34" {
+		t.Fatalf("%s = %q, want dynamic version 1.2.34", xaiClientVersionHeader, got)
+	}
+	if got, want := req.Header.Get("User-Agent"), "xai-grok-workspace/1.2.34"; got != want {
+		t.Fatalf("User-Agent = %q, want %q", got, want)
 	}
 }

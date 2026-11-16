@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Source completion is a barrier even when the winning name or either ID is late.
@@ -30,7 +30,7 @@ func TestInteractionsApplyPatchSourceStopFragments(t *testing.T) {
 						if input == "complete" {
 							before, after, final = `{"input":"p"}`, " \t\n", "p"
 						}
-						var events []gjson.Result
+						var events []ojson.Result
 						events = append(events, patchSend(&param, patchStep("step.start", step))...)
 						events = append(events, patchSend(&param, patchJSON(map[string]any{"event_type": "step.delta", "index": 2, "delta": map[string]any{"type": "arguments_delta", "arguments": before}}))...)
 						events = append(events, patchSend(&param, patchStep("step.stop", nil))...)
@@ -125,7 +125,7 @@ func TestInteractionsApplyPatchSourceStopLateIdentityReplay(t *testing.T) {
 						}
 					}
 					resolved := map[string]any{"index": 2, "type": "function_call", "id": "item_2", "call_id": "call_2", "name": "functions__apply_patch"}
-					var events []gjson.Result
+					var events []ojson.Result
 					if boundary != "terminal-snapshot" {
 						events = patchSend(&param, patchJSON(map[string]any{"event_type": "step.delta", "index": 2, "step": resolved, "delta": map[string]any{"type": "arguments_delta", "arguments": ""}}))
 						wantCount := 3

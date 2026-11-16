@@ -20,7 +20,13 @@ func ResolveModelInfo(name, modelType string, support *registry.ThinkingSupport)
 	info.ID = trimmedName
 	info.Type = strings.TrimSpace(modelType)
 	if support != nil {
-		info.Thinking = NormalizeThinkingSupport(support)
+		normalized := NormalizeThinkingSupport(support)
+		// Configured levels replace the catalog entry, but the way a known model
+		// turns thinking off is an upstream API fact, not a level choice.
+		if normalized.DisableType == "" && info.Thinking != nil {
+			normalized.DisableType = info.Thinking.DisableType
+		}
+		info.Thinking = normalized
 	}
 	info.UserDefined = false
 	return info

@@ -7,12 +7,13 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const interactionsAgentAuthSelectionModel = "gemini-2.5-flash"
@@ -24,12 +25,12 @@ type interactionsRequestTarget struct {
 }
 
 func parseInteractionsRequestTarget(rawJSON []byte) (interactionsRequestTarget, error) {
-	if !gjson.ValidBytes(rawJSON) {
+	if !ojson.ValidBytes(rawJSON) {
 		return interactionsRequestTarget{}, fmt.Errorf("invalid JSON body")
 	}
-	root := gjson.ParseBytes(rawJSON)
-	model := strings.TrimSpace(root.Get("model").String())
-	agent := strings.TrimSpace(root.Get("agent").String())
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
+	model := strings.Clone(strings.TrimSpace(root.Get("model").String()))
+	agent := strings.Clone(strings.TrimSpace(root.Get("agent").String()))
 	if model == "" && agent == "" {
 		return interactionsRequestTarget{}, fmt.Errorf("request requires exactly one of model or agent")
 	}
@@ -55,7 +56,7 @@ func prepareInteractionsExecutionTarget(rawJSON []byte, target interactionsReque
 	if model == target.Model {
 		return model, rawJSON
 	}
-	updatedRawJSON, errSet := sjson.SetBytes(rawJSON, "model", model)
+	updatedRawJSON, errSet := ojson.SetBytes(rawJSON, "model", model)
 	if errSet != nil {
 		return model, rawJSON
 	}
@@ -93,7 +94,7 @@ func buildInteractionsExecutionRequest(target interactionsRequestTarget, modelNa
 func (h *GeminiAPIHandler) Interactions(c *gin.Context) {
 	rawJSON, errRead := c.GetRawData()
 	if errRead != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: errRead.Error(), Type: "invalid_request_error"}})
+		c.JSON(clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest), handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: errRead.Error(), Type: "invalid_request_error"}})
 		return
 	}
 	target, errParse := parseInteractionsRequestTarget(rawJSON)
@@ -137,17 +138,67 @@ func (h *GeminiAPIHandler) handleInteractionsStream(c *gin.Context, cliCtx conte
 		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: "Streaming not supported", Type: "server_error"}})
 		return
 	}
-	stream, errMsg := h.ExecuteProtocolStreamWithAuthManager(cliCtx, req)
+	var upstreamHeaders http.Header
+	committed := false
+	commitSSE := func() {
+		if committed {
+			return
+		}
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("Access-Control-Allow-Origin", "*")
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		committed = true
+	}
+	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	defer stopKeepAlive()
+
+	var stream handlers.ModelExecutionStream
+	var errMsg *interfaces.ErrorMessage
+	if keepAliveC == nil {
+		stream, errMsg = h.ExecuteProtocolStreamWithAuthManager(cliCtx, req)
+	} else {
+		type protocolStreamResult struct {
+			stream handlers.ModelExecutionStream
+			errMsg *interfaces.ErrorMessage
+		}
+		resultChan := make(chan protocolStreamResult, 1)
+		go func() {
+			s, e := h.ExecuteProtocolStreamWithAuthManager(cliCtx, req)
+			resultChan <- protocolStreamResult{stream: s, errMsg: e}
+		}()
+		for waiting := true; waiting; {
+			select {
+			case <-c.Request.Context().Done():
+				cliCancel(c.Request.Context().Err())
+				<-resultChan
+				return
+			case res := <-resultChan:
+				stream, errMsg = res.stream, res.errMsg
+				waiting = false
+			case <-keepAliveC:
+				commitSSE()
+				_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+				flusher.Flush()
+			}
+		}
+	}
+	stopKeepAlive()
 	if errMsg != nil {
+		if committed {
+			pendingErrors := make(chan *interfaces.ErrorMessage, 1)
+			pendingErrors <- errMsg
+			close(pendingErrors)
+			h.forwardInteractionsStream(c, flusher, func(err error) { cliCancel(err) }, make(chan []byte), pendingErrors)
+			return
+		}
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
 		return
 	}
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("Access-Control-Allow-Origin", "*")
-	handlers.WriteUpstreamHeaders(c.Writer.Header(), stream.Headers)
+	upstreamHeaders = stream.Headers
+	commitSSE()
 	data := make(chan []byte)
 	errs := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
@@ -187,6 +238,7 @@ func (h *GeminiAPIHandler) forwardInteractionsStream(c *gin.Context, flusher htt
 			if errMsg == nil {
 				return
 			}
+			h.LoggingAPIResponseError(c, errMsg)
 			status := http.StatusInternalServerError
 			if errMsg.StatusCode > 0 {
 				status = errMsg.StatusCode

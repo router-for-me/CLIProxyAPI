@@ -7,22 +7,23 @@ import (
 )
 
 type Manifest struct {
-	SchemaVersion int         `yaml:"schema-version,omitempty" json:"schema_version,omitempty"`
-	ID            string      `yaml:"id,omitempty" json:"id,omitempty"`
-	Name          string      `yaml:"name,omitempty" json:"name,omitempty"`
-	Description   string      `yaml:"description,omitempty" json:"description,omitempty"`
-	Author        string      `yaml:"author,omitempty" json:"author,omitempty"`
-	Version       string      `yaml:"version,omitempty" json:"version,omitempty"`
-	ReleaseTag    string      `yaml:"release-tag,omitempty" json:"release_tag,omitempty"`
-	Repository    string      `yaml:"repository,omitempty" json:"repository,omitempty"`
-	Logo          string      `yaml:"logo,omitempty" json:"logo,omitempty"`
-	Homepage      string      `yaml:"homepage,omitempty" json:"homepage,omitempty"`
-	License       string      `yaml:"license,omitempty" json:"license,omitempty"`
-	Tags          []string    `yaml:"tags,omitempty" json:"tags,omitempty"`
-	SourceID      string      `yaml:"source-id,omitempty" json:"source_id,omitempty"`
-	SourceName    string      `yaml:"source-name,omitempty" json:"source_name,omitempty"`
-	SourceURL     string      `yaml:"source-url,omitempty" json:"source_url,omitempty"`
-	Install       InstallPlan `yaml:"install,omitempty" json:"install,omitempty"`
+	SchemaVersion int                     `yaml:"schema-version,omitempty" json:"schema_version,omitempty"`
+	ID            string                  `yaml:"id,omitempty" json:"id,omitempty"`
+	Name          string                  `yaml:"name,omitempty" json:"name,omitempty"`
+	Description   string                  `yaml:"description,omitempty" json:"description,omitempty"`
+	Author        string                  `yaml:"author,omitempty" json:"author,omitempty"`
+	Version       string                  `yaml:"version,omitempty" json:"version,omitempty"`
+	ReleaseTag    string                  `yaml:"release-tag,omitempty" json:"release_tag,omitempty"`
+	Repository    string                  `yaml:"repository,omitempty" json:"repository,omitempty"`
+	Logo          string                  `yaml:"logo,omitempty" json:"logo,omitempty"`
+	Homepage      string                  `yaml:"homepage,omitempty" json:"homepage,omitempty"`
+	License       string                  `yaml:"license,omitempty" json:"license,omitempty"`
+	Tags          []string                `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Locales       map[string]PluginLocale `yaml:"locales,omitempty" json:"locales,omitempty"`
+	SourceID      string                  `yaml:"source-id,omitempty" json:"source_id,omitempty"`
+	SourceName    string                  `yaml:"source-name,omitempty" json:"source_name,omitempty"`
+	SourceURL     string                  `yaml:"source-url,omitempty" json:"source_url,omitempty"`
+	Install       InstallPlan             `yaml:"install,omitempty" json:"install,omitempty"`
 }
 
 func ManifestFromRelease(source Source, plugin Plugin, release Release) (Manifest, error) {
@@ -69,6 +70,7 @@ func manifestFromPlugin(source Source, plugin Plugin, base Manifest) Manifest {
 	base.Homepage = strings.TrimSpace(plugin.Homepage)
 	base.License = strings.TrimSpace(plugin.License)
 	base.Tags = append([]string(nil), plugin.Tags...)
+	base.Locales = NormalizePluginLocales(plugin.Locales)
 	base.SourceID = strings.TrimSpace(source.ID)
 	base.SourceName = strings.TrimSpace(source.Name)
 	base.SourceURL = strings.TrimSpace(source.URL)
@@ -87,6 +89,7 @@ func (m Manifest) Plugin() Plugin {
 		Homepage:    strings.TrimSpace(m.Homepage),
 		License:     strings.TrimSpace(m.License),
 		Tags:        append([]string(nil), m.Tags...),
+		Locales:     NormalizePluginLocales(m.Locales),
 		Install:     NormalizeInstallPlan(m.Install),
 	}
 }

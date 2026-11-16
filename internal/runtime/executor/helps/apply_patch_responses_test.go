@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestApplyPatchResponsesHelperNativeSSEBytes(t *testing.T) {
@@ -60,10 +60,10 @@ func TestApplyPatchResponsesHelperDispatcherKeysAndFinal(t *testing.T) {
 				}
 				found := false
 				for _, e := range out {
-					if gjson.GetBytes(e, "type").String() == "response.custom_tool_call_input.done" {
+					if ojson.GetBytes(e, "type").String() == "response.custom_tool_call_input.done" {
 						found = true
 					}
-					if gjson.GetBytes(e, "type").String() == "response.custom_tool_call_input.delta" {
+					if ojson.GetBytes(e, "type").String() == "response.custom_tool_call_input.delta" {
 						t.Fatalf("fabricated dispatcher preview: %s", out)
 					}
 				}
@@ -97,7 +97,7 @@ func TestApplyPatchResponsesHelperRequestChatPreference(t *testing.T) {
 	original := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","function":{"name":"apply_patch","parameters":{"type":"object","properties":{"x":{"type":"integer"}}}}}]}`)
 	body := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"apply_patch","parameters":{"type":"object","properties":{"x":{"type":"integer"}}}}]}`)
 	out, errNormalize := NormalizeApplyPatchResponsesRequest(body, original)
-	if errNormalize != nil || !gjson.GetBytes(out, "tools.0.parameters.properties.x").Exists() || gjson.GetBytes(out, "tools.0.parameters.properties.input").Exists() {
+	if errNormalize != nil || !ojson.GetBytes(out, "tools.0.parameters.properties.x").Exists() || ojson.GetBytes(out, "tools.0.parameters.properties.input").Exists() {
 		t.Fatalf("request ordinary preference lost: %s %v", out, errNormalize)
 	}
 }
@@ -117,7 +117,7 @@ func TestApplyPatchResponsesHelperDispatcherOmittedArguments(t *testing.T) {
 				}
 			}
 			out, errTransform := s.Transform([]byte(fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"c","name":%q,"namespace":"n"}}`, lateName)))
-			if errTransform != nil || len(out) == 0 || gjson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
+			if errTransform != nil || len(out) == 0 || ojson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
 				t.Fatalf("sourced dispatcher completion lost: %s %v", out, errTransform)
 			}
 		})
@@ -239,17 +239,17 @@ func TestApplyPatchResponsesHelperRetainedDispatcherProvenance(t *testing.T) {
 			for _, wrapper := range tc.wrappers {
 				s.RememberDispatcherArguments([]byte(fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"a","arguments":%q}`, wrapper)))
 				// The real restorer removes the wrapper before this event reaches Transform.
-				if _, errTransform := s.Transform([]byte(fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"a","arguments":%q}`, gjson.Get(wrapper, "arguments").Raw))); errTransform != nil {
+				if _, errTransform := s.Transform([]byte(fmt.Sprintf(`{"type":"response.function_call_arguments.done","item_id":"a","arguments":%q}`, ojson.Get(wrapper, "arguments").Raw))); errTransform != nil {
 					t.Fatal(errTransform)
 				}
 			}
 			final := fmt.Sprintf(`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"a","call_id":"late","name":%q,"namespace":"n"}}`, tc.finalName)
 			out, errTransform := s.Transform([]byte(final))
 			if tc.shouldFail {
-				if errTransform == nil || len(out) != 1 || gjson.GetBytes(out[0], "type").String() != "response.failed" {
+				if errTransform == nil || len(out) != 1 || ojson.GetBytes(out[0], "type").String() != "response.failed" {
 					t.Fatalf("dispatcher child evidence lost: %s %v", out, errTransform)
 				}
-			} else if errTransform != nil || len(out) == 0 || gjson.GetBytes(out[len(out)-1], "item.name").String() != "lookup" || gjson.GetBytes(out[len(out)-1], "item.namespace").String() != "n" || gjson.GetBytes(out[len(out)-1], "item.arguments").String() != gjson.Get(tc.wrappers[len(tc.wrappers)-1], "arguments").Raw || bytes.Contains(bytes.Join(out, nil), []byte(`custom_tool_call`)) {
+			} else if errTransform != nil || len(out) == 0 || ojson.GetBytes(out[len(out)-1], "item.name").String() != "lookup" || ojson.GetBytes(out[len(out)-1], "item.namespace").String() != "n" || ojson.GetBytes(out[len(out)-1], "item.arguments").String() != ojson.Get(tc.wrappers[len(tc.wrappers)-1], "arguments").Raw || bytes.Contains(bytes.Join(out, nil), []byte(`custom_tool_call`)) {
 				t.Fatalf("ordinary dispatcher child changed: %s %v", out, errTransform)
 			}
 		})
@@ -278,7 +278,7 @@ func TestApplyPatchResponsesHelperDispatcherSnapshotsAllMatched(t *testing.T) {
 				t.Fatal(errTransform)
 			}
 			out, errTransform := s.Transform([]byte(fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":{"type":"function_call","id":"i%d","call_id":"c%d","name":"n"}}`, discover, discover, discover)))
-			if errTransform == nil || len(out) != 1 || gjson.GetBytes(out[0], "type").String() != "response.failed" {
+			if errTransform == nil || len(out) != 1 || ojson.GetBytes(out[0], "type").String() != "response.failed" {
 				t.Fatalf("conflicting all-key evidence lost on record %d: %s %v", discover, out, errTransform)
 			}
 		})
@@ -324,7 +324,7 @@ func TestApplyPatchResponsesHelperDispatcherLifecycle(t *testing.T) {
 				}
 			}
 			out, errTransform := s.Transform([]byte(`{"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","id":"a","call_id":"c","name":"n"}}`))
-			if errTransform != nil || len(out) == 0 || gjson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
+			if errTransform != nil || len(out) == 0 || ojson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
 				t.Fatalf("retained source not acquired: %s %v", out, errTransform)
 			}
 			call := s.byDispatcherKey["item:a"]
@@ -337,7 +337,7 @@ func TestApplyPatchResponsesHelperDispatcherLifecycle(t *testing.T) {
 			switch closeAt {
 			case "response":
 				out, errTransform = s.Transform([]byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"c","name":"n"}]}}`))
-				if errTransform != nil || len(out) != 1 || gjson.GetBytes(out[0], "response.output.0.input").String() != "p" {
+				if errTransform != nil || len(out) != 1 || ojson.GetBytes(out[0], "response.output.0.input").String() != "p" {
 					t.Fatalf("sparse terminal lost completed child or replayed progress: %s %v", out, errTransform)
 				}
 			case "sentinel":
@@ -382,7 +382,7 @@ func TestApplyPatchResponsesHelperLateChildNamespace(t *testing.T) {
 		}
 		out = append(out, converted...)
 	}
-	if len(out) == 0 || gjson.GetBytes(out[len(out)-1], "item.namespace").String() != "n" || gjson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
+	if len(out) == 0 || ojson.GetBytes(out[len(out)-1], "item.namespace").String() != "n" || ojson.GetBytes(out[len(out)-1], "item.input").String() != "p" {
 		t.Fatalf("sourced late child lost its namespace/input: %s", out)
 	}
 }
@@ -404,7 +404,7 @@ func TestApplyPatchResponsesHelperTerminalSourceIdentity(t *testing.T) {
 	// Provider filtering can remove an earlier item after the original snapshot is copied.
 	s.RememberDispatcherEvent([]byte(`{"type":"response.completed","response":{"output":[{"type":"message","id":"removed"},{"type":"function_call","id":"a","call_id":"c","name":"n","namespace":"other"}]}}`))
 	out, errTransform := s.Transform([]byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","id":"a","call_id":"c","name":"n","namespace":"n"}]}}`))
-	if errTransform == nil || len(out) != 1 || gjson.GetBytes(out[0], "type").String() != "response.failed" {
+	if errTransform == nil || len(out) != 1 || ojson.GetBytes(out[0], "type").String() != "response.failed" {
 		t.Fatalf("terminal source matched by position, losing contradictory namespace: %s %v", out, errTransform)
 	}
 }
@@ -427,7 +427,7 @@ func TestApplyPatchResponsesHelperIndexOnlyTerminal(t *testing.T) {
 	terminal := []byte(`{"type":"response.completed","response":{"output":[{"type":"function_call","name":"n"}]}}`)
 	s.RememberDispatcherEvent(terminal)
 	out, errTransform := s.Transform(terminal)
-	if errTransform != nil || len(out) == 0 || gjson.GetBytes(out[len(out)-1], "response.output.0.input").String() != "p" {
+	if errTransform != nil || len(out) == 0 || ojson.GetBytes(out[len(out)-1], "response.output.0.input").String() != "p" {
 		t.Fatalf("index-only provenance bypassed: %s %v", out, errTransform)
 	}
 }
@@ -493,5 +493,29 @@ func TestApplyPatchResponsesHelperInactiveEOFAndDONE(t *testing.T) {
 		if out, errStream := s.Stream(line); errStream != nil || len(out) != 1 || !bytes.Equal(out[0], line) {
 			t.Fatalf("ordinary DONE changed: %s %v", out, errStream)
 		}
+	}
+}
+
+func TestNormalizeApplyPatchResponsesRequestDocMutatesInPlace(t *testing.T) {
+	raw := []byte(`{"tools":[{"type":"namespace","name":"ns","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"g"}}]}],"tool_choice":{"type":"custom","namespace":"ns","name":"apply_patch"},"input":[{"type":"custom_tool_call","call_id":"c1","name":"\u00a0apply_patch\u00a0","input":"*** Begin Patch\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"c1","output":"ok"}]}`)
+	doc := ojson.NewDoc(raw)
+	if errNorm := NormalizeApplyPatchResponsesRequestDoc(doc); errNorm != nil {
+		t.Fatalf("NormalizeApplyPatchResponsesRequestDoc error: %v", errNorm)
+	}
+	out := doc.Bytes()
+	if got := ojson.GetBytesNoCopy(out, "tools.0.tools.0.type").String(); got != "function" {
+		t.Fatalf("tools.0.tools.0.type = %q, want function: %s", got, out)
+	}
+	if ojson.GetBytesNoCopy(out, "tools.0.tools.0.format").Exists() {
+		t.Fatalf("expected tools.0.tools.0.format to be deleted: %s", out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function: %s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.0.type").String(); got != "function_call" {
+		t.Fatalf("input.0.type = %q, want function_call: %s", got, out)
+	}
+	if got := ojson.GetBytesNoCopy(out, "input.1.type").String(); got != "function_call_output" {
+		t.Fatalf("input.1.type = %q, want function_call_output: %s", got, out)
 	}
 }

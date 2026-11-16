@@ -2,11 +2,13 @@ package pluginapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type compileTimePlugin struct{}
@@ -45,12 +47,16 @@ func TestMetadataConfigFieldsExposePluginSchema(t *testing.T) {
 		ConfigFields: []ConfigField{{
 			Name:        "mode",
 			Type:        ConfigFieldTypeEnum,
+			Default:     "safe",
 			EnumValues:  []string{"safe", "fast"},
 			Description: "Execution mode.",
 		}},
 	}
 	if meta.Logo == "" || len(meta.ConfigFields) != 1 {
 		t.Fatalf("metadata missing logo or config fields: %#v", meta)
+	}
+	if meta.ConfigFields[0].Default != "safe" {
+		t.Fatalf("config field default = %#v, want safe", meta.ConfigFields[0].Default)
 	}
 }
 
@@ -187,13 +193,15 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		ForcedProvider: "gemini",
 		AuthID:         "exact-auth-123",
 		ProxyURL:       "socks5://127.0.0.1:1080",
+		Path:           "/v1/messages",
+		CallerScope:    "opaque-caller-scope-123",
 	}
 	rawRequest, errMarshalRequest := json.Marshal(request)
 	if errMarshalRequest != nil {
 		t.Fatalf("marshal HostModelExecutionRequest: %v", errMarshalRequest)
 	}
 	requestJSON := string(rawRequest)
-	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id", "proxy_url"} {
+	for _, field := range []string{"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt", "forced_provider", "auth_id", "proxy_url", "path", "caller_scope"} {
 		if !strings.Contains(requestJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
 		}
@@ -212,7 +220,9 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		decodedRequest.Alt != request.Alt ||
 		decodedRequest.ForcedProvider != request.ForcedProvider ||
 		decodedRequest.AuthID != request.AuthID ||
-		decodedRequest.ProxyURL != request.ProxyURL {
+		decodedRequest.ProxyURL != request.ProxyURL ||
+		decodedRequest.Path != request.Path ||
+		decodedRequest.CallerScope != request.CallerScope {
 		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
 	}
 	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {
@@ -415,6 +425,7 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 		wantReject   bool
 		wantCode     string
 		wantReason   string
+		wantExclude  []string
 	}{
 		{
 			name:         "legacy pascal case auth id",
@@ -464,6 +475,19 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 			wantCode:    "policy_violation",
 			wantReason:  "blocked by policy",
 		},
+		{
+			name:        "pascal case exclude candidates unhandled",
+			payload:     `{"Handled":false,"ExcludeCandidates":["ag-1","ag-2"]}`,
+			wantHandled: false,
+			wantExclude: []string{"ag-1", "ag-2"},
+		},
+		{
+			name:         "snake case exclude candidates with delegate",
+			payload:      `{"handled":true,"delegate_builtin":"round-robin","exclude_candidates":["ag-1","ag-3"]}`,
+			wantHandled:  true,
+			wantDelegate: "round-robin",
+			wantExclude:  []string{"ag-1", "ag-3"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -490,22 +514,26 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 			if resp.RejectReason != tc.wantReason {
 				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
 			}
+			if !slices.Equal(resp.ExcludeCandidates, tc.wantExclude) {
+				t.Fatalf("ExcludeCandidates = %v, want %v", resp.ExcludeCandidates, tc.wantExclude)
+			}
 		})
 	}
 }
 
 func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T) {
-	// Verify that explicit false or empty string in incoming JSON correctly overwrites pre-existing true/non-empty values.
+	// Verify that explicit false, empty string, or empty slice in incoming JSON correctly overwrites pre-existing values.
 	resp := SchedulerPickResponse{
-		AuthID:          "old-auth",
-		DelegateBuiltin: "old-delegate",
-		Handled:         true,
-		Reject:          true,
-		RejectCode:      "old-code",
-		RejectReason:    "old-reason",
+		AuthID:            "old-auth",
+		DelegateBuiltin:   "old-delegate",
+		Handled:           true,
+		Reject:            true,
+		RejectCode:        "old-code",
+		RejectReason:      "old-reason",
+		ExcludeCandidates: []string{"old-excluded"},
 	}
 
-	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`
+	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":"","exclude_candidates":[]}`
 	if errUnmarshal := json.Unmarshal([]byte(payload), &resp); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
 	}
@@ -528,11 +556,26 @@ func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T
 	if resp.RejectReason != "" {
 		t.Fatalf("RejectReason = %q, want empty", resp.RejectReason)
 	}
+	if len(resp.ExcludeCandidates) != 0 {
+		t.Fatalf("ExcludeCandidates = %v, want empty", resp.ExcludeCandidates)
+	}
+
+	// Verify that explicit null in incoming JSON clears existing ExcludeCandidates.
+	respNull := SchedulerPickResponse{
+		ExcludeCandidates: []string{"old-excluded"},
+	}
+	if errUnmarshal := json.Unmarshal([]byte(`{"exclude_candidates":null}`), &respNull); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal(null) error = %v", errUnmarshal)
+	}
+	if len(respNull.ExcludeCandidates) != 0 {
+		t.Fatalf("ExcludeCandidates after null = %v, want empty", respNull.ExcludeCandidates)
+	}
 
 	// Verify that omitting fields in incoming JSON leaves existing fields intact.
 	resp2 := SchedulerPickResponse{
-		AuthID:  "keep-auth",
-		Handled: true,
+		AuthID:            "keep-auth",
+		Handled:           true,
+		ExcludeCandidates: []string{"keep-excluded"},
 	}
 	if errUnmarshal := json.Unmarshal([]byte(`{"reject":true}`), &resp2); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
@@ -545,6 +588,17 @@ func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T
 	}
 	if !resp2.Reject {
 		t.Fatalf("Reject = %v, want true", resp2.Reject)
+	}
+	if !slices.Equal(resp2.ExcludeCandidates, []string{"keep-excluded"}) {
+		t.Fatalf("ExcludeCandidates = %v, want [keep-excluded]", resp2.ExcludeCandidates)
+	}
+
+	// Verify that non-array or non-string exclude_candidates payloads fail cleanly.
+	for _, badPayload := range []string{`{"exclude_candidates":"not-array"}`, `{"exclude_candidates":["ok",123]}`} {
+		var badResp SchedulerPickResponse
+		if errBad := json.Unmarshal([]byte(badPayload), &badResp); errBad == nil {
+			t.Fatalf("json.Unmarshal(%s) error = nil, want error", badPayload)
+		}
 	}
 }
 
@@ -841,16 +895,95 @@ func TestUsageRecordResponseModelServiceTierAndStream(t *testing.T) {
 
 func TestUsageRecordRequestIDAndTraceID(t *testing.T) {
 	record := UsageRecord{
-		RequestID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
-		TraceID:   "00000001",
-		Provider:  "codex",
-		Model:     "gpt-5.6-luna",
+		RequestID:   "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		TraceID:     "00000001",
+		SelectionID: "7e57d004-2b97-4e7a-b45f-5387367791cd",
+		Provider:    "codex",
+		Model:       "gpt-5.6-luna",
 	}
 	if record.RequestID != "b5db448b-3d6d-495c-9c71-f925b68926cb" {
 		t.Fatalf("UsageRecord.RequestID = %q, want %q", record.RequestID, "b5db448b-3d6d-495c-9c71-f925b68926cb")
 	}
 	if record.TraceID != "00000001" {
 		t.Fatalf("UsageRecord.TraceID = %q, want %q", record.TraceID, "00000001")
+	}
+	if record.SelectionID != "7e57d004-2b97-4e7a-b45f-5387367791cd" {
+		t.Fatalf("UsageRecord.SelectionID = %q, want %q", record.SelectionID, "7e57d004-2b97-4e7a-b45f-5387367791cd")
+	}
+	if SelectionIDMetadataKey != "selection_id" {
+		t.Fatalf("SelectionIDMetadataKey = %q, want selection_id", SelectionIDMetadataKey)
+	}
+}
+
+func TestUsageDetailModalityTokenCounters(t *testing.T) {
+	int64Ptr := func(v int64) *int64 { return &v }
+	record := UsageRecord{
+		Provider: "openai",
+		Model:    "gpt-image-2.5-flare",
+		Detail: UsageDetail{
+			InputTokens:       80,
+			OutputTokens:      1056,
+			CachedTokens:      40,
+			CacheReadTokens:   40,
+			TotalTokens:       1136,
+			TextInputTokens:   int64Ptr(30),
+			ImageInputTokens:  int64Ptr(50),
+			AudioInputTokens:  int64Ptr(0),
+			VideoInputTokens:  nil,
+			FileInputTokens:   int64Ptr(12),
+			CachedTextTokens:  int64Ptr(25),
+			CachedImageTokens: int64Ptr(15),
+			CachedAudioTokens: int64Ptr(0),
+			TextOutputTokens:  int64Ptr(0),
+			ImageOutputTokens: int64Ptr(1056),
+			AudioOutputTokens: nil,
+		},
+	}
+
+	raw, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshal)
+	}
+	var decoded UsageRecord
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshal)
+	}
+	got := decoded.Detail
+	if got.InputTokens != 80 || got.OutputTokens != 1056 || got.TotalTokens != 1136 {
+		t.Fatalf("aggregate Detail = %+v", got)
+	}
+	if got.TextInputTokens == nil || *got.TextInputTokens != 30 {
+		t.Fatalf("TextInputTokens = %v, want 30", got.TextInputTokens)
+	}
+	if got.ImageInputTokens == nil || *got.ImageInputTokens != 50 {
+		t.Fatalf("ImageInputTokens = %v, want 50", got.ImageInputTokens)
+	}
+	if got.AudioInputTokens == nil || *got.AudioInputTokens != 0 {
+		t.Fatalf("AudioInputTokens = %v, want explicit 0", got.AudioInputTokens)
+	}
+	if got.VideoInputTokens != nil {
+		t.Fatalf("VideoInputTokens = %v, want nil", got.VideoInputTokens)
+	}
+	if got.FileInputTokens == nil || *got.FileInputTokens != 12 {
+		t.Fatalf("FileInputTokens = %v, want 12", got.FileInputTokens)
+	}
+	if got.CachedTextTokens == nil || *got.CachedTextTokens != 25 {
+		t.Fatalf("CachedTextTokens = %v, want 25", got.CachedTextTokens)
+	}
+	if got.CachedImageTokens == nil || *got.CachedImageTokens != 15 {
+		t.Fatalf("CachedImageTokens = %v, want 15", got.CachedImageTokens)
+	}
+	if got.CachedAudioTokens == nil || *got.CachedAudioTokens != 0 {
+		t.Fatalf("CachedAudioTokens = %v, want explicit 0", got.CachedAudioTokens)
+	}
+	if got.TextOutputTokens == nil || *got.TextOutputTokens != 0 {
+		t.Fatalf("TextOutputTokens = %v, want explicit 0", got.TextOutputTokens)
+	}
+	if got.ImageOutputTokens == nil || *got.ImageOutputTokens != 1056 {
+		t.Fatalf("ImageOutputTokens = %v, want 1056", got.ImageOutputTokens)
+	}
+	if got.AudioOutputTokens != nil {
+		t.Fatalf("AudioOutputTokens = %v, want nil", got.AudioOutputTokens)
 	}
 }
 
@@ -934,5 +1067,54 @@ func TestQuotaBucketZeroRemainingFractionPreserved(t *testing.T) {
 	}
 	if bucket.RemainingFraction != 0 {
 		t.Fatalf("expected remainingFraction 0 to be preserved, got %f", bucket.RemainingFraction)
+	}
+}
+
+func TestHostAuthModelsTypes(t *testing.T) {
+	emptyReqData, errMarshalEmpty := json.Marshal(HostAuthModelsRequest{})
+	if errMarshalEmpty != nil {
+		t.Fatalf("marshal empty request: %v", errMarshalEmpty)
+	}
+	if string(emptyReqData) != "{}" {
+		t.Fatalf("marshaled empty request = %s, want {}", string(emptyReqData))
+	}
+
+	req := HostAuthModelsRequest{AuthIndex: "idx-codex-1"}
+	reqData, errMarshalReq := json.Marshal(req)
+	if errMarshalReq != nil {
+		t.Fatalf("marshal request: %v", errMarshalReq)
+	}
+	var decodedReq HostAuthModelsRequest
+	if errUnmarshalReq := json.Unmarshal(reqData, &decodedReq); errUnmarshalReq != nil {
+		t.Fatalf("unmarshal request: %v", errUnmarshalReq)
+	}
+	if decodedReq != req {
+		t.Fatalf("decoded request = %#v, want %#v", decodedReq, req)
+	}
+
+	resp := HostAuthModelsResponse{
+		Credentials: []HostAuthModels{
+			{
+				ID:        "codex-auth-1",
+				AuthIndex: "idx-codex-1",
+				Provider:  "codex",
+				Models:    []string{"codex/gpt-5.6-sol", "codex/gpt-6-astra"},
+			},
+		},
+	}
+	respData, errMarshalResp := json.Marshal(resp)
+	if errMarshalResp != nil {
+		t.Fatalf("marshal response: %v", errMarshalResp)
+	}
+	var decodedResp HostAuthModelsResponse
+	if errUnmarshalResp := json.Unmarshal(respData, &decodedResp); errUnmarshalResp != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshalResp)
+	}
+	if len(decodedResp.Credentials) != 1 ||
+		decodedResp.Credentials[0].ID != "codex-auth-1" ||
+		decodedResp.Credentials[0].AuthIndex != "idx-codex-1" ||
+		decodedResp.Credentials[0].Provider != "codex" ||
+		len(decodedResp.Credentials[0].Models) != 2 {
+		t.Fatalf("decoded response = %#v, want %#v", decodedResp, resp)
 	}
 }

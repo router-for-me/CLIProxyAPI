@@ -4,11 +4,11 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/vertex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -60,7 +60,7 @@ func DoVertexImport(cfg *config.Config, keyPath string, prefix string) {
 		log.Warn("vertex-import: client_email missing in service account json")
 	}
 	// Default location if not provided by user. Can be edited in the saved file later.
-	location := "us-central1"
+	location := "global"
 
 	// Normalize and validate prefix: must be a single segment (no "/" allowed).
 	prefix = strings.TrimSpace(prefix)

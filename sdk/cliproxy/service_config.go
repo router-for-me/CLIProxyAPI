@@ -6,11 +6,41 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
+
+func (s *Service) currentConfig() *config.Config {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	return cfg
+}
+
+func (s *Service) currentWatcher() *WatcherWrapper {
+	if s == nil {
+		return nil
+	}
+	s.cfgMu.RLock()
+	w := s.watcher
+	s.cfgMu.RUnlock()
+	return w
+}
+
+func (s *Service) setWatcher(w *WatcherWrapper) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.Lock()
+	s.watcher = w
+	s.cfgMu.Unlock()
+}
 
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	s.applyConfigUpdateWithAuthSynthesis(context.Background(), newCfg, true)
@@ -30,6 +60,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	sessionAffinityRebindOn  string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -37,6 +68,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		strategy:                 "round-robin",
 		sessionAffinityTTL:       time.Hour,
 		sessionAffinitySubagents: true,
+		sessionAffinityRebindOn:  coreauth.SessionAffinityRebindOnAny,
 	}
 	if cfg == nil {
 		return state
@@ -60,14 +92,30 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
+	if state.sessionAffinity {
+		switch strings.ToLower(strings.TrimSpace(cfg.Routing.SessionAffinityRebindOn)) {
+		case coreauth.SessionAffinityRebindOnQuota:
+			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnQuota
+		case coreauth.SessionAffinityRebindOnNever:
+			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnNever
+		}
+	}
 	return state
 }
 
 func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
+	return newRoutingSelectorWithExisting(state, nil)
+}
+
+func newRoutingSelectorWithExisting(state routingRuntimeState, existing coreauth.Selector) coreauth.Selector {
 	var selector coreauth.Selector
 	switch state.strategy {
 	case "weighted-round-robin":
-		selector = &coreauth.WeightedRoundRobinSelector{}
+		if existingWeighted := coreauth.UnwrapWeightedRoundRobinSelector(existing); existingWeighted != nil {
+			selector = existingWeighted
+		} else {
+			selector = &coreauth.WeightedRoundRobinSelector{}
+		}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
 	default:
@@ -79,6 +127,7 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 			Fallback:         selector,
 			TTL:              state.sessionAffinityTTL,
 			SubagentAffinity: &subagents,
+			RebindOn:         state.sessionAffinityRebindOn,
 		})
 	}
 	return selector
@@ -120,6 +169,9 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
 		return configCommit{}
 	}
+	// Clone before assigning the generation: callers may still hold the input snapshot.
+	newCfg = newCfg.CloneForRuntime()
+	helps.AdvanceProxyPoolGeneration(s.proxyPoolPublisher, newCfg)
 	s.cfgMu.Lock()
 	s.cfg = newCfg
 	s.cfgMu.Unlock()
@@ -166,6 +218,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.applyDiscoveryConfigContext(ctx, cfg)
+	if s.kvStoreManaged.Load() {
+		s.applyKVStoreConfig(cfg)
+	}
 	if errContext := ctx.Err(); errContext != nil {
 		return false
 	}
@@ -208,6 +263,9 @@ func (s *Service) applyConfigRuntime(ctx context.Context, commit configCommit, s
 		return false
 	}
 	s.syncPluginModelRuntime(registrationCtx)
+	if ctx.Err() == nil && s.hooks.OnConfigApplied != nil {
+		s.hooks.OnConfigApplied(s, cfg)
+	}
 	return ctx.Err() == nil
 }
 
@@ -223,7 +281,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.coreManager.SetSelector(newRoutingSelectorWithExisting(routingState, s.coreManager.Selector()))
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)
@@ -249,10 +307,11 @@ func (s *Service) updateServerClientsContext(ctx context.Context, cfg *config.Co
 }
 
 func (s *Service) reloadConfigFromWatcher() bool {
-	if s == nil || s.watcher == nil {
+	w := s.currentWatcher()
+	if w == nil {
 		return false
 	}
-	return s.watcher.ReloadConfigIfChanged()
+	return w.ReloadConfigIfChanged()
 }
 
 func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Config) {
@@ -308,8 +367,9 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false
-	cfg.WebsocketAuth = false
+	cfg.WebsocketAuth = true
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
 	cfg.Plugins.StoreAuth = nil
+	cfg.KVStore.Disabled = true
 }

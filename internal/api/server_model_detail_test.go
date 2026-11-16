@@ -6,11 +6,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/tidwall/gjson"
 )
 
 type issue5190LifecycleHost struct {
@@ -81,7 +81,7 @@ func TestIssue5190ModelDetailUsesVisibleCatalog(t *testing.T) {
 		if rr.Code != tc.status {
 			t.Errorf("%s: status=%d want=%d body=%s", tc.id, rr.Code, tc.status, rr.Body.String())
 		}
-		if tc.status == 200 && gjson.Get(rr.Body.String(), "id").String() != tc.id {
+		if tc.status == 200 && ojson.GetBytesNoCopy(rr.Body.Bytes(), "id").String() != tc.id {
 			t.Errorf("wrong model: %s", rr.Body.String())
 		}
 	}
@@ -123,7 +123,7 @@ func TestIssue5190ModelDetailHomeVisibility(t *testing.T) {
 	previousHome := home.Current()
 	home.SetCurrent(newHomeCatalogClient(t, `{"openai":[{"id":"home/visible"}]}`))
 	t.Cleanup(func() { home.SetCurrent(previousHome) })
-	if rr := get("home/visible", true); rr.Code != 200 || gjson.Get(rr.Body.String(), "id").String() != "home/visible" {
+	if rr := get("home/visible", true); rr.Code != 200 || ojson.GetBytesNoCopy(rr.Body.Bytes(), "id").String() != "home/visible" {
 		t.Fatalf("Home detail: %d %s", rr.Code, rr.Body.String())
 	}
 	if rr := get("local/only", true); rr.Code != 404 {

@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const issue6258Usage = `{"promptTokenCount":100,"candidatesTokenCount":10,"thoughtsTokenCount":50,"totalTokenCount":160,"cachedContentTokenCount":7}`
 
-func issue6258Translate(t *testing.T, param *any, frame string) []gjson.Result {
+func issue6258Translate(t *testing.T, param *any, frame string) []ojson.Result {
 	t.Helper()
-	var events []gjson.Result
+	var events []ojson.Result
 	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.7-flash", nil, nil, []byte(frame), param) {
 		_, event := parseSSEEvent(t, chunk)
 		events = append(events, event)
@@ -20,12 +21,12 @@ func issue6258Translate(t *testing.T, param *any, frame string) []gjson.Result {
 	return events
 }
 
-func issue6258Terminal(t *testing.T, events []gjson.Result) gjson.Result {
+func issue6258Terminal(t *testing.T, events []ojson.Result) ojson.Result {
 	t.Helper()
-	var terminal gjson.Result
+	var terminal ojson.Result
 	terminals, created, inProgress := 0, 0, 0
 	previous := int64(-1)
-	added := map[string]gjson.Result{}
+	added := map[string]ojson.Result{}
 	done := map[string]int{}
 	responseID := ""
 	for _, event := range events {
@@ -79,7 +80,7 @@ func issue6258Terminal(t *testing.T, events []gjson.Result) gjson.Result {
 	return terminal.Get("response")
 }
 
-func issue6258AssertUsage(t *testing.T, response gjson.Result, input, output, reasoning, total, cached int64) {
+func issue6258AssertUsage(t *testing.T, response ojson.Result, input, output, reasoning, total, cached int64) {
 	t.Helper()
 	for path, want := range map[string]int64{
 		"input_tokens": input, "output_tokens": output, "output_tokens_details.reasoning_tokens": reasoning,
@@ -174,13 +175,13 @@ func TestIssue6258GeminiResponsesMaxTokens(t *testing.T) {
 	}
 	t.Run("nonstream", func(t *testing.T) {
 		raw := `{"responseId":"max","candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`
-		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.7-flash", nil, nil, []byte(raw), nil))
+		response := util.ParseGJSONBytesNoCopy(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.7-flash", nil, nil, []byte(raw), nil))
 		issue6258AssertIncomplete(t, response)
 		issue6258AssertUsage(t, response, 100, 60, 50, 160, 7)
 	})
 }
 
-func issue6258AssertIncomplete(t *testing.T, response gjson.Result) {
+func issue6258AssertIncomplete(t *testing.T, response ojson.Result) {
 	t.Helper()
 	if response.Get("status").String() != "incomplete" || response.Get("incomplete_details.reason").String() != "max_output_tokens" {
 		t.Errorf("MAX_TOKENS status=%q details=%s, want incomplete/max_output_tokens", response.Get("status").String(), response.Get("incomplete_details").Raw)
@@ -200,7 +201,7 @@ func TestIssue6258GeminiResponsesUsageSnapshots(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var param any
-			var events []gjson.Result
+			var events []ojson.Result
 			for _, frame := range []string{
 				`{"responseId":"snapshots","candidates":[{"content":{"parts":[{"text":"answer"}]}}],"usageMetadata":` + issue6258Usage + `}`,
 				`{"usageMetadata":` + issue6258Usage + `}`,
@@ -217,7 +218,7 @@ func TestIssue6258GeminiResponsesUsageSnapshots(t *testing.T) {
 
 func TestIssue6258GeminiResponsesMaxTokensOnlyActiveMessageIncomplete(t *testing.T) {
 	var param any
-	var events []gjson.Result
+	var events []ojson.Result
 	for _, frame := range []string{
 		`{"responseId":"mixed","candidates":[{"content":{"parts":[{"text":"preface"}]}}]}`,
 		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{"key":"value"}}}]}}]}`,
@@ -247,7 +248,7 @@ func TestIssue6258GeminiResponsesDoneUsesUsageSnapshot(t *testing.T) {
 	for _, usageKey := range []string{"usageMetadata", "cpaUsageMetadata"} {
 		t.Run(usageKey, func(t *testing.T) {
 			var param any
-			var events []gjson.Result
+			var events []ojson.Result
 			for _, frame := range []string{
 				`{"responseId":"snapshot-done","candidates":[{"content":{"parts":[{"text":"answer"}]}}],"` + usageKey + `":` + issue6258Usage + `}`,
 				`{"` + usageKey + `":` + issue6258Usage + `}`,

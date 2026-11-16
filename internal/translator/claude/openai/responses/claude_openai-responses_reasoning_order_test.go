@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIResponsesRequestToClaude_KeepsLatestConsecutiveReasoning(t *testing.T) {
@@ -21,8 +21,8 @@ func TestConvertOpenAIResponsesRequestToClaude_KeepsLatestConsecutiveReasoning(t
 		responsesFunctionCallOutputItem("call_latest", "done"),
 	)
 
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	wantTypes := []string{"text", "thinking", "tool_use"}
 	if len(content) != len(wantTypes) {
 		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
@@ -56,8 +56,8 @@ func TestConvertOpenAIResponsesRequestToClaude_ToolCallsSeparateReasoningBlocks(
 		responsesFunctionCallOutputItem("call_second", "second result"),
 	)
 
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	wantTypes := []string{"thinking", "tool_use", "thinking", "tool_use"}
 	if len(content) != len(wantTypes) {
 		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
@@ -96,8 +96,8 @@ func TestConvertOpenAIResponsesRequestToClaude_NonThinkingBlocksSeparateReasonin
 		responsesFunctionCallOutputItem("call_separator", "done"),
 	)
 
-	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-	content := gjson.GetBytes(out, "messages.0.content").Array()
+	out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	content := ojson.GetBytesNoCopy(out, "messages.0.content").Array()
 	wantTypes := []string{"thinking", "text", "thinking", "redacted_thinking", "thinking", "tool_use"}
 	if len(content) != len(wantTypes) {
 		t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
@@ -153,8 +153,8 @@ func TestConvertOpenAIResponsesRequestToClaude_WebSearchSeparatesToolUseWithThin
 			responsesFunctionCallOutputItem("call_00_abc", "hi"),
 		)
 
-		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-		content := gjson.GetBytes(out, "messages.1.content").Array()
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := ojson.GetBytesNoCopy(out, "messages.1.content").Array()
 		wantTypes := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
 		if len(content) != len(wantTypes) {
 			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
@@ -188,8 +188,8 @@ func TestConvertOpenAIResponsesRequestToClaude_WebSearchSeparatesToolUseWithThin
 			responsesFunctionCallOutputItem("call_00_abc", "hi"),
 		)
 
-		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-		content := gjson.GetBytes(out, "messages.1.content").Array()
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := ojson.GetBytesNoCopy(out, "messages.1.content").Array()
 		wantTypes := []string{"thinking", "text", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
 		if len(content) != len(wantTypes) {
 			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
@@ -216,8 +216,8 @@ func TestConvertOpenAIResponsesRequestToClaude_WebSearchSeparatesToolUseWithThin
 			responsesFunctionCallOutputItem("call_00_abc", "hi"),
 		)
 
-		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-		content := gjson.GetBytes(out, "messages.1.content").Array()
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := ojson.GetBytesNoCopy(out, "messages.1.content").Array()
 		wantTypes := []string{"text", "server_tool_use", "web_search_tool_result", "tool_use"}
 		if len(content) != len(wantTypes) {
 			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)
@@ -243,8 +243,8 @@ func TestConvertOpenAIResponsesRequestToClaude_WebSearchSeparatesToolUseWithThin
 			responsesFunctionCallOutputItem("call_00_abc", "hi"),
 		)
 
-		out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
-		content := gjson.GetBytes(out, "messages.1.content").Array()
+		out, _ := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+		content := ojson.GetBytesNoCopy(out, "messages.1.content").Array()
 		wantTypes := []string{"thinking", "text", "thinking", "server_tool_use", "web_search_tool_result", "thinking", "tool_use"}
 		if len(content) != len(wantTypes) {
 			t.Fatalf("assistant content count = %d, want %d. Output: %s", len(content), len(wantTypes), out)

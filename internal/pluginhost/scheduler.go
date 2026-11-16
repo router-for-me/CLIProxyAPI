@@ -19,6 +19,9 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 		return resp, handled, errPick
 	}
 	if !resp.Handled {
+		if excluded := normalizeExcludedCandidates(resp.ExcludeCandidates); len(excluded) > 0 {
+			return pluginapi.SchedulerPickResponse{ExcludeCandidates: excluded}, false, nil
+		}
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
@@ -84,6 +87,7 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 	resp.DelegateBuiltin = strings.TrimSpace(resp.DelegateBuiltin)
 	resp.RejectCode = strings.TrimSpace(resp.RejectCode)
 	resp.RejectReason = strings.TrimSpace(resp.RejectReason)
+	resp.ExcludeCandidates = normalizeExcludedCandidates(resp.ExcludeCandidates)
 
 	if resp.Reject {
 		if resp.RejectCode == "" {
@@ -92,6 +96,7 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 		if resp.RejectReason == "" {
 			resp.RejectReason = "scheduler rejected candidate selection"
 		}
+		resp.ExcludeCandidates = nil
 		return resp, true, ""
 	}
 
@@ -104,12 +109,36 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 		if !schedulerCandidateExists(req.Candidates, resp.AuthID) {
 			return pluginapi.SchedulerPickResponse{}, false, "unknown auth id"
 		}
+		resp.ExcludeCandidates = nil
 		return resp, true, ""
 	}
 	if !validSchedulerBuiltin(resp.DelegateBuiltin) {
 		return pluginapi.SchedulerPickResponse{}, false, "unknown delegate"
 	}
 	return resp, true, ""
+}
+
+func normalizeExcludedCandidates(candidates []string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func schedulerCandidateExists(candidates []pluginapi.SchedulerAuthCandidate, authID string) bool {
