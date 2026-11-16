@@ -19,8 +19,34 @@ func quotaRecoverySIWCAccountMatches(auth *Auth) bool {
 	if account == "" {
 		return false
 	}
-	partition, _ := auth.Metadata["siwc"].(map[string]any)
-	idToken, _ := partition["id_token"].(string)
-	claims, err := codex.ParseJWTToken(strings.TrimSpace(idToken))
-	return err == nil && strings.TrimSpace(claims.GetAccountID()) == account
+	claims, err := codex.ParseJWTToken(authSIWCTokenField(auth, "id_token"))
+	if err != nil || strings.TrimSpace(claims.GetAccountID()) != account {
+		return false
+	}
+	token := authSIWCTokenField(auth, "access_token")
+	if token == "" {
+		token = authSIWCTokenField(auth, "access")
+	}
+	// Configured headers are applied after credential selection. Unknown or
+	// different identity overrides cannot be established by the outer probe.
+	for key, raw := range auth.Attributes {
+		if !strings.HasPrefix(key, "header:") {
+			continue
+		}
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(strings.TrimPrefix(key, "header:"))) {
+		case "authorization":
+			if token == "" || value != "Bearer "+token {
+				return false
+			}
+		case "chatgpt-account-id":
+			if value != account {
+				return false
+			}
+		}
+	}
+	return true
 }
