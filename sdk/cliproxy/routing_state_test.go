@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/apicost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotahistory"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -51,7 +52,7 @@ func TestRoutingStatePersisterRoundTripRestoresQuotaHistoryAndBindings(t *testin
 	}
 
 	history := quotahistory.NewStore()
-	persister := newRoutingStatePersister(path, manager, history)
+	persister := newRoutingStatePersister(path, manager, history, nil)
 	persister.now = func() time.Time { return now }
 	persister.tick()
 	if _, errStat := os.Stat(path); errStat != nil {
@@ -62,7 +63,7 @@ func TestRoutingStatePersisterRoundTripRestoresQuotaHistoryAndBindings(t *testin
 	registerStateAuth(t, restarted, &coreauth.Auth{ID: "rs-claude", Provider: "claude"})
 	registerStateAuth(t, restarted, &coreauth.Auth{ID: "rs-claude-2", Provider: "claude"})
 	restartedHistory := quotahistory.NewStore()
-	loader := newRoutingStatePersister(path, restarted, restartedHistory)
+	loader := newRoutingStatePersister(path, restarted, restartedHistory, nil)
 	loader.now = func() time.Time { return now.Add(2 * time.Minute) }
 	if errLoad := loader.load(); errLoad != nil {
 		t.Fatalf("load: %v", errLoad)
@@ -94,12 +95,12 @@ func TestRoutingStatePersisterKeepsPendingQuotaForLateAuths(t *testing.T) {
 	manager, _ := newAffinityManager()
 	registerStateAuth(t, manager, &coreauth.Auth{ID: "late", Provider: "claude",
 		Quota: coreauth.QuotaState{ObservedAt: now, Signals: claudeStateSignals("0.2", now.Add(24*time.Hour))}})
-	writer := newRoutingStatePersister(path, manager, quotahistory.NewStore())
+	writer := newRoutingStatePersister(path, manager, quotahistory.NewStore(), nil)
 	writer.now = func() time.Time { return now }
 	writer.tick()
 
 	restarted, _ := newAffinityManager()
-	loader := newRoutingStatePersister(path, restarted, quotahistory.NewStore())
+	loader := newRoutingStatePersister(path, restarted, quotahistory.NewStore(), nil)
 	loader.now = func() time.Time { return now.Add(time.Minute) }
 	if errLoad := loader.load(); errLoad != nil {
 		t.Fatalf("load: %v", errLoad)
@@ -121,13 +122,13 @@ func TestRoutingStatePersisterReappliesQuotaAfterCredentialReplacement(t *testin
 	manager, _ := newAffinityManager()
 	registerStateAuth(t, manager, &coreauth.Auth{ID: "cfg-claude", Provider: "claude",
 		Quota: coreauth.QuotaState{ObservedAt: now, Signals: claudeStateSignals("0.3", now.Add(24*time.Hour))}})
-	writer := newRoutingStatePersister(path, manager, quotahistory.NewStore())
+	writer := newRoutingStatePersister(path, manager, quotahistory.NewStore(), nil)
 	writer.now = func() time.Time { return now }
 	writer.tick()
 
 	restarted, _ := newAffinityManager()
 	registerStateAuth(t, restarted, &coreauth.Auth{ID: "cfg-claude", Provider: "claude"})
-	loader := newRoutingStatePersister(path, restarted, quotahistory.NewStore())
+	loader := newRoutingStatePersister(path, restarted, quotahistory.NewStore(), nil)
 	loader.now = func() time.Time { return now.Add(time.Minute) }
 	if errLoad := loader.load(); errLoad != nil {
 		t.Fatalf("load: %v", errLoad)
@@ -151,7 +152,7 @@ func TestRoutingStatePersisterReappliesQuotaAfterCredentialReplacement(t *testin
 func TestRoutingStatePersisterSkipsUnchangedWrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routing-state.json")
 	manager := coreauth.NewManager(nil, nil, nil)
-	persister := newRoutingStatePersister(path, manager, quotahistory.NewStore())
+	persister := newRoutingStatePersister(path, manager, quotahistory.NewStore(), nil)
 	base := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	persister.now = func() time.Time { return base }
 	persister.tick()
@@ -194,5 +195,28 @@ func TestCarrySessionBindingsKeepsSessionsAcrossSelectorSwap(t *testing.T) {
 		if errNext != nil || got.ID != picked.ID {
 			t.Fatalf("Pick %d after swap = %v/%v, want %s", i, got, errNext, picked.ID)
 		}
+	}
+}
+
+func TestRoutingStatePersisterRoundTripRestoresAPICost(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routing-state.json")
+	now := time.Now().UTC().Truncate(time.Hour)
+	manager, _ := newAffinityManager()
+	cost := apicost.NewStore()
+	cost.Import([]apicost.Bucket{{Hour: now, Model: "claude-opus-5-5", Provider: "claude", AuthID: "a1", Requests: 2, InputTokens: 10, OutputTokens: 5, CostUSD: 1.25}})
+	writer := newRoutingStatePersister(path, manager, quotahistory.NewStore(), cost)
+	writer.now = func() time.Time { return now }
+	writer.tick()
+
+	restarted, _ := newAffinityManager()
+	restoredCost := apicost.NewStore()
+	loader := newRoutingStatePersister(path, restarted, quotahistory.NewStore(), restoredCost)
+	loader.now = func() time.Time { return now.Add(time.Minute) }
+	if errLoad := loader.load(); errLoad != nil {
+		t.Fatalf("load: %v", errLoad)
+	}
+	buckets := restoredCost.Buckets(now.Add(-time.Hour))
+	if len(buckets) != 1 || buckets[0].CostUSD != 1.25 || buckets[0].Requests != 2 || buckets[0].AuthID != "a1" {
+		t.Fatalf("restored buckets = %+v", buckets)
 	}
 }
