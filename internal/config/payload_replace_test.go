@@ -110,6 +110,59 @@ func TestPayloadReplaceConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPayloadReplaceSavePreservesEmptyReplacements(t *testing.T) {
+	for _, initial := range []struct {
+		name, yaml string
+	}{
+		{"new-payload", "port: 8317\n"},
+		{"new-replace", "payload: {}\n"},
+		{"empty-replace", "payload: {replace: []}\n"},
+		{"new-replacements", "payload:\n  replace:\n    - models: [{name: '*'}]\n      target: {role: user, all: true}\n"},
+		{"existing-replacements", payloadReplaceFixture},
+		{"v8-new-payload", "config-version: 8\nserver: {port: 8317}\n"},
+	} {
+		for _, replacements := range []struct {
+			name   string
+			values []PayloadReplacement
+		}{
+			{"delete-only", []PayloadReplacement{{"remove": ""}}},
+			{"mixed", []PayloadReplacement{{"hero": "fool"}, {"remove": ""}, {"fool": "friend"}}},
+		} {
+			for _, migrate := range []bool{false, true} {
+				layout := "preserve-layout"
+				if migrate {
+					layout = "migrate-v8"
+				}
+				t.Run(initial.name+"/"+replacements.name+"/"+layout, func(t *testing.T) {
+					cfg, errParse := ParseConfigBytes([]byte(payloadReplaceFixture))
+					if errParse != nil {
+						t.Fatal(errParse)
+					}
+					cfg.Payload.Replace[0].Replacements = replacements.values
+					file := filepath.Join(t.TempDir(), "config.yaml")
+					if errWrite := os.WriteFile(file, []byte(initial.yaml), 0600); errWrite != nil {
+						t.Fatal(errWrite)
+					}
+					// Verify both initial insertion and subsequent saves preserve deletion operands.
+					for save := 0; save < 2; save++ {
+						if errSave := SaveConfigPreserveComments(file, cfg, migrate); errSave != nil {
+							t.Fatalf("save %d: %v", save+1, errSave)
+						}
+						reloaded, errLoad := LoadConfig(file)
+						if errLoad != nil {
+							t.Fatalf("reload %d: %v", save+1, errLoad)
+						}
+						if !reflect.DeepEqual(cfg.Payload.Replace, reloaded.Payload.Replace) {
+							t.Fatalf("save %d changed replacement rules: got %#v, want %#v", save+1, reloaded.Payload.Replace, cfg.Payload.Replace)
+						}
+						cfg = reloaded
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestPayloadReplaceConfigValidation(t *testing.T) {
 	valid := PayloadReplaceRule{Models: []PayloadModelRule{{Name: "*"}}, Target: PayloadReplaceTarget{Role: "user", Positions: []int{1, 2}}, Replacements: []PayloadReplacement{{"hero": "fool"}}}
 	for _, tt := range []struct {
