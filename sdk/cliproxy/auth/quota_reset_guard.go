@@ -31,13 +31,20 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 	if !safe {
 		return false
 	}
+	now := time.Now()
+	if effectiveAuthForceUntil(auth).After(now) || effectiveCredQuotaForceUntil(auth).After(now) {
+		return false
+	}
 	for _, state := range auth.ModelStates {
 		if state == nil {
 			continue
 		}
 		// A subscription refresh cannot release an independent model failure
 		// hidden beneath a later credential-wide quota restriction.
-		if isModelStateActiveCooldown(state.credentialQuotaShadow, time.Now()) {
+		if isModelStateActiveCooldown(state.credentialQuotaShadow, now) {
+			return false
+		}
+		if effectiveModelForceUntil(state).After(now) {
 			return false
 		}
 		modelKnown, modelSafe := quotaRecoveryState(auth.Provider, state.Status, state.StatusMessage, state.Unavailable, state.NextRetryAfter, state.Quota, state.LastError)
