@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -45,7 +46,8 @@ func FilterModelList(c *gin.Context, models []map[string]any) []map[string]any {
 
 // FilterModelListResponseBody re-filters a serialized model-list response after
 // plugin response interceptors have had an opportunity to replace its body.
-// Restricted requests fail closed when the interceptor returns a malformed catalog.
+// Restricted requests fail closed when the interceptor returns a malformed or
+// ambiguous catalog, including one with duplicate object keys.
 // The optional source format lets Claude catalogs match the decoded routing ID.
 func FilterModelListResponseBody(c *gin.Context, body []byte, sourceFormat ...string) ([]byte, error) {
 	policy := ModelPolicyFromGin(c)
@@ -54,6 +56,9 @@ func FilterModelListResponseBody(c *gin.Context, body []byte, sourceFormat ...st
 	}
 	if !ojson.ValidBytes(body) {
 		return nil, errors.New("invalid model catalog JSON")
+	}
+	if errDuplicate := rejectDuplicateCatalogKeys(body); errDuplicate != nil {
+		return nil, fmt.Errorf("ambiguous model catalog JSON: %w", errDuplicate)
 	}
 
 	doc := ojson.NewDoc(body)

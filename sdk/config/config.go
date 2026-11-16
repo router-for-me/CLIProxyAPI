@@ -73,3 +73,7 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
 }
+
+func ValidateAPIKeyModelAccess(access map[string]APIKeyModelAccess) error {
+	return internalconfig.ValidateAPIKeyModelAccess(access)
+}

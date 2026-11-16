@@ -93,3 +93,59 @@ func TestFilterModelListResponseBody_FiltersBothArrays(t *testing.T) {
 		t.Fatalf("unexpected filtered catalog: %s", body)
 	}
 }
+
+func TestFilterModelListResponseBody_RejectsDuplicateKeys(t *testing.T) {
+	policy := sdkaccess.NewModelPolicy([]string{"gpt-*"}, nil)
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		// ojson keeps the first "id" and the entry would survive, but a client that
+		// keeps the last duplicate would receive the denied model.
+		{"duplicate entry id", `{"data":[{"id":"gpt-4o","id":"denied-model"}]}`},
+		{"duplicate escaped entry id", `{"data":[{"id":"gpt-4o","\u0069d":"denied-model"}]}`},
+		{"duplicate nested key", `{"data":[{"id":"gpt-4o","limits":{"max":1,"max":2}}]}`},
+		// Only the first array is filtered, so the second would leak every entry.
+		{"duplicate data member", `{"data":[{"id":"gpt-4o"}],"data":[{"id":"denied-model"}]}`},
+		{"duplicate models member", `{"models":[{"name":"models/gpt-4o"}],"models":[{"name":"models/denied-model"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := ginWithPolicy(policy)
+			if filtered, errFilter := FilterModelListResponseBody(ctx, []byte(tc.body)); errFilter == nil {
+				t.Fatalf("expected a fail-closed error, got %s", filtered)
+			}
+		})
+	}
+
+	t.Run("unrestricted", func(t *testing.T) {
+		body := []byte(`{"data":[{"id":"gpt-4o","id":"denied-model"}]}`)
+		ctx := ginWithPolicy(nil)
+		filtered, errFilter := FilterModelListResponseBody(ctx, body)
+		if errFilter != nil {
+			t.Fatalf("unrestricted requests must not be affected: %v", errFilter)
+		}
+		if string(filtered) != string(body) {
+			t.Fatalf("unrestricted body changed: %s", filtered)
+		}
+	})
+}
+
+func TestWriteModelListResponse_RejectsAmbiguousInterceptorCatalog(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(context.Context, pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			return pluginapi.ResponseInterceptResponse{Body: []byte(`{"data":[{"id":"gpt-4o","id":"denied-model"}]}`)}
+		},
+	})
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Set(sdkaccess.ModelPolicyContextKey, sdkaccess.NewModelPolicy([]string{"gpt-*"}, nil))
+	handler.WriteModelListResponse(ctx, "openai", gin.H{"data": []any{}})
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusBadGateway, recorder.Body.String())
+	}
+	if recorded := ojson.ParseBytes(recorder.Body.Bytes()); recorded.Get("data").Exists() {
+		t.Fatalf("fail-closed response must not echo a catalog: %s", recorder.Body.String())
+	}
+}

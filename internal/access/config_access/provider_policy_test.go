@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
@@ -16,7 +17,7 @@ func TestProviderAttachesModelPolicyPerKey(t *testing.T) {
 			"blank":     {},
 		},
 	}
-	p := newProvider("test", normalizeKeys(cfg.APIKeys), modelPolicies(cfg.APIKeyModelAccess))
+	p := newProviderForTest(t, cfg)
 
 	authenticate := func(key string) *authResult {
 		req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -33,6 +34,36 @@ func TestProviderAttachesModelPolicyPerKey(t *testing.T) {
 	}
 	if got := authenticate("limited"); !got.opus || got.claude3 || got.gpt {
 		t.Fatalf("limited key policy not applied, got %+v", got)
+	}
+}
+
+func newProviderForTest(t *testing.T, cfg *sdkconfig.SDKConfig) *provider {
+	t.Helper()
+	policies, errPolicies := modelPolicies(cfg.APIKeyModelAccess)
+	if errPolicies != nil {
+		t.Fatalf("unexpected policy error: %v", errPolicies)
+	}
+	return newProvider("test", normalizeKeys(cfg.APIKeys), policies)
+}
+
+func TestModelPoliciesRejectsNormalizedKeyCollision(t *testing.T) {
+	t.Cleanup(func() { sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey) })
+	cfg := &sdkconfig.SDKConfig{
+		APIKeys: []string{"client"},
+		APIKeyModelAccess: map[string]sdkconfig.APIKeyModelAccess{
+			"client":   {AllowedModels: []string{"claude-*"}},
+			" client ": {DeniedModels: []string{"claude-*"}},
+		},
+	}
+	if _, errPolicies := modelPolicies(cfg.APIKeyModelAccess); errPolicies == nil {
+		t.Fatal("expected a collision error for keys that normalize to the same API key")
+	}
+
+	Register(cfg)
+	for _, existing := range sdkaccess.RegisteredProviders() {
+		if existing.Identifier() == sdkaccess.DefaultAccessProviderName {
+			t.Fatalf("config API key provider must stay disabled on a colliding policy config, got %q", existing.Identifier())
+		}
 	}
 }
 
