@@ -44,6 +44,16 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 		{name: "dynamic_account_header", bound: true, account: "outer-account", headers: map[string]string{"Chatgpt-Account-Id": "$X-Selected-Account"}, dynamicAccount: true},
 		{name: "matching_identity_headers", bound: true, account: "outer-account", headers: map[string]string{"Chatgpt-Account-Id": "outer-account", "Authorization": "Bearer siwc-token"}, recover: true},
 		{name: "unrelated_header", bound: true, account: "outer-account", headers: map[string]string{"X-Test": "preserved"}, recover: true},
+		{name: "ordinary_account_header", headers: map[string]string{"Chatgpt-Account-Id": "other-account"}},
+		{name: "ordinary_bearer_header", headers: map[string]string{"Authorization": "Bearer other-token"}},
+		{name: "ordinary_dynamic_header", headers: map[string]string{"Chatgpt-Account-Id": "$X-Selected-Account"}, dynamicAccount: true},
+		{name: "ordinary_matching_headers", headers: map[string]string{"Authorization": "Bearer outer-token", "Chatgpt-Account-Id": "outer-account"}, recover: true},
+		{name: "ordinary_unrelated_header", headers: map[string]string{"X-Test": "preserved"}, recover: true},
+		{name: "disabled_account_header", bound: true, disabled: true, headers: map[string]string{"Chatgpt-Account-Id": "other-account"}},
+		{name: "disabled_bearer_header", bound: true, disabled: true, headers: map[string]string{"Authorization": "Bearer other-token"}},
+		{name: "disabled_dynamic_header", bound: true, disabled: true, headers: map[string]string{"Chatgpt-Account-Id": "$X-Selected-Account"}, dynamicAccount: true},
+		{name: "disabled_matching_headers", bound: true, disabled: true, headers: map[string]string{"Authorization": "Bearer outer-token", "Chatgpt-Account-Id": "outer-account"}, recover: true},
+		{name: "disabled_unrelated_header", bound: true, disabled: true, headers: map[string]string{"X-Test": "preserved"}, recover: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
