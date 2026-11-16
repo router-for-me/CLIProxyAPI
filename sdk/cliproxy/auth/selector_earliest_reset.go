@@ -91,9 +91,21 @@ func ForgetUsageReading(authID string) {
 	delete(usageReadings.byAuth, authID)
 }
 
-// QuotaWindows merges the quota windows observed on the credential's latest
-// response with its latest usage reading, keeping the newer value per window.
+// QuotaWindows returns the credential's quota windows as of now: a window
+// whose reset has passed is reported as unused (see QuotaObservations).
 func QuotaWindows(auth *Auth, now time.Time) []QuotaWindow {
+	windows := QuotaObservations(auth)
+	for i := range windows {
+		windows[i] = windows[i].current(now)
+	}
+	return windows
+}
+
+// QuotaObservations merges the quota windows observed on the credential's
+// latest response with its latest usage reading, keeping the newer value per
+// window, sorted by kind then scope. Windows are returned as observed, even
+// when their reset has passed.
+func QuotaObservations(auth *Auth) []QuotaWindow {
 	if auth == nil {
 		return nil
 	}
@@ -116,7 +128,7 @@ func QuotaWindows(auth *Auth, now time.Time) []QuotaWindow {
 	}
 	windows := make([]QuotaWindow, 0, len(merged))
 	for _, w := range merged {
-		windows = append(windows, w.current(now))
+		windows = append(windows, w)
 	}
 	sort.Slice(windows, func(i, j int) bool {
 		if windows[i].Kind != windows[j].Kind {

@@ -143,6 +143,7 @@ retain the corresponding business operation's fields.
 | `/credentials` | GET, POST, DELETE | List, upload, or delete credential files. |
 | `/credentials/models` | GET | Get credential models. |
 | `/credentials/download` | GET | Download a credential file. |
+| `/credentials/quota-history` | GET | Recorded weekly quota readings per credential (query: `since`, `provider`); 200 with `enabled:false` in Home mode or when not recording. |
 | `/credentials/status` | PATCH | Change credential status. |
 | `/credentials/fields` | PATCH | Change credential fields. |
 | `/credentials/refresh` | POST | Refresh credentials. |

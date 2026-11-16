@@ -237,6 +237,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if !homeEnabled {
 		go s.runAntigravityModelRefresh(ctx)
 		go s.runQuotaUsageReader(ctx)
+		go s.runQuotaHistoryRecorder(ctx)
 	}
 
 	select {

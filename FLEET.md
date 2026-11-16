@@ -20,9 +20,14 @@ run on a Synology DS218+ as the Claude and Codex account pool behind
     minute at most, and backs off on 429.
   - A failed or throttled read never takes a credential out of rotation. Only
     upstream's own cooldown after a real 429 does.
-- **Console:** `web/` is the CLI Proxy API Console (v1.25.6) with the Quota Management
-  ledger.
-  - It reads `quota_windows` from `/v0/management/auth-files`, so it never calls
+- **Quota history** (`sdk/cliproxy/quota_history_recorder.go`, `sdk/cliproxy/auth/quota_history.go`):
+  - Every credential's weekly quota is recorded every minute to
+    `<auth-dir>/quota-history.jsonl` and kept for 30 days.
+  - It is served at `GET /v8/management/credentials/quota-history`.
+  - It is not recorded in Home mode, and it is durable only with the file store.
+- **Console:** `web/` is the prox console (from CLI Proxy API Console v1.25.6), with pooled
+  Quota Management.
+  - It reads `quota_windows` from `/v8/management/credentials`, so it never calls
     Anthropic or OpenAI.
   - The image builds it into `/CLIProxyAPI/static/management.html`, and
     `MANAGEMENT_PANEL_BAKED=1` stops the server from replacing it with upstream's
