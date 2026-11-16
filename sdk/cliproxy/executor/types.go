@@ -34,6 +34,8 @@ const GenerateMetadataKey = "generate"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// ExcludedAuthIDsMetadataKey excludes specific auth IDs from selection for the current attempt.
+	ExcludedAuthIDsMetadataKey = "excluded_auth_ids"
 	// SelectionIDMetadataKey stores the per-selection ID generated for a plugin scheduler pick.
 	SelectionIDMetadataKey = "selection_id"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.

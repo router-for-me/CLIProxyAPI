@@ -2,10 +2,11 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type openAIResponsesStreamErrorChunk struct {

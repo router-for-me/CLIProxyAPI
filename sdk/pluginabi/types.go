@@ -1,8 +1,9 @@
 package pluginabi
 
 import (
-	"encoding/json"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (

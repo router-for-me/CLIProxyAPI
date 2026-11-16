@@ -159,6 +159,26 @@ func TestGeminiOpenAILateSignatureDoesNotCrossText(t *testing.T) {
 	}
 }
 
+func TestGeminiOpenAILateSignatureDoesNotCrossThoughtImage(t *testing.T) {
+	var param any
+	chunks := []string{
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}}]}}]}`,
+		`{"candidates":[{"content":{"parts":[{"thought":true,"inlineData":{"mimeType":"image/png","data":"eA=="}}]}}]}`,
+		`{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + capturedGeminiToolCallThoughtSignature + `"}]}}]}`,
+	}
+	for i, raw := range chunks {
+		outputs := ConvertGeminiResponseToOpenAI(context.Background(), "gemini-3-pro-image", nil, nil, []byte(raw), &param)
+		if i == 1 && len(outputs) != 0 {
+			t.Fatalf("thought image chunk must be dropped without emitting delta, got: %s", outputs[0])
+		}
+		for _, output := range outputs {
+			if ojson.GetBytes(output, "choices.0.delta.tool_calls.0.extra_content").Exists() {
+				t.Fatalf("signature after thought image was attached to an earlier tool: %s", output)
+			}
+		}
+	}
+}
+
 func TestGeminiOpenAINonStreamTrailingToolSignatureRoundTrip(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -169,6 +189,7 @@ func TestGeminiOpenAINonStreamTrailingToolSignatureRoundTrip(t *testing.T) {
 		{"empty text", `{"text":""},`, capturedGeminiToolCallThoughtSignature},
 		{"text boundary", `{"text":"answer"},`, ""},
 		{"image boundary", `{"inlineData":{"mimeType":"image/png","data":"eA=="}},`, ""},
+		{"thought image boundary", `{"thought":true,"inlineData":{"mimeType":"image/png","data":"eA=="}},`, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{}}},` + tt.between + `{"thoughtSignature":"` + capturedGeminiToolCallThoughtSignature + `"}]},"finishReason":"STOP"}]}`)

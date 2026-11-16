@@ -3,7 +3,6 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -28,6 +28,7 @@ type responsesWebsocketForwardOptions struct {
 	duplexStream             func() bool
 	toolCacheTurn            *responsesWebsocketToolCacheTurn
 	suppressError            func(*interfaces.ErrorMessage) bool
+	onDownstreamCommit       func()
 	localInterrupt           *responsesLocalInterrupt
 	// websocketOwned reports whether this turn runs on an upstream
 	// websocket. While true, no interrupt may claim the local HTTP path.
@@ -65,6 +66,11 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 		downstreamSessionKey = websocketDownstreamSessionKey(c.Request)
 	}
 
+	markDownstreamCommitted := func() {
+		if opts.onDownstreamCommit != nil {
+			opts.onDownstreamCommit()
+		}
+	}
 	if opts.localInterrupt != nil {
 		websocketOwned := opts.websocketOwned != nil && opts.websocketOwned()
 		opts.localInterrupt.begin(websocketOwned)
@@ -81,6 +87,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			// already gone need no answer.
 			if c.Request.Context().Err() == nil {
 				if claimed := opts.localInterrupt.takeClaimed(); claimed != nil {
+					markDownstreamCommitted()
 					_, _ = writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
 						StatusCode: http.StatusBadRequest,
 						Error:      errors.New("no active response to interrupt"),
@@ -138,6 +145,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				continue
 			}
+			markDownstreamCommitted()
 			return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 		case <-c.Request.Context().Done():
 			cause := context.Cause(c.Request.Context())
@@ -200,10 +208,12 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			if opts.localInterrupt != nil {
 				if interruptPayload := opts.localInterrupt.takeClaimed(); interruptPayload != nil {
 					if !turnEnded {
+						markDownstreamCommitted()
 						return completeResponsesWebsocketLocalInterrupt(writer, wsTimelineLog, cancel, interruptPayload, outputItemsByIndex, outputItemsFallback, pendingToolCallIDs)
 					}
 					// The response is over: reject instead of fabricating an
 					// incomplete event, then keep forwarding this chunk.
+					markDownstreamCommitted()
 					if _, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, &interfaces.ErrorMessage{
 						StatusCode: http.StatusBadRequest,
 						Error:      errors.New("no active response to interrupt"),
@@ -223,6 +233,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				if eventType == "response.created" {
 					responseStarted = true
+					markDownstreamCommitted()
 					completed = false
 					turnEnded = false
 					if opts.localInterrupt != nil {
@@ -246,20 +257,26 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// In Codex duplex mode the executor owns connection termination:
 				// payload errors after response.created are recoverable events;
 				// StreamChunk.Err still arrives through errs and closes the socket.
-				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
-				if eventType == wsEventTypeError && preserveErrorEvent {
-					turnEnded = true
-					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
-						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-					}
-				} else if eventType == wsEventTypeError && !preserveErrorEvent {
-					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
-					if h != nil {
-						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
-					}
-					if opts.suppressError != nil && opts.suppressError(payloadErrMsg) {
-						cancel(payloadErrMsg.Error)
-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
+				// Known credential quota/cooldown errors are not recoverable on the
+				// same socket and must still consult the replay guard.
+				if eventType == wsEventTypeError {
+					errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i])
+					preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream() &&
+						(errMsg == nil || !isResponsesWebsocketQuotaOrCooldownError(errMsg.Error))
+					if preserveErrorEvent {
+						turnEnded = true
+						if errMsg != nil && h != nil {
+							h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+						}
+					} else {
+						payloadErrMsg = errMsg
+						if h != nil {
+							h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
+						}
+						if opts.suppressError != nil && opts.suppressError(payloadErrMsg) {
+							cancel(payloadErrMsg.Error)
+							return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
+						}
 					}
 				} else if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" {
 					// response.incomplete ends the turn too. Codex uses it, with
@@ -312,6 +329,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					// reactivated it.
 					opts.localInterrupt.deactivate()
 				}
+				markDownstreamCommitted()
 				if errWrite := writeResponsesWebsocketPayload(writer, wsTimelineLog, payloads[i], time.Now()); errWrite != nil {
 					log.Warnf(
 						"responses websocket: downstream_out write failed id=%s event=%s error=%v",

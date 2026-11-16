@@ -41,15 +41,25 @@ type thinkingTestCase struct {
 	expectErr       bool
 }
 
+func registerTestModelsForProviders(t *testing.T, prefix string) {
+	t.Helper()
+	reg := registry.GetGlobalRegistry()
+	models := getTestModels()
+	for _, provider := range []string{"gemini", "antigravity", "claude", "openai", "codex", "kimi", "xai", "interactions"} {
+		clientID := fmt.Sprintf("%s-%s", prefix, provider)
+		reg.RegisterClient(clientID, provider, models)
+		t.Cleanup(func() {
+			reg.UnregisterClient(clientID)
+		})
+	}
+}
+
 // TestThinkingE2EMatrix_Suffix tests the thinking configuration transformation using model name suffix.
 // Data flow: Input JSON → TranslateRequest → ApplyThinking → Validate Output
 // No helper functions are used; all test data is inline.
 func TestThinkingE2EMatrix_Suffix(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-suffix-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// level-model (Levels=minimal/low/medium/high, ZeroAllowed=false, DynamicAllowed=false)
@@ -1089,11 +1099,8 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 // TestThinkingE2EMatrix_Body tests the thinking configuration transformation using request body parameters.
 // Data flow: Input JSON with thinking params → TranslateRequest → ApplyThinking → Validate Output
 func TestThinkingE2EMatrix_Body(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-body-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// level-model (Levels=minimal/low/medium/high, ZeroAllowed=false, DynamicAllowed=false)
@@ -2157,11 +2164,8 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 
 // TestThinkingE2EProviderTargets covers provider-specific targets that are not part of the main matrix.
 func TestThinkingE2EProviderTargets(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-provider-targets-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// Kimi target: emit the native thinking object and accept reasoning_effort only as legacy input.
@@ -2528,11 +2532,8 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 // client against every provider, so an explicit on/off request has to survive the
 // round trip in both roles.
 func TestThinkingE2EInteractionsMatrix(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-interactions-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// Interactions as provider: explicit on from every client protocol.
@@ -2773,11 +2774,8 @@ func TestThinkingE2EInteractionsMatrix(t *testing.T) {
 // TestThinkingE2EClaudeAdaptive_Body covers Group 3 cases in docs/thinking-e2e-test-cases.md.
 // It focuses on Claude 4.6 adaptive thinking and effort/level cross-protocol semantics (body-only).
 func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-claude-adaptive-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// A subgroup: OpenAI -> Claude (reasoning_effort -> output_config.effort)

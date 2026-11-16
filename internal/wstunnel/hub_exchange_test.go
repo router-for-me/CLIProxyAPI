@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 )
 
@@ -76,9 +77,24 @@ func TestHubExchange_TenantIsolation(t *testing.T) {
 	cli1 := dialRole(t, srv.URL, "key-1", RoleClient, "shared-cli-uuid", "Tenant1-Client")
 	cli2 := dialRole(t, srv.URL, "key-2", RoleClient, "shared-cli-uuid", "Tenant2-Client")
 
+	// The client Dial returns as soon as the WebSocket handshake finishes, but
+	// commitPeer may not yet have published every registered server. Drain the
+	// topology stream until each expected server is observable; an initial
+	// server_list is followed only by incremental server_online events, so each
+	// uuid must be awaited rather than assuming one snapshot has all of them.
+	waitServersVisible(t, cli1, "shared-srv-uuid")
+	waitServersVisible(t, cli2, "shared-srv-uuid", "only-in-tenant-2")
+
+	// Verify no cross-tenant leak with explicit list_servers snapshots.
+	if errWrite := cli1.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"t1"}`)); errWrite != nil {
+		t.Fatalf("cli1 list_servers error = %v", errWrite)
+	}
 	list1 := readTextJSONFrame(t, cli1)
 	if list1.Get("servers.#").Int() != 1 || list1.Get("servers.0.name").String() != "Tenant1-Server" {
 		t.Fatalf("tenant 1 server_list leaked or wrong: %s", list1.Raw)
+	}
+	if errWrite := cli2.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"t2"}`)); errWrite != nil {
+		t.Fatalf("cli2 list_servers error = %v", errWrite)
 	}
 	list2 := readTextJSONFrame(t, cli2)
 	if list2.Get("servers.#").Int() != 2 {
@@ -125,6 +141,12 @@ func TestHubExchange_DiscoveryEventsAndControlCommands(t *testing.T) {
 	_ = dialRoleWithType(t, srv.URL, "key-disc", RoleServer, "srv-a", "Server A", "cpa-desktop")
 
 	cli := dialRole(t, srv.URL, "key-disc", RoleClient, "cli-1", "Client 1")
+	// Drain the topology stream until both pre-connected servers are visible;
+	// their commitPeer may not have run before the client's snapshot was taken.
+	waitServersVisible(t, cli, "srv-a", "srv-b")
+	if errWrite := cli.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"init"}`)); errWrite != nil {
+		t.Fatalf("cli list_servers error = %v", errWrite)
+	}
 	initial := readTextJSONFrame(t, cli)
 	if initial.Get("type").String() != ControlTypeServerList ||
 		initial.Get("servers.#").Int() != 2 ||
@@ -388,18 +410,35 @@ func TestHubExchange_ManyToManyFullDuplexMultiplexing(t *testing.T) {
 }
 
 func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
-	hub := NewHub(Options{SendQueueSize: 2})
+	// A tight per-peer byte budget plus a gated transport make the flood hit
+	// target_buffer_full deterministically: srv-slow's socket write stays
+	// parked so its queued bytes are never released back to the budget. The
+	// send-queue slot count stays large so the client's own control queue is
+	// not overflowed by the target_buffer_full error frames it must also
+	// carry back to the test.
+	hub := NewHub(Options{
+		SendQueueSize:        64,
+		MaxPeerQueuedBytes:   1 << 20,
+		MaxTenantQueuedBytes: 2 << 20,
+	})
 	hub.UpdateAllowedAPIKeys([]string{"key-sec"})
 	t.Cleanup(hub.Close)
-	srv := httptest.NewServer(hub)
-	t.Cleanup(srv.Close)
+	srv := newGatedTunnelServer(t, hub)
 
 	srvSlow := dialRole(t, srv.URL, "key-sec", RoleServer, "srv-slow", "Slow Server")
 	srvFast := dialRole(t, srv.URL, "key-sec", RoleServer, "srv-fast", "Fast Server")
 	cli1 := dialRole(t, srv.URL, "key-sec", RoleClient, "cli-1", "Client 1")
 	cli2 := dialRole(t, srv.URL, "key-sec", RoleClient, "cli-2", "Client 2")
-	_ = readTextJSONFrame(t, cli1)
-	_ = readTextJSONFrame(t, cli2)
+	// Drain the topology stream until both servers are observable so a delayed
+	// server_online cannot be mistaken for the error/data frames read below.
+	waitServersVisible(t, cli1, "srv-slow", "srv-fast")
+	waitServersVisible(t, cli2, "srv-slow", "srv-fast")
+
+	// Park srv-slow's socket write so the byte budget cannot drain, making the
+	// target_buffer_full rejection deterministic rather than dependent on
+	// kernel send-buffer saturation.
+	slowPeer := lookupTunnelPeer(t, hub, "key-sec", "srv-slow")
+	slowPeer.conn.UnderlyingConn().(*deadlineGuardConn).Conn.(*gatedTunnelConn).arm()
 
 	// 1. Source UUID spoofing rejected.
 	spoof, _ := EncodeDataFrame(PayloadTypeBinary, "cli-2", "srv-fast", []byte("spoof"))
@@ -434,7 +473,18 @@ func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
 	go func() {
 		var once sync.Once
 		for {
-			frame := readTextJSONFrame(t, cli1)
+			// Read raw frames so a read failure is reported on syncDone instead
+			// of terminating this goroutine via t.Fatalf and leaving the main
+			// test blocked on the barrier forever.
+			msgType, raw, errRead := readTunnelTestMessage(cli1)
+			if errRead != nil {
+				syncDone <- errRead
+				return
+			}
+			if msgType != websocket.TextMessage || !ojson.ValidBytes(raw) {
+				continue
+			}
+			frame := ojson.ParseBytes(raw)
 			if frame.Get("type").String() == ControlTypeError && frame.Get("code").String() == ErrCodeTargetBufferFull {
 				once.Do(func() { close(gotBufferFull) })
 				continue
@@ -448,7 +498,7 @@ func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
 
 	largeChunk := bytes.Repeat([]byte("z"), 256*1024)
 	floodDone := false
-	for i := 0; i < 128 && !floodDone; i++ {
+	for i := 0; i < 64 && !floodDone; i++ {
 		pkt, _ := EncodeDataFrame(PayloadTypeBinary, "cli-1", "srv-slow", largeChunk)
 		if errWrite := cli1.WriteMessage(websocket.BinaryMessage, pkt); errWrite != nil {
 			t.Fatalf("WriteMessage(flood %d) error = %v", i, errWrite)
@@ -469,8 +519,13 @@ func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
 	if errWrite := cli1.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"post-flood-barrier"}`)); errWrite != nil {
 		t.Fatalf("WriteMessage(barrier) error = %v", errWrite)
 	}
-	if errSync := <-syncDone; errSync != nil {
-		t.Fatalf("barrier sync error = %v", errSync)
+	select {
+	case errSync := <-syncDone:
+		if errSync != nil {
+			t.Fatalf("barrier sync error = %v", errSync)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for post-flood barrier server_list")
 	}
 
 	// Verify srvFast still exchanges traffic with cli1 without being blocked by srvSlow.

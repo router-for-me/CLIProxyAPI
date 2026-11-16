@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -104,6 +105,9 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, do
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
 	if sanitizeClaudeWebSearchDomainsDoc(doc) {
+		changed = true
+	}
+	if sanitizeClaudeAdvisorToolModelsDoc(doc) {
 		changed = true
 	}
 	if helps.NormalizeClaudeToolCallIDsDoc(doc) {
@@ -272,6 +276,53 @@ func sanitizeClaudeWebSearchDomainsDoc(doc *ojson.Doc) bool {
 		}
 		return true
 	})
+	return changed
+}
+
+// sanitizeClaudeAdvisorToolModelsDoc strips thinking suffixes from the model
+// field of advisor_* server tools so Anthropic receives a valid model ID.
+func sanitizeClaudeAdvisorToolModelsDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	type advisorModelUpdate struct {
+		path  string
+		model string
+	}
+	var updates []advisorModelUpdate
+	for idx, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if !strings.HasPrefix(toolType, "advisor_") {
+			continue
+		}
+		modelRes := tool.Get("model")
+		if !modelRes.Exists() || modelRes.Type != ojson.String {
+			continue
+		}
+		rawModel := strings.TrimSpace(modelRes.String())
+		if rawModel == "" {
+			continue
+		}
+		parsed := thinking.ParseSuffix(rawModel)
+		baseModel := strings.TrimSpace(parsed.ModelName)
+		if !parsed.HasSuffix || baseModel == "" {
+			continue
+		}
+		updates = append(updates, advisorModelUpdate{
+			path:  fmt.Sprintf("tools.%d.model", idx),
+			model: baseModel,
+		})
+	}
+	changed := false
+	for _, u := range updates {
+		if doc.Set(u.path, u.model) == nil {
+			changed = true
+		}
+	}
 	return changed
 }
 

@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -1142,6 +1142,12 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(ctx context.Context, sel
 		}
 	}
 	return current, false, nil
+}
+
+// RefreshAfterUnauthorized refreshes a local credential once after an upstream 401
+// using the same rejection-marking and single-refresh rules as request execution.
+func (m *Manager) RefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
+	return m.tryRefreshAfterUnauthorized(ctx, auth, execErr, alreadyTried, clientHeaders...)
 }
 
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a

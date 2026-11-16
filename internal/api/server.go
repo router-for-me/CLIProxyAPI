@@ -21,6 +21,7 @@ import (
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/musecode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
@@ -56,6 +57,7 @@ type Server struct {
 	// handlers contains the API handlers for processing requests.
 	handlers         *handlers.BaseAPIHandler
 	codexLiveHandler *codexlive.Handler
+	museCodeHandler  *musecode.Handler
 	tunnelHub        *wstunnel.Hub
 
 	// cfg holds the current server configuration.
@@ -90,6 +92,13 @@ type Server struct {
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
+
+	// interceptorHost is the resolved PluginInterceptorHost installed on request
+	// handlers. When a caller provides their own host via
+	// WithPluginInterceptorHost, interceptor calls and capability detection
+	// delegate to that host while plugin model routing, lifecycle callbacks, and
+	// websocket observers stay delegated to pluginHost.
+	interceptorHost handlers.PluginInterceptorHost
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -172,6 +181,22 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
 
+	// Resolve the interceptor host once so startup and reload share the same
+	// wiring. A caller-provided host keeps interceptor dispatch and capability
+	// detection on the embedder implementation while model routing, lifecycle
+	// callbacks, and websocket observers remain delegated to the internal
+	// plugin host. Typed-nil values are normalized first so they cannot defeat
+	// SetPluginHost's own nil-interface normalization.
+
+	if custom := normalizeInterceptorHost(optionState.pluginInterceptorHost); custom != nil {
+		s.interceptorHost = &delegatedInterceptorHost{
+			primary:    custom,
+			pluginHost: optionState.pluginHost,
+		}
+	} else {
+		s.interceptorHost = optionState.pluginHost
+	}
+
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.CPATraceIDMiddleware())
@@ -206,7 +231,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
-	s.handlers.SetPluginHost(optionState.pluginHost)
+	s.handlers.SetPluginHost(s.interceptorHost)
 	if optionState.pluginHost != nil {
 		optionState.pluginHost.SetModelExecutor(s.handlers)
 		optionState.pluginHost.SetAuthManager(authManager)
