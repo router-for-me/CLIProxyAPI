@@ -2,7 +2,9 @@ package helps
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -354,4 +356,37 @@ func validCodexQuotaEventIdentifier(value string) bool {
 func validCodexQuotaEventText(value string) bool {
 	value = strings.TrimSpace(value)
 	return value != "" && len(value) <= 256 && !strings.ContainsAny(value, "\r\n")
+}
+
+// anchorCodexQuotaResetHeaders fixes relative base-window deadlines at receipt.
+// Only the internal observation is changed; callers keep raw headers for logs
+// and downstream forwarding. Each websocket event is anchored before merging so
+// a later partial event cannot rebase a window from an earlier observation.
+func anchorCodexQuotaResetHeaders(headers http.Header, observedAt time.Time) http.Header {
+	if observedAt.IsZero() {
+		return headers
+	}
+	anchored := headers
+	cloned := false
+	for _, window := range []string{"Primary", "Secondary"} {
+		prefix := "X-Codex-" + window
+		minutes, err := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Window-Minutes")), 10, 64)
+		if err != nil || (minutes != 10080 && minutes != 300) {
+			continue
+		}
+		absolute, errAbsolute := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Reset-At")), 10, 64)
+		if errAbsolute == nil && absolute > 0 && absolute <= 253402300799 {
+			continue
+		}
+		seconds, errSeconds := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Reset-After-Seconds")), 10, 64)
+		if errSeconds != nil || seconds < 0 || seconds > 604800 {
+			continue
+		}
+		if !cloned {
+			anchored = headers.Clone()
+			cloned = true
+		}
+		anchored.Set(prefix+"-Reset-At", strconv.FormatInt(observedAt.Add(time.Duration(seconds)*time.Second).Unix(), 10))
+	}
+	return anchored
 }
