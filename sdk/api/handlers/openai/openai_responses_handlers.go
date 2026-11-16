@@ -835,6 +835,12 @@ func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIR
 	}
 }
 
+// WriteErrorResponse writes errMsg like the base handler, with a pooled
+// usage-limit cooldown reported as usage_limit_reached.
+func (h *OpenAIResponsesAPIHandler) WriteErrorResponse(c *gin.Context, errMsg *interfaces.ErrorMessage) {
+	h.BaseAPIHandler.WriteErrorResponse(c, usageLimitCooldownErrorMessage(errMsg))
+}
+
 // HandlerType returns the identifier for this handler implementation.
 func (h *OpenAIResponsesAPIHandler) HandlerType() string {
 	return OpenaiResponse
