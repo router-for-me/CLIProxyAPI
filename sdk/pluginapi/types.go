@@ -98,6 +98,8 @@ type Capabilities struct {
 	FrontendAuthOmitBody bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// SchedulerContinuity provides optional nonblocking pre-admission guidance.
+	SchedulerContinuity SchedulerContinuity
 	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
 	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
 	// credentials from the highest available priority tier.
@@ -582,6 +584,27 @@ type Scheduler interface {
 // or a built-in provider before model-to-provider resolution and auth selection.
 type ModelRouter interface {
 	RouteModel(context.Context, ModelRouteRequest) (ModelRouteResponse, error)
+}
+
+// SchedulerContinuity provides an immediate, side-effect-safe pre-admission decision.
+type SchedulerContinuity interface {
+	Continuity(context.Context, SchedulerContinuityRequest) (SchedulerContinuityResponse, error)
+}
+
+// SchedulerContinuityRequest carries the stable request lifecycle and current candidates.
+type SchedulerContinuityRequest struct {
+	RequestID                  string               `json:"request_id"`
+	Pick                       SchedulerPickRequest `json:"pick"`
+	PreviousAttemptRejected429 bool                 `json:"previous_attempt_rejected_429,omitempty"`
+}
+
+// SchedulerContinuityResponse asks the host to wait or proceed with normal admission.
+type SchedulerContinuityResponse struct {
+	Action       string `json:"action"`
+	Reason       string `json:"reason,omitempty"`
+	RetryAfterMS int64  `json:"retry_after_ms,omitempty"`
+	MaxWaitMS    int64  `json:"max_wait_ms,omitempty"`
+	ResetAt      string `json:"reset_at,omitempty"`
 }
 
 // SchedulerPickRequest describes the routing context offered to a scheduler plugin.

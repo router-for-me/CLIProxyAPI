@@ -998,7 +998,62 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if executionAuthID != "" && !isPluginExecutorRoute {
 			cliCtx = handlers.WithPinnedAuthID(cliCtx, executionAuthID)
 		}
-		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+		var dataChan <-chan []byte
+		var errChan <-chan *interfaces.ErrorMessage
+		if !h.CanWaitForCodexContinuity(modelName) {
+			dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+		} else {
+			// A continuity wait happens before ExecuteStreamWithAuthManager returns.
+			// Keep the websocket alive without writing application data or replaying a turn.
+			waitSignal := make(chan struct{}, 1)
+			cliCtx = coreauth.WithContinuityWaitNotifier(cliCtx, waitSignal)
+			type websocketStreamStart struct {
+				data <-chan []byte
+				errs <-chan *interfaces.ErrorMessage
+			}
+			started := make(chan websocketStreamStart, 1)
+			go func() {
+				data, _, errs := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+				started <- websocketStreamStart{data: data, errs: errs}
+			}()
+			var waitTicker *time.Ticker
+			var waitTick <-chan time.Time
+			waitingForStart := true
+			for waitingForStart {
+				select {
+				case result := <-started:
+					dataChan, errChan = result.data, result.errs
+					waitingForStart = false
+				case <-waitSignal:
+					if waitTicker == nil {
+						interval := handlers.StreamingKeepAliveInterval(h.CurrentConfig())
+						if interval <= 0 {
+							interval = 15 * time.Second
+						}
+						waitTicker = time.NewTicker(interval)
+						waitTick = waitTicker.C
+					}
+				case <-waitTick:
+					if errPing := writer.writePing(); errPing != nil {
+						cliCancel(errPing)
+						waitTicker.Stop()
+						<-started
+						wsTerminateErr = errPing
+						return
+					}
+				case <-c.Request.Context().Done():
+					cliCancel(c.Request.Context().Err())
+					if waitTicker != nil {
+						waitTicker.Stop()
+					}
+					<-started
+					return
+				}
+			}
+			if waitTicker != nil {
+				waitTicker.Stop()
+			}
+		}
 		if !selectedAuthObserved {
 			// Plugin/alternate routes bypass auth selection. Keep canonical HTTP-mode
 			// state instead of inheriting the previous pinned websocket mode.

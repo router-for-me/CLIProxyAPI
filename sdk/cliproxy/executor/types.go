@@ -8,6 +8,9 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
+// RequestLifecycleIDMetadataKey links pre-admission decisions to the terminal callback.
+const RequestLifecycleIDMetadataKey = "request_lifecycle_id"
+
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 

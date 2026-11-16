@@ -92,8 +92,10 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 	if errExec == nil {
 		t.Fatal("authMgr.Execute returned nil error")
 	}
-	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "7" {
-		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 7", got)
+	// The terminal pool deadline includes CPA's native 10-second cooldown.
+	// The original plugin error above must still retain its exact 7-second hint.
+	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "10" {
+		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 10", got)
 	}
 	updated, okAuth := authMgr.GetByID(authID)
 	if !okAuth || updated == nil {

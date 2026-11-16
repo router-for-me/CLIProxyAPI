@@ -97,6 +97,24 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 	return out
 }
 
+// CanWaitForCodexContinuity leaves unrelated model routes on their existing
+// synchronous execution path. The manager still performs authoritative checks.
+func (h *BaseAPIHandler) CanWaitForCodexContinuity(modelName string) bool {
+	if h == nil || h.AuthManager == nil || h.AuthManager.HomeEnabled() || !h.AuthManager.HasSchedulerContinuity() {
+		return false
+	}
+	providers, _, err := h.getRequestDetails(modelName)
+	if err != nil || len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	return h.getRequestDetailsWithOptions(modelName, false, false)
 }
