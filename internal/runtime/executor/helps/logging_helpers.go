@@ -542,6 +542,11 @@ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, pa
 	appendCodexAPIWebsocketResponseAt(ctx, cfg, payload, time.Now())
 }
 
+// AppendCodexAPIWebsocketResponseAt records a frame using its socket receipt time.
+func AppendCodexAPIWebsocketResponseAt(ctx context.Context, cfg *config.Config, payload []byte, receivedAt time.Time) {
+	appendCodexAPIWebsocketResponseAt(ctx, cfg, payload, receivedAt)
+}
+
 func appendCodexAPIWebsocketResponseAt(ctx context.Context, cfg *config.Config, payload []byte, observedAt time.Time) {
 	logging.MergeResponseHeadersAt(ctx, anchorCodexQuotaResetHeaders(ParseCodexQuotaEventHeaders(payload), observedAt), observedAt)
 	AppendAPIWebsocketResponse(ctx, cfg, payload)

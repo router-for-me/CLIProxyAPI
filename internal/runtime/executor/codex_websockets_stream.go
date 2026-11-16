@@ -348,7 +348,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				return nil, ctx.Err()
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, receivedAt, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
 				mappedErr := codexWebsocketTurnEventID(mapCodexWebsocketReadError(errRead), originalPayload)
 				if sess != nil {
@@ -417,7 +417,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, receivedAt)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
@@ -673,7 +673,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				_ = send(cliproxyexecutor.StreamChunk{Err: ctx.Err()})
 				return
 			}
-			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+			msgType, payload, receivedAt, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
 				if sess != nil && ctx != nil && ctx.Err() != nil {
 					terminateReason = "context_done"
@@ -710,7 +710,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				continue
 			}
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, receivedAt)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 

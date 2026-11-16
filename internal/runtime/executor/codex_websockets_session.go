@@ -109,10 +109,11 @@ type codexWebsocketSession struct {
 }
 
 type codexWebsocketRead struct {
-	conn    *websocket.Conn
-	msgType int
-	payload []byte
-	err     error
+	conn       *websocket.Conn
+	msgType    int
+	payload    []byte
+	receivedAt time.Time
+	err        error
 }
 
 func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
@@ -793,6 +794,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
+		receivedAt := time.Now()
 		if errRead != nil {
 			sess.connMu.Lock()
 			recoverTransport := sess.recoverTransport
@@ -908,7 +910,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			continue
 		}
 		select {
-		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload}:
+		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload, receivedAt: receivedAt}:
 		case <-done:
 		}
 	}

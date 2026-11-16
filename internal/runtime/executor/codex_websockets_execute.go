@@ -320,7 +320,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
 		}
-		msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
+		msgType, payload, receivedAt, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 		if errRead != nil {
 			mappedErr := mapCodexWebsocketReadError(errRead)
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "read", mappedErr)
@@ -343,7 +343,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			continue
 		}
 		observeCodexTokenEvent(reporter, payload)
-		helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+		helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, receivedAt)
 		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 		payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
