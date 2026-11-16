@@ -82,6 +82,20 @@ func (d *DevinApplyPatchDiagnostics) ObserveDelta(tc DevinToolCallDelta) int {
 	return key
 }
 
+// HasPatchActivity reports whether any unnamed or apply_patch tool-call delta
+// was observed during the upstream response.
+func (d *DevinApplyPatchDiagnostics) HasPatchActivity() bool {
+	if d == nil {
+		return false
+	}
+	for _, call := range d.calls {
+		if call != nil && (call.name == "" || IsApplyPatchUpstreamTool(d.original, call.name)) {
+			return true
+		}
+	}
+	return false
+}
+
 // MarkRecovered marks the call identified by key as recovered from a complete
 // bare patch in invalid_json_str so subsequent failures on later calls report
 // the actually failing call.

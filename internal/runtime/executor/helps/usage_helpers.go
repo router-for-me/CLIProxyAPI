@@ -1386,7 +1386,7 @@ func (b *StreamUsageBuffer) ObserveClaudeStream(line []byte) {
 		return
 	}
 	payload := jsonPayload(line)
-	if b.responseModel == "" && len(payload) > 0 {
+	if len(payload) > 0 {
 		if model, _ := extractClaudeResponseModelEvent(payload); model != "" {
 			b.responseModel = model
 		}

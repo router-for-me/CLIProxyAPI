@@ -7,17 +7,21 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	log "github.com/sirupsen/logrus"
 )
 
-var requestLogID atomic.Uint64
+var (
+	requestLogID                        atomic.Uint64
+	sanitizeFilenameInvalidCharsPattern = regexp.MustCompile(`[<>:"|?*\s]`)
+	sanitizeFilenameMultiHyphenPattern  = regexp.MustCompile(`-+`)
+)
 
 // LogRequest logs a complete non-streaming request/response cycle to a file.
 //
@@ -369,8 +373,7 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")
 
 	// Replace other problematic characters with hyphens
-	reg := regexp.MustCompile(`[<>:"|?*\s]`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = sanitizeFilenameInvalidCharsPattern.ReplaceAllString(sanitized, "-")
 
 	// Never let a parent-directory sequence survive.
 	for strings.Contains(sanitized, "..") {
@@ -378,8 +381,7 @@ func (l *FileRequestLogger) sanitizeForFilename(path string) string {
 	}
 
 	// Remove multiple consecutive hyphens
-	reg = regexp.MustCompile(`-+`)
-	sanitized = reg.ReplaceAllString(sanitized, "-")
+	sanitized = sanitizeFilenameMultiHyphenPattern.ReplaceAllString(sanitized, "-")
 
 	// Remove leading/trailing hyphens and dots
 	sanitized = strings.Trim(sanitized, "-.")

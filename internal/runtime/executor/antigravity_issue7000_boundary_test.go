@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -241,7 +241,7 @@ func TestIssue7000AntigravityExecutionAndFinalPayloadRules(t *testing.T) {
 					switch rules {
 					case "none":
 						assertIssue7000PromptSchema(t, request.Get("systemInstruction"), issue7000LiteralSchema)
-						if !strings.Contains(request.Get("systemInstruction.parts.0.text").String(), "a\u200bnthropic") {
+						if !strings.Contains(request.Get("systemInstruction.parts.0.text").String(), "a\u034fnthropic") {
 							t.Errorf("original system instruction was lost or not obfuscated: %s", body)
 						}
 						for _, key := range []string{"responseSchema", "responseMimeType"} {

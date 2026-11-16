@@ -68,6 +68,9 @@ func TestUnwrapExecutionBoundaryErrorRemovesInternalMarkers(t *testing.T) {
 	}{
 		{name: "attempt inside stop", err: wrapRequestStopError(markUpstreamExecutionAttempt(base))},
 		{name: "stop inside attempt", err: markUpstreamExecutionAttempt(wrapRequestStopError(base))},
+		{name: "scheduler reject", err: wrapSchedulerRejectError(base)},
+		{name: "attempt inside round scheduler reject", err: markRoundEndedBySchedulerReject(markUpstreamExecutionAttempt(base))},
+		{name: "round scheduler reject inside attempt", err: markUpstreamExecutionAttempt(markRoundEndedBySchedulerReject(base))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := unwrapExecutionBoundaryError(test.err); got != base {

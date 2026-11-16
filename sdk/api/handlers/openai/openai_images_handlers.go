@@ -3,9 +3,7 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -13,6 +11,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"

@@ -46,9 +46,28 @@ func extractClaudeResponseModelEvent(data []byte) (model string, terminal bool) 
 			}
 		}
 		return "", false
+	case "content_block_start":
+		if ojson.GetBytesNoCopy(data, "content_block.type").String() == "fallback" {
+			m := ojson.GetBytesNoCopy(data, "content_block.to.model")
+			if m.Type == ojson.String {
+				s := strings.TrimSpace(m.String())
+				if len(s) <= maxResponseModelLength {
+					return strings.Clone(s), false
+				}
+			}
+		}
+		return "", false
+	case "message_delta":
+		if s := extractClaudeFallbackIterationModel(ojson.GetBytesNoCopy(data, "usage.iterations")); s != "" {
+			return s, false
+		}
+		return "", false
 	case "message_stop":
 		return "", true
 	case "message":
+		if s := extractClaudeFallbackIterationModel(ojson.GetBytesNoCopy(data, "usage.iterations")); s != "" {
+			return s, true
+		}
 		m := ojson.GetBytesNoCopy(data, "model")
 		if m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
@@ -74,6 +93,30 @@ func extractClaudeResponseModelEvent(data []byte) (model string, terminal bool) 
 		}
 		return "", false
 	}
+}
+
+func extractClaudeFallbackIterationModel(iterations ojson.Result) string {
+	if !iterations.Exists() || !iterations.IsArray() {
+		return ""
+	}
+	var served string
+	for _, it := range iterations.Array() {
+		if it.Get("type").String() != "fallback_message" {
+			continue
+		}
+		m := it.Get("model")
+		if m.Type != ojson.String {
+			continue
+		}
+		s := strings.TrimSpace(m.String())
+		if s != "" && len(s) <= maxResponseModelLength {
+			served = s
+		}
+	}
+	if served == "" {
+		return ""
+	}
+	return strings.Clone(served)
 }
 
 // extractGeminiResponseModelEvent extracts the response model from a Google Gemini / Vertex / AIStudio response.

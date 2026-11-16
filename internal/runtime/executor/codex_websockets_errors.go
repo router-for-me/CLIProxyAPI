@@ -194,15 +194,50 @@ func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, resp *
 }
 
 func websocketHandshakeBody(resp *http.Response) []byte {
+	body, _ := websocketHandshakeBodyWithReadErr(resp)
+	return body
+}
+
+func websocketHandshakeBodyWithReadErr(resp *http.Response) ([]byte, error) {
 	if resp == nil || resp.Body == nil {
-		return nil
+		return nil, nil
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, errRead := io.ReadAll(resp.Body)
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 	if len(body) == 0 {
-		return nil
+		return nil, errRead
 	}
-	return body
+	return body, errRead
+}
+
+func recordWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response) []byte {
+	bodyErr, errRead := websocketHandshakeBodyWithReadErr(resp)
+	if resp != nil {
+		helps.RecordAPIWebsocketUpgradeRejection(ctx, cfg, websocketUpgradeRequestLog(wsReqLog), resp.StatusCode, resp.Header.Clone(), bodyErr)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, cfg, errRead)
+		}
+	}
+	return bodyErr
+}
+
+func recordWebsocketDialFailure(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response, errDial error) []byte {
+	bodyErr := recordWebsocketUpgradeRejection(ctx, cfg, wsReqLog, resp)
+	helps.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
+	return bodyErr
+}
+
+func recordWebsocketDialRetryFailure(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response, errDial error) []byte {
+	if resp != nil {
+		bodyErr := recordWebsocketUpgradeRejection(ctx, cfg, wsReqLog, resp)
+		helps.RecordAPIWebsocketError(ctx, cfg, "dial_retry", errDial)
+		return bodyErr
+	}
+	if cfg != nil && !cfg.CommercialMode && !cfg.RequestLog {
+		helps.RecordAPIRequest(ctx, cfg, websocketUpgradeRequestLog(wsReqLog))
+	}
+	helps.RecordAPIWebsocketError(ctx, cfg, "dial_retry", errDial)
+	return nil
 }
 
 func closeHTTPResponseBody(resp *http.Response, logPrefix string) {

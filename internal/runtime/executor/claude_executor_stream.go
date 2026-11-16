@@ -225,9 +225,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, err
 		}
 	}
-	if cloaked && len(wireSettings.sensitiveWords) > 0 {
-		matcher := helps.BuildSensitiveWordMatcher(wireSettings.sensitiveWords)
-		helps.ObfuscateSensitiveWordsDoc(doc, matcher)
+	if cloaked {
+		if matcher := wireSettings.buildSensitiveWordMatcher(); matcher != nil {
+			helps.ObfuscateSensitiveWordsDoc(doc, matcher)
+		}
 	}
 	cchBilling := ""
 	if cchSigning {
@@ -245,7 +246,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	touchedPayloadPaths := helps.ApplyPayloadConfigWithTrackedPathsDoc(
 		e.cfg, baseModel, to.String(), from.String(), "", doc, stripTranslatedDefaultMaxTokens(from, originalPayload, originalTranslated),
 		helps.PayloadRequestedModel(opts, req.Model), helps.PayloadRequestPath(opts), opts.Headers,
-		"diagnostics",
+		"diagnostics", "betas",
 	)
 	if touchedPayloadPaths["diagnostics"] {
 		diagnosticsState = claudeDiagnosticsRequestState{}
@@ -285,6 +286,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	); errHeaders != nil {
 		return nil, errHeaders
 	}
+	threadBetas, errThread := e.prepareClaudeThreadBetas(ctx, httpReq, auth, bodyForUpstream, extraBetas, touchedPayloadPaths["betas"], incomingHeaders, wirePolicy.Uncloak, opts.Metadata, req.Metadata)
+	if errThread != nil {
+		return nil, errThread
+	}
 	fastRequest := isAnthropicUpstreamBase(baseURL) && claudeRequestIsFast(httpReq, bodyForUpstream)
 	authID, authLabel, authType, authValue := claudeAuthLogIdentity(auth)
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
@@ -323,13 +328,15 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			return nil, errClassified
 		}
 		b, readErr := io.ReadAll(errBody)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
 			helps.LogWithRequestID(ctx).Warn(msg)
-			b = []byte(msg)
+			if len(b) == 0 {
+				b = []byte(msg)
+			}
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
@@ -389,9 +396,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
+		streamBody := threadBetas.StreamReader(decodedBody, func(messageID string) {
+			commitClaudeContinuity(diagnosticsState, messageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
+			e.rememberClaudeOAuthToolAliases(body, oauthToolNamesReverseMap, messageID)
+		})
 		// If the response target is Claude, directly forward complete SSE events without translation.
 		if responseFormat == to {
-			scanner := bufio.NewScanner(decodedBody)
+			scanner := bufio.NewScanner(streamBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			var event bytes.Buffer
 			var upstreamMessageID string
@@ -469,7 +480,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 
 		// For other formats, use translation
-		scanner := bufio.NewScanner(decodedBody)
+		scanner := bufio.NewScanner(streamBody)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), bodyForTranslation, &param)

@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 const (

@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -53,6 +53,7 @@ type ObjectTokenStore struct {
 	putObjectFn       func(ctx context.Context, key string, data []byte, contentType string) error
 	refreshProbeMu    sync.Mutex
 	refreshProbeReady bool
+	refreshClaims     sync.Map
 }
 
 // NewObjectTokenStore initializes an object storage backed token store.

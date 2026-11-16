@@ -142,6 +142,45 @@ func TestDevinExecutor_GetSensitiveWords(t *testing.T) {
 	}
 }
 
+func TestDevinSensitiveWordsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`devin:
+  sensitive-words:
+    - "Codex"
+  sensitive-words-replace:
+    "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	e := NewDevinExecutor(cfg)
+	got := helps.SanitizeDevinSystemPrompt("You are Codex, an agent based on GPT-5.\nFollow project conventions.", e.getSensitiveWordMatcher())
+	want := "You are a helpful coding assistant.\nFollow project conventions."
+	if got != want {
+		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", got, want)
+	}
+}
+
+func TestDevinSensitivePatternsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`devin:
+  sensitive-words:
+    - "omp"
+  sensitive-patterns-replace:
+    - pattern: '(?m)^You are omp[^\n]*'
+      replacement: "You are a coding assistant."
+    - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+      replacement: ""
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	e := NewDevinExecutor(cfg)
+	got := helps.SanitizeDevinSystemPrompt("You are omp's assistant.\n<system-conventions>\nRFC 2119.\n</system-conventions>\nFollow project conventions.", e.getSensitiveWordMatcher())
+	want := "You are a coding assistant.\nFollow project conventions."
+	if got != want {
+		t.Fatalf("SanitizeDevinSystemPrompt() = %q, want %q", got, want)
+	}
+}
+
 func TestParseInteractionsPayload(t *testing.T) {
 	interactionsPayload := []byte(`{
 		"system_instruction": "You are a helpful coding assistant.",

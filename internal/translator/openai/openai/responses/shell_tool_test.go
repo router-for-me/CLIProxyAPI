@@ -2,11 +2,11 @@ package responses
 
 import (
 	"context"
-	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 )
 

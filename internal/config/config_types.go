@@ -122,6 +122,12 @@ type ClaudeConfig struct {
 	// translation elsewhere, and per-credential search advertising in the Codex
 	// catalog. Default false keeps the translation that predates tool_search support.
 	ToolSearch bool `yaml:"tool-search" json:"tool-search"`
+	// ServerSideFallback opts cloaked Claude requests into Anthropic server-side
+	// refusal fallback injection (claude-opus-5-5 -> claude-opus-4-8 and
+	// claude-fable-5-1 -> claude-opus-5) when the request body does not already
+	// specify fallbacks. Default false leaves cross-model fallbacks omitted unless
+	// explicitly configured by the caller or payload rules.
+	ServerSideFallback bool `yaml:"server-side-fallback" json:"server-side-fallback"`
 	// SessionDatePinDays retains the cloaked currentDate pin per session for
 	// this many days in in-memory mode (server.kv-store.disabled: true without
 	// Home), independently of continuity expiry and credential switches. A nil
@@ -202,10 +208,25 @@ type XAIConfig struct {
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
 }
 
+// SensitivePatternRule defines a Go RE2 regular expression replacement rule.
+type SensitivePatternRule struct {
+	// Pattern is the Go RE2 regular expression to match.
+	Pattern string `yaml:"pattern" json:"pattern"`
+
+	// Replacement is the substitution string (empty string deletes matches).
+	Replacement string `yaml:"replacement" json:"replacement"`
+}
+
 // DevinConfig configures provider-wide Devin request behavior.
 type DevinConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters in system prompts and messages.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system prompts.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules for system prompts.
+	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
 }
 
 // ProxyConnectionPoolConfig configures upstream connection reuse for one api-key
@@ -237,11 +258,24 @@ type ProxyConnectionPoolConfig struct {
 
 // AntigravityConfig configures provider-wide Antigravity request behavior.
 type AntigravityConfig struct {
-	// SensitiveWords is a list of words to obfuscate with zero-width characters in system instructions.
+	// SensitiveWords is a list of words to obfuscate with invisible combining grapheme joiners in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements in system instructions.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules for system instructions.
+	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
 
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+
+	// TOSPauseWindow controls the pool-wide protective pause armed after the first
+	// 403 TOS_VIOLATION. Defaults to "0" (disabled), so only the violating
+	// credential is deactivated unless a positive Go duration string (e.g. "6h")
+	// is explicitly configured. Set to "0", "off", "false", "none", or
+	// "disabled" to explicitly disable the pause.
+	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.
@@ -642,7 +676,7 @@ func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, metadataMod
 	return nameMatch
 }
 
-// PayloadConfig defines default and override parameter rules applied to provider payloads.
+// PayloadConfig defines parameter and text mutation rules applied to provider payloads.
 type PayloadConfig struct {
 	// Default defines rules that only set parameters when they are missing in the payload.
 	Default []PayloadRule `yaml:"default" json:"default"`
@@ -652,6 +686,8 @@ type PayloadConfig struct {
 	Override []PayloadRule `yaml:"override" json:"override"`
 	// OverrideRaw defines rules that always set raw JSON values, overwriting any existing values.
 	OverrideRaw []PayloadRule `yaml:"override-raw" json:"override-raw"`
+	// Replace defines ordered literal replacements in selected user messages.
+	Replace []PayloadReplaceRule `yaml:"replace" json:"replace"`
 	// Filter defines rules that remove parameters from the payload by JSON path.
 	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`
 }
@@ -711,6 +747,12 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// SensitiveWordsReplace maps sensitive words or phrases to literal replacements.
+	SensitiveWordsReplace map[string]string `yaml:"sensitive-words-replace,omitempty" json:"sensitive-words-replace,omitempty"`
+
+	// SensitivePatternsReplace defines ordered Go RE2 regex replacement rules.
+	SensitivePatternsReplace []SensitivePatternRule `yaml:"sensitive-patterns-replace,omitempty" json:"sensitive-patterns-replace,omitempty"`
 
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.

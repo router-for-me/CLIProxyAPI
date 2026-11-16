@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -19,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
