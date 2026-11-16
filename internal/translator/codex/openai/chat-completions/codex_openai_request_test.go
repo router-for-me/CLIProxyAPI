@@ -2,11 +2,11 @@ package chat_completions
 
 import (
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 )
 
 func TestConvertOpenAIRequestToCodex_MaxOutputTokens(t *testing.T) {

@@ -1255,6 +1255,7 @@ func applyClaudeHeadersWithNativeProfile(
 
 	incomingBetas := strings.TrimSpace(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","))
 	countTokens := r.URL != nil && strings.HasSuffix(r.URL.Path, "/count_tokens")
+	preserveThreadCapabilities := !countTokens && (incomingBetas != "" || len(extraBetas) > 0) && ojson.GetBytesNoCopy(body, "thread").IsObject()
 	if !confirmedClaudeCode && !wirePolicy.Cloak && wirePolicy.ExplicitNever && !wirePolicy.Uncloak {
 		det := helps.DetectClaudeCodeRequest(incomingHeaders, body, countTokens, cfg)
 		if det.ConfirmedShape {
@@ -1363,6 +1364,25 @@ func applyClaudeHeadersWithNativeProfile(
 			}
 		}
 	}
+	// A Thread declares capabilities for all turns, not just its first body.
+	// Preserve them before binding the final emitted profile to its response ID.
+	if preserveThreadCapabilities {
+		threadCapabilities := incomingBetas
+		if useOAuthBetas {
+			threadCapabilities = withClaudeOAuthCredentialBetas(threadCapabilities, !wirePolicy.Uncloak)
+		}
+		for _, beta := range extraBetas {
+			threadCapabilities = withClaudeBetaAppended(threadCapabilities, beta)
+		}
+		// Keep required protocol additions after the client-declared capabilities.
+		for _, beta := range strings.Split(baseBetas, ",") {
+			threadCapabilities = withClaudeBetaAppended(threadCapabilities, beta)
+		}
+		if advisorNeeded {
+			threadCapabilities = withClaudeAdvisorToolBeta(threadCapabilities)
+		}
+		baseBetas = threadCapabilities
+	}
 	applyBetaHeader := func() {
 		if wirePolicy.Uncloak {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeCodeBeta)
@@ -1379,29 +1399,30 @@ func applyClaudeHeadersWithNativeProfile(
 				baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
 			}
 		}
-		// Enforce strict native Claude Code 2.1.321 model & turn beta gating:
-		if !claudeRequestSupportsEffort(body, nil) {
-			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
-		}
 		reqProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)
-		if reqProbeOrHelper && !helperProfile {
-			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
-			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
-			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
-		}
-		reqThinkingType := ojson.GetBytesNoCopy(body, "thinking.type").String()
-		if reqThinkingType == "disabled" {
-			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
-		}
-		if helps.IsClaudeSubagentRequest(incomingHeaders, body) && !helps.ClaudeSubagentRequests1h(incomingHeaders, body) {
-			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+		if !preserveThreadCapabilities {
+			// Per-turn gating remains unchanged outside caller-declared Threads.
+			if !claudeRequestSupportsEffort(body, nil) {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
+			}
+			if reqProbeOrHelper && !helperProfile {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
+				baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
+				baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+			}
+			if ojson.GetBytesNoCopy(body, "thinking.type").String() == "disabled" {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
+			}
+			if helps.IsClaudeSubagentRequest(incomingHeaders, body) && !helps.ClaudeSubagentRequests1h(incomingHeaders, body) {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
+			}
+			reqModel := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "model").String()))
+			if isClaudeHaikuModel(reqModel) && !ojson.GetBytesNoCopy(body, "fallbacks").Exists() && !helperProfile {
+				baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
+			}
 		}
 		if !reqProbeOrHelper && !countTokens && helps.ClaudePayloadHas1hTTL(body) {
 			baseBetas = withClaudeExtendedCacheTTLBeta(baseBetas)
-		}
-		reqModel := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "model").String()))
-		if isClaudeHaikuModel(reqModel) && !ojson.GetBytesNoCopy(body, "fallbacks").Exists() && !helperProfile {
-			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
 		}
 		// A body carrying thinking.block_binding is rejected upstream unless
 		// the binding-controls beta travels with it, in every fingerprint

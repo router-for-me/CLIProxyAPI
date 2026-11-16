@@ -1,12 +1,12 @@
 package codex
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 )
 
 // JWTClaims represents the claims section of a JSON Web Token (JWT).

@@ -114,6 +114,8 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		_ = outDoc.Set("reasoning_effort", effort)
 	}
 
+	reasoningActive := isClaudeRequestReasoningActive(outDoc.Get("reasoning_effort"), modelName, root.Get("model").String())
+
 	// Process messages and system.
 	messageCapacity := root.Get("messages.#").Int()
 	if root.Get("system").Exists() {
@@ -342,6 +344,11 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Add reasoning_content if present
 						if hasReasoning {
 							_ = msgDoc.Set("reasoning_content", reasoningContent)
+						} else if hasToolCalls && preserveThinkingBlocks && reasoningActive {
+							// Assistant turn with tool_calls but no replayable thinking text.
+							// Compat thinking upstreams (DeepSeek, Moonshot/Kimi) require
+							// reasoning_content to be present on such messages when reasoning is active.
+							_ = msgDoc.Set("reasoning_content", " ")
 						}
 
 						// Add tool_calls if present (in same message as content)
@@ -543,6 +550,37 @@ func normalizeObjectSchemaProperties(schema any) any {
 	default:
 		return schema
 	}
+}
+
+func isClaudeRequestReasoningActive(effortRes ojson.Result, modelName, payloadModel string) bool {
+	if active, ok := isThinkingSuffixActive(modelName); ok {
+		return active
+	}
+	if active, ok := isThinkingSuffixActive(payloadModel); ok {
+		return active
+	}
+	if !effortRes.Exists() {
+		return false
+	}
+	resolvedEffort := strings.ToLower(strings.TrimSpace(effortRes.String()))
+	return resolvedEffort != "" && resolvedEffort != string(thinking.LevelNone) && resolvedEffort != "0" && resolvedEffort != "false"
+}
+
+func isThinkingSuffixActive(model string) (bool, bool) {
+	suffix := thinking.ParseSuffix(strings.TrimSpace(model))
+	if !suffix.HasSuffix {
+		return false, false
+	}
+	if mode, ok := thinking.ParseSpecialSuffix(suffix.RawSuffix); ok {
+		return mode != thinking.ModeNone, true
+	}
+	if budget, ok := thinking.ParseNumericSuffix(suffix.RawSuffix); ok {
+		return budget > 0, true
+	}
+	if level, ok := thinking.ParseLevelSuffix(suffix.RawSuffix); ok {
+		return level != "" && level != thinking.LevelNone, true
+	}
+	return false, false
 }
 
 func shouldMapClaudeThinkingToGPTReasoning(part ojson.Result, preserveThinkingBlocks ...bool) bool {

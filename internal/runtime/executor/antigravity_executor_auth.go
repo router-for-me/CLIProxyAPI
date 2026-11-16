@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"

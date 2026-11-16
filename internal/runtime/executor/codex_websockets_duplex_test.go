@@ -591,3 +591,67 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 		t.Fatal("server did not finish")
 	}
 }
+
+func TestCodexDuplexNativeAliasContinuationUsesRealModel(t *testing.T) {
+	frames := make(chan []byte, 3)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Error(errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := c.Close(); errClose != nil {
+				t.Errorf("close upstream websocket: %v", errClose)
+			}
+		}()
+		for i := 0; i < 3; i++ {
+			_, frame, errRead := c.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			frames <- frame
+			for _, payload := range []string{`{"type":"response.created","response":{"id":"r1"}}`, `{"type":"response.completed","response":{"id":"r1","output":[]}}`} {
+				if errWrite := c.WriteMessage(websocket.TextMessage, []byte(payload)); errWrite != nil {
+					t.Error(errWrite)
+					return
+				}
+			}
+		}
+		_, _, _ = c.ReadMessage()
+	}))
+	defer upstream.Close()
+	cfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "test-key", BaseURL: upstream.URL, Models: []config.CodexModel{{Name: "real-model", IsCompat: false}}}}}
+	cfg.Codex.ResponseSteering = true
+	cfg.CodexResponseSteering = true
+	exec := NewCodexWebsocketsExecutor(cfg)
+	defer exec.CloseExecutionSession("native-alias-session")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	input := make(chan core.WebsocketInput, 1)
+	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
+	stream, errStream := exec.ExecuteStream(ctx, &cliproxyauth.Auth{ID: "native-alias-account", Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}, core.Request{Model: "real-model", Payload: []byte(`{"model":"client-alias","input":[]}`)}, core.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "native-alias-session"}})
+	if errStream != nil {
+		t.Fatal(errStream)
+	}
+	for turn := 0; turn < 3; turn++ {
+		for {
+			chunk, ok := <-stream.Chunks
+			if !ok || chunk.Err != nil {
+				t.Fatalf("turn %d stream closed or failed: %v", turn, chunk.Err)
+			}
+			if ojson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+				break
+			}
+		}
+		frame := <-frames
+		if got := ojson.GetBytes(frame, "model").String(); got != "real-model" {
+			t.Fatalf("turn %d model = %q, want real-model; frame=%s", turn, got, frame)
+		}
+		if turn == 0 {
+			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"client-alias","previous_response_id":"r1","input":"follow up"}`)}
+		} else if turn == 1 {
+			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","previous_response_id":"r1","input":"follow up again"}`)}
+		}
+	}
+}

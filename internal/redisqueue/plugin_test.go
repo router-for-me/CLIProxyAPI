@@ -2,12 +2,12 @@ package redisqueue
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"

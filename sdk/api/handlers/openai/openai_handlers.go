@@ -9,12 +9,12 @@ package openai
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
