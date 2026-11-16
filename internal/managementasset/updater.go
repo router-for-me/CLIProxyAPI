@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
+	defaultManagementReleaseURL  = "https://api.github.com/repos/iamkunal9/proxx-panel/releases/latest" // proxx: default panel
 	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"

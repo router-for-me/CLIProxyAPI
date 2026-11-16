@@ -18,9 +18,10 @@ active and touches most files. The owner also wants the product named "proxx" in
     archives containing `proxx`). The container keeps upstream's `/CLIProxyAPI` directory so
     `docker-compose.yml` mounts still work. On upstream merges, re-apply the rename if those lines conflict;
   - the management panel (`iamkunal9/proxx-panel`) is fully branded "proxx".
-- `DefaultPanelGitHubRepository` stays upstream's until `proxx-panel` has a published release; until
-  then point `remote-management.panel-github-repository` at `https://github.com/iamkunal9/proxx-panel`
-  in config. Changing the default first would break panel downloads for anyone running defaults.
+- The default panel is `iamkunal9/proxx-panel` (`DefaultPanelGitHubRepository`, `defaultManagementReleaseURL`,
+  `config.example.yaml`), switched once its first release (`v1.28.0-proxx.1`, 2026-11-16) was published.
+  If GitHub is unreachable on first start, upstream's fallback page (`cpamc.router-for.me`, the upstream
+  panel) is still used. Panel releases: push a `v*` tag on proxx-panel; its workflow attaches `management.html`.
 - Fork features go in new files and new packages. Upstream files get one-line hooks marked
   `proxx:` and listed in `docs/proxx/README.md`.
 - All fork config sits under one `proxx:` root; all fork management routes under `/v8/management/proxx`.
