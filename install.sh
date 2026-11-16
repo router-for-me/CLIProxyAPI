@@ -74,6 +74,12 @@ stop_service() {
 	Darwin) [ -f "$PLIST" ] && launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1 || true ;;
 	Linux) [ -f "$UNIT" ] && has_systemd_user && systemctl --user stop proxx.service >/dev/null 2>&1 || true ;;
 	esac
+	# Wait (up to ~10s) for a previous proxx process to exit so its port is free.
+	i=0
+	while [ "$i" -lt 20 ] && pgrep -f "$BIN --config" >/dev/null 2>&1; do
+		i=$((i + 1))
+		sleep 0.5
+	done
 }
 
 if [ -n "$UNINSTALL" ]; then
