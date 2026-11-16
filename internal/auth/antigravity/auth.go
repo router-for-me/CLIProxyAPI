@@ -403,9 +403,14 @@ func (o *AntigravityAuth) WarmupAfterLogin(ctx context.Context, accessToken, pro
 	}
 	_, _ = o.callControlPlane(ctx, accessToken, "fetchUserInfo", projectBody)
 	_, _ = o.callControlPlane(ctx, accessToken, "fetchAvailableModels", projectBody)
-	_, _ = o.callControlPlane(ctx, accessToken, "listExperiments", map[string]any{
-		"metadata": map[string]string{"updateChannel": "stable"},
-	})
+	experimentsBody := struct {
+		Project  string            `json:"project,omitempty"`
+		Metadata map[string]string `json:"metadata"`
+	}{
+		Project:  strings.TrimSpace(projectID),
+		Metadata: map[string]string{"updateChannel": "stable"},
+	}
+	_, _ = o.callControlPlane(ctx, accessToken, "listExperiments", experimentsBody)
 }
 
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
