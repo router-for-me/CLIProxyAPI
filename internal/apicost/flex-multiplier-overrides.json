@@ -1,0 +1,26 @@
+{
+	"exact": {
+		"gpt-6-astra": 0.5,
+		"gpt-6.1-sol": 0.5,
+		"gpt-6.1-terra": 0.5,
+		"gpt-6-luna": 0.5,
+		"gpt-6-sol": 0.5,
+		"gpt-5.6-sol": 0.5,
+		"gpt-5.6-terra": 0.5,
+		"gpt-5.6-luna": 0.5,
+		"gpt-5.5": 0.5,
+		"gpt-5.5-pro": 0.5,
+		"gpt-5.4": 0.5,
+		"gpt-5.4-mini": 0.5,
+		"gpt-5.4-nano": 0.5,
+		"gpt-5.4-pro": 0.5,
+		"gpt-5.2": 0.5,
+		"gpt-5.1": 0.5,
+		"gpt-5": 0.5,
+		"gpt-5-mini": 0.5,
+		"gpt-5-nano": 0.5,
+		"o3": 0.5,
+		"o4-mini": 0.5
+	},
+	"normalized_prefix": {}
+}

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/apicost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotahistory"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -35,6 +36,7 @@ type routingStateFile struct {
 	Quota           map[string]coreauth.QuotaObservation `json:"quota,omitempty"`
 	SessionBindings []coreauth.SessionBindingRecord      `json:"session_bindings,omitempty"`
 	History         map[string][]quotahistory.Point      `json:"history,omitempty"`
+	APICost         []apicost.Bucket                     `json:"api_cost,omitempty"`
 }
 
 // sessionBindingSnapshotter is implemented by selectors that keep session
@@ -46,11 +48,12 @@ type sessionBindingSnapshotter interface {
 
 // routingStatePersister samples passive quota snapshots into the history
 // store and, when a path is configured, persists quota snapshots, history,
-// and session bindings across restarts.
+// estimated API costs, and session bindings across restarts.
 type routingStatePersister struct {
 	path    string
 	manager *coreauth.Manager
 	history *quotahistory.Store
+	cost    *apicost.Store
 	now     func() time.Time
 
 	mu           sync.Mutex
@@ -62,8 +65,8 @@ type routingStatePersister struct {
 	done         chan struct{}
 }
 
-func newRoutingStatePersister(path string, manager *coreauth.Manager, history *quotahistory.Store) *routingStatePersister {
-	return &routingStatePersister{path: path, manager: manager, history: history, now: time.Now}
+func newRoutingStatePersister(path string, manager *coreauth.Manager, history *quotahistory.Store, cost *apicost.Store) *routingStatePersister {
+	return &routingStatePersister{path: path, manager: manager, history: history, cost: cost, now: time.Now}
 }
 
 // resolveRoutingStatePath expands "~" and resolves relative paths against
@@ -112,6 +115,10 @@ func (p *routingStatePersister) load() error {
 		p.history.Import(state.History)
 		p.history.Prune(now, nil)
 	}
+	if p.cost != nil {
+		p.cost.Import(state.APICost)
+		p.cost.Prune(now)
+	}
 	p.mu.Lock()
 	p.pending = state.Quota
 	p.pendingUntil = now.Add(routingStatePendingTTL)
@@ -121,8 +128,8 @@ func (p *routingStatePersister) load() error {
 	if selector, ok := p.manager.Selector().(sessionBindingSnapshotter); ok {
 		restoredBindings = selector.RestoreSessionBindings(state.SessionBindings, now)
 	}
-	log.Infof("routing state restored from %s: %d quota snapshots, %d session bindings, %d history series",
-		p.path, restoredQuota, restoredBindings, len(state.History))
+	log.Infof("routing state restored from %s: %d quota snapshots, %d session bindings, %d history series, %d api cost buckets",
+		p.path, restoredQuota, restoredBindings, len(state.History), len(state.APICost))
 	return nil
 }
 
@@ -153,9 +160,16 @@ func (p *routingStatePersister) applyPendingQuota(now time.Time) int {
 }
 
 // sample records the current quota windows of every credential into the
-// history store and prunes expired points and removed credentials.
+// history store and prunes expired points, removed credentials, and expired
+// cost buckets. Cost buckets of removed credentials are kept.
 func (p *routingStatePersister) sample(now time.Time) {
-	if p == nil || p.manager == nil || p.history == nil {
+	if p == nil {
+		return
+	}
+	if p.cost != nil {
+		p.cost.Prune(now)
+	}
+	if p.manager == nil || p.history == nil {
 		return
 	}
 	auths := p.manager.List()
@@ -223,6 +237,9 @@ func (p *routingStatePersister) save(now time.Time) error {
 	p.mu.Unlock()
 	if p.history != nil {
 		state.History = p.history.Export()
+	}
+	if p.cost != nil {
+		state.APICost = p.cost.Export()
 	}
 	body, errMarshal := json.Marshal(state)
 	if errMarshal != nil {
@@ -351,7 +368,7 @@ func (s *Service) startRoutingState(ctx context.Context) {
 		log.Warnf("routing state persistence disabled: %v", errResolve)
 		path = ""
 	}
-	persister := newRoutingStatePersister(path, s.coreManager, quotahistory.Default())
+	persister := newRoutingStatePersister(path, s.coreManager, quotahistory.Default(), apicost.Default())
 	if errLoad := persister.load(); errLoad != nil {
 		log.Warnf("failed to restore routing state: %v", errLoad)
 	}
