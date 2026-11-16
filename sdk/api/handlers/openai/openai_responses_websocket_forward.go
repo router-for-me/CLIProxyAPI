@@ -248,6 +248,14 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// StreamChunk.Err still arrives through errs and closes the socket.
 				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
 				if eventType == wsEventTypeError && preserveErrorEvent {
+					frameErr := responsesWebsocketErrorMessageFromPayload(payloads[i])
+					// A depleted credential cannot recover on this socket. Consult the
+					// alternative-target replay guard even after response.created.
+					if frameErr != nil && isResponsesWebsocketQuotaOrCooldownError(frameErr.Error) {
+						preserveErrorEvent = false
+					}
+				}
+				if eventType == wsEventTypeError && preserveErrorEvent {
 					turnEnded = true
 					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
