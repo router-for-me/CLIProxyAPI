@@ -79,6 +79,29 @@ func TestAccessAdapterDecodesZstdBodyForPlugin(t *testing.T) {
 	}
 }
 
+// The Claude messages and count_tokens handlers read the body through ReadRequestBody too, so a
+// plugin sees the same decoded JSON the handler runs.
+func TestAccessAdapterDecodesZstdBodyForClaudeRoutes(t *testing.T) {
+	plain := []byte(`{"model":"claude-sonnet-4","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	compressed := zstdCompress(t, plain)
+	for _, path := range []string{"/v1/messages", "/v1/messages/count_tokens"} {
+		seen, calls, req, authErr := authenticateWithBody(context.Background(), t, http.MethodPost, path, compressed, "zstd", 0)
+		if authErr != nil || calls != 1 {
+			t.Fatalf("%s: auth error %v, plugin calls %d", path, authErr, calls)
+		}
+		if !bytes.Equal(seen.DecodedBody, plain) {
+			t.Fatalf("%s: DecodedBody = %q, want %q", path, seen.DecodedBody, plain)
+		}
+		if !bytes.Equal(seen.Body, compressed) || seen.Headers.Get("Content-Encoding") != "zstd" {
+			t.Fatalf("%s: Body or Headers are not raw: headers %v", path, seen.Headers)
+		}
+		rest, errReadAll := io.ReadAll(req.Body)
+		if errReadAll != nil || !bytes.Equal(rest, compressed) {
+			t.Fatalf("%s: the handler no longer gets the raw compressed body", path)
+		}
+	}
+}
+
 // Nothing is decoded where the handler does not decode: GET (websocket upgrade) on a decoding path,
 // routes whose handler reads raw bytes, and plain JSON labeled zstd.
 func TestAccessAdapterLeavesDecodedBodyNilWhereHandlerDoesNotDecode(t *testing.T) {
@@ -90,7 +113,6 @@ func TestAccessAdapterLeavesDecodedBodyNilWhereHandlerDoesNotDecode(t *testing.T
 	}{
 		{"GET responses upgrade", http.MethodGet, "/v1/responses", compressed},
 		{"GET codex responses upgrade", http.MethodGet, "/backend-api/codex/responses", compressed},
-		{"claude handler reads raw", http.MethodPost, "/v1/messages", compressed},
 		{"gemini handler reads raw", http.MethodPost, "/v1beta/models/m:generateContent", compressed},
 		{"plain JSON labeled zstd", http.MethodPost, "/v1/responses", plainJSON},
 	} {
