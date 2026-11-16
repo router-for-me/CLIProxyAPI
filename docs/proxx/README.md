@@ -1,7 +1,7 @@
 # proxx: fork guide
 
 `proxx` is a fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
-It adds three features on top of upstream while staying cheap to sync:
+It adds four features on top of upstream while staying cheap to sync:
 
 1. **Model groups / auto model**: a virtual model (e.g. `auto`) that routes to the first
    available real model across any configured providers, skipping rate-limited ones.
@@ -11,6 +11,9 @@ It adds three features on top of upstream while staying cheap to sync:
 3. **Pricing**: per-token prices per model (catalog + config overrides), per-request cost
    (upstream-reported cost first, config/catalog otherwise, with an override flag), and
    `pricing` objects in model listings.
+4. **Request log viewer**: browse, search, inspect and live-tail the per-request log files
+   (`request-log: true`) through `/v8/management/proxx/requests`, joined with usage/cost, plus
+   size-based retention (`proxx.request-logs.max-total-size-mb`).
 
 Decisions live in [`decisions/`](decisions/) as numbered ADRs. Read them before changing a feature.
 
@@ -94,7 +97,7 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `sdk/api/handlers/claude/code_handlers.go` | `pricing.AttachPricing(h.Models(), "id")` inside `ClaudeModels` (+ import) | `pricing` object in Claude `/v1/models` |
 | `sdk/api/handlers/gemini/gemini_handlers.go` | `pricing.AttachPricing(normalizedModels, "name")` (+ import) | `pricing` object in Gemini `/v1beta/models` |
 | `internal/api/server_routes.go` | `pricing.AttachPricing(...)` in `handleHomeModels` (2 lines + import) | `pricing` object in Home-mode listings |
-| `config.example.yaml` | commented `proxx:` example block | documentation only |
+| `config.example.yaml` | commented `proxx:` example block (incl. `request-logs`) | documentation only |
 | `.gitignore` | `!docs/proxx/` after `docs/*` | track fork docs |
 | `README.md` | one proxx header line at the top | branding (ADR 0001) |
 | `internal/config/config_defaults.go`, `internal/managementasset/updater.go`, `config.example.yaml` | default panel repo → `iamkunal9/proxx-panel` (1 line each) | proxx panel by default (ADR 0001) |
@@ -107,7 +110,8 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `sdk/cliproxy/auth/conductor_execution.go` | `maxWait = proxxGroupMaxWait(ctx, maxWait)` after `retrySettings()` (3x) | group members fail over instead of sleeping for a cooldown |
 
 Fork-owned files that other proxx features also touch: `internal/api/server_management_proxx.go`
-(one `s.registerProxx*Routes(proxx)` line per feature).
+(one `s.registerProxx*Routes(proxx)` line per feature), `internal/proxx/proxx.go` (lifecycle facade),
+`internal/config/proxx.go` (config root).
 
 ## Request flow (upstream, for orientation)
 
@@ -151,12 +155,23 @@ Filled in as features land (see the ADRs for design):
     (lifecycle facade), handlers in `internal/api/handlers/management/usage_proxx.go`, routes in
     `internal/api/server_management_proxx_usage.go`.
   - Management: `GET /v8/management/proxx/usage/summary`, `GET .../usage/recent`, `DELETE .../usage`.
+- Request log viewer and retention: ADR 0006
+  - `internal/proxx/requestlogs` (directory index, section parser, SSE assembler, usage join plugin
+    `proxx-request-logs`, retention, live-tail poller), driven from the `internal/proxx/proxx.go` facade
+    (no new upstream hooks). Handlers in `internal/api/handlers/management/requestlogs_proxx.go`, routes in
+    `internal/api/server_management_proxx_requestlogs.go`.
+  - Config: `proxx.request-logs.max-total-size-mb` (unset = 10240, 0 = unlimited).
+  - Management: `GET /v8/management/proxx/requests` (list/filter/search), `GET .../requests/stream` (SSE),
+    `GET .../requests/:id`, `GET .../requests/:id/raw`, `DELETE .../requests/:id`, `DELETE .../requests`.
+    Request logging itself is toggled with the existing `PUT /v8/management/config/observability/logs/request-log`
+    (raw JSON `true`/`false`).
 
 ## Tests
 
 ```bash
-go test ./internal/proxx/...                                     # unit tests (pricing formula, lookup, aggregator, groups)
+go test ./internal/proxx/...                                     # unit tests (pricing formula, lookup, aggregator, groups, request logs)
 PROXX_E2E=1 go test ./test/proxx/groups_e2e/ -run E2E -v -count=1  # e2e: model groups
+PROXX_E2E=1 go test ./test/proxx/requestlogs_e2e/ -run E2E -v -count=1  # e2e: request log viewer + retention
 go test -tags proxxe2e -count=1 -v ./test/proxx/pricing_e2e/     # e2e: builds and runs the real binary
 ```
 

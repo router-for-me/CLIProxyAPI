@@ -213,6 +213,12 @@ func (s *Store) HandleUsage(_ context.Context, record usage.Record) {
 	s.dirty = true
 }
 
+// TokenCounts returns input (incl. cache reads/writes), output (incl. reasoning), cache-read and
+// reasoning token counts from a usage detail, preferring the canonical token breakdown.
+func TokenCounts(d usage.Detail) (in, out, cached, reasoning int64) {
+	return tokenCounts(d)
+}
+
 func tokenCounts(d usage.Detail) (in, out, cached, reasoning int64) {
 	b := d.TokenBreakdown
 	if b.Valid() && b.Quality == usage.TokenAccountingQualityComplete {

@@ -1,0 +1,60 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/chat/completions
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-11-16T12:18:48.262971+05:30
+
+
+=== HEADERS ===
+User-Agent: Go-http-client/1.1
+Content-Length: 79
+Authorization: Bearer te...ey
+Content-Type: application/json
+Accept-Encoding: gzip
+
+
+=== REQUEST BODY ===
+{"messages":[{"content":"hi","role":"user"}],"model":"model-ok","stream":false}
+
+
+=== API REQUEST 1 ===
+Timestamp: 2026-11-16T12:18:48.264559+05:30
+Upstream URL: http://127.0.0.1:58760/pok/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-pok, auth_id=openai-compatibility:pok:7419655b292c, label=pok, type=api_key value=mock...-pok
+
+Headers:
+Authorization: Bearer mock...-pok
+Content-Type: application/json
+User-Agent: Go-http-client/1.1
+
+Body:
+{"messages":[{"content":"hi","role":"user"}],"model":"up-ok","stream":false}
+
+
+=== API RESPONSE 1 ===
+Timestamp: 2026-11-16T12:18:48.265997+05:30
+
+Status: 200
+Headers:
+Content-Length: 257
+Content-Type: application/json
+Date: Mon, 16 Nov 2026 06:48:48 GMT
+
+Body:
+{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"up-ok","choices":[{"index":0,"message":{"role":"assistant","content":"hello from up-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}
+
+
+=== RESPONSE ===
+Status: 200
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta
+Access-Control-Expose-Headers: X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, ETag, X-Request-Id, OpenAI-Request-Id
+Content-Type: application/json
+Vary: Accept-Encoding
+X-Cpa-Trace-Id: 20261116121848-4580f7bb6c859cd3-01a1e31d-9186-7ec9-99b3-62f494483428
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+
+{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"up-ok","choices":[{"index":0,"message":{"role":"assistant","content":"hello from up-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}

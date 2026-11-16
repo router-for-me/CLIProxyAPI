@@ -13,6 +13,32 @@ type ProxxConfig struct {
 
 	// Usage configures the in-process usage/spend aggregator exposed to the panel.
 	Usage ProxxUsageConfig `yaml:"usage,omitempty" json:"usage,omitempty"`
+
+	// RequestLogs configures the request log viewer (retention of request-log files).
+	RequestLogs ProxxRequestLogsConfig `yaml:"request-logs,omitempty" json:"request-logs,omitempty"`
+}
+
+// DefaultProxxRequestLogsMaxTotalSizeMB is the request log retention cap when unset (10 GB).
+const DefaultProxxRequestLogsMaxTotalSizeMB = 10240
+
+// ProxxRequestLogsConfig configures retention for the per-request log files written when
+// request-log is enabled.
+type ProxxRequestLogsConfig struct {
+	// MaxTotalSizeMB caps the total size of request log files (normal and error- files);
+	// the oldest are deleted first. Unset uses 10240 (10 GB); 0 means unlimited.
+	MaxTotalSizeMB *int `yaml:"max-total-size-mb,omitempty" json:"max-total-size-mb,omitempty"`
+}
+
+// MaxTotalSizeBytes resolves the retention cap in bytes (0 = unlimited).
+func (c ProxxRequestLogsConfig) MaxTotalSizeBytes() int64 {
+	mb := DefaultProxxRequestLogsMaxTotalSizeMB
+	if c.MaxTotalSizeMB != nil {
+		mb = *c.MaxTotalSizeMB
+	}
+	if mb <= 0 {
+		return 0
+	}
+	return int64(mb) * 1024 * 1024
 }
 
 // ProxxModelGroup is a client-visible virtual model backed by several real models.
