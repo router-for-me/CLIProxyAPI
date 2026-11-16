@@ -147,7 +147,9 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+	originalTranslated = syncCodexAPIKeyPromptCacheTTL(originalTranslated, auth, from, originalPayload)
 	doc := ojson.NewDoc(body)
+	syncCodexAPIKeyPromptCacheTTLDoc(doc, auth, from, req.Payload)
 	normalizeCodexOutputBudgetDoc(doc)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 

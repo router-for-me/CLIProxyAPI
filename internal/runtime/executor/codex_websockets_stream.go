@@ -920,7 +920,9 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 		return nil, err
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+	originalTranslated = syncCodexAPIKeyPromptCacheTTL(originalTranslated, auth, from, originalPayload)
 	doc := ojson.NewDoc(body)
+	syncCodexAPIKeyPromptCacheTTLDoc(doc, auth, from, req.Payload)
 	normalizeCodexOutputBudgetDoc(doc)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 

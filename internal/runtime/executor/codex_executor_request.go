@@ -476,6 +476,52 @@ func applyCodexSIWCCompactBodyRulesDoc(doc *ojson.Doc, hasExplicitInstructions b
 	return changed
 }
 
+// codexAPIKeyPromptCacheTTL returns the explicit non-empty string
+// prompt_cache_options.ttl supplied by a Responses caller when the credential is
+// an API key. OAuth and SIWC credentials reject prompt_cache_options, so they
+// keep the translator's removal. Other source formats are left alone: the field
+// is a Responses API setting, and a Claude-format prompt_cache_options carries
+// Claude semantics.
+func codexAPIKeyPromptCacheTTL(auth *cliproxyauth.Auth, from sdktranslator.Format, source []byte) string {
+	if len(source) == 0 || !codexAuthUsesAPIKey(auth) {
+		return ""
+	}
+	if from != sdktranslator.FormatOpenAIResponse && from != sdktranslator.FormatCodex {
+		return ""
+	}
+	val := ojson.GetBytesNoCopy(source, "prompt_cache_options.ttl")
+	if val.Type != ojson.String {
+		return ""
+	}
+	return strings.TrimSpace(val.String())
+}
+
+// syncCodexAPIKeyPromptCacheTTLDoc restores the caller's prompt_cache_options.ttl
+// on requests sent with an API key, without injecting a default. Only ttl is
+// carried: prompt_cache_options.mode and prompt_cache_breakpoint markers stay
+// removed for every credential, so implicit caching keeps working.
+func syncCodexAPIKeyPromptCacheTTLDoc(doc *ojson.Doc, auth *cliproxyauth.Auth, from sdktranslator.Format, source []byte) bool {
+	if doc == nil {
+		return false
+	}
+	ttl := codexAPIKeyPromptCacheTTL(auth, from, source)
+	if ttl == "" {
+		return false
+	}
+	return helps.SetStringIfDifferentDoc(doc, "prompt_cache_options.ttl", ttl)
+}
+
+// syncCodexAPIKeyPromptCacheTTL is the byte form of syncCodexAPIKeyPromptCacheTTLDoc,
+// used on the translated original request so payload default rules see the
+// caller's value as present.
+func syncCodexAPIKeyPromptCacheTTL(body []byte, auth *cliproxyauth.Auth, from sdktranslator.Format, source []byte) []byte {
+	ttl := codexAPIKeyPromptCacheTTL(auth, from, source)
+	if ttl == "" {
+		return body
+	}
+	return helps.SetStringIfDifferent(body, "prompt_cache_options.ttl", ttl)
+}
+
 func stripCodexSIWCUnsupportedFields(body []byte, hasExplicitInstructions bool, opts ...cliproxyexecutor.Options) []byte {
 	doc := ojson.NewDoc(body)
 	if !stripCodexSIWCUnsupportedFieldsDoc(doc, hasExplicitInstructions, opts...) {
