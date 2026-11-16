@@ -35,7 +35,7 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 		return false
 	}
 	now := time.Now()
-	if effectiveAuthForceUntil(auth).After(now) || effectiveCredQuotaForceUntil(auth).After(now) {
+	if auth.nonQuotaCooldownUntil.After(now) || effectiveAuthForceUntil(auth).After(now) || effectiveCredQuotaForceUntil(auth).After(now) {
 		return false
 	}
 	for _, state := range auth.ModelStates {
@@ -47,7 +47,7 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 		if isModelStateActiveCooldown(state.credentialQuotaShadow, now) {
 			return false
 		}
-		if effectiveModelForceUntil(state).After(now) {
+		if state.nonQuotaCooldownUntil.After(now) || effectiveModelForceUntil(state).After(now) {
 			return false
 		}
 		modelKnown, modelSafe := quotaRecoveryState(auth.Provider, state.Status, state.StatusMessage, state.Unavailable, state.NextRetryAfter, state.Quota, state.LastError)

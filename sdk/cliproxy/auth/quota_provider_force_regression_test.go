@@ -133,6 +133,7 @@ func TestQuotaRecoveryRetainedForceDeadline(t *testing.T) {
 					switch kind {
 					case "auth":
 						current.forceCooldownUntil = now.Add(-time.Minute)
+						current.nonQuotaCooldownUntil = now.Add(-time.Minute)
 					case "credential":
 						current.credQuotaForceUntil = now.Add(-time.Minute)
 					case "model":
