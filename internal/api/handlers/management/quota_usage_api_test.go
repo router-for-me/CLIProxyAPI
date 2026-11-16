@@ -150,6 +150,13 @@ func TestQuotaUsageAPICallRecovery(t *testing.T) {
 				if current.Quota.Exceeded || current.Unavailable || !current.NextRetryAfter.IsZero() || current.LastError != nil {
 					t.Fatalf("quota remains blocked: %+v", current)
 				}
+			} else if tc.legacy {
+				if current.ID != expected.ID || current.Provider != expected.Provider || current.Disabled != expected.Disabled ||
+					current.Status != expected.Status || current.StatusMessage != expected.StatusMessage || current.Unavailable != expected.Unavailable ||
+					!reflect.DeepEqual(current.Quota, expected.Quota) || !current.NextRetryAfter.Equal(expected.NextRetryAfter) ||
+					!reflect.DeepEqual(current.LastError, expected.LastError) || !reflect.DeepEqual(current.ModelStates, expected.ModelStates) {
+					t.Fatalf("legacy route changed quota restrictions: current=%+v expected=%+v", current, expected)
+				}
 			} else if !reflect.DeepEqual(current, expected) {
 				t.Fatalf("unproven recovery changed credential: current=%+v expected=%+v", current, expected)
 			}

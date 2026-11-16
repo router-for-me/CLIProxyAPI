@@ -133,6 +133,13 @@ func testManagementV8QuotaUsageRoute(t *testing.T, usage string) {
 				if current.Quota.Exceeded || current.Unavailable || !current.NextRetryAfter.IsZero() || current.LastError != nil {
 					t.Fatalf("v8 route left quota blocked: %+v", current)
 				}
+			} else if tc.route == "/v0/management/api-call" && tc.want == http.StatusOK {
+				if current.ID != before.ID || current.Provider != before.Provider || current.Disabled != before.Disabled ||
+					current.Status != before.Status || current.StatusMessage != before.StatusMessage || current.Unavailable != before.Unavailable ||
+					!reflect.DeepEqual(current.Quota, before.Quota) || !current.NextRetryAfter.Equal(before.NextRetryAfter) ||
+					!reflect.DeepEqual(current.LastError, before.LastError) || !reflect.DeepEqual(current.ModelStates, before.ModelStates) {
+					t.Fatalf("legacy route changed quota restrictions: before=%+v after=%+v", before, current)
+				}
 			} else if !reflect.DeepEqual(current, before) {
 				t.Fatalf("route changed credential: before=%+v after=%+v", before, current)
 			}
