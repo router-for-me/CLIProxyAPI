@@ -2,7 +2,9 @@ package kiro
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestTranslateToKiroRequest(t *testing.T) {
@@ -190,5 +192,67 @@ func TestCleanKiroModelIDNormalizesUnknownDashedVersions(t *testing.T) {
 		if got := CleanKiroModelID(input); got != want {
 			t.Fatalf("CleanKiroModelID(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestTranslateToKiroRequestTruncatesOversizedToolResultsAndKeepsParallelTools(t *testing.T) {
+	largeOutput := strings.Repeat("Ngữ cảnh phiên HR Agent: file_path/bundles/amazon/component.py\n", 8000)
+	openAIReq := map[string]any{
+		"model": "claude-opus-5.5",
+		"messages": []map[string]any{
+			{"role": "system", "content": "You are a support agent."},
+			{"role": "user", "content": "List Amazon components."},
+			{"role": "assistant", "content": nil, "tool_calls": []map[string]any{
+				{
+					"id":   "toolu_1",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "component_code_search",
+						"arguments": `{"column":"file_path"}`,
+					},
+				},
+				{
+					"id":   "toolu_2",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "fetch_content",
+						"arguments": `{"urls":["https://docs.langflow.org"]}`,
+					},
+				},
+			}},
+			{"role": "tool", "tool_call_id": "toolu_1", "content": largeOutput},
+			{"role": "tool", "tool_call_id": "toolu_2", "content": "doc summary"},
+		},
+	}
+
+	rawBody, err := json.Marshal(openAIReq)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	translated, _, err := TranslateToKiroRequest(rawBody, "")
+	if err != nil {
+		t.Fatalf("TranslateToKiroRequest failed: %v", err)
+	}
+	if len(translated) > maxPayloadBytes {
+		t.Fatalf("translated payload size %d exceeds maxPayloadBytes %d", len(translated), maxPayloadBytes)
+	}
+	if !utf8.Valid(translated) {
+		t.Fatalf("translated payload is not valid UTF-8")
+	}
+
+	var res KiroGenerateRequest
+	if err := json.Unmarshal(translated, &res); err != nil {
+		t.Fatalf("unmarshal translated payload: %v", err)
+	}
+	ctx := res.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil || len(ctx.ToolResults) != 2 {
+		t.Fatalf("expected 2 parallel tool results, got %#v", ctx)
+	}
+	if len(ctx.ToolResults[0].Content) != 1 || len(ctx.ToolResults[0].Content[0].Text) > maxToolResultBytes {
+		t.Fatalf("expected first tool result to be truncated to <= %d bytes, got %d", maxToolResultBytes, len(ctx.ToolResults[0].Content[0].Text))
+	}
+	lastHistory := res.ConversationState.History[len(res.ConversationState.History)-1]
+	if lastHistory.AssistantResponseMessage == nil || strings.TrimSpace(lastHistory.AssistantResponseMessage.Content) == "" {
+		t.Fatalf("expected non-empty assistant content on tool-use history item, got %#v", lastHistory.AssistantResponseMessage)
 	}
 }

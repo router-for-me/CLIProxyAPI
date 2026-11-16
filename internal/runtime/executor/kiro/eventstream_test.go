@@ -3,7 +3,9 @@ package kiro
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
+	"strings"
 	"testing"
 )
 
@@ -139,6 +141,24 @@ func TestParseEventStreamTrackedEmptyStream(t *testing.T) {
 	emitted, err := ParseEventStreamTracked(bytes.NewReader(nil), nil)
 	if err != ErrEmptyKiroStream {
 		t.Fatalf("expected ErrEmptyKiroStream, got %v", err)
+	}
+	if emitted {
+		t.Fatalf("expected emitted=false")
+	}
+}
+
+func TestParseEventStreamTrackedInvalidStateEvent(t *testing.T) {
+	headers := map[string]string{
+		":message-type": "event",
+		":event-type":   "invalidStateEvent",
+	}
+	frame := createTestEventStreamFrame(headers, []byte(`{"reason":"CONTENT_LENGTH_EXCEEDS_THRESHOLD","message":"Input is too long"}`))
+	emitted, err := ParseEventStreamTracked(bytes.NewReader(frame), nil)
+	if !errors.Is(err, ErrKiroEventStreamUpstream) {
+		t.Fatalf("expected ErrKiroEventStreamUpstream, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
+		t.Fatalf("expected reason in error, got %v", err)
 	}
 	if emitted {
 		t.Fatalf("expected emitted=false")

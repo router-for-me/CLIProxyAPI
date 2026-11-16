@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -15,8 +16,12 @@ const (
 	minimalFallbackUserContent    = "."
 	toolResultsContinuationPrefix = "Tool results:"
 	toolResultImagePlaceholder    = "[Tool returned an image; the image is attached to this message.]"
+	toolResultEmptyPlaceholder    = "(no output)"
+	toolResultTruncatedSuffix     = "\n...[tool output truncated to fit model input limit]"
 	maxToolDescLen                = 10237
-	maxPayloadBytes               = 900 * 1024
+	maxToolResultBytes            = 100 * 1024
+	maxNarratedToolResultBytes    = 8 * 1024
+	maxPayloadBytes               = 400 * 1024
 	truncationPlaceholder         = "[Earlier conversation history was truncated to fit the model's input limit. Older messages and tool activity have been omitted.]"
 	minRecentHistoryTurns         = 4
 )
@@ -182,6 +187,11 @@ func TranslateToKiroRequest(rawBody []byte, profileArn string) ([]byte, string, 
 	var currentImages []KiroImage
 	var currentToolResults []KiroToolResult
 
+	firstTrailingToolIdx := len(nonSystemMessages)
+	for firstTrailingToolIdx > 0 && strings.EqualFold(strings.TrimSpace(nonSystemMessages[firstTrailingToolIdx-1].Role), "tool") {
+		firstTrailingToolIdx--
+	}
+
 	for i, msg := range nonSystemMessages {
 		isLast := i == len(nonSystemMessages)-1
 		switch strings.ToLower(strings.TrimSpace(msg.Role)) {
@@ -204,16 +214,13 @@ func TranslateToKiroRequest(rawBody []byte, profileArn string) ([]byte, string, 
 			history = append(history, KiroHistoryItem{AssistantResponseMessage: &KiroAssistantMessage{Content: content, ToolUses: toolUses}})
 		case "tool":
 			content, images, _ := extractUserContent(msg.Content)
-			content = strings.TrimSpace(content)
-			if content == "" && len(images) > 0 {
-				content = toolResultImagePlaceholder
-			}
+			content = normalizeToolResultText(content, len(images) > 0)
 			result := KiroToolResult{ToolUseID: msg.ToolCallID, Content: []KiroResultContent{{Text: content}}, Status: "success"}
-			if isLast {
+			if i >= firstTrailingToolIdx {
 				currentToolResults = append(currentToolResults, result)
 				currentImages = append(currentImages, images...)
 			} else {
-				userMsg := KiroUserMessage{Content: buildToolResultsContinuation([]KiroToolResult{result}), ModelID: cleanModel, Origin: origin, Images: images, UserInputMessageContext: &UserInputMessageContext{ToolResults: []KiroToolResult{result}}}
+				userMsg := KiroUserMessage{ModelID: cleanModel, Origin: origin, Images: images, UserInputMessageContext: &UserInputMessageContext{ToolResults: []KiroToolResult{result}}}
 				history = append(history, KiroHistoryItem{UserInputMessage: &userMsg})
 			}
 		}
@@ -399,10 +406,8 @@ func extractUserContent(content any) (string, []KiroImage, []KiroToolResult) {
 			resultContent, resultImages := extractToolResultContent(block["content"])
 			if len(resultImages) > 0 {
 				images = append(images, resultImages...)
-				if strings.TrimSpace(resultContent) == "" {
-					resultContent = toolResultImagePlaceholder
-				}
 			}
+			resultContent = normalizeToolResultText(resultContent, len(resultImages) > 0)
 			toolResults = append(toolResults, KiroToolResult{ToolUseID: toolUseID, Content: []KiroResultContent{{Text: resultContent}}, Status: "success"})
 		default:
 			if t, ok := extractTextPart(block); ok {
@@ -647,7 +652,7 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 			continue
 		}
 		if len(desc) > maxToolDescLen {
-			desc = desc[:maxToolDescLen] + "..."
+			desc = truncateUTF8Bytes(desc, maxToolDescLen) + "..."
 		}
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = shortenToolName(name)
@@ -799,8 +804,15 @@ func sanitizeKiroHistory(history []KiroHistoryItem, currentToolResultIDs map[str
 	}
 	for i := range history {
 		msg := &history[i]
-		if msg.AssistantResponseMessage != nil && len(msg.AssistantResponseMessage.ToolUses) > 0 && i != activeIdx {
-			msg.AssistantResponseMessage.ToolUses = nil
+		if msg.AssistantResponseMessage != nil {
+			if len(msg.AssistantResponseMessage.ToolUses) > 0 {
+				if strings.TrimSpace(msg.AssistantResponseMessage.Content) == "" {
+					msg.AssistantResponseMessage.Content = summarizeToolUses(msg.AssistantResponseMessage.ToolUses)
+				}
+				if i != activeIdx {
+					msg.AssistantResponseMessage.ToolUses = nil
+				}
+			}
 		}
 		if msg.UserInputMessage != nil && msg.UserInputMessage.UserInputMessageContext != nil {
 			ctx := msg.UserInputMessage.UserInputMessageContext
@@ -827,6 +839,57 @@ func sanitizeKiroHistory(history []KiroHistoryItem, currentToolResultIDs map[str
 	return trimLeadingAssistantHistory(cleaned)
 }
 
+func summarizeToolUses(toolUses []KiroToolUse) string {
+	if len(toolUses) == 0 {
+		return minimalFallbackUserContent
+	}
+	names := make([]string, 0, len(toolUses))
+	for _, tu := range toolUses {
+		if name := strings.TrimSpace(tu.Name); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return minimalFallbackUserContent
+	}
+	return "[Called tool: " + strings.Join(names, ", ") + "]"
+}
+
+func normalizeToolResultText(content string, hasImages bool) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		if hasImages {
+			return toolResultImagePlaceholder
+		}
+		return toolResultEmptyPlaceholder
+	}
+	return truncateToolResultText(content, maxToolResultBytes)
+}
+
+func truncateToolResultText(content string, limit int) string {
+	if limit <= 0 || len(content) <= limit {
+		return content
+	}
+	budget := limit - len(toolResultTruncatedSuffix)
+	if budget <= 0 {
+		return truncateUTF8Bytes(content, limit)
+	}
+	return truncateUTF8Bytes(content, budget) + toolResultTruncatedSuffix
+}
+
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 func narrateToolResults(toolResults []KiroToolResult, names map[string]string) string {
 	if len(toolResults) == 0 {
 		return ""
@@ -841,8 +904,9 @@ func narrateToolResults(toolResults []KiroToolResult, names map[string]string) s
 		}
 		body := strings.Join(texts, "\n")
 		if strings.TrimSpace(body) == "" {
-			body = "(no output)"
+			body = toolResultEmptyPlaceholder
 		}
+		body = truncateToolResultText(body, maxNarratedToolResultBytes)
 		if name := names[tr.ToolUseID]; name != "" {
 			parts = append(parts, fmt.Sprintf("[%s] %s", name, body))
 		} else {
@@ -882,7 +946,7 @@ func buildToolResultsContinuation(toolResults []KiroToolResult) string {
 	}
 	joined := toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
 	if len(joined) > 4000 {
-		return joined[:4000]
+		return truncateUTF8Bytes(joined, 4000)
 	}
 	return joined
 }
@@ -931,13 +995,50 @@ func truncatePayloadToLimit(payload *KiroGenerateRequest) {
 		return
 	}
 	history := payload.ConversationState.History
-	keepFrom := len(history)
-	for keepFrom > 0 {
-		payload.ConversationState.History = append([]KiroHistoryItem{{UserInputMessage: &KiroUserMessage{Content: truncationPlaceholder, ModelID: payload.ConversationState.CurrentMessage.UserInputMessage.ModelID, Origin: "AI_EDITOR"}}}, history[keepFrom:]...)
-		if payloadByteSize(payload) <= maxPayloadBytes || len(history)-keepFrom < minRecentHistoryTurns {
+	modelID := payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
+	maxDrop := len(history) - minRecentHistoryTurns
+	if maxDrop < 0 {
+		maxDrop = len(history)
+	}
+	// Preserve the trailing assistant message when current tool results depend on it.
+	if curCtx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext; curCtx != nil && len(curCtx.ToolResults) > 0 && maxDrop >= len(history) && len(history) > 0 {
+		maxDrop = len(history) - 1
+	}
+	for dropCount := 1; dropCount <= maxDrop; dropCount++ {
+		remaining := trimLeadingAssistantHistory(history[dropCount:])
+		marker := []KiroHistoryItem{
+			{UserInputMessage: &KiroUserMessage{Content: truncationPlaceholder, ModelID: modelID, Origin: "AI_EDITOR"}},
+			{AssistantResponseMessage: &KiroAssistantMessage{Content: "Understood."}},
+		}
+		payload.ConversationState.History = append(marker, remaining...)
+		if payloadByteSize(payload) <= maxPayloadBytes {
 			break
 		}
-		keepFrom--
+	}
+	if payloadByteSize(payload) > maxPayloadBytes {
+		cur := &payload.ConversationState.CurrentMessage.UserInputMessage
+		if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) > 0 {
+			totalResultBytes := 0
+			for i := range cur.UserInputMessageContext.ToolResults {
+				for j := range cur.UserInputMessageContext.ToolResults[i].Content {
+					totalResultBytes += len(cur.UserInputMessageContext.ToolResults[i].Content[j].Text)
+				}
+			}
+			overhead := payloadByteSize(payload) - totalResultBytes
+			budget := maxPayloadBytes - overhead
+			if budget < 1024 {
+				budget = 1024
+			}
+			perResultBudget := budget / len(cur.UserInputMessageContext.ToolResults)
+			if perResultBudget < 512 {
+				perResultBudget = 512
+			}
+			for i := range cur.UserInputMessageContext.ToolResults {
+				for j := range cur.UserInputMessageContext.ToolResults[i].Content {
+					cur.UserInputMessageContext.ToolResults[i].Content[j].Text = truncateToolResultText(cur.UserInputMessageContext.ToolResults[i].Content[j].Text, perResultBudget)
+				}
+			}
+		}
 	}
 	if payloadByteSize(payload) > maxPayloadBytes {
 		cur := &payload.ConversationState.CurrentMessage.UserInputMessage
@@ -946,7 +1047,7 @@ func truncatePayloadToLimit(payload *KiroGenerateRequest) {
 		if budget <= 0 {
 			cur.Content = minimalFallbackUserContent
 		} else if len(cur.Content) > budget {
-			cur.Content = cur.Content[:budget]
+			cur.Content = truncateUTF8Bytes(cur.Content, budget)
 		}
 	}
 }

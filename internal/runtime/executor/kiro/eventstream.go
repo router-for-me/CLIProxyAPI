@@ -308,27 +308,36 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 			}
 		}
 
-		if messageType := frame.MessageType(); messageType == "error" || messageType == "exception" {
-			detail, _ := event["message"].(string)
-			if detail == "" {
-				detail = string(frame.Payload)
-			}
+		if isUpstreamErrorFrame(frame) {
+			detail := formatUpstreamErrorDetail(frame, event)
 			return emitted, fmt.Errorf("%w: %s", ErrKiroEventStreamUpstream, detail)
 		}
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
 
 		switch frame.EventType() {
-		case "assistantResponseEvent":
-			if content, ok := event["content"].(string); ok && content != "" {
+		case "assistantResponseEvent", "codeEvent":
+			if reasoning := firstStringField(event, "reasoningContent", "reasoning"); reasoning != "" {
+				sawOutput = true
+				if callback.OnText != nil {
+					emitted = true
+					callback.OnText(reasoning, true)
+				}
+			}
+			if content := firstStringField(event, "content", "code"); content != "" {
 				sawOutput = true
 				if callback.OnText != nil {
 					emitted = true
 					callback.OnText(content, false)
 				}
 			}
+			if toolUseObj, ok := event["toolUse"].(map[string]any); ok {
+				if toolErr := handleToolUseEvent(toolUseObj, pending, callback); toolErr != nil {
+					return emitted, toolErr
+				}
+			}
 		case "reasoningContentEvent":
-			if text, ok := event["text"].(string); ok && text != "" {
+			if text := firstStringField(event, "text", "reasoningContent", "reasoning", "content"); text != "" {
 				sawOutput = true
 				if callback.OnText != nil {
 					emitted = true
@@ -376,6 +385,50 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 		callback.OnComplete(inputTokens, outputTokens)
 	}
 	return emitted, nil
+}
+
+func isUpstreamErrorFrame(frame *EventStreamFrame) bool {
+	if frame == nil {
+		return false
+	}
+	if frame.ExceptionType() != "" {
+		return true
+	}
+	switch frame.MessageType() {
+	case "error", "exception":
+		return true
+	}
+	switch frame.EventType() {
+	case "error", "exception", "invalidStateEvent":
+		return true
+	}
+	return false
+}
+
+func formatUpstreamErrorDetail(frame *EventStreamFrame, event map[string]any) string {
+	reason := firstStringField(event, "reason", "code", "errorCode", "error_code")
+	message := firstStringField(event, "message", "errorMessage", "error_message", "detail")
+	if reason != "" && message != "" && !strings.Contains(message, reason) {
+		return reason + ": " + message
+	}
+	if message != "" {
+		return message
+	}
+	if reason != "" {
+		return reason
+	}
+	if frame != nil {
+		if raw := strings.TrimSpace(string(frame.Payload)); raw != "" {
+			return raw
+		}
+		if exc := strings.TrimSpace(frame.ExceptionType()); exc != "" {
+			return exc
+		}
+		if ev := strings.TrimSpace(frame.EventType()); ev != "" {
+			return ev
+		}
+	}
+	return "unknown error"
 }
 
 type toolUseState struct {
