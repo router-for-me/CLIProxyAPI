@@ -13,7 +13,10 @@ active and touches most files. The owner also wants the product named "proxx" in
   import block of nearly every `.go` file, so every upstream merge would conflict everywhere.
 - Rename only what users see, with the smallest possible footprint in upstream files:
   - one header line at the top of `README.md` (upstream's most-edited doc, so nothing more);
-  - build the binary as `proxx` (`go build -o proxx ./cmd/server`); no change to upstream build scripts;
+  - the binary is `proxx`: `go build -o proxx ./cmd/server` locally, and the build outputs in
+    `Dockerfile` (`/CLIProxyAPI/proxx`) and `.github/workflows/release.yaml` (`proxx_<version>_<os>_<arch>`
+    archives containing `proxx`). The container keeps upstream's `/CLIProxyAPI` directory so
+    `docker-compose.yml` mounts still work. On upstream merges, re-apply the rename if those lines conflict;
   - the management panel (`iamkunal9/proxx-panel`) is fully branded "proxx".
 - `DefaultPanelGitHubRepository` stays upstream's until `proxx-panel` has a published release; until
   then point `remote-management.panel-github-repository` at `https://github.com/iamkunal9/proxx-panel`

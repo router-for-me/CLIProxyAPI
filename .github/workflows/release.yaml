@@ -37,12 +37,12 @@ jobs:
           <!-- cliproxyapi-linux-release-assets:start -->
           ## Linux release assets
 
-          - `CLIProxyAPI_<version>_linux_<arch>.tar.gz` is the default Linux build. It supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
-          - `CLIProxyAPI_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt. It does not support dynamic library plugins.
+          - `proxx_<version>_linux_<arch>.tar.gz` is the default Linux build. It supports dynamic library plugins and is built against a GLIBC 2.17 baseline.
+          - `proxx_<version>_linux_<arch>_no-plugin.tar.gz` is the portable Linux build for musl-based or older systems such as OpenWrt. It does not support dynamic library plugins.
 
           ## FreeBSD release assets
 
-          - `CLIProxyAPI_<version>_freebsd_aarch64_no-plugin.tar.gz` is the FreeBSD arm64 build. It is built without CGO and does not support dynamic library plugins.
+          - `proxx_<version>_freebsd_aarch64_no-plugin.tar.gz` is the FreeBSD arm64 build. It is built without CGO and does not support dynamic library plugins.
 
           <!-- cliproxyapi-linux-release-assets:end -->
           EOF
@@ -163,13 +163,13 @@ jobs:
           ARCHIVE_FORMAT: ${{ matrix.archive_format }}
         run: |
           set -euo pipefail
-          binary_name="cli-proxy-api"
+          binary_name="proxx"
           if [[ "$GOOS" == "windows" ]]; then
-            binary_name="cli-proxy-api.exe"
+            binary_name="proxx.exe"
           fi
 
           archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_${GOOS}_${ASSET_ARCH}.${ARCHIVE_FORMAT}"
+          archive_name="proxx_${RELEASE_VERSION}_${GOOS}_${ASSET_ARCH}.${ARCHIVE_FORMAT}"
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
@@ -186,7 +186,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
+          path: dist/proxx_*
           if-no-files-found: error
       - name: Upload release assets
         shell: bash
@@ -195,7 +195,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz dist/CLIProxyAPI_*.zip)
+          assets=(dist/proxx_*.tar.gz dist/proxx_*.zip)
           if [[ ${#assets[@]} -eq 0 ]]; then
             printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
@@ -212,14 +212,14 @@ jobs:
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
           gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
+            --pattern 'proxx_*.tar.gz' \
+            --pattern 'proxx_*.zip' \
             --dir "$tmp_dir" \
             --clobber
           (
             cd "$tmp_dir"
             shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            archives=(proxx_*.tar.gz proxx_*.zip)
             if [[ ${#archives[@]} -eq 0 ]]; then
               echo "No release archives found"
               exit 0
@@ -282,7 +282,7 @@ jobs:
           set -euo pipefail
 
           archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_linux_${ASSET_ARCH}.tar.gz"
+          archive_name="proxx_${RELEASE_VERSION}_linux_${ASSET_ARCH}.tar.gz"
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
@@ -304,9 +304,9 @@ jobs:
 
               CGO_ENABLED=1 GOOS=linux GOARCH="${GOARCH}" go build -buildvcs=false \
                 -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-                -o "'"$archive_dir"'/cli-proxy-api" ./cmd/server/
+                -o "'"$archive_dir"'/proxx" ./cmd/server/
 
-              glibc_versions="$(readelf --version-info "'"$archive_dir"'/cli-proxy-api" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
+              glibc_versions="$(readelf --version-info "'"$archive_dir"'/proxx" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -Vu)"
               if [[ -n "${glibc_versions}" ]]; then
                 printf "GLIBC versions:\n%s\n" "${glibc_versions}"
                 max_glibc="$(printf "%s\n" "${glibc_versions}" | sort -V | tail -n 1)"
@@ -318,11 +318,11 @@ jobs:
             '
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          tar -C "$archive_dir" -czf "dist/$archive_name" proxx LICENSE README.md README_CN.md config.example.yaml
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
+          path: dist/proxx_*
           if-no-files-found: error
       - name: Upload release assets
         shell: bash
@@ -331,7 +331,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz)
+          assets=(dist/proxx_*.tar.gz)
           if [[ ${#assets[@]} -eq 0 ]]; then
             printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
@@ -348,14 +348,14 @@ jobs:
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
           gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
+            --pattern 'proxx_*.tar.gz' \
+            --pattern 'proxx_*.zip' \
             --dir "$tmp_dir" \
             --clobber
           (
             cd "$tmp_dir"
             shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            archives=(proxx_*.tar.gz proxx_*.zip)
             if [[ ${#archives[@]} -eq 0 ]]; then
               echo "No release archives found"
               exit 0
@@ -422,26 +422,26 @@ jobs:
           set -euo pipefail
 
           archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_linux_${ASSET_ARCH}_no-plugin.tar.gz"
+          archive_name="proxx_${RELEASE_VERSION}_linux_${ASSET_ARCH}_no-plugin.tar.gz"
           rm -rf "dist/${TARGET}"
           mkdir -p "$archive_dir"
 
           CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "$archive_dir/cli-proxy-api" ./cmd/server/
+            -o "$archive_dir/proxx" ./cmd/server/
 
-          if readelf -l "$archive_dir/cli-proxy-api" | grep -q 'Requesting program interpreter'; then
-            readelf -l "$archive_dir/cli-proxy-api" >&2
+          if readelf -l "$archive_dir/proxx" | grep -q 'Requesting program interpreter'; then
+            readelf -l "$archive_dir/proxx" >&2
             echo "no-plugin linux binary must not require a dynamic interpreter" >&2
             exit 1
           fi
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          tar -C "$archive_dir" -czf "dist/$archive_name" proxx LICENSE README.md README_CN.md config.example.yaml
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
+          path: dist/proxx_*
           if-no-files-found: error
       - name: Upload release assets
         shell: bash
@@ -450,7 +450,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz)
+          assets=(dist/proxx_*.tar.gz)
           if [[ ${#assets[@]} -eq 0 ]]; then
             printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
@@ -467,14 +467,14 @@ jobs:
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
           gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
+            --pattern 'proxx_*.tar.gz' \
+            --pattern 'proxx_*.zip' \
             --dir "$tmp_dir" \
             --clobber
           (
             cd "$tmp_dir"
             shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            archives=(proxx_*.tar.gz proxx_*.zip)
             if [[ ${#archives[@]} -eq 0 ]]; then
               echo "No release archives found"
               exit 0
@@ -616,7 +616,7 @@ jobs:
           CC="clang --target=${clang_target} --sysroot=${sysroot_dir}" \
           go build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
+            -o "dist/${TARGET}/bin/proxx" ./cmd/server/
       - name: Build FreeBSD no-plugin binary
         if: ${{ !matrix.cgo_enabled }}
         shell: bash
@@ -625,24 +625,24 @@ jobs:
           mkdir -p "dist/${TARGET}/bin"
           CGO_ENABLED=0 GOOS=freebsd GOARCH="$TARGET_GOARCH" go build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
-            -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
+            -o "dist/${TARGET}/bin/proxx" ./cmd/server/
       - name: Package FreeBSD archive
         shell: bash
         run: |
           set -euo pipefail
 
           archive_dir="dist/${TARGET}/archive"
-          archive_name="CLIProxyAPI_${RELEASE_VERSION}_freebsd_${ASSET_ARCH}${ASSET_SUFFIX}.tar.gz"
+          archive_name="proxx_${RELEASE_VERSION}_freebsd_${ASSET_ARCH}${ASSET_SUFFIX}.tar.gz"
           mkdir -p "$archive_dir"
 
           echo "Packaging ${archive_name}"
-          cp "dist/${TARGET}/bin/cli-proxy-api" "$archive_dir/cli-proxy-api"
+          cp "dist/${TARGET}/bin/proxx" "$archive_dir/proxx"
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          tar -C "$archive_dir" -czf "dist/$archive_name" proxx LICENSE README.md README_CN.md config.example.yaml
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/CLIProxyAPI_*
+          path: dist/proxx_*
           if-no-files-found: error
       - name: Upload release assets
         shell: bash
@@ -651,7 +651,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(dist/CLIProxyAPI_*.tar.gz)
+          assets=(dist/proxx_*.tar.gz)
           if [[ ${#assets[@]} -eq 0 ]]; then
             printf 'expected archive assets, found %s\n' "${#assets[@]}" >&2
             printf '%s\n' "${assets[@]}" >&2
@@ -668,14 +668,14 @@ jobs:
           tmp_dir="$(mktemp -d)"
           trap 'rm -rf "$tmp_dir"' EXIT
           gh release download "$GITHUB_REF_NAME" \
-            --pattern 'CLIProxyAPI_*.tar.gz' \
-            --pattern 'CLIProxyAPI_*.zip' \
+            --pattern 'proxx_*.tar.gz' \
+            --pattern 'proxx_*.zip' \
             --dir "$tmp_dir" \
             --clobber
           (
             cd "$tmp_dir"
             shopt -s nullglob
-            archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+            archives=(proxx_*.tar.gz proxx_*.zip)
             if [[ ${#archives[@]} -eq 0 ]]; then
               echo "No release archives found"
               exit 0
@@ -708,7 +708,7 @@ jobs:
           set -euo pipefail
           cd dist
           shopt -s nullglob
-          archives=(CLIProxyAPI_*.tar.gz CLIProxyAPI_*.zip)
+          archives=(proxx_*.tar.gz proxx_*.zip)
           if [[ ${#archives[@]} -eq 0 ]]; then
             echo "No release archives found"
             exit 0

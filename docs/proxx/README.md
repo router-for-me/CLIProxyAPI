@@ -69,6 +69,8 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `config.example.yaml` | commented `proxx:` example block | documentation only |
 | `.gitignore` | `!docs/proxx/` after `docs/*` | track fork docs |
 | `README.md` | one proxx header line at the top | branding (ADR 0001) |
+| `Dockerfile` | binary built and run as `proxx` (3 lines) | binary name (ADR 0001) |
+| `.github/workflows/release.yaml` | `cli-proxy-api` → `proxx`, `CLIProxyAPI_` → `proxx_` throughout | release binary/archive names (ADR 0001) |
 | `sdk/api/handlers/handlers_routing.go` | `proxxgroups.RequestProviders(model)` in `getRequestDetailsWithOptions` | model groups bypass provider lookup and win over `auto` resolution |
 | `sdk/api/handlers/openai/openai_responses_websocket_session.go` | `proxxgroups.IsGroup(model)` in `responsesWebsocketResolvedModelName` | same for Responses websocket sessions |
 | `sdk/cliproxy/auth/conductor_execution.go` | `m.proxxExecuteGroup` / `proxxExecuteCountGroup` / `proxxExecuteStreamGroup` at the top of `Execute` / `ExecuteCount` / `ExecuteStream` | expand a group into member executions |
