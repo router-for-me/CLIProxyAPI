@@ -51,6 +51,8 @@ export interface AuthFileItem {
    * API key 本身（AccountInfo() → return "api_key", apiKey），**绝不可用于展示或搜索**。
    */
   email?: string;
+  /** Backend display label for the credential (set to the account email at login). */
+  label?: string;
   /** GCP / Vertex 项目 ID，账号邮箱缺失时作为身份回落。 */
   projectId?: string;
   size?: number;

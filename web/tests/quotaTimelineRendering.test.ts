@@ -15,7 +15,6 @@ const entries: QuotaFileEntry[] = [
 
 const baseProps = {
   entries,
-  displayNameFor: (name: string) => name,
   resolvedTheme: 'light' as const,
   now: new Date(2026, 6, 29, 12).getTime(),
 };
@@ -101,7 +100,6 @@ describe('QuotaTimeline rendering', () => {
             type: 'kimi',
           },
         ],
-        displayNameFor: (name: string) => name,
         resolvedTheme: 'light',
         now: new Date('2099-07-31T04:40:00Z').getTime(),
         initialMode: 'session',
@@ -122,7 +120,6 @@ describe('QuotaTimeline rendering', () => {
             type: 'codex',
           },
         ],
-        displayNameFor: (name: string) => name,
         resolvedTheme: 'light',
         now: new Date(2026, 6, 29, 12).getTime(),
         quotaFor: () => ({

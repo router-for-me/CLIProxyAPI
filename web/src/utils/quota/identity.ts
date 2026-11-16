@@ -15,11 +15,17 @@ export function getQuotaCacheKey(file: AuthFileItem): string {
   return `${file.name}${QUOTA_IDENTITY_SEPARATOR}${authIndex ?? ''}`;
 }
 
-/** Disambiguate same-name Devin cards without ever falling back to account (a secret). */
+/**
+ * The backend's label (the account email for OAuth logins), then the email, then
+ * the filename. Same-name Devin identities fall back to their auth_index, never
+ * to account (a secret).
+ */
 export function getQuotaDisplayName(file: AuthFileItem): string {
+  const identity = file.label?.trim() || file.email?.trim();
+  if (identity) return identity;
   if (!isDevinFile(file)) return file.name;
-  const identity = file.email?.trim() || normalizeRecentRequestAuthIndex(file.authIndex);
-  return identity ? `${file.name} · ${identity}` : file.name;
+  const authIndex = normalizeRecentRequestAuthIndex(file.authIndex);
+  return authIndex ? `${file.name} · ${authIndex}` : file.name;
 }
 
 /** Resolve a cache identity back to the physical filename used by file mutations. */

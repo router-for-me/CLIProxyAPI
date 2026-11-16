@@ -45,10 +45,24 @@ describe('Devin quota identity', () => {
 
   test('disambiguates displayed identities without using account secrets', () => {
     expect(getQuotaDisplayName({ ...devinFile('42'), email: 'demo@example.test' })).toBe(
-      'shared.json · demo@example.test'
+      'demo@example.test'
     );
     expect(getQuotaDisplayName({ ...devinFile('42'), account: 'secret' })).toBe('shared.json · 42');
     expect(getQuotaDisplayName({ ...devinFile(null), account: 'secret' })).toBe('shared.json');
+  });
+
+  test('labels every provider by backend label, then email, then filename', () => {
+    const claude: AuthFileItem = { name: 'claude-5d3dafb9-a@example.test.json', type: 'claude' };
+    expect(
+      getQuotaDisplayName({ ...claude, label: 'a@example.test', email: 'b@example.test' })
+    ).toBe('a@example.test');
+    expect(getQuotaDisplayName({ ...claude, email: 'b@example.test' })).toBe('b@example.test');
+    expect(getQuotaDisplayName({ ...claude, label: '  ' })).toBe(claude.name);
+
+    const [parsed] = normalizeAuthFilesResponse({
+      files: [{ ...claude, label: 'a@example.test' }],
+    }).files;
+    expect(getQuotaDisplayName(parsed)).toBe('a@example.test');
   });
 
   test('does not merge same-name Devin identities or leak quota and email between them', () => {

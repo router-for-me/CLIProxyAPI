@@ -108,7 +108,7 @@ export function QuotaCard(props: QuotaCardProps) {
             <span className={styles.iconFallback}>{typeLabel.slice(0, 1).toUpperCase()}</span>
           )}
         </span>
-        <span className={styles.fileName} title={displayName}>
+        <span className={styles.fileName} title={file.name}>
           {displayName}
         </span>
       </header>

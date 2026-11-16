@@ -263,6 +263,7 @@ const normalizeAuthFileEntry = (
     typeof entry.statusMessage === 'string' ? entry.statusMessage.trim() : '';
   const statusMessage = readTextField(entry, 'status_message') || declaredStatusMessage;
   const note = readTextField(entry, 'note');
+  const label = readTextField(entry, 'label');
   const email = readTextField(entry, 'email');
   // account / account_type 故意不归一化：api-key 类凭证的 account 就是 API key 本身
   // （sdk/cliproxy/auth/types.go AccountInfo），不能进入展示与搜索路径。
@@ -284,6 +285,7 @@ const normalizeAuthFileEntry = (
     priority,
     weight,
     ...(note ? { note } : {}),
+    ...(label ? { label } : {}),
     ...(email ? { email } : {}),
     ...(projectId ? { projectId } : {}),
   };

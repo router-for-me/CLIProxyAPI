@@ -16,7 +16,11 @@ import { useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatRelativeInstant, TYPE_COLORS } from '@/utils/quota';
-import { getQuotaCacheKey, getQuotaDisplayName } from '@/utils/quota/identity';
+import {
+  getQuotaCacheFileName,
+  getQuotaCacheKey,
+  getQuotaDisplayName,
+} from '@/utils/quota/identity';
 import { useNow } from '@/hooks/useNow';
 import type { ResolvedTheme, ThemeColors } from '@/types';
 import {
@@ -52,7 +56,6 @@ export interface QuotaTimelineProps {
    * off the entry, and lanes see exactly what the cards see.
    */
   quotaFor: (entry: QuotaFileEntry) => QuotaCardState | undefined;
-  displayNameFor: (name: string) => string;
   resolvedTheme: ResolvedTheme;
   /** Injectable for tests/screenshots; defaults to the real clock. */
   now?: number;
@@ -65,7 +68,6 @@ export interface QuotaTimelineProps {
 export function QuotaTimeline({
   entries,
   quotaFor,
-  displayNameFor,
   resolvedTheme,
   now: nowProp,
   initialMode = 'weekly',
@@ -93,14 +95,11 @@ export function QuotaTimeline({
     () =>
       entries.map((entry) => ({
         name: getQuotaCacheKey(entry.file),
-        displayName:
-          entry.type === 'devin'
-            ? getQuotaDisplayName(entry.file)
-            : displayNameFor(entry.file.name),
+        displayName: getQuotaDisplayName(entry.file),
         provider: entry.type,
         quota: quotaFor(entry),
       })),
-    [entries, quotaFor, displayNameFor]
+    [entries, quotaFor]
   );
 
   // Keep the timeline hidden until at least one loaded credential exposes a
@@ -349,7 +348,7 @@ function Lane({ lane, span, now, mode, cells, nowPercent, resolvedTheme }: LaneP
       <div className={styles.laneHead}>
         <div className={styles.laneTop}>
           <span className={styles.laneDot} />
-          <span className={styles.laneName} title={lane.displayName}>
+          <span className={styles.laneName} title={getQuotaCacheFileName(lane.name)}>
             {lane.displayName}
           </span>
           {periodLabel && <span className={styles.lanePeriod}>{periodLabel}</span>}

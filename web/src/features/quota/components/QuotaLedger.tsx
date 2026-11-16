@@ -150,7 +150,7 @@ function LedgerRow({
   return (
     <div className={styles.row}>
       <div className={styles.identity}>
-        <span className={styles.fileName} title={name}>
+        <span className={styles.fileName} title={entry.file.name}>
           {name}
         </span>
         {plan && <span className={styles.plan}>{plan}</span>}
