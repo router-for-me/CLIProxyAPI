@@ -197,7 +197,8 @@ appear without Codex traffic. Returns the `GET /usage/windows` shape, plus
 ## POST /usage/reset-credit
 
 Spends one of a Codex or Claude account's rate-limit reset credits. Body
-`{"auth_index": "<auth_index>"}`; enabled Codex and Claude OAuth logins only.
+`{"auth_index": "<auth_index>", "grant_id": "<Claude grant id>"}`; enabled Codex and Claude OAuth logins only.
+`grant_id` is optional for legacy clients and is rejected for Codex. A supplied ID must be a non-empty string.
 
 - Codex: ChatGPT's `POST /backend-api/wham/rate-limit-reset-credits/consume`, as
   Codex's `/usage` panel does.
@@ -205,6 +206,16 @@ Spends one of a Codex or Claude account's rate-limit reset credits. Body
   `POST https://api.anthropic.com/api/organizations/<organization_uuid>/reset_rate_limits`
   claims it (`{"program": "cedar_ember", "grant_id": …, "request_id": …}`), as
   Claude Code's `/usage` does. Needs the login's `organization_uuid`.
+
+When `grant_id` is supplied, the fresh lookup validates that exact grant instead of picking the default.
+Missing, spent, expired, paused, blocked or unknown-scope selections return `no_credit` without claiming another grant.
+The app always supplies an explicit Claude grant ID.
+
+Claude `reset_credits.grants` lists held, unexpired grants with `id`, `label`, `scope`, `available`, `applicable`,
+nullable `expires_at`, `clears`, nullable `gives_back_weekly` and nullable `unavailable_reason`.
+Scope is `fable`, `general` or `unknown`, determined from restoration semantics, never campaign IDs or upstream `type`.
+Both known scopes currently report upstream `type: "full"`. Codex and older saved lookups omit `grants`.
+The existing total counts and expiry list remain available. Grant changes are persisted even when totals stay the same.
 
 Each call sends a fresh request id, so it spends at most one credit.
 

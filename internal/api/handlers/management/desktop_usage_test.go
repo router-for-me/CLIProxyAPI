@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/resetcredits"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -243,6 +245,9 @@ func TestUseResetCreditValidation(t *testing.T) {
 		want int
 	}{
 		{`{}`, http.StatusBadRequest},
+		{`{"auth_index":"idx-soon","grant_id":null}`, http.StatusBadRequest},
+		{`{"auth_index":"idx-soon","grant_id":" "}`, http.StatusBadRequest},
+		{`{"auth_index":"idx-soon","grant_id":3}`, http.StatusBadRequest},
 		{`{"auth_index":"missing"}`, http.StatusNotFound},
 		{`{"auth_index":"idx-soon"}`, http.StatusBadRequest},
 		// A Codex credential without an access token is not an eligible login.
@@ -251,5 +256,21 @@ func TestUseResetCreditValidation(t *testing.T) {
 		if rec := serveDesktop(t, h.UseResetCredit, http.MethodPost, tc.body, "127.0.0.1:1"); rec.Code != tc.want {
 			t.Fatalf("%s status = %d, want %d", tc.body, rec.Code, tc.want)
 		}
+	}
+}
+
+func TestDesktopResetCreditsIncludesGrantScopeAndNullableExpiry(t *testing.T) {
+	auth := &coreauth.Auth{Provider: "claude", Metadata: map[string]any{}}
+	resetcredits.Store(auth.Metadata, time.Now(), &resetcredits.Credits{Available: 1, Applicable: 1, Grants: []resetcredits.Grant{
+		{ID: "fable", Label: "Fable reset", Scope: "fable", Available: 1, Applicable: 1, Clears: []string{"five_hour", "seven_day_overage_included"}},
+	}})
+	doc := ojson.NewDocString(`{}`)
+	if errSet := doc.Set("credits", desktopResetCredits(auth)); errSet != nil {
+		t.Fatal(errSet)
+	}
+	grant := doc.Get("credits.grants.0")
+	if grant.Get("id").String() != "fable" || grant.Get("scope").String() != "fable" || grant.Get("expires_at").Type != ojson.Null ||
+		grant.Get("applicable").Int() != 1 || len(grant.Get("clears").Array()) != 2 {
+		t.Fatalf("payload = %s", doc.String())
 	}
 }

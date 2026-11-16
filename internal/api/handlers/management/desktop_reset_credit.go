@@ -19,12 +19,24 @@ func (h *Handler) UseResetCredit(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
-	var body desktopUsageRefreshRequest
-	if errBind := c.ShouldBindJSON(&body); errBind != nil || strings.TrimSpace(body.AuthIndex) == "" {
+	var body map[string]any
+	if errBind := c.ShouldBindJSON(&body); errBind != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
 		return
 	}
-	auth := h.authByIndex(strings.TrimSpace(body.AuthIndex))
+	authIndex, _ := body["auth_index"].(string)
+	if strings.TrimSpace(authIndex) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth_index is required"})
+		return
+	}
+	grantValue, hasGrantID := body["grant_id"]
+	grantID, validGrantID := grantValue.(string)
+	grantID = strings.TrimSpace(grantID)
+	if hasGrantID && (!validGrantID || grantID == "") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "grant_id must be a non-empty string"})
+		return
+	}
+	auth := h.authByIndex(strings.TrimSpace(authIndex))
 	if auth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
 		return
@@ -39,13 +51,17 @@ func (h *Handler) UseResetCredit(c *gin.Context) {
 	)
 	switch {
 	case codexusage.Eligible(auth):
+		if hasGrantID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "grant_id applies to Claude only"})
+			return
+		}
 		var result codexusage.ConsumeResult
 		result, errConsume = codexusage.ConsumeResetCredit(ctx, cfg(), auth)
 		code, windowsReset = result.Code, result.WindowsReset
 		refresh = func() error { return codexusage.NewTracker(h.authManager, cfg).Refresh(ctx, auth) }
 	case claudeusage.Eligible(auth):
 		poller := claudeusage.NewPoller(h.authManager, cfg)
-		code, errConsume = poller.RedeemResetCredit(ctx, auth)
+		code, errConsume = poller.RedeemResetCredit(ctx, auth, grantID)
 		refresh = func() error { return poller.Refresh(ctx, auth) }
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "reset credits apply to enabled Codex and Claude logins only"})

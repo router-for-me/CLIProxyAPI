@@ -41,3 +41,26 @@ func TestStoreWithoutCreditsClearsCountsButRecordsTheCheck(t *testing.T) {
 		t.Fatalf("metadata = %v; want only the check time", metadata)
 	}
 }
+
+func TestGrantsSurviveMetadataRoundTripAndParticipateInEquality(t *testing.T) {
+	checkedAt := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	expiry := checkedAt.Add(time.Hour)
+	givesBack := true
+	reason := "blocked_seven_day"
+	credits := Credits{Available: 1, Grants: []Grant{{ID: "fable", Label: "Fable reset", Scope: "fable", Available: 1,
+		ExpiresAt: &expiry, Clears: []string{"five_hour", "seven_day_overage_included"}, GivesBackWeekly: &givesBack, UnavailableReason: &reason}}}
+	metadata := map[string]any{}
+	Store(metadata, checkedAt, &credits)
+	got, ok := Of(&coreauth.Auth{Metadata: roundTrip(t, metadata)})
+	if !ok || !got.Same(credits) {
+		t.Fatalf("credits = %+v", got)
+	}
+	got.Grants[0].Scope = "unknown"
+	if got.Same(credits) {
+		t.Fatal("grant scope change compares equal")
+	}
+	Store(metadata, checkedAt, nil)
+	if _, exists := metadata[grantsKey]; exists {
+		t.Fatal("grants survived clearing credits")
+	}
+}

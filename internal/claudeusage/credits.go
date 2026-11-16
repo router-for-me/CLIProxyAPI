@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -21,27 +22,60 @@ import (
 // RedeemFunc claims one reset from grantID and returns Claude's result.
 type RedeemFunc func(ctx context.Context, cfg *config.Config, auth *coreauth.Auth, organizationUUID, grantID, requestID string) (string, error)
 
-// usageCredits is the usage document's reset-credit block, requested with cedar_ember=1.
-type usageCredits struct {
-	CedarEmber *struct {
-		Eligible      bool    `json:"eligible"`
-		Grants        []grant `json:"grants"`
-		NextGrantID   string  `json:"next_grant_id"`
-		CooldownUntil string  `json:"cooldown_until"`
-	} `json:"cedar_ember"`
-}
-
 // grant is one batch of resets; resets_left of them remain.
 type grant struct {
-	ID         string `json:"id"`
-	ResetsLeft int    `json:"resets_left"`
-	EndsAt     string `json:"ends_at"`
-	Paused     bool   `json:"paused"`
-	UsableNow  bool   `json:"usable_now"`
+	ID                string `json:"id"`
+	Label             string `json:"label"`
+	ResetsLeft        int    `json:"resets_left"`
+	EndsAt            string `json:"ends_at"`
+	StartsAt          string `json:"starts_at"`
+	Paused            bool   `json:"paused"`
+	UsableNow         bool   `json:"usable_now"`
+	Clears            []string
+	GivesBackWeekly   *bool
+	UnavailableReason string
 }
 
 // usable reports a grant that can be claimed now.
-func (g grant) usable() bool { return g.UsableNow && !g.Paused }
+func (g grant) usable(now time.Time) bool {
+	startsAt, errStart := time.Parse(time.RFC3339Nano, g.StartsAt)
+	_, validExpiry := g.endsAt()
+	return g.UsableNow && !g.Paused && g.UnavailableReason == "" &&
+		(g.StartsAt == "" || (errStart == nil && !startsAt.After(now))) && (g.EndsAt == "" || validExpiry)
+}
+
+// scope uses restoration semantics; both known scopes report upstream type "full".
+func (g grant) scope() string {
+	for _, key := range g.Clears {
+		if key != "five_hour" && key != "seven_day" && key != "seven_day_overage_included" {
+			return "unknown"
+		}
+	}
+	if g.GivesBackWeekly == nil {
+		return "unknown"
+	}
+	if slices.Contains(g.Clears, "seven_day") && slices.Contains(g.Clears, "seven_day_overage_included") && !*g.GivesBackWeekly {
+		return "general"
+	}
+	if !slices.Contains(g.Clears, "seven_day") && slices.Contains(g.Clears, "seven_day_overage_included") && *g.GivesBackWeekly {
+		return "fable"
+	}
+	return "unknown"
+}
+
+func parseGrant(raw ojson.Result) grant {
+	g := grant{ID: raw.Get("id").String(), Label: raw.Get("label").String(), ResetsLeft: int(raw.Get("resets_left").Int()),
+		EndsAt: raw.Get("ends_at").String(), StartsAt: raw.Get("starts_at").String(), Paused: raw.Get("paused").Bool(),
+		UsableNow: raw.Get("usable_now").Bool(), UnavailableReason: raw.Get("unavailable_reason").String(), Clears: []string{}}
+	for _, clear := range raw.Get("clears").Array() {
+		g.Clears = append(g.Clears, clear.String())
+	}
+	if givesBack := raw.Get("gives_back_weekly"); givesBack.Type == ojson.True || givesBack.Type == ojson.False {
+		value := givesBack.Bool()
+		g.GivesBackWeekly = &value
+	}
+	return g
+}
 
 // endsAt is the grant's expiry; false when it never expires or the time is unreadable.
 func (g grant) endsAt() (time.Time, bool) {
@@ -61,28 +95,40 @@ type creditState struct {
 // parseCredits reads the reset credits from a usage document. Credits are nil when the account is
 // ineligible or the block is missing, so nothing is shown.
 func parseCredits(raw json.RawMessage, now time.Time) creditState {
-	var doc usageCredits
-	if errDecode := json.Unmarshal(raw, &doc); errDecode != nil || doc.CedarEmber == nil || !doc.CedarEmber.Eligible {
+	if !ojson.ValidBytes(raw) {
 		return creditState{}
 	}
-	block := doc.CedarEmber
+	block := ojson.GetBytes(raw, "cedar_ember")
+	if !block.Get("eligible").Bool() {
+		return creditState{}
+	}
 	var state creditState
-	if until, errParse := time.Parse(time.RFC3339Nano, strings.TrimSpace(block.CooldownUntil)); errParse == nil && until.After(now) {
+	if until, errParse := time.Parse(time.RFC3339Nano, strings.TrimSpace(block.Get("cooldown_until").String())); errParse == nil && until.After(now) {
 		state.coolingUntil = until
 	}
-	credits := &resetcredits.Credits{}
-	for _, g := range block.Grants {
+	credits := &resetcredits.Credits{Grants: []resetcredits.Grant{}}
+	for _, rawGrant := range block.Get("grants").Array() {
+		g := parseGrant(rawGrant)
 		endsAt, expires := g.endsAt()
-		if g.ResetsLeft <= 0 || (expires && !endsAt.After(now)) {
+		if g.ID == "" || g.ResetsLeft <= 0 || (expires && !endsAt.After(now)) {
 			continue
 		}
+		item := resetcredits.Grant{ID: g.ID, Label: g.Label, Scope: g.scope(), Available: g.ResetsLeft, Clears: g.Clears, GivesBackWeekly: g.GivesBackWeekly}
+		if expires {
+			item.ExpiresAt = &endsAt
+		}
+		if g.UnavailableReason != "" {
+			item.UnavailableReason = &g.UnavailableReason
+		}
 		credits.Available += g.ResetsLeft
-		if g.usable() && state.coolingUntil.IsZero() {
+		if g.usable(now) && state.coolingUntil.IsZero() {
+			item.Applicable = g.ResetsLeft
 			credits.Applicable += g.ResetsLeft
-			if g.ID == block.NextGrantID {
+			if g.ID == block.Get("next_grant_id").String() {
 				state.nextGrant = g.ID
 			}
 		}
+		credits.Grants = append(credits.Grants, item)
 		if expires {
 			for range g.ResetsLeft {
 				credits.Expiries = append(credits.Expiries, endsAt)
@@ -126,7 +172,7 @@ var claimResults = map[string]string{
 
 // RedeemResetCredit spends one of the account's reset credits. A fresh lookup picks Claude's next
 // grant; each claim carries a new request id, so it spends at most one reset.
-func (p *Poller) RedeemResetCredit(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (p *Poller) RedeemResetCredit(ctx context.Context, auth *coreauth.Auth, grantID string) (string, error) {
 	if !Eligible(auth) {
 		return "", fmt.Errorf("credential %s is not an enabled Claude OAuth credential", auth.ID)
 	}
@@ -144,10 +190,21 @@ func (p *Poller) RedeemResetCredit(ctx context.Context, auth *coreauth.Auth) (st
 	if !state.coolingUntil.IsZero() {
 		return "", fmt.Errorf("Claude resets are cooling down until %s", state.coolingUntil.Format(time.RFC3339))
 	}
-	if state.nextGrant == "" {
+	selected := state.nextGrant
+	if grantID != "" {
+		selected = ""
+		if state.credits != nil {
+			for _, grant := range state.credits.Grants {
+				if grant.ID == grantID && grant.Applicable > 0 && grant.Scope != "unknown" {
+					selected = grant.ID
+				}
+			}
+		}
+	}
+	if selected == "" {
 		return resetcredits.NoCredit, nil
 	}
-	result, errRedeem := p.redeem(lookupCtx, p.config(), auth, organization, state.nextGrant, uuid.NewString())
+	result, errRedeem := p.redeem(lookupCtx, p.config(), auth, organization, selected, uuid.NewString())
 	var httpErr *claudeauth.UsageHTTPError
 	switch {
 	case errors.As(errRedeem, &httpErr) && httpErr.StatusCode == http.StatusTooManyRequests:
