@@ -474,7 +474,8 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
-	if auth.Provider == existing.Provider && quotaScheduleIdentityMatches(auth, existing) &&
+	sameQuotaAccount := auth.Provider == existing.Provider && quotaScheduleIdentityMatches(auth, existing)
+	if sameQuotaAccount &&
 		auth.QuotaResetSchedule.ObservedAt.Before(existing.QuotaResetSchedule.ObservedAt) {
 		auth.QuotaResetSchedule = existing.QuotaResetSchedule
 	}
@@ -740,6 +741,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	if existing.Generation >= auth.Generation {
 		auth.Generation = existing.Generation + 1
+	}
+	if !sameQuotaAccount {
+		auth.QuotaResetSchedule = QuotaResetSchedule{}
+		switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+		case "claude", "codex":
+			auth.Quota.ObservedAt = time.Time{}
+			auth.Quota.Signals = nil
+		}
 	}
 	auth.ClearFileSnapshot()
 	authClone := auth.Clone()
