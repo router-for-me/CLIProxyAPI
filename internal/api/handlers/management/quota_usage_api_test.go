@@ -61,11 +61,15 @@ func TestQuotaUsageAPICallRecovery(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager := coreauth.NewManager(nil, nil, nil)
+			quotaMessage := "quota exceeded"
+			if tc.provider == "codex" {
+				quotaMessage = `{"error":{"type":"usage_limit_reached"}}`
+			}
 			deadline := time.Now().Add(time.Hour).Round(0)
 			auth, err := manager.Register(context.Background(), &coreauth.Auth{
 				ID: "usage-" + tc.provider, Provider: tc.provider, Status: coreauth.StatusError, Unavailable: true,
 				Metadata:  map[string]any{"access_token": "selected-token", "account_id": "selected-account"},
-				LastError: &coreauth.Error{HTTPStatus: 429, Message: "quota exceeded"},
+				LastError: &coreauth.Error{HTTPStatus: 429, Message: quotaMessage},
 				Quota:     coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline}, NextRetryAfter: deadline,
 			})
 			if err != nil {

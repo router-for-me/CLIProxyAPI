@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type quotaFeedbackStore struct {
@@ -75,6 +76,52 @@ func TestQuotaRecoveryAbortedSaveKeepsNextEditPersistent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestQuotaRecoveryCodexOnlySubscriptionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, message, code string
+		credential, want    bool
+	}{
+		{name: "usage limit", message: `{"error":{"type":"usage_limit_reached","resets_in_seconds":3600}}`, credential: true, want: true},
+		{name: "model usage limit", message: `{"error":{"type":"usage_limit_reached","resets_in_seconds":3600}}`, want: true},
+		{name: "top-level usage limit", message: `{"type":"usage_limit_reached"}`, credential: true, want: true},
+		{name: "classified credential quota", message: "quota exceeded", code: ErrorCodeCredentialQuota, credential: true, want: true},
+		{name: "usage name only in message", message: `{"error":{"type":"rate_limit_exceeded","message":"usage_limit_reached"}}`},
+		{name: "rate limit", message: `{"error":{"type":"rate_limit_exceeded","message":"too many requests"}}`},
+		{name: "model capacity", message: `{"error":{"type":"server_error","code":"model_capacity_exceeded"}}`},
+		{name: "transient classification", message: `{"error":{"type":"rate_limit_exceeded"}}`, code: ErrorCodeTransientRateLimit},
+		{name: "unknown quota", message: "quota exceeded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			m := NewManager(nil, nil, nil)
+			a, err := m.Register(context.Background(), &Auth{ID: t.Name(), Provider: "codex", Status: StatusActive})
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry := time.Hour
+			m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "codex", Model: "gpt-6.1-sol", Error: &Error{HTTPStatus: 429, Code: tc.code, Message: tc.message}, RetryAfter: &retry, CredentialScope: tc.credential})
+			before, _ := m.GetByID(a.ID)
+			if got := QuotaRecoveryCandidate(before); got != tc.want {
+				t.Fatalf("candidate=%v want=%v", got, tc.want)
+			}
+			got, _, err := m.ResetQuotaIfUnchanged(context.Background(), before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want {
+				if got == nil || got.Unavailable {
+					t.Fatal("subscription recovery stayed blocked")
+				}
+			} else {
+				after, _ := m.GetByID(a.ID)
+				if got != nil || !reflect.DeepEqual(before, after) {
+					t.Fatal("healthy plan observation cleared unrelated cooldown")
+				}
+			}
+		})
 	}
 }
 

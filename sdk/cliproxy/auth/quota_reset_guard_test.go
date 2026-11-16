@@ -27,7 +27,7 @@ func quotaGuardFixture(t *testing.T) (*Manager, *Auth, CooldownStateStore, strin
 	r.RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { r.UnregisterClient(id) })
 	duration := time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "codex", Model: model, Error: &Error{HTTPStatus: 429, Message: "quota exceeded"}, RetryAfter: &duration, CredentialScope: true})
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "codex", Model: model, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"usage_limit_reached"}}`}, RetryAfter: &duration, CredentialScope: true})
 	a, _ := m.GetByID(id)
 	return m, a, store, model
 }

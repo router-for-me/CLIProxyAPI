@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
@@ -25,7 +26,7 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 	if auth == nil || auth.Disabled || strings.TrimSpace(auth.ID) == "" || strings.TrimSpace(auth.Provider) == "" {
 		return false
 	}
-	known, safe := quotaRecoveryState(auth.Status, auth.StatusMessage, auth.Unavailable, auth.NextRetryAfter, auth.Quota, auth.LastError)
+	known, safe := quotaRecoveryState(auth.Provider, auth.Status, auth.StatusMessage, auth.Unavailable, auth.NextRetryAfter, auth.Quota, auth.LastError)
 	if !safe {
 		return false
 	}
@@ -33,7 +34,7 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 		if state == nil {
 			continue
 		}
-		modelKnown, modelSafe := quotaRecoveryState(state.Status, state.StatusMessage, state.Unavailable, state.NextRetryAfter, state.Quota, state.LastError)
+		modelKnown, modelSafe := quotaRecoveryState(auth.Provider, state.Status, state.StatusMessage, state.Unavailable, state.NextRetryAfter, state.Quota, state.LastError)
 		if !modelSafe {
 			return false
 		}
@@ -42,7 +43,7 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 	return known
 }
 
-func quotaRecoveryState(status Status, message string, unavailable bool, retry time.Time, quota QuotaState, lastError *Error) (bool, bool) {
+func quotaRecoveryState(provider string, status Status, message string, unavailable bool, retry time.Time, quota QuotaState, lastError *Error) (bool, bool) {
 	if status != "" && status != StatusActive && status != StatusError {
 		return false, false
 	}
@@ -55,6 +56,9 @@ func quotaRecoveryState(status Status, message string, unavailable bool, retry t
 		return false, false
 	}
 	if lastError != nil && (lastError.Code == ErrorCodeForceCooldown || statusCodeFromResult(lastError) != http.StatusTooManyRequests || isInvalidGrantResultError(lastError) || isCloudflareChallengeResultError(lastError)) {
+		return false, false
+	}
+	if known && strings.EqualFold(provider, "codex") && lastError != nil && !quotaCodexSubscriptionError(lastError) {
 		return false, false
 	}
 	if !retry.IsZero() && (!known || quota.NextRecoverAt.IsZero() || retry.After(quota.NextRecoverAt)) {
@@ -81,4 +85,18 @@ func (m *Manager) quotaResetMatchesLocked(auth, expected *Auth) bool {
 	return auth != nil && !(cfg != nil && cfg.Home.Enabled) && auth.ID == expected.ID && auth.Provider == expected.Provider &&
 		auth.RegistrationEpoch == expected.RegistrationEpoch && auth.Generation == expected.Generation &&
 		QuotaRecoveryCandidate(expected) && QuotaRecoveryCandidate(auth)
+}
+
+// Codex uses 429 for subscription limits and independent request/capacity limits.
+// Only the subscription failure is established by the plan usage observation.
+func quotaCodexSubscriptionError(err *Error) bool {
+	if err.Code == ErrorCodeCredentialQuota {
+		return true
+	}
+	for _, path := range []string{"error.type", "type", "body.error.type", "response.error.type"} {
+		if ojson.Get(err.Message, path).String() == "usage_limit_reached" {
+			return true
+		}
+	}
+	return false
 }
