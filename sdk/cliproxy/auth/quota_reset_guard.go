@@ -27,6 +27,9 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 	if auth == nil || auth.Disabled || strings.TrimSpace(auth.ID) == "" || strings.TrimSpace(auth.Provider) == "" {
 		return false
 	}
+	if !quotaRecoverySIWCAccountMatches(auth) {
+		return false
+	}
 	known, safe := quotaRecoveryState(auth.Provider, auth.Status, auth.StatusMessage, auth.Unavailable, auth.NextRetryAfter, auth.Quota, auth.LastError)
 	if !safe {
 		return false
