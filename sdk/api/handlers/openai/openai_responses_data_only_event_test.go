@@ -52,3 +52,34 @@ func TestResponsesSSEFramerDataOnlyEventKeepsTerminal(t *testing.T) {
 		}
 	}
 }
+
+// A typed event may legally carry its data: field before its own event: field. Splitting it would
+// orphan the event: line and shift pairing for every later event.
+func TestResponsesSSEFramerKeepsTypedDataBeforeMatchingEvent(t *testing.T) {
+	lines := []string{
+		`data: {"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"hi"}`,
+		"event: response.output_text.delta",
+		`data: {"type":"response.completed","sequence_number":2,"response":{"id":"resp_1","status":"completed","output":[]}}`,
+		"event: response.completed",
+	}
+	framer := &responsesSSEFramer{failureEvent: "error", canComplete: func() bool { return true }}
+	var out bytes.Buffer
+	for _, line := range lines {
+		framer.WriteChunk(&out, []byte(line))
+	}
+	framer.Flush(&out)
+
+	frames := strings.Split(strings.TrimSpace(out.String()), "\n\n")
+	if len(frames) != 2 {
+		t.Fatalf("got %d frames, want 2:\n%s", len(frames), out.String())
+	}
+	for i, want := range []string{"response.output_text.delta", "response.completed"} {
+		payload, _ := responsesSSEDataPayload([]byte(frames[i]))
+		if name, typ := responsesSSEEventName([]byte(frames[i])), ojson.GetBytesNoCopy(payload, "type").String(); name != want || typ != want {
+			t.Fatalf("frame %d: event=%q type=%q, want %q:\n%s", i, name, typ, want, frames[i])
+		}
+	}
+	if framer.terminalEvent != "response.completed" {
+		t.Fatalf("terminal=%q, want response.completed", framer.terminalEvent)
+	}
+}

@@ -741,10 +741,11 @@ func responsesSSECanFlushWithoutDelimiter(chunk []byte) bool {
 
 // responsesSSEStartsNewDataFrame reports whether chunk begins a new event while pending holds a
 // complete data-only event (valid JSON data, no event: line) whose blank-line delimiter was not
-// forwarded. When the pending payload declares its own type, an event: line starts a new event
-// too: otherwise it is glued to the data-only event, every later event name pairs with the
+// forwarded. An event: line naming a different event than the pending payload's type starts a new
+// event too: otherwise it is glued to the data-only event, every later event name pairs with the
 // preceding payload, and a final event: response.completed marks the stream terminal on the wrong
-// payload and drops the real response.completed. Untyped data still waits for its event: field.
+// payload and drops the real response.completed. Untyped data, or typed data followed by its own
+// event: field, still forms one event.
 func responsesSSEStartsNewDataFrame(pending, chunk []byte) bool {
 	trimmedPending := bytes.TrimSpace(pending)
 	if len(trimmedPending) == 0 || responsesSSEHasField(trimmedPending, []byte("event:")) ||
@@ -759,7 +760,9 @@ func responsesSSEStartsNewDataFrame(pending, chunk []byte) bool {
 		return false
 	}
 	payload, _ := responsesSSEDataPayload(trimmedPending)
-	return ojson.GetBytesNoCopy(payload, "type").String() != ""
+	pendingType := ojson.GetBytesNoCopy(payload, "type").String()
+	eventName := responsesSSEEventName(trimmedChunk)
+	return pendingType != "" && eventName != "" && eventName != pendingType
 }
 
 func responsesSSEEventName(frame []byte) string {
