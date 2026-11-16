@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -117,8 +118,29 @@ type requestLifecycleTracker struct {
 }
 
 func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
-	requestID := uuid.NewString()
+	var requestID string
+	if metadata != nil {
+		if existing, _ := metadata[coreexecutor.RequestIDMetadataKey].(string); strings.TrimSpace(existing) != "" {
+			requestID = strings.TrimSpace(existing)
+		}
+	}
+	if requestID == "" {
+		requestID = coreauth.ContinuitySessionRequestID(ctx)
+	}
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
 	traceID := logging.GetRequestID(ctx)
+	if metadata != nil {
+		if existing, _ := metadata[coreexecutor.RequestIDMetadataKey].(string); strings.TrimSpace(existing) == "" {
+			metadata[coreexecutor.RequestIDMetadataKey] = requestID
+		}
+		if traceID != "" {
+			if existing, _ := metadata[coreexecutor.TraceIDMetadataKey].(string); strings.TrimSpace(existing) == "" {
+				metadata[coreexecutor.TraceIDMetadataKey] = traceID
+			}
+		}
+	}
 	return &requestLifecycleTracker{
 		ctx:          ctx,
 		host:         h.interceptorHost(),

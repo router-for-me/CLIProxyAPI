@@ -228,6 +228,19 @@ func (h *Host) SchedulerWantsAcrossPriorities() bool {
 	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
 }
 
+// HasSchedulerContinuity reports whether the active scheduler supports bounded continuity evaluation.
+func (h *Host) HasSchedulerContinuity() bool {
+	return h != nil && h.inner != nil && h.inner.HasSchedulerContinuity()
+}
+
+// EvaluateSchedulerContinuity invokes the active scheduler plugin's Continuity callback.
+func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	if h == nil || h.inner == nil {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	return h.inner.EvaluateSchedulerContinuity(ctx, req)
+}
+
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.
 func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 	if h == nil || h.inner == nil {
