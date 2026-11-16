@@ -26,9 +26,37 @@ Note: the root `.gitignore` ignores `docs/*` but un-ignores `docs/proxx/` (hook 
 Note: `../CLIProxyAPI` on this machine is an unrelated upstream checkout. The panel's own
 AGENTS.md says to read backend contracts from `../CLIProxyAPI`; for proxx work use `../proxx`.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iamkunal9/proxx/main/install.sh | sh
+```
+
+[`install.sh`](../../install.sh) downloads the latest release for the OS/CPU, checks it against
+`checksums.txt`, and installs `proxx` to `~/.local/bin` (`/usr/local/bin` as root). The config lives in
+`~/.proxx/config.yaml`. On first install it copies Homebrew's `cliproxyapi.conf` when present (same
+format; the panel repo is switched to proxx-panel), otherwise `config.example.yaml`; an existing config
+is never overwritten. It then starts a launchd agent (`io.github.iamkunal9.proxx`, logs in
+`~/.proxx/proxx.log`) or a systemd user unit (`proxx`). Options: `sh -s -- --no-service`,
+`--version <tag>`, `--install-dir <dir>`, `--home <dir>`, `--no-plugin`, `--uninstall` (or the `PROXX_*`
+variables listed at the top of the script). Re-running it upgrades in place.
+
+Migrating from Homebrew CLIProxyAPI: `brew services stop cliproxyapi`, then run the installer.
+
+## Releases
+
+- Backend: push a tag `v<upstream version>-proxx.<n>` (e.g. `v8.0.73-proxx.1`) on `main`. The upstream
+  `release.yaml` workflow builds `proxx_<version>_<os>_<arch>` archives for macOS, Linux, Windows and
+  FreeBSD plus `checksums.txt`; `install.sh` picks them up from "latest".
+- Panel: push a `v*` tag on proxx-panel (e.g. `v1.28.0-proxx.2`); the proxy auto-updates the panel.
+- Forks start with Actions off: if a pushed tag starts no run, enable Actions
+  (`gh api -X PUT repos/<repo>/actions/permissions -F enabled=true -f allowed_actions=all`) and re-push the tag.
+- Disabled in the fork (`gh workflow disable`): `docker-image.yml` (pushes to upstream's Docker Hub),
+  `auto-retarget-main-pr-to-dev.yml`, `agents-md-guard.yml`.
+
 ## Quick start
 
-- Build: `go build -o proxx ./cmd/server`
+- Build from source: `go build -o proxx ./cmd/server`
 - Example config for a bot on free APIs with an `auto` model: [`examples/free-auto.yaml`](examples/free-auto.yaml)
 - Known pre-existing upstream test failure (not proxx): `internal/pluginhost` `TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader` (fails on unmodified upstream main, Nov 2026).
 
@@ -72,6 +100,7 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `internal/config/config_defaults.go`, `internal/managementasset/updater.go`, `config.example.yaml` | default panel repo → `iamkunal9/proxx-panel` (1 line each) | proxx panel by default (ADR 0001) |
 | `Dockerfile` | binary built and run as `proxx` (3 lines) | binary name (ADR 0001) |
 | `.github/workflows/release.yaml` | `cli-proxy-api` → `proxx`, `CLIProxyAPI_` → `proxx_` throughout | release binary/archive names (ADR 0001) |
+| `.github/workflows/release.yaml` | fetch upstream tags + cap generated notes at 60k chars (2 lines in `prepare-release`) | fork releases: changelog range and GitHub's 125k body limit |
 | `sdk/api/handlers/handlers_routing.go` | `proxxgroups.RequestProviders(model)` in `getRequestDetailsWithOptions` | model groups bypass provider lookup and win over `auto` resolution |
 | `sdk/api/handlers/openai/openai_responses_websocket_session.go` | `proxxgroups.IsGroup(model)` in `responsesWebsocketResolvedModelName` | same for Responses websocket sessions |
 | `sdk/cliproxy/auth/conductor_execution.go` | `m.proxxExecuteGroup` / `proxxExecuteCountGroup` / `proxxExecuteStreamGroup` at the top of `Execute` / `ExecuteCount` / `ExecuteStream` | expand a group into member executions |
