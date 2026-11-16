@@ -48,6 +48,7 @@ jobs:
           EOF
 
           git fetch --force --tags
+          git fetch --force --tags https://github.com/router-for-me/CLIProxyAPI.git || true # proxx: upstream tags bound the changelog range
           previous_tag=""
           if previous_tag_value="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null)"; then
             previous_tag="$previous_tag_value"
@@ -62,6 +63,7 @@ jobs:
           gh api "repos/${GH_REPO}/releases/generate-notes" \
             -f tag_name="$GITHUB_REF_NAME" \
             --jq .body > "$generated_notes_file"
+          head -c 60000 "$generated_notes_file" > "$generated_notes_file.cap" && mv "$generated_notes_file.cap" "$generated_notes_file" # proxx: fork has no previous release, cap the notes
           if [[ ! -s "$generated_notes_file" ]]; then
             if [[ -n "$previous_tag" ]]; then
               printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' "$GH_REPO" "$previous_tag" "$GITHUB_REF_NAME" > "$generated_notes_file"

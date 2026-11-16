@@ -1,4 +1,4 @@
-> **proxx** — fork of CLIProxyAPI with model groups (`auto`), per-token pricing and spend tracking. Fork docs: [`docs/proxx/`](docs/proxx/README.md). Build: `go build -o proxx ./cmd/server`.
+> **proxx** — fork of CLIProxyAPI with model groups (`auto`), per-token pricing and spend tracking. Fork docs: [`docs/proxx/`](docs/proxx/README.md). Install: `curl -fsSL https://raw.githubusercontent.com/iamkunal9/proxx/main/install.sh | sh`.
 
 # CLI Proxy API
 
