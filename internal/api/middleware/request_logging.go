@@ -82,6 +82,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 					deferredCapture.Cleanup()
 					deferredCapture = nil
 				}
+				startAuthenticatedCapture(c)
 				if errCapture := captureRequestInfoBody(c, requestInfo); errCapture != nil {
 					var maxBytesErr *http.MaxBytesError
 					if errors.As(errCapture, &maxBytesErr) {
@@ -136,15 +137,13 @@ func CaptureAuthenticatedRequestBody(c *gin.Context) {
 	}
 	c.Set(archiveAuthenticatedKey, true)
 	value, exists := c.Get(authenticatedRequestBodyCapturerContextKey)
-	if !exists {
-		return
+	if exists {
+		c.Set(authenticatedRequestBodyCapturerContextKey, nil)
+		if capturer, ok := value.(func()); ok && capturer != nil {
+			capturer()
+		}
 	}
-	c.Set(authenticatedRequestBodyCapturerContextKey, nil)
-	capturer, ok := value.(func())
-	if !ok || capturer == nil {
-		return
-	}
-	capturer()
+	startAuthenticatedCapture(c)
 }
 
 type deferredRequestBodyCapture struct {

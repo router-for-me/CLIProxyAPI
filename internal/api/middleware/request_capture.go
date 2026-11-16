@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,66 +14,71 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 )
 
-type boundedCapture struct{ logging.CaptureBuffer }
-
-func (b *boundedCapture) add(p []byte) { _, _ = b.Write(p) }
-
 type captureReader struct {
 	io.ReadCloser
-	body *boundedCapture
-	eof  bool
-	read int64
+	write func([]byte)
+	eof   bool
+	read  int64
 }
 
 func (r *captureReader) Read(p []byte) (int, error) {
-	n, e := r.ReadCloser.Read(p)
-	r.body.add(p[:n])
+	n, err := r.ReadCloser.Read(p)
+	r.write(p[:n])
 	r.read += int64(n)
-	if e == io.EOF {
+	if err == io.EOF {
 		r.eof = true
 	}
-	return n, e
+	return n, err
 }
 
 type captureWriter struct {
 	gin.ResponseWriter
-	body        *boundedCapture
+	write       func([]byte)
 	hijacked    bool
 	writeFailed bool
 }
 
 func (w *captureWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
 func (w *captureWriter) Write(p []byte) (int, error) {
-	n, e := w.ResponseWriter.Write(p)
-	w.body.add(p[:n])
-	if e != nil || n != len(p) {
+	n, err := w.ResponseWriter.Write(p)
+	w.write(p[:n])
+	if err != nil || n != len(p) {
 		w.writeFailed = true
 	}
-	return n, e
+	return n, err
 }
 func (w *captureWriter) WriteString(p string) (int, error) {
-	n, e := w.ResponseWriter.WriteString(p)
-	w.body.add([]byte(p[:n]))
-	if e != nil || n != len(p) {
+	n, err := w.ResponseWriter.WriteString(p)
+	for offset := 0; offset < n; offset += logging.CaptureChunkBytes {
+		w.write([]byte(p[offset:min(n, offset+logging.CaptureChunkBytes)]))
+	}
+	if err != nil || n != len(p) {
 		w.writeFailed = true
 	}
-	return n, e
+	return n, err
 }
 func (w *captureWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	w.hijacked = true
-	return w.ResponseWriter.Hijack()
+	conn, rw, err := w.ResponseWriter.Hijack()
+	w.hijacked = err == nil
+	return conn, rw, err
 }
 
 const archiveAuthenticatedKey = "CPA_ARCHIVE_AUTHENTICATED"
+const captureStartContextKey = "CPA_CAPTURE_START"
 
-// RequestCaptureMiddleware observes consumed downstream bytes. It never reads ahead,
-// writes disk, waits on a queue, or reads authentication headers.
-type captureSink interface {
-	Begin() (uint64, bool)
-	Finish(uint64, logging.CaptureRecord)
+func startAuthenticatedCapture(c *gin.Context) {
+	if start, ok := c.Get(captureStartContextKey); ok {
+		if begin, valid := start.(func() *logging.CaptureStream); valid {
+			begin()
+		}
+	}
 }
 
+type captureSink interface {
+	StartCapture(logging.CaptureRecord) *logging.CaptureStream
+}
+
+// Body wrappers are installed only after authentication and capture opt-in; unauthenticated transport remains untouched.
 func RequestCaptureMiddleware(spool captureSink) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		trace := logging.GetGinRequestID(c)
@@ -80,96 +86,74 @@ func RequestCaptureMiddleware(spool captureSink) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		begin, finish := spool.Begin, spool.Finish
-		if isResponsesWebsocketUpgrade(c.Request) {
-			if ws, ok := spool.(interface {
-				BeginWebsocket() (uint64, bool)
-				FinishWebsocket(uint64, logging.CaptureRecord)
-			}); ok {
-				begin, finish = ws.BeginWebsocket, ws.FinishWebsocket
-			}
+		r := logging.CaptureRecord{ID: uuid.NewString(), TraceID: trace, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Method: boundedCaptureField(c.Request.Method, 16), Path: boundedCaptureField(c.Request.URL.Path, 2048), State: "complete", Reason: "http-finalized", RequestType: boundedCaptureField(c.GetHeader("Content-Type"), 256), RequestEncoding: boundedCaptureField(c.GetHeader("Content-Encoding"), 64), Format: "http"}
+		websocket := strings.EqualFold(c.GetHeader("Upgrade"), "websocket")
+		if websocket {
+			r.Format = "websocket"
 		}
-		generation, enabled := begin()
-		if !enabled {
-			c.Next()
-			return
-		}
-		r := logging.CaptureRecord{ID: uuid.NewString(), TraceID: trace, StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Method: c.Request.Method, Path: c.Request.URL.Path, State: "complete", RequestType: c.GetHeader("Content-Type"), RequestEncoding: c.GetHeader("Content-Encoding")}
-		r.Method = boundedCaptureField(r.Method, 16)
-		r.Path = boundedCaptureField(r.Path, 2048)
-		r.RequestType = boundedCaptureField(r.RequestType, 256)
-		r.RequestEncoding = boundedCaptureField(r.RequestEncoding, 64)
-		var messages *logging.CaptureMessages
-		updateBase := r
-		if isResponsesWebsocketUpgrade(c.Request) {
-			messages = logging.NewCaptureMessages(func() {
-				if updates, ok := spool.(interface {
-					Update(uint64, logging.CaptureRecord)
-				}); ok {
-					snapshot := updateBase
-					snapshot.Status = 101
-					snapshot.State = "pending"
-					snapshot.Messages = messages
-					updates.Update(generation, snapshot)
+		var mu sync.Mutex
+		var stream *logging.CaptureStream
+		var reader *captureReader
+		var writer *captureWriter
+		started := false
+		ensure := func() *logging.CaptureStream {
+			mu.Lock()
+			defer mu.Unlock()
+			if !started && c.GetBool(archiveAuthenticatedKey) {
+				started = true
+				stream = spool.StartCapture(r)
+				if stream != nil {
+					if c.Request.Body != nil {
+						reader = &captureReader{ReadCloser: c.Request.Body, write: func(p []byte) { stream.Write("request", p) }}
+						c.Request.Body = reader
+					}
 				}
-			})
+			}
+			return stream
+		}
+		writer = &captureWriter{ResponseWriter: c.Writer, write: func(p []byte) { ensure().Write("response", p) }}
+		c.Writer = writer
+		c.Set(captureStartContextKey, ensure)
+		var messages *logging.CaptureMessages
+		if websocket {
+			messages = logging.NewStreamingCaptureMessages(ensure)
 			c.Set(logging.CaptureMessagesContextKey, messages)
 		}
-		var request, response boundedCapture
-		var reader *captureReader
-		if c.Request.Body != nil {
-			reader = &captureReader{ReadCloser: c.Request.Body, body: &request}
-			c.Request.Body = reader
-		}
-		writer := &captureWriter{ResponseWriter: c.Writer, body: &response}
-		c.Writer = writer
 		defer func() {
 			panicValue := recover()
-			if messages != nil {
-				messages.Close(false)
+			if writer == nil {
+				if panicValue != nil {
+					panic(panicValue)
+				}
+				return
 			}
 			r.Status = writer.Status()
-			r.ResponseType = writer.Header().Get("Content-Type")
-			r.ResponseEncoding = writer.Header().Get("Content-Encoding")
-			r.ResponseType = boundedCaptureField(r.ResponseType, 256)
-			r.ResponseEncoding = boundedCaptureField(r.ResponseEncoding, 64)
-			if !c.GetBool(archiveAuthenticatedKey) {
-				r.State = "missing"
-				r.Reason = "not-authenticated"
-			} else if writer.hijacked || strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
-				if messages != nil && writer.hijacked {
-					r.Messages = messages
-					r.Status = 101
+			r.ResponseType = boundedCaptureField(writer.Header().Get("Content-Type"), 256)
+			r.ResponseEncoding = boundedCaptureField(writer.Header().Get("Content-Encoding"), 64)
+			if websocket {
+				if writer.hijacked {
+					r.Status, r.Reason = http.StatusSwitchingProtocols, "websocket-messages-finalized"
+					_, partial, _, reason := messages.Snapshot()
+					if partial {
+						r.State, r.Reason = "partial", reason
+					}
 				} else {
-					r.State = "partial"
-					r.Reason = "websocket-upgrade-not-captured"
+					r.Format = "http"
 				}
-			} else {
-				r.RawRequest = request.Bytes()
-				r.RawResponse = response.Bytes()
-				r.RequestCut, r.ResponseCut = request.Cut(), response.Cut()
-				if r.RequestCut != nil || r.ResponseCut != nil {
-					r.State = "partial"
-					r.Reason = "byte-limit"
-				}
-				if reader != nil && !reader.eof && (c.Request.ContentLength < 0 || reader.read < c.Request.ContentLength) {
-					r.State = "partial"
-					r.Reason = "request-not-fully-consumed"
-				}
-				if c.Request.Context().Err() != nil {
-					r.State = "partial"
-					r.Reason = "connection-cancelled"
-				}
-				if writer.writeFailed {
-					r.State = "partial"
-					r.Reason = "response-write-failed"
-				}
+			}
+			if !writer.hijacked && reader != nil && !reader.eof && (c.Request.ContentLength < 0 || reader.read < c.Request.ContentLength) {
+				r.State, r.Reason = "partial", "request-not-fully-consumed"
+			}
+			if c.Request.Context().Err() != nil {
+				r.State, r.Reason = "partial", "connection-cancelled"
+			}
+			if writer.writeFailed {
+				r.State, r.Reason = "partial", "response-write-failed"
 			}
 			if panicValue != nil {
-				r.State = "partial"
-				r.Reason = "handler-panic"
+				r.State, r.Reason = "partial", "handler-panic"
 			}
-			finish(generation, r)
+			ensure().Finish(r)
 			if panicValue != nil {
 				panic(panicValue)
 			}

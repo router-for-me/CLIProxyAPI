@@ -515,7 +515,9 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}
 	consumeSession = true
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	capture := logging.CaptureMessagesFromGin(c)
+	if errRelay := relayWebsockets(downstream, upstream, capture); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+		capture.WriteError()
 		helps.RecordAPIWebsocketError(ctx, runtimeConfig, "relay", errRelay)
 		log.WithError(errRelay).Debug("codex live sideband relay closed")
 	}
@@ -638,10 +640,18 @@ func websocketCloseFunc(name string, conn *websocket.Conn) func() error {
 	}
 }
 
-func relayWebsockets(downstream, upstream *websocket.Conn) error {
+func relayWebsockets(downstream, upstream *websocket.Conn, captures ...*logging.CaptureMessages) error {
+	var capture *logging.CaptureMessages
+	if len(captures) > 0 {
+		capture = captures[0]
+	}
 	results := make(chan error, 2)
-	go func() { results <- copyWebsocket(upstream, downstream) }()
-	go func() { results <- copyWebsocket(downstream, upstream) }()
+	go func() {
+		results <- copyWebsocket(upstream, downstream, func(kind int) io.WriteCloser { return capture.Writer("request", kind) })
+	}()
+	go func() {
+		results <- copyWebsocket(downstream, upstream, func(kind int) io.WriteCloser { return capture.Writer("response", kind) })
+	}()
 
 	firstErr := <-results
 	closeCode, closeReason := websocketCloseDetails(firstErr)
@@ -650,11 +660,14 @@ func relayWebsockets(downstream, upstream *websocket.Conn) error {
 	_ = upstream.WriteControl(websocket.CloseMessage, payload, time.Time{})
 	_ = downstream.Close()
 	_ = upstream.Close()
-	<-results
+	secondErr := <-results
+	if isNormalWebsocketClose(firstErr) && !isNormalWebsocketClose(secondErr) {
+		return secondErr
+	}
 	return firstErr
 }
 
-func copyWebsocket(destination, source *websocket.Conn) error {
+func copyWebsocket(destination, source *websocket.Conn, observers ...func(int) io.WriteCloser) error {
 	for {
 		messageType, reader, errReader := source.NextReader()
 		if errReader != nil {
@@ -664,8 +677,21 @@ func copyWebsocket(destination, source *websocket.Conn) error {
 		if errWriter != nil {
 			return errWriter
 		}
-		_, errCopy := io.Copy(writer, reader)
+		var target io.Writer = writer
+		var observer io.WriteCloser
+		if len(observers) > 0 {
+			observer = observers[0](messageType)
+			target = observedWebsocketWriter{writer, observer}
+		}
+		_, errCopy := io.Copy(target, reader)
 		errClose := writer.Close()
+		if observer != nil {
+			if errCopy == nil && errClose == nil {
+				_ = observer.Close()
+			} else if abort, ok := observer.(interface{ Abort() }); ok {
+				abort.Abort()
+			}
+		}
 		if errCopy != nil {
 			return errCopy
 		}

@@ -3,6 +3,7 @@ package logging
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,19 +112,15 @@ func TestCaptureMessagesBoundsLiveRevisionsAndImmutablePrefixes(t *testing.T) {
 		t.Fatal("frame count not bounded")
 	}
 }
-func TestCaptureWebsocketPermitsCannotStarveHTTP(t *testing.T) {
-	s := testCaptureSpool()
-	s.Lease(true)
-	for i := 0; i < 16; i++ {
-		if _, ok := s.BeginWebsocket(); !ok {
-			t.Fatal("WS permit missing")
+func TestCaptureWebsocketDoesNotStarveHTTP(t *testing.T) {
+	s := testCaptureSpool(t)
+	for i := 0; i < 32; i++ {
+		if s.StartCapture(captureBase("websocket"+fmt.Sprint(i))) == nil {
+			t.Fatal("websocket capture refused")
 		}
 	}
-	if _, ok := s.BeginWebsocket(); ok {
-		t.Fatal("WS active limit missing")
-	}
-	if _, ok := s.Begin(); !ok {
-		t.Fatal("long WS sessions starved HTTP capture")
+	if s.StartCapture(captureBase("http")) == nil {
+		t.Fatal("HTTP capture refused")
 	}
 }
 

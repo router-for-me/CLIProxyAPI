@@ -235,7 +235,9 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	capture := logging.CaptureMessagesFromGin(c)
+	if errRelay := relayWebsockets(downstream, upstream, capture); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+		capture.WriteError()
 		helps.RecordAPIWebsocketError(ctx, h.currentConfig(), "relay", errRelay)
 		log.WithError(errRelay).Debug("codex realtime direct websocket relay closed")
 	}

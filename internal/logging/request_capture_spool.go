@@ -1,15 +1,16 @@
 package logging
 
 import (
+	"crypto/cipher"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"sync"
-	"time"
 
-	"github.com/google/uuid"
+	bolt "go.etcd.io/bbolt"
 )
 
-// CaptureRecord v1 identifies an inbound exchange, independently of usage executions.
-// HTTP bodies are decoded in the worker; frames are bounded downstream messages.
-// RequestCut/ResponseCut are always sent, null for a complete side; clients read their absence as a proxy before per-side cuts.
+// CaptureRecord describes the downstream exchange; legacy text fields remain readable in old archives.
 type CaptureRecord struct {
 	ID               string           `json:"id"`
 	TraceID          string           `json:"traceId"`
@@ -38,158 +39,126 @@ type CaptureRecord struct {
 	Messages         *CaptureMessages `json:"-"`
 }
 
+// This bound applies only to legacy text previews, never journal storage.
 const CaptureBodyLimit = 8 << 20
-const captureBudget = 64 << 20
-const captureRecordLimit = 256
 
-type captureEnvelope struct {
-	generation uint64
-	record     CaptureRecord
+// Chunks bound journal, management-page and archive-worker memory independently of body size.
+const CaptureChunkBytes = 64 << 10
+const CapturePageRecords = 4
+
+type CaptureChunk struct {
+	Direction string `json:"direction"`
+	Offset    uint64 `json:"offset"`
+	Data      []byte `json:"data"`
+	Frame     uint64 `json:"frame"`
+	Type      string `json:"type"`
+	At        string `json:"at"`
+	End       bool   `json:"end"`
+}
+type CaptureEvent struct {
+	CaptureRecord
+	Event          string        `json:"event"`
+	Chunk          *CaptureChunk `json:"chunk,omitempty"`
+	RequestBytes   uint64        `json:"requestBytes"`
+	ResponseBytes  uint64        `json:"responseBytes"`
+	FrameCount     uint64        `json:"frameCount"`
+	RequestSHA256  string        `json:"requestSha256"`
+	ResponseSHA256 string        `json:"responseSha256"`
+}
+type CapturePage struct {
+	Version int            `json:"version"`
+	Epoch   string         `json:"epoch"`
+	Dropped uint64         `json:"dropped"`
+	Error   string         `json:"error,omitempty"`
+	Records []CaptureEvent `json:"records"`
 }
 
-// CaptureSpool does no disk I/O on inference. A bounded finalization queue can lose
-// records; counters and sequences expose this. Restart loses the entire memory spool.
+// CaptureSpool synchronously commits encrypted chunks. It never evicts unacknowledged events.
+type captureJournal interface {
+	Update(func(*bolt.Tx) error) error
+	View(func(*bolt.Tx) error) error
+	Close() error
+}
 type CaptureSpool struct {
 	mu         sync.Mutex
+	policyMu   sync.Mutex
+	streams    map[string]*CaptureStream
+	dir        string
+	key        []byte
+	db         captureJournal
+	aead       cipher.AEAD
 	epoch      string
+	enabled    bool
 	generation uint64
-	sequence   uint64
-	dropped    uint64
-	until      time.Time
-	records    []CaptureRecord
-	bytes      int
-	queue      chan captureEnvelope
-	active     chan struct{}
-	wsActive   chan struct{}
+	error      string
 }
 
 func NewCaptureSpool() *CaptureSpool {
-	s := &CaptureSpool{epoch: uuid.NewString(), queue: make(chan captureEnvelope, 8), active: make(chan struct{}, 16), wsActive: make(chan struct{}, 16)}
-	go func() {
-		for e := range s.queue {
-			s.store(e)
-		}
-	}()
-	return s
+	key, _ := hex.DecodeString(os.Getenv("SPILLWAY_CAPTURE_KEY"))
+	_ = os.Unsetenv("SPILLWAY_CAPTURE_KEY")
+	return NewDurableCaptureSpool(os.Getenv("SPILLWAY_CAPTURE_DIR"), key)
+}
+func NewDurableCaptureSpool(dir string, key []byte) *CaptureSpool {
+	return &CaptureSpool{dir: dir, key: append([]byte(nil), key...), streams: make(map[string]*CaptureStream)}
 }
 
 var DesktopCaptures = NewCaptureSpool()
 
-// Lease is operational, not config: opt-in expires after 60 seconds without renewal.
-func (s *CaptureSpool) Lease(enabled bool) {
+// Recording stays enabled until explicitly disabled; consumer stalls cannot silently stop capture.
+func (s *CaptureSpool) Lease(enabled bool) error {
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if enabled {
-		s.until = time.Now().Add(time.Minute)
-		return
+		err := s.open()
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.enabled = true
+		s.mu.Unlock()
+		s.retryFinalizations()
+		return nil
 	}
-	s.until = time.Time{}
-	s.generation++
-	s.records = nil
-	s.bytes = 0
-}
-
-func (s *CaptureSpool) Begin() (uint64, bool) {
-	return s.begin(s.active)
-}
-func (s *CaptureSpool) BeginWebsocket() (uint64, bool) { return s.begin(s.wsActive) }
-func (s *CaptureSpool) begin(permits chan struct{}) (uint64, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !time.Now().Before(s.until) {
-		return 0, false
-	}
-	select {
-	case permits <- struct{}{}:
-		return s.generation, true
-	default:
-		s.dropped++
-		return 0, false
-	}
-}
-
-func (s *CaptureSpool) Finish(generation uint64, r CaptureRecord) {
-	defer func() { <-s.active }()
-	s.Update(generation, r)
-}
-func (s *CaptureSpool) FinishWebsocket(generation uint64, r CaptureRecord) {
-	defer func() { <-s.wsActive }()
-	s.Update(generation, r)
-}
-
-// Update publishes a best-effort revision without releasing a live connection permit.
-func (s *CaptureSpool) Update(generation uint64, r CaptureRecord) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if generation != s.generation {
-		return
-	}
-	if !time.Now().Before(s.until) {
-		s.dropped++
-		return
-	}
-	s.sequence++
-	r.Sequence, r.Epoch = s.sequence, s.epoch
-	select {
-	case s.queue <- captureEnvelope{generation, r}:
-	default:
-		s.dropped++
-	}
-}
-
-func (s *CaptureSpool) store(e captureEnvelope) {
-	e.record = NormalizeCapture(e.record)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e.generation != s.generation {
-		return
-	}
-	if !time.Now().Before(s.until) {
-		s.dropped++
-		return
-	}
-	size := captureRecordSize(e.record)
-	for len(s.records) > 0 && (s.bytes+size > captureBudget || len(s.records) >= captureRecordLimit) {
-		s.bytes -= captureRecordSize(s.records[0])
-		s.records = s.records[1:]
-		s.dropped++
-	}
-	s.records = append(s.records, e.record)
-	s.bytes += size
-}
-
-func captureRecordSize(r CaptureRecord) int {
-	size := len(r.Request) + len(r.Response)
-	for _, f := range r.Frames {
-		size += len(f.Payload) + 128
-	}
-	return size
-}
-
-type CapturePage struct {
-	Version int             `json:"version"`
-	Epoch   string          `json:"epoch"`
-	Dropped uint64          `json:"dropped"`
-	Records []CaptureRecord `json:"records"`
-}
-
-// Page returns at most four bounded records; clients persist before advancing cursor.
-func (s *CaptureSpool) Page(after uint64) CapturePage {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p := CapturePage{Version: 1, Epoch: s.epoch, Dropped: s.dropped, Records: []CaptureRecord{}}
-	if !time.Now().Before(s.until) {
-		s.records = nil
-		s.bytes = 0
-		return p
-	}
-	for _, r := range s.records {
-		if r.Sequence > after {
-			p.Records = append(p.Records, r)
-			if len(p.Records) == 4 {
-				break
+	s.enabled = false
+	if s.db == nil {
+		if _, err := os.Stat(filepath.Join(s.dir, "captures.db")); err == nil {
+			if errOpen := s.open(); errOpen != nil {
+				s.mu.Unlock()
+				return errOpen
 			}
 		}
 	}
-	return p
+	streams := make([]*CaptureStream, 0, len(s.streams))
+	for _, stream := range s.streams {
+		streams = append(streams, stream)
+	}
+	s.mu.Unlock()
+	for _, stream := range streams {
+		stream.stop("capture-disabled")
+	}
+	return nil
+}
+func (s *CaptureSpool) Close() error {
+	s.policyMu.Lock()
+	defer s.policyMu.Unlock()
+	s.mu.Lock()
+	s.enabled = false
+	streams := make([]*CaptureStream, 0, len(s.streams))
+	for _, stream := range s.streams {
+		streams = append(streams, stream)
+	}
+	s.mu.Unlock()
+	for _, stream := range streams {
+		stream.abandon()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	s.streams = make(map[string]*CaptureStream)
+	return err
 }

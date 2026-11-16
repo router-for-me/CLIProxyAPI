@@ -1,6 +1,8 @@
 package management
 
 import (
+	"crypto/rand"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -10,6 +12,11 @@ import (
 
 func TestCaptureManagementLeaseAndCursorValidation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
+	old := logging.DesktopCaptures
+	logging.DesktopCaptures = logging.NewDurableCaptureSpool(t.TempDir(), key)
+	defer func() { _ = logging.DesktopCaptures.Close(); logging.DesktopCaptures = old }()
 	h := &Handler{}
 	router := gin.New()
 	router.PUT("/lease", h.LeaseCaptures)
@@ -18,7 +25,8 @@ func TestCaptureManagementLeaseAndCursorValidation(t *testing.T) {
 		method, path, body string
 		want               int
 	}{
-		{"PUT", "/lease", `{"enabled":true}`, 200},
+		{"PUT", "/lease", `{"enabled":true}`, 409},
+		{"PUT", "/lease", `{"enabled":true,"version":2}`, 200},
 		{"GET", "/captures?after=0", "", 200},
 		{"GET", "/captures?after=-1", "", 400},
 		{"GET", "/captures?after=invalid", "", 400},
@@ -33,7 +41,7 @@ func TestCaptureManagementLeaseAndCursorValidation(t *testing.T) {
 		if res.Code != test.want {
 			t.Fatalf("%s %s=%d, want %d", test.method, test.path, res.Code, test.want)
 		}
-		if test.path == "/captures?after=0" && !strings.Contains(res.Body.String(), `"version":1`) {
+		if test.path == "/captures?after=0" && !strings.Contains(res.Body.String(), `"version":2`) {
 			t.Fatal("missing capture version")
 		}
 	}

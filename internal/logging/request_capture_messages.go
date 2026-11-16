@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -37,6 +38,7 @@ type rawCaptureFrame struct {
 // CaptureMessages only copies bounded application messages on the socket path.
 // JSON/text normalization and serialization happen in the spool worker.
 type CaptureMessages struct {
+	stream     func() *CaptureStream
 	mu         sync.Mutex
 	frames     []rawCaptureFrame
 	bytes      map[string]int
@@ -53,6 +55,17 @@ type CaptureMessages struct {
 func NewCaptureMessages(notify func()) *CaptureMessages {
 	return &CaptureMessages{bytes: map[string]int{}, notify: notify}
 }
+
+// Streaming captures persist application bytes instead of retaining diagnostic snapshots.
+func NewStreamingCaptureMessages(stream func() *CaptureStream) *CaptureMessages {
+	return &CaptureMessages{stream: stream}
+}
+func (m *CaptureMessages) Writer(direction string, kind int) io.WriteCloser {
+	if m == nil || m.stream == nil {
+		return discardCaptureWriter{}
+	}
+	return m.stream().MessageWriter(direction, kind)
+}
 func CaptureMessagesFromGin(c *gin.Context) *CaptureMessages {
 	if c == nil || !c.GetBool("CPA_ARCHIVE_AUTHENTICATED") {
 		return nil
@@ -63,6 +76,10 @@ func CaptureMessagesFromGin(c *gin.Context) *CaptureMessages {
 }
 func (m *CaptureMessages) Append(direction string, kind int, payload []byte) {
 	if m == nil || (direction != "request" && direction != "response") || (kind != 1 && kind != 2) {
+		return
+	}
+	if m.stream != nil {
+		m.stream().Message(direction, kind, payload)
 		return
 	}
 	m.mu.Lock()
