@@ -294,7 +294,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 							if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
 								return nil, streamErr
 							}
-							return nil, newCodexBootstrapOverloadErr(terminalBody, streamErr)
+							return nil, newCodexBootstrapOverloadErrWithRetryAfter(terminalBody, streamErr)
 						}
 						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}

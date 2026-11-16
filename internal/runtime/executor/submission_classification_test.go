@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -32,6 +33,8 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 	if !ok {
 		t.Fatal("OpenAI fixture did not reach its error parser")
 	}
+	overloadBody := []byte(`{"error":{"code":"server_is_overloaded","message":"overloaded"}}`)
+	retryAfter := time.Second
 	for _, tc := range []struct {
 		name  string
 		err   error
@@ -49,6 +52,8 @@ func TestAcceptedExecutorErrorClassification(t *testing.T) {
 		{"Claude local validation", validateClaudeStreamingResponse([]byte("data: {\"type\":\"message_start\",\"message\":{}}\n\n")), false},
 		{"Codex synthesized error", codexErr(`{"type":"response.failed","response":{}}`), false},
 		{"Codex malformed source", codexErr(`{"type":"response.failed","response":{"error":{"message":"broken"}}`), false},
+		{"Codex synthesized overload with Retry-After", newCodexBootstrapOverloadErrWithRetryAfter(overloadBody, statusErr{retryAfter: &retryAfter}), false},
+		{"Codex parsed overload with Retry-After", newCodexBootstrapOverloadErrWithRetryAfter(overloadBody, statusErr{retryAfter: &retryAfter, providerErrorPayload: true}), true},
 		{"xAI synthesized error", xaiErr(`{"type":"response.failed","response":{}}`), false},
 		{"xAI malformed source", xaiErr(`{"error":{"message":"broken"}`), false},
 		{"Meta synthesized error", metaStreamEventError([]byte(`{"type":"response.failed"}`)), false},

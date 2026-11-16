@@ -380,11 +380,12 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body), providerErrorPayload: providerErrorPayload, credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	// A usage_limit_reached body reset describes quota recovery and wins over
-	// the generic Retry-After header. Every other 429 honours the upstream
-	// header so per-turn admission limits cool until their real deadline.
+	// the generic Retry-After header. Other 429s and recoverable transient
+	// upstream errors honour the upstream header so capacity rejections cool
+	// until their real deadline.
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
-	} else if errCode == http.StatusTooManyRequests {
+	} else if shouldParseCodexRetryAfterHeader(errCode) {
 		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
@@ -757,9 +758,19 @@ func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 // change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
 // scoped to this path means disabling the feature restores the previous behaviour exactly.
 func newCodexBootstrapOverloadErr(body []byte, source statusErr) statusErr {
-	err := newCodexStatusErr(http.StatusServiceUnavailable, body)
+	err := newCodexStatusErrWithHeaders(http.StatusServiceUnavailable, parseCodexWebsocketErrorHeaders(body), body)
 	// The body may be a normalized fallback; only the original event grants replay.
 	err.providerErrorPayload = source.providerErrorPayload
+	return err
+}
+
+func newCodexBootstrapOverloadErrWithRetryAfter(body []byte, source statusErr) statusErr {
+	err := newCodexStatusErr(http.StatusServiceUnavailable, body)
+	err.providerErrorPayload = source.providerErrorPayload
+	if preferredRetryAfter := source.RetryAfter(); preferredRetryAfter != nil {
+		delay := *preferredRetryAfter
+		err.retryAfter = &delay
+	}
 	return err
 }
 
