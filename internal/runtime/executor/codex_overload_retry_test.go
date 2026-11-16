@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -25,13 +26,13 @@ func TestCodexOverloadRetryAfter(t *testing.T) {
 		{
 			name:       "captured overload without status",
 			payload:    codexOverloadRetryEvent,
-			wantStatus: http.StatusBadGateway,
+			wantStatus: http.StatusServiceUnavailable,
 			wantRetry:  326 * time.Second,
 		},
 		{
 			name:       "second captured delay",
 			payload:    `{"type":"error","error":{"message":"Our servers are currently overloaded. Please try again later.","type":"service_unavailable_error","param":null,"code":"server_is_overloaded","headers":{"retry-after":"303","retry-after-ms":"303000"}},"sequence_number":3}`,
-			wantStatus: http.StatusBadGateway,
+			wantStatus: http.StatusServiceUnavailable,
 			wantRetry:  303 * time.Second,
 		},
 		{
@@ -112,53 +113,62 @@ func TestCodexOverloadRetryAfter(t *testing.T) {
 	}
 }
 
-func TestCodexOverloadRetryAfterCooldownThroughWebsocket(t *testing.T) {
-	for _, buffered := range []bool{false, true} {
-		t.Run(fmt.Sprintf("buffered=%t", buffered), func(t *testing.T) {
-			server := codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, codexOverloadRetryEvent)
-			defer server.Close()
-			cfg := codexBufferingConfig(buffered)
-			manager := cliproxyauth.NewManager(nil, nil, nil)
-			manager.SetConfig(cfg)
-			manager.SetRetryConfig(0, 0, 0)
-			executor := NewCodexWebsocketsExecutor(cfg)
-			manager.RegisterExecutor(executor)
-			auth := codexTestAuth(server.URL)
-			auth.ID = fmt.Sprintf("overload-retry-%t", buffered)
-			auth.Provider = "codex"
-			auth.Status = cliproxyauth.StatusActive
-			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
-				t.Fatal(errRegister)
-			}
-			req, opts := codexWebsocketRequest()
-			registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: req.Model}})
-			defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+func TestCodexOverloadRetryAfterCooldown(t *testing.T) {
+	for _, transport := range []string{"websocket", "sse"} {
+		for _, buffered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/buffered=%t", transport, buffered), func(t *testing.T) {
+				cfg := codexBufferingConfig(buffered)
+				var server *httptest.Server
+				var executor cliproxyauth.ProviderExecutor
+				if transport == "websocket" {
+					server = codexWebsocketServer(t, codexCreatedEvent, codexInProgressEvent, codexOverloadRetryEvent)
+					executor = NewCodexWebsocketsExecutor(cfg)
+				} else {
+					server = codexSSEServer(codexCreatedEvent, codexInProgressEvent, codexOverloadRetryEvent)
+					executor = NewCodexExecutor(cfg)
+				}
+				defer server.Close()
+				manager := cliproxyauth.NewManager(nil, nil, nil)
+				manager.SetConfig(cfg)
+				manager.SetRetryConfig(0, 0, 0)
+				manager.RegisterExecutor(executor)
+				auth := codexTestAuth(server.URL)
+				auth.ID = fmt.Sprintf("overload-retry-%s-%t", transport, buffered)
+				auth.Provider = "codex"
+				auth.Status = cliproxyauth.StatusActive
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatal(errRegister)
+				}
+				req, opts := codexWebsocketRequest()
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: req.Model}})
+				defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 
-			before := time.Now()
-			result, err := manager.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
-			if err == nil && result != nil {
-				_, err = drainChunks(result)
-			}
-			after := time.Now()
-			if err == nil {
-				t.Fatal("expected the upstream overload to fail the request")
-			}
-			current, ok := manager.GetByID(auth.ID)
-			if !ok {
-				t.Fatal("credential disappeared")
-			}
-			state := current.ModelStates[req.Model]
-			if state == nil || !state.Unavailable {
-				t.Fatal("overloaded model must be cooling down")
-			}
-			wantDelay := 326 * time.Second
-			if state.NextRetryAfter.Before(before.Add(wantDelay)) || state.NextRetryAfter.After(after.Add(wantDelay)) {
-				t.Fatalf("cooldown = %v after request start, want %v", state.NextRetryAfter.Sub(before), wantDelay)
-			}
-			if state.Quota.Exceeded {
-				t.Fatal("overload must remain a transient failure")
-			}
-		})
+				before := time.Now()
+				result, err := manager.ExecuteStream(context.Background(), []string{"codex"}, req, opts)
+				if err == nil && result != nil {
+					_, err = drainChunks(result)
+				}
+				after := time.Now()
+				if err == nil {
+					t.Fatal("expected the upstream overload to fail the request")
+				}
+				current, ok := manager.GetByID(auth.ID)
+				if !ok {
+					t.Fatal("credential disappeared")
+				}
+				state := current.ModelStates[req.Model]
+				if state == nil || !state.Unavailable {
+					t.Fatal("overloaded model must be cooling down")
+				}
+				wantDelay := 326 * time.Second
+				if state.NextRetryAfter.Before(before.Add(wantDelay)) || state.NextRetryAfter.After(after.Add(wantDelay)) {
+					t.Fatalf("cooldown = %v after request start, want %v", state.NextRetryAfter.Sub(before), wantDelay)
+				}
+				if state.Quota.Exceeded {
+					t.Fatal("overload must remain a transient failure")
+				}
+			})
+		}
 	}
 }
 
