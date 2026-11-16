@@ -258,12 +258,22 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// payload errors after response.created are recoverable events;
 				// StreamChunk.Err still arrives through errs and closes the socket.
 				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
+				quotaFailureEvent := false
+				if (eventType == wsEventTypeError && preserveErrorEvent) || eventType == "response.failed" {
+					frameErr := responsesWebsocketErrorMessageFromPayload(payloads[i])
+					// A depleted credential cannot recover on this socket. Consult the
+					// alternative-target replay guard even after response.created.
+					if frameErr != nil && isResponsesWebsocketQuotaOrCooldownError(frameErr.Error) {
+						preserveErrorEvent = false
+						quotaFailureEvent = eventType == "response.failed"
+					}
+				}
 				if eventType == wsEventTypeError && preserveErrorEvent {
 					turnEnded = true
 					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
 					}
-				} else if eventType == wsEventTypeError && !preserveErrorEvent {
+				} else if (eventType == wsEventTypeError && !preserveErrorEvent) || quotaFailureEvent {
 					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
 					if h != nil {
 						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
