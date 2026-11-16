@@ -540,3 +540,52 @@ func TestApplyClaudeHeaders_BlockBindingBodyAlwaysGetsBindingBeta(t *testing.T) 
 		}
 	}
 }
+
+func TestNormalizeClaudeAdvisorToolModels(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-opus-5-5",
+		"tools": [
+			{"type": "custom", "name": "lookup", "model": "custom(high)"},
+			{"type": "advisor_20260301", "name": "advisor", "model": "claude-opus-5-5(high)", "defer_loading": true},
+			{"type": "advisor", "name": "advisor2", "model": "claude-sonnet-4-5(8192)"},
+			{"type": "advisor_20260301", "name": "advisor3", "model": "claude-haiku-4-5"}
+		],
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_addition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"type": "advisor_20260301",
+								"name": "advisor_inline",
+								"model": "claude-opus-5-5(high)"
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	out := normalizeClaudeAdvisorToolModels(body)
+	doc := ojson.NewDoc(out)
+
+	if got := doc.Get("tools.0.model").String(); got != "custom(high)" {
+		t.Errorf("custom tool model = %q, want %q", got, "custom(high)")
+	}
+	if got := doc.Get("tools.1.model").String(); got != "claude-opus-5-5" {
+		t.Errorf("advisor tool 1 model = %q, want %q", got, "claude-opus-5-5")
+	}
+	if got := doc.Get("tools.2.model").String(); got != "claude-sonnet-4-5" {
+		t.Errorf("advisor tool 2 model = %q, want %q", got, "claude-sonnet-4-5")
+	}
+	if got := doc.Get("tools.3.model").String(); got != "claude-haiku-4-5" {
+		t.Errorf("advisor tool 3 model = %q, want %q", got, "claude-haiku-4-5")
+	}
+	if got := doc.Get("messages.0.content.0.tool.definition.model").String(); got != "claude-opus-5-5" {
+		t.Errorf("inline advisor tool model = %q, want %q", got, "claude-opus-5-5")
+	}
+}

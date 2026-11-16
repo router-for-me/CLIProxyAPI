@@ -243,6 +243,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	applyClaudePreservedThinkingBindingDoc(doc)
 	// Keep built-in cleanup before the final user payload rules.
 	stripPromptCacheOptionsDoc(doc)
+	normalizeClaudeAdvisorToolModelsDoc(doc, e.upstreamModel)
 	// User rules match the fully prepared business body and are applied only once.
 	touchedPayloadPaths := helps.ApplyPayloadConfigWithTrackedPathsDoc(
 		e.cfg, baseModel, to.String(), from.String(), "", doc, stripTranslatedDefaultMaxTokens(from, originalPayload, originalTranslated),

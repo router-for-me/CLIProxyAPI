@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -651,6 +652,100 @@ func claudeBodyHasAdvisorTool(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// normalizeClaudeAdvisorToolModelsDoc strips thinking suffixes from any advisor
+// server tool's declared model. Anthropic rejects requests whose tools[i].model
+// carries a thinking suffix (e.g. claude-opus-5-5(high) -> 400).
+func normalizeClaudeAdvisorToolModelsDoc(doc *ojson.Doc, normalizers ...func(string) string) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	var normalizer func(string) string
+	if len(normalizers) > 0 && normalizers[0] != nil {
+		normalizer = normalizers[0]
+	}
+	changed := false
+	normalizeModel := func(rawModel string) (string, bool) {
+		parsed := thinking.ParseSuffix(rawModel)
+		if !parsed.HasSuffix {
+			return rawModel, false
+		}
+		clean := strings.TrimSpace(parsed.ModelName)
+		if normalizer != nil {
+			clean = normalizer(clean)
+		}
+		return clean, clean != rawModel
+	}
+
+	tools := doc.Get("tools")
+	if tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(index, tool ojson.Result) bool {
+			toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+			if !strings.HasPrefix(toolType, "advisor_") && toolType != "advisor" {
+				return true
+			}
+			modelResult := tool.Get("model")
+			if !modelResult.Exists() || modelResult.Type != ojson.String {
+				return true
+			}
+			rawModel := modelResult.String()
+			if cleanModel, ok := normalizeModel(rawModel); ok {
+				path := fmt.Sprintf("tools.%d.model", index.Int())
+				if doc.Set(path, cleanModel) == nil {
+					changed = true
+				}
+			}
+			return true
+		})
+	}
+
+	messages := doc.Get("messages")
+	if messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(messageIndex, message ojson.Result) bool {
+			content := message.Get("content")
+			if !content.Exists() || !content.IsArray() {
+				return true
+			}
+			content.ForEach(func(partIndex, part ojson.Result) bool {
+				if part.Get("type").String() != "tool_addition" || part.Get("tool.type").String() != "tool_definition" {
+					return true
+				}
+				toolDef := part.Get("tool.definition")
+				toolType := strings.ToLower(strings.TrimSpace(toolDef.Get("type").String()))
+				if !strings.HasPrefix(toolType, "advisor_") && toolType != "advisor" {
+					return true
+				}
+				modelResult := toolDef.Get("model")
+				if !modelResult.Exists() || modelResult.Type != ojson.String {
+					return true
+				}
+				rawModel := modelResult.String()
+				if cleanModel, ok := normalizeModel(rawModel); ok {
+					path := fmt.Sprintf("messages.%d.content.%d.tool.definition.model", messageIndex.Int(), partIndex.Int())
+					if doc.Set(path, cleanModel) == nil {
+						changed = true
+					}
+				}
+				return true
+			})
+			return true
+		})
+	}
+
+	return changed
+}
+
+// normalizeClaudeAdvisorToolModels normalizes advisor server tool model names in the request body.
+func normalizeClaudeAdvisorToolModels(body []byte, normalizers ...func(string) string) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	doc := ojson.NewDoc(body)
+	if !normalizeClaudeAdvisorToolModelsDoc(doc, normalizers...) {
+		return body
+	}
+	return doc.Bytes()
 }
 
 // claudeThinkingDisplaySet reports whether the request carries a thinking.display
