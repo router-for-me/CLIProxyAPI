@@ -128,7 +128,7 @@ management:
   # base-url: "https://proxy.example.com"
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+  panel-github-repository: "https://github.com/iamkunal9/proxx-panel"
 
 # Client authentication for the proxy API. These are not upstream provider keys.
 access:

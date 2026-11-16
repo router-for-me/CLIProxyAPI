@@ -69,6 +69,7 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `config.example.yaml` | commented `proxx:` example block | documentation only |
 | `.gitignore` | `!docs/proxx/` after `docs/*` | track fork docs |
 | `README.md` | one proxx header line at the top | branding (ADR 0001) |
+| `internal/config/config_defaults.go`, `internal/managementasset/updater.go`, `config.example.yaml` | default panel repo → `iamkunal9/proxx-panel` (1 line each) | proxx panel by default (ADR 0001) |
 | `Dockerfile` | binary built and run as `proxx` (3 lines) | binary name (ADR 0001) |
 | `.github/workflows/release.yaml` | `cli-proxy-api` → `proxx`, `CLIProxyAPI_` → `proxx_` throughout | release binary/archive names (ADR 0001) |
 | `sdk/api/handlers/handlers_routing.go` | `proxxgroups.RequestProviders(model)` in `getRequestDetailsWithOptions` | model groups bypass provider lookup and win over `auto` resolution |
