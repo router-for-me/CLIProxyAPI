@@ -1,0 +1,88 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/chat/completions
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-11-16T12:18:48.273322+05:30
+
+
+=== HEADERS ===
+User-Agent: Go-http-client/1.1
+Content-Length: 75
+Authorization: Bearer te...ey
+Content-Type: application/json
+Accept-Encoding: gzip
+
+
+=== REQUEST BODY ===
+{"messages":[{"content":"hi","role":"user"}],"model":"auto","stream":false}
+
+
+=== API REQUEST 1 ===
+Timestamp: 2026-11-16T12:18:48.273765+05:30
+Upstream URL: http://127.0.0.1:58760/p429/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-p429, auth_id=openai-compatibility:p429:3047d985c7be, label=p429, type=api_key value=mock...p429
+
+Headers:
+Authorization: Bearer mock...p429
+Content-Type: application/json
+User-Agent: Go-http-client/1.1
+
+Body:
+{"messages":[{"content":"hi","role":"user"}],"model":"up-429","stream":false}
+
+=== API REQUEST 2 ===
+Timestamp: 2026-11-16T12:18:48.275617+05:30
+Upstream URL: http://127.0.0.1:58760/pok/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-pok, auth_id=openai-compatibility:pok:7419655b292c, label=pok, type=api_key value=mock...-pok
+
+Headers:
+Authorization: Bearer mock...-pok
+Content-Type: application/json
+User-Agent: Go-http-client/1.1
+
+Body:
+{"messages":[{"content":"hi","role":"user"}],"model":"up-ok","stream":false}
+
+
+=== API RESPONSE 1 ===
+Timestamp: 2026-11-16T12:18:48.274469+05:30
+
+Status: 429
+Headers:
+Content-Length: 62
+Content-Type: application/json
+Date: Mon, 16 Nov 2026 06:48:48 GMT
+Retry-After: 30
+
+Body:
+{"error":{"message":"rate limited","type":"rate_limit_error"}}
+
+=== API RESPONSE 2 ===
+Timestamp: 2026-11-16T12:18:48.276112+05:30
+
+Status: 200
+Headers:
+Content-Length: 257
+Content-Type: application/json
+Date: Mon, 16 Nov 2026 06:48:48 GMT
+
+Body:
+{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"up-ok","choices":[{"index":0,"message":{"role":"assistant","content":"hello from up-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}
+
+
+=== RESPONSE ===
+Status: 200
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Expose-Headers: X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, ETag, X-Request-Id, OpenAI-Request-Id
+X-Proxx-Served-Model: model-ok
+Vary: Accept-Encoding
+X-Cpa-Trace-Id: 20261116121848-4580f7bb6c859cd3-01a1e31d-9191-74e2-8fbc-148299c2cb23
+
+{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"up-ok","choices":[{"index":0,"message":{"role":"assistant","content":"hello from up-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}

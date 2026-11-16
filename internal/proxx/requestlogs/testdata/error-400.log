@@ -1,0 +1,65 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/chat/completions
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-11-16T12:18:48.278327+05:30
+
+
+=== HEADERS ===
+Content-Type: application/json
+Accept-Encoding: gzip
+User-Agent: Go-http-client/1.1
+Content-Length: 75
+Authorization: Bearer te...ey
+
+
+=== REQUEST BODY ===
+{"messages":[{"content":"hi","role":"user"}],"model":"m400","stream":false}
+
+
+=== API REQUEST 1 ===
+Timestamp: 2026-11-16T12:18:48.278604+05:30
+Upstream URL: http://127.0.0.1:58760/p400/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-p400, auth_id=openai-compatibility:p400:497b43f22a31, label=p400, type=api_key value=mock...p400
+
+Headers:
+Authorization: Bearer mock...p400
+Content-Type: application/json
+User-Agent: Go-http-client/1.1
+
+Body:
+{"messages":[{"content":"hi","role":"user"}],"model":"up-400","stream":false}
+
+
+=== API RESPONSE ===
+Timestamp: 2026-11-16T12:18:48.280059+05:30
+{"error":{"message":"invalid parameter foo","type":"invalid_request_error"}}
+
+
+=== API RESPONSE 1 ===
+Timestamp: 2026-11-16T12:18:48.279504+05:30
+
+Status: 400
+Headers:
+Content-Length: 76
+Content-Type: application/json
+Date: Mon, 16 Nov 2026 06:48:48 GMT
+
+Body:
+{"error":{"message":"invalid parameter foo","type":"invalid_request_error"}}
+
+
+=== RESPONSE ===
+Status: 400
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta
+Access-Control-Expose-Headers: X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, ETag, X-Request-Id, OpenAI-Request-Id
+Content-Type: application/json
+Vary: Accept-Encoding
+X-Cpa-Trace-Id: 20261116121848-a7fc3ec7dc621a6d-01a1e31d-9196-74f5-9752-76e52ddaa355
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+
+{"error":{"message":"invalid parameter foo","type":"invalid_request_error"}}

@@ -1414,6 +1414,9 @@ plugins:
 #     disabled: false            # independent of observability.usage.usage-statistics-enabled
 #     file: ""                   # default: proxx-usage.json next to this config file
 #     recent-limit: 500          # recent-request ring buffer size
+#   request-logs:                # request log viewer (needs observability.logs.request-log: true)
+#     max-total-size-mb: 10240   # cap for request log files (normal + error-); oldest deleted first.
+#                                # Unset = 10240 (10 GB); 0 = unlimited. main.log/app logs are not counted.
 
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only
