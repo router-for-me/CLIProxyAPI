@@ -3,7 +3,7 @@ package management
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	"github.com/MoeForge/moego/json"
 	"io"
 	"net"
 	"net/http"
