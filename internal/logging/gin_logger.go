@@ -22,6 +22,7 @@ var aiAPIPrefixes = []string{
 	"/v1beta",
 	"/openai/v1",
 	"/backend-api/codex",
+	"/muse-code",
 }
 
 const (
@@ -43,6 +44,11 @@ func GinLogrusLogger() gin.HandlerFunc {
 		start := time.Now()
 		path := c.Request.URL.Path
 		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
+		// OAuth state is a callback capability; authorization codes and issued
+		// client IDs must not be included in management access logs either.
+		if strings.HasPrefix(path, "/v8/management/oauth/") {
+			raw = ""
+		}
 
 		// Only generate request ID for AI API paths
 		var requestID string
@@ -89,7 +95,7 @@ func GinLogrusLogger() gin.HandlerFunc {
 		if requestID == "" {
 			requestID = "--------"
 		}
-		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s \"%s\"", statusCode, latency, clientIP, method, path)
+		logLine := fmt.Sprintf("%3d | %13v | %15s | %-7s %q", statusCode, latency, clientIP, method, path)
 		if creditsUsed(c) {
 			logLine += " [credits]"
 		}

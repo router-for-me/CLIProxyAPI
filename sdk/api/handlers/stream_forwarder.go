@@ -6,7 +6,61 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"golang.org/x/net/context"
 )
+
+// ExecuteStreamWithPreFTKeepAlive executes a streaming request via ExecuteStreamWithAuthManager.
+// When keepAliveC is non-nil (streaming.send-keepalive-before-ft is enabled and keepalive-seconds > 0),
+// it runs the synchronous bootstrap in a goroutine and invokes writeKeepAlive on each tick while waiting.
+// It returns (dataChan, upstreamHeaders, errChan, ok), where ok is false if the request context was canceled
+// or writeKeepAlive returned false.
+func (h *BaseAPIHandler) ExecuteStreamWithPreFTKeepAlive(
+	c *gin.Context,
+	cliCtx context.Context,
+	cliCancel func(error),
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+	keepAliveC <-chan time.Time,
+	writeKeepAlive func() bool,
+) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, bool) {
+	if keepAliveC == nil {
+		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, handlerType, modelName, rawJSON, alt)
+		return dataChan, upstreamHeaders, errChan, true
+	}
+
+	type streamBootstrapResult struct {
+		data    <-chan []byte
+		headers http.Header
+		errs    <-chan *interfaces.ErrorMessage
+	}
+	bootstrapResult := make(chan streamBootstrapResult, 1)
+	go func() {
+		data, headers, errs := h.ExecuteStreamWithAuthManager(cliCtx, handlerType, modelName, rawJSON, alt)
+		bootstrapResult <- streamBootstrapResult{data: data, headers: headers, errs: errs}
+	}()
+
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			if cliCancel != nil {
+				cliCancel(c.Request.Context().Err())
+			}
+			<-bootstrapResult
+			return nil, nil, nil, false
+		case result := <-bootstrapResult:
+			return result.data, result.headers, result.errs, true
+		case <-keepAliveC:
+			if writeKeepAlive != nil && !writeKeepAlive() {
+				if cliCancel != nil {
+					cliCancel(context.Canceled)
+				}
+				<-bootstrapResult
+				return nil, nil, nil, false
+			}
+		}
+	}
+}
 
 // PendingStreamError returns an immediately available non-nil stream error.
 func PendingStreamError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {
@@ -94,77 +148,83 @@ func (h *BaseAPIHandler) ForwardStream(c *gin.Context, flusher http.Flusher, can
 		}
 	}
 
-	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
+	keepAliveInterval := StreamingKeepAliveInterval(h.CurrentConfig())
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
 	}
-	var keepAlive *time.Ticker
-	var keepAliveC <-chan time.Time
-	if keepAliveInterval > 0 {
-		keepAlive = time.NewTicker(keepAliveInterval)
-		defer keepAlive.Stop()
-		keepAliveC = keepAlive.C
-	}
+	keepAliveC, stopKeepAlive, resetKeepAlive := NewStreamingKeepAliveTickerWithReset(keepAliveInterval)
+	defer stopKeepAlive()
 
 	var terminalErr *interfaces.ErrorMessage
+	handleChunk := func(chunk []byte, ok bool) bool {
+		if !ok {
+			// Prefer surfacing a terminal error if one is pending.
+			if terminalErr == nil {
+				if errMsg, ok := PendingStreamError(errs); ok {
+					terminalErr = errMsg
+					if opts.NormalizeTerminalError != nil {
+						terminalErr = opts.NormalizeTerminalError(terminalErr)
+					}
+				}
+			}
+			if terminalErr == nil && opts.CloseError != nil {
+				terminalErr = opts.CloseError()
+			}
+			if terminalErr != nil {
+				if opts.WriteTerminalError != nil {
+					opts.WriteTerminalError(terminalErr)
+				}
+				if !flush() {
+					return true
+				}
+				cancel(terminalErr.Error)
+				return true
+			}
+			if opts.WriteDone != nil {
+				opts.WriteDone()
+			}
+			if !flush() {
+				return true
+			}
+			cancel(nil)
+			return true
+		}
+		beforeSize := c.Writer.Size()
+		writeChunk(chunk)
+		if c.Writer.Size() > beforeSize {
+			resetKeepAlive()
+		}
+		if !flush() {
+			return true
+		}
+		if opts.ChunkError != nil {
+			chunkErr := opts.ChunkError()
+			if chunkErr != nil {
+				if opts.NormalizeTerminalError != nil {
+					chunkErr = opts.NormalizeTerminalError(chunkErr)
+				}
+				if chunkErr != nil {
+					cancel(chunkErr.Error)
+				} else {
+					cancel(nil)
+				}
+				return true
+			}
+		}
+		if opts.ChunkDone != nil && opts.ChunkDone() {
+			cancel(nil)
+			return true
+		}
+		return false
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return
 		case chunk, ok := <-data:
-			if !ok {
-				// Prefer surfacing a terminal error if one is pending.
-				if terminalErr == nil {
-					if errMsg, ok := PendingStreamError(errs); ok {
-						terminalErr = errMsg
-						if opts.NormalizeTerminalError != nil {
-							terminalErr = opts.NormalizeTerminalError(terminalErr)
-						}
-					}
-				}
-				if terminalErr == nil && opts.CloseError != nil {
-					terminalErr = opts.CloseError()
-				}
-				if terminalErr != nil {
-					if opts.WriteTerminalError != nil {
-						opts.WriteTerminalError(terminalErr)
-					}
-					if !flush() {
-						return
-					}
-					cancel(terminalErr.Error)
-					return
-				}
-				if opts.WriteDone != nil {
-					opts.WriteDone()
-				}
-				if !flush() {
-					return
-				}
-				cancel(nil)
-				return
-			}
-			writeChunk(chunk)
-			if !flush() {
-				return
-			}
-			if opts.ChunkError != nil {
-				chunkErr := opts.ChunkError()
-				if chunkErr != nil {
-					if opts.NormalizeTerminalError != nil {
-						chunkErr = opts.NormalizeTerminalError(chunkErr)
-					}
-					if chunkErr != nil {
-						cancel(chunkErr.Error)
-					} else {
-						cancel(nil)
-					}
-					return
-				}
-			}
-			if opts.ChunkDone != nil && opts.ChunkDone() {
-				cancel(nil)
+			if handleChunk(chunk, ok) {
 				return
 			}
 		case errMsg, ok := <-errs:

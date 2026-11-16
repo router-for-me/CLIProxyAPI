@@ -16,6 +16,15 @@ type antigravityModelRefreshRequest struct {
 	registryEpoch uint64
 }
 
+type antigravityHintPersistRequest struct {
+	ctx      context.Context
+	auth     *coreauth.Auth
+	routeKey string
+	endpoint string
+	hints    antigravityModelCapabilityHints
+	cancel   context.CancelFunc
+}
+
 // queueAntigravityModelRefresh coalesces registration and periodic probes into
 // one worker per account. Repeated updates replace a single queued successor,
 // rather than accumulating singleflight followers while an upstream is stalled.
@@ -101,7 +110,10 @@ func (s *Service) executeAntigravityModelRefresh(request *antigravityModelRefres
 			return
 		}
 	}
-	s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)
+	expectedKey, hints := s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)
+	if hints.ModelIDs != nil {
+		s.queueAntigravityHintPersistence(request.ctx, request.auth, expectedKey, antigravityModelBaseURLs(request.auth)[0], hints)
+	}
 }
 
 // antigravityAccountProbe owns both queued and connected work for one auth snapshot.
@@ -212,6 +224,126 @@ func (s *Service) antigravityAccountProbeCurrent(probe *antigravityAccountProbe)
 // Run after the manager/config mutation. New probes check current state while
 // joining this same map, so deletion cannot slip between validation and tracking.
 // Empty authID invalidates stale probes across all accounts after config changes.
+func (s *Service) queueAntigravityHintPersistence(ctx context.Context, auth *coreauth.Auth, expectedKey, endpoint string, hints antigravityModelCapabilityHints) {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 || s.antigravityHomeEnabled() {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil || pluginHostHasAuthModelProvider(s.pluginHost, auth.Provider) {
+		return
+	}
+	s.cfgMu.RLock()
+	lifetime := s.antigravityContext
+	s.cfgMu.RUnlock()
+	if lifetime != nil && lifetime.Err() != nil {
+		return
+	}
+	antigravityCapabilityMu.RLock()
+	entry := antigravityCapabilityCache[expectedKey]
+	stale := entry.hints.ModelIDs == nil || entry.hints.revision != hints.revision || entry.persistedRevision >= hints.revision
+	antigravityCapabilityMu.RUnlock()
+	if stale {
+		return
+	}
+	request := &antigravityHintPersistRequest{
+		ctx:      ctx,
+		auth:     auth.Clone(),
+		routeKey: expectedKey,
+		endpoint: endpoint,
+		hints:    hints.clone(),
+	}
+	s.antigravityProbeMu.Lock()
+	if ctx.Err() != nil || !s.antigravityHintPersistCurrent(request) {
+		s.antigravityProbeMu.Unlock()
+		return
+	}
+	if s.antigravityPersistPending == nil {
+		s.antigravityPersistPending = make(map[string]*antigravityHintPersistRequest)
+	}
+	queued, running := s.antigravityPersistPending[auth.ID]
+	if queued != nil && queued.hints.revision > request.hints.revision {
+		s.antigravityProbeMu.Unlock()
+		return
+	}
+	if active := s.antigravityPersistActive[auth.ID]; active != nil && (active.hints.revision < request.hints.revision || active.routeKey != request.routeKey) {
+		if active.cancel != nil {
+			active.cancel()
+		}
+	}
+	s.antigravityPersistPending[auth.ID] = request
+	if !running {
+		s.antigravityProbeWg.Add(1)
+	}
+	s.antigravityProbeMu.Unlock()
+	if !running {
+		go s.runAntigravityHintPersistence(auth.ID)
+	}
+}
+
+func (s *Service) runAntigravityHintPersistence(authID string) {
+	defer s.antigravityProbeWg.Done()
+	defer s.signalAntigravityModelRefresh()
+	for {
+		s.antigravityProbeMu.Lock()
+		request := s.antigravityPersistPending[authID]
+		if request == nil {
+			delete(s.antigravityPersistPending, authID)
+			delete(s.antigravityPersistActive, authID)
+			s.antigravityProbeMu.Unlock()
+			return
+		}
+		s.antigravityPersistPending[authID] = nil
+		persistCtx, cancel := context.WithCancel(request.ctx)
+		request.cancel = cancel
+		if s.antigravityPersistActive == nil {
+			s.antigravityPersistActive = make(map[string]*antigravityHintPersistRequest)
+		}
+		s.antigravityPersistActive[authID] = request
+		s.antigravityProbeMu.Unlock()
+		s.executeAntigravityHintPersistence(persistCtx, cancel, request)
+	}
+}
+
+func (s *Service) executeAntigravityHintPersistence(persistCtx context.Context, cancel context.CancelFunc, request *antigravityHintPersistRequest) {
+	defer cancel()
+	if persistCtx.Err() != nil || pluginHostHasAuthModelProvider(s.pluginHost, request.auth.Provider) {
+		return
+	}
+	s.cfgMu.RLock()
+	lifetime := s.antigravityContext
+	s.cfgMu.RUnlock()
+	if lifetime != nil {
+		stop := context.AfterFunc(lifetime, cancel)
+		defer stop()
+		if lifetime.Err() != nil {
+			return
+		}
+	}
+	if s.persistAntigravityCapabilityHints(persistCtx, request.auth, request.routeKey, request.endpoint, request.hints) && request.ctx.Err() == nil {
+		s.queueAntigravityHintPersistence(request.ctx, request.auth, request.routeKey, request.endpoint, request.hints)
+	}
+}
+
+func (s *Service) antigravityHintPersistCurrent(request *antigravityHintPersistRequest) bool {
+	if request == nil || request.auth == nil || s.antigravityHomeEnabled() {
+		return false
+	}
+	current := request.auth
+	if s.coreManager != nil {
+		var exists bool
+		current, exists = s.coreManager.GetByID(request.auth.ID)
+		if !exists || current == nil {
+			return false
+		}
+	}
+	return !current.Disabled && current.Status != coreauth.StatusDisabled &&
+		current.Provider == request.auth.Provider &&
+		current.RegistrationEpoch == request.auth.RegistrationEpoch &&
+		s.antigravityCapabilityKey(current) == request.routeKey
+}
+
 func (s *Service) cancelStaleAntigravityProbes(authID string) {
 	if s == nil {
 		return
@@ -232,6 +364,24 @@ func (s *Service) cancelStaleAntigravityProbes(authID string) {
 		}
 		if len(probes) == 0 {
 			delete(s.antigravityAccountProbes, id)
+		}
+	}
+	for id, active := range s.antigravityPersistActive {
+		if authID != "" && id != authID {
+			continue
+		}
+		if active != nil && !s.antigravityHintPersistCurrent(active) {
+			if active.cancel != nil {
+				active.cancel()
+			}
+		}
+	}
+	for id, pending := range s.antigravityPersistPending {
+		if authID != "" && id != authID {
+			continue
+		}
+		if pending != nil && !s.antigravityHintPersistCurrent(pending) {
+			s.antigravityPersistPending[id] = nil
 		}
 	}
 	s.antigravityProbeMu.Unlock()

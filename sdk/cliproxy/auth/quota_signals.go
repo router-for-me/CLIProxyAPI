@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"maps"
 	"net/http"
 	"sort"
 	"strings"
@@ -86,6 +87,32 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.Reason = cooldown.Reason
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
+	dst.cooldownSignals = maps.Clone(cooldown.cooldownSignals)
+	dst.cooldownEvaluated = cooldown.Exceeded || cooldown.cooldownEvaluated
+}
+
+func rejectedClaudeSignalsForCooldown(provider string, headers http.Header) map[string]string {
+	if !strings.EqualFold(strings.TrimSpace(provider), "claude") {
+		return nil
+	}
+	signals := collectQuotaSignals("claude", headers)
+	if !hasRejectedClaudeUnifiedSignals(signals) {
+		return nil
+	}
+	return signals
+}
+
+func sanitizePersistedClaudeCooldownSignals(raw map[string]string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	headers := make(http.Header, len(raw))
+	for key, val := range raw {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(key)), "anthropic-ratelimit-unified-") {
+			headers.Set(key, val)
+		}
+	}
+	return rejectedClaudeSignalsForCooldown("claude", headers)
 }
 
 // collectQuotaSignals builds the bounded snapshot for a single response.

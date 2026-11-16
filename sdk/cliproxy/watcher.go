@@ -25,6 +25,9 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 			w.SetConfig(cfg)
 		},
 		snapshotAuths: func() []*coreauth.Auth { return w.SnapshotCoreAuths() },
+		snapshotAuthFile: func(path string) ([]*coreauth.Auth, error) {
+			return w.SnapshotAuthFile(path)
+		},
 		setUpdateQueue: func(queue chan<- watcher.AuthUpdate) {
 			w.SetAuthUpdateQueue(queue)
 		},
@@ -36,6 +39,9 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		},
 		dispatchPersistedAuthWithRev: func(update *watcher.AuthUpdate) (bool, uint64) {
 			return w.DispatchPersistedAuthUpdateWithRevision(update)
+		},
+		rereadDiscardedFileSnapshot: func(auth *coreauth.Auth) {
+			w.RereadDiscardedFileSnapshot(auth)
 		},
 		setPluginAuthParser: func(parser PluginAuthParser) {
 			w.SetPluginAuthParser(parser)

@@ -7,11 +7,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type codexWebsocketHintFrame struct {
@@ -49,9 +49,9 @@ func newCodexWebsocketHintServer(t *testing.T, rec *codexWebsocketHintRecorder) 
 			rec.mu.Lock()
 			rec.frames = append(rec.frames, codexWebsocketHintFrame{
 				conn:               connIndex,
-				model:              gjson.GetBytes(payload, "model").String(),
-				tier:               gjson.GetBytes(payload, "service_tier").String(),
-				previousResponseID: gjson.GetBytes(payload, "previous_response_id").String(),
+				model:              ojson.GetBytes(payload, "model").String(),
+				tier:               ojson.GetBytes(payload, "service_tier").String(),
+				previousResponseID: ojson.GetBytes(payload, "previous_response_id").String(),
 			})
 			rec.mu.Unlock()
 			completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","object":"response","status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`)

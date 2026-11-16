@@ -143,7 +143,7 @@ func TestRoutingUsageAPICallObservation(t *testing.T) {
 				if after.QuotaResetSchedule.WeeklyResetAt.Year() != 2030 || !reflect.DeepEqual(a.Quota, after.Quota) {
 					t.Fatal("observation invalid or cooldown changed")
 				}
-				entry := h.buildAuthFileEntry(after)
+				entry := h.buildAuthFileEntry(after, authFileQuotaContext{})
 				if entry == nil || entry["routing_reset_schedule"] == nil {
 					t.Fatal("management inventory lacks routing observation")
 				}

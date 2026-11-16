@@ -87,3 +87,32 @@ codex:
 		t.Fatalf("default ModelLevelCooling = true, want false")
 	}
 }
+
+func TestParseConfigBytes_CodexSignInWithChatGPTIdentifier(t *testing.T) {
+	defaultCfg, errDefault := ParseConfigBytes([]byte("port: 8317\n"))
+	if errDefault != nil {
+		t.Fatalf("ParseConfigBytes (default) error: %v", errDefault)
+	}
+	if got := defaultCfg.Codex.EffectiveSignInWithChatGPTIdentifier(); got != "CLIProxyAPI" {
+		t.Fatalf("EffectiveSignInWithChatGPTIdentifier (default) = %q, want CLIProxyAPI", got)
+	}
+
+	rawV8 := []byte(`oauth:
+  providers:
+    codex:
+      signin-with-chatgpt-identifier: "  CustomSIWCClient/2.0  "
+`)
+	if errValidate := ValidateV8Config(rawV8); errValidate != nil {
+		t.Fatalf("ValidateV8Config error: %v", errValidate)
+	}
+	cfg, errParse := ParseConfigBytes(rawV8)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes (v8) error: %v", errParse)
+	}
+	if cfg.Codex.SignInWithChatGPTIdentifier != "CustomSIWCClient/2.0" {
+		t.Fatalf("SignInWithChatGPTIdentifier = %q, want CustomSIWCClient/2.0", cfg.Codex.SignInWithChatGPTIdentifier)
+	}
+	if got := cfg.Codex.EffectiveSignInWithChatGPTIdentifier(); got != "CustomSIWCClient/2.0" {
+		t.Fatalf("EffectiveSignInWithChatGPTIdentifier = %q, want CustomSIWCClient/2.0", got)
+	}
+}

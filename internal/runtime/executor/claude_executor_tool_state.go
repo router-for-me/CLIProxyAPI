@@ -2,13 +2,19 @@ package executor
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 const claudeOAuthToolAliasStateLimit = 1024
+
+// claudeOAuthToolAliasStoreInitMu guards lazy allocation for executors built
+// without a constructor. It lives outside ClaudeExecutor because ForAPIKey
+// copies the executor by value, and a mutex field would be copied with it.
+var claudeOAuthToolAliasStoreInitMu sync.Mutex
 
 type claudeOAuthToolAliasStore struct {
 	mu      sync.Mutex
@@ -69,8 +75,8 @@ func cloneClaudeOAuthToolAliasMap(source map[string]string) map[string]string {
 }
 
 func (e *ClaudeExecutor) claudeOAuthToolAliasStore() *claudeOAuthToolAliasStore {
-	e.oauthToolAliasStoreMu.Lock()
-	defer e.oauthToolAliasStoreMu.Unlock()
+	claudeOAuthToolAliasStoreInitMu.Lock()
+	defer claudeOAuthToolAliasStoreInitMu.Unlock()
 	if e.oauthToolAliases == nil {
 		e.oauthToolAliases = &claudeOAuthToolAliasStore{}
 	}
@@ -79,8 +85,21 @@ func (e *ClaudeExecutor) claudeOAuthToolAliasStore() *claudeOAuthToolAliasStore 
 
 func claudeOAuthToolAliasKeys(payload []byte, messageID string) []string {
 	keys := make([]string, 0, 2)
-	if previousMessageID := gjson.GetBytes(payload, "thread.previous_message_id").String(); previousMessageID != "" {
-		keys = append(keys, "message:"+previousMessageID)
+	if previousMessageID := ojson.GetBytesNoCopy(payload, "thread.previous_message_id").String(); previousMessageID != "" {
+		keys = append(keys, "message:"+strings.Clone(previousMessageID))
+	}
+	if messageID != "" {
+		keys = append(keys, "message:"+messageID)
+	}
+	return keys
+}
+
+func claudeOAuthToolAliasKeysDoc(doc *ojson.Doc, messageID string) []string {
+	keys := make([]string, 0, 2)
+	if doc != nil {
+		if previousMessageID := doc.Get("thread.previous_message_id").String(); previousMessageID != "" {
+			keys = append(keys, "message:"+strings.Clone(previousMessageID))
+		}
 	}
 	if messageID != "" {
 		keys = append(keys, "message:"+messageID)
@@ -89,14 +108,26 @@ func claudeOAuthToolAliasKeys(payload []byte, messageID string) []string {
 }
 
 func claudeThreadContinuationNeedsAliasState(payload []byte) bool {
-	if gjson.GetBytes(payload, "thread.type").String() != "continue" {
+	if ojson.GetBytesNoCopy(payload, "thread.type").String() != "continue" {
 		return false
 	}
-	previousMessageID := gjson.GetBytes(payload, "thread.previous_message_id")
+	previousMessageID := ojson.GetBytesNoCopy(payload, "thread.previous_message_id")
 	if !previousMessageID.Exists() || previousMessageID.String() == "" {
 		return false
 	}
-	tools := gjson.GetBytes(payload, "tools")
+	tools := ojson.GetBytesNoCopy(payload, "tools")
+	return !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0
+}
+
+func claudeThreadContinuationNeedsAliasStateDoc(doc *ojson.Doc) bool {
+	if doc == nil || doc.Get("thread.type").String() != "continue" {
+		return false
+	}
+	previousMessageID := doc.Get("thread.previous_message_id")
+	if !previousMessageID.Exists() || previousMessageID.String() == "" {
+		return false
+	}
+	tools := doc.Get("tools")
 	return !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0
 }
 
@@ -112,8 +143,20 @@ func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequest(payload []byte, o
 	return remapped, aliases, nil
 }
 
+func (e *ClaudeExecutor) prepareClaudeOAuthToolNamesForRequestDoc(doc *ojson.Doc, options claudeMCPAliasOptions) (map[string]string, error) {
+	if claudeThreadContinuationNeedsAliasStateDoc(doc) {
+		aliases, ok := e.claudeOAuthToolAliasStore().load(claudeOAuthToolAliasKeysDoc(doc, ""))
+		if !ok {
+			return nil, newClaudeThreadNotFoundError()
+		}
+		return aliases, nil
+	}
+	aliases, _ := prepareClaudeOAuthToolNamesForUpstreamDoc(doc, options)
+	return aliases, nil
+}
+
 func (e *ClaudeExecutor) rememberClaudeOAuthToolAliases(payload []byte, aliases map[string]string, messageID string) {
-	if gjson.GetBytes(payload, "thread.type").String() == "" {
+	if ojson.GetBytesNoCopy(payload, "thread.type").String() == "" {
 		return
 	}
 	keys := claudeOAuthToolAliasKeys(payload, messageID)
@@ -123,6 +166,8 @@ func (e *ClaudeExecutor) rememberClaudeOAuthToolAliases(payload []byte, aliases 
 	e.claudeOAuthToolAliasStore().save(keys, aliases)
 }
 
+const claudeThreadNotFoundErrorMessage = "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread."
+
 type claudeThreadNotFoundError struct {
 	statusErr
 }
@@ -130,10 +175,14 @@ type claudeThreadNotFoundError struct {
 func newClaudeThreadNotFoundError() claudeThreadNotFoundError {
 	return claudeThreadNotFoundError{statusErr: statusErr{
 		code: http.StatusNotFound,
-		msg:  "No thread state was found for the requested previous_message_id. Replay the full conversation with thread create to start a new Thread.",
+		msg:  claudeThreadNotFoundErrorMessage,
 	}}
 }
 
 func (claudeThreadNotFoundError) IsRequestScoped() bool { return true }
+
+func (claudeThreadNotFoundError) ResponseBody() []byte {
+	return []byte(`{"type":"error","error":{"type":"not_found_error","message":"` + claudeThreadNotFoundErrorMessage + `"}}`)
+}
 
 var _ cliproxyexecutor.RequestScopedError = claudeThreadNotFoundError{}

@@ -5,9 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 func TestGeminiResponsesLateSignaturePreservesSummary(t *testing.T) {
@@ -18,7 +17,7 @@ func TestGeminiResponsesLateSignaturePreservesSummary(t *testing.T) {
 		`data: [DONE]`,
 	}
 	var state any
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, chunk := range chunks {
 		for _, event := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", nil, nil, []byte(chunk), &state) {
 			name, data := parseSSEEvent(t, event)
@@ -33,8 +32,8 @@ func TestGeminiResponsesLateSignaturePreservesSummary(t *testing.T) {
 	if len(completed.Array()) != 2 || completed.Get("0.summary.0.text").String() != "Let me think." || completed.Get("1.type").String() != "message" {
 		t.Fatalf("unexpected completed output: %s", completed.Raw)
 	}
-	replayed := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(`{"input":`+completed.Raw+`}`), false)
-	if gjson.GetBytes(replayed, "contents.0.parts.1.thoughtSignature").String() != testResponsesGeminiThoughtSignature {
+	replayed, _ := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(`{"input":`+completed.Raw+`}`), false)
+	if ojson.GetBytesNoCopy(replayed, "contents.0.parts.1.thoughtSignature").String() != testResponsesGeminiThoughtSignature {
 		t.Fatalf("late text signature was not restored: %s", replayed)
 	}
 }
@@ -61,7 +60,7 @@ func TestGeminiResponsesCachedTextSignatureReplayBoundaries(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			request := []byte(`{"input":[` + testCase.message + `]}`)
-			output := ConvertOpenAIResponsesRequestToGemini(testCase.model, request, false)
+			output, _ := ConvertOpenAIResponsesRequestToGemini(testCase.model, request, false)
 			got := strings.Contains(string(output), testResponsesGeminiThoughtSignature)
 			if got != testCase.wantSignature {
 				t.Fatalf("signature restored=%v, want %v: %s", got, testCase.wantSignature, output)
@@ -69,9 +68,9 @@ func TestGeminiResponsesCachedTextSignatureReplayBoundaries(t *testing.T) {
 		})
 	}
 	carrier := []byte(`{"type":"reasoning","summary":[]}`)
-	carrier, _ = sjson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(testResponsesGeminiThoughtSignature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
+	carrier, _ = ojson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(testResponsesGeminiThoughtSignature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
 	request := []byte(`{"input":[` + message + `,` + string(carrier) + `]}`)
-	output := ConvertOpenAIResponsesRequestToGemini(model, request, false)
+	output, _ := ConvertOpenAIResponsesRequestToGemini(model, request, false)
 	if strings.Count(string(output), testResponsesGeminiThoughtSignature) != 1 {
 		t.Fatalf("explicit carrier duplicated cached signature: %s", output)
 	}
@@ -83,7 +82,7 @@ func TestGeminiResponsesTextSignatureCacheRejectsInvalidSignature(t *testing.T) 
 	}
 	var state any
 	line := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"answer"},{"text":"","thoughtSignature":"invalid"}]},"finishReason":"STOP"}],"responseId":"invalid-cache-fallback"}`)
-	var completed gjson.Result
+	var completed ojson.Result
 	streamEvents := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-test", nil, nil, line, &state)
 	streamEvents = append(streamEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-test", nil, nil, []byte("[DONE]"), &state)...)
 	for _, chunk := range streamEvents {
@@ -100,7 +99,7 @@ func TestGeminiResponsesTextSignatureCacheRejectsInvalidSignature(t *testing.T) 
 func TestGeminiResponsesLateSignatureReplayWithThinkingSuffix(t *testing.T) {
 	var state any
 	line := []byte(`data: {"candidates":[{"content":{"parts":[{"text":"suffix answer"},{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"}]},"finishReason":"STOP"}],"responseId":"issue-5513-suffix"}`)
-	var completed gjson.Result
+	var completed ojson.Result
 	streamEvents := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-pro(8192)", nil, nil, line, &state)
 	streamEvents = append(streamEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-2.5-pro(8192)", nil, nil, []byte("[DONE]"), &state)...)
 	for _, chunk := range streamEvents {
@@ -109,8 +108,8 @@ func TestGeminiResponsesLateSignatureReplayWithThinkingSuffix(t *testing.T) {
 			completed = data.Get("response.output")
 		}
 	}
-	output := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", []byte(`{"input":`+completed.Raw+`}`), false)
-	if gjson.GetBytes(output, "contents.0.parts.0.thoughtSignature").String() != testResponsesGeminiThoughtSignature {
+	output, _ := ConvertOpenAIResponsesRequestToGemini("gemini-2.5-pro", []byte(`{"input":`+completed.Raw+`}`), false)
+	if ojson.GetBytesNoCopy(output, "contents.0.parts.0.thoughtSignature").String() != testResponsesGeminiThoughtSignature {
 		t.Fatalf("executor base model could not restore suffixed response signature: %s", output)
 	}
 }
@@ -124,10 +123,10 @@ func TestGeminiResponsesCachedSignaturesMergeExplicitPrefixInOrder(t *testing.T)
 	}
 	for _, explicitSignature := range []string{testResponsesGeminiThoughtSignature, signature2} {
 		carrier := []byte(`{"type":"reasoning","summary":[]}`)
-		carrier, _ = sjson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(explicitSignature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
+		carrier, _ = ojson.SetBytes(carrier, "encrypted_content", encodeGeminiResponsesCarrier(explicitSignature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText))
 		request := []byte(`{"input":[{"id":"` + messageID + `","type":"message","role":"assistant","content":[{"type":"output_text","text":"answer"}]},` + string(carrier) + `]}`)
-		output := ConvertOpenAIResponsesRequestToGemini(model, request, false)
-		parts := gjson.GetBytes(output, "contents.0.parts").Array()
+		output, _ := ConvertOpenAIResponsesRequestToGemini(model, request, false)
+		parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 		if len(parts) != 2 || parts[0].Get("text").String() != "answer" || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("thoughtSignature").String() != signature2 {
 			t.Fatalf("partial explicit carrier changed cached signature order: %s", output)
 		}
@@ -143,7 +142,7 @@ func TestGeminiResponsesLateThoughtSignatureDoesNotBindEarlierMessage(t *testing
 		`data: [DONE]`,
 	}
 	var state any
-	var completed gjson.Result
+	var completed ojson.Result
 	for _, line := range lines {
 		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.8-flash-high", nil, nil, []byte(line), &state) {
 			name, data := parseSSEEvent(t, chunk)
@@ -152,8 +151,8 @@ func TestGeminiResponsesLateThoughtSignatureDoesNotBindEarlierMessage(t *testing
 			}
 		}
 	}
-	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(`{"input":`+completed.Raw+`}`), false)
-	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	output, _ := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(`{"input":`+completed.Raw+`}`), false)
+	parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 	if len(parts) < 2 || parts[0].Get("thoughtSignature").String() != "" || parts[1].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || !strings.Contains(string(output), signature2) {
 		t.Fatalf("late thought signature rebound to the earlier message: %s", output)
 	}
@@ -170,7 +169,7 @@ func TestGeminiResponsesCacheRecoveryPreservesFallbackSignatureOrder(t *testing.
 		`data: [DONE]`,
 	}
 	var state any
-	var completed gjson.Result
+	var completed ojson.Result
 	for index, line := range lines {
 		// A disabled Home client rejects the first cache write. Returning to
 		// local storage makes the next write succeed without timers or mocks.
@@ -189,8 +188,8 @@ func TestGeminiResponsesCacheRecoveryPreservesFallbackSignatureOrder(t *testing.
 	if len(completed.Array()) != 2 || decodedResponsesCarrierSignature(t, completed.Get("1.encrypted_content").String()) != testResponsesGeminiThoughtSignature {
 		t.Fatalf("expected only the first write's fallback carrier: %s", completed.Raw)
 	}
-	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(`{"input":`+completed.Raw+`}`), false)
-	parts := gjson.GetBytes(output, "contents.0.parts").Array()
+	output, _ := ConvertOpenAIResponsesRequestToGemini("gemini-3.8-flash-high", []byte(`{"input":`+completed.Raw+`}`), false)
+	parts := ojson.GetBytesNoCopy(output, "contents.0.parts").Array()
 	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != testResponsesGeminiThoughtSignature || parts[1].Get("thoughtSignature").String() != signature2 {
 		t.Fatalf("cache recovery changed fallback signature order: %s", output)
 	}

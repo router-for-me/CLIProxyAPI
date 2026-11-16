@@ -8,6 +8,7 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestInternalModelExecutionIsolatesDelivery(t *testing.T) {
@@ -63,5 +64,45 @@ func TestInternalModelExecutionIsolatesDelivery(t *testing.T) {
 				t.Error("internal execution lost caller cancellation")
 			}
 		})
+	}
+}
+
+func TestExecuteModelStreamCanceledBeforeFirstChunkCompletesAsCanceled(t *testing.T) {
+	var cancelCurrent context.CancelFunc
+	executor := &modelExecutionCaptureExecutor{
+		stream: func(_ context.Context, _ *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			cancelCurrent()
+			chunks := make(chan coreexecutor.StreamChunk, 1)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"ok\":true}\n\n")}
+			close(chunks)
+			return &coreexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	}
+	h := newModelExecutionHandler(t, "nested-cancel-before-read-model", executor, &sdkconfig.SDKConfig{})
+	completions := make(chan pluginapi.RequestCompletion, 1)
+	h.SetPluginHost(&handlerInterceptorTestHost{
+		completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
+			completions <- completion
+		},
+	})
+	req := ModelExecutionRequest{
+		Model:         "nested-cancel-before-read-model",
+		EntryProtocol: "openai",
+		Stream:        true,
+		Body:          []byte(`{"model":"nested-cancel-before-read-model"}`),
+	}
+	for round := range 2000 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelCurrent = cancel
+		result, errMsg := h.ExecuteModelStream(ctx, req)
+		if errMsg != nil {
+			t.Fatalf("round %d: ExecuteModelStream() error = %+v", round, errMsg)
+		}
+		for range result.Chunks {
+		}
+		completion := <-completions
+		if completion.Outcome != pluginapi.RequestCompletionCanceled {
+			t.Fatalf("round %d: completion = %+v, want %s", round, completion, pluginapi.RequestCompletionCanceled)
+		}
 	}
 }

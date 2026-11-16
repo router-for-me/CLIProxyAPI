@@ -50,6 +50,26 @@ type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
 }
 
+// ExecutionSessionSharer reports whether a replaced executor shares its execution
+// session store with the replacement executor so active sessions stay open.
+type ExecutionSessionSharer interface {
+	SharesExecutionSessionsWith(other ProviderExecutor) bool
+}
+
+// ExecutorUnwrapper exposes the underlying executor for wrappers so reuse and
+// session-lifecycle decisions can consult the service-owned executor even when
+// a wrapper hides its concrete type. Wrappers should return their immediate
+// inner executor; the manager follows the chain.
+type ExecutorUnwrapper interface {
+	Unwrap() ProviderExecutor
+}
+
+// AuthExecutionSessionCloser allows executors to release execution sessions
+// associated with a removed credential without tearing down other credentials' sessions.
+type AuthExecutionSessionCloser interface {
+	CloseAuthExecutionSessions(authID string)
+}
+
 // Result captures execution outcome used to adjust auth state.
 type Result struct {
 	// AuthID references the auth that produced this result.
@@ -62,6 +82,9 @@ type Result struct {
 	RouteModel string
 	// Success marks whether the execution succeeded.
 	Success bool
+	// CompletedResponse reports that the upstream execution produced a completed
+	// generation response (as opposed to an incomplete stream or non-generation call).
+	CompletedResponse bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
 	// CredentialScope indicates that the failure affects the whole credential across models (e.g. Anthropic 5h/7d unified limits).
@@ -74,6 +97,22 @@ type Result struct {
 	// observed watermark. Count-tokens requests reuse the credential but are not
 	// generation traffic; their response headers are not a generation snapshot.
 	SkipQuotaObservation bool
+	// AccessToken captures the active access token under which the request was executed.
+	AccessToken string
+	// RefreshToken captures the refresh credential associated with the request,
+	// used to distinguish a same-account OAuth token rotation from a genuine
+	// credential replacement when evaluating result staleness.
+	RefreshToken string
+	// CredentialVersion captures the credential version under which the request was executed.
+	CredentialVersion uint64
+	// RegistrationEpoch captures the registration epoch under which the request was executed.
+	RegistrationEpoch uint64
+	// ExecutionSeq is the manager-local monotonic sequence assigned when the
+	// execution was dispatched upstream. It orders in-flight executions so a
+	// success dispatched before a cooldown was recorded cannot clear that
+	// cooldown. Zero means unknown (direct MarkResult callers) and is exempt
+	// from the ordering guard.
+	ExecutionSeq uint64
 }
 
 // Selector chooses an auth candidate for execution.
@@ -145,10 +184,12 @@ type resultPolicyHolder struct {
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
+	inFlightTracker           *inFlightTracker
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor
+	executorRevisions         map[string]uint64
 	selector                  Selector
 	hook                      Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
@@ -156,12 +197,15 @@ type Manager struct {
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex
 	syncSchedulerMu           sync.Mutex
-	structuralEpoch           atomic.Uint64
-	syncedVersion             atomic.Uint64
-	auths                     map[string]*Auth
-	authEpochs                map[string]uint64
-	authChangeWatchers        map[string]map[chan struct{}]struct{}
-	scheduler                 *authScheduler
+	// executionSeq stamps upstream dispatches with a monotonic sequence used
+	// to reject cooldown clears from executions dispatched before the cooldown.
+	executionSeq       atomic.Uint64
+	structuralEpoch    atomic.Uint64
+	syncedVersion      atomic.Uint64
+	auths              map[string]*Auth
+	authEpochs         map[string]uint64
+	authChangeWatchers map[string]map[chan struct{}]struct{}
+	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
@@ -211,7 +255,9 @@ type Manager struct {
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
 	persistLocks sync.Map
 	// authMutationLocks coordinate credential mutations without blocking unrelated readers.
-	authMutationLocks sync.Map
+	authMutationLocks      sync.Map
+	metadataPersistCancels sync.Map
+	metadataSaveGate       sync.Map
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
 	// Mutations acquire one permit; Load acquires all permits before reading the store.
 	authLoadGate *semaphore.Weighted
@@ -226,9 +272,11 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
+		inFlightTracker:       newInFlightTracker(),
 		store:                 store,
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
+		executorRevisions:     make(map[string]uint64),
 		selector:              selector,
 		hook:                  hook,
 		auths:                 make(map[string]*Auth),

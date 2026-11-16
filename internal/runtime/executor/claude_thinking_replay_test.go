@@ -9,12 +9,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const claudeReplayResolvedModelInfoKey = "cliproxy.resolved_api_key_model_info"
@@ -165,9 +165,9 @@ func TestClaudeExecutorCompatThinkingReplayRestoresOmittedBlock(t *testing.T) {
 	if len(requestBodies) != 2 {
 		t.Fatalf("upstream request count = %d, want 2", len(requestBodies))
 	}
-	content := gjson.GetBytes(requestBodies[1], "messages.1.content").Array()
+	content := ojson.GetBytes(requestBodies[1], "messages.1.content").Array()
 	if len(content) != 2 {
-		t.Fatalf("second assistant content = %s, want thinking and tool_use", gjson.GetBytes(requestBodies[1], "messages.1.content").Raw)
+		t.Fatalf("second assistant content = %s, want thinking and tool_use", ojson.GetBytes(requestBodies[1], "messages.1.content").Raw)
 	}
 	if got := content[0].Get("type").String(); got != "thinking" {
 		t.Fatalf("restored first content type = %q, want thinking", got)
@@ -236,9 +236,9 @@ func TestClaudeExecutorCompatThinkingReplayRestoresOmittedBlockInStream(t *testi
 	if len(requestBodies) != 2 {
 		t.Fatalf("upstream request count = %d, want 2", len(requestBodies))
 	}
-	content := gjson.GetBytes(requestBodies[1], "messages.1.content").Array()
+	content := ojson.GetBytes(requestBodies[1], "messages.1.content").Array()
 	if len(content) != 2 || content[0].Get("type").String() != "thinking" {
-		t.Fatalf("second streamed assistant content = %s, want restored thinking and tool_use", gjson.GetBytes(requestBodies[1], "messages.1.content").Raw)
+		t.Fatalf("second streamed assistant content = %s, want restored thinking and tool_use", ojson.GetBytes(requestBodies[1], "messages.1.content").Raw)
 	}
 	if got := content[0].Get("signature").String(); got != "EgI=" {
 		t.Fatalf("restored streamed signature = %q, want EgI=", got)
@@ -357,13 +357,13 @@ func TestClaudeExecutorCompatThinkingReplayRestoresMultipleOmittedBlocks(t *test
 	if len(requestBodies) != 3 {
 		t.Fatalf("upstream request count = %d, want 3", len(requestBodies))
 	}
-	firstContent := gjson.GetBytes(requestBodies[2], "messages.1.content").Array()
-	secondContent := gjson.GetBytes(requestBodies[2], "messages.3.content").Array()
+	firstContent := ojson.GetBytes(requestBodies[2], "messages.1.content").Array()
+	secondContent := ojson.GetBytes(requestBodies[2], "messages.3.content").Array()
 	if len(firstContent) != 2 || firstContent[0].Get("type").String() != "thinking" || firstContent[0].Get("signature").String() != "EgI=" {
-		t.Fatalf("first omitted turn was not restored: %s", gjson.GetBytes(requestBodies[2], "messages.1.content").Raw)
+		t.Fatalf("first omitted turn was not restored: %s", ojson.GetBytes(requestBodies[2], "messages.1.content").Raw)
 	}
 	if len(secondContent) != 2 || secondContent[0].Get("type").String() != "thinking" || secondContent[0].Get("signature").String() != "EgM=" {
-		t.Fatalf("second omitted turn was not restored: %s", gjson.GetBytes(requestBodies[2], "messages.3.content").Raw)
+		t.Fatalf("second omitted turn was not restored: %s", ojson.GetBytes(requestBodies[2], "messages.3.content").Raw)
 	}
 }
 

@@ -27,6 +27,8 @@ type modelExecutionOptions struct {
 	AuthSelectionModel      string
 	ProxyURL                string
 	Path                    string
+	CallerScope             string
+	AllowSpeechModel        bool
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.
@@ -60,6 +62,7 @@ type ModelExecutionRequest struct {
 	AuthID                  string
 	ProxyURL                string
 	Path                    string
+	CallerScope             string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -126,6 +129,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		ForcedProvider:          req.ForcedProvider,
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
+		CallerScope:             strings.TrimSpace(req.CallerScope),
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -163,6 +167,7 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		ForcedProvider:          req.ForcedProvider,
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
+		CallerScope:             strings.TrimSpace(req.CallerScope),
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {
@@ -228,6 +233,10 @@ func modelExecutionModeError(message string) *interfaces.ErrorMessage {
 
 func isModelExecutionImageProtocol(protocol string) bool {
 	return strings.EqualFold(strings.TrimSpace(protocol), "openai-image")
+}
+
+func isModelExecutionSpeechProtocol(protocol string) bool {
+	return strings.EqualFold(strings.TrimSpace(protocol), "openai-speech")
 }
 
 func validateModelExecutionProxy(raw string) *interfaces.ErrorMessage {

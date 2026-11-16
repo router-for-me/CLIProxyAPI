@@ -71,3 +71,24 @@ func TestContextWithRequestedModelAliasPreservesExistingGenerateFalse(t *testing
 		t.Fatalf("generate = %v, want false", got)
 	}
 }
+
+func TestContextWithRequestedModelAliasPropagatesAndClearsSelectionID(t *testing.T) {
+	ctx := contextWithRequestedModelAlias(context.Background(), cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.SelectionIDMetadataKey: "sel-123",
+		},
+	}, "fallback-model")
+	if got := coreusage.SelectionIDFromContext(ctx); got != "sel-123" {
+		t.Fatalf("SelectionIDFromContext = %q, want sel-123", got)
+	}
+
+	// Explicit empty key in metadata clears an existing context SelectionID.
+	clearedCtx := contextWithRequestedModelAlias(ctx, cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.SelectionIDMetadataKey: "",
+		},
+	}, "fallback-model")
+	if got := coreusage.SelectionIDFromContext(clearedCtx); got != "" {
+		t.Fatalf("SelectionIDFromContext after clear = %q, want empty", got)
+	}
+}

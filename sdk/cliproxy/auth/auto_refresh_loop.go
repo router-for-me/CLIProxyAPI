@@ -132,7 +132,7 @@ func (l *authAutoRefreshLoop) rebuild(now time.Time) {
 
 	l.manager.mu.RLock()
 	for id, auth := range l.manager.auths {
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := l.manager.nextRefreshCheckAt(now, auth, l.interval)
 		if !ok {
 			continue
 		}
@@ -275,7 +275,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		manager.mu.RUnlock()
 		return
 	}
-	next, shouldSchedule := nextRefreshCheckAt(now, auth, l.interval)
+	next, shouldSchedule := manager.nextRefreshCheckAt(now, auth, l.interval)
 	shouldRefresh := manager.shouldRefresh(auth, now)
 	exec, _ := manager.executorLocked(executorKeyFromAuth(auth))
 	registrationEpoch := auth.RegistrationEpoch
@@ -300,7 +300,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	if job == nil {
 		manager.mu.RLock()
 		auth = manager.auths[authID]
-		next, shouldSchedule = nextRefreshCheckAt(now, auth, l.interval)
+		next, shouldSchedule = manager.nextRefreshCheckAt(now, auth, l.interval)
 		manager.mu.RUnlock()
 		if shouldSchedule {
 			if !next.After(now) {
@@ -336,7 +336,7 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 	for _, authID := range dirty {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
-		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		next, ok := l.manager.nextRefreshCheckAt(now, auth, l.interval)
 		l.manager.mu.RUnlock()
 
 		if !ok {
@@ -392,6 +392,15 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	delete(l.index, authID)
 }
 
+// nextRefreshCheckAt excludes local Codex credentials that cannot renew before
+// evaluating generic expiry-based scheduling. Home can renew without a local RT.
+func (m *Manager) nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
+	if m.codexAutoRefreshUnavailable(auth, now) {
+		return time.Time{}, false
+	}
+	return nextRefreshCheckAt(now, auth, interval)
+}
+
 func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {
 	if auth == nil {
 		return time.Time{}, false
@@ -400,12 +409,53 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
-	if auth.AuthKind() == AuthKindAPIKey {
-		return time.Time{}, false
+	// Quota-exhausted Devin credentials revalidate upstream status so early
+	// restoration can be detected (issue #6690); their tokens never expire,
+	// so the generic expiry/lead schedule below would drop them entirely.
+	// A custom RefreshEvaluator keeps precedence (matching shouldRefresh),
+	// otherwise an evaluator veto would reschedule an immediately-due entry.
+	if _, hasEvaluator := auth.Runtime.(RefreshEvaluator); hasEvaluator {
+		// Fall through to the evaluator branch below.
+	} else if next, due := devinQuotaRevalidateAt(auth, now); due {
+		if !auth.NextRefreshAfter.IsZero() && auth.NextRefreshAfter.After(next) {
+			next = auth.NextRefreshAfter
+		}
+		if !next.After(now) {
+			return now, true
+		}
+		return next, true
 	}
 
 	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
 		return auth.NextRefreshAfter, true
+	}
+
+	if authHasUnchangedRejectedRefreshToken(auth) {
+		if auth.HasValidAccessToken(now) {
+			if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+				return exp, true
+			}
+			return time.Time{}, false
+		}
+		if auth.Disabled || auth.Status == StatusDisabled {
+			return time.Time{}, false
+		}
+		return now, true
+	}
+
+	if siwcDueAt, hasSIWC, _ := CodexSIWCNeedsRefresh(auth, now); hasSIWC {
+		minDue := siwcDueAt
+		if outerDueAt, hasOuter, _ := CodexOuterNeedsRefresh(auth, now); hasOuter && outerDueAt.Before(minDue) {
+			minDue = outerDueAt
+		}
+		if !minDue.After(now) {
+			return now, true
+		}
+		return minDue, true
+	}
+
+	if auth.AuthKind() == AuthKindAPIKey {
+		return time.Time{}, false
 	}
 
 	if evaluator, ok := auth.Runtime.(RefreshEvaluator); ok && evaluator != nil {

@@ -2,7 +2,6 @@ package management
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -238,7 +238,7 @@ func TestAuthFileLookupAndEntryBuildConcurrentEnsureIndex(t *testing.T) {
 				if !matchesAuthFileLookup(auth, fileName, "idx-concurrent") {
 					t.Errorf("auth lookup did not match")
 				}
-				entry := h.buildAuthFileEntry(auth)
+				entry := h.buildAuthFileEntry(auth, authFileQuotaContext{})
 				if entry == nil {
 					t.Errorf("entry is nil")
 					continue

@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -683,6 +685,8 @@ plugins:
 			t.Fatal(errLoad)
 		}
 		loaded.Home = cfg.Home
+		// SourceHash is runtime-only metadata of a file load, not persisted config.
+		loaded.SourceHash = ""
 		select {
 		case snapshot := <-reloads:
 			if !reflect.DeepEqual(snapshot, loaded) || !reflect.DeepEqual(h.cfg, loaded) {
@@ -754,5 +758,318 @@ plugins:
 		checkReload()
 		request(http.MethodGet, path, http.StatusNotFound, "")
 		request(http.MethodDelete, path, http.StatusNotFound, "")
+	}
+}
+
+func TestConfigV8SaveNormalizesCollectionStylesToBlockYAML(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `config-version: 8
+server:
+  port: 8317
+api-keys:
+  openai-compatibility:
+    - name: compat-provider
+      base-url: "https://api.example.com"
+      headers:
+        User-Agent: "$User-Agent"
+      models:
+        - alias: "coding"
+          name: "gpt-4o"
+      keys:
+        - api-key: "sk-compat-1"
+`
+	if errWrite := os.WriteFile(file, []byte(raw), 0600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(file)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	h := &Handler{cfg: cfg, configFilePath: file}
+	router := gin.New()
+	router.PUT("/v8/management/config", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	router.PATCH("/v8/management/config", h.ConfigV8)
+
+	// Send JSON update simulating v8 management panel saving complex items
+	jsonUpdate := `[{"name":"compat-provider","base-url":"https://api.example.com","headers":{"User-Agent":"$User-Agent"},"models":[{"alias":"coding","name":"gpt-4o"}],"keys":[{"api-key":"sk-compat-1"}]}]`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v8/management/config/api-keys/openai-compatibility", strings.NewReader(jsonUpdate))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	saved, errRead := os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr := string(saved)
+
+	// Ensure the saved config does NOT contain inline JSON / flow style for complex collections
+	if strings.Contains(savedStr, "[{") || strings.Contains(savedStr, `headers: {`) || strings.Contains(savedStr, `models: [{`) {
+		t.Fatalf("config contains flow style / inline JSON collections:\n%s", savedStr)
+	}
+	if !strings.Contains(savedStr, "openai-compatibility:") || !strings.Contains(savedStr, "- name:") || !strings.Contains(savedStr, "base-url:") {
+		t.Fatalf("expected block style sequence with unquoted keys for openai-compatibility, got:\n%s", savedStr)
+	}
+	if strings.Contains(savedStr, `"name":`) || strings.Contains(savedStr, `"base-url":`) {
+		t.Fatalf("expected keys to be unquoted in block YAML, got:\n%s", savedStr)
+	}
+
+	// Also test PATCH at root /v8/management/config with JSON
+	patchJSON := `{"api-keys":{"openai-compatibility":[{"name":"compat-provider-2","base-url":"https://api.example2.com","headers":{"User-Agent":"$User-Agent-2"},"models":[{"alias":"coding-2","name":"gpt-4o-mini"}],"keys":[{"api-key":"sk-compat-2"}]}]}}`
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(patchJSON))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	saved, errRead = os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr = string(saved)
+	if strings.Contains(savedStr, "[{") || strings.Contains(savedStr, `headers: {`) || strings.Contains(savedStr, `models: [{`) {
+		t.Fatalf("PATCH saved config contains flow style / inline JSON collections:\n%s", savedStr)
+	}
+	if !strings.Contains(savedStr, "openai-compatibility:") || !strings.Contains(savedStr, "- name:") {
+		t.Fatalf("expected block style sequence after PATCH for openai-compatibility, got:\n%s", savedStr)
+	}
+
+	// Verify that empty sequence retains flow style []
+	emptyJSON := `{"server":{"trusted-proxies":[]}}`
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(emptyJSON))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PATCH with empty sequence failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	saved, errRead = os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr = string(saved)
+	if !strings.Contains(savedStr, "trusted-proxies: []") {
+		t.Fatalf("expected empty sequence to retain flow style [], got:\n%s", savedStr)
+	}
+
+	// Also test root PUT with entire JSON document
+	rootPutJSON := `{"config-version":8,"server":{"port":8317},"api-keys":{"openai-compatibility":[{"name":"compat-provider-root","base-url":"https://api.example3.com","headers":{"User-Agent":"$User-Agent-3"},"models":[{"alias":"coding-3","name":"gpt-4o"}],"keys":[{"api-key":"sk-compat-3"}]}]}}`
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/v8/management/config", strings.NewReader(rootPutJSON))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("root PUT failed: status=%d body=%s", w.Code, w.Body.String())
+	}
+	saved, errRead = os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	savedStr = string(saved)
+	if strings.Contains(savedStr, "[{") || strings.Contains(savedStr, `headers: {`) || strings.Contains(savedStr, `models: [{`) {
+		t.Fatalf("root PUT saved config contains flow style / inline JSON collections:\n%s", savedStr)
+	}
+	if strings.Contains(savedStr, `"config-version":`) || strings.Contains(savedStr, `"server":`) || strings.Contains(savedStr, `"api-keys":`) {
+		t.Fatalf("root PUT saved config contains quoted keys:\n%s", savedStr)
+	}
+	if !strings.Contains(savedStr, "compat-provider-root") {
+		t.Fatalf("expected compat-provider-root in saved config, got:\n%s", savedStr)
+	}
+
+	// Verify the final saved file loads correctly into Config
+	loaded, errLoaded := config.LoadConfig(file)
+	if errLoaded != nil {
+		t.Fatalf("LoadConfig failed on normalized saved YAML: %v", errLoaded)
+	}
+	if len(loaded.OpenAICompatibility) != 1 || loaded.OpenAICompatibility[0].Name != "compat-provider-root" {
+		t.Fatalf("unexpected loaded config content: %+v", loaded.OpenAICompatibility)
+	}
+	if loaded.OpenAICompatibility[0].Headers["User-Agent"] != "$User-Agent-3" {
+		t.Fatalf("unexpected loaded headers: %+v", loaded.OpenAICompatibility[0].Headers)
+	}
+}
+
+func TestConfigV8InjectsDistinctAuthIndexesForDistinctConnectionPools(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `config-version: 8
+api-keys:
+  gemini:
+    - name: gemini-group
+      base-url: "https://example.invalid"
+      connection-pool:
+        enabled: true
+        idle-conn-timeout: "120s"
+        max-idle-conns-per-host: 2
+      keys:
+        - api-key: "shared-gemini-key"
+        - api-key: "shared-gemini-key"
+          connection-pool:
+            idle-conn-timeout: ""
+            max-idle-conns-per-host: 5
+  vertex:
+    - name: vertex-group
+      base-url: "https://vertex.example.invalid"
+      connection-pool:
+        enabled: true
+        max-idle-conns-per-host: 2
+      keys:
+        - api-key: "shared-vertex-key"
+        - api-key: "shared-vertex-key"
+          connection-pool:
+            max-idle-conns-per-host: 6
+`
+	if errWrite := os.WriteFile(file, []byte(raw), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(file)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	synth := synthesizer.NewConfigSynthesizer()
+	auths, errSynth := synth.Synthesize(&synthesizer.SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	})
+	if errSynth != nil {
+		t.Fatal(errSynth)
+	}
+	for _, a := range auths {
+		if _, errReg := manager.Register(context.Background(), a); errReg != nil {
+			t.Fatal(errReg)
+		}
+	}
+	h := &Handler{cfg: cfg, configFilePath: file, authManager: manager}
+	router := gin.New()
+	router.GET("/v8/management/config/*path", h.ConfigV8)
+
+	for _, provider := range []string{"gemini", "vertex"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys/"+provider, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s status=%d body=%s", provider, w.Code, w.Body.String())
+		}
+		var groups []struct {
+			Keys []struct {
+				AuthIndex string `yaml:"auth_index" json:"auth_index"`
+			} `yaml:"keys" json:"keys"`
+		}
+		if err := yaml.Unmarshal(w.Body.Bytes(), &groups); err != nil {
+			t.Fatalf("unmarshal %s response: %v", provider, err)
+		}
+		if len(groups) != 1 || len(groups[0].Keys) != 2 {
+			t.Fatalf("%s groups = %+v, want 1 group with 2 keys", provider, groups)
+		}
+		first := groups[0].Keys[0].AuthIndex
+		second := groups[0].Keys[1].AuthIndex
+		if first == "" || second == "" || first == second {
+			t.Fatalf("%s auth_index values = (%q, %q), want two distinct non-empty indexes", provider, first, second)
+		}
+	}
+}
+
+func TestConfigV8_SensitiveWordsReplace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("server: {port: 8317}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: cfg, configFilePath: path}
+	router := gin.New()
+	router.GET("/v8/management/config/*path", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	router.PATCH("/v8/management/config/*path", h.ConfigV8)
+	router.DELETE("/v8/management/config/*path", h.ConfigV8)
+
+	for _, endpoint := range []string{
+		"/v8/management/config/oauth/providers/antigravity/sensitive-words-replace",
+		"/v8/management/config/oauth/providers/devin/sensitive-words-replace",
+	} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodPut, endpoint, strings.NewReader(`{"You are Codex, an agent based on GPT-5.":"You are a helpful coding assistant."}`)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT %s: status=%d body=%s", endpoint, w.Code, w.Body.String())
+		}
+		getRec := httptest.NewRecorder()
+		router.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, endpoint, nil))
+		if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), "You are a helpful coding assistant.") {
+			t.Fatalf("GET %s: status=%d body=%s", endpoint, getRec.Code, getRec.Body.String())
+		}
+		delRec := httptest.NewRecorder()
+		router.ServeHTTP(delRec, httptest.NewRequest(http.MethodDelete, endpoint, nil))
+		if delRec.Code != http.StatusOK {
+			t.Fatalf("DELETE %s: status=%d body=%s", endpoint, delRec.Code, delRec.Body.String())
+		}
+	}
+
+	claudePut := httptest.NewRecorder()
+	router.ServeHTTP(claudePut, httptest.NewRequest(
+		http.MethodPut,
+		"/v8/management/config/api-keys/claude",
+		strings.NewReader(`[{"name":"claude-1","keys":[{"api-key":"sk-ant-1","cloak":{"sensitive-words-replace":{"Claude Code":"Claude"}}}] }]`),
+	))
+	if claudePut.Code != http.StatusOK {
+		t.Fatalf("PUT api-keys/claude: status=%d body=%s", claudePut.Code, claudePut.Body.String())
+	}
+}
+
+func TestConfigV8_SensitivePatternsReplace(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("server: {port: 8317}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: cfg, configFilePath: path}
+	router := gin.New()
+	router.GET("/v8/management/config/*path", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+	router.PATCH("/v8/management/config/*path", h.ConfigV8)
+	router.DELETE("/v8/management/config/*path", h.ConfigV8)
+
+	for _, endpoint := range []string{
+		"/v8/management/config/oauth/providers/antigravity/sensitive-patterns-replace",
+		"/v8/management/config/oauth/providers/devin/sensitive-patterns-replace",
+	} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodPut, endpoint, strings.NewReader(`[{"pattern":"(?m)^RFC 2119[^\\n]*\\n?","replacement":""}]`)))
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT %s: status=%d body=%s", endpoint, w.Code, w.Body.String())
+		}
+		getRec := httptest.NewRecorder()
+		router.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, endpoint, nil))
+		if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), "RFC 2119") {
+			t.Fatalf("GET %s: status=%d body=%s", endpoint, getRec.Code, getRec.Body.String())
+		}
+		delRec := httptest.NewRecorder()
+		router.ServeHTTP(delRec, httptest.NewRequest(http.MethodDelete, endpoint, nil))
+		if delRec.Code != http.StatusOK {
+			t.Fatalf("DELETE %s: status=%d body=%s", endpoint, delRec.Code, delRec.Body.String())
+		}
+	}
+
+	claudePut := httptest.NewRecorder()
+	router.ServeHTTP(claudePut, httptest.NewRequest(
+		http.MethodPut,
+		"/v8/management/config/api-keys/claude",
+		strings.NewReader(`[{"name":"claude-1","keys":[{"api-key":"sk-ant-1","cloak":{"sensitive-patterns-replace":[{"pattern":"Claude\\s+Code","replacement":"Claude"}]}}] }]`),
+	))
+	if claudePut.Code != http.StatusOK {
+		t.Fatalf("PUT api-keys/claude: status=%d body=%s", claudePut.Code, claudePut.Body.String())
 	}
 }

@@ -80,6 +80,9 @@ func summarizeOAuthSettingsList(list []config.OAuthModelSetting) OAuthSettingsSu
 		}
 		alias := strings.ToLower(strings.TrimSpace(setting.Alias))
 		key := name + "->" + alias
+		if setting.OpenAPI != nil {
+			key += fmt.Sprintf("|openapi=%t", *setting.OpenAPI)
+		}
 		if setting.MaxContextLength > 0 {
 			key += fmt.Sprintf("|max-context-length=%d", setting.MaxContextLength)
 		}

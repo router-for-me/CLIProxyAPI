@@ -4,8 +4,17 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+// ServerResponseCompression mirrors SDKConfig.ResponseCompression on the outer
+// Config so JSON and YAML round trips preserve server.response-compression.
+// The canonical storage remains SDKConfig.ResponseCompression; read the
+// effective value via EffectiveResponseCompression.
+type ServerResponseCompression = ResponseCompressionConfig
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
+	// ServerResponseCompression is the JSON-visible mirror of the downstream
+	// response compression settings (YAML: server.response-compression).
+	ServerResponseCompression ResponseCompressionConfig `yaml:"-" json:"response-compression"`
 	// Models selects optional catalog sources independently for each catalog.
 	Models ModelCatalogs `yaml:"models" json:"models"`
 
@@ -16,6 +25,9 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// GitHubToken is the global token for GitHub requests, taking precedence over GITHUB_TOKEN.
+	GitHubToken string `yaml:"github-token" json:"-"`
+
 	// TrustedProxies lists the IPs or CIDRs allowed to provide forwarded client IP headers.
 	// The server applies this list at startup; changing it requires a restart.
 	TrustedProxies []string `yaml:"trusted-proxies" json:"trusted-proxies"`
@@ -23,8 +35,18 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
+	// ShutdownTimeoutSeconds controls how long the API server waits for in-flight
+	// requests to finish during shutdown before forcibly closing connections.
+	// 0 (the default) keeps the legacy behavior of closing immediately without draining.
+	// Values are in seconds.
+	ShutdownTimeoutSeconds int `yaml:"shutdown-timeout" json:"shutdown-timeout"`
+
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
+
+	// SourceHash is runtime-only: the SHA-256 of the config file bytes this config was
+	// parsed from, or empty when the config was not loaded from a file.
+	SourceHash string `yaml:"-" json:"-"`
 
 	// CredentialConcurrency contains Home-authoritative credential lifecycle settings.
 	CredentialConcurrency CredentialConcurrencyConfig `yaml:"credential-concurrency" json:"credential-concurrency"`
@@ -49,6 +71,9 @@ type Config struct {
 
 	// Discovery configures local network mDNS / DNS-SD service advertising.
 	Discovery DiscoveryConfig `yaml:"discovery" json:"discovery"`
+
+	// KVStore configures the local bbolt key-value store.
+	KVStore KVStoreConfig `yaml:"kv-store" json:"kv-store"`
 
 	// CommercialMode disables high-overhead request logging and HTTP middleware features to minimize per-request memory usage.
 	CommercialMode bool `yaml:"commercial-mode" json:"commercial-mode"`
@@ -114,6 +139,13 @@ type Config struct {
 	AntigravitySignatureCacheEnabled *bool `yaml:"antigravity-signature-cache-enabled,omitempty" json:"antigravity-signature-cache-enabled,omitempty"`
 
 	AntigravitySignatureBypassStrict *bool `yaml:"antigravity-signature-bypass-strict,omitempty" json:"antigravity-signature-bypass-strict,omitempty"`
+
+	// ProxyPoolPublisher identifies the runtime that published this snapshot, so a
+	// reload in one runtime never retires another runtime's snapshots.
+	ProxyPoolPublisher uint64 `yaml:"-" json:"-"`
+
+	// ProxyPoolGeneration fences obsolete runtime snapshots from the shared transport cache.
+	ProxyPoolGeneration uint64 `yaml:"-" json:"-"`
 
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`

@@ -3,7 +3,7 @@ package helps
 import (
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 var defaultClaudeBuiltinToolNames = []string{
@@ -49,16 +49,16 @@ func AugmentClaudeBuiltinToolRegistry(body []byte, registry map[string]bool) map
 	if registry == nil {
 		registry = newClaudeBuiltinToolRegistry()
 	}
-	tools := gjson.GetBytes(body, "tools")
+	tools := ojson.GetBytesNoCopy(body, "tools")
 	if !tools.Exists() || !tools.IsArray() {
 		return registry
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
+	tools.ForEach(func(_, tool ojson.Result) bool {
 		if !IsClaudeServerToolType(tool.Get("type").String()) {
 			return true
 		}
 		if name := tool.Get("name").String(); name != "" {
-			registry[name] = true
+			registry[strings.Clone(name)] = true
 		}
 		return true
 	})

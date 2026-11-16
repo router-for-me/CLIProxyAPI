@@ -13,7 +13,9 @@ type Config = internalconfig.Config
 type ModelCatalogs = internalconfig.ModelCatalogs
 
 type ClientConfig = internalconfig.ClientConfig
+type ClaudeClientConfig = internalconfig.ClaudeClientConfig
 type CodexClientConfig = internalconfig.CodexClientConfig
+type CodexWebSearchResultCacheConfig = internalconfig.CodexWebSearchResultCacheConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
 type TLSConfig = internalconfig.TLSConfig
@@ -25,8 +27,12 @@ type OAuthModelSetting = internalconfig.OAuthModelSetting
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
+type PayloadReplaceRule = internalconfig.PayloadReplaceRule
+type PayloadReplaceTarget = internalconfig.PayloadReplaceTarget
+type PayloadReplacement = internalconfig.PayloadReplacement
 type PayloadModelRule = internalconfig.PayloadModelRule
 
+type ProxyConnectionPoolConfig = internalconfig.ProxyConnectionPoolConfig
 type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey
 type XAIKey = internalconfig.XAIKey

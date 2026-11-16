@@ -57,6 +57,12 @@ func TestCatalogPolicyHotReload(t *testing.T) {
 	if source != "disabled" {
 		t.Fatal("Home allowed general catalog")
 	}
+	devinCatalogUpdater.mu.Lock()
+	source = devinCatalogUpdater.source
+	devinCatalogUpdater.mu.Unlock()
+	if source != "disabled" {
+		t.Fatal("Home allowed Devin catalog")
+	}
 	UpdateModelCatalogSources(CatalogSources{}, false)
 	awaitSource(general, embeddedCatalogSource)
 
@@ -76,7 +82,6 @@ func TestCatalogPolicyHotReload(t *testing.T) {
 	defer restartCancel()
 	StartModelCatalogUpdaters(restartCtx, CatalogSources{Catalog: "https://example.com/ignored"}, true)
 	awaitSource(codex, embeddedCatalogSource)
-	awaitSource(devin, embeddedCatalogSource)
 	generalCatalogUpdater.mu.Lock()
 	source = generalCatalogUpdater.source
 	generalCatalogUpdater.mu.Unlock()

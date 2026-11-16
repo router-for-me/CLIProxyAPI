@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -24,7 +25,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -122,7 +122,7 @@ func assertTask6FailedStream(t *testing.T, chunks <-chan cliproxyexecutor.Stream
 	for chunk := range chunks {
 		output = append(output, chunk.Payload...)
 		for _, line := range bytes.Split(chunk.Payload, []byte("\n")) {
-			if bytes.HasPrefix(line, []byte("data:")) && gjson.GetBytes(bytes.TrimSpace(line[5:]), "type").String() == "response.failed" {
+			if bytes.HasPrefix(line, []byte("data:")) && ojson.GetBytes(bytes.TrimSpace(line[5:]), "type").String() == "response.failed" {
 				failed++
 			}
 		}
@@ -148,7 +148,7 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 					}
 					name := "apply_patch"
 					if strings.HasPrefix(provider, "claude") {
-						name = gjson.GetBytes(body, "tools.0.name").String()
+						name = ojson.GetBytes(body, "tools.0.name").String()
 					}
 					if mode != "nonstream" {
 						w.Header().Set("Content-Type", "text/event-stream")
@@ -282,6 +282,10 @@ func (p *task6UsageCapture) HandleUsage(_ context.Context, record usage.Record) 
 	}
 }
 func task6CaptureFailureUsage(t *testing.T, id string) func() {
+	return task6CaptureFailureUsageWithCheck(t, id, nil)
+}
+
+func task6CaptureFailureUsageWithCheck(t *testing.T, id string, check func(usage.Record)) func() {
 	t.Helper()
 	capture := &task6UsageCapture{id: id, records: make(chan usage.Record, 32)}
 	usage.RegisterNamedPlugin("task6-patch-failure", capture)
@@ -293,13 +297,16 @@ func task6CaptureFailureUsage(t *testing.T, id string) func() {
 			case record := <-capture.records:
 				if record.RequestID == id+"-barrier" {
 					if count != 1 {
-						t.Errorf("usage records=%d, want one failure", count)
+						t.Errorf("usage records=%d, want one", count)
 					}
 					return
 				}
 				count++
 				if !record.Failed {
 					t.Errorf("invalid patch published success usage: %+v", record)
+				}
+				if check != nil {
+					check(record)
 				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("usage barrier did not arrive")
@@ -360,6 +367,74 @@ func task6Gateway(t *testing.T, exec cliproxyauth.ProviderExecutor, auth *clipro
 	return recorder
 }
 
+func TestApplyPatchFailurePreservesUpstreamUsage(t *testing.T) {
+	const sseBody = `data: {"type":"response.created","response":{"id":"r"}}
+
+data: {"type":"response.completed","response":{"output":[{"type":"function_call","id":"c","name":"apply_patch","arguments":"{}"}],"usage":{"input_tokens":5,"output_tokens":3}}}
+
+`
+	for _, tc := range []struct {
+		name     string
+		provider string
+		body     string
+		stream   bool
+		compact  bool
+	}{
+		{name: "meta-direct", provider: "meta", body: `{"object":"response","output":[{"type":"function_call","id":"c","name":"apply_patch","arguments":"{}"}],"usage":{"input_tokens":5,"output_tokens":3}}`},
+		{name: "meta-direct-event", provider: "meta", body: `{"type":"response.completed","response":{"output":[{"type":"function_call","id":"c","name":"apply_patch","arguments":"{}"}],"usage":{"input_tokens":5,"output_tokens":3}}}`},
+		{name: "xai-compact", provider: "xai", body: `{"id":"r","output":[{"type":"function_call","id":"c","name":"apply_patch","arguments":"{}"}],"usage":{"input_tokens":5,"output_tokens":3}}`, compact: true},
+		{name: "meta-sse", provider: "meta", body: sseBody, stream: true},
+		{name: "xai-sse", provider: "xai", body: sseBody, stream: true},
+		{name: "meta-buffered-sse", provider: "meta", body: sseBody},
+		{name: "xai-buffered-sse", provider: "xai", body: sseBody},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.compact && r.URL.Path != "/responses/compact" {
+					t.Errorf("request path = %q, want /responses/compact", r.URL.Path)
+				}
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+				}
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			var exec cliproxyauth.ProviderExecutor
+			if tc.provider == "meta" {
+				exec = NewMetaExecutor(&config.Config{})
+			} else {
+				exec = NewXAIExecutor(&config.Config{})
+			}
+			auth := &cliproxyauth.Auth{ID: "task6-usage-" + tc.name, Provider: tc.provider, Attributes: map[string]string{"api_key": "test", "base_url": server.URL}}
+			checkUsage := task6CaptureFailureUsageWithCheck(t, auth.ID, func(record usage.Record) {
+				if record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 3 {
+					t.Errorf("failure usage = %+v, want input/output 5/3", record.Detail)
+				}
+			})
+			req := cliproxyexecutor.Request{Model: "grok-4", Payload: []byte(task6PatchRequest)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: req.Payload}
+			if tc.compact {
+				opts.Alt = "responses/compact"
+			}
+			if tc.stream {
+				result, errExecuteStream := exec.ExecuteStream(t.Context(), auth, req, opts)
+				if errExecuteStream != nil {
+					t.Fatal(errExecuteStream)
+				}
+				assertTask6FailedStream(t, result.Chunks)
+			} else {
+				result, errExecute := exec.Execute(t.Context(), auth, req, opts)
+				if len(result.Payload) != 0 {
+					t.Errorf("failed response returned payload %s", result.Payload)
+				}
+				assertTask6PatchError(t, errExecute)
+			}
+			checkUsage()
+		})
+	}
+}
+
 func TestApplyPatchHTTPGatewayErrorMatrix(t *testing.T) {
 	for _, provider := range []string{"custom-compat", "claude", "claude-oauth", "gemini", "gemini-interactions", "vertex", "antigravity", "devin", "xai", "meta", "kimi"} {
 		for _, mode := range []string{"nonstream", "stream", "eof"} {
@@ -373,7 +448,7 @@ func TestApplyPatchHTTPGatewayErrorMatrix(t *testing.T) {
 					name := "apply_patch"
 					actualMode := mode
 					if strings.HasPrefix(provider, "claude") {
-						name = gjson.GetBytes(body, "tools.0.name").String()
+						name = ojson.GetBytes(body, "tools.0.name").String()
 						if mode == "nonstream" {
 							actualMode = "stream"
 						}
@@ -507,7 +582,7 @@ func TestApplyPatchFailureStopsConsumptionAndNextAttemptIsFresh(t *testing.T) {
 		t.Fatal("failed attempt kept consuming the upstream")
 	}
 	response, errExecute := exec.Execute(t.Context(), auth, req, opts)
-	if errExecute != nil || gjson.GetBytes(response.Payload, "output.0.input").String() != "valid patch" {
+	if errExecute != nil || ojson.GetBytes(response.Payload, "output.0.input").String() != "valid patch" {
 		t.Fatalf("next attempt reused failed state: %s %v", response.Payload, errExecute)
 	}
 }
@@ -561,10 +636,10 @@ func TestApplyPatchXAIWebsocketFailureMatrix(t *testing.T) {
 						errors++
 						assertTask6PatchError(t, chunk.Err)
 					}
-					if gjson.GetBytes(chunk.Payload, "type").String() == "response.failed" {
+					if ojson.GetBytes(chunk.Payload, "type").String() == "response.failed" {
 						failed++
 					}
-					if bytes.Contains(chunk.Payload, []byte("RAW_SECRET")) || gjson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+					if bytes.Contains(chunk.Payload, []byte("RAW_SECRET")) || ojson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
 						t.Fatal("raw WS failure leaked or completed")
 					}
 				}
@@ -625,7 +700,7 @@ func TestApplyPatchDevinLegacyOtherToolsPreserved(t *testing.T) {
 			if custom {
 				key, expectedType = "input", "custom_tool_call"
 			}
-			item := gjson.GetBytes(response.Payload, "output.0")
+			item := ojson.GetBytes(response.Payload, "output.0")
 			if item.Get("type").String() != expectedType || item.Get(key).String() != input {
 				t.Fatalf("legacy provenance changed: %s", response.Payload)
 			}

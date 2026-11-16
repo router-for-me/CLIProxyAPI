@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func TestRequestPairWithEmptyPluginHostSanitizesSignaturesOnce(t *testing.T) {
@@ -45,7 +45,11 @@ func TestRequestPairWithEmptyPluginHostSanitizesSignaturesOnce(t *testing.T) {
 				var base, work []byte
 				if route == "envelope" {
 					req := sdktranslator.RequestEnvelope{Format: sdktranslator.FormatOpenAIResponse, Model: "gemini-3.6-flash-high", Stream: stream}
-					base, work = helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, req, payload, payload)
+					var errTranslate error
+					base, work, errTranslate = helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, req, payload, payload)
+					if errTranslate != nil {
+						t.Fatalf("translate request pair: %v", errTranslate)
+					}
 				} else {
 					base, work = helps.TranslateRequestPairWithAPIKeyModelCompatibility(t.Context(), nil, &config.Config{}, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, "gemini-3.6-flash-high", payload, payload, stream, route == "api-key-compat")
 				}
@@ -56,7 +60,7 @@ func TestRequestPairWithEmptyPluginHostSanitizesSignaturesOnce(t *testing.T) {
 				if !bytes.Equal(base, work) {
 					t.Fatal("same input produced different translations")
 				}
-				parts := gjson.GetBytes(work, "request.contents.0.parts").Array()
+				parts := ojson.GetBytes(work, "request.contents.0.parts").Array()
 				if len(parts) != 10 || parts[0].Get("thoughtSignature").String() != "skip_thought_signature_validator" {
 					t.Fatalf("unexpected parallel tool call layout: %s", work)
 				}

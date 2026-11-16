@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	apihandlers "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
-	"github.com/tidwall/gjson"
 )
 
 func performVideosEndpointRequest(t *testing.T, method string, endpointPath string, contentType string, body io.Reader, handler gin.HandlerFunc) *httptest.ResponseRecorder {
@@ -63,12 +63,13 @@ func performVideosRouteRequest(t *testing.T, method string, routePath string, re
 }
 
 type videoAuthCaptureExecutor struct {
-	mu            sync.Mutex
-	requestID     string
-	contentURL    string
-	authIDs       []string
-	models        []string
-	payloadModels []string
+	mu                 sync.Mutex
+	requestID          string
+	contentURL         string
+	authIDs            []string
+	models             []string
+	payloadModels      []string
+	payloadResolutions []string
 }
 
 func (e *videoAuthCaptureExecutor) Identifier() string { return "xai" }
@@ -81,10 +82,11 @@ func (e *videoAuthCaptureExecutor) Execute(_ context.Context, auth *coreauth.Aut
 	e.mu.Lock()
 	e.authIDs = append(e.authIDs, authID)
 	e.models = append(e.models, req.Model)
-	e.payloadModels = append(e.payloadModels, strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String()))
+	e.payloadModels = append(e.payloadModels, strings.TrimSpace(ojson.GetBytesNoCopy(req.Payload, "model").String()))
+	e.payloadResolutions = append(e.payloadResolutions, ojson.GetBytesNoCopy(req.Payload, "resolution").String())
 	e.mu.Unlock()
 
-	requestID := strings.TrimSpace(gjson.GetBytes(req.Payload, "request_id").String())
+	requestID := strings.TrimSpace(ojson.GetBytesNoCopy(req.Payload, "request_id").String())
 	if requestID == "" {
 		requestID = e.requestID
 	}
@@ -188,6 +190,10 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 		"xai/grok-imagine-video-1.5-preview",
 		"x-ai/grok-imagine-video-1.5-preview",
 		"grok/grok-imagine-video-1.5-preview",
+		"grok-imagine-video-1.5-lite",
+		"xai/grok-imagine-video-1.5-lite",
+		"x-ai/grok-imagine-video-1.5-lite",
+		"grok/grok-imagine-video-1.5-lite",
 	} {
 		if !isSupportedVideosModel(model) {
 			t.Fatalf("expected %s to be supported", model)
@@ -208,6 +214,9 @@ func TestVideosModelValidationAllowsXAIVideoModel(t *testing.T) {
 	if isSupportedVideosModel("codex/grok-imagine-video-1.5-preview") {
 		t.Fatal("expected codex/grok-imagine-video-1.5-preview to be rejected")
 	}
+	if isSupportedVideosModel("codex/grok-imagine-video-1.5-lite") {
+		t.Fatal("expected codex/grok-imagine-video-1.5-lite to be rejected")
+	}
 }
 
 func TestBuildXAIVideosCreateRequestMapsSoraModelToXAIBackend(t *testing.T) {
@@ -218,7 +227,7 @@ func TestBuildXAIVideosCreateRequestMapsSoraModelToXAIBackend(t *testing.T) {
 		t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(req, "model").String(); got != defaultXAIVideosModel {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != defaultXAIVideosModel {
 		t.Fatalf("upstream model = %q, want %s", got, defaultXAIVideosModel)
 	}
 	if meta.Model != defaultXAIVideosModel {
@@ -234,22 +243,22 @@ func TestBuildXAIVideosCreateRequest(t *testing.T) {
 		t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(req, "model").String(); got != defaultXAIVideosModel {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != defaultXAIVideosModel {
 		t.Fatalf("model = %q, want %s", got, defaultXAIVideosModel)
 	}
-	if got := gjson.GetBytes(req, "prompt").String(); got != "a cat playing piano" {
+	if got := ojson.GetBytesNoCopy(req, "prompt").String(); got != "a cat playing piano" {
 		t.Fatalf("prompt = %q", got)
 	}
-	if got := gjson.GetBytes(req, "duration").Int(); got != 8 {
+	if got := ojson.GetBytesNoCopy(req, "duration").Int(); got != 8 {
 		t.Fatalf("duration = %d, want 8", got)
 	}
-	if got := gjson.GetBytes(req, "aspect_ratio").String(); got != "16:9" {
+	if got := ojson.GetBytesNoCopy(req, "aspect_ratio").String(); got != "16:9" {
 		t.Fatalf("aspect_ratio = %q, want 16:9", got)
 	}
-	if got := gjson.GetBytes(req, "resolution").String(); got != "720p" {
+	if got := ojson.GetBytesNoCopy(req, "resolution").String(); got != "720p" {
 		t.Fatalf("resolution = %q, want 720p", got)
 	}
-	if got := gjson.GetBytes(req, "image.url").String(); got != "https://example.com/cat.png" {
+	if got := ojson.GetBytesNoCopy(req, "image.url").String(); got != "https://example.com/cat.png" {
 		t.Fatalf("image.url = %q", got)
 	}
 	if meta.Seconds != "8" || meta.Size != "1280x720" || meta.Prompt != "a cat playing piano" {
@@ -265,7 +274,7 @@ func TestBuildXAIVideosCreateRequestAllowsVideo15Model(t *testing.T) {
 		t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(req, "model").String(); got != xaiVideos15Model {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != xaiVideos15Model {
 		t.Fatalf("model = %q, want %s", got, xaiVideos15Model)
 	}
 	if meta.Model != xaiVideos15Model {
@@ -284,7 +293,7 @@ func TestBuildXAIVideosCreateRequestNormalizesVideo15PreviewAlias(t *testing.T) 
 		t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(req, "model").String(); got != xaiVideos15Model {
+	if got := ojson.GetBytesNoCopy(req, "model").String(); got != xaiVideos15Model {
 		t.Fatalf("model = %q, want %s", got, xaiVideos15Model)
 	}
 	if meta.Model != xaiVideos15Model {
@@ -303,7 +312,7 @@ func TestBuildXAIVideosCreateRequestAllowsCustomSeconds(t *testing.T) {
 		t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(req, "duration").Int(); got != 6 {
+	if got := ojson.GetBytesNoCopy(req, "duration").Int(); got != 6 {
 		t.Fatalf("duration = %d, want 6", got)
 	}
 	if meta.Seconds != "6" {
@@ -332,13 +341,13 @@ func TestBuildXAIVideosCreateRequestPreservesMultiReferenceSeconds(t *testing.T)
 				t.Fatalf("buildXAIVideosCreateRequest() error = %v", err)
 			}
 
-			if got := gjson.GetBytes(req, "duration").Int(); got != tt.duration {
+			if got := ojson.GetBytesNoCopy(req, "duration").Int(); got != tt.duration {
 				t.Fatalf("duration = %d, want %d", got, tt.duration)
 			}
 			if meta.Seconds != tt.seconds {
 				t.Fatalf("meta seconds = %q, want %q", meta.Seconds, tt.seconds)
 			}
-			if got := gjson.GetBytes(req, "reference_images.#").Int(); got != 2 {
+			if got := ojson.GetBytesNoCopy(req, "reference_images.#").Int(); got != 2 {
 				t.Fatalf("reference image count = %d, want 2", got)
 			}
 		})
@@ -367,16 +376,16 @@ func TestBuildVideosCreateAPIResponseFromXAI(t *testing.T) {
 		t.Fatalf("buildVideosCreateAPIResponseFromXAI() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(out, "id").String(); got != "vid_123" {
+	if got := ojson.GetBytesNoCopy(out, "id").String(); got != "vid_123" {
 		t.Fatalf("id = %q, want vid_123", got)
 	}
-	if got := gjson.GetBytes(out, "object").String(); got != "video" {
+	if got := ojson.GetBytesNoCopy(out, "object").String(); got != "video" {
 		t.Fatalf("object = %q, want video", got)
 	}
-	if got := gjson.GetBytes(out, "status").String(); got != "queued" {
+	if got := ojson.GetBytesNoCopy(out, "status").String(); got != "queued" {
 		t.Fatalf("status = %q, want queued", got)
 	}
-	if got := gjson.GetBytes(out, "created_at").Int(); got != 123 {
+	if got := ojson.GetBytesNoCopy(out, "created_at").Int(); got != 123 {
 		t.Fatalf("created_at = %d, want 123", got)
 	}
 }
@@ -389,31 +398,31 @@ func TestBuildVideosRetrieveAPIResponseFromXAI(t *testing.T) {
 		t.Fatalf("buildVideosRetrieveAPIResponseFromXAI() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(out, "id").String(); got != "91989464-273f-95df-8197-703b4fefd40e" {
+	if got := ojson.GetBytesNoCopy(out, "id").String(); got != "91989464-273f-95df-8197-703b4fefd40e" {
 		t.Fatalf("id = %q", got)
 	}
-	if got := gjson.GetBytes(out, "object").String(); got != "video" {
+	if got := ojson.GetBytesNoCopy(out, "object").String(); got != "video" {
 		t.Fatalf("object = %q, want video", got)
 	}
-	if got := gjson.GetBytes(out, "model").String(); got != defaultXAIVideosModel {
+	if got := ojson.GetBytesNoCopy(out, "model").String(); got != defaultXAIVideosModel {
 		t.Fatalf("model = %q, want %s", got, defaultXAIVideosModel)
 	}
-	if got := gjson.GetBytes(out, "status").String(); got != "completed" {
+	if got := ojson.GetBytesNoCopy(out, "status").String(); got != "completed" {
 		t.Fatalf("status = %q, want completed", got)
 	}
-	if got := gjson.GetBytes(out, "progress").Int(); got != 100 {
+	if got := ojson.GetBytesNoCopy(out, "progress").Int(); got != 100 {
 		t.Fatalf("progress = %d, want 100", got)
 	}
-	if got := gjson.GetBytes(out, "seconds").String(); got != "4" {
+	if got := ojson.GetBytesNoCopy(out, "seconds").String(); got != "4" {
 		t.Fatalf("seconds = %q, want 4", got)
 	}
-	if got := gjson.GetBytes(out, "video_url").String(); got != "https://vidgen.x.ai/xai-vidgen-bucket/xai-video-08609066-e7e9-43ba-bd8d-bd29cb6221d9.mp4" {
+	if got := ojson.GetBytesNoCopy(out, "video_url").String(); got != "https://vidgen.x.ai/xai-vidgen-bucket/xai-video-08609066-e7e9-43ba-bd8d-bd29cb6221d9.mp4" {
 		t.Fatalf("video_url = %q", got)
 	}
-	if gjson.GetBytes(out, "video").Exists() {
+	if ojson.GetBytesNoCopy(out, "video").Exists() {
 		t.Fatalf("video field must not be exposed in OpenAI retrieve response: %s", string(out))
 	}
-	if gjson.GetBytes(out, "usage").Exists() {
+	if ojson.GetBytesNoCopy(out, "usage").Exists() {
 		t.Fatalf("usage field must not be exposed in OpenAI retrieve response: %s", string(out))
 	}
 }
@@ -426,16 +435,16 @@ func TestBuildVideosRetrieveAPIResponseFromXAINormalizesTopLevelError(t *testing
 		t.Fatalf("buildVideosRetrieveAPIResponseFromXAI() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(out, "status").String(); got != "failed" {
+	if got := ojson.GetBytesNoCopy(out, "status").String(); got != "failed" {
 		t.Fatalf("status = %q, want failed", got)
 	}
-	if got := gjson.GetBytes(out, "progress").Int(); got != 0 {
+	if got := ojson.GetBytesNoCopy(out, "progress").Int(); got != 0 {
 		t.Fatalf("progress = %d, want 0", got)
 	}
-	if got := gjson.GetBytes(out, "error.code").String(); got != "invalid-argument" {
+	if got := ojson.GetBytesNoCopy(out, "error.code").String(); got != "invalid-argument" {
 		t.Fatalf("error.code = %q, want invalid-argument", got)
 	}
-	if got := gjson.GetBytes(out, "error.message").String(); got != "1080p video resolution is not available for your team." {
+	if got := ojson.GetBytesNoCopy(out, "error.message").String(); got != "1080p video resolution is not available for your team." {
 		t.Fatalf("error.message = %q", got)
 	}
 }
@@ -448,13 +457,13 @@ func TestBuildVideosRetrieveAPIResponseFromXAINormalizesNestedError(t *testing.T
 		t.Fatalf("buildVideosRetrieveAPIResponseFromXAI() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(out, "error.code").String(); got != "content_policy_violation" {
+	if got := ojson.GetBytesNoCopy(out, "error.code").String(); got != "content_policy_violation" {
 		t.Fatalf("error.code = %q, want content_policy_violation", got)
 	}
-	if got := gjson.GetBytes(out, "error.message").String(); got != "The request was rejected by the safety system." {
+	if got := ojson.GetBytesNoCopy(out, "error.message").String(); got != "The request was rejected by the safety system." {
 		t.Fatalf("error.message = %q", got)
 	}
-	if gjson.GetBytes(out, "error.type").Exists() {
+	if ojson.GetBytesNoCopy(out, "error.type").Exists() {
 		t.Fatalf("error.type must not be present: %s", string(out))
 	}
 }
@@ -658,29 +667,29 @@ func TestVideosCreateRejectsUnsupportedModel(t *testing.T) {
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "object").String(); got != "video" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "object").String(); got != "video" {
 		t.Fatalf("object = %q, want video", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "model").String(); got != "not-a-video-model" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "model").String(); got != "not-a-video-model" {
 		t.Fatalf("model = %q, want not-a-video-model", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "status").String(); got != "failed" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "status").String(); got != "failed" {
 		t.Fatalf("status = %q, want failed", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "progress").Int(); got != 0 {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "progress").Int(); got != 0 {
 		t.Fatalf("progress = %d, want 0", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "error.code").String(); got != "invalid_request_error" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.code").String(); got != "invalid_request_error" {
 		t.Fatalf("error.code = %q, want invalid_request_error", got)
 	}
 	expectedMessage := "Model not-a-video-model is not supported on " + openAIVideosPath + ". Use " + defaultOpenAIVideosModel + "."
-	if got := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); got != expectedMessage {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String(); got != expectedMessage {
 		t.Fatalf("error.message = %q, want %q", got, expectedMessage)
 	}
-	if gjson.GetBytes(resp.Body.Bytes(), "error.type").Exists() {
+	if ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.type").Exists() {
 		t.Fatalf("error.type must not be present: %s", resp.Body.String())
 	}
-	if id := gjson.GetBytes(resp.Body.Bytes(), "id").String(); !strings.HasPrefix(id, "video_") {
+	if id := ojson.GetBytesNoCopy(resp.Body.Bytes(), "id").String(); !strings.HasPrefix(id, "video_") {
 		t.Fatalf("id = %q, want video_ prefix", id)
 	}
 }
@@ -694,26 +703,26 @@ func TestVideosCreateInvalidSizeReturnsFailedVideoResource(t *testing.T) {
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "object").String(); got != "video" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "object").String(); got != "video" {
 		t.Fatalf("object = %q, want video", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "model").String(); got != defaultXAIVideosModel {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "model").String(); got != defaultXAIVideosModel {
 		t.Fatalf("model = %q, want %s", got, defaultXAIVideosModel)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "status").String(); got != "failed" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "status").String(); got != "failed" {
 		t.Fatalf("status = %q, want failed", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "progress").Int(); got != 0 {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "progress").Int(); got != 0 {
 		t.Fatalf("progress = %d, want 0", got)
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "error.code").String(); got != "invalid_request_error" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.code").String(); got != "invalid_request_error" {
 		t.Fatalf("error.code = %q, want invalid_request_error", got)
 	}
 	expectedMessage := "Invalid request: size must be one of 720x1280, 1280x720, 1024x1792, or 1792x1024"
-	if got := gjson.GetBytes(resp.Body.Bytes(), "error.message").String(); got != expectedMessage {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String(); got != expectedMessage {
 		t.Fatalf("error.message = %q, want %q", got, expectedMessage)
 	}
-	if gjson.GetBytes(resp.Body.Bytes(), "error.type").Exists() {
+	if ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.type").Exists() {
 		t.Fatalf("error.type must not be present: %s", resp.Body.String())
 	}
 }
@@ -727,7 +736,7 @@ func TestXAIVideosNativeRejectsUnsupportedModel(t *testing.T) {
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
-	message := gjson.GetBytes(resp.Body.Bytes(), "error.message").String()
+	message := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.message").String()
 	expectedMessage := "Model sora-2 is not supported on " + xaiVideosGenerationsAPI + ", " + xaiVideosEditsAPI + ", or " + xaiVideosExtensionsAPI + ". Use " + defaultXAIVideosModel + "."
 	if message != expectedMessage {
 		t.Fatalf("error message = %q, want %q", message, expectedMessage)
@@ -743,7 +752,7 @@ func TestXAIVideosNativeRejectsInvalidJSON(t *testing.T) {
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
-	if got := gjson.GetBytes(resp.Body.Bytes(), "error.type").String(); got != "invalid_request_error" {
+	if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "error.type").String(); got != "invalid_request_error" {
 		t.Fatalf("error type = %q, want invalid_request_error", got)
 	}
 }
@@ -757,11 +766,11 @@ func TestVideosCreateBindsRetrieveToSelectedAuth(t *testing.T) {
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
 	}
-	videoID := gjson.GetBytes(createResp.Body.Bytes(), "id").String()
+	videoID := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "id").String()
 	if videoID != executor.requestID {
 		t.Fatalf("created video id = %q, want %q", videoID, executor.requestID)
 	}
-	if got := gjson.GetBytes(createResp.Body.Bytes(), "model").String(); got != defaultXAIVideosModel {
+	if got := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "model").String(); got != defaultXAIVideosModel {
 		t.Fatalf("created model = %q, want %s", got, defaultXAIVideosModel)
 	}
 
@@ -788,7 +797,7 @@ func TestXAIVideosNativeCreateBindsRetrieveToSelectedAuth(t *testing.T) {
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
 	}
-	videoID := gjson.GetBytes(createResp.Body.Bytes(), "request_id").String()
+	videoID := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "request_id").String()
 	if videoID != executor.requestID {
 		t.Fatalf("created request_id = %q, want %q", videoID, executor.requestID)
 	}
@@ -845,7 +854,7 @@ func TestXAIVideosNativeRetrieveUsesCanonicalBoundModel(t *testing.T) {
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
 	}
-	videoID := gjson.GetBytes(createResp.Body.Bytes(), "request_id").String()
+	videoID := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "request_id").String()
 	if videoID != executor.requestID {
 		t.Fatalf("created request_id = %q, want %q", videoID, executor.requestID)
 	}
@@ -882,6 +891,172 @@ func TestXAIVideosNativeRetrieveUsesCanonicalBoundModel(t *testing.T) {
 	}
 }
 
+func TestVideosLiteCreatePreservesResolution(t *testing.T) {
+	resetVideoAuthBindingsForTest(t)
+	executor := &videoAuthCaptureExecutor{requestID: "video-lite-resolution"}
+	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "video-lite-resolution-auth", Provider: "xai", Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("manager.Register(): %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: xaiVideos15LiteModel}})
+	manager.RefreshSchedulerEntry(auth.ID)
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+	handler := NewOpenAIAPIHandler(apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+
+	for _, tc := range []struct {
+		name       string
+		resolution string
+		want       string
+	}{
+		{name: "1080p", resolution: "1080p", want: "1080p"},
+		{name: "480p", resolution: "480p", want: "480p"},
+		{name: "720p", resolution: "720p", want: "720p"},
+		{name: "default", want: "720p"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"grok-imagine-video-1.5-lite","prompt":"make a video"`
+			if tc.resolution != "" {
+				body += `,"resolution":` + strconv.Quote(tc.resolution)
+			}
+			body += `}`
+			executor.mu.Lock()
+			before := len(executor.payloadResolutions)
+			executor.mu.Unlock()
+			resp := performVideosEndpointRequest(t, http.MethodPost, openAIVideosPath, "application/json", strings.NewReader(body), handler.VideosCreate)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("create status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+			}
+			executor.mu.Lock()
+			defer executor.mu.Unlock()
+			if len(executor.payloadResolutions) != before+1 {
+				t.Fatalf("upstream calls = %d, want %d", len(executor.payloadResolutions), before+1)
+			}
+			if got := executor.payloadResolutions[before]; got != tc.want {
+				t.Fatalf("upstream resolution = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVideosLiteCreateRetrievePreservesModelAndAuth(t *testing.T) {
+	const liteModel = "grok-imagine-video-1.5-lite"
+	for _, route := range []string{openAIVideosPath, xaiVideosGenerationsAPI, xaiVideosEditsAPI, xaiVideosExtensionsAPI} {
+		t.Run(route, func(t *testing.T) {
+			for _, model := range []string{liteModel, "xai/" + liteModel, "x-ai/" + liteModel, "grok/" + liteModel} {
+				t.Run(model, func(t *testing.T) {
+					resetVideoAuthBindingsForTest(t)
+					executor := &videoAuthCaptureExecutor{requestID: "video-lite-bound"}
+					manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+					manager.RegisterExecutor(executor)
+					authModels := []struct {
+						authID string
+						model  string
+					}{
+						{authID: "video-lite-default-auth", model: defaultXAIVideosModel},
+						{authID: "video-lite-auth-a", model: liteModel},
+						{authID: "video-lite-auth-b", model: liteModel},
+					}
+					for _, entry := range authModels {
+						auth := &coreauth.Auth{ID: entry.authID, Provider: "xai", Status: coreauth.StatusActive}
+						if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+							t.Fatalf("manager.Register(%s): %v", entry.authID, errRegister)
+						}
+						registry.GetGlobalRegistry().RegisterClient(entry.authID, auth.Provider, []*registry.ModelInfo{{ID: entry.model}})
+						manager.RefreshSchedulerEntry(entry.authID)
+					}
+					t.Cleanup(func() {
+						for _, entry := range authModels {
+							registry.GetGlobalRegistry().UnregisterClient(entry.authID)
+						}
+					})
+					handler := NewOpenAIAPIHandler(apihandlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+					createHandler := handler.VideosCreate
+					retrieveHandler := handler.VideosRetrieve
+					idField, retrieveRoute := "id", openAIVideosPath+"/:video_id"
+					retrievePath := openAIVideosPath + "/" + executor.requestID
+					if route != openAIVideosPath {
+						switch route {
+						case xaiVideosGenerationsAPI:
+							createHandler = handler.XAIVideosGenerations
+						case xaiVideosEditsAPI:
+							createHandler = handler.XAIVideosEdits
+						case xaiVideosExtensionsAPI:
+							createHandler = handler.XAIVideosExtensions
+						}
+						retrieveHandler = handler.XAIVideosRetrieve
+						idField, retrieveRoute = "request_id", videosPath+"/:request_id"
+						retrievePath = videosPath + "/" + executor.requestID
+					}
+
+					body := strings.NewReader(`{"model":` + strconv.Quote(model) + `,"prompt":"make a video"}`)
+					createResp := performVideosEndpointRequest(t, http.MethodPost, route, "application/json", body, createHandler)
+					if createResp.Code != http.StatusOK {
+						t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
+					}
+					if got := ojson.GetBytesNoCopy(createResp.Body.Bytes(), idField).String(); got != executor.requestID {
+						t.Fatalf("created %s = %q, want %q", idField, got, executor.requestID)
+					}
+					retrieveResp := performVideosRouteRequest(t, http.MethodGet, retrieveRoute, retrievePath, "", nil, retrieveHandler)
+					if retrieveResp.Code != http.StatusOK {
+						t.Fatalf("retrieve status = %d, want %d: %s", retrieveResp.Code, http.StatusOK, retrieveResp.Body.String())
+					}
+					if route == openAIVideosPath {
+						for _, resp := range []*httptest.ResponseRecorder{createResp, retrieveResp} {
+							if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), "model").String(); got != liteModel {
+								t.Fatalf("response model = %q, want %s", got, liteModel)
+							}
+						}
+					}
+					authIDs := executor.AuthIDs()
+					if len(authIDs) != 2 || (authIDs[0] != "video-lite-auth-a" && authIDs[0] != "video-lite-auth-b") || authIDs[1] != authIDs[0] {
+						t.Fatalf("authIDs = %v, want both calls to use the same Lite auth", authIDs)
+					}
+					models := executor.Models()
+					if len(models) != 2 || models[0] != liteModel || models[1] != liteModel {
+						t.Fatalf("models = %v, want both calls to route with %s", models, liteModel)
+					}
+					payloadModels := executor.PayloadModels()
+					if len(payloadModels) != 2 || payloadModels[0] != liteModel {
+						t.Fatalf("payload models = %v, want create payload model %s", payloadModels, liteModel)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestVideosLiteRejectsForeignProviderPrefix(t *testing.T) {
+	handler := &OpenAIAPIHandler{}
+	for _, route := range []struct {
+		path    string
+		handler gin.HandlerFunc
+	}{
+		{openAIVideosPath, handler.VideosCreate},
+		{xaiVideosGenerationsAPI, handler.XAIVideosGenerations},
+		{xaiVideosEditsAPI, handler.XAIVideosEdits},
+		{xaiVideosExtensionsAPI, handler.XAIVideosExtensions},
+	} {
+		t.Run(route.path, func(t *testing.T) {
+			body := strings.NewReader(`{"model":"codex/grok-imagine-video-1.5-lite","prompt":"make a video"}`)
+			resp := performVideosEndpointRequest(t, http.MethodPost, route.path, "application/json", body, route.handler)
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusBadRequest, resp.Body.String())
+			}
+			errorField := "error.type"
+			if route.path == openAIVideosPath {
+				errorField = "error.code"
+			}
+			if got := ojson.GetBytesNoCopy(resp.Body.Bytes(), errorField).String(); got != "invalid_request_error" {
+				t.Fatalf("%s = %q, want invalid_request_error", errorField, got)
+			}
+		})
+	}
+}
+
 func TestVideosCreatePreviewAliasUsesPreviewAuthWithGAPayload(t *testing.T) {
 	resetVideoAuthBindingsForTest(t)
 	executor := &videoAuthCaptureExecutor{requestID: "video-openai-preview-alias"}
@@ -891,8 +1066,8 @@ func TestVideosCreatePreviewAliasUsesPreviewAuthWithGAPayload(t *testing.T) {
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
 	}
-	videoID := gjson.GetBytes(createResp.Body.Bytes(), "id").String()
-	if got := gjson.GetBytes(createResp.Body.Bytes(), "model").String(); got != xaiVideos15Model {
+	videoID := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "id").String()
+	if got := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "model").String(); got != xaiVideos15Model {
 		t.Fatalf("response model = %q, want %s", got, xaiVideos15Model)
 	}
 
@@ -913,8 +1088,8 @@ func TestVideosCreatePreviewAliasUsesDefaultXAIModelsWithGAPayload(t *testing.T)
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
 	}
-	videoID := gjson.GetBytes(createResp.Body.Bytes(), "id").String()
-	if got := gjson.GetBytes(createResp.Body.Bytes(), "model").String(); got != xaiVideos15Model {
+	videoID := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "id").String()
+	if got := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "model").String(); got != xaiVideos15Model {
 		t.Fatalf("response model = %q, want %s", got, xaiVideos15Model)
 	}
 
@@ -935,7 +1110,7 @@ func TestXAIVideosNativePreviewAliasUsesPreviewAuthWithGAPayload(t *testing.T) {
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create status = %d, want %d: %s", createResp.Code, http.StatusOK, createResp.Body.String())
 	}
-	videoID := gjson.GetBytes(createResp.Body.Bytes(), "request_id").String()
+	videoID := ojson.GetBytesNoCopy(createResp.Body.Bytes(), "request_id").String()
 
 	retrieveResp := performVideosRouteRequest(t, http.MethodGet, videosPath+"/:request_id", videosPath+"/"+videoID, "", nil, handler.XAIVideosRetrieve)
 	if retrieveResp.Code != http.StatusOK {
@@ -1033,7 +1208,7 @@ func TestVideosCreateFormRequest(t *testing.T) {
 		t.Fatalf("videosCreateRequestFromFormContext() error = %v", err)
 	}
 
-	if got := gjson.GetBytes(rawJSON, "input_reference.image_url").String(); got != "https://example.com/a.png" {
+	if got := ojson.GetBytesNoCopy(rawJSON, "input_reference.image_url").String(); got != "https://example.com/a.png" {
 		t.Fatalf("input_reference.image_url = %q", got)
 	}
 }

@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,13 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // The server waits for all explicit creates before rejecting one. This makes
@@ -45,7 +45,7 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 						t.Error(e)
 						return ""
 					}
-					return gjson.GetBytes(p, "prompt_cache_key").String()
+					return ojson.GetBytes(p, "prompt_cache_key").String()
 				}
 				write := func(kind, id, key string) {
 					p := fmt.Sprintf(`{"type":%q,"response":{"id":%q,"prompt_cache_key":%q,"output":[],"error":{"type":"invalid_request_error","message":"rejected"}}}`, kind, id, key)
@@ -99,8 +99,8 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 					terminated = true
 					continue
 				}
-				kind := gjson.GetBytes(chunk.Payload, "type").String()
-				id := gjson.GetBytes(chunk.Payload, "response.id").String()
+				kind := ojson.GetBytes(chunk.Payload, "type").String()
+				id := ojson.GetBytes(chunk.Payload, "response.id").String()
 				if !sent && id == "first" && ((activeFailure && kind == "response.created") || (!activeFailure && kind == "response.completed")) {
 					sent = true
 					if !activeFailure {
@@ -117,13 +117,13 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 					if activeFailure {
 						want = "first-key"
 					}
-					if got := gjson.GetBytes(chunk.Payload, "response.prompt_cache_key").String(); got != want {
+					if got := ojson.GetBytes(chunk.Payload, "response.prompt_cache_key").String(); got != want {
 						t.Errorf("failure metadata = %q, want %q", got, want)
 					}
 				}
 				if kind == "response.completed" && id == "good" {
 					completed = true
-					if got := gjson.GetBytes(chunk.Payload, "response.prompt_cache_key").String(); got != "good-key" {
+					if got := ojson.GetBytes(chunk.Payload, "response.prompt_cache_key").String(); got != "good-key" {
 						t.Errorf("success consumed another create's metadata: %q", got)
 					}
 					cancel()
@@ -141,7 +141,7 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 }
 
 func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
-	for _, kind := range []string{"response.failed", "error", "error_without_status"} {
+	for _, kind := range []string{"response.failed", "error", "error_without_status", "typeless_error", "typeless_body", "string_error", "wrapped_string_error"} {
 		for _, started := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/started=%t", kind, started), func(t *testing.T) {
 				internalcache.ClearCodexReasoningReplayCache()
@@ -179,6 +179,14 @@ func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
 						write(`{"type":"response.failed","response":{"id":"rejected","error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}}`)
 					case "error":
 						write(`{"type":"error","status":400,"body":{"error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}}`)
+					case "typeless_error":
+						write(`{"status":400,"error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}`)
+					case "typeless_body":
+						write(`{"body":{"error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}}`)
+					case "string_error":
+						write(`{"type":"error","status":400,"error":"Invalid signature in thinking block"}`)
+					case "wrapped_string_error":
+						write(`{"type":"error","status":400,"body":{"error":"Invalid signature in thinking block"}}`)
 					default:
 						write(`{"type":"error","error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}`)
 					}
@@ -224,8 +232,8 @@ func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
 					if chunk.Err != nil {
 						t.Fatal(chunk.Err)
 					}
-					event := gjson.GetBytes(chunk.Payload, "type").String()
-					id := gjson.GetBytes(chunk.Payload, "response.id").String()
+					event := ojson.GetBytes(chunk.Payload, "type").String()
+					id := ojson.GetBytes(chunk.Payload, "response.id").String()
 					if event == "response.completed" && id == "first" {
 						input <- core.WebsocketInput{Payload: rejected}
 					}

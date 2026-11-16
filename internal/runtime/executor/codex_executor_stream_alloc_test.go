@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func codexAllocationStream(deltas, deltaSize int) string {
@@ -76,11 +76,11 @@ func TestCodexStreamChunksRemainOwnedAfterScannerAdvances(t *testing.T) {
 							continue
 						}
 						data := bytes.TrimSpace(line[5:])
-						switch gjson.GetBytes(data, "type").String() {
+						switch ojson.GetBytes(data, "type").String() {
 						case "response.output_text.delta":
-							text.WriteString(gjson.GetBytes(data, "delta").String())
+							text.WriteString(ojson.GetBytes(data, "delta").String())
 						case "content_block_delta":
-							text.WriteString(gjson.GetBytes(data, "delta.text").String())
+							text.WriteString(ojson.GetBytes(data, "delta.text").String())
 						}
 					}
 				}
