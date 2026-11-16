@@ -1146,7 +1146,13 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth)
 			auth.Status = StatusActive
 		}
 	}
-	auth.Generation++
+	if expected != nil {
+		// A staged recovery is one publication. Do not let its speculative
+		// persistence watermark outrun the next edit if this save aborts.
+		auth.Generation = expected.Generation + 1
+	} else {
+		auth.Generation++
+	}
 	auth.UpdatedAt = now
 	snapshot = auth.Clone()
 	if trackCooldownState {
