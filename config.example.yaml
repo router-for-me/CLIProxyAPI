@@ -291,6 +291,18 @@ requests:
   # Set to 0 to disable (default).
   tls-handshake-timeout-seconds: 0
 
+  # Interval, in seconds, for blank-line keepalives on the Claude Code Anthropic
+  # transport. After a request is fully sent and until the first response byte
+  # arrives, the transport writes an empty line (CRLF) every this many seconds.
+  # Some egress proxies, such as residential SOCKS5 gateways, drop a tunnel after
+  # about 60 seconds without payload traffic, which breaks requests whose first
+  # byte takes longer (for example Claude Code compaction of a large context) with
+  # an EOF. HTTP/1.1 servers ignore empty lines before a request line, so the
+  # request itself is unchanged. A connection that carried keepalives is not reused
+  # for another request. Nothing is ever closed or timed out by this setting.
+  # Set to 0 to disable (default). 40 works for proxies with a 60-second idle limit.
+  claude-await-keepalive-seconds: 0
+
   # When true, forward filtered upstream response headers to downstream clients.
   # Default is false (disabled).
   passthrough-headers: false
