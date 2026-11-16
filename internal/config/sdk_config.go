@@ -57,6 +57,18 @@ type SDKConfig struct {
 	// 0, and values beyond the representable duration range saturate.
 	TLSHandshakeTimeoutSeconds int `yaml:"tls-handshake-timeout-seconds" json:"tls-handshake-timeout-seconds"`
 
+	// ClaudeAwaitKeepAliveSeconds makes the Claude Code Anthropic transport
+	// write a blank line (CRLF) into the upstream connection every this many
+	// seconds while a request is fully sent and no response byte has arrived.
+	// Some egress proxies (for example residential SOCKS5 gateways) drop a
+	// tunnel after about 60 seconds without payload traffic, which kills
+	// requests whose first response byte takes longer, such as Claude Code
+	// compaction on a large context. HTTP/1.1 servers ignore empty lines
+	// before the next request line, so the request and the TLS/header
+	// fingerprint are unchanged. It never closes or times out a connection.
+	// The default 0 disables it; negative values are treated as 0.
+	ClaudeAwaitKeepAliveSeconds int `yaml:"claude-await-keepalive-seconds" json:"claude-await-keepalive-seconds"`
+
 	// DisableImageGeneration controls whether the built-in image_generation tool is injected/allowed.
 	//
 	// Supported values:
@@ -123,6 +135,20 @@ func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(c.TLSHandshakeTimeoutSeconds) * time.Second
+}
+
+// ClaudeAwaitKeepAlive returns the interval for blank-line keepalives the
+// Claude Code transport sends while awaiting a response. A non-positive
+// configured value disables them and yields 0.
+func (c *SDKConfig) ClaudeAwaitKeepAlive() time.Duration {
+	if c == nil || c.ClaudeAwaitKeepAliveSeconds <= 0 {
+		return 0
+	}
+	const maxClaudeAwaitKeepAliveSeconds = math.MaxInt64 / int64(time.Second)
+	if int64(c.ClaudeAwaitKeepAliveSeconds) > maxClaudeAwaitKeepAliveSeconds {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(c.ClaudeAwaitKeepAliveSeconds) * time.Second
 }
 
 // ClientConfig configures client-facing compatibility behavior.

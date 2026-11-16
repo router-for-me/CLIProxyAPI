@@ -421,7 +421,9 @@ func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509
 				}
 				return nil, fmt.Errorf("claude tls: handshake upstream: %w", errHandshake)
 			}
-			return httpwire.NewOrderedRequestConn(tlsConn, claudeCodeRequestHeaderOrder), nil
+			return newAwaitKeepAliveWire(tlsConn, claudeAwaitKeepAliveFromContext(ctx), func(conn net.Conn) net.Conn {
+				return httpwire.NewOrderedRequestConn(conn, claudeCodeRequestHeaderOrder)
+			}), nil
 		},
 	}
 	return transport
@@ -488,14 +490,20 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	// standard fallback transport ignores the context value. The uTLS dial
 	// paths read it per dial, so cached per-proxy transports need no rebuild
 	// when the value changes. A disabled bound (0) leaves requests untouched.
-	var handshakeTimeout time.Duration
+	// The await keepalive interval travels the same way; only the Claude
+	// Code dial path reads it.
+	var handshakeTimeout, awaitKeepAlive time.Duration
 	if cfg != nil {
 		handshakeTimeout = cfg.TLSHandshakeTimeout()
+		awaitKeepAlive = cfg.ClaudeAwaitKeepAlive()
 	}
 	defer func() {
 		clientOut = httptransport.Decorate(ctx, clientOut)
 		if clientOut != nil && handshakeTimeout > 0 {
 			clientOut.Transport = &tlsHandshakeTimeoutRoundTripper{base: clientOut.Transport, timeout: handshakeTimeout}
+		}
+		if clientOut != nil && awaitKeepAlive > 0 {
+			clientOut.Transport = &claudeAwaitKeepAliveRoundTripper{base: clientOut.Transport, interval: awaitKeepAlive}
 		}
 	}()
 	proxyURL := effectiveProxyURL(ctx, cfg, auth)
