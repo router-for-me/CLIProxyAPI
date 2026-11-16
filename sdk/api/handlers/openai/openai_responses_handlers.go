@@ -1163,6 +1163,8 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		return
 	}
 	upstreamHeaders = resolvedHeaders
+	waitKeepAliveC, canWriteWaitKeepAlive, stopWaitKeepAlive := h.StartContinuityWaitKeepAliveForPeek(c, keepAliveC)
+	defer stopWaitKeepAlive()
 
 	isCodexClient := isCodexResponsesClientRequest(c)
 	failureEvent := "error"
@@ -1187,6 +1189,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			framer.Flush(&initialOutput)
 			if committed || framer.dataFrames > 0 {
 				stopKeepAlive()
+				stopWaitKeepAlive()
 				safeErrMsg := sanitizeResponsesStreamErrorMessage(errMsg)
 				commitSSE()
 				if initialOutput.Len() > 0 {
@@ -1238,6 +1241,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 				if committed || framer.dataFrames > 0 {
 					stopKeepAlive()
+					stopWaitKeepAlive()
 					commitSSE()
 					if initialOutput.Len() > 0 {
 						if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
@@ -1281,6 +1285,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			}
 
 			stopKeepAlive()
+			stopWaitKeepAlive()
 			commitSSE()
 			if errWrite := writeResponsesSSEChunk(c.Writer, initialOutput.Bytes()); errWrite != nil {
 				cliCancel(errWrite)
@@ -1298,6 +1303,10 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
 			return
+		case <-waitKeepAliveC:
+			if canWriteWaitKeepAlive() && !writeKeepAlive() {
+				return
+			}
 		case <-keepAliveC:
 			if !writeKeepAlive() {
 				return
