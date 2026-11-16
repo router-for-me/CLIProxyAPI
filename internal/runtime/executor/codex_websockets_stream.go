@@ -502,7 +502,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 						if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
 							return nil, streamErr
 						}
-						return nil, newCodexBootstrapOverloadErr(terminalBody)
+						return nil, newCodexBootstrapOverloadErrWithRetryAfter(terminalBody, streamErr.RetryAfter())
 					}
 					return nil, streamErr
 				}
