@@ -344,13 +344,14 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 	body = classifyCodexStatusError(errCode, body)
 	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	// A usage_limit_reached body reset describes quota recovery and wins over
-	// the generic Retry-After header. Every other 429 honours the upstream
-	// header so per-turn admission limits cool until their real deadline.
+	// the generic Retry-After header. Rate limits and upstream server failures
+	// also honour retry headers embedded in streamed error bodies.
 	if retryAfter := parseCodexRetryAfter(errCode, body, time.Now()); retryAfter != nil {
 		err.retryAfter = retryAfter
-	} else if errCode == http.StatusTooManyRequests {
-		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
-			err.retryAfter = retryAfter
+	} else if errCode == http.StatusTooManyRequests || (errCode >= 500 && errCode < 600) {
+		err.retryAfter = parseRetryAfterHeader(headers, time.Now())
+		if err.retryAfter == nil {
+			err.retryAfter = parseRetryAfterHeader(parseCodexWebsocketErrorHeaders(body), time.Now())
 		}
 	}
 	return err

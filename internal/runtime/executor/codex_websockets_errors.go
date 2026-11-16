@@ -61,7 +61,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	} else if isCodexWebsocketConnectionLimitError(payload) {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
-	} else if status == http.StatusTooManyRequests {
+	} else if status == http.StatusTooManyRequests || (status >= 500 && status < 600) {
 		if retryAfter := parseRetryAfterHeader(headers, time.Now()); retryAfter != nil {
 			statusError.retryAfter = retryAfter
 		}
@@ -118,29 +118,32 @@ func isCodexWebsocketConnectionLimitError(payload []byte) bool {
 }
 
 func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
-	headersNode := ojson.GetBytesNoCopy(payload, "headers")
-	if !headersNode.Exists() || !headersNode.IsObject() {
-		return nil
-	}
 	mapped := make(http.Header)
-	headersNode.ForEach(func(key, value ojson.Result) bool {
-		name := strings.TrimSpace(key.String())
-		if name == "" {
+	// Match the error-body precedence, then let envelope headers override it.
+	for _, path := range []string{"error.headers", "body.error.headers", "headers"} {
+		headersNode := ojson.GetBytesNoCopy(payload, path)
+		if !headersNode.IsObject() {
+			continue
+		}
+		headersNode.ForEach(func(key, value ojson.Result) bool {
+			name := strings.TrimSpace(key.String())
+			if name == "" {
+				return true
+			}
+			switch value.Type {
+			case ojson.String:
+				if v := strings.TrimSpace(value.String()); v != "" {
+					mapped.Set(strings.Clone(name), strings.Clone(v))
+				}
+			case ojson.Number, ojson.True, ojson.False:
+				if v := strings.TrimSpace(value.Raw); v != "" {
+					mapped.Set(strings.Clone(name), strings.Clone(v))
+				}
+			default:
+			}
 			return true
-		}
-		switch value.Type {
-		case ojson.String:
-			if v := strings.TrimSpace(value.String()); v != "" {
-				mapped.Set(strings.Clone(name), strings.Clone(v))
-			}
-		case ojson.Number, ojson.True, ojson.False:
-			if v := strings.TrimSpace(value.Raw); v != "" {
-				mapped.Set(strings.Clone(name), strings.Clone(v))
-			}
-		default:
-		}
-		return true
-	})
+		})
+	}
 	if len(mapped) == 0 {
 		return nil
 	}
