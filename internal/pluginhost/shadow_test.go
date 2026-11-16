@@ -207,9 +207,7 @@ func TestShadowDirectoryDigestResolvesRelativePathsByWorkingDirectory(t *testing
 	if errWD != nil {
 		t.Fatalf("Getwd() error = %v", errWD)
 	}
-	t.Cleanup(func() {
-		_ = os.Chdir(origWD)
-	})
+	defer func() { _ = os.Chdir(origWD) }()
 
 	workA := t.TempDir()
 	workB := t.TempDir()
