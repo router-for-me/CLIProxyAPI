@@ -769,6 +769,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 		}
 	}
 	ctx = WithCapturedIdentity(ctx, record.APIKey, record.AccessProvider, record.IsNativeKey)
+	applyCostHook(ctx, &record) // proxx: per-request cost (cost_hook_proxx.go)
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()

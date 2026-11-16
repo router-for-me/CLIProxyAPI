@@ -1,0 +1,69 @@
+# proxx example: one "auto" model for a bot, backed by free-tier LLM APIs.
+# Merge the relevant parts into your config.yaml (config-version 8). Replace the keys.
+#
+# Free tiers change often; verify model IDs and limits in each provider's console.
+# As of Nov 2026: GitHub Models is retired; Cerebras' free tier now needs a card;
+# OpenRouter ":free" models allow ~20 RPM and 50 requests/day (1000/day after a one-time $10 top-up).
+
+api-keys:
+  # Native Gemini API (AI Studio key). Daily quota resets at midnight Pacific.
+  gemini:
+    - name: gemini-free
+      priority: 10              # tried before lower priorities when several serve the same model
+      keys:
+        - api-key: "AIza...your-key"
+
+  openai-compatibility:
+    - name: "groq"
+      base-url: "https://api.groq.com/openai/v1"
+      keys:
+        - api-key: "gsk_...your-key"
+      models:
+        - name: "llama-3.3-70b-versatile"
+          alias: "groq-llama-70b"
+        - name: "openai/gpt-oss-120b"
+          alias: "groq-gpt-oss"
+
+    - name: "openrouter"
+      base-url: "https://openrouter.ai/api/v1"
+      keys:
+        - api-key: "sk-or-v1-...your-key"
+      models:
+        # Repeating one alias pools several free models inside this provider.
+        - name: "meta-llama/llama-3.3-70b-instruct:free"
+          alias: "or-free"
+        - name: "deepseek/deepseek-chat-v3.1:free"
+          alias: "or-free"
+
+proxx:
+  model-groups:
+    # Clients send model "auto". Members are tried in order; a member whose credentials are
+    # cooling down after a 429 is skipped until it recovers; 5xx/429/auth/context-length errors
+    # fail over to the next member. The member that answered is in X-Proxx-Served-Model.
+    - name: auto
+      strategy: ordered
+      models:
+        - gemini-2.5-flash
+        - groq-llama-70b
+        - groq-gpt-oss
+        - or-free
+    # Spread load instead of always hitting the first member.
+    - name: auto-rr
+      strategy: round-robin
+      hidden: true
+      models: [gemini-2.5-flash, groq-llama-70b, or-free]
+
+  pricing:
+    # Prices match the model that served the request (not the alias). OpenRouter ":free"
+    # models already price at 0. Without the entries below, Groq/Gemini traffic is priced at
+    # their paid-tier catalog rates, i.e. "what this would cost on a paid plan".
+    models:
+      - model: "llama-3.3-70b-versatile"
+        provider: "groq"
+        input: 0
+        output: 0
+        override: true
+
+management:
+  # Use the proxx panel (needs a published proxx-panel release; see docs/proxx/README.md).
+  panel-github-repository: "https://github.com/iamkunal9/proxx-panel"

@@ -200,6 +200,9 @@ func isOpenAIImageExecutionOptions(opts cliproxyexecutor.Options) bool {
 }
 
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if resp, handled, errGroup := m.proxxExecuteGroup(ctx, providers, req, opts); handled { // proxx: model groups
+		return resp, errGroup
+	}
 	scope := m.beginInFlight("")
 	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
@@ -221,6 +224,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	maxWait = proxxGroupMaxWait(ctx, maxWait) // proxx: group members fail over instead of waiting
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -282,6 +286,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if resp, handled, errGroup := m.proxxExecuteCountGroup(ctx, providers, req, opts); handled { // proxx: model groups
+		return resp, errGroup
+	}
 	scope := m.beginInFlight("")
 	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
@@ -299,6 +306,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	maxWait = proxxGroupMaxWait(ctx, maxWait) // proxx: group members fail over instead of waiting
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -351,6 +359,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (result *cliproxyexecutor.StreamResult, err error) {
+	if groupResult, handled, errGroup := m.proxxExecuteStreamGroup(ctx, providers, req, opts); handled { // proxx: model groups
+		return groupResult, errGroup
+	}
 	scope := m.beginInFlight("")
 	defer func() {
 		if scope != nil {
@@ -378,6 +389,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	maxWait = proxxGroupMaxWait(ctx, maxWait) // proxx: group members fail over instead of waiting
 
 	var lastErr error
 	var preferredUpstreamErr error
