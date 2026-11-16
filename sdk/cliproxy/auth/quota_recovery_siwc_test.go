@@ -30,6 +30,8 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 		name, account            string
 		bound, disabled, recover bool
 		outerUnknown             bool
+		headers                  map[string]string
+		dynamicAccount           bool
 	}{
 		{name: "plain", recover: true},
 		{name: "disabled_partition", bound: true, disabled: true, recover: true},
@@ -37,6 +39,11 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 		{name: "different_account", bound: true, account: "other-account"},
 		{name: "known_same_account", bound: true, account: "outer-account", recover: true},
 		{name: "unproven_outer_account", bound: true, outerUnknown: true},
+		{name: "account_header_override", bound: true, account: "outer-account", headers: map[string]string{"Chatgpt-Account-Id": "other-account"}},
+		{name: "bearer_header_override", bound: true, account: "outer-account", headers: map[string]string{"Authorization": "Bearer other-token"}},
+		{name: "dynamic_account_header", bound: true, account: "outer-account", headers: map[string]string{"Chatgpt-Account-Id": "$X-Selected-Account"}, dynamicAccount: true},
+		{name: "matching_identity_headers", bound: true, account: "outer-account", headers: map[string]string{"Chatgpt-Account-Id": "outer-account", "Authorization": "Bearer siwc-token"}, recover: true},
+		{name: "unrelated_header", bound: true, account: "outer-account", headers: map[string]string{"X-Test": "preserved"}, recover: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -49,6 +56,11 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 			credential := ojson.NewDocString(`{"type":"codex","access_token":"outer-token","refresh_token":"outer-refresh"}`)
 			if err := credential.Set("account_id", outerAccount); err != nil {
 				t.Fatal(err)
+			}
+			if len(tc.headers) > 0 {
+				if err := credential.Set("headers", tc.headers); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := os.WriteFile(path, credential.Bytes(), 0600); err != nil {
 				t.Fatal(err)
@@ -66,8 +78,27 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 					if tc.bound && !tc.disabled {
 						want = "siwc-token"
 					}
+					if bearer := tc.headers["Authorization"]; bearer != "" {
+						want = strings.TrimPrefix(bearer, "Bearer ")
+					}
 					if r.Header.Get("Authorization") != "Bearer "+want {
 						t.Errorf("inference bearer did not select expected partition")
+					}
+					wantAccount := outerAccount
+					if tc.bound && !tc.disabled {
+						wantAccount = ""
+					}
+					if account := tc.headers["Chatgpt-Account-Id"]; account != "" {
+						wantAccount = account
+					}
+					if tc.dynamicAccount {
+						wantAccount = "other-account"
+					}
+					if r.Header.Get("Chatgpt-Account-Id") != wantAccount {
+						t.Errorf("inference did not apply expected account selector")
+					}
+					if tc.headers["X-Test"] != "" && r.Header.Get("X-Test") != tc.headers["X-Test"] {
+						t.Errorf("inference did not preserve unrelated configured header")
 					}
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusTooManyRequests)
@@ -91,7 +122,12 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 			}}
 			http.DefaultTransport = transport
 			defer func() { http.DefaultTransport = previous; transport.CloseIdleConnections() }()
-			auth, err := manager.Register(ctx, &coreauth.Auth{ID: "siwc-recovery", FileName: "codex.json", Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"type": "codex", "access_token": "outer-token", "refresh_token": "outer-refresh", "account_id": outerAccount}, Attributes: map[string]string{"path": path, "base_url": upstream.URL}})
+			inputAuth := &coreauth.Auth{ID: "siwc-recovery", FileName: "codex.json", Provider: "codex", Status: coreauth.StatusActive, Metadata: map[string]any{"type": "codex", "access_token": "outer-token", "refresh_token": "outer-refresh", "account_id": outerAccount}, Attributes: map[string]string{"path": path, "base_url": upstream.URL}}
+			if len(tc.headers) > 0 {
+				inputAuth.Metadata["headers"] = tc.headers
+				coreauth.ApplyCustomHeadersFromMetadata(inputAuth)
+			}
+			auth, err := manager.Register(ctx, inputAuth)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +152,11 @@ func TestQuotaRecoverySIWCPartitionIdentity(t *testing.T) {
 			registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
 			defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
 			manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
-			_, err = manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"siwc-recovery-model","input":[]}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+			if tc.dynamicAccount {
+				opts.Headers = http.Header{"X-Selected-Account": []string{"other-account"}}
+			}
+			_, err = manager.Execute(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"siwc-recovery-model","input":[]}`)}, opts)
 			if err == nil || inferenceCalls != 1 {
 				t.Fatalf("inference failure was not recorded through executor: calls=%d err=%v", inferenceCalls, err)
 			}
