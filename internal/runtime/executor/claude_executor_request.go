@@ -1584,6 +1584,10 @@ func applyClaudeHeadersWithNativeProfile(
 			"X-Claude-Code-Prev-Tool-Durations",
 			"X-Claude-Code-Compaction",
 			"X-Claude-Code-Context-Compacted",
+			"X-Claude-Code-Sandy-Plover",
+			"Anthropic-Dispatch-Id",
+			"X-Claude-Code-Prompt-Id",
+			"Anthropic-Usage-Limit",
 		} {
 			if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
 				r.Header.Set(hdr, val)
