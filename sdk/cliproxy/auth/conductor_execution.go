@@ -172,7 +172,7 @@ func (m *Manager) normalizeSessionAffinityNeverTerminalError(err error, provider
 		return err
 	}
 	affinity, ok := m.Selector().(*SessionAffinitySelector)
-	if !ok || affinity == nil || !affinity.rebindOnNever {
+	if !ok || affinity == nil || !affinity.rebindNeverForModel(model) {
 		return err
 	}
 	if _, okBound := affinity.boundAuthForRequest(providers, model, opts); !okBound {

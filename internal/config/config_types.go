@@ -601,6 +601,13 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SessionAffinityRebindOnModels lists model IDs that always use the "never" rebind policy
+	// even when SessionAffinityRebindOn is "any" or "quota". Matching ignores case and
+	// thinking suffixes. Other models keep the global SessionAffinityRebindOn value.
+	// An empty list leaves the global value in effect for every model.
+	// Ignored when SessionAffinity is false.
+	SessionAffinityRebindOnModels []string `yaml:"session-affinity-rebind-on-models,omitempty" json:"session-affinity-rebind-on-models,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

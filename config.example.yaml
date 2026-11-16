@@ -227,6 +227,15 @@ routing:
   #     keep the binding and return the error (or retry the same credential) instead.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
+  # Models listed here always use the "never" policy above, even when
+  # session-affinity-rebind-on is "any" or "quota". Matching is case-insensitive and
+  # ignores thinking suffixes such as "(high)". Other models keep the global
+  # session-affinity-rebind-on value, so one model can stay pinned while the rest
+  # keep normal failover.
+  # Example:
+  # session-affinity-rebind-on-models:
+  #   - "claude-fable-5-2"
+  session-affinity-rebind-on-models: []
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

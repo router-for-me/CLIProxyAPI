@@ -2,9 +2,11 @@ package cliproxy
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
@@ -61,6 +63,9 @@ type routingRuntimeState struct {
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
 	sessionAffinityRebindOn  string
+	// sessionAffinityRebindOnModels is a sorted, comma-joined list so the
+	// struct stays comparable for hot-reload equality checks.
+	sessionAffinityRebindOnModels string
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -99,6 +104,9 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		case coreauth.SessionAffinityRebindOnNever:
 			state.sessionAffinityRebindOn = coreauth.SessionAffinityRebindOnNever
 		}
+		models := internalconfig.NormalizeExcludedModels(cfg.Routing.SessionAffinityRebindOnModels)
+		sort.Strings(models)
+		state.sessionAffinityRebindOnModels = strings.Join(models, ",")
 	}
 	return state
 }
@@ -123,11 +131,16 @@ func newRoutingSelectorWithExisting(state routingRuntimeState, existing coreauth
 	}
 	if state.sessionAffinity {
 		subagents := state.sessionAffinitySubagents
+		var rebindOnModels []string
+		if state.sessionAffinityRebindOnModels != "" {
+			rebindOnModels = strings.Split(state.sessionAffinityRebindOnModels, ",")
+		}
 		selector = coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 			Fallback:         selector,
 			TTL:              state.sessionAffinityTTL,
 			SubagentAffinity: &subagents,
 			RebindOn:         state.sessionAffinityRebindOn,
+			RebindOnModels:   rebindOnModels,
 		})
 	}
 	return selector
