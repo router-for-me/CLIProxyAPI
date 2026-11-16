@@ -1,11 +1,12 @@
 package management
 
 import (
-	"github.com/MoeForge/moego/json"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestRoutingUsageWeeklyOnlySchedule(t *testing.T) {
