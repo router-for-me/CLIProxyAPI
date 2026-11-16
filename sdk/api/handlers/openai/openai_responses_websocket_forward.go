@@ -257,20 +257,26 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				// In Codex duplex mode the executor owns connection termination:
 				// payload errors after response.created are recoverable events;
 				// StreamChunk.Err still arrives through errs and closes the socket.
-				preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream()
-				if eventType == wsEventTypeError && preserveErrorEvent {
-					turnEnded = true
-					if errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i]); errMsg != nil && h != nil {
-						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
-					}
-				} else if eventType == wsEventTypeError && !preserveErrorEvent {
-					payloadErrMsg = responsesWebsocketErrorMessageFromPayload(payloads[i])
-					if h != nil {
-						h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
-					}
-					if opts.suppressError != nil && opts.suppressError(payloadErrMsg) {
-						cancel(payloadErrMsg.Error)
-						return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
+				// Known credential quota/cooldown errors are not recoverable on the
+				// same socket and must still consult the replay guard.
+				if eventType == wsEventTypeError {
+					errMsg := responsesWebsocketErrorMessageFromPayload(payloads[i])
+					preserveErrorEvent := responseStarted && opts.duplexStream != nil && opts.duplexStream() &&
+						(errMsg == nil || !isResponsesWebsocketQuotaOrCooldownError(errMsg.Error))
+					if preserveErrorEvent {
+						turnEnded = true
+						if errMsg != nil && h != nil {
+							h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+						}
+					} else {
+						payloadErrMsg = errMsg
+						if h != nil {
+							h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), payloadErrMsg)
+						}
+						if opts.suppressError != nil && opts.suppressError(payloadErrMsg) {
+							cancel(payloadErrMsg.Error)
+							return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, nil
+						}
 					}
 				} else if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" {
 					// response.incomplete ends the turn too. Codex uses it, with

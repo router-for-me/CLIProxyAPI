@@ -8,13 +8,24 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
+// SanitizePayloadRules validates raw JSON and text replacement rules, dropping invalid rules.
 func (cfg *Config) SanitizePayloadRules() {
 	if cfg == nil {
 		return
 	}
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+	if len(cfg.Payload.Replace) > 0 {
+		valid := make([]PayloadReplaceRule, 0, len(cfg.Payload.Replace))
+		for i, rule := range cfg.Payload.Replace {
+			if errValidate := rule.Validate(); errValidate != nil {
+				log.Warnf("payload.replace rule %d dropped: %v", i+1, errValidate)
+				continue
+			}
+			valid = append(valid, rule)
+		}
+		cfg.Payload.Replace = valid
+	}
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {

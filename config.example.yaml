@@ -356,6 +356,20 @@ requests:
   #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+  #   replace: # Ordered literal replacements in existing user text; runs after overrides, before filter.
+  #     - models: # Same model, protocol, header, and payload conditions as other rules.
+  #         - name: "*"
+  #           protocol: "claude"
+  #           from-protocol: "openai"
+  #       target:
+  #         role: user
+  #         positions: [1, 2] # One-based user positions in the final upstream body; missing positions are skipped.
+  #         # all: true      # Select every user instead of positions (mutually exclusive).
+  #       replacements: # Each entry has exactly one non-empty string key and a string value.
+  #         - "you are hero": "you are fool"
+  #         - "remove this phrase": ""
+  #       # Text blocks are processed separately; images, tools, and thinking are not modified.
+  #       # Supported layouts: OpenAI Chat, Claude, Responses/Codex, Gemini, and Antigravity.
   #   filter: # Filter rules remove specified parameters from the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")

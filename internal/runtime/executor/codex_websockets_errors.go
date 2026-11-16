@@ -29,23 +29,77 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 	return parseCodexWebsocketErrorWithCooling(payload, false)
 }
 
+func codexWebsocketErrorStatus(payload []byte) int {
+	for _, path := range []string{"status", "status_code"} {
+		if status := int(ojson.GetBytesNoCopy(payload, path).Int()); status > 0 {
+			return status
+		}
+	}
+	for _, path := range []string{
+		"body.status", "body.status_code",
+		"error.status", "error.status_code",
+		"body.error.status", "body.error.status_code",
+		"response.error.status", "response.error.status_code",
+	} {
+		if status := int(ojson.GetBytesNoCopy(payload, path).Int()); status >= 400 && status <= 599 {
+			return status
+		}
+	}
+	return 0
+}
+
+func codexWebsocketErrorStatusWithHeaders(payload []byte, headers http.Header) int {
+	if status := codexWebsocketErrorStatus(payload); status > 0 {
+		return status
+	}
+	if len(headers) == 0 {
+		return 0
+	}
+	return inferCodexWebsocketErrorStatus(payload)
+}
+
+func inferCodexWebsocketErrorStatus(payload []byte) int {
+	if isCodexWebsocketConnectionLimitError(payload) {
+		return http.StatusTooManyRequests
+	}
+	body, ok := codexTerminalFailureBody(payload)
+	if !ok {
+		return 0
+	}
+	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+		return http.StatusTooManyRequests
+	}
+	if codexTerminalErrorIsContextLength(body) {
+		return http.StatusBadRequest
+	}
+	if code, _, classified := codexStatusErrorClassification(http.StatusBadRequest, body); classified {
+		if code == "auth_unavailable" {
+			return http.StatusUnauthorized
+		}
+		return http.StatusBadRequest
+	}
+	errorType := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
+	errorCode := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.code").String()))
+	if errorType == "service_unavailable_error" || errorCode == "server_is_overloaded" {
+		return http.StatusServiceUnavailable
+	}
+	return codexTerminalFailureStatus(body)
+}
+
 func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool) (error, bool) {
 	if len(payload) == 0 {
 		return nil, false
 	}
-	if strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String()) != "error" {
+	if helps.CodexResponseEventType(payload) != "error" {
 		return nil, false
 	}
-	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
-	if status == 0 {
-		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
-	}
+	headers := parseCodexWebsocketErrorHeaders(payload)
+	status := codexWebsocketErrorStatusWithHeaders(payload, headers)
 	if status <= 0 {
 		return nil, false
 	}
 
 	out := buildCodexWebsocketErrorPayload(payload, status)
-	headers := parseCodexWebsocketErrorHeaders(payload)
 	isUsageLimit := isCodexUsageLimitError(out)
 	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
 	statusError := statusErr{
@@ -74,10 +128,8 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 }
 
 func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexReasoningReplayScope, payload []byte) error {
-	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
-	if status == 0 {
-		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
-	}
+	headers := parseCodexWebsocketErrorHeaders(payload)
+	status := codexWebsocketErrorStatusWithHeaders(payload, headers)
 	if status <= 0 {
 		return nil
 	}
@@ -85,19 +137,55 @@ func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexR
 }
 
 func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
-	doc := ojson.NewDoc([]byte(`{}`))
+	doc := ojson.NewDocString(`{"type":"error"}`)
 	_ = doc.Set("status", status)
+	if seq := ojson.GetBytesNoCopy(payload, "sequence_number"); seq.Exists() {
+		_ = doc.Set("sequence_number", seq.Int())
+	}
+
+	fillBlankErrorMessage := func() {
+		if node := doc.Get("error"); !node.IsObject() {
+			scalar := ""
+			if node.Type != ojson.Null && strings.TrimSpace(node.String()) != "" {
+				scalar = node.String()
+			}
+			_ = doc.SetRawBytes("error", []byte(`{}`))
+			if scalar != "" {
+				_ = doc.Set("error.message", scalar)
+				return
+			}
+		}
+		if strings.TrimSpace(doc.Get("error.message").String()) != "" {
+			return
+		}
+		if code := strings.TrimSpace(doc.Get("error.code").String()); code != "" {
+			_ = doc.Set("error.message", codexPolicyFallbackMessage(code))
+		} else if errType := strings.TrimSpace(doc.Get("error.type").String()); errType != "" {
+			_ = doc.Set("error.message", errType)
+		} else {
+			_ = doc.Set("error.message", http.StatusText(status))
+		}
+	}
 
 	if bodyNode := ojson.GetBytesNoCopy(payload, "body"); bodyNode.Exists() {
 		_ = doc.SetRawBytes("body", []byte(bodyNode.Raw))
-		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() {
+		if bodyErrorNode := bodyNode.Get("error"); bodyErrorNode.Exists() && bodyErrorNode.Type != ojson.Null {
 			_ = doc.SetRawBytes("error", []byte(bodyErrorNode.Raw))
+			fillBlankErrorMessage()
 			return doc.Bytes()
 		}
 	}
 
-	if errNode := ojson.GetBytesNoCopy(payload, "error"); errNode.Exists() {
-		_ = doc.SetRawBytes("error", []byte(errNode.Raw))
+	for _, path := range []string{"error", "response.error"} {
+		if errNode := ojson.GetBytesNoCopy(payload, path); errNode.Exists() && errNode.Type != ojson.Null {
+			_ = doc.SetRawBytes("error", []byte(errNode.Raw))
+			fillBlankErrorMessage()
+			return doc.Bytes()
+		}
+	}
+	if topLevel := codexTerminalTopLevelErrorBody(payload); topLevel != nil {
+		_ = doc.SetRawBytes("error", []byte(topLevel.Get("error").Raw))
+		fillBlankErrorMessage()
 		return doc.Bytes()
 	}
 
@@ -120,6 +208,9 @@ func isCodexWebsocketConnectionLimitError(payload []byte) bool {
 
 func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
 	headersNode := ojson.GetBytesNoCopy(payload, "headers")
+	if !headersNode.Exists() || !headersNode.IsObject() {
+		headersNode = ojson.GetBytesNoCopy(payload, "body.headers")
+	}
 	if !headersNode.Exists() || !headersNode.IsObject() {
 		return nil
 	}
