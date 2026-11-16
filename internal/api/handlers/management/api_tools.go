@@ -215,7 +215,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
 	var routingSnapshot *coreauth.Auth
-	if h.authManager != nil && auth != nil && routingUsageRequestMatches(req, auth) {
+	if c.GetBool(ConfigV8ContextKey) && h.authManager != nil && auth != nil && routingUsageRequestMatches(req, auth) {
 		routingSnapshot = auth.Clone()
 	}
 	routingRedirected := false

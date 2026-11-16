@@ -120,7 +120,10 @@ func TestRoutingUsageAPICallObservation(t *testing.T) {
 			body, _ := json.Marshal(map[string]any{"authIndex": a.EnsureIndex(), "method": "GET", "url": url, "header": headers})
 			h := &Handler{authManager: m}
 			router := gin.New()
-			router.POST("/", h.APICall)
+			router.POST("/", func(c *gin.Context) {
+				c.Set(ConfigV8ContextKey, true)
+				h.APICall(c)
+			})
 			recorder := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
 			req.Header.Set("Content-Type", "application/json")
@@ -143,7 +146,7 @@ func TestRoutingUsageAPICallObservation(t *testing.T) {
 				if after.QuotaResetSchedule.WeeklyResetAt.Year() != 2030 || !reflect.DeepEqual(a.Quota, after.Quota) {
 					t.Fatal("observation invalid or cooldown changed")
 				}
-				entry := h.buildAuthFileEntry(after, authFileQuotaContext{})
+				entry := h.buildAuthFileEntry(after, authFileQuotaContext{v8: true})
 				if entry == nil || entry["routing_reset_schedule"] == nil {
 					t.Fatal("management inventory lacks routing observation")
 				}
