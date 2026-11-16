@@ -1,6 +1,8 @@
 # Container Manager project: /volume1/docker/projects/fleet-controller
 # Data: /volume1/docker/fleet-controller (config, auths, logs)
-# Update: change the image tag, then Container Manager > Project > Build.
+# Update: change the image tag here AND in the NAS copy at
+# /volume1/docker/projects/fleet-controller/compose.yaml (pushing this file does
+# not reach the NAS), then Container Manager > Project > Build.
 services:
   fleet-controller:
     container_name: fleet-controller
