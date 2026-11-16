@@ -380,7 +380,7 @@ func (e *authUnavailableError) Headers() http.Header {
 
 // poolCooldownTerminalError wraps a terminal upstream 429 when every eligible
 // candidate credential for the requested model is blocked and at least one is
-// in a timed cooldown. It keeps the upstream error text, body, status, and
+// in a timed cooldown. It keeps the upstream error text, body, and
 // passthrough headers while marking the error as a model cooldown and exposing
 // the pool's earliest recovery deadline via Retry-After.
 type poolCooldownTerminalError struct {
@@ -424,7 +424,9 @@ func (e *poolCooldownTerminalError) StatusCode() int {
 	if e == nil {
 		return 0
 	}
-	return statusCodeFromError(e.cause)
+	// The request that exhausted the last account must behave like later
+	// requests against the cooling pool, so clients keep retrying both.
+	return modelCooldownHTTPStatus()
 }
 
 func (e *poolCooldownTerminalError) RetryAfter() *time.Duration {

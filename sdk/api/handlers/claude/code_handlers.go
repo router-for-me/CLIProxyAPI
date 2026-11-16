@@ -578,9 +578,14 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 		}
 	}
 	errType, message := claudeErrorDetailFromText(status, errText)
-	if status == http.StatusTooManyRequests && msg != nil && msg.Error != nil {
+	if (status == http.StatusTooManyRequests || status == 529) && msg != nil && msg.Error != nil {
 		var cooldown interface{ IsModelCooldown() bool }
 		if errors.As(msg.Error, &cooldown) && cooldown != nil && cooldown.IsModelCooldown() {
+			// A terminal pool error retains the upstream 429 JSON body. The
+			// configured 529 must still be exposed as overloaded_error.
+			if status == 529 {
+				errType = claudeErrorTypeFromStatus(status)
+			}
 			if seconds, errParse := strconv.ParseInt(retryAfter, 10, 64); errParse == nil && seconds > 0 {
 				delay := retryAfter + "s"
 				if seconds <= (1<<63-1)/int64(time.Second) {
