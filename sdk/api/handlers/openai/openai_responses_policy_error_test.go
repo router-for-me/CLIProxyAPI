@@ -33,4 +33,15 @@ func TestResponsesSSEFramerTypelessBodyPolicyError(t *testing.T) {
 	if bodyStatusFramer.terminalError == nil || bodyStatusFramer.terminalError.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("body status terminal error = %#v", bodyStatusFramer.terminalError)
 	}
+
+	metadataFramer := &responsesSSEFramer{isCodexClient: true}
+	metadataFrame := []byte("event: response.metadata\ndata: " + `{"type":"response.metadata","body":{"error":{"code":"bio_policy"}}}` + "\n\n")
+	repairedMetadata := metadataFramer.repairFrame(metadataFrame)
+	if metadataFramer.terminalError != nil {
+		t.Fatalf("unexpected terminal error on response.metadata: %#v", metadataFramer.terminalError)
+	}
+	metadataPayload, ok := responsesSSEDataPayload(repairedMetadata)
+	if !ok || ojson.GetBytes(metadataPayload, "type").String() != "response.metadata" {
+		t.Fatalf("response.metadata frame was rewritten: %s", repairedMetadata)
+	}
 }

@@ -181,4 +181,21 @@ func TestCodexTypelessErrorsPreserveCredentialStatus(t *testing.T) {
 	if got := ojson.Get(blankScalarWS.Error(), "error.message").String(); got != http.StatusText(http.StatusServiceUnavailable) {
 		t.Fatalf("blank scalar fallback message = %q, want %q", got, http.StatusText(http.StatusServiceUnavailable))
 	}
+
+	for _, nestedPayload := range []string{
+		`{"body":{"status":429,"error":{"message":"Too many concurrent requests"}},"headers":{"retry-after":"9","x-request-id":"req-body-429"}}`,
+		`{"error":{"status_code":429,"message":"Too many concurrent requests"},"headers":{"retry-after":"9","x-request-id":"req-err-429"}}`,
+	} {
+		nestedErr, okNested := parseCodexWebsocketError([]byte(nestedPayload))
+		if !okNested || statusCodeFromTestError(t, nestedErr) != http.StatusTooManyRequests {
+			t.Fatalf("nested websocket 429 = %v (ok=%v)", nestedErr, okNested)
+		}
+		retry := nestedErr.(interface{ RetryAfter() *time.Duration }).RetryAfter()
+		if retry == nil || *retry != 9*time.Second {
+			t.Fatalf("nested websocket retry-after = %v, want 9s", retry)
+		}
+		if gotReqID := nestedErr.(interface{ Headers() http.Header }).Headers().Get("X-Request-Id"); gotReqID == "" {
+			t.Fatalf("nested websocket headers lost: %#v", nestedErr)
+		}
+	}
 }

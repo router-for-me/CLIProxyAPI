@@ -308,7 +308,7 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 
 	f.dataFrames++
 
-	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasError(payload) {
+	if responsesSSEErrorEvent(payloadType) || responsesSSEPayloadHasErrorForEvent(streamEvent, payload) {
 		if payloadType != "" {
 			f.lastEvent = sanitizeResponsesStreamEventName(payloadType)
 		}
@@ -488,11 +488,42 @@ func responsesSSETerminalEvent(eventType string) bool {
 	}
 }
 
+func responsesSSETypeDenotesError(eventType string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(eventType))
+	if trimmed == "" {
+		return false
+	}
+	return responsesSSEErrorEvent(trimmed) ||
+		trimmed == "invalid_request" ||
+		strings.HasSuffix(trimmed, "_error") ||
+		strings.HasSuffix(trimmed, ".error")
+}
+
+func responsesSSECanInferBodyError(streamEvent, payloadType string) bool {
+	if s := strings.TrimSpace(streamEvent); s != "" && !responsesSSETypeDenotesError(s) {
+		return false
+	}
+	if p := strings.TrimSpace(payloadType); p != "" && !responsesSSETypeDenotesError(p) {
+		return false
+	}
+	return true
+}
+
 func responsesSSEPayloadHasError(payload []byte) bool {
-	var fieldsBuf [5]ojson.Result
-	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "body.error", "code", "message")
-	for _, result := range fields[:3] {
+	return responsesSSEPayloadHasErrorForEvent("", payload)
+}
+
+func responsesSSEPayloadHasErrorForEvent(streamEvent string, payload []byte) bool {
+	var fieldsBuf [6]ojson.Result
+	fields := ojson.GetManyBytesNoCopy(fieldsBuf[:0], payload, "error", "response.error", "body.error", "code", "message", "type")
+	for _, result := range fields[:2] {
 		if result.Exists() && result.Type != ojson.Null {
+			return true
+		}
+	}
+	if fields[2].Exists() && fields[2].Type != ojson.Null {
+		if !(fields[2].Type == ojson.String && strings.TrimSpace(fields[2].String()) == "") &&
+			responsesSSECanInferBodyError(streamEvent, fields[5].String()) {
 			return true
 		}
 	}

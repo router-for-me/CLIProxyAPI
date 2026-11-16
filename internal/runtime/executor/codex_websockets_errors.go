@@ -29,6 +29,25 @@ func parseCodexWebsocketError(payload []byte) (error, bool) {
 	return parseCodexWebsocketErrorWithCooling(payload, false)
 }
 
+func codexWebsocketErrorStatus(payload []byte) int {
+	for _, path := range []string{"status", "status_code"} {
+		if status := int(ojson.GetBytesNoCopy(payload, path).Int()); status > 0 {
+			return status
+		}
+	}
+	for _, path := range []string{
+		"body.status", "body.status_code",
+		"error.status", "error.status_code",
+		"body.error.status", "body.error.status_code",
+		"response.error.status", "response.error.status_code",
+	} {
+		if status := int(ojson.GetBytesNoCopy(payload, path).Int()); status >= 400 && status <= 599 {
+			return status
+		}
+	}
+	return 0
+}
+
 func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool) (error, bool) {
 	if len(payload) == 0 {
 		return nil, false
@@ -36,10 +55,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	if helps.CodexResponseEventType(payload) != "error" {
 		return nil, false
 	}
-	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
-	if status == 0 {
-		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
-	}
+	status := codexWebsocketErrorStatus(payload)
 	if status <= 0 {
 		return nil, false
 	}
@@ -73,10 +89,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 }
 
 func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexReasoningReplayScope, payload []byte) error {
-	status := int(ojson.GetBytesNoCopy(payload, "status").Int())
-	if status == 0 {
-		status = int(ojson.GetBytesNoCopy(payload, "status_code").Int())
-	}
+	status := codexWebsocketErrorStatus(payload)
 	if status <= 0 {
 		return nil
 	}
