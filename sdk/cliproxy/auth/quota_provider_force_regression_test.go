@@ -90,13 +90,10 @@ func TestQuotaRecoveryRetainedForceDeadline(t *testing.T) {
 				}
 				forced := 45 * time.Second
 				status := 429
-				if kind == "auth" {
-					status = 503
-				}
 				m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: status, Code: ErrorCodeForceCooldown, Message: "operator forced cooldown"}, RetryAfter: &forced, CredentialScope: kind == "credential"})
 				quota := time.Hour
 				m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: "codex", Model: model, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"usage_limit_reached"}}`}, RetryAfter: &quota, CredentialScope: kind != "model"})
-				if kind == "credential" {
+				if kind == "credential" || kind == "auth" {
 					restored := quotaProviderForceManager(t)
 					if _, err = restored.Register(context.Background(), &Auth{ID: a.ID, Provider: "codex", Status: StatusActive}); err != nil {
 						t.Fatal(err)
@@ -114,7 +111,7 @@ func TestQuotaRecoveryRetainedForceDeadline(t *testing.T) {
 				now := time.Now()
 				switch kind {
 				case "auth":
-					if len(before.ModelStates) != 0 || !effectiveAuthForceUntil(before).After(now) || !effectiveCredQuotaForceUntil(before).IsZero() {
+					if len(before.ModelStates) != 0 || !effectiveAuthForceUntil(before).After(now) || !effectiveCredQuotaForceUntil(before).IsZero() || !before.nonQuotaCooldownUntil.IsZero() {
 						t.Fatal("fixture did not isolate the retained auth force deadline")
 					}
 				case "credential":
@@ -133,7 +130,6 @@ func TestQuotaRecoveryRetainedForceDeadline(t *testing.T) {
 					switch kind {
 					case "auth":
 						current.forceCooldownUntil = now.Add(-time.Minute)
-						current.nonQuotaCooldownUntil = now.Add(-time.Minute)
 					case "credential":
 						current.credQuotaForceUntil = now.Add(-time.Minute)
 					case "model":
