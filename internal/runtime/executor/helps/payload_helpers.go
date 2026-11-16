@@ -1,13 +1,13 @@
 package helps
 
 import (
-	"encoding/json"
 	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"

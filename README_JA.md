@@ -314,6 +314,10 @@ CLIProxyAPI のアカウントプール向けのネイティブ macOS メニュ�
 
 話しながらリアルタイムで描画・操作できるインタラクティブな SVG/HTML キャンバスを備えた、全二重音声コンパニオン。CLIProxyAPI の 2 つの機能を組み合わせています：音声対話と即時割り込みを担う Codex GPT-Live 1.1 メディアリレー（`gpt-live-1-codex`、WebRTC + Sideband）と、会話中にキャンバスをリアルタイムで生成・編集する `ultrafast` Responses（`gpt-6.1-sol` / `gpt-6-astra`）です。
 
+### [Hyphantria](https://hyphantria.com)
+
+AI 支援による部品作成、リファレンスデザインの採用、および配置・配線の同時最適化を備えたネイティブ macOS 向け回路図・PCB 設計アプリ。CLIProxyAPI をネイティブサポートしており、AI 支援機能をお使いの AI プロバイダーに接続できます。
+
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
 

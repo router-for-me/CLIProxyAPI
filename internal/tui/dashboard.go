@@ -1,10 +1,10 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"

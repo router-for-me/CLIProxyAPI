@@ -9,3 +9,5 @@ require (
 )
 
 replace github.com/router-for-me/CLIProxyAPI/v8 => ../../../..
+
+replace github.com/MoeForge/moego => github.com/router-for-me/moego v0.1.3

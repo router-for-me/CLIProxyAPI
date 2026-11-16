@@ -2,10 +2,10 @@ package management
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )

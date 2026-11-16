@@ -1,13 +1,13 @@
 package handlers
 
 import (
-	"encoding/json"
 	"maps"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"

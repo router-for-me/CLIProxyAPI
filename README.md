@@ -328,6 +328,10 @@ Native macOS menu bar app for CLIProxyAPI pools. It shows how much of the pool's
 
 Real-time full-duplex voice companion with a live, interactive SVG/HTML canvas. It combines two CLIProxyAPI capabilities: the Codex GPT-Live 1.1 media relay (`gpt-live-1-codex`, WebRTC + Sideband) for voice with instant barge-in, and `ultrafast` Responses (`gpt-6.1-sol` / `gpt-6-astra`) for drawing and editing the canvas while you talk.
 
+### [Hyphantria](https://hyphantria.com)
+
+Native macOS schematic and PCB design app with AI-assisted component creation, reference-design adoption, and joint placement and routing optimisation. Natively supports CLIProxyAPI for connecting its AI-assisted features to your AI providers.
+
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 

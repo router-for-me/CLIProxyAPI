@@ -120,3 +120,5 @@ require (
 	google.golang.org/protobuf v1.34.1
 	gopkg.in/ini.v1 v1.67.0 // indirect
 )
+
+replace github.com/MoeForge/moego v0.1.0-alpha.3 => github.com/router-for-me/moego v0.1.3

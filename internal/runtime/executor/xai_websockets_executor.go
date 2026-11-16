@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"compress/flate"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"

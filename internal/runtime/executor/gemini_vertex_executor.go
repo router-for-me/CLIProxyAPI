@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	vertexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/vertex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"

@@ -5,7 +5,6 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -15,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -319,6 +319,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+	}
+	if excludedAuthIDs := excludedAuthIDsFromContext(ctx); len(excludedAuthIDs) > 0 {
+		meta[coreexecutor.ExcludedAuthIDsMetadataKey] = excludedAuthIDs
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
