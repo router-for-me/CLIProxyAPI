@@ -292,7 +292,7 @@ func (m multiplierOverrides) lookup(model string) (float64, bool) {
 }
 
 var (
-	dateSuffix      = regexp.MustCompile(`[-@]\d{8}$`)
+	dateSuffix      = regexp.MustCompile(`[-@](\d{8}|\d{4}-\d{2}-\d{2})$`)
 	effortSuffix    = regexp.MustCompile(`\([^)]*\)$`)
 	lookupPrefixes  = []string{"", "anthropic/", "openai/", "gemini/", "xai/", "deepseek/", "moonshot/"}
 	variantSuffixes = []string{"-thinking"}

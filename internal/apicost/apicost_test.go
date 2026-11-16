@@ -3,6 +3,7 @@ package apicost
 import (
 	"context"
 	"math"
+	"strconv"
 	"testing"
 	"time"
 
@@ -226,5 +227,38 @@ func TestEmbeddedSnapshotPricesCurrentModels(t *testing.T) {
 		if _, _, ok := catalog.Lookup(model); !ok {
 			t.Fatalf("embedded snapshot has no price for %s", model)
 		}
+	}
+}
+
+func TestMultiplierOverridesIgnoreISODateSuffix(t *testing.T) {
+	catalog, errParse := ParseLiteLLM(embeddedPricing)
+	if errParse != nil {
+		t.Fatalf("embedded snapshot: %v", errParse)
+	}
+	price := mustPrice(t, catalog, "gpt-5.5-2026-04-23")
+	if price.Fast != 2.5 || price.Flex != 0.5 {
+		t.Fatalf("gpt-5.5-2026-04-23 multipliers = %v/%v, want gpt-5.5 overrides 2.5/0.5", price.Fast, price.Flex)
+	}
+}
+
+func TestStorePrunesExpiredBucketsWhenFull(t *testing.T) {
+	catalog := testCatalog(t)
+	store := NewStore()
+	store.catalog = func() *Catalog { return catalog }
+	now := time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	old := make([]Bucket, maxBuckets)
+	for i := range old {
+		old[i] = Bucket{Hour: now.Add(-DefaultRetention - 24*time.Hour), Model: "claude-test", AuthID: strconv.Itoa(i), Requests: 1}
+	}
+	store.Import(old)
+	store.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "claude",
+		Model:       "claude-test",
+		RequestedAt: now,
+		Detail:      coreusage.Detail{TokenBreakdown: coreusage.NewIndependentTokenBreakdown(10, 0, 0, 10, 0, 0)},
+	})
+	if got := store.Buckets(now.Add(-time.Hour)); len(got) != 1 {
+		t.Fatalf("recent buckets = %d, want the new usage stored after expiring old buckets", len(got))
 	}
 }

@@ -104,7 +104,12 @@ func (s *Store) HandleUsage(_ context.Context, record coreusage.Record) {
 	entry := s.buckets[key]
 	if entry == nil {
 		if len(s.buckets) >= maxBuckets {
-			return
+			// Expire old buckets here too: the routing-state persister that
+			// normally prunes does not run on every node (e.g. Home-enabled).
+			s.pruneLocked(s.now())
+			if len(s.buckets) >= maxBuckets {
+				return
+			}
 		}
 		entry = &Bucket{Hour: time.Unix(key.hour, 0).UTC(), Model: key.model, Provider: key.provider, AuthID: key.authID}
 		s.buckets[key] = entry
@@ -187,9 +192,13 @@ func (s *Store) Prune(now time.Time) {
 	if s == nil {
 		return
 	}
-	cutoff := now.Add(-s.retention).Unix()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneLocked(now)
+}
+
+func (s *Store) pruneLocked(now time.Time) {
+	cutoff := now.Add(-s.retention).Unix()
 	for key := range s.buckets {
 		if key.hour < cutoff {
 			delete(s.buckets, key)
