@@ -47,6 +47,9 @@ func TestCodexResetReceiptSurvivesDelayedResult(t *testing.T) {
 			}
 			manager.MarkResult(ctx, auth.Result{AuthID: selected.ID, Provider: "codex", Success: true})
 			got, _ := manager.GetByID(selected.ID)
+			if !got.Quota.ObservedAt.Equal(receipt) {
+				t.Errorf("passive observation lost receipt time: got=%v want=%v", got.Quota.ObservedAt, receipt)
+			}
 			want := receipt.Add(180 * time.Second)
 			if !got.QuotaResetSchedule.WeeklyResetAt.Equal(want) || !got.QuotaResetSchedule.FiveHourResetAt.Equal(receipt.Add(240*time.Second)) {
 				t.Fatalf("delayed accounting shifted receipt resets: %+v, want weekly %s", got.QuotaResetSchedule, want)

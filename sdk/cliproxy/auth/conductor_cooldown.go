@@ -1540,7 +1540,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 		now = time.Now()
-		responseHeaders := internallogging.GetResponseHeaders(ctx)
+		responseHeaders, responseReceiptTimes := internallogging.GetResponseHeadersWithReceiptTimes(ctx)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
 		if trackCooldownState {
@@ -2159,10 +2159,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.UpdatedAt = now
 
 		if !result.SkipQuotaObservation {
-			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
-			auth.QuotaResetSchedule = EffectiveQuotaResetSchedule(auth)
+			observation := quotaScheduleFromResponseHeaders(result.Provider, responseHeaders, responseReceiptTimes, now)
+			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observation.ObservedAt)
+			if !observation.WeeklyResetAt.IsZero() || !observation.FiveHourResetAt.IsZero() {
+				auth.QuotaResetSchedule = mergeQuotaResetSchedule(auth.QuotaResetSchedule, observation)
+			}
 			if modelState != nil {
-				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
+				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observation.ObservedAt)
 			}
 		}
 

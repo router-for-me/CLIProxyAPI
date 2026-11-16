@@ -295,7 +295,7 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 }
 
 func recordAPIResponseMetadataAt(ctx context.Context, cfg *config.Config, status int, headers http.Header, observedAt time.Time) {
-	logging.SetResponseHeaders(ctx, anchorCodexQuotaResetHeaders(headers, observedAt))
+	logging.SetResponseHeadersAt(ctx, anchorCodexQuotaResetHeaders(headers, observedAt), observedAt)
 	if !requestLogCaptureEnabled(cfg) {
 		recordDeferredResponseMetadata(ctx, cfg, status, headers)
 		return
@@ -439,7 +439,7 @@ func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status
 }
 
 func recordAPIWebsocketHandshakeAt(ctx context.Context, cfg *config.Config, status int, headers http.Header, observedAt time.Time) {
-	logging.SetResponseHeaders(ctx, anchorCodexQuotaResetHeaders(headers, observedAt))
+	logging.SetResponseHeadersAt(ctx, anchorCodexQuotaResetHeaders(headers, observedAt), observedAt)
 	if !requestLogCaptureEnabled(cfg) {
 		recordDeferredResponseMetadata(ctx, cfg, status, headers)
 		return
@@ -468,7 +468,7 @@ func RecordAPIWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config,
 }
 
 func recordAPIWebsocketUpgradeRejectionAt(ctx context.Context, cfg *config.Config, info UpstreamRequestLog, status int, headers http.Header, body []byte, observedAt time.Time) {
-	logging.SetResponseHeaders(ctx, anchorCodexQuotaResetHeaders(headers, observedAt))
+	logging.SetResponseHeadersAt(ctx, anchorCodexQuotaResetHeaders(headers, observedAt), observedAt)
 	if cfg == nil || cfg.CommercialMode {
 		return
 	}
@@ -543,7 +543,7 @@ func AppendCodexAPIWebsocketResponse(ctx context.Context, cfg *config.Config, pa
 }
 
 func appendCodexAPIWebsocketResponseAt(ctx context.Context, cfg *config.Config, payload []byte, observedAt time.Time) {
-	logging.MergeResponseHeaders(ctx, anchorCodexQuotaResetHeaders(ParseCodexQuotaEventHeaders(payload), observedAt))
+	logging.MergeResponseHeadersAt(ctx, anchorCodexQuotaResetHeaders(ParseCodexQuotaEventHeaders(payload), observedAt), observedAt)
 	AppendAPIWebsocketResponse(ctx, cfg, payload)
 }
 

@@ -13,9 +13,11 @@ import (
 // QuotaResetSchedule is an in-memory observation from a provider usage endpoint.
 // It does not determine credential availability or release quota cooldowns.
 type QuotaResetSchedule struct {
-	WeeklyResetAt   time.Time `json:"weekly_reset_at"`
-	FiveHourResetAt time.Time `json:"five_hour_reset_at"`
-	ObservedAt      time.Time `json:"observed_at"`
+	WeeklyResetAt      time.Time `json:"weekly_reset_at"`
+	FiveHourResetAt    time.Time `json:"five_hour_reset_at"`
+	ObservedAt         time.Time `json:"observed_at"`
+	weeklyObservedAt   time.Time
+	fiveHourObservedAt time.Time
 }
 
 func quotaScheduleIdentityMatches(a, b *Auth) bool {
@@ -56,16 +58,75 @@ func EffectiveQuotaResetSchedule(auth *Auth) QuotaResetSchedule {
 	return mergeQuotaResetSchedule(schedule, observed)
 }
 
-// ObservedAt identifies the latest merged observation, not the age of every
-// reset field. A missing window retains its prior reset only until that reset.
+// Each reset window keeps its own receipt age: partial websocket events may
+// advance one window while retaining a window from an older response.
 func mergeQuotaResetSchedule(previous, observed QuotaResetSchedule) QuotaResetSchedule {
-	if observed.WeeklyResetAt.IsZero() && previous.WeeklyResetAt.After(observed.ObservedAt) {
-		observed.WeeklyResetAt = previous.WeeklyResetAt
+	mergeWindow := func(oldReset, oldAt, reset, at time.Time) (time.Time, time.Time) {
+		if oldAt.IsZero() && !oldReset.IsZero() {
+			oldAt = previous.ObservedAt
+		}
+		if at.IsZero() {
+			at = observed.ObservedAt
+		}
+		if reset.IsZero() {
+			if oldReset.After(observed.ObservedAt) {
+				return oldReset, oldAt
+			}
+			return time.Time{}, oldAt
+		}
+		if at.Before(oldAt) {
+			return oldReset, oldAt
+		}
+		return reset, at
 	}
-	if observed.FiveHourResetAt.IsZero() && previous.FiveHourResetAt.After(observed.ObservedAt) {
-		observed.FiveHourResetAt = previous.FiveHourResetAt
+	observed.WeeklyResetAt, observed.weeklyObservedAt = mergeWindow(previous.WeeklyResetAt, previous.weeklyObservedAt, observed.WeeklyResetAt, observed.weeklyObservedAt)
+	observed.FiveHourResetAt, observed.fiveHourObservedAt = mergeWindow(previous.FiveHourResetAt, previous.fiveHourObservedAt, observed.FiveHourResetAt, observed.fiveHourObservedAt)
+	if previous.ObservedAt.After(observed.ObservedAt) {
+		observed.ObservedAt = previous.ObservedAt
 	}
 	return observed
+}
+
+func quotaScheduleFromResponseHeaders(provider string, headers http.Header, receiptTimes map[string]time.Time, fallback time.Time) QuotaResetSchedule {
+	var observedAt time.Time
+	for _, at := range receiptTimes {
+		if at.After(observedAt) {
+			observedAt = at
+		}
+	}
+	if observedAt.IsZero() {
+		observedAt = fallback
+	}
+	schedule := quotaScheduleFromHeaders(provider, headers, observedAt)
+	receipt := func(name string) time.Time {
+		if at := receiptTimes[http.CanonicalHeaderKey(name)]; !at.IsZero() {
+			return at
+		}
+		return observedAt
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		schedule.weeklyObservedAt = receipt("Anthropic-Ratelimit-Unified-7d-Reset")
+		schedule.fiveHourObservedAt = receipt("Anthropic-Ratelimit-Unified-5h-Reset")
+	case "codex":
+		for _, window := range []string{"primary", "secondary"} {
+			prefix := "X-Codex-" + window
+			name := prefix + "-Reset-At"
+			absolute, err := strconv.ParseInt(strings.TrimSpace(headers.Get(name)), 10, 64)
+			if err != nil || absolute <= 0 || absolute > 253402300799 {
+				name = prefix + "-Reset-After-Seconds"
+			}
+			at := receipt(name)
+			windowSchedule := quotaScheduleFromHeaders(provider, headers, at)
+			switch strings.TrimSpace(headers.Get(prefix + "-Window-Minutes")) {
+			case "10080":
+				schedule.WeeklyResetAt, schedule.weeklyObservedAt = windowSchedule.WeeklyResetAt, at
+			case "300":
+				schedule.FiveHourResetAt, schedule.fiveHourObservedAt = windowSchedule.FiveHourResetAt, at
+			}
+		}
+	}
+	return schedule
 }
 
 func quotaScheduleFromHeaders(provider string, headers http.Header, observedAt time.Time) QuotaResetSchedule {
