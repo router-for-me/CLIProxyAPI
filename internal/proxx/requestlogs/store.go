@@ -359,14 +359,22 @@ func (s *Store) rowOf(e *entry) Row {
 			row.ServedModel = agg.model
 		}
 		in, out, cached, reasoning := agg.in, agg.out, agg.cached, agg.reasoning
-		row.InputTokens, row.OutputTokens, row.CachedTokens, row.ReasoningTokens = &in, &out, &cached, &reasoning
-		if agg.costKnown {
-			cost := agg.cost
-			row.CostUSD = &cost
-		}
-		row.CostSource = agg.costSource
-		if row.CostSource == "" {
-			row.CostSource = "unknown"
+		// A failed request whose attempts reported no usage has unknown (not zero) tokens and cost.
+		if row.Error && in+out+cached+reasoning == 0 {
+			if m.tokens.any() {
+				row.InputTokens, row.OutputTokens = m.tokens.in, m.tokens.out
+				row.ReasoningTokens, row.CachedTokens = m.tokens.reasoning, m.tokens.cached
+			}
+		} else {
+			row.InputTokens, row.OutputTokens, row.CachedTokens, row.ReasoningTokens = &in, &out, &cached, &reasoning
+			if agg.costKnown {
+				cost := agg.cost
+				row.CostUSD = &cost
+			}
+			row.CostSource = agg.costSource
+			if row.CostSource == "" {
+				row.CostSource = "unknown"
+			}
 		}
 		if row.Attempts == 0 {
 			row.Attempts = agg.records

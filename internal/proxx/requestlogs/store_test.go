@@ -362,3 +362,25 @@ func TestWebsocketTranscript(t *testing.T) {
 		t.Fatalf("attempts/response = %+v %+v", d.Attempts, d.Response)
 	}
 }
+
+func TestFailedRequestWithoutUsageHasUnknownTokensAndCost(t *testing.T) {
+	dir := t.TempDir()
+	fixtureCopy(t, dir, "error-400.log", "error-v1-chat-completions-2026-11-16T121848-2ddaa355.log", baseTime)
+	s := newTestStore(dir, 0)
+	zero := 0.0
+	s.usage.HandleUsage(context.Background(), usage.Record{
+		TraceID:  "01a1e31d-9196-74f5-9752-76e52ddaa355",
+		Provider: "openai-compatible-p400",
+		Model:    "up-400",
+		Failed:   true,
+		Detail:   usage.Detail{CostDetails: &usage.CostDetails{FinalCost: &zero, CostSource: "catalog"}},
+	})
+	p, _ := s.List(Query{})
+	r := p.Items[0]
+	if !r.Error || r.Provider != "openai-compatible-p400" {
+		t.Fatalf("row = %+v", r)
+	}
+	if r.InputTokens != nil || r.OutputTokens != nil || r.CostUSD != nil || r.CostSource != "" {
+		t.Fatalf("failed request without usage must have unknown tokens/cost, got in=%v out=%v cost=%v source=%q", r.InputTokens, r.OutputTokens, r.CostUSD, r.CostSource)
+	}
+}

@@ -83,6 +83,9 @@ Field semantics (interpretations the panel relies on):
   - With no usage record (the request was logged before the last restart, or the record was evicted),
     tokens fall back to the `usage` reported in the client response body: OpenAI chat/responses,
     Claude, Gemini `usageMetadata`. Cost is then null and `cost_source` is empty.
+  - A failed request (`error: true`) whose usage records report no tokens at all is treated the same way:
+    tokens come only from the response body (usually null), cost is null and `cost_source` is empty, so the
+    panel shows "—" instead of "0 / 0" and "$0" (2026-11-16).
 - `attempts` is the number of `API REQUEST n` sections, else the number of usage records.
 
 Detail:
