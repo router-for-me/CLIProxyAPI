@@ -180,7 +180,7 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 }
 
 func codexTerminalFailureStatus(body []byte) int {
-	for _, path := range []string{"error.status_code", "error.status"} {
+	for _, path := range []string{"error.status_code", "error.status", "status_code", "status"} {
 		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
 			return status
 		}
@@ -233,6 +233,12 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	}
 	if doc == nil {
 		doc = ojson.NewDocString(`{"error":{"message":"upstream stream failed without error details"}}`)
+	}
+	for _, statusPath := range []string{"status_code", "status", "body.status_code", "body.status"} {
+		if status := int(ojson.GetBytesNoCopy(eventData, statusPath).Int()); status >= 400 && status <= 599 {
+			_ = doc.Set("status", status)
+			break
+		}
 	}
 	if seq := ojson.GetBytesNoCopy(eventData, "sequence_number"); seq.Exists() {
 		_ = doc.Set("sequence_number", seq.Int())

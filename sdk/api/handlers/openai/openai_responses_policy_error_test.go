@@ -27,4 +27,10 @@ func TestResponsesSSEFramerTypelessBodyPolicyError(t *testing.T) {
 	if got := ojson.GetBytes(payload, "sequence_number").Int(); got != 7 {
 		t.Fatalf("sequence = %d", got)
 	}
+
+	bodyStatusFramer := &responsesSSEFramer{}
+	_ = bodyStatusFramer.repairFrame([]byte("data: " + `{"body":{"status":429,"error":{"message":"rate limited"}}}` + "\n\n"))
+	if bodyStatusFramer.terminalError == nil || bodyStatusFramer.terminalError.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("body status terminal error = %#v", bodyStatusFramer.terminalError)
+	}
 }

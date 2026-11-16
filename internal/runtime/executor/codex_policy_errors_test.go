@@ -147,10 +147,10 @@ func TestCodexTypelessErrorsPreserveCredentialStatus(t *testing.T) {
 		payload := fmt.Sprintf(`{"status":%d,"error":{"type":"authentication_error","code":"invalid_request_error","message":"rejected"},"headers":{"retry-after":"7"}}`, status)
 		err, ok := parseCodexWebsocketError([]byte(payload))
 		if !ok || statusCodeFromTestError(t, err) != status {
-			t.Fatalf("status %d: %v", status, err)
+			t.Fatalf("websocket status %d: %v", status, err)
 		}
 		if clienterror.IsRequestFault(status, err) {
-			t.Fatalf("credential status %d became a request fault", status)
+			t.Fatalf("websocket credential status %d became a request fault", status)
 		}
 		if status == 429 {
 			retry := err.(interface{ RetryAfter() *time.Duration }).RetryAfter()
@@ -158,5 +158,27 @@ func TestCodexTypelessErrorsPreserveCredentialStatus(t *testing.T) {
 				t.Fatalf("retry-after = %v", retry)
 			}
 		}
+
+		sseErr, _, okSSE := codexTerminalFailureErr([]byte(payload))
+		if !okSSE || statusCodeFromTestError(t, sseErr) != status {
+			t.Fatalf("sse status %d: %v", status, sseErr)
+		}
+		if clienterror.IsRequestFault(statusCodeFromTestError(t, sseErr), sseErr) {
+			t.Fatalf("sse credential status %d became a request fault", status)
+		}
+	}
+
+	untypedRateLimit := []byte(`{"status":429,"error":{"message":"Too many concurrent requests"}}`)
+	sseRateLimitErr, _, ok := codexTerminalFailureErr(untypedRateLimit)
+	if !ok || statusCodeFromTestError(t, sseRateLimitErr) != http.StatusTooManyRequests {
+		t.Fatalf("untyped 429 sse status = %v (ok=%v)", sseRateLimitErr, ok)
+	}
+
+	blankScalarWS, okWS := parseCodexWebsocketError([]byte(`{"type":"error","status":503,"error":"   "}`))
+	if !okWS || blankScalarWS == nil {
+		t.Fatal("missing blank scalar websocket error")
+	}
+	if got := ojson.Get(blankScalarWS.Error(), "error.message").String(); got != http.StatusText(http.StatusServiceUnavailable) {
+		t.Fatalf("blank scalar fallback message = %q, want %q", got, http.StatusText(http.StatusServiceUnavailable))
 	}
 }

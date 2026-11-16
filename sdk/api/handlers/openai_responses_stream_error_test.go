@@ -376,4 +376,38 @@ func TestBuildOpenAIResponsesStreamErrorChunk_BodyErrorLayoutAndBlankPolicyFallb
 	if genericChunk.Error["message"] != "content_policy_violation" {
 		t.Fatalf("error.message = %v, want content_policy_violation", genericChunk.Error["message"])
 	}
+
+	scalarBody := BuildOpenAIResponsesStreamErrorChunk(
+		http.StatusServiceUnavailable,
+		`{"type":"error","body":{"error":"model is at capacity"},"sequence_number":4}`,
+		0,
+	)
+	var scalarChunk openAIResponsesStreamErrorChunk
+	if err := json.Unmarshal(scalarBody, &scalarChunk); err != nil {
+		t.Fatalf("unmarshal scalar body chunk: %v", err)
+	}
+	if scalarChunk.SequenceNumber != 4 {
+		t.Fatalf("sequence_number = %d, want 4", scalarChunk.SequenceNumber)
+	}
+	if scalarChunk.Error["message"] != "model is at capacity" {
+		t.Fatalf("error.message = %v, want scalar message", scalarChunk.Error["message"])
+	}
+
+	scalarFailed := BuildOpenAIResponsesStreamFailedChunk(
+		http.StatusServiceUnavailable,
+		`{"error":"model is at capacity","sequence_number":6}`,
+		0,
+	)
+	var failedPayload struct {
+		SequenceNumber int `json:"sequence_number"`
+		Response       struct {
+			Error map[string]any `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(scalarFailed, &failedPayload); err != nil {
+		t.Fatalf("unmarshal scalar failed chunk: %v", err)
+	}
+	if failedPayload.SequenceNumber != 6 || failedPayload.Response.Error["message"] != "model is at capacity" {
+		t.Fatalf("unexpected scalar failed payload: %+v", failedPayload)
+	}
 }

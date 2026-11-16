@@ -344,8 +344,8 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 
 func responsesSSEPayloadErrorMessage(payload []byte) *interfaces.ErrorMessage {
 	status := http.StatusBadGateway
-	var candidatesBuf [6]ojson.Result
-	candidates := ojson.GetManyBytesNoCopy(candidatesBuf[:0], payload, "status", "status_code", "error.status", "error.status_code", "response.error.status", "response.error.status_code")
+	var candidatesBuf [10]ojson.Result
+	candidates := ojson.GetManyBytesNoCopy(candidatesBuf[:0], payload, "status", "status_code", "error.status", "error.status_code", "response.error.status", "response.error.status_code", "body.status", "body.status_code", "body.error.status", "body.error.status_code")
 	foundStatus := false
 	for _, res := range candidates {
 		candidate := int(res.Int())

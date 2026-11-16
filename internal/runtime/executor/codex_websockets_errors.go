@@ -91,9 +91,16 @@ func buildCodexWebsocketErrorPayload(payload []byte, status int) []byte {
 	}
 
 	fillBlankErrorMessage := func() {
-		if node := doc.Get("error"); node.Type == ojson.String && strings.TrimSpace(node.String()) != "" {
-			_ = doc.Set("error", map[string]any{"message": node.String()})
-			return
+		if node := doc.Get("error"); !node.IsObject() {
+			scalar := ""
+			if node.Type != ojson.Null && strings.TrimSpace(node.String()) != "" {
+				scalar = node.String()
+			}
+			_ = doc.SetRawBytes("error", []byte(`{}`))
+			if scalar != "" {
+				_ = doc.Set("error.message", scalar)
+				return
+			}
 		}
 		if strings.TrimSpace(doc.Get("error.message").String()) != "" {
 			return
