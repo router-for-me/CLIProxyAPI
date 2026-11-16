@@ -117,3 +117,24 @@ func TestModelAccessError_AllowsResolvedAutoModel(t *testing.T) {
 		t.Fatalf("modelAccessError(auto) = %v, want resolved model %q to be allowed", errMsg, resolved)
 	}
 }
+
+func TestFilterModelListIgnoresThinkingSuffix(t *testing.T) {
+	models := []map[string]any{{"id": "gpt-5(high)"}, {"id": "gpt-5"}}
+	if got := FilterModelList(ginWithPolicy(sdkaccess.NewModelPolicy([]string{"gpt-5"}, nil)), models); len(got) != 2 {
+		t.Fatalf("allowed model must not be hidden by its thinking suffix, got %v", got)
+	}
+	if got := FilterModelList(ginWithPolicy(sdkaccess.NewModelPolicy(nil, []string{"gpt-5"})), models); len(got) != 0 {
+		t.Fatalf("denied model must not be advertised through its thinking suffix, got %v", got)
+	}
+}
+
+func TestFilterModelListDropsConflictingIdentity(t *testing.T) {
+	models := []map[string]any{
+		{"id": "gpt-5", "name": "models/gpt-5"},
+		{"id": "gpt-5", "name": "models/private"},
+	}
+	got := FilterModelList(ginWithPolicy(sdkaccess.NewModelPolicy([]string{"gpt-5"}, nil)), models)
+	if len(got) != 1 {
+		t.Fatalf("conflicting identity fields must drop the entry, got %v", got)
+	}
+}

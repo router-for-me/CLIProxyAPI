@@ -149,3 +149,43 @@ func TestWriteModelListResponse_RejectsAmbiguousInterceptorCatalog(t *testing.T)
 		t.Fatalf("fail-closed response must not echo a catalog: %s", recorder.Body.String())
 	}
 }
+
+func TestFilterModelListResponseBody_NormalizesThinkingSuffix(t *testing.T) {
+	body := []byte(`{"data":[{"id":"gpt-5(high)"}]}`)
+	filtered, errFilter := FilterModelListResponseBody(ginWithPolicy(sdkaccess.NewModelPolicy([]string{"gpt-5"}, nil)), body)
+	if errFilter != nil {
+		t.Fatal(errFilter)
+	}
+	if models := ojson.ParseBytes(filtered).Get("data").Array(); len(models) != 1 {
+		t.Fatalf("allowed model must not be hidden by its thinking suffix: %s", filtered)
+	}
+
+	filtered, errFilter = FilterModelListResponseBody(ginWithPolicy(sdkaccess.NewModelPolicy(nil, []string{"gpt-5"})), body)
+	if errFilter != nil {
+		t.Fatal(errFilter)
+	}
+	if models := ojson.ParseBytes(filtered).Get("data").Array(); len(models) != 0 {
+		t.Fatalf("denied model must not be advertised through its thinking suffix: %s", filtered)
+	}
+}
+
+func TestFilterModelListResponseBody_RejectsConflictingIdentity(t *testing.T) {
+	policy := sdkaccess.NewModelPolicy([]string{"gpt-*"}, nil)
+	for _, body := range []string{
+		`{"models":[{"id":"gpt-5","name":"models/private"}]}`,
+		`{"data":[{"id":"gpt-5","slug":"private"}]}`,
+	} {
+		if filtered, errFilter := FilterModelListResponseBody(ginWithPolicy(policy), []byte(body)); errFilter == nil {
+			t.Fatalf("expected a fail-closed error for %s, got %s", body, filtered)
+		}
+	}
+
+	agreeing := []byte(`{"models":[{"id":"gpt-5","name":"models/gpt-5"}]}`)
+	filtered, errFilter := FilterModelListResponseBody(ginWithPolicy(policy), agreeing)
+	if errFilter != nil {
+		t.Fatalf("agreeing identity fields must not be rejected: %v", errFilter)
+	}
+	if models := ojson.ParseBytes(filtered).Get("models").Array(); len(models) != 1 {
+		t.Fatalf("agreeing identity entry must stay listed: %s", filtered)
+	}
+}

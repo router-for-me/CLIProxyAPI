@@ -29,7 +29,9 @@ func ModelPolicyFromGin(c *gin.Context) *sdkaccess.ModelPolicy {
 }
 
 // FilterModelList drops the entries of a registry model list that the request's key may not use.
-// Entries are identified by their "id" (OpenAI/Claude) or "name" (Gemini) field.
+// Entries are identified by their "id" (OpenAI/Claude), "name" (Gemini) or "slug" (Codex)
+// field. Thinking suffixes are ignored, matching execution, and entries whose identity
+// fields disagree are dropped.
 func FilterModelList(c *gin.Context, models []map[string]any) []map[string]any {
 	policy := ModelPolicyFromGin(c)
 	if policy == nil {
@@ -37,7 +39,11 @@ func FilterModelList(c *gin.Context, models []map[string]any) []map[string]any {
 	}
 	filtered := make([]map[string]any, 0, len(models))
 	for _, model := range models {
-		if policy.Allows(listedModelName(model)) {
+		name, conflict := mapModelIdentity(model)
+		if conflict || name == "" {
+			continue
+		}
+		if policy.Allows(policyModelName(name)) {
 			filtered = append(filtered, model)
 		}
 	}
@@ -47,7 +53,8 @@ func FilterModelList(c *gin.Context, models []map[string]any) []map[string]any {
 // FilterModelListResponseBody re-filters a serialized model-list response after
 // plugin response interceptors have had an opportunity to replace its body.
 // Restricted requests fail closed when the interceptor returns a malformed or
-// ambiguous catalog, including one with duplicate object keys.
+// ambiguous catalog, including one with duplicate object keys or with model entries
+// whose identity fields disagree.
 // The optional source format lets Claude catalogs match the decoded routing ID.
 func FilterModelListResponseBody(c *gin.Context, body []byte, sourceFormat ...string) ([]byte, error) {
 	policy := ModelPolicyFromGin(c)
@@ -103,19 +110,20 @@ func filterOJSONModelArray(doc *ojson.Doc, field string, policy *sdkaccess.Model
 	// Delete from the end so removal never shifts an index still to be checked.
 	for index := len(models) - 1; index >= 0; index-- {
 		item := models[index]
-		name := ""
-		if item.IsObject() {
-			for _, key := range []string{"id", "name", "slug"} {
-				value := item.Get(key)
-				if value.Type == ojson.String && value.Str != "" {
-					name = strings.TrimPrefix(value.Str, "models/")
-					break
-				}
+		if !item.IsObject() {
+			if errDelete := doc.Delete(field + "." + strconv.Itoa(index)); errDelete != nil {
+				return errDelete
 			}
+			continue
+		}
+		name, conflict := ojsonModelIdentity(item)
+		if conflict {
+			return errors.New("model catalog entry has conflicting identity fields")
 		}
 		if claudeCatalog {
 			name = claudemodels.ResolveClaudeModelIDPrefix(name)
 		}
+		name = policyModelName(name)
 		if name == "" || !policy.Allows(name) {
 			if errDelete := doc.Delete(field + "." + strconv.Itoa(index)); errDelete != nil {
 				return errDelete
@@ -125,13 +133,59 @@ func filterOJSONModelArray(doc *ojson.Doc, field string, policy *sdkaccess.Model
 	return nil
 }
 
-func listedModelName(model map[string]any) string {
-	for _, field := range []string{"id", "name", "slug"} {
-		if name, _ := model[field].(string); name != "" {
-			return strings.TrimPrefix(name, "models/")
+// mapModelIdentity returns the catalog identity of a model map and reports whether
+// its identity fields disagree.
+func mapModelIdentity(model map[string]any) (string, bool) {
+	fieldValue := func(field string) string {
+		value, _ := model[field].(string)
+		return value
+	}
+	return catalogIdentity(fieldValue("id"), fieldValue("name"), fieldValue("slug"))
+}
+
+// ojsonModelIdentity returns the catalog identity of a catalog entry and reports
+// whether its identity fields disagree.
+func ojsonModelIdentity(item ojson.Result) (string, bool) {
+	fieldValue := func(field string) string {
+		value := item.Get(field)
+		if value.Type != ojson.String {
+			return ""
+		}
+		return value.Str
+	}
+	return catalogIdentity(fieldValue("id"), fieldValue("name"), fieldValue("slug"))
+}
+
+// catalogIdentity returns the single model name carried by the identity fields of a
+// catalog entry. Distinct values are reported as a conflict: the policy would then
+// authorize one name while the client consumes another.
+func catalogIdentity(values ...string) (string, bool) {
+	name := ""
+	for _, value := range values {
+		identity := normalizeCatalogIdentity(value)
+		if identity == "" {
+			continue
+		}
+		if name == "" {
+			name = identity
+			continue
+		}
+		if !strings.EqualFold(identity, name) {
+			return "", true
 		}
 	}
-	return ""
+	return name, false
+}
+
+func normalizeCatalogIdentity(value string) string {
+	value = strings.TrimSpace(value)
+	return strings.TrimSpace(strings.TrimPrefix(value, "models/"))
+}
+
+// policyModelName normalizes a catalog identity for policy matching the same way
+// execution does: the thinking suffix is ignored.
+func policyModelName(name string) string {
+	return strings.TrimSpace(thinking.ParseSuffix(name).ModelName)
 }
 
 // modelAccessError rejects a request for a model the authenticated key may not use.

@@ -35,6 +35,12 @@ func TestValidateAPIKeyModelAccessRejectsNormalizedKeyCollision(t *testing.T) {
 				if !strings.Contains(errValidate.Error(), "api-key-model-access") {
 					t.Fatalf("error lacks configuration context: %v", errValidate)
 				}
+				// Client API keys are secrets; diagnostics are logged.
+				for _, secret := range []string{"client", "secret"} {
+					if strings.Contains(errValidate.Error(), secret) {
+						t.Fatalf("error repeats key material: %v", errValidate)
+					}
+				}
 				return
 			}
 			if errValidate != nil {
