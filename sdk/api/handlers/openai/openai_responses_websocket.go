@@ -952,6 +952,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var completedResponseID string
 		var completedPendingToolCallIDs []string
 		var forwardErrMsg *interfaces.ErrorMessage
+		continuityParent := coreauth.WithContinuityBudget(executionParent)
 
 		for {
 			lastAttemptedAuthID = pinnedAuthID
@@ -963,7 +964,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			pinnedAuthAttempted = false
 			turnStartEpoch := inputEpoch.Load()
 			var cliCancel handlers.APIHandlerCancelFunc
-			cliCtx, cliCancel = h.GetContextWithCancel(h, c, executionParent)
+			cliCtx, cliCancel = h.GetContextWithCancel(h, c, continuityParent)
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = cliproxyexecutor.WithLocalWebsocketTurnTracker(cliCtx)
 			cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
@@ -1017,7 +1018,57 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if len(excludedAuthIDs) > 0 {
 				cliCtx = handlers.WithExcludedAuthIDs(cliCtx, excludedAuthIDs)
 			}
-			dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+			var dataChan <-chan []byte
+			var errChan <-chan *interfaces.ErrorMessage
+			if !h.CanWaitForCodexContinuity(modelName) || handlers.StreamingKeepAliveInterval(h.CurrentConfig()) > 0 {
+				// The existing socket keepalive already covers configured intervals.
+				dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+			} else {
+				waitSignal := make(chan struct{}, 1)
+				cliCtx = coreauth.WithContinuityWaitNotifier(cliCtx, waitSignal)
+				type websocketStreamStart struct {
+					data <-chan []byte
+					errs <-chan *interfaces.ErrorMessage
+				}
+				started := make(chan websocketStreamStart, 1)
+				go func() {
+					data, _, errs := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+					started <- websocketStreamStart{data: data, errs: errs}
+				}()
+				var waitTicker *time.Ticker
+				var waitTick <-chan time.Time
+				waitingForStart := true
+				for waitingForStart {
+					select {
+					case result := <-started:
+						dataChan, errChan = result.data, result.errs
+						waitingForStart = false
+					case <-waitSignal:
+						if waitTicker == nil {
+							waitTicker = time.NewTicker(15 * time.Second)
+							waitTick = waitTicker.C
+						}
+					case <-waitTick:
+						if errPing := writer.writePing(); errPing != nil {
+							cliCancel(errPing)
+							waitTicker.Stop()
+							<-started
+							wsTerminateErr = errPing
+							return
+						}
+					case <-cliCtx.Done():
+						cliCancel(cliCtx.Err())
+						if waitTicker != nil {
+							waitTicker.Stop()
+						}
+						<-started
+						return
+					}
+				}
+				if waitTicker != nil {
+					waitTicker.Stop()
+				}
+			}
 			if !selectedAuthObserved {
 				// Plugin/alternate routes bypass auth selection. Keep canonical HTTP-mode
 				// state instead of inheriting the previous pinned websocket mode.

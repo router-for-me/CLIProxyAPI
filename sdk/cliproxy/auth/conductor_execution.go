@@ -220,6 +220,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
 
+	ctx = WithContinuityBudget(ctx)
+	if _, errWait := m.waitForSchedulerContinuity(ctx, normalized, authSelectionModelFromOptions(opts, req.Model), opts); errWait != nil {
+		return cliproxyexecutor.Response{}, errWait
+	}
+
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
 	var lastErr error
@@ -375,6 +380,13 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	opts, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return nil, errThread
+	}
+
+	if !m.HomeEnabled() {
+		ctx = WithContinuityBudget(ctx)
+		if _, errWait := m.waitForSchedulerContinuity(ctx, normalized, authSelectionModelFromOptions(opts, req.Model), opts); errWait != nil {
+			return nil, errWait
+		}
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -670,8 +682,26 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	continuityReplaySafe := retryRound == 0
+	recoverConfirmedQuota := func() (bool, error) {
+		if homeMode || !continuityReplaySafe || !ConfirmedUpstreamQuotaRejection(lastErr) {
+			return false, nil
+		}
+		ready, err := m.waitAfterConfirmed429(ctx, providers, routeModel, opts)
+		if err != nil || !ready {
+			return false, err
+		}
+		tried, attempted = make(map[string]struct{}), make(map[string]struct{})
+		lastErr, upstreamErr = nil, nil
+		return true, nil
+	}
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+			if ready, errWait := recoverConfirmedQuota(); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			} else if ready {
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
@@ -689,6 +719,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			updateInFlightScopeProvider(ctx, provider)
 		}
 		if errPick != nil {
+			if ready, errWait := recoverConfirmedQuota(); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			} else if ready {
+				continue
+			}
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				return cliproxyexecutor.Response{}, roundPickFailureError(lastErr, upstreamErr, errPick)
 			}
@@ -717,6 +752,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			continuityReplaySafe = false
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -774,6 +810,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
+				if len(models) != 1 || statusCodeFromError(errExec) != http.StatusTooManyRequests {
+					continuityReplaySafe = false
+				}
 				if hasUpstreamExecutionAttempt(errExec) {
 					upstreamErr = errExec
 				}
@@ -1127,9 +1166,30 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
+	continuityReplaySafe := retryRound == 0
+	recoverConfirmedQuota := func() (bool, error) {
+		if homeMode || !continuityReplaySafe || !ConfirmedUpstreamQuotaRejection(lastErr) {
+			return false, nil
+		}
+		ready, err := m.waitAfterConfirmed429(ctx, providers, routeModel, opts)
+		if err != nil || !ready {
+			return false, err
+		}
+		// The previous attempts were rejected before output. Rebuild the whole
+		// candidate set so a recovered credential can be selected again.
+		tried = make(map[string]struct{})
+		attempted = make(map[string]struct{})
+		lastErr, upstreamErr = nil, nil
+		return true, nil
+	}
 	for {
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
+			if ready, errWait := recoverConfirmedQuota(); errWait != nil {
+				return nil, errWait
+			} else if ready {
+				continue
+			}
 			if lastErr != nil {
 				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
 				if homeMode {
@@ -1166,6 +1226,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		}
 		if errPick != nil {
+			if ready, errWait := recoverConfirmedQuota(); errWait != nil {
+				return nil, errWait
+			} else if ready {
+				continue
+			}
 			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
 			var homeCooldown *homeDispatchRetryAfterError
 			if homeMode && lastErr != nil && errors.As(errPick, &homeCooldown) && homeCooldown != nil {
@@ -1297,6 +1362,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			continuityReplaySafe = false
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
 				if homeSameAuthRetries[auth.ID] > 0 {
@@ -1386,6 +1452,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
+			if len(models) != 1 || statusCodeFromError(errStream) != http.StatusTooManyRequests {
+				continuityReplaySafe = false
+			}
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
 			}

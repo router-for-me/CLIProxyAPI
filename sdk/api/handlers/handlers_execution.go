@@ -86,6 +86,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
+	reqMeta[coreexecutor.RequestLifecycleIDMetadataKey] = lifecycle.requestID()
 	opts := coreexecutor.Options{
 		Stream:                      false,
 		Alt:                         alt,
@@ -158,6 +159,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
+	reqMeta[coreexecutor.RequestLifecycleIDMetadataKey] = lifecycle.requestID()
 	opts := coreexecutor.Options{
 		Stream:                      false,
 		Alt:                         alt,

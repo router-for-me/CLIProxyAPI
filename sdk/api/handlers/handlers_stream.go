@@ -9,6 +9,7 @@ import (
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -385,6 +386,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, true, reqMeta, execOptions.SkipInterceptorPluginID)
+	reqMeta[coreexecutor.RequestLifecycleIDMetadataKey] = lifecycle.requestID()
 	opts := coreexecutor.Options{
 		Stream:                       true,
 		Alt:                          alt,
@@ -410,6 +412,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
+	ctx = coreauth.WithContinuityBudget(ctx)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
@@ -605,7 +608,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		bootstrapRetries++
-		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+		retryCtx := ctx
+		if h.AuthManager.HasSchedulerContinuity() && coreauth.ConfirmedUpstreamQuotaRejection(bootstrapStreamErr) {
+			retryCtx = coreauth.WithContinuityRejected429(ctx, bootstrapStreamErr)
+		}
+		retryResult, retryErr := h.AuthManager.ExecuteStream(retryCtx, providers, req, opts)
 		if retryErr != nil {
 			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {

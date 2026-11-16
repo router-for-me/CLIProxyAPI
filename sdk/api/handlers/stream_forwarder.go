@@ -24,7 +24,40 @@ func (h *BaseAPIHandler) ExecuteStreamWithPreFTKeepAlive(
 	keepAliveC <-chan time.Time,
 	writeKeepAlive func() bool,
 ) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, bool) {
-	if keepAliveC == nil {
+	return h.executeStreamWithContinuityKeepAlive(c, cliCtx, cliCancel, handlerType, modelName, rawJSON, alt, keepAliveC, nil, 0, writeKeepAlive)
+}
+
+// ExecuteStreamWithContinuityKeepAlive starts a heartbeat only after the
+// scheduler reports an actual continuity wait, unless pre-first-token
+// keep-alives are already enabled by configuration.
+func (h *BaseAPIHandler) ExecuteStreamWithContinuityKeepAlive(
+	c *gin.Context,
+	cliCtx context.Context,
+	cliCancel func(error),
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+	keepAliveC <-chan time.Time,
+	waitSignal <-chan struct{},
+	continuityInterval time.Duration,
+	writeKeepAlive func() bool,
+) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, bool) {
+	return h.executeStreamWithContinuityKeepAlive(c, cliCtx, cliCancel, handlerType, modelName, rawJSON, alt, keepAliveC, waitSignal, continuityInterval, writeKeepAlive)
+}
+
+func (h *BaseAPIHandler) executeStreamWithContinuityKeepAlive(
+	c *gin.Context,
+	cliCtx context.Context,
+	cliCancel func(error),
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+	keepAliveC <-chan time.Time,
+	waitSignal <-chan struct{},
+	continuityInterval time.Duration,
+	writeKeepAlive func() bool,
+) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage, bool) {
+	if keepAliveC == nil && waitSignal == nil {
 		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, handlerType, modelName, rawJSON, alt)
 		return dataChan, upstreamHeaders, errChan, true
 	}
@@ -40,6 +73,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithPreFTKeepAlive(
 		bootstrapResult <- streamBootstrapResult{data: data, headers: headers, errs: errs}
 	}()
 
+	var continuityTicker *time.Ticker
+	defer func() {
+		if continuityTicker != nil {
+			continuityTicker.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -50,6 +89,15 @@ func (h *BaseAPIHandler) ExecuteStreamWithPreFTKeepAlive(
 			return nil, nil, nil, false
 		case result := <-bootstrapResult:
 			return result.data, result.headers, result.errs, true
+		case <-waitSignal:
+			waitSignal = nil
+			if keepAliveC == nil {
+				if continuityInterval <= 0 {
+					continuityInterval = 15 * time.Second
+				}
+				continuityTicker = time.NewTicker(continuityInterval)
+				keepAliveC = continuityTicker.C
+			}
 		case <-keepAliveC:
 			if writeKeepAlive != nil && !writeKeepAlive() {
 				if cliCancel != nil {

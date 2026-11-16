@@ -97,6 +97,16 @@ func excludeExecutionProvider(providers []string, excluded string) []string {
 	return out
 }
 
+// CanWaitForCodexContinuity installs a notifier whenever the optional capability
+// is available. Model-router plugins resolve the authoritative provider later;
+// only an actual Codex wait starts transport keepalives.
+func (h *BaseAPIHandler) CanWaitForCodexContinuity(_ string) bool {
+	if h == nil || h.AuthManager == nil || h.AuthManager.HomeEnabled() || !h.AuthManager.HasSchedulerContinuity() {
+		return false
+	}
+	return true
+}
+
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	return h.getRequestDetailsWithOptions(modelName, false, false)
 }

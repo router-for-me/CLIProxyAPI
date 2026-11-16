@@ -28,6 +28,7 @@ import (
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
@@ -1125,6 +1126,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		finishDelivery(err)
 		cancelExecution(err)
 	}
+	var waitSignal chan struct{}
+	if h.CanWaitForCodexContinuity(modelName) {
+		waitSignal = make(chan struct{}, 1)
+		cliCtx = coreauth.WithContinuityWaitNotifier(cliCtx, waitSignal)
+	}
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -1156,8 +1162,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	keepAliveC, stopKeepAlive := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	defer stopKeepAlive()
 
-	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithPreFTKeepAlive(
-		c, cliCtx, cliCancel, h.HandlerType(), modelName, rawJSON, "", keepAliveC, writeKeepAlive,
+	dataChan, resolvedHeaders, errChan, okBootstrap := h.ExecuteStreamWithContinuityKeepAlive(
+		c, cliCtx, cliCancel, h.HandlerType(), modelName, rawJSON, "", keepAliveC, waitSignal,
+		handlers.StreamingKeepAliveInterval(h.CurrentConfig()), writeKeepAlive,
 	)
 	if !okBootstrap {
 		return

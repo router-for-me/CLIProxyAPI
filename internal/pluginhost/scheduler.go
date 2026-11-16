@@ -33,6 +33,29 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	return resp, true, nil
 }
 
+// HasSchedulerContinuity reports whether the active scheduler advertised the optional capability.
+func (h *Host) HasSchedulerContinuity() bool {
+	record := h.schedulerRecord()
+	return record != nil && record.plugin.Capabilities.SchedulerContinuity != nil && h.recordCurrent(*record)
+}
+
+// SchedulerContinuity queries the same active scheduler, if it opted into continuity.
+func (h *Host) SchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (resp pluginapi.SchedulerContinuityResponse, handled bool, err error) {
+	record := h.schedulerRecord()
+	if record == nil || record.plugin.Capabilities.SchedulerContinuity == nil || !h.recordCurrent(*record) {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "Scheduler.Continuity", recovered)
+			resp, handled, err = pluginapi.SchedulerContinuityResponse{}, false, nil
+		}
+	}()
+	req.Pick.Plugin = record.meta
+	resp, err = record.plugin.Capabilities.SchedulerContinuity.Continuity(ctx, req)
+	return resp, true, err
+}
+
 func (h *Host) HasScheduler() bool {
 	return h.schedulerRecord() != nil
 }
