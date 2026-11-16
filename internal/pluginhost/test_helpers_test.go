@@ -251,6 +251,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errPick
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodSchedulerContinuity:
+		if l.active.Capabilities.SchedulerContinuity == nil {
+			return nil, fmt.Errorf("missing scheduler continuity")
+		}
+		var req pluginapi.SchedulerContinuityRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errEval := l.active.Capabilities.SchedulerContinuity.Continuity(ctx, req)
+		if errEval != nil {
+			return nil, errEval
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodModelRoute:
 		if l.active.Capabilities.ModelRouter == nil {
 			return nil, fmt.Errorf("missing model router")
