@@ -1,7 +1,6 @@
 package oauthflow
 
 import (
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -175,26 +174,25 @@ func TestCallbackConcurrentExactlyOnce(t *testing.T) {
 	default:
 	}
 }
-func TestCallbackIPv6Fallback(t *testing.T) {
+func TestCallbackServesIPv6Loopback(t *testing.T) {
 	probe, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
 		t.Skip("IPv6 unavailable")
 	}
 	probe.Close()
-	cb, err := startCallback("s", 0, "/cb", func(network, address string) (net.Listener, error) {
-		if network == "tcp4" {
-			return nil, errors.New("IPv4 unavailable")
-		}
-		return net.Listen(network, address)
-	})
+	cb, err := StartCallback("s", 0, "/cb")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cb.Close()
-	if !strings.HasPrefix(cb.URI, "http://[::1]:") {
+	if !strings.HasPrefix(cb.URI, "http://localhost:") {
 		t.Fatal(cb.URI)
 	}
-	status, _, _ := call(t, callbackClient(t), "GET", cb.URI+"?state=s&code=c", "")
+	// One dual-stack listener serves the forwarded container port and both
+	// loopback families, so an IPv6 redirect must work without a second bind.
+	u, _ := url.Parse(cb.URI)
+	v6 := "http://[::1]:" + u.Port() + "/cb?state=s&code=c"
+	status, _, _ := call(t, callbackClient(t), "GET", v6, "")
 	if status != 200 {
 		t.Fatal(status)
 	}

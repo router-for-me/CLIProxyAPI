@@ -3,6 +3,7 @@
 package oauthflow
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -118,11 +119,33 @@ func (c *Callback) Close() {
 		return
 	}
 	c.once.Do(func() {
+		// Let an accepted callback finish writing its response before the
+		// listeners go away; Close would cut the browser off mid-answer.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = c.server.Shutdown(ctx)
 		for _, ln := range c.listeners {
 			_ = ln.Close()
 		}
 		_ = c.server.Close()
 	})
+}
+
+
+// allowedCallbackHost accepts loopback authorities on the bound port. A browser
+// reaching a forwarded container port keeps "localhost" in its Host header, so
+// matching the dial address exactly would reject legitimate callbacks.
+func allowedCallbackHost(authority, port string) bool {
+	host, gotPort, err := net.SplitHostPort(authority)
+	if err != nil || gotPort != port {
+		return false
+	}
+	switch strings.ToLower(strings.Trim(host, "[]")) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func StartCallback(state string, port int, path string) (*Callback, error) {
@@ -133,25 +156,17 @@ func startCallback(state string, port int, path string, listen func(string, stri
 	if state == "" || len(state) > 512 || port < 0 || port > 65535 || path == "" || path[0] != '/' || strings.ContainsAny(path, "?#\\") {
 		return nil, errors.New("oauth callback: invalid listener configuration")
 	}
-	var listeners []net.Listener
-	host := "127.0.0.1"
-	ln4, err4 := listen("tcp4", net.JoinHostPort(host, strconv.Itoa(port)))
-	if err4 == nil {
-		listeners = append(listeners, ln4)
-		port = ln4.Addr().(*net.TCPAddr).Port
+	// Listen on every interface: a container publishes the callback port on a
+	// non-loopback address, so a loopback-only bind leaves the forwarded browser
+	// redirect unreachable. State validation below protects the flow, not the
+	// bind address.
+	ln, errListen := listen("tcp", net.JoinHostPort("", strconv.Itoa(port)))
+	if errListen != nil {
+		return nil, fmt.Errorf("oauth callback: listen: %w", errListen)
 	}
-	ln6, err6 := listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
-	if err6 == nil {
-		listeners = append(listeners, ln6)
-		if err4 != nil {
-			host = "::1"
-			port = ln6.Addr().(*net.TCPAddr).Port
-		}
-	}
-	if len(listeners) == 0 {
-		return nil, fmt.Errorf("oauth callback: no loopback listener: %w", errors.Join(err4, err6))
-	}
-	authority := net.JoinHostPort(host, strconv.Itoa(port))
+	listeners := []net.Listener{ln}
+	port = ln.Addr().(*net.TCPAddr).Port
+	authority := net.JoinHostPort("localhost", strconv.Itoa(port))
 	results := make(chan Result, 1)
 	serveErrors := make(chan error, len(listeners))
 	var accepted bool
@@ -172,7 +187,7 @@ func startCallback(state string, port int, path string, listen func(string, stri
 			http.NotFound(w, r)
 			return
 		}
-		if r.Host != authority {
+		if !allowedCallbackHost(r.Host, strconv.Itoa(port)) {
 			http.Error(w, "Invalid callback host", http.StatusBadRequest)
 			return
 		}

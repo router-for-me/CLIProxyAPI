@@ -1,12 +1,13 @@
 package oauthflow
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ReadBounded detects oversized responses rather than accepting truncated JSON.
