@@ -747,6 +747,41 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							drops.Drop("image")
 						}
 					} else if contentTypeResult.Type == ojson.String && (contentTypeResult.String() == "document" || contentTypeResult.String() == "container_upload") {
+						emitAntigravityText := func(text string) {
+							partDoc := ojson.NewDoc([]byte(`{}`))
+							_ = partDoc.Set("text", text)
+							if pendingDetachedSignature != "" {
+								if pendingDetachedTargetKind == "" || pendingDetachedTargetKind == geminiClaudeCarrierAny || pendingDetachedTargetKind == geminiClaudeCarrierText {
+									_ = partDoc.Set("thoughtSignature", pendingDetachedSignature)
+								} else {
+									appendDetachedCarrier(pendingDetachedSignature, true)
+								}
+								clearPendingDetachedSignature()
+							}
+							partItems = append(partItems, partDoc.Bytes())
+						}
+						if contentTypeResult.String() == "document" {
+							if docText, ok := translatorcommon.ClaudeDocumentTextBlock(contentResult); ok {
+								emitAntigravityText(docText)
+								continue
+							}
+							var onImageDrop func()
+							if originalRole == "user" {
+								onImageDrop = func() { drops.Drop("image") }
+							}
+							if translatorcommon.ExpandClaudeContentDocument(
+								contentResult,
+								emitAntigravityText,
+								func(img ojson.Result) ([]byte, bool) {
+									p := claudeBase64InlineData(img.Get("source"))
+									return p, p != nil
+								},
+								func(p []byte) { partItems = append(partItems, p) },
+								onImageDrop,
+							) {
+								continue
+							}
+						}
 						if partJSON := claudeBase64InlineData(contentResult.Get("source")); partJSON != nil {
 							partItems = append(partItems, partJSON)
 						} else if originalRole == "user" {
