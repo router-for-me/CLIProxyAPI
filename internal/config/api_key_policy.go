@@ -59,6 +59,38 @@ type ModelPrice struct {
 	Input       float64 `yaml:"input,omitempty" json:"input,omitempty"`
 	Output      float64 `yaml:"output,omitempty" json:"output,omitempty"`
 	CachedInput float64 `yaml:"cached-input,omitempty" json:"cached-input,omitempty"`
+	// CacheWrite prices prompt-cache writes; 0 bills them as regular input.
+	CacheWrite float64 `yaml:"cache-write,omitempty" json:"cache-write,omitempty"`
+}
+
+// ModelPriceFeed configures the public price list used for models without a
+// configured price. It is enabled by default with the LiteLLM price list.
+type ModelPriceFeed struct {
+	// Disabled turns the feed off; only ModelPrices and upstream-reported costs are used.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// URL of a LiteLLM-format price JSON. Empty uses DefaultModelPriceFeedURL.
+	URL string `yaml:"url,omitempty" json:"url,omitempty"`
+	// RefreshHours between downloads. Values below 1 use 24.
+	RefreshHours int `yaml:"refresh-hours,omitempty" json:"refresh-hours,omitempty"`
+}
+
+// DefaultModelPriceFeedURL is LiteLLM's public, community-maintained price list.
+const DefaultModelPriceFeedURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+
+// EffectiveURL returns the feed URL, falling back to the default.
+func (f ModelPriceFeed) EffectiveURL() string {
+	if url := strings.TrimSpace(f.URL); url != "" {
+		return url
+	}
+	return DefaultModelPriceFeedURL
+}
+
+// RefreshInterval returns how often the feed is downloaded.
+func (f ModelPriceFeed) RefreshInterval() time.Duration {
+	if f.RefreshHours < 1 {
+		return 24 * time.Hour
+	}
+	return time.Duration(f.RefreshHours) * time.Hour
 }
 
 // ExpiresAtTime parses ExpiresAt. ok is false when the key has no (valid) expiry.
@@ -151,7 +183,7 @@ func (cfg *Config) SanitizeAPIKeyPolicies() {
 	prices := make([]ModelPrice, 0, len(cfg.ModelPrices))
 	for _, price := range cfg.ModelPrices {
 		price.Model = strings.TrimSpace(price.Model)
-		if price.Model == "" || price.Input < 0 || price.Output < 0 || price.CachedInput < 0 {
+		if price.Model == "" || price.Input < 0 || price.Output < 0 || price.CachedInput < 0 || price.CacheWrite < 0 {
 			continue
 		}
 		prices = append(prices, price)

@@ -107,6 +107,9 @@ type SDKConfig struct {
 	// when the upstream does not report a cost.
 	ModelPrices []ModelPrice `yaml:"model-prices,omitempty" json:"model-prices,omitempty"`
 
+	// ModelPriceFeed downloads public model prices used when ModelPrices has no match.
+	ModelPriceFeed ModelPriceFeed `yaml:"model-price-feed,omitempty" json:"model-price-feed,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

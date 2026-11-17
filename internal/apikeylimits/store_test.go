@@ -414,3 +414,61 @@ func TestAccountsAndRecentRequests(t *testing.T) {
 		t.Fatal("recent requests or accounts not restored")
 	}
 }
+
+func TestPriceTokensUsesCacheWritePrice(t *testing.T) {
+	price := config.ModelPrice{Input: 4, Output: 20, CachedInput: 0.2, CacheWrite: 5}
+	// fresh 100k*4 + read 800k*0.2 + write 100k*5 + out 10k*20 = 0.4+0.16+0.5+0.2 = 1.26 USD
+	got := priceTokens(price, tokenCounts{input: 1_000_000, cacheRead: 800_000, cacheWrite: 100_000, output: 10_000})
+	if got < 1.2599 || got > 1.2601 {
+		t.Fatalf("cost = %v, want 1.26", got)
+	}
+	// Without cache prices both fall back to the input price.
+	if got = priceTokens(config.ModelPrice{Input: 1, Output: 2}, tokenCounts{input: 1_000_000, cacheRead: 500_000, output: 0}); got < 0.9999 || got > 1.0001 {
+		t.Fatalf("fallback cost = %v", got)
+	}
+}
+
+func TestBackfillCostsPricesStoredUsageOnce(t *testing.T) {
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "api-key-usage.json")
+	cfg := &config.Config{}
+	cfg.ModelPrices = []config.ModelPrice{{Model: "priced-*", Input: 2, Output: 10, CachedInput: 0.5}}
+	s := newTestStore(now)
+	s.path = path
+	s.cfgFn = func() *config.Config { return cfg }
+	s.AddUsage("k", Usage{Model: "priced-a", InputTokens: 1_000_000, CachedTokens: 400_000, OutputTokens: 100_000,
+		Tokens: 1_100_000, Effort: "high", AuthID: "acc"})
+	s.AddUsage("k", Usage{Model: "unpriced", InputTokens: 10, OutputTokens: 10, Tokens: 20})
+	s.AddUsage("k", Usage{Model: "priced-b", Tokens: 50, Cost: 7}) // real cost is kept
+
+	s.BackfillCosts()
+	// 600k*2 + 400k*0.5 + 100k*10 = 1.2 + 0.2 + 1.0 = 2.4 USD
+	day := s.Usage("k")[Day]
+	m := day.Models["priced-a"]
+	if m.Cost < 2.399 || m.Cost > 2.401 || day.Models["unpriced"].Cost != 0 || day.Models["priced-b"].Cost != 7 {
+		t.Fatalf("models = a %+v unpriced %+v b %+v", m, day.Models["unpriced"], day.Models["priced-b"])
+	}
+	if day.Cost < 9.399 || day.Cost > 9.401 || m.Efforts["high"].Cost < 2.399 || day.Accounts["acc"].Cost <= 0 {
+		t.Fatalf("window cost = %v effort = %+v account = %+v", day.Cost, m.Efforts["high"], day.Accounts["acc"])
+	}
+	if daily, _ := s.History("k"); daily[0].Models["priced-a"].Cost < 2.399 {
+		t.Fatalf("history not backfilled: %+v", daily[0].Models["priced-a"])
+	}
+	if r := s.Recent(0); r[len(r)-1].Cost < 2.399 {
+		t.Fatalf("recent not backfilled: %+v", r[len(r)-1])
+	}
+
+	// Runs once: prices that change later do not re-price stored usage.
+	cfg.ModelPrices[0].Input = 100
+	s.BackfillCosts()
+	if c := s.Usage("k")[Day].Models["priced-a"].Cost; c > 2.401 {
+		t.Fatalf("backfill ran twice: %v", c)
+	}
+	s.Flush()
+	restored := newTestStore(now)
+	restored.path = path
+	restored.load()
+	if !restored.costsBackfilled {
+		t.Fatal("backfill flag not persisted")
+	}
+}

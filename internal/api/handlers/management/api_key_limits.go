@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/apikeylimits"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelprices"
 )
 
 type apiKeyModelUsage struct {
@@ -209,7 +210,13 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 		out = append(out, entry)
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"keys": out, "timezone": now.Location().String()})
+	c.JSON(http.StatusOK, gin.H{
+		"keys":       out,
+		"timezone":   now.Location().String(),
+		"price_feed": modelprices.Default().Status(),
+		// Models with a price in access.model-prices (those override the feed).
+		"configured_prices": len(cfg.ModelPrices),
+	})
 }
 
 // apiKeyAccountUsage is a key's usage through one upstream credential.

@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelprices"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wstunnel"
@@ -305,6 +306,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if configFilePath != "" {
 		// Client key limit counters live next to the config file, outside the watched auth dir.
 		apikeylimits.Default().Init(filepath.Join(filepath.Dir(configFilePath), "api-key-usage.json"), s.getConfig)
+		// Public model prices for cost estimates; cached next to the config file.
+		modelprices.Default().Init(filepath.Join(filepath.Dir(configFilePath), "model-prices-cache.json"), s.getConfig)
+		modelprices.Default().OnUpdate(apikeylimits.Default().BackfillCosts)
 	}
 	return s
 }

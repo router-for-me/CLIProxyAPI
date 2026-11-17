@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelprices"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -249,12 +250,14 @@ type Store struct {
 	counters map[string]keyCounters
 	history  map[string]*keyHistory
 	recent   []RequestEntry
-	path     string
-	dirty    bool
-	cfgFn    func() *config.Config
-	now      func() time.Time
-	stopOnce sync.Once
-	stop     chan struct{}
+	// costsBackfilled is set once BackfillCosts priced the stored usage.
+	costsBackfilled bool
+	path            string
+	dirty           bool
+	cfgFn           func() *config.Config
+	now             func() time.Time
+	stopOnce        sync.Once
+	stop            chan struct{}
 }
 
 var (
@@ -817,21 +820,137 @@ func RecordCost(cfg *config.Config, record coreusage.Record) float64 {
 			return float64(*cd.CostInUSDTicks) / 1e10
 		}
 	}
-	if cfg == nil {
-		return 0
-	}
-	price, ok := cfg.FindModelPrice(record.Model, record.Alias, record.ResponseModel)
+	price, ok := FindPrice(cfg, record.Model, record.Alias, record.ResponseModel)
 	if !ok {
 		return 0
 	}
 	t := normalizeTokens(coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType))
-	// Cache writes have no price of their own here; they are billed as regular input.
-	uncached := max(t.input-t.cacheRead, 0)
+	return priceTokens(price, t)
+}
+
+// FindPrice returns the price for the first matching model name: access.model-prices
+// first, then the public price feed (unless disabled).
+func FindPrice(cfg *config.Config, models ...string) (config.ModelPrice, bool) {
+	if cfg != nil {
+		if price, ok := cfg.FindModelPrice(models...); ok {
+			return price, true
+		}
+	}
+	if p, ok := modelprices.Default().Lookup(models...); ok {
+		return config.ModelPrice{Input: p.Input, Output: p.Output, CachedInput: p.CachedInput, CacheWrite: p.CacheWrite}, true
+	}
+	return config.ModelPrice{}, false
+}
+
+// priceTokens returns the USD cost of t at price (USD per 1M tokens). Cache reads use
+// the cached-input price and cache writes the cache-write price, each falling back to
+// the input price.
+func priceTokens(price config.ModelPrice, t tokenCounts) float64 {
+	read := min(max(t.cacheRead, 0), max(t.input, 0))
+	write := min(max(t.cacheWrite, 0), max(t.input-read, 0))
+	fresh := max(t.input-read-write, 0)
 	cachedPrice := price.CachedInput
 	if cachedPrice <= 0 {
 		cachedPrice = price.Input
 	}
-	return (float64(uncached)*price.Input + float64(t.cacheRead)*cachedPrice + float64(t.output)*price.Output) / 1e6
+	writePrice := price.CacheWrite
+	if writePrice <= 0 {
+		writePrice = price.Input
+	}
+	return (float64(fresh)*price.Input + float64(read)*cachedPrice + float64(write)*writePrice +
+		float64(max(t.output, 0))*price.Output) / 1e6
+}
+
+// BackfillCosts prices stored usage that was recorded without a cost (no price was
+// known at the time) from its token counts. It runs once per usage file; dimension
+// and account rows get the cost split by their token share.
+func (s *Store) BackfillCosts() {
+	s.mu.Lock()
+	if s.costsBackfilled {
+		s.mu.Unlock()
+		return
+	}
+	cfgFn := s.cfgFn
+	s.mu.Unlock()
+	var cfg *config.Config
+	if cfgFn != nil {
+		cfg = cfgFn()
+	}
+	priced := 0
+	costOf := func(model string, t tokenCounts) float64 {
+		price, ok := FindPrice(cfg, model)
+		if !ok {
+			return 0
+		}
+		priced++
+		return priceTokens(price, t)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.costsBackfilled {
+		return
+	}
+	for _, kc := range s.counters {
+		for _, c := range kc {
+			if c == nil {
+				continue
+			}
+			added := backfillModels(c.Models, costOf)
+			if added <= 0 {
+				continue
+			}
+			c.Cost += added
+			for _, a := range c.Accounts {
+				if a != nil && a.Cost == 0 && a.Tokens > 0 && c.Tokens > 0 {
+					a.Cost = c.Cost * float64(a.Tokens) / float64(c.Tokens)
+				}
+			}
+		}
+	}
+	for _, h := range s.history {
+		for _, b := range []modelBuckets{h.Daily, h.Hourly} {
+			for _, models := range b {
+				backfillModels(models, costOf)
+			}
+		}
+	}
+	for i := range s.recent {
+		e := &s.recent[i]
+		if e.Cost == 0 && e.Tokens > 0 && !e.Failed {
+			e.Cost = costOf(e.Model, tokenCounts{input: e.InputTokens, cacheRead: e.CachedTokens, output: e.OutputTokens})
+		}
+	}
+	if priced == 0 {
+		// Nothing could be priced yet (for example the feed has not loaded); try again later.
+		return
+	}
+	s.costsBackfilled = true
+	s.dirty = true
+	log.Infof("api key limits: estimated costs for %d stored usage rows without a cost", priced)
+}
+
+// backfillModels prices zero-cost model rows and returns the cost added.
+func backfillModels(models map[string]*ModelCounter, costOf func(string, tokenCounts) float64) float64 {
+	added := 0.0
+	for name, m := range models {
+		if m == nil || m.Cost != 0 || m.Tokens <= 0 {
+			continue
+		}
+		cost := costOf(name, tokenCounts{input: m.InputTokens, cacheRead: m.CachedTokens, cacheWrite: m.CacheWriteTokens, output: m.OutputTokens})
+		if cost <= 0 {
+			continue
+		}
+		m.Cost = cost
+		added += cost
+		for _, dims := range []map[string]*DimCounter{m.Efforts, m.Tiers} {
+			for _, d := range dims {
+				if d != nil && d.Cost == 0 && d.Tokens > 0 {
+					d.Cost = cost * float64(d.Tokens) / float64(m.Tokens)
+				}
+			}
+		}
+	}
+	return added
 }
 
 // persistedVersion 2 stores InputTokens including cache reads and writes for every
@@ -843,6 +962,8 @@ type persisted struct {
 	Counters map[string]map[Window]*Counter `json:"counters"`
 	History  map[string]*keyHistory         `json:"history,omitempty"`
 	Recent   []RequestEntry                 `json:"recent,omitempty"`
+	// CostsBackfilled records that BackfillCosts already ran for this file.
+	CostsBackfilled bool `json:"costs_backfilled,omitempty"`
 }
 
 func (s *Store) load() {
@@ -881,6 +1002,7 @@ func (s *Store) load() {
 			s.history[fp] = &keyHistory{Daily: cloneBuckets(h.Daily), Hourly: cloneBuckets(h.Hourly)}
 		}
 	}
+	s.costsBackfilled = state.CostsBackfilled
 	s.recent = append([]RequestEntry(nil), state.Recent...)
 	if len(s.recent) > RecentLimit {
 		s.recent = s.recent[len(s.recent)-RecentLimit:]
@@ -909,6 +1031,7 @@ func (s *Store) Flush() {
 		state.History[fp] = &keyHistory{Daily: cloneBuckets(h.Daily), Hourly: cloneBuckets(h.Hourly)}
 	}
 	state.Recent = append([]RequestEntry(nil), s.recent...)
+	state.CostsBackfilled = s.costsBackfilled
 	path := s.path
 	s.dirty = false
 	s.mu.Unlock()
