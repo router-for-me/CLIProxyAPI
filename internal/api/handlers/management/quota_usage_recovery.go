@@ -17,6 +17,9 @@ func quotaUsageHasCapacity(provider string, body []byte, auth *coreauth.Auth) bo
 	}
 	switch provider {
 	case "claude":
+		if coreauth.QuotaRecoveryRequiresClaudeExtraUsage(auth) && !quotaClaudeExtraCapacity(payload["extra_usage"]) {
+			return false
+		}
 		if !quotaPercentCapacity(payload["seven_day"], "utilization") {
 			return false
 		}
@@ -147,4 +150,34 @@ func quotaCodexLimitCapacity(raw json.RawMessage) bool {
 		return false
 	}
 	return true
+}
+
+// A paid-pool rejection requires an enabled pool and explicit remaining capacity.
+// Validate every supplied measure so a healthy percentage cannot mask exhausted credits.
+func quotaClaudeExtraCapacity(raw json.RawMessage) bool {
+	var extra map[string]json.RawMessage
+	if json.Unmarshal(raw, &extra) != nil || extra == nil {
+		return false
+	}
+	var enabled *bool
+	if json.Unmarshal(extra["is_enabled"], &enabled) != nil || enabled == nil || !*enabled {
+		return false
+	}
+	proved := false
+	if _, exists := extra["utilization"]; exists {
+		if !quotaPercentCapacity(raw, "utilization") {
+			return false
+		}
+		proved = true
+	}
+	limit, hasLimit := extra["monthly_limit"]
+	used, hasUsed := extra["used_credits"]
+	if hasLimit || hasUsed {
+		var maximum, spent *float64
+		if !hasLimit || !hasUsed || json.Unmarshal(limit, &maximum) != nil || json.Unmarshal(used, &spent) != nil || maximum == nil || spent == nil || !(*maximum > 0 && *spent >= 0 && *spent < *maximum) {
+			return false
+		}
+		proved = true
+	}
+	return proved
 }

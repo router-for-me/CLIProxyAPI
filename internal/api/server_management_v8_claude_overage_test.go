@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -91,6 +94,13 @@ func TestManagementV8ClaudeOverageRecovery(t *testing.T) {
 }
 
 type overageRouteFixture struct {
+	store     *coreauth.FileCooldownStateStore
+	cfgPath   string
+	kind      string
+	bearer    atomic.Value
+	mu        sync.RWMutex
+	usageHook func()
+
 	manager              *coreauth.Manager
 	auth                 *coreauth.Auth
 	cfg                  *config.Config
@@ -110,16 +120,25 @@ func newOverageRouteFixture(t *testing.T, usage string, messages http.HandlerFun
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &overageRouteFixture{manager: coreauth.NewManager(nil, nil, nil), cfg: cfg, usageBody: usage}
+	f := &overageRouteFixture{manager: coreauth.NewManager(nil, nil, nil), cfg: cfg, usageBody: usage, cfgPath: cfgPath}
+	f.bearer.Store(overageTestToken)
+	f.store = coreauth.NewFileCooldownStateStore(t.TempDir())
+	f.manager.SetCooldownStateStore(f.store)
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != "api.anthropic.com" || r.Header.Get("Authorization") != "Bearer "+overageTestToken || r.Header.Get("X-Api-Key") != "" {
+		if r.Host != "api.anthropic.com" || r.Header.Get("Authorization") != "Bearer "+f.bearer.Load().(string) || r.Header.Get("X-Api-Key") != "" {
 			t.Errorf("canonical OAuth identity changed: host=%s bearer=%q api-key=%q", r.Host, r.Header.Get("Authorization"), r.Header.Get("X-Api-Key"))
 		}
 		switch r.URL.Path {
-		case "/v1/messages":
+		case "/v1/messages", "/v1/messages/count_tokens":
 			f.messages.Add(1)
 			messages(w, r)
 		case "/api/oauth/usage":
+			f.mu.RLock()
+			hook := f.usageHook
+			f.mu.RUnlock()
+			if hook != nil {
+				hook()
+			}
 			f.usageCalls.Add(1)
 			w.Header().Set("X-Usage-Evidence", "unchanged")
 			_, _ = io.WriteString(w, f.usageBody)
@@ -143,7 +162,7 @@ func newOverageRouteFixture(t *testing.T, usage string, messages http.HandlerFun
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry.GetGlobalRegistry().RegisterClient(f.auth.ID, "claude", []*registry.ModelInfo{{ID: overageTestModel}, {ID: "claude-opus-5"}})
+	registry.GetGlobalRegistry().RegisterClient(f.auth.ID, "claude", []*registry.ModelInfo{{ID: overageTestModel}, {ID: "claude-fable-5-2"}, {ID: "claude-opus-5"}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(f.auth.ID) })
 	h := management.NewHandler(cfg, cfgPath, f.manager)
 	h.SetLocalPassword("test-password")
@@ -155,9 +174,10 @@ func newOverageRouteFixture(t *testing.T, usage string, messages http.HandlerFun
 func (f *overageRouteFixture) fail(t *testing.T, model string) {
 	t.Helper()
 	before := f.messages.Load()
-	_, err := f.manager.Execute(f.ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"` + model + `","max_tokens":16,"messages":[{"role":"user","content":"test"}]}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
-	if err == nil || f.messages.Load() != before+1 {
-		t.Fatalf("actual Claude wire rejection missing: calls=%d err=%v", f.messages.Load()-before, err)
+	err := f.execute(model)
+	var status interface{ StatusCode() int }
+	if err == nil || !errors.As(err, &status) || status.StatusCode() != 429 || f.messages.Load() != before+1 {
+		t.Fatalf("OVERAGE_CHILD_INFRASTRUCTURE: actual local Claude429 missing: calls=%d err=%v", f.messages.Load()-before, err)
 	}
 }
 func (f *overageRouteFixture) usage(t *testing.T) {
@@ -219,7 +239,7 @@ func runIsolatedOverageCase(t *testing.T, name string) {
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestManagementV8ClaudeOverageRecovery$/^"+name+"$", "-test.v")
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^"+strings.Split(t.Name(), "/")[0]+"$/^"+name+"$", "-test.v")
 	cmd.Env = append(os.Environ(), "CPA_OVERAGE_CHILD_CASE="+name, "GOMAXPROCS=1")
 	cmd.WaitDelay = 5 * time.Second
 	output := &overageChildOutput{}
@@ -254,4 +274,366 @@ func (o *overageChildOutput) Write(p []byte) (int, error) {
 	}
 	_, _ = o.Buffer.Write(p)
 	return n, nil
+}
+
+func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
+	for _, phase := range []string{"sibling", "update", "refresh", "rotation", "replacement", "replacement_restore", "restore", "later_longer", "earlier_longer", "later_longer_restore", "shadow_restore", "late_old_account", "late_old_account_count", "late_old_account_stream", "late_same_account", "count", "stream", "manual", "manual_auth", "manual_auth_restore", "alias_source_later", "alias_target_later", "new_failure_during_usage"} {
+		t.Run(phase, func(t *testing.T) {
+			if child := os.Getenv("CPA_OVERAGE_CHILD_CASE"); child == "" {
+				runIsolatedOverageCase(t, phase)
+				return
+			} else if child != phase {
+				t.Fatal("OVERAGE_CHILD_INFRASTRUCTURE: wrong attribution case")
+			}
+			usage := `{"five_hour":{"utilization":10},"seven_day":{"utilization":20},"extra_usage":{"is_enabled":false}}`
+			entered := make(chan int, 2)
+			releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
+			var order atomic.Int32
+			concurrent := phase == "later_longer" || phase == "earlier_longer" || phase == "later_longer_restore" || phase == "shadow_restore" || strings.HasPrefix(phase, "late_old_account") || phase == "late_same_account" || phase == "new_failure_during_usage"
+			fixture := newOverageRouteFixture(t, usage, func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				var request struct {
+					Model string `json:"model"`
+				}
+				if err := json.Unmarshal(body, &request); err != nil {
+					t.Error("local fixture received malformed business JSON")
+					http.Error(w, "bad fixture request", 400)
+					return
+				}
+				t.Logf("local fixture business model=%s", request.Model)
+				if request.Model == "claude-opus-5" {
+					w.Header().Set("Anthropic-Ratelimit-Unified-Status", "allowed")
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"msg-ok","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+					return
+				}
+				n := int(order.Add(1))
+				if concurrent {
+					entered <- n
+					if n == 1 {
+						<-releaseFirst
+					} else {
+						<-releaseSecond
+					}
+				}
+				overage := true
+				if phase == "earlier_longer" && n == 1 || (phase == "later_longer" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "new_failure_during_usage") && n == 2 {
+					overage = false
+				}
+				if !overage {
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+					w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
+					w.Header().Set("Retry-After", "3600")
+					w.WriteHeader(429)
+					_, _ = io.WriteString(w, `{"error":{"type":"rate_limit_error","message":"shared subscription exhausted"}}`)
+					return
+				}
+				writeOverageTestRejection(w, true)
+			})
+			if strings.Contains(phase, "longer") || phase == "new_failure_during_usage" {
+				fixture.cfg.Claude.ModelLevelCooling = true
+				fixture.manager.SetConfig(fixture.cfg)
+			}
+			if phase == "count" || phase == "late_old_account_count" {
+				fixture.kind = "count"
+			}
+			if phase == "stream" || phase == "late_old_account_stream" {
+				fixture.kind = "stream"
+			}
+			var firstDeadline time.Time
+			if concurrent {
+				failures := make(chan error, 2)
+				go func() { failures <- fixture.execute(overageTestModel) }()
+				if n := <-entered; n != 1 {
+					t.Fatal("first actual request ordering changed")
+				}
+				if strings.HasPrefix(phase, "late_old_account") || phase == "late_same_account" {
+					current, _ := fixture.manager.GetByID(fixture.auth.ID)
+					if strings.HasPrefix(phase, "late_old_account") {
+						current.Metadata["account_uuid"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+					} else {
+						current.Metadata["notes"] = "same account update"
+					}
+					if _, err := fixture.manager.Update(fixture.ctx, current); err != nil {
+						t.Fatal(err)
+					}
+					close(releaseFirst)
+					if err := <-failures; err == nil {
+						t.Fatal("late actual overage failure missing")
+					}
+				} else {
+					go func() { failures <- fixture.execute(overageTestModel) }()
+					if n := <-entered; n != 2 {
+						t.Fatal("second actual request ordering changed")
+					}
+					if phase == "new_failure_during_usage" {
+						// Request two records ordinary quota first. The earlier request's overage
+						// result arrives only after the authenticated usage snapshot was taken.
+						close(releaseSecond)
+						if err := <-failures; err == nil {
+							t.Fatal("ordinary actual failure missing")
+						}
+						usageEntered, usageRelease := make(chan struct{}), make(chan struct{})
+						fixture.setUsageHook(func() { close(usageEntered); <-usageRelease })
+						usageDone := make(chan struct{})
+						go func() { defer close(usageDone); fixture.usage(t) }()
+						<-usageEntered
+						close(releaseFirst)
+						if err := <-failures; err == nil {
+							t.Fatal("new actual overage failure missing")
+						}
+						afterFailure, _ := fixture.manager.GetByID(fixture.auth.ID)
+						close(usageRelease)
+						<-usageDone
+						afterUsage, _ := fixture.manager.GetByID(fixture.auth.ID)
+						if !reflect.DeepEqual(afterFailure, afterUsage) {
+							t.Fatal("stale usage snapshot cleared new actual overage failure")
+						}
+						if !t.Failed() {
+							fmt.Println("OVERAGE_CASE_COMPLETED:" + phase)
+						}
+						return
+					}
+					close(releaseFirst)
+					if err := <-failures; err == nil {
+						t.Fatal("first actual rejection missing")
+					}
+					if phase != "earlier_longer" {
+						firstDeadline = fixture.overageDeadline(t, false)
+					}
+					close(releaseSecond)
+					if err := <-failures; err == nil {
+						t.Fatal("second actual rejection missing")
+					}
+				}
+			} else if strings.HasPrefix(phase, "manual") {
+				ctx := logging.WithResponseHeadersHolder(fixture.ctx)
+				a, _ := fixture.manager.GetByID(fixture.auth.ID)
+				_, err := runtimeexecutor.NewClaudeExecutor(fixture.cfg).Execute(ctx, a, cliproxyexecutor.Request{Model: overageTestModel, Payload: []byte(`{"model":"claude-fable-5-1","max_tokens":16,"messages":[{"role":"user","content":"test"}]}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+				if err == nil || fixture.messages.Load() != 1 {
+					t.Fatal("manual real executor rejection missing")
+				}
+				status, ok := err.(interface{ StatusCode() int })
+				if !ok {
+					t.Fatal("actual executor error lost HTTP status")
+				}
+				resultModel := overageTestModel
+				if strings.HasPrefix(phase, "manual_auth") {
+					resultModel = ""
+				}
+				result := coreauth.Result{AuthID: a.ID, Provider: "claude", Model: resultModel, Error: &coreauth.Error{HTTPStatus: status.StatusCode(), Message: err.Error()}}
+				if hint, ok := err.(interface{ RetryAfter() *time.Duration }); ok {
+					result.RetryAfter = hint.RetryAfter()
+				}
+				fixture.manager.MarkResult(ctx, result)
+			} else {
+				fixture.fail(t, overageTestModel)
+			}
+
+			if strings.HasPrefix(phase, "alias_") {
+				fixture.fail(t, "claude-fable-5-2")
+				records, err := fixture.store.Load(fixture.ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var latest time.Time
+				for _, record := range records {
+					if record.Model == "claude-fable-5-2" {
+						latest = record.ClaudeOverageCooldownUntil
+					}
+				}
+				target, source := overageTestModel, "claude-fable-5-2"
+				if phase == "alias_target_later" {
+					target, source = source, target
+				}
+				registry.GetGlobalRegistry().RegisterClient(fixture.auth.ID, "claude", []*registry.ModelInfo{{ID: target}, {ID: "claude-opus-5"}})
+				fixture.manager.SetOAuthModelAlias(map[string][]config.OAuthModelAlias{"claude": {{Name: target, Alias: source}}})
+				merged, _ := fixture.manager.GetByID(fixture.auth.ID)
+				if merged.ModelStates[source] != nil || merged.ModelStates[target] == nil {
+					t.Fatal("actual alias reconciliation did not merge both model states")
+				}
+				records, err = fixture.store.Load(fixture.ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var actual time.Time
+				for _, record := range records {
+					if record.Model == target {
+						actual = record.ClaudeOverageCooldownUntil
+					}
+				}
+				if latest.IsZero() || !actual.Equal(latest) {
+					t.Fatal("alias merge lost maximum overage causal deadline")
+				}
+			}
+			if phase == "sibling" {
+				if err := fixture.execute("claude-opus-5"); err != nil {
+					t.Fatalf("healthy sibling failed: %v", err)
+				}
+				sibling, _ := fixture.manager.GetByID(fixture.auth.ID)
+				if sibling.Quota.Signals["Anthropic-Ratelimit-Unified-Status"] != "allowed" {
+					t.Fatal("healthy sibling did not replace passive observation")
+				}
+			}
+			if phase == "update" || phase == "refresh" || phase == "rotation" || phase == "replacement" || phase == "replacement_restore" {
+				current, _ := fixture.manager.GetByID(fixture.auth.ID)
+				updated := current.Clone()
+				updated.Metadata["notes"] = "ordinary edit"
+				if phase == "replacement" || phase == "replacement_restore" {
+					updated.Metadata["account_uuid"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+				}
+				if phase == "rotation" {
+					updated.Metadata["access_token"] = "sk-ant-oat01-overage-rotated"
+					fixture.bearer.Store("sk-ant-oat01-overage-rotated")
+				}
+				var err error
+				if phase == "refresh" || phase == "rotation" {
+					_, err = fixture.manager.UpdateRefreshedAuth(fixture.ctx, current, updated)
+				} else {
+					_, err = fixture.manager.Update(fixture.ctx, updated)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if strings.Contains(phase, "longer") {
+				deadline := fixture.overageDeadline(t, false)
+				state, _ := fixture.manager.GetByID(fixture.auth.ID)
+				if deadline.IsZero() || !deadline.Before(state.ModelStates[overageTestModel].Quota.NextRecoverAt.Add(-30*time.Minute)) {
+					t.Fatal("unrelated long quota inflated overage own deadline")
+				}
+				if !firstDeadline.IsZero() && !deadline.Equal(firstDeadline) {
+					t.Fatal("later ordinary quota replaced overage causal deadline")
+				}
+			}
+			if phase == "shadow_restore" {
+				if fixture.overageDeadline(t, true).IsZero() {
+					t.Fatal("credential shadow lost overage causal deadline")
+				}
+			}
+			if phase == "restore" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "replacement_restore" || phase == "manual_auth_restore" {
+				fixture.restore(t)
+			}
+			beforeUsage, _ := fixture.manager.GetByID(fixture.auth.ID)
+			recover := phase == "replacement" || phase == "replacement_restore" || strings.HasPrefix(phase, "late_old_account")
+			if coreauth.QuotaRecoveryRequiresClaudeExtraUsage(beforeUsage) == recover {
+				t.Fatalf("overage attribution crossed configuration or was lost: phase=%s", phase)
+			}
+			fixture.usage(t)
+			after, _ := fixture.manager.GetByID(fixture.auth.ID)
+			if recover {
+				state := after.ModelStates[overageTestModel]
+				if state != nil && (state.Unavailable || state.Quota.Exceeded) {
+					t.Fatal("replacement account ordinary cooldown did not recover")
+				}
+			} else if !reflect.DeepEqual(beforeUsage, after) {
+				t.Fatal("unproven overage capacity changed retained cooldown")
+			}
+			if !t.Failed() {
+				fmt.Println("OVERAGE_CASE_COMPLETED:" + phase)
+			}
+		})
+	}
+}
+
+func (f *overageRouteFixture) execute(model string) error {
+	request := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"model":"` + model + `","max_tokens":16,"messages":[{"role":"user","content":"test"}]}`)}
+	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+	switch f.kind {
+	case "count":
+		_, err := f.manager.ExecuteCount(f.ctx, []string{"claude"}, request, options)
+		return err
+	case "stream":
+		_, err := f.manager.ExecuteStream(f.ctx, []string{"claude"}, request, options)
+		return err
+	default:
+		_, err := f.manager.Execute(f.ctx, []string{"claude"}, request, options)
+		return err
+	}
+}
+func (f *overageRouteFixture) overageDeadline(t *testing.T, independent bool) time.Time {
+	t.Helper()
+	records, err := f.store.Load(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.Model == overageTestModel {
+			if independent {
+				return record.IndependentClaudeOverageCooldownUntil
+			}
+			return record.ClaudeOverageCooldownUntil
+		}
+	}
+	t.Fatal("actual cooldown record missing")
+	return time.Time{}
+}
+func (f *overageRouteFixture) restore(t *testing.T) {
+	t.Helper()
+	current, _ := f.manager.GetByID(f.auth.ID)
+	fresh := coreauth.NewManager(nil, nil, nil)
+	fresh.SetConfig(f.cfg)
+	fresh.SetRetryConfig(0, 0, 0)
+	fresh.RegisterExecutor(runtimeexecutor.NewClaudeExecutor(f.cfg))
+	_, err := fresh.Register(f.ctx, &coreauth.Auth{ID: current.ID, Provider: current.Provider, Status: coreauth.StatusActive, Metadata: current.Metadata, Attributes: current.Attributes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh.SetCooldownStateStore(f.store)
+	if err = fresh.RestoreCooldownStates(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.manager = fresh
+	handler := management.NewHandler(f.cfg, f.cfgPath, f.manager)
+	handler.SetLocalPassword("test-password")
+	f.server = &Server{cfg: f.cfg, engine: gin.New(), mgmt: handler}
+	f.server.managementRoutesEnabled.Store(true)
+	f.server.registerManagementRoutes()
+}
+
+func (f *overageRouteFixture) setUsageHook(hook func()) {
+	f.mu.Lock()
+	f.usageHook = hook
+	f.mu.Unlock()
+}
+
+func TestManagementV8ClaudeOverageLegacyRestore(t *testing.T) {
+	t.Run("old_header_record", func(t *testing.T) {
+		if child := os.Getenv("CPA_OVERAGE_CHILD_CASE"); child == "" {
+			runIsolatedOverageCase(t, "old_header_record")
+			return
+		} else if child != "old_header_record" {
+			t.Fatal("OVERAGE_CHILD_INFRASTRUCTURE: wrong legacy case")
+		}
+		f := newOverageRouteFixture(t, `{"five_hour":{"utilization":10},"seven_day":{"utilization":20},"extra_usage":{"is_enabled":false}}`, func(w http.ResponseWriter, r *http.Request) { writeOverageTestRejection(w, true) })
+		f.fail(t, overageTestModel)
+		records, err := f.store.Load(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Downgrade only the newly added fields on a real persisted wire rejection.
+		// The existing bounded rejected headers are exactly the old record evidence.
+		for i := range records {
+			records[i].ClaudeOverageEvaluated = false
+			records[i].ClaudeOverageCooldownUntil = time.Time{}
+			records[i].IndependentClaudeOverageCooldownUntil = time.Time{}
+		}
+		if err = f.store.Save(f.ctx, records); err != nil {
+			t.Fatal(err)
+		}
+		f.restore(t)
+		before, _ := f.manager.GetByID(f.auth.ID)
+		if !coreauth.QuotaRecoveryRequiresClaudeExtraUsage(before) {
+			t.Fatal("legacy rejected overage headers lost attribution during restore")
+		}
+		f.usage(t)
+		after, _ := f.manager.GetByID(f.auth.ID)
+		if !reflect.DeepEqual(before, after) {
+			t.Fatal("unproven overage capacity changed legacy cooldown")
+		}
+		if !t.Failed() {
+			fmt.Println("OVERAGE_CASE_COMPLETED:old_header_record")
+		}
+	})
 }

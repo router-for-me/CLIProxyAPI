@@ -129,3 +129,24 @@ func TestQuotaClaudeWeeklyOnlyCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestQuotaClaudeExtraUsageCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"missing", "", false}, {"null", "null", false}, {"array", "[]", false},
+		{"missing_enabled", `{"utilization":1}`, false}, {"disabled", `{"is_enabled":false,"utilization":0}`, false}, {"null_enabled", `{"is_enabled":null,"utilization":0}`, false}, {"string_enabled", `{"is_enabled":"true","utilization":0}`, false},
+		{"unobserved", `{"is_enabled":true}`, false}, {"percentage_zero", `{"is_enabled":true,"utilization":0}`, true}, {"percentage_below_cap", `{"is_enabled":true,"utilization":99.9}`, true}, {"percentage_exhausted", `{"is_enabled":true,"utilization":100}`, false}, {"percentage_negative", `{"is_enabled":true,"utilization":-1}`, false}, {"percentage_null", `{"is_enabled":true,"utilization":null}`, false}, {"percentage_nan", `{"is_enabled":true,"utilization":NaN}`, false}, {"percentage_infinite", `{"is_enabled":true,"utilization":1e999}`, false},
+		{"credits_remaining", `{"is_enabled":true,"monthly_limit":100,"used_credits":0}`, true}, {"credits_exhausted", `{"is_enabled":true,"monthly_limit":100,"used_credits":100}`, false}, {"credits_negative", `{"is_enabled":true,"monthly_limit":100,"used_credits":-1}`, false}, {"credits_zero_cap", `{"is_enabled":true,"monthly_limit":0,"used_credits":0}`, false}, {"credits_null_unlimited", `{"is_enabled":true,"monthly_limit":null,"used_credits":0}`, false}, {"credits_missing_pair", `{"is_enabled":true,"monthly_limit":100}`, false},
+		{"contradictory_credits", `{"is_enabled":true,"utilization":0,"monthly_limit":100,"used_credits":100}`, false}, {"contradictory_percentage", `{"is_enabled":true,"utilization":100,"monthly_limit":100,"used_credits":0}`, false}, {"percentage_with_missing_credit_pair", `{"is_enabled":true,"utilization":0,"monthly_limit":100}`, false},
+		{"percentage_with_null_credit_pair", `{"is_enabled":true,"utilization":0,"monthly_limit":null,"used_credits":0}`, false},
+		{"consistent", `{"is_enabled":true,"utilization":20,"monthly_limit":100,"used_credits":20}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := quotaClaudeExtraCapacity([]byte(tc.body)); got != tc.want {
+				t.Fatalf("extra usage capacity=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
