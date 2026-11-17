@@ -1,0 +1,35 @@
+name: proxx-e2e
+
+# proxx: self-update e2e (ADR 0007) on Linux and macOS. Builds real binaries, serves them from a mock
+# GitHub release API and upgrades a supervised proxx in place under load.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selfupdate:
+    name: selfupdate e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Refresh models catalog
+        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Unit tests
+        run: go test -race -count=1 ./internal/proxx/... ./internal/managementasset/ ./cmd/proxx-sign/
+      - name: Self-update e2e
+        env:
+          PROXX_E2E: "1"
+        run: go test ./test/proxx/selfupdate_e2e/ -run TestE2ESelfUpdate -v -count=1 -timeout 30m

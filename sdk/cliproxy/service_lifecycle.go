@@ -71,7 +71,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), proxx.ShutdownBudget(s.currentConfig())) // proxx: drain budget (default 120s)
+		shutdownCtx, shutdownCancel := proxx.ShutdownContext(s.currentConfig()) // proxx: drain budget (default 120s) + exit watchdog
 		defer shutdownCancel()
 		if errShutdown := s.Shutdown(shutdownCtx); errShutdown != nil {
 			log.Errorf("service shutdown returned error: %v", errShutdown)

@@ -61,6 +61,7 @@ server:
   # in-flight HTTP requests are allowed to finish for up to this many seconds before
   # remaining connections are forcibly closed. Shutdown never hangs longer than this budget.
   # Default 0 keeps the legacy behavior: close immediately without draining.
+  # proxx: 0 (unset) drains for up to 120s; set -1 to close immediately.
   # Note: hijacked connections (WebSocket sessions) are not drained; they are
   # released by their own connection managers after the drain window.
   shutdown-timeout: 0
@@ -1417,6 +1418,11 @@ plugins:
 #   request-logs:                # request log viewer (needs observability.logs.request-log: true)
 #     max-total-size-mb: 10240   # cap for request log files (normal + error-); oldest deleted first.
 #                                # Unset = 10240 (10 GB); 0 = unlimited. main.log/app logs are not counted.
+#   update:                      # self-update (ADR 0007); the update source and signing key are build-time only
+#     check: true                # periodic check of the latest GitHub release
+#     interval-hours: 24
+#     auto-apply: false          # true: download, verify and restart in place at the next idle moment
+#     window: ""                 # "HH:MM-HH:MM" local time for auto-apply (may wrap midnight); "" = any time
 
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only

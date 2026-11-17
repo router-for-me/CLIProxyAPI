@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -326,7 +327,10 @@ func TestRollbackAttemptCounter(t *testing.T) {
 	}
 	var execed []string
 	oldExec, oldExit, oldDeadline := execFn, exitFn, healthDeadline
-	execFn = func(p string, _ []string, _ []string) error { execed = append(execed, p); return errors.New("test: no exec") }
+	execFn = func(p string, _ []string, _ []string) error {
+		execed = append(execed, p)
+		return errors.New("test: no exec")
+	}
 	exitFn = func(code int) { panic(exitPanic(code)) }
 	healthDeadline = time.Hour
 	defer func() { execFn, exitFn, healthDeadline = oldExec, oldExit, oldDeadline }()
@@ -430,10 +434,12 @@ func TestSupportedDetection(t *testing.T) {
 		t.Fatalf("plain linux install unsupported: %s", reason)
 	}
 	cases := map[string]func(e *environment){
-		"windows":    func(e *environment) { e.goos = "windows" },
-		"freebsd":    func(e *environment) { e.goos = "freebsd" },
-		"dockerenv":  func(e *environment) { e.fileExists = func(p string) bool { return p == "/.dockerenv" } },
-		"cgroup":     func(e *environment) { e.readFile = func(string) ([]byte, error) { return []byte("0::/docker/abc"), nil } },
+		"windows":   func(e *environment) { e.goos = "windows" },
+		"freebsd":   func(e *environment) { e.goos = "freebsd" },
+		"dockerenv": func(e *environment) { e.fileExists = func(p string) bool { return p == "/.dockerenv" } },
+		"cgroup": func(e *environment) {
+			e.readFile = func(string) ([]byte, error) { return []byte("0::/docker/abc"), nil }
+		},
 		"homebrew":   func(e *environment) { e.goos = "darwin"; e.exePath = "/opt/homebrew/Cellar/proxx/1.0/bin/proxx" },
 		"unwritable": func(e *environment) { e.writable = func(string) error { return os.ErrPermission } },
 		"no trigger": func(e *environment) { e.hasTrigger = false },
@@ -635,5 +641,40 @@ func TestWaitForApplyMomentWindow(t *testing.T) {
 	}
 	if m.state != StateStaged {
 		t.Fatalf("state outside window = %s, want staged", m.state)
+	}
+}
+
+type fakeConn struct {
+	net.Conn
+	closed bool
+}
+
+func (f *fakeConn) Close() error { f.closed = true; return nil }
+
+type wrapConn struct {
+	net.Conn
+	inner net.Conn
+}
+
+func (w *wrapConn) NetConn() net.Conn { return w.inner }
+
+func (w *wrapConn) Close() error { return w.inner.Close() }
+
+func TestTrackedConnRawCloseDecrements(t *testing.T) {
+	tr := newTracker()
+	raw := &fakeConn{}
+	tr.inc()
+	tc := &trackedConn{Conn: &wrapConn{inner: raw}, t: tr}
+	r := tc.NetConn()
+	if _, ok := r.(interface{ NetConn() net.Conn }); ok {
+		t.Fatal("raw view must not unwrap further")
+	}
+	_ = r.Close()
+	if !raw.closed || tr.active.Load() != 0 {
+		t.Fatalf("raw closed=%v active=%d", raw.closed, tr.active.Load())
+	}
+	_ = tc.Close() // a later outer Close must not decrement twice
+	if tr.active.Load() != 0 {
+		t.Fatalf("double decrement: %d", tr.active.Load())
 	}
 }

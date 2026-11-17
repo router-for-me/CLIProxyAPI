@@ -10,6 +10,7 @@
 #   PROXX_NO_SERVICE=1               --no-service      do not install/start a launchd or systemd service
 #   PROXX_NO_PLUGIN=1                --no-plugin       Linux: use the portable no-plugin build (musl, old glibc)
 #   PROXX_UNINSTALL=1                --uninstall       remove the service and binary (keeps PROXX_HOME)
+#   PROXX_SERVICE_LABEL=<label>                        launchd label (default io.github.iamkunal9.proxx; for tests)
 #
 # A first install copies an existing CLIProxyAPI config (Homebrew's cliproxyapi.conf) when there is one;
 # proxx reads the same config format. An existing $PROXX_HOME/config.yaml is never overwritten.
@@ -17,7 +18,7 @@
 set -eu
 
 REPO="iamkunal9/proxx"
-SERVICE_LABEL="io.github.iamkunal9.proxx"
+SERVICE_LABEL="${PROXX_SERVICE_LABEL:-io.github.iamkunal9.proxx}"
 PANEL_UPSTREAM="https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 PANEL_PROXX="https://github.com/iamkunal9/proxx-panel"
 
@@ -40,7 +41,7 @@ while [ $# -gt 0 ]; do
 	--no-service) NO_SERVICE=1; shift ;;
 	--no-plugin) NO_PLUGIN=1; shift ;;
 	--uninstall) UNINSTALL=1; shift ;;
-	-h | --help) sed -n '2,17p' "$0" 2>/dev/null || true; exit 0 ;;
+	-h | --help) sed -n '2,18p' "$0" 2>/dev/null || true; exit 0 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -74,9 +75,10 @@ stop_service() {
 	Darwin) [ -f "$PLIST" ] && launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1 || true ;;
 	Linux) [ -f "$UNIT" ] && has_systemd_user && systemctl --user stop proxx.service >/dev/null 2>&1 || true ;;
 	esac
-	# Wait (up to ~10s) for a previous proxx process to exit so its port is free.
+	# Wait for a previous proxx process to exit so its port is free. proxx drains in-flight requests
+	# for up to 120s (server.shutdown-timeout) before it exits, so allow ~135s.
 	i=0
-	while [ "$i" -lt 20 ] && pgrep -f "$BIN --config" >/dev/null 2>&1; do
+	while [ "$i" -lt 270 ] && pgrep -f "$BIN --config" >/dev/null 2>&1; do
 		i=$((i + 1))
 		sleep 0.5
 	done
@@ -184,8 +186,19 @@ else
 	info "Keeping existing config $CONFIG"
 fi
 
+# Tells proxx (and support) how this copy was installed.
+printf 'script\n' >"$PROXX_HOME/.install-method"
+
+update_hint() {
+	info "Updates: proxx can now update itself in place from the panel (or set proxx.update.auto-apply: true); re-running this installer also works."
+}
+
 # --- service --------------------------------------------------------------------
+# proxx drains in-flight requests for up to 120s on stop and bounds its own shutdown (~150s), so the
+# supervisor must not kill it earlier: launchd ExitTimeOut 0 (launchd caps agent values at 60s) and
+# systemd TimeoutStopSec=130.
 if [ -n "$NO_SERVICE" ]; then
+	update_hint
 	info "Done. Run: $BIN --config $CONFIG"
 	exit 0
 fi
@@ -210,6 +223,7 @@ Darwin)
 	<key>WorkingDirectory</key><string>$PROXX_HOME</string>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
+	<key>ExitTimeOut</key><integer>0</integer>
 	<key>StandardOutPath</key><string>$LOG</string>
 	<key>StandardErrorPath</key><string>$LOG</string>
 </dict>
@@ -237,6 +251,7 @@ After=network-online.target
 ExecStart=$BIN --config $CONFIG
 WorkingDirectory=$PROXX_HOME
 Restart=on-failure
+TimeoutStopSec=130
 
 [Install]
 WantedBy=default.target
@@ -254,3 +269,4 @@ EOF
 	;;
 esac
 info "Panel: http://127.0.0.1:$port/management.html"
+update_hint

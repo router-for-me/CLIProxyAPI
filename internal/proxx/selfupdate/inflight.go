@@ -166,3 +166,37 @@ func (c *trackedConn) Close() error {
 	c.once.Do(c.t.dec)
 	return err
 }
+
+// NetConn exposes the raw transport for code that reclaims a socket without calling the wrappers'
+// Close (wstunnel does this when a TLS close_notify stalls). The returned conn closes the raw transport
+// and still decrements the counter.
+func (c *trackedConn) NetConn() net.Conn {
+	return &trackedRawConn{Conn: rawConn(c.Conn), owner: c}
+}
+
+type trackedRawConn struct {
+	net.Conn
+	owner *trackedConn
+}
+
+func (r *trackedRawConn) Close() error {
+	err := r.Conn.Close()
+	r.owner.once.Do(r.owner.t.dec)
+	return err
+}
+
+// rawConn follows NetConn() wrappers (tls.Conn, buffered conns) down to the transport.
+func rawConn(conn net.Conn) net.Conn {
+	for i := 0; i < 16; i++ {
+		w, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return conn
+		}
+		next := w.NetConn()
+		if next == nil || next == conn {
+			return conn
+		}
+		conn = next
+	}
+	return conn
+}
