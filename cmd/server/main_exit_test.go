@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -14,13 +16,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/tui"
 )
 
-const serverExitHelperEnv = "CLIPROXY_TEST_SERVER_EXIT_HELPER"
+const (
+	serverExitHelperEnv         = "CLIPROXY_TEST_SERVER_EXIT_HELPER"
+	serverExitTUIFailureEnv     = "CLIPROXY_TEST_TUI_FAILURE"
+	serverExitTUIFailureMessage = "forced TUI startup failure"
+)
 
 func TestServerExitHelper(t *testing.T) {
 	if os.Getenv(serverExitHelperEnv) != "1" {
 		return
+	}
+	if os.Getenv(serverExitTUIFailureEnv) == "1" {
+		errTUI := errors.New(serverExitTUIFailureMessage)
+		runTUI = func(int, string, *tui.LogHook, io.Writer) error { return errTUI }
+		runTUIWithBaseURL = func(string, string, *tui.LogHook, io.Writer) error { return errTUI }
 	}
 	for index, arg := range os.Args {
 		if arg == "--" {
@@ -43,6 +56,7 @@ func newServerExitCommand(t *testing.T, dir string, args ...string) (*exec.Cmd, 
 	// Isolate from host store environment variables and prevent external network calls.
 	command.Env = append(os.Environ(),
 		serverExitHelperEnv+"=1",
+		serverExitTUIFailureEnv+"=",
 		"HOME_JWT=", "home_jwt=",
 		"PGSTORE_DSN=", "pgstore_dsn=",
 		"GITSTORE_GIT_URL=", "gitstore_git_url=",
@@ -113,12 +127,13 @@ func TestTUIClientFailureExitsWithFailure(t *testing.T) {
 	dir := t.TempDir()
 	configPath := writeTestServerConfig(t, dir, 18317)
 	command, stdout, stderr := newServerExitCommand(t, dir, "--config", configPath, "--tui")
+	command.Env = append(command.Env, serverExitTUIFailureEnv+"=1")
 	errRun := command.Run()
 	if command.ProcessState == nil || command.ProcessState.ExitCode() != 1 {
 		t.Fatalf("expected exit code 1 for TUI failure, got err=%v exit=%d\nstdout:\n%s\nstderr:\n%s",
 			errRun, command.ProcessState.ExitCode(), stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "TUI error:") {
+	if !strings.Contains(stderr.String(), "TUI error: "+serverExitTUIFailureMessage) {
 		t.Fatalf("expected TUI error on stderr, got:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 }
@@ -167,12 +182,13 @@ func TestTUIStandaloneFailureExitsWithFailure(t *testing.T) {
 	dir := t.TempDir()
 	configPath := writeTestServerConfig(t, dir, port)
 	command, stdout, stderr := newServerExitCommand(t, dir, "--config", configPath, "--tui", "--standalone", "--local-model")
+	command.Env = append(command.Env, serverExitTUIFailureEnv+"=1")
 	errRun := command.Run()
 	if command.ProcessState == nil || command.ProcessState.ExitCode() != 1 {
 		t.Fatalf("expected exit code 1 for standalone TUI failure, got err=%v exit=%d\nstdout:\n%s\nstderr:\n%s",
 			errRun, command.ProcessState.ExitCode(), stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "TUI error:") {
+	if !strings.Contains(stderr.String(), "TUI error: "+serverExitTUIFailureMessage) {
 		t.Fatalf("expected TUI error on stderr, got:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
 	}
 }
