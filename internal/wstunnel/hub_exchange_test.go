@@ -388,11 +388,10 @@ func TestHubExchange_ManyToManyFullDuplexMultiplexing(t *testing.T) {
 }
 
 func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
-	hub := NewHub(Options{SendQueueSize: 2})
+	const sendQueueCapacity = 2
+	hub := NewHub(Options{SendQueueSize: sendQueueCapacity})
 	hub.UpdateAllowedAPIKeys([]string{"key-sec"})
-	t.Cleanup(hub.Close)
-	srv := httptest.NewServer(hub)
-	t.Cleanup(srv.Close)
+	srv := newGatedTunnelServer(t, hub)
 
 	srvSlow := dialRole(t, srv.URL, "key-sec", RoleServer, "srv-slow", "Slow Server")
 	srvFast := dialRole(t, srv.URL, "key-sec", RoleServer, "srv-fast", "Fast Server")
@@ -428,49 +427,25 @@ func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
 		t.Fatalf("server->server code = %q, want %q", got, ErrCodeInvalidTargetRole)
 	}
 
-	// 3. Slow peer backpressure: flood srvSlow (without reading from it) until target_buffer_full arrives.
-	gotBufferFull := make(chan struct{})
-	syncDone := make(chan error, 1)
-	go func() {
-		var once sync.Once
-		for {
-			frame := readTextJSONFrame(t, cli1)
-			if frame.Get("type").String() == ControlTypeError && frame.Get("code").String() == ErrCodeTargetBufferFull {
-				once.Do(func() { close(gotBufferFull) })
-				continue
-			}
-			if frame.Get("type").String() == ControlTypeServerList && frame.Get("request_id").String() == "post-flood-barrier" {
-				syncDone <- nil
-				return
-			}
-		}
-	}()
-
-	largeChunk := bytes.Repeat([]byte("z"), 256*1024)
-	floodDone := false
-	for i := 0; i < 128 && !floodDone; i++ {
-		pkt, _ := EncodeDataFrame(PayloadTypeBinary, "cli-1", "srv-slow", largeChunk)
-		if errWrite := cli1.WriteMessage(websocket.BinaryMessage, pkt); errWrite != nil {
-			t.Fatalf("WriteMessage(flood %d) error = %v", i, errWrite)
-		}
-		select {
-		case <-gotBufferFull:
-			floodDone = true
-		default:
+	// Block one active write, then exceed the actual queue capacity by one frame.
+	slowPeer := lookupTunnelPeer(t, hub, "key-sec", "srv-slow")
+	transport := slowPeer.conn.UnderlyingConn().(*deadlineGuardConn).Conn.(*gatedTunnelConn)
+	transport.arm()
+	packet, errEncode := EncodeDataFrame(PayloadTypeBinary, "cli-1", "srv-slow", []byte("backpressure"))
+	if errEncode != nil {
+		t.Fatal(errEncode)
+	}
+	if errWrite := cli1.WriteMessage(websocket.BinaryMessage, packet); errWrite != nil {
+		t.Fatalf("WriteMessage(active slow write) error = %v", errWrite)
+	}
+	waitTunnelSignal(t, transport.blocked, "active slow write")
+	for i := 0; i < cap(slowPeer.sendCh)+1; i++ {
+		if errWrite := cli1.WriteMessage(websocket.BinaryMessage, packet); errWrite != nil {
+			t.Fatalf("WriteMessage(queued slow write %d) error = %v", i, errWrite)
 		}
 	}
-	select {
-	case <-gotBufferFull:
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for target_buffer_full from slow server")
-	}
-
-	// Barrier sync via list_servers to deterministically drain all in-flight error frames on cli1.
-	if errWrite := cli1.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"post-flood-barrier"}`)); errWrite != nil {
-		t.Fatalf("WriteMessage(barrier) error = %v", errWrite)
-	}
-	if errSync := <-syncDone; errSync != nil {
-		t.Fatalf("barrier sync error = %v", errSync)
+	if got := readTextJSONFrame(t, cli1).Get("code").String(); got != ErrCodeTargetBufferFull {
+		t.Fatalf("slow target error = %q, want %q", got, ErrCodeTargetBufferFull)
 	}
 
 	// Verify srvFast still exchanges traffic with cli1 without being blocked by srvSlow.

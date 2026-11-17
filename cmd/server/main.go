@@ -51,6 +51,12 @@ var (
 	DefaultConfigPath = ""
 )
 
+// TUI runners are replaceable in subprocess exit tests.
+var (
+	runTUI            = tui.Run
+	runTUIWithBaseURL = tui.RunWithBaseURL
+)
+
 // init initializes the shared logger setup.
 func init() {
 	logging.SetupBaseLogger()
@@ -847,7 +853,7 @@ func run() (exitStatus int) {
 				}
 
 				var errTUI error
-				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
+				if errRun := runTUI(cfg.Port, password, hook, origStdout); errRun != nil {
 					restoreIO()
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
 					errTUI = errRun
@@ -864,7 +870,7 @@ func run() (exitStatus int) {
 				// Default TUI mode: pure management client.
 				// The proxy server must already be running (locally or remotely).
 				baseURL := resolveManagementBaseURL(managementBaseURL, cfg)
-				if errRun := tui.RunWithBaseURL(baseURL, password, nil, os.Stdout); errRun != nil {
+				if errRun := runTUIWithBaseURL(baseURL, password, nil, os.Stdout); errRun != nil {
 					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
 					return 1
 				}

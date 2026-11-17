@@ -121,9 +121,8 @@ func TestControllerConfigureLocalInvalidPathReportsUnavailableError(t *testing.T
 }
 
 func TestControllerPrioritizesHomeProviderOverLocalBoltStore(t *testing.T) {
-	resetControllerForTest(t)
-
 	localPath := filepath.Join(t.TempDir(), "local.db")
+	resetControllerForTest(t)
 	if errCfg := ConfigureLocal(true, localPath); errCfg != nil {
 		t.Fatalf("ConfigureLocal(true, localPath) error = %v", errCfg)
 	}
@@ -173,9 +172,8 @@ func TestControllerPrioritizesHomeProviderOverLocalBoltStore(t *testing.T) {
 }
 
 func TestControllerHelpersWithLocalBoltStore(t *testing.T) {
-	resetControllerForTest(t)
-
 	dbPath := filepath.Join(t.TempDir(), "helpers.db")
+	resetControllerForTest(t)
 	if errCfg := ConfigureLocal(true, dbPath); errCfg != nil {
 		t.Fatalf("ConfigureLocal(true, dbPath) error = %v", errCfg)
 	}
