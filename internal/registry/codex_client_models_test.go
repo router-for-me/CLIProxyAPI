@@ -2,10 +2,11 @@ package registry
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestEmbeddedCodexClientModelsCatalogIsValid(t *testing.T) {

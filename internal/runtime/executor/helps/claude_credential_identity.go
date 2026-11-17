@@ -3,11 +3,11 @@ package helps
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"

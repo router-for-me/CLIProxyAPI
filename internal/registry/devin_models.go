@@ -3,13 +3,13 @@ package registry
 import (
 	"bytes"
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 )
 

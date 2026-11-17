@@ -1,9 +1,9 @@
 package helps
 
 import (
-	"regexp"
 	"testing"
 
+	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )

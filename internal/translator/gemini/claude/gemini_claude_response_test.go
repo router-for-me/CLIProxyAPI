@@ -1515,3 +1515,103 @@ func TestConvertGeminiResponseToClaude_EmptyFunctionCallPlaceholderReturnsError(
 		t.Fatalf("expected error event for empty functionCall placeholder:\n%s", streamOut)
 	}
 }
+
+func TestConvertGeminiResponseToClaudeStream_CoalescesConsecutiveUnsignedTextChunks(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":"why is the sky blue?"}]}`)
+	chunks := [][]byte{
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"First chunk, "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"second chunk, "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"third chunk, "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"fourth chunk, "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"fifth chunk."}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig-7587"}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte(`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20},"modelVersion":"gemini-4-argon","responseId":"resp-7587"}`),
+		[]byte("[DONE]"),
+	}
+
+	var param any
+	ctx := context.Background()
+	var fullOut []byte
+	for _, chunk := range chunks {
+		fullOut = append(fullOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-4-argon", requestJSON, requestJSON, chunk, &param), nil)...)
+	}
+
+	textBlockStarts := 0
+	thinkingBlockStarts := 0
+	var block0Text strings.Builder
+	var carrierSig string
+	for _, line := range strings.Split(string(fullOut), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		switch ojson.Get(payload, "type").String() {
+		case "content_block_start":
+			switch ojson.Get(payload, "content_block.type").String() {
+			case "text":
+				textBlockStarts++
+			case "thinking":
+				thinkingBlockStarts++
+			}
+		case "content_block_delta":
+			switch ojson.Get(payload, "delta.type").String() {
+			case "text_delta":
+				if idx := ojson.Get(payload, "index").Int(); idx != 0 {
+					t.Fatalf("text_delta index = %d, want 0; output:\n%s", idx, string(fullOut))
+				}
+				block0Text.WriteString(ojson.Get(payload, "delta.text").String())
+			case "signature_delta":
+				if idx := ojson.Get(payload, "index").Int(); idx != 1 {
+					t.Fatalf("signature_delta index = %d, want 1; output:\n%s", idx, string(fullOut))
+				}
+				carrierSig = ojson.Get(payload, "delta.signature").String()
+			}
+		}
+	}
+
+	if textBlockStarts != 1 {
+		t.Fatalf("text content_block_start count = %d, want 1; output:\n%s", textBlockStarts, string(fullOut))
+	}
+	if thinkingBlockStarts != 1 {
+		t.Fatalf("thinking content_block_start count = %d, want 1; output:\n%s", thinkingBlockStarts, string(fullOut))
+	}
+	if got := block0Text.String(); got != "First chunk, second chunk, third chunk, fourth chunk, fifth chunk." {
+		t.Fatalf("block 0 text = %q, want concatenated text", got)
+	}
+	if carrierSig != "cpa-gemini-carrier-v1:previous:text:c2lnLTc1ODc" {
+		t.Fatalf("carrier signature = %q, want previous:text carrier", carrierSig)
+	}
+
+	t.Run("isolates explicitly signed text part between unsigned chunks", func(t *testing.T) {
+		var p any
+		mixedChunks := [][]byte{
+			[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"before-1 "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587-mixed"}`),
+			[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"before-2 "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587-mixed"}`),
+			[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"signed-mid","thoughtSignature":"sig-mid"}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587-mixed"}`),
+			[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"after-1 "}]}}],"modelVersion":"gemini-4-argon","responseId":"resp-7587-mixed"}`),
+			[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"after-2"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20},"modelVersion":"gemini-4-argon","responseId":"resp-7587-mixed"}`),
+			[]byte("[DONE]"),
+		}
+		var mixedOut []byte
+		for _, ch := range mixedChunks {
+			mixedOut = append(mixedOut, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-4-argon", requestJSON, requestJSON, ch, &p), nil)...)
+		}
+		content := ojson.Parse(claudeContentFromGeminiStream(t, mixedOut).String()).Array()
+		if len(content) != 4 {
+			t.Fatalf("expected 4 content blocks (text, carrier, signed text, text), got %d: %s", len(content), string(mixedOut))
+		}
+		if content[0].Get("type").String() != "text" || content[0].Get("text").String() != "before-1 before-2 " {
+			t.Fatalf("block 0 = %s, want coalesced 'before-1 before-2 '", content[0].Raw)
+		}
+		if content[1].Get("type").String() != "thinking" || content[1].Get("signature").String() != "sig-mid" {
+			t.Fatalf("block 1 = %s, want carrier for sig-mid", content[1].Raw)
+		}
+		if content[2].Get("type").String() != "text" || content[2].Get("text").String() != "signed-mid" {
+			t.Fatalf("block 2 = %s, want isolated 'signed-mid'", content[2].Raw)
+		}
+		if content[3].Get("type").String() != "text" || content[3].Get("text").String() != "after-1 after-2" {
+			t.Fatalf("block 3 = %s, want coalesced 'after-1 after-2'", content[3].Raw)
+		}
+	})
+}

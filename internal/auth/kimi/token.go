@@ -5,12 +5,12 @@ package kimi
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/atomicfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 )
