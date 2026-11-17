@@ -23,10 +23,16 @@ func TestOpenAIModelsListsAccountKindsOnRequest(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	model := "accounts-test-model"
 	only := "accounts-test-key-only"
+	compat := "accounts-test-lab/compat-model"
 	auths := []*coreauth.Auth{
 		{ID: "accounts-test-key", Provider: "claude", Attributes: map[string]string{coreauth.AttributeAPIKey: "secret-key", "priority": "-25"}},
 		{ID: "accounts-test-login", Provider: "claude", Label: "someone@example.com", Attributes: map[string]string{coreauth.AttributeAuthKind: "oauth", "priority": "-15"}},
 		{ID: "accounts-test-off", Provider: "claude", Disabled: true, Attributes: map[string]string{coreauth.AttributeAuthKind: "oauth", "priority": "-10"}},
+		// An OpenAI-compatible entry: its name is the operator's choice, so the upstream host tells what it is.
+		{ID: "accounts-test-compat", Provider: "openai-compatible-mine", Attributes: map[string]string{
+			coreauth.AttributeAPIKey: "secret-compat-key",
+			"base_url":               "https://user:secret-pass@OpenRouter.ai:443/api/v1?token=secret-token",
+		}},
 	}
 	for _, auth := range auths {
 		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
@@ -35,6 +41,9 @@ func TestOpenAIModelsListsAccountKindsOnRequest(t *testing.T) {
 		models := []*registry.ModelInfo{{ID: model, OwnedBy: "anthropic"}}
 		if auth.ID == "accounts-test-key" {
 			models = append(models, &registry.ModelInfo{ID: only, OwnedBy: "anthropic"})
+		}
+		if auth.ID == "accounts-test-compat" {
+			models = []*registry.ModelInfo{{ID: compat, OwnedBy: "openai"}}
 		}
 		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, models)
 		id := auth.ID
@@ -96,7 +105,13 @@ func TestOpenAIModelsListsAccountKindsOnRequest(t *testing.T) {
 	if len(keyOnly) != 1 || keyOnly[0]["kind"] != "apikey" {
 		t.Fatalf("accounts of %s = %v, want one api key", only, keyOnly)
 	}
-	for _, secret := range []string{"secret-key", "someone@example.com", "accounts-test-login"} {
+	// Only the host of an API key's base URL: no credentials, port, path or query.
+	var compatAccounts []map[string]any
+	_ = json.Unmarshal(withAccounts[compat]["accounts"], &compatAccounts)
+	if len(compatAccounts) != 1 || compatAccounts[0]["host"] != "openrouter.ai" || compatAccounts[0]["kind"] != "apikey" {
+		t.Fatalf("accounts of %s = %v, want one api key on host openrouter.ai", compat, compatAccounts)
+	}
+	for _, secret := range []string{"secret-key", "secret-compat-key", "secret-pass", "secret-token", "/api/v1", "someone@example.com", "accounts-test-login"} {
 		if strings.Contains(raw, secret) {
 			t.Fatalf("the model list exposes %q", secret)
 		}

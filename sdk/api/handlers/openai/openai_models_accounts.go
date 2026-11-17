@@ -1,11 +1,13 @@
 package openai
 
 import (
+	"net/url"
 	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // includeAccountsParam is the /v1/models query value that adds, per model, the kinds of credential serving it.
@@ -17,6 +19,21 @@ type modelAccount struct {
 	// Kind is "oauth" for a subscription login and "apikey" for an API key.
 	Kind     string `json:"kind"`
 	Priority int    `json:"priority"`
+	// Host is the host of an API key's base URL, when it has one: an OpenAI-compatible entry's name is the operator's
+	// choice, so the host is what tells the upstream service. Only the host: no credentials, port, path or query.
+	Host string `json:"host,omitempty"`
+}
+
+// baseURLHost returns the lowercased host of an API key's base URL, or "" when there is none.
+func baseURLHost(auth *coreauth.Auth) string {
+	if auth.Attributes == nil || auth.AuthKind() != "apikey" {
+		return ""
+	}
+	parsed, errParse := url.Parse(strings.TrimSpace(auth.Attributes["base_url"]))
+	if errParse != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
 }
 
 // wantsAccounts reports whether the request asked for the accounts of each model (`?include=accounts`).
@@ -36,7 +53,8 @@ func wantsAccounts(c *gin.Context) bool {
 
 // modelAccounts lists, per model ID, the enabled credentials that serve it, in the order CPA tries them: highest
 // priority first. A client uses it to tell whether a model is reached through a subscription login or an API key,
-// which can differ in limits, prompt-cache lifetime and price. Only provider, kind and priority are given.
+// which can differ in limits, prompt-cache lifetime and price. Only provider, kind, priority and, for an API key with a
+// base URL, its host are given.
 func (h *OpenAIAPIHandler) modelAccounts() map[string][]modelAccount {
 	if h == nil || h.BaseAPIHandler == nil || h.AuthManager == nil {
 		return nil
@@ -47,7 +65,7 @@ func (h *OpenAIAPIHandler) modelAccounts() map[string][]modelAccount {
 		if auth == nil || auth.Disabled {
 			continue
 		}
-		account := modelAccount{Provider: auth.Provider, Kind: auth.AuthKind(), Priority: auth.Priority()}
+		account := modelAccount{Provider: auth.Provider, Kind: auth.AuthKind(), Priority: auth.Priority(), Host: baseURLHost(auth)}
 		for _, model := range modelRegistry.GetModelsForClient(auth.ID) {
 			if model == nil || model.ID == "" {
 				continue
