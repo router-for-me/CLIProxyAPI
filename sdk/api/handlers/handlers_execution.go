@@ -30,6 +30,11 @@ type pluginExecutorFormatResolver interface {
 	PluginExecutorRequestToFormat(string, coreexecutor.Request, coreexecutor.Options) sdktranslator.Format
 }
 
+type pluginExecutorAttributionHost interface {
+	ExecutePluginExecutorWithAttribution(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, *pluginapi.UsageAttribution, error)
+	ExecutePluginExecutorStreamWithAttribution(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, *pluginapi.UsageAttribution, error)
+}
+
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
@@ -222,10 +227,20 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	var reporter *helps.UsageReporter
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)
+		reporter.ApplyPluginExecutorAttribution(executorPluginID, nil)
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
-	resp, errExecute := host.ExecutePluginExecutor(execCtx, executorPluginID, req, opts)
+	var (
+		resp        coreexecutor.Response
+		attribution *pluginapi.UsageAttribution
+		errExecute  error
+	)
+	if attrHost, ok := host.(pluginExecutorAttributionHost); ok && attrHost != nil {
+		resp, attribution, errExecute = attrHost.ExecutePluginExecutorWithAttribution(execCtx, executorPluginID, req, opts)
+	} else {
+		resp, errExecute = host.ExecutePluginExecutor(execCtx, executorPluginID, req, opts)
+	}
 	if errExecute != nil {
 		if reporter != nil && !nestedTracker.hasNestedExecution() {
 			reporter.PublishFailure(execCtx, errExecute)
@@ -235,6 +250,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		return nil, nil, errMsg
 	}
 	if reporter != nil && !nestedTracker.hasNestedExecution() {
+		reporter.ApplyPluginExecutorAttribution(executorPluginID, attribution)
 		reporter.RecordFirstPacket()
 		detail := parsePluginExecutorResponseUsage(responseProtocol, resp.Payload)
 		reporter.Publish(execCtx, detail)
