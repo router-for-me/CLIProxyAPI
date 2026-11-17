@@ -20,7 +20,7 @@ func TestGetAPIKeyPolicyUsageReportsNamesAndModels(t *testing.T) {
 	store := apikeylimits.Default()
 	store.AddUsage(key, apikeylimits.Usage{Model: "small", Tokens: 10})
 	store.AddUsage(key, apikeylimits.Usage{Model: "big", Tokens: 90, Cost: 1.5})
-	store.AddUsage(key, apikeylimits.Usage{Model: "big", Tokens: 10, Failed: true})
+	store.AddUsage(key, apikeylimits.Usage{Model: "big", Tokens: 10, Failed: true, AuthID: "acc-x", RequestID: "req-policy-usage"})
 
 	h := NewHandlerWithoutConfigFilePath(cfg, nil)
 	rec := httptest.NewRecorder()
@@ -54,5 +54,22 @@ func TestGetAPIKeyPolicyUsageReportsNamesAndModels(t *testing.T) {
 	if len(payload.Keys[0].Daily) == 0 || len(payload.Keys[0].Hourly) == 0 ||
 		len(payload.Keys[0].Daily[len(payload.Keys[0].Daily)-1].Models) != 2 {
 		t.Fatalf("history daily=%+v hourly=%+v", payload.Keys[0].Daily, payload.Keys[0].Hourly)
+	}
+	if accs := total.Accounts; len(accs) == 0 || accs[0].ID != "acc-x" || accs[0].Name != "acc-x" {
+		t.Fatalf("accounts = %+v", total.Accounts)
+	}
+
+	rec = httptest.NewRecorder()
+	ginCtx, _ = gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/access/api-key-requests?limit=1", nil)
+	h.GetAPIKeyRequests(ginCtx)
+	var logs struct {
+		Requests []apiKeyRequestEntry `json:"requests"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil || len(logs.Requests) != 1 {
+		t.Fatalf("requests decode err=%v body=%s", err, rec.Body.String())
+	}
+	if r := logs.Requests[0]; r.RequestID != "req-policy-usage" || r.KeyName != "Team A" || r.Key != key || r.AccountName != "acc-x" || !r.Failed {
+		t.Fatalf("request entry = %+v", r)
 	}
 }

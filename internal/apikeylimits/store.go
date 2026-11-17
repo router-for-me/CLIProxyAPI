@@ -111,6 +111,8 @@ type Counter struct {
 	Failed   int64     `json:"failed,omitempty"`
 	// Models breaks the window down by upstream model name.
 	Models map[string]*ModelCounter `json:"models,omitempty"`
+	// Accounts breaks the window down by upstream credential (auth ID).
+	Accounts map[string]*DimCounter `json:"accounts,omitempty"`
 	// Rejected counts requests refused by the key's policy before reaching a model
 	// (disabled, expired or over its limits); they are not part of Requests.
 	Rejected        int64            `json:"rejected,omitempty"`
@@ -121,6 +123,7 @@ type Counter struct {
 // clone returns a deep copy so callers never share maps or pointers with the store.
 func (c *Counter) clone() Counter {
 	out := *c
+	out.Accounts = cloneDims(c.Accounts)
 	if c.RejectedReasons != nil {
 		out.RejectedReasons = make(map[string]int64, len(c.RejectedReasons))
 		for reason, n := range c.RejectedReasons {
@@ -161,6 +164,57 @@ type Usage struct {
 	Stream  bool
 	Latency time.Duration
 	TTFT    time.Duration
+	// AuthID and Provider identify the upstream credential that served the request.
+	AuthID   string
+	Provider string
+	// StatusCode is the upstream HTTP status of a failed request, when known.
+	StatusCode int
+	RequestID  string
+}
+
+// maxAccountValues caps distinct credentials tracked per key and window.
+const maxAccountValues = 64
+
+// RecentLimit is how many recent requests the store keeps for the request log.
+const RecentLimit = 500
+
+// RequestEntry is one served request in the recent request log. It carries
+// metadata only: no prompts, responses or key material.
+type RequestEntry struct {
+	Time            time.Time `json:"time"`
+	KeyFP           string    `json:"key_fp"`
+	AuthID          string    `json:"auth_id,omitempty"`
+	Provider        string    `json:"provider,omitempty"`
+	Model           string    `json:"model"`
+	Effort          string    `json:"effort,omitempty"`
+	Tier            string    `json:"tier,omitempty"`
+	Stream          bool      `json:"stream,omitempty"`
+	Failed          bool      `json:"failed,omitempty"`
+	StatusCode      int       `json:"status_code,omitempty"`
+	LatencyMs       int64     `json:"latency_ms,omitempty"`
+	TTFTMs          int64     `json:"ttft_ms,omitempty"`
+	InputTokens     int64     `json:"input_tokens,omitempty"`
+	CachedTokens    int64     `json:"cached_tokens,omitempty"`
+	OutputTokens    int64     `json:"output_tokens,omitempty"`
+	ReasoningTokens int64     `json:"reasoning_tokens,omitempty"`
+	Tokens          int64     `json:"tokens,omitempty"`
+	Cost            float64   `json:"cost,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+}
+
+// Recent returns up to limit of the latest requests, newest first.
+func (s *Store) Recent(limit int) []RequestEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.recent)
+	if limit <= 0 || limit > n {
+		limit = n
+	}
+	out := make([]RequestEntry, 0, limit)
+	for i := n - 1; i >= n-limit; i-- {
+		out = append(out, s.recent[i])
+	}
+	return out
 }
 
 type keyCounters map[Window]*Counter
@@ -194,6 +248,7 @@ type Store struct {
 	mu       sync.Mutex
 	counters map[string]keyCounters
 	history  map[string]*keyHistory
+	recent   []RequestEntry
 	path     string
 	dirty    bool
 	cfgFn    func() *config.Config
@@ -344,6 +399,9 @@ func (s *Store) AddUsage(key string, u Usage) {
 		if u.Cost > 0 {
 			c.Cost += u.Cost
 		}
+		if u.AuthID != "" {
+			c.Accounts = addDimKey(c.Accounts, u.AuthID, maxAccountValues, u)
+		}
 		if u.Model == "" {
 			continue
 		}
@@ -365,6 +423,18 @@ func (s *Store) AddUsage(key string, u Usage) {
 	}
 	h.Daily = addBucket(h.Daily, now.Format(DailyLayout), hu)
 	h.Hourly = addBucket(h.Hourly, now.Format(HourlyLayout), hu)
+	s.recent = append(s.recent, RequestEntry{
+		Time: now, KeyFP: fp, AuthID: u.AuthID, Provider: u.Provider, Model: model,
+		Effort: dimValue(u.Effort), Tier: dimValue(u.Tier), Stream: u.Stream,
+		Failed: u.Failed, StatusCode: u.StatusCode,
+		LatencyMs: u.Latency.Milliseconds(), TTFTMs: u.TTFT.Milliseconds(),
+		InputTokens: max(u.InputTokens, 0), CachedTokens: max(u.CachedTokens, 0),
+		OutputTokens: max(u.OutputTokens, 0), ReasoningTokens: max(u.ReasoningTokens, 0),
+		Tokens: max(u.Tokens, 0), Cost: max(u.Cost, 0), RequestID: u.RequestID,
+	})
+	if len(s.recent) > RecentLimit {
+		s.recent = append([]RequestEntry(nil), s.recent[len(s.recent)-RecentLimit:]...)
+	}
 	s.dirty = true
 }
 
@@ -441,11 +511,15 @@ func dimValue(raw string) string {
 }
 
 func addDim(dims map[string]*DimCounter, raw string, u Usage) map[string]*DimCounter {
+	return addDimKey(dims, dimValue(raw), maxDimValues, u)
+}
+
+// addDimKey adds u under key, folding new keys into "other" once limit is reached.
+func addDimKey(dims map[string]*DimCounter, key string, limit int, u Usage) map[string]*DimCounter {
 	if dims == nil {
 		dims = make(map[string]*DimCounter)
 	}
-	key := dimValue(raw)
-	if dims[key] == nil && len(dims) >= maxDimValues {
+	if dims[key] == nil && len(dims) >= limit {
 		key = "other"
 	}
 	d := dims[key]
@@ -652,6 +726,10 @@ func (s *Store) HandleUsage(ctx context.Context, record coreusage.Record) {
 		Stream:           record.Stream,
 		Latency:          record.Latency,
 		TTFT:             record.TTFT,
+		AuthID:           strings.TrimSpace(record.AuthID),
+		Provider:         strings.TrimSpace(record.Provider),
+		StatusCode:       record.Fail.StatusCode,
+		RequestID:        strings.TrimSpace(record.TraceID),
 	})
 }
 
@@ -681,12 +759,17 @@ type tokenCounts struct {
 // it is valid and classified.
 func normalizeTokens(d coreusage.Detail) tokenCounts {
 	if b := d.TokenBreakdown; b.Valid() && b.Input.TotalTokens+b.Output.TotalTokens > 0 {
-		return tokenCounts{
+		t := tokenCounts{
 			input:      b.Input.TotalTokens,
 			cacheRead:  b.Input.CacheReadTokens,
 			cacheWrite: b.Input.CacheWriteTokens,
 			output:     b.Output.TotalTokens,
 		}
+		// Some sources only fill the legacy cached_tokens field.
+		if t.cacheRead == 0 && d.CachedTokens > 0 && d.CachedTokens <= t.input-t.cacheWrite {
+			t.cacheRead = d.CachedTokens
+		}
+		return t
 	}
 	read := max(d.CacheReadTokens, 0)
 	if read == 0 {
@@ -759,6 +842,7 @@ type persisted struct {
 	Version  int                            `json:"version"`
 	Counters map[string]map[Window]*Counter `json:"counters"`
 	History  map[string]*keyHistory         `json:"history,omitempty"`
+	Recent   []RequestEntry                 `json:"recent,omitempty"`
 }
 
 func (s *Store) load() {
@@ -797,6 +881,10 @@ func (s *Store) load() {
 			s.history[fp] = &keyHistory{Daily: cloneBuckets(h.Daily), Hourly: cloneBuckets(h.Hourly)}
 		}
 	}
+	s.recent = append([]RequestEntry(nil), state.Recent...)
+	if len(s.recent) > RecentLimit {
+		s.recent = s.recent[len(s.recent)-RecentLimit:]
+	}
 }
 
 // Flush writes counters to disk when they changed since the last flush.
@@ -820,6 +908,7 @@ func (s *Store) Flush() {
 	for fp, h := range s.history {
 		state.History[fp] = &keyHistory{Daily: cloneBuckets(h.Daily), Hourly: cloneBuckets(h.Hourly)}
 	}
+	state.Recent = append([]RequestEntry(nil), s.recent...)
 	path := s.path
 	s.dirty = false
 	s.mu.Unlock()

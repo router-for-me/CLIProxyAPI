@@ -369,3 +369,48 @@ func TestDimValuesAreCapped(t *testing.T) {
 		t.Fatalf("efforts = %d entries, other=%+v", len(efforts), efforts["other"])
 	}
 }
+
+func TestAccountsAndRecentRequests(t *testing.T) {
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "api-key-usage.json")
+	s := newTestStore(now)
+	s.path = path
+	s.HandleUsage(context.Background(), coreusage.Record{
+		APIKey: "k", IsNativeKey: true, Model: "m1", AuthID: "acc-1", Provider: "codex", TraceID: "t1",
+		Stream: true, Latency: 3 * time.Second, TTFT: time.Second,
+		Detail: coreusage.Detail{InputTokens: 100, CachedTokens: 40, OutputTokens: 20, TotalTokens: 120},
+	})
+	s.now = func() time.Time { return now.Add(time.Minute) }
+	s.HandleUsage(context.Background(), coreusage.Record{
+		APIKey: "k", IsNativeKey: true, Model: "m1", AuthID: "acc-2", Failed: true,
+		Fail: coreusage.Failure{StatusCode: 429},
+	})
+
+	accounts := s.Usage("k")[Day].Accounts
+	if len(accounts) != 2 || accounts["acc-1"].Requests != 1 || accounts["acc-1"].Tokens != 120 || accounts["acc-2"].Failed != 1 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	recent := s.Recent(0)
+	if len(recent) != 2 || recent[0].AuthID != "acc-2" || recent[0].StatusCode != 429 || !recent[0].Failed ||
+		recent[1].RequestID != "t1" || recent[1].LatencyMs != 3000 || recent[1].TTFTMs != 1000 ||
+		recent[1].CachedTokens != 40 || recent[1].KeyFP != Fingerprint("k") || recent[1].Effort != DefaultDimValue {
+		t.Fatalf("recent = %+v", recent)
+	}
+	if got := s.Recent(1); len(got) != 1 || got[0].AuthID != "acc-2" {
+		t.Fatalf("limited recent = %+v", got)
+	}
+
+	for i := 0; i < RecentLimit+10; i++ {
+		s.AddUsage("k", Usage{Model: "m2"})
+	}
+	if got := s.Recent(0); len(got) != RecentLimit || got[len(got)-1].Model != "m2" {
+		t.Fatalf("ring size = %d", len(got))
+	}
+	s.Flush()
+	restored := newTestStore(now)
+	restored.path = path
+	restored.load()
+	if len(restored.Recent(0)) != RecentLimit || restored.Usage("k")[Day].Accounts["acc-1"].Requests != 1 {
+		t.Fatal("recent requests or accounts not restored")
+	}
+}

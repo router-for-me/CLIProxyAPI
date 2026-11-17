@@ -3,6 +3,8 @@ package management
 import (
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,6 +83,8 @@ type apiKeyWindowUsage struct {
 	Failed   int64              `json:"failed"`
 	ResetAt  *time.Time         `json:"reset_at,omitempty"`
 	Models   []apiKeyModelUsage `json:"models"`
+	// Accounts lists usage by upstream credential, most requests first.
+	Accounts []apiKeyAccountUsage `json:"accounts"`
 	// Rejected counts requests refused by the key policy (not included in Requests).
 	Rejected        int64            `json:"rejected"`
 	RejectedReasons map[string]int64 `json:"rejected_reasons,omitempty"`
@@ -169,6 +173,7 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 	}
 	now := time.Now()
 	store := apikeylimits.Default()
+	accounts := h.accountDirectory()
 	out := make([]apiKeyPolicyUsage, 0, len(cfg.APIKeys))
 	for _, key := range cfg.APIKeys {
 		if key == "" {
@@ -188,6 +193,7 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 				Failed:   counter.Failed,
 				Models:   apiKeyModelBreakdown(counter.Models),
 
+				Accounts:        accounts.usage(counter.Accounts),
 				Rejected:        counter.Rejected,
 				RejectedReasons: counter.RejectedReasons,
 				LastRejectedAt:  counter.LastRejectedAt,
@@ -204,4 +210,109 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{"keys": out, "timezone": now.Location().String()})
+}
+
+// apiKeyAccountUsage is a key's usage through one upstream credential.
+type apiKeyAccountUsage struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Provider string `json:"provider,omitempty"`
+	Plan     string `json:"plan,omitempty"`
+	apiKeyDimUsage
+}
+
+type accountInfo struct{ name, provider, plan string }
+
+// accountDirectory maps credential IDs to display names for usage reports.
+type accountDirectory map[string]accountInfo
+
+func (h *Handler) accountDirectory() accountDirectory {
+	h.mu.Lock()
+	manager := h.authManager
+	h.mu.Unlock()
+	dir := make(accountDirectory)
+	if manager == nil {
+		return dir
+	}
+	for _, auth := range manager.List() {
+		if auth == nil {
+			continue
+		}
+		info := accountInfo{provider: auth.Provider, name: strings.TrimSpace(auth.Label)}
+		// Never show API key material; OAuth credentials are named by their account.
+		if kind, account := auth.AccountInfo(); !strings.EqualFold(kind, "api_key") && strings.TrimSpace(account) != "" {
+			info.name = strings.TrimSpace(account)
+		}
+		if plan, ok := auth.Metadata["plan_type"].(string); ok {
+			info.plan = strings.TrimSpace(plan)
+		}
+		if info.name == "" {
+			info.name = auth.Provider
+		}
+		dir[auth.ID] = info
+	}
+	return dir
+}
+
+func (d accountDirectory) lookup(id string) accountInfo {
+	if info, ok := d[id]; ok {
+		return info
+	}
+	return accountInfo{name: id}
+}
+
+func (d accountDirectory) usage(dims map[string]*apikeylimits.DimCounter) []apiKeyAccountUsage {
+	rows := apiKeyDims(dims)
+	out := make([]apiKeyAccountUsage, 0, len(rows))
+	for _, row := range rows {
+		info := d.lookup(row.Name)
+		out = append(out, apiKeyAccountUsage{ID: row.Name, Name: info.name, Provider: info.provider, Plan: info.plan, apiKeyDimUsage: row})
+	}
+	return out
+}
+
+type apiKeyRequestEntry struct {
+	apikeylimits.RequestEntry
+	// Key is the client key, as in the api-key-usage report, so the panel can match rows to keys.
+	Key         string `json:"key,omitempty"`
+	KeyName     string `json:"key_name,omitempty"`
+	AccountName string `json:"account_name,omitempty"`
+	Plan        string `json:"plan,omitempty"`
+}
+
+// GetAPIKeyRequests returns the latest served requests (metadata only), newest first.
+func (h *Handler) GetAPIKeyRequests(c *gin.Context) {
+	h.mu.Lock()
+	cfg := h.cfg
+	h.mu.Unlock()
+	if cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "config unavailable"})
+		return
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	type keyInfo struct{ name, key string }
+	keys := make(map[string]keyInfo, len(cfg.APIKeys))
+	for _, key := range cfg.APIKeys {
+		info := keyInfo{key: key}
+		if policy, ok := cfg.FindAPIKeyPolicy(key); ok {
+			info.name = policy.Name
+		}
+		keys[apikeylimits.Fingerprint(key)] = info
+	}
+	accounts := h.accountDirectory()
+	recent := apikeylimits.Default().Recent(limit)
+	out := make([]apiKeyRequestEntry, 0, len(recent))
+	for _, entry := range recent {
+		row := apiKeyRequestEntry{RequestEntry: entry}
+		if info, ok := keys[entry.KeyFP]; ok {
+			row.KeyName, row.Key = info.name, info.key
+		}
+		if entry.AuthID != "" {
+			info := accounts.lookup(entry.AuthID)
+			row.AccountName, row.Plan = info.name, info.plan
+		}
+		out = append(out, row)
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, gin.H{"requests": out, "limit": apikeylimits.RecentLimit})
 }
