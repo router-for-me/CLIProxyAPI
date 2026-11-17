@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,6 +10,72 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
+
+type quotaObservationIdentityKey struct{}
+
+// quotaObservationIdentity owns only immutable dispatch identity, never the
+// mutable auth state or secrets themselves.
+type quotaObservationIdentity struct {
+	provider   string
+	account    [5]string
+	hasAccount bool
+	grant      [32]byte
+}
+
+func quotaObservationIdentityFor(auth *Auth) quotaObservationIdentity {
+	identity := quotaObservationIdentity{provider: strings.ToLower(strings.TrimSpace(auth.Provider))}
+	keys := []string{"account_id", "email", "sub"}
+	if identity.provider == "claude" {
+		keys = append(keys, "account_uuid", "organization_uuid")
+	}
+	for i, key := range keys {
+		identity.account[i], _ = auth.Metadata[key].(string)
+		identity.hasAccount = identity.hasAccount || strings.TrimSpace(identity.account[i]) != ""
+	}
+	// Match the credential fallback of quotaScheduleIdentityMatches without
+	// retaining an Auth snapshot or plaintext credential material in context.
+	idToken := authMetadataString(auth, "id_token")
+	if idToken == "" {
+		idToken = authMetadataString(auth, "idToken")
+	}
+	apiKey := auth.Attributes[AttributeAPIKey]
+	if apiKey == "" {
+		apiKey = authMetadataString(auth, "api_key")
+	}
+	useSIWC, hasSIWC := parseBoolAny(auth.Metadata["use_siwc"])
+	parts := []string{authAccessToken(auth), authOuterAccessToken(auth), authRefreshToken(auth), idToken, apiKey,
+		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
+		authSIWCTokenField(auth, "id_token"), authSIWCTokenField(auth, "client_id"),
+		strconv.FormatBool(useSIWC), strconv.FormatBool(hasSIWC)}
+	var encoded strings.Builder
+	for _, part := range parts {
+		encoded.WriteString(strconv.Itoa(len(part)))
+		encoded.WriteByte(':')
+		encoded.WriteString(part)
+	}
+	identity.grant = sha256.Sum256([]byte(encoded.String()))
+	return identity
+}
+
+func withQuotaObservationIdentity(ctx context.Context, auth *Auth) context.Context {
+	if auth == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, quotaObservationIdentityKey{}, quotaObservationIdentityFor(auth))
+}
+
+func quotaObservationIdentityMatches(ctx context.Context, current *Auth) bool {
+	identity, known := ctx.Value(quotaObservationIdentityKey{}).(quotaObservationIdentity)
+	if !known {
+		return true
+	} // Preserve direct/manual MarkResult compatibility.
+	if current == nil {
+		return false
+	}
+	now := quotaObservationIdentityFor(current)
+	return identity.provider == now.provider && identity.account == now.account &&
+		(identity.hasAccount || identity.grant == now.grant)
+}
 
 // QuotaResetSchedule is an in-memory observation from a provider usage endpoint.
 // It does not determine credential availability or release quota cooldowns.

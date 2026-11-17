@@ -2238,7 +2238,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.Generation++
 		auth.UpdatedAt = now
 
-		if !result.SkipQuotaObservation {
+		if !result.SkipQuotaObservation && quotaObservationIdentityMatches(ctx, auth) {
 			observation := quotaScheduleFromResponseHeaders(result.Provider, responseHeaders, responseReceiptTimes, now)
 			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, observation.ObservedAt)
 			if !observation.WeeklyResetAt.IsZero() || !observation.FiveHourResetAt.IsZero() {
