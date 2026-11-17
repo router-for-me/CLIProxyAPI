@@ -741,6 +741,10 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 	}
 
 	thoughtStepIndex := -1
+	// thoughtSignature collects the open thought's signature fragments. Devin's Claude models
+	// send a CAIS signature, and no truncated CAIS fragment passes structural validation, so a
+	// valid one means the thought is fully signed and later content and tools need not wait.
+	var thoughtSignature strings.Builder
 	var streamErr error
 	var lastStopReason uint64
 	sawEOS := false
@@ -1208,6 +1212,7 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 						return
 					}
 					thoughtStarted = true
+					thoughtSignature.Reset()
 				}
 				deltaDoc := ojson.NewDoc([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"thought_summary","text":"","content":{"type":"text","text":""}}}`))
 				_ = deltaDoc.Set("index", thoughtStepIndex)
@@ -1246,6 +1251,17 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 				_ = sigDoc.Set("delta.signature_type", frameRes.DeltaSignatureType)
 			}
 			if !emitInteractionsEvent(sigDoc.Bytes()) {
+				return
+			}
+			if thoughtStarted {
+				thoughtSignature.Write(frameRes.DeltaSignature)
+			}
+		}
+
+		// Once the open thought is signed, release queued work and stream the rest directly.
+		if thoughtStarted && (len(frameRes.ToolCallDeltas) > 0 || frameRes.ContentText != "") &&
+			internalsignature.IsValidClaudeCAISSignature(thoughtSignature.String()) {
+			if !flushPendingActions() {
 				return
 			}
 		}
