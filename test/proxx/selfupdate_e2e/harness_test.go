@@ -607,6 +607,7 @@ func startLoad(base string, _ int) *loadGen {
 			defer lg.wg.Done()
 			var conn net.Conn
 			var br *bufio.Reader
+			var used int
 			defer func() {
 				if conn != nil {
 					_ = conn.Close()
@@ -628,11 +629,12 @@ func startLoad(base string, _ int) *loadGen {
 						time.Sleep(loadInterval)
 						continue
 					}
-					conn, br = c, bufio.NewReader(c)
+					conn, br, used = c, bufio.NewReader(c), 0
 				}
+				used++
 				closeAfter, err := rawChat(conn, br, addr, stream)
 				if err != nil {
-					lg.fail(n, fmt.Sprintf("stream=%v: %v", stream, err))
+					lg.fail(n, fmt.Sprintf("%s stream=%v request#%d on conn %s: %v", time.Now().Format("15:04:05.000"), stream, used, conn.LocalAddr(), err))
 					_ = conn.Close()
 					conn = nil
 				} else if closeAfter {

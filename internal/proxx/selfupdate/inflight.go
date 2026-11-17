@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"bufio"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -50,10 +51,6 @@ func (t *tracker) wrap(next http.Handler) http.Handler {
 		return nil
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if t.draining.Load() {
-			// Last moments before a restart: do not keep this connection alive.
-			w.Header().Set("Connection", "close")
-		}
 		if r != nil {
 			noteRequest(r.RemoteAddr)
 		}
@@ -120,15 +117,48 @@ func (t *tracker) cancelManagement() {
 	}
 }
 
-// trackedWriter forwards the optional ResponseWriter interfaces and counts hijacked connections.
+// trackedWriter forwards the optional ResponseWriter interfaces and counts hijacked connections. While
+// draining it forces Connection: close when the headers are written: handlers (the streaming ones set
+// "Connection: keep-alive") must not keep a connection open into the restart.
 type trackedWriter struct {
 	http.ResponseWriter
-	t *tracker
+	t           *tracker
+	wroteHeader bool
 }
 
 func (w *trackedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+func (w *trackedWriter) beforeHeader() {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	if w.t.draining.Load() {
+		w.ResponseWriter.Header().Set("Connection", "close")
+	}
+}
+
+func (w *trackedWriter) WriteHeader(code int) {
+	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(code) // informational; the final header comes later
+		return
+	}
+	w.beforeHeader()
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *trackedWriter) Write(b []byte) (int, error) {
+	w.beforeHeader()
+	return w.ResponseWriter.Write(b)
+}
+
+func (w *trackedWriter) WriteString(s string) (int, error) {
+	w.beforeHeader()
+	return io.WriteString(w.ResponseWriter, s)
+}
+
 func (w *trackedWriter) Flush() {
+	w.beforeHeader()
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}

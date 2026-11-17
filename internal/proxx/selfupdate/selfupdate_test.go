@@ -569,7 +569,12 @@ func TestInFlightCounterIncludesHijackedWebSocket(t *testing.T) {
 
 func TestDrainingSetsConnectionClose(t *testing.T) {
 	tr := newTracker()
-	srv := httptest.NewServer(tr.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("x")) })))
+	srv := httptest.NewServer(tr.wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Like the streaming handlers: they set keep-alive explicitly.
+		w.Header().Set("Connection", "keep-alive")
+		_, _ = w.Write([]byte("x"))
+		w.(http.Flusher).Flush()
+	})))
 	defer srv.Close()
 	get := func() *http.Response {
 		resp, err := http.Get(srv.URL)
@@ -584,7 +589,7 @@ func TestDrainingSetsConnectionClose(t *testing.T) {
 	}
 	tr.draining.Store(true)
 	if resp := get(); !resp.Close {
-		t.Fatal("no Connection: close while draining")
+		t.Fatal("no Connection: close while draining (handler's keep-alive must not win)")
 	}
 }
 

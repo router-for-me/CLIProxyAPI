@@ -54,10 +54,19 @@ This is state `staged`.
 - The status reports the count as `inflight`.
 - Wait until the count is 0. Then:
   1. For 1s, every response carries `Connection: close`.
-  2. The listener is paused: `Accept` is not called, so new connections queue in the kernel backlog and are
-     not refused.
-  3. Wait up to 2s more for the count to reach 0. If anything is still running, unpause, stop draining and
-     wait again.
+     - The header is forced when the response headers are written, not at request entry. The streaming
+       handlers set `Connection: keep-alive` themselves, and the rc.1 release test lost requests on such
+       connections.
+  2. The listener is paused, and new connections queue in the kernel backlog instead of being refused.
+     - Pausing sets a past deadline on the listening socket. That wakes the `Accept` that the server's
+       accept loop is already blocked in; the timeout is swallowed inside the gate and never reaches
+       `http.Server`.
+     - Without this, that pending `Accept` takes one more connection, and it is dropped at exec. The rc.1
+       release test lost one request per client this way.
+  3. Wait up to 2s for the count to reach 0, **and** for every "fresh" connection to deliver a request.
+     - A fresh connection was accepted but has not reached a handler yet (tracked by remote address).
+     - A fresh connection silent for over 3s is treated as idle.
+     - If anything is still busy, unpause, stop draining and wait again.
 - A stream is never cut. If the server never goes idle, the apply keeps waiting until it is cancelled.
 - To restart:
   1. `dup` the listening socket (`F_DUPFD_CLOEXEC`), cancel the management contexts, and call the restart
@@ -191,10 +200,16 @@ Config writes use the generic v8 config endpoint with a raw JSON body, exactly l
   restart, and consumers reconnect.
 - Long-lived WebSocket peers (wsrelay providers, wstunnel) keep the count above 0. The update then waits
   until they disconnect or the apply is cancelled; `inflight` in the status shows why.
-- Keep-alive race: a client that sends on an idle keep-alive connection at the exact moment the old process
-  closes it gets a connection error, which Go's transport retries only for replayable requests. The
-  `Connection: close` second and the paused listener make this rare. The e2e counts such retries
-  separately, and saw 0.
+- Remaining inherent race: a client whose keep-alive connection was idle for the whole drain second, and
+  that sends on it at the instant the shutdown closes idle connections, gets the connection closed without
+  a response.
+  - HTTP/1.1 has no way to tell an idle client to stop using a connection.
+  - A client that sends at least once a second is not affected: during the drain it gets `Connection: close`,
+    and it reconnects into the backlog.
+- `Keep-Alive: timeout=5` is not sent.
+  - The server does not enforce it (`IdleTimeout` is upstream's 0), and Go's Transport and python's
+    http.client ignore the header.
+  - Advertising a timeout that is not enforced would only mislead.
 - A new binary that crashes before `main()` (in a package `init`) cannot count its own attempts. The
   `--proxx-selfcheck` run before install catches that case.
 - With store backends (Postgres, git, object store), the state file still lives next to the `--config` path.
@@ -209,7 +224,9 @@ Config writes use the generic v8 config endpoint with a raw JSON body, exactly l
   - the rollback attempt counter (3rd start restores `.prev` and execs it) and the health confirmation;
   - supported detection (fake environment and a real unwritable dir);
   - the in-flight counter with a hijacked WebSocket that outlives its handler, and management cancellation;
-  - `Connection: close` while draining, and the paused listener queueing instead of refusing;
+  - `Connection: close` while draining, even when the handler sets keep-alive;
+  - the paused listener, with an `Accept` already blocked before the pause, queueing instead of
+    accepting or refusing; fresh-connection tracking;
   - auto-apply staying staged outside the window;
   - the drain default, shutdown budget and watchdog; the panel `proxx-min-backend-api` skip.
 - E2E: `PROXX_E2E=1 go test ./test/proxx/selfupdate_e2e/ -run TestE2ESelfUpdate -v -count=1 -timeout 30m`.
@@ -219,7 +236,12 @@ Config writes use the generic v8 config endpoint with a raw JSON body, exactly l
     - a mock upstream serves fast and slow SSE;
     - a supervisor restarts the process on exit, like KeepAlive.
   - Scenarios:
-    1. 20 rps keep-alive load across the upgrade, with zero failures (connection-error retries reported).
+    1. Load across the upgrade with zero failures.
+       - The client is a **raw HTTP/1.1 keep-alive client that never retries**: 4 workers, one request every
+         150ms each, mixed stream/non-stream, own `net.Conn`, `http.ReadResponse`. It reconnects only after
+         `Connection: close` or a failure.
+       - Go's `http.Transport` is not used, because it silently retries a server closing a reused
+         connection, which hid the rc.1 bug.
     2. A 6s stream started before apply finishes with every chunk, and v2 answers only after it ended.
     3. Same PID, no supervisor restart, v2 reported, `last_result.ok`.
     4. A bad signature, a tampered archive and a downgrade are refused, and v1 keeps serving.
