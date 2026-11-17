@@ -4410,8 +4410,8 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 						}
 					}
 				}
-				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !quotaCodexSubscriptionError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
-					auth.nonQuotaCooldownUntil = next
+				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !quotaCodexSubscriptionError(resultErr) {
+					ownAuthNonQuotaDeadline = next
 				}
 				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
 					auth.nonQuotaCooldownUntil = next
@@ -4452,9 +4452,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if isForceAuth && ownAuthForceDeadline.After(ownAuthNonQuotaDeadline) {
 			ownAuthNonQuotaDeadline = ownAuthForceDeadline
 		}
-		if ownAuthNonQuotaDeadline.After(auth.nonQuotaCooldownUntil) {
-			auth.nonQuotaCooldownUntil = ownAuthNonQuotaDeadline
-		}
+	}
+	if ownAuthNonQuotaDeadline.After(auth.nonQuotaCooldownUntil) {
+		auth.nonQuotaCooldownUntil = ownAuthNonQuotaDeadline
 	}
 	if isForceAuth {
 		if ownAuthForceDeadline.IsZero() {
