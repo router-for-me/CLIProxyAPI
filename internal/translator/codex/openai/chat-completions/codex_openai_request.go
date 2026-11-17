@@ -253,7 +253,7 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 								audioData := it.Get("input_audio.data").String()
 								audioFormat := it.Get("input_audio.format").String()
 								if audioData != "" {
-									partDoc := ojson.NewDocString(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
+									partDoc := ojson.NewDocString(`{"type":"input_audio","input_audio":{"data":""}}`)
 									_ = partDoc.Set("input_audio.data", audioData)
 									if audioFormat != "" {
 										_ = partDoc.Set("input_audio.format", audioFormat)
