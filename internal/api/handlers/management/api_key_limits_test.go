@@ -51,4 +51,8 @@ func TestGetAPIKeyPolicyUsageReportsNamesAndModels(t *testing.T) {
 		total.Models[0].Requests < 2 || total.Models[0].Failed < 1 || total.Models[1].Model != "small" {
 		t.Fatalf("models = %+v", total.Models)
 	}
+	if len(payload.Keys[0].Daily) == 0 || len(payload.Keys[0].Hourly) == 0 ||
+		len(payload.Keys[0].Daily[len(payload.Keys[0].Daily)-1].Models) != 2 {
+		t.Fatalf("history daily=%+v hourly=%+v", payload.Keys[0].Daily, payload.Keys[0].Hourly)
+	}
 }

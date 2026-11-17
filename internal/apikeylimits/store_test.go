@@ -156,3 +156,42 @@ func TestPersistenceKeepsModelBreakdown(t *testing.T) {
 		t.Fatalf("restored model usage = %+v", m)
 	}
 }
+
+func TestHistoryBucketsAndRetention(t *testing.T) {
+	now := time.Date(2026, 11, 15, 10, 30, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "api-key-usage.json")
+	s := newTestStore(now)
+	s.path = path
+	s.AddUsage("k", Usage{Model: "m1", Tokens: 10})
+	s.now = func() time.Time { return now.Add(time.Hour) }
+	s.AddUsage("k", Usage{Model: "m1", Tokens: 5, Failed: true})
+	s.AddUsage("k", Usage{Tokens: 1}) // no model → "unknown" in history only
+
+	daily, hourly := s.History("k")
+	if len(daily) != 1 || daily[0].Time != "2026-11-15" || daily[0].Models["m1"].Tokens != 15 ||
+		daily[0].Models["m1"].Failed != 1 || daily[0].Models["unknown"].Tokens != 1 {
+		t.Fatalf("daily = %+v", daily)
+	}
+	if len(hourly) != 2 || hourly[0].Time != "2026-11-15T10" || hourly[1].Time != "2026-11-15T11" ||
+		hourly[0].Models["m1"].Tokens != 10 {
+		t.Fatalf("hourly = %+v", hourly)
+	}
+
+	s.Flush()
+	restored := newTestStore(now.Add(time.Hour))
+	restored.path = path
+	restored.load()
+	if d, h := restored.History("k"); len(d) != 1 || len(h) != 2 || d[0].Models["m1"].Tokens != 15 {
+		t.Fatalf("restored history daily=%+v hourly=%+v", d, h)
+	}
+
+	// Hourly buckets expire after HistoryHours, daily ones after HistoryDays.
+	s.now = func() time.Time { return now.Add(HistoryHours * time.Hour) }
+	if d, h := s.History("k"); len(d) != 1 || len(h) != 1 || h[0].Time != "2026-11-15T11" {
+		t.Fatalf("after 48h daily=%+v hourly=%+v", d, h)
+	}
+	s.now = func() time.Time { return now.AddDate(0, 0, HistoryDays) }
+	if d, h := s.History("k"); d != nil || h != nil {
+		t.Fatalf("after retention daily=%+v hourly=%+v", d, h)
+	}
+}

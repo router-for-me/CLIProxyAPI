@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -84,10 +85,35 @@ type Usage struct {
 
 type keyCounters map[Window]*Counter
 
+// History retention and bucket key layouts (server local time).
+const (
+	HistoryDays      = 90
+	HistoryHours     = 48
+	DailyLayout      = "2006-01-02"
+	HourlyLayout     = "2006-01-02T15"
+	unknownModelName = "unknown"
+)
+
+// modelBuckets maps a time bucket key to per-model counters.
+type modelBuckets map[string]map[string]*ModelCounter
+
+// keyHistory keeps per-model usage over time for one client key.
+type keyHistory struct {
+	Daily  modelBuckets `json:"daily,omitempty"`
+	Hourly modelBuckets `json:"hourly,omitempty"`
+}
+
+// Bucket is one time slot of a key's usage history.
+type Bucket struct {
+	Time   string
+	Models map[string]ModelCounter
+}
+
 // Store keeps usage counters keyed by a SHA-256 fingerprint of the client key.
 type Store struct {
 	mu       sync.Mutex
 	counters map[string]keyCounters
+	history  map[string]*keyHistory
 	path     string
 	dirty    bool
 	cfgFn    func() *config.Config
@@ -103,7 +129,12 @@ var (
 )
 
 func newStore() *Store {
-	return &Store{counters: make(map[string]keyCounters), now: time.Now, stop: make(chan struct{})}
+	return &Store{
+		counters: make(map[string]keyCounters),
+		history:  make(map[string]*keyHistory),
+		now:      time.Now,
+		stop:     make(chan struct{}),
+	}
 }
 
 // Default returns the process-wide store.
@@ -239,25 +270,122 @@ func (s *Store) AddUsage(key string, u Usage) {
 		if c.Models == nil {
 			c.Models = make(map[string]*ModelCounter)
 		}
-		m := c.Models[u.Model]
-		if m == nil {
-			m = &ModelCounter{}
-			c.Models[u.Model] = m
+		addModel(c.Models, u)
+	}
+	model := u.Model
+	if model == "" {
+		model = unknownModelName
+	}
+	hu := u
+	hu.Model = model
+	h := s.history[fp]
+	if h == nil {
+		h = &keyHistory{}
+		s.history[fp] = h
+	}
+	h.Daily = addBucket(h.Daily, now.Format(DailyLayout), hu)
+	h.Hourly = addBucket(h.Hourly, now.Format(HourlyLayout), hu)
+	s.dirty = true
+}
+
+func addModel(models map[string]*ModelCounter, u Usage) {
+	m := models[u.Model]
+	if m == nil {
+		m = &ModelCounter{}
+		models[u.Model] = m
+	}
+	m.Requests++
+	if u.Failed {
+		m.Failed++
+	}
+	m.InputTokens += max(u.InputTokens, 0)
+	m.OutputTokens += max(u.OutputTokens, 0)
+	m.CachedTokens += max(u.CachedTokens, 0)
+	m.ReasoningTokens += max(u.ReasoningTokens, 0)
+	m.Tokens += max(u.Tokens, 0)
+	if u.Cost > 0 {
+		m.Cost += u.Cost
+	}
+}
+
+func addBucket(b modelBuckets, slot string, u Usage) modelBuckets {
+	if b == nil {
+		b = make(modelBuckets)
+	}
+	models := b[slot]
+	if models == nil {
+		models = make(map[string]*ModelCounter)
+		b[slot] = models
+	}
+	addModel(models, u)
+	return b
+}
+
+// pruneHistory drops buckets older than the retention. Callers must hold s.mu.
+func (s *Store) pruneHistory(now time.Time) {
+	dayCutoff := now.AddDate(0, 0, -(HistoryDays - 1)).Format(DailyLayout)
+	hourCutoff := now.Add(-time.Duration(HistoryHours-1) * time.Hour).Format(HourlyLayout)
+	for fp, h := range s.history {
+		for slot := range h.Daily {
+			if slot < dayCutoff {
+				delete(h.Daily, slot)
+			}
 		}
-		m.Requests++
-		if u.Failed {
-			m.Failed++
+		for slot := range h.Hourly {
+			if slot < hourCutoff {
+				delete(h.Hourly, slot)
+			}
 		}
-		m.InputTokens += max(u.InputTokens, 0)
-		m.OutputTokens += max(u.OutputTokens, 0)
-		m.CachedTokens += max(u.CachedTokens, 0)
-		m.ReasoningTokens += max(u.ReasoningTokens, 0)
-		m.Tokens += max(u.Tokens, 0)
-		if u.Cost > 0 {
-			m.Cost += u.Cost
+		if len(h.Daily) == 0 && len(h.Hourly) == 0 {
+			delete(s.history, fp)
 		}
 	}
-	s.dirty = true
+}
+
+// History returns a key's retained daily and hourly buckets, oldest first.
+func (s *Store) History(key string) (daily, hourly []Bucket) {
+	fp := Fingerprint(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneHistory(s.now())
+	h := s.history[fp]
+	if h == nil {
+		return nil, nil
+	}
+	return snapshotBuckets(h.Daily), snapshotBuckets(h.Hourly)
+}
+
+func snapshotBuckets(b modelBuckets) []Bucket {
+	out := make([]Bucket, 0, len(b))
+	for slot, models := range b {
+		cp := make(map[string]ModelCounter, len(models))
+		for name, m := range models {
+			if m != nil {
+				cp[name] = *m
+			}
+		}
+		out = append(out, Bucket{Time: slot, Models: cp})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time < out[j].Time })
+	return out
+}
+
+func cloneBuckets(b modelBuckets) modelBuckets {
+	if b == nil {
+		return nil
+	}
+	out := make(modelBuckets, len(b))
+	for slot, models := range b {
+		cp := make(map[string]*ModelCounter, len(models))
+		for name, m := range models {
+			if m != nil {
+				mc := *m
+				cp[name] = &mc
+			}
+		}
+		out[slot] = cp
+	}
+	return out
 }
 
 // Usage returns the current counters for a key (zero values for unseen keys).
@@ -414,6 +542,7 @@ func RecordCost(cfg *config.Config, record coreusage.Record) float64 {
 type persisted struct {
 	Version  int                            `json:"version"`
 	Counters map[string]map[Window]*Counter `json:"counters"`
+	History  map[string]*keyHistory         `json:"history,omitempty"`
 }
 
 func (s *Store) load() {
@@ -444,6 +573,11 @@ func (s *Store) load() {
 		}
 		s.counters[fp] = dst
 	}
+	for fp, h := range state.History {
+		if h != nil {
+			s.history[fp] = &keyHistory{Daily: cloneBuckets(h.Daily), Hourly: cloneBuckets(h.Hourly)}
+		}
+	}
 }
 
 // Flush writes counters to disk when they changed since the last flush.
@@ -461,6 +595,11 @@ func (s *Store) Flush() {
 			cp[w] = &copyC
 		}
 		state.Counters[fp] = cp
+	}
+	s.pruneHistory(s.now())
+	state.History = make(map[string]*keyHistory, len(s.history))
+	for fp, h := range s.history {
+		state.History[fp] = &keyHistory{Daily: cloneBuckets(h.Daily), Hourly: cloneBuckets(h.Hourly)}
 	}
 	path := s.path
 	s.dirty = false

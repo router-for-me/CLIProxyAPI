@@ -30,17 +30,39 @@ type apiKeyWindowUsage struct {
 	Models   []apiKeyModelUsage `json:"models"`
 }
 
+type apiKeyHistoryBucket struct {
+	Time   string             `json:"time"`
+	Models []apiKeyModelUsage `json:"models"`
+}
+
 type apiKeyPolicyUsage struct {
 	Key     string                       `json:"key"`
 	Name    string                       `json:"name,omitempty"`
 	Expired bool                         `json:"expired"`
 	Usage   map[string]apiKeyWindowUsage `json:"usage"`
+	// Daily (YYYY-MM-DD) and Hourly (YYYY-MM-DDTHH) buckets in server local time,
+	// oldest first; empty buckets are omitted.
+	Daily  []apiKeyHistoryBucket `json:"daily"`
+	Hourly []apiKeyHistoryBucket `json:"hourly"`
 }
 
-// apiKeyModelBreakdown lists a window's models, heaviest token users first.
-func apiKeyModelBreakdown(counter apikeylimits.Counter) []apiKeyModelUsage {
-	models := make([]apiKeyModelUsage, 0, len(counter.Models))
-	for name, m := range counter.Models {
+func apiKeyHistory(buckets []apikeylimits.Bucket) []apiKeyHistoryBucket {
+	out := make([]apiKeyHistoryBucket, 0, len(buckets))
+	for _, b := range buckets {
+		models := make(map[string]*apikeylimits.ModelCounter, len(b.Models))
+		for name, m := range b.Models {
+			mc := m
+			models[name] = &mc
+		}
+		out = append(out, apiKeyHistoryBucket{Time: b.Time, Models: apiKeyModelBreakdown(models)})
+	}
+	return out
+}
+
+// apiKeyModelBreakdown lists models, heaviest token users first.
+func apiKeyModelBreakdown(counters map[string]*apikeylimits.ModelCounter) []apiKeyModelUsage {
+	models := make([]apiKeyModelUsage, 0, len(counters))
+	for name, m := range counters {
 		if m == nil {
 			continue
 		}
@@ -70,7 +92,7 @@ func apiKeyModelBreakdown(counter apikeylimits.Counter) []apiKeyModelUsage {
 
 // GetAPIKeyPolicyUsage reports per client key usage in the windows used by
 // access.api-key-policies limits (server local time), plus an all-time "total"
-// window, each broken down by model.
+// window, each broken down by model, plus daily and hourly per-model history.
 func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 	h.mu.Lock()
 	cfg := h.cfg
@@ -97,13 +119,16 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 				Cost:     counter.Cost,
 				Requests: counter.Requests,
 				Failed:   counter.Failed,
-				Models:   apiKeyModelBreakdown(counter),
+				Models:   apiKeyModelBreakdown(counter.Models),
 			}
 			if end := apikeylimits.WindowEnd(window, now); !end.IsZero() {
 				usage.ResetAt = &end
 			}
 			entry.Usage[string(window)] = usage
 		}
+		daily, hourly := store.History(key)
+		entry.Daily = apiKeyHistory(daily)
+		entry.Hourly = apiKeyHistory(hourly)
 		out = append(out, entry)
 	}
 	c.Header("Cache-Control", "no-store")
