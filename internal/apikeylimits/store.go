@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,9 +25,24 @@ const (
 	Day   Window = "day"
 	Week  Window = "week"
 	Month Window = "month"
+	// Total accumulates all usage since counters were first recorded. It never resets
+	// and is not used for limits.
+	Total Window = "total"
 )
 
-var windows = []Window{Day, Week, Month}
+var windows = []Window{Day, Week, Month, Total}
+
+// ModelCounter holds one model's usage within a window.
+type ModelCounter struct {
+	Requests        int64   `json:"requests"`
+	Failed          int64   `json:"failed,omitempty"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	CachedTokens    int64   `json:"cached_tokens,omitempty"`
+	ReasoningTokens int64   `json:"reasoning_tokens,omitempty"`
+	Tokens          int64   `json:"tokens"`
+	Cost            float64 `json:"cost"`
+}
 
 // Counter holds usage accumulated in one window.
 type Counter struct {
@@ -34,6 +50,36 @@ type Counter struct {
 	Tokens   int64     `json:"tokens"`
 	Cost     float64   `json:"cost"`
 	Requests int64     `json:"requests"`
+	Failed   int64     `json:"failed,omitempty"`
+	// Models breaks the window down by upstream model name.
+	Models map[string]*ModelCounter `json:"models,omitempty"`
+}
+
+// clone returns a deep copy so callers never share the Models map with the store.
+func (c *Counter) clone() Counter {
+	out := *c
+	if c.Models != nil {
+		out.Models = make(map[string]*ModelCounter, len(c.Models))
+		for name, m := range c.Models {
+			if m != nil {
+				mc := *m
+				out.Models[name] = &mc
+			}
+		}
+	}
+	return out
+}
+
+// Usage is a single request's contribution to the counters.
+type Usage struct {
+	Model           string
+	Failed          bool
+	InputTokens     int64
+	OutputTokens    int64
+	CachedTokens    int64
+	ReasoningTokens int64
+	Tokens          int64
+	Cost            float64
 }
 
 type keyCounters map[Window]*Counter
@@ -108,8 +154,11 @@ func (s *Store) Close() {
 }
 
 // WindowStart returns the start of the window containing t, in t's location.
-// Weeks start on Monday.
+// Weeks start on Monday. The Total window has a zero start.
 func WindowStart(w Window, t time.Time) time.Time {
+	if w == Total {
+		return time.Time{}
+	}
 	y, m, d := t.Date()
 	day := time.Date(y, m, d, 0, 0, 0, 0, t.Location())
 	switch w {
@@ -123,8 +172,12 @@ func WindowStart(w Window, t time.Time) time.Time {
 	}
 }
 
-// WindowEnd returns the end (exclusive) of the window containing t.
+// WindowEnd returns the end (exclusive) of the window containing t. The Total
+// window never ends and returns the zero time.
 func WindowEnd(w Window, t time.Time) time.Time {
+	if w == Total {
+		return time.Time{}
+	}
 	start := WindowStart(w, t)
 	switch w {
 	case Week:
@@ -153,8 +206,14 @@ func (s *Store) current(fp string, w Window, now time.Time) *Counter {
 	return c
 }
 
-// Add records usage for a client key.
+// Add records usage for a client key without a model breakdown.
 func (s *Store) Add(key string, tokens int64, cost float64) {
+	s.AddUsage(key, Usage{Tokens: tokens, Cost: cost})
+}
+
+// AddUsage records one request for a client key, including its per-model breakdown
+// when u.Model is set.
+func (s *Store) AddUsage(key string, u Usage) {
 	if key == "" {
 		return
 	}
@@ -164,13 +223,39 @@ func (s *Store) Add(key string, tokens int64, cost float64) {
 	now := s.now()
 	for _, w := range windows {
 		c := s.current(fp, w, now)
-		if tokens > 0 {
-			c.Tokens += tokens
-		}
-		if cost > 0 {
-			c.Cost += cost
-		}
 		c.Requests++
+		if u.Failed {
+			c.Failed++
+		}
+		if u.Tokens > 0 {
+			c.Tokens += u.Tokens
+		}
+		if u.Cost > 0 {
+			c.Cost += u.Cost
+		}
+		if u.Model == "" {
+			continue
+		}
+		if c.Models == nil {
+			c.Models = make(map[string]*ModelCounter)
+		}
+		m := c.Models[u.Model]
+		if m == nil {
+			m = &ModelCounter{}
+			c.Models[u.Model] = m
+		}
+		m.Requests++
+		if u.Failed {
+			m.Failed++
+		}
+		m.InputTokens += max(u.InputTokens, 0)
+		m.OutputTokens += max(u.OutputTokens, 0)
+		m.CachedTokens += max(u.CachedTokens, 0)
+		m.ReasoningTokens += max(u.ReasoningTokens, 0)
+		m.Tokens += max(u.Tokens, 0)
+		if u.Cost > 0 {
+			m.Cost += u.Cost
+		}
 	}
 	s.dirty = true
 }
@@ -186,7 +271,7 @@ func (s *Store) Usage(key string) map[Window]Counter {
 		start := WindowStart(w, now)
 		if kc := s.counters[fp]; kc != nil {
 			if c := kc[w]; c != nil && c.Start.Equal(start) {
-				out[w] = *c
+				out[w] = c.clone()
 				continue
 			}
 		}
@@ -256,8 +341,32 @@ func (s *Store) HandleUsage(_ context.Context, record coreusage.Record) {
 	if cfgFn != nil {
 		cfg = cfgFn()
 	}
-	tokens := recordTokens(record.Detail)
-	s.Add(record.APIKey, tokens, RecordCost(cfg, record))
+	d := record.Detail
+	cached := d.CachedTokens
+	if cached <= 0 {
+		cached = d.CacheReadTokens
+	}
+	s.AddUsage(record.APIKey, Usage{
+		Model:           recordModel(record),
+		Failed:          record.Failed,
+		InputTokens:     d.InputTokens,
+		OutputTokens:    d.OutputTokens,
+		CachedTokens:    cached,
+		ReasoningTokens: d.ReasoningTokens,
+		Tokens:          recordTokens(d),
+		Cost:            RecordCost(cfg, record),
+	})
+}
+
+// recordModel names the model a request was served by: the resolved upstream model,
+// then the upstream-reported one, then the client-requested name.
+func recordModel(record coreusage.Record) string {
+	for _, name := range []string{record.Model, record.ResponseModel, record.Alias} {
+		if name = strings.TrimSpace(name); name != "" {
+			return name
+		}
+	}
+	return "unknown"
 }
 
 func recordTokens(d coreusage.Detail) int64 {
@@ -329,7 +438,7 @@ func (s *Store) load() {
 		dst := make(keyCounters, len(kc))
 		for w, c := range kc {
 			if c != nil {
-				copyC := *c
+				copyC := c.clone()
 				dst[w] = &copyC
 			}
 		}
@@ -348,7 +457,7 @@ func (s *Store) Flush() {
 	for fp, kc := range s.counters {
 		cp := make(map[Window]*Counter, len(kc))
 		for w, c := range kc {
-			copyC := *c
+			copyC := c.clone()
 			cp[w] = &copyC
 		}
 		state.Counters[fp] = cp
