@@ -1207,6 +1207,10 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth)
 			m.mu.Unlock()
 			return nil, nil, nil
 		}
+		if !quotaRecoverySavedIdentityMatches(auth, expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
 		m.auths[authID] = auth
 		snapshot = auth.Clone()
 	}

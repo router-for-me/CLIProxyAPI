@@ -107,6 +107,22 @@ func (m *Manager) quotaResetMatchesLocked(auth, expected *Auth) bool {
 		m.quotaRecoveryModelHeadersMatchLocked(expected) && m.quotaRecoveryModelHeadersMatchLocked(auth)
 }
 
+// A store may import newer credentials from disk into the staged snapshot.
+// Recovery evidence still belongs to the identity inspected before that save.
+func quotaRecoverySavedIdentityMatches(saved, expected *Auth) bool {
+	if saved.ID != expected.ID || saved.Provider != expected.Provider || CredentialsChanged(saved, expected) {
+		return false
+	}
+	for _, key := range []string{"account_id", "email", "sub", "account_uuid", "organization_uuid"} {
+		actual, _ := saved.Metadata[key].(string)
+		inspected, _ := expected.Metadata[key].(string)
+		if actual != inspected {
+			return false
+		}
+	}
+	return quotaRecoverySIWCAccountMatches(saved)
+}
+
 // Codex uses 429 for subscription limits and independent request/capacity limits.
 // Only the subscription failure is established by the plan usage observation.
 func quotaCodexSubscriptionError(err *Error) bool {
