@@ -13,7 +13,7 @@ func TestOAuthModelAliasCaseOnlyExecution(t *testing.T) {
 	const provider = "opencode-go"
 	const upstream = "minimax-m3.1-flash"
 	const alias = "MiniMax-M3.1-Flash"
-	for _, scope := range []string{"global", "credential"} {
+	for _, scope := range []string{"global", "credential", "credential-overrides-global"} {
 		t.Run(scope, func(t *testing.T) {
 			manager := NewManager(nil, nil, nil)
 			manager.SetConfig(&internalconfig.Config{})
@@ -24,13 +24,23 @@ func TestOAuthModelAliasCaseOnlyExecution(t *testing.T) {
 			if scope == "global" {
 				manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{provider: mappings})
 			} else {
+				if scope == "credential-overrides-global" {
+					mappings[0].Fork = true
+					manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+						provider: {{Name: "different-upstream", Alias: alias}},
+					})
+				}
 				SetOAuthModelAliasesAttribute(auth, mappings)
 			}
 			if _, err := manager.Register(context.Background(), auth); err != nil {
 				t.Fatal(err)
 			}
 			reg := registry.GetGlobalRegistry()
-			reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: alias}})
+			models := []*registry.ModelInfo{{ID: alias}}
+			if mappings[0].Fork {
+				models = append(models, &registry.ModelInfo{ID: upstream})
+			}
+			reg.RegisterClient(auth.ID, provider, models)
 			t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
 			manager.RefreshSchedulerEntry(auth.ID)
 			for _, request := range []struct{ model, want string }{
@@ -38,6 +48,7 @@ func TestOAuthModelAliasCaseOnlyExecution(t *testing.T) {
 				{"MINIMAX-M3.1-FLASH", upstream},
 				{alias + "(high)", upstream + "(high)"},
 				{upstream, upstream},
+				{upstream + "(high)", upstream + "(high)"},
 			} {
 				response, err := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: request.model}, cliproxyexecutor.Options{})
 				if err != nil || string(response.Payload) != request.want {

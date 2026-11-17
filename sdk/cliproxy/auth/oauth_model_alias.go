@@ -386,10 +386,6 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 	if len(candidates) == 0 {
 		return OAuthModelAliasResult{}
 	}
-	baseModel := requestResult.ModelName
-	if baseModel == "" {
-		baseModel = strings.TrimSpace(requestedModel)
-	}
 	for _, candidate := range candidates {
 		key := strings.TrimSpace(candidate)
 		if key == "" {
@@ -401,20 +397,11 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 			if original == "" || alias == "" || !strings.EqualFold(alias, key) {
 				continue
 			}
-			if original == baseModel {
-				if !entry.ForceMapping {
-					return OAuthModelAliasResult{}
-				}
-				return OAuthModelAliasResult{
-					UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
-					ForceMapping:  entry.ForceMapping,
-					OriginalAlias: oauthModelAliasForceMappingResponseModel(alias),
-				}
-			}
 			originalAlias := requestedModel
 			if entry.ForceMapping {
 				originalAlias = oauthModelAliasForceMappingResponseModel(alias)
 			}
+			// A matched credential rule must suppress global aliases even when the upstream spelling is unchanged.
 			return OAuthModelAliasResult{
 				UpstreamModel: preserveResolvedModelSuffix(original, requestResult),
 				ForceMapping:  entry.ForceMapping,

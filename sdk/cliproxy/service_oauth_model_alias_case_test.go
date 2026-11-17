@@ -43,10 +43,10 @@ func TestApplyOAuthModelAliasCaseOnly(t *testing.T) {
 	}
 }
 
-func TestApplyOAuthModelAliasPreservesDistinctModelCasing(t *testing.T) {
+func TestApplyOAuthModelAliasKeepsCaseInsensitiveCollisionProtection(t *testing.T) {
 	models := []*ModelInfo{{ID: "model-a"}, {ID: "Model-A"}, {ID: "model-a"}, {ID: "model-b"}}
 	got := applyOAuthModelAliasEntries([]config.OAuthModelAlias{{Name: "model-b", Alias: "public-b"}}, models)
-	want := []string{"model-a", "Model-A", "public-b"}
+	want := []string{"model-a", "public-b"}
 	if len(got) != len(want) {
 		t.Fatalf("published %d IDs, want %v", len(got), want)
 	}
@@ -54,6 +54,29 @@ func TestApplyOAuthModelAliasPreservesDistinctModelCasing(t *testing.T) {
 		if got[index].ID != id {
 			t.Fatalf("published ID %q, want %q", got[index].ID, id)
 		}
+	}
+}
+
+func TestApplyOAuthModelAliasRejectsUnrelatedCaseCollision(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		models []*ModelInfo
+		want   []string
+	}{
+		{"alias first", []*ModelInfo{{ID: "model-a"}, {ID: "Public-B"}}, []string{"public-b"}},
+		{"native first", []*ModelInfo{{ID: "Public-B"}, {ID: "model-a"}}, []string{"Public-B", "model-a"}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			got := applyOAuthModelAliasEntries([]config.OAuthModelAlias{{Name: "model-a", Alias: "public-b"}}, scenario.models)
+			if len(got) != len(scenario.want) {
+				t.Fatalf("published %d IDs, want %v", len(got), scenario.want)
+			}
+			for index, id := range scenario.want {
+				if got[index].ID != id {
+					t.Fatalf("published ID %q, want %q", got[index].ID, id)
+				}
+			}
+		})
 	}
 }
 
