@@ -103,7 +103,8 @@ func (m *Manager) quotaResetMatchesLocked(auth, expected *Auth) bool {
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	return auth != nil && !(cfg != nil && cfg.Home.Enabled) && auth.ID == expected.ID && auth.Provider == expected.Provider &&
 		auth.RegistrationEpoch == expected.RegistrationEpoch && auth.Generation == expected.Generation &&
-		QuotaRecoveryCandidate(expected) && QuotaRecoveryCandidate(auth)
+		QuotaRecoveryCandidate(expected) && QuotaRecoveryCandidate(auth) &&
+		m.quotaRecoveryModelHeadersMatchLocked(expected) && m.quotaRecoveryModelHeadersMatchLocked(auth)
 }
 
 // Codex uses 429 for subscription limits and independent request/capacity limits.
