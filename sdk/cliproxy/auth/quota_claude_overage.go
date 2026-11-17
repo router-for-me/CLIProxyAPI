@@ -26,6 +26,24 @@ func QuotaRecoveryRequiresClaudeExtraUsage(a *Auth) bool {
 	return false
 }
 
+// QuotaRecoveryRequiresClaudeFablePool identifies a live standalone 7d_oi
+// rejection. No canonical usage field is proven to cover that opaque pool.
+func QuotaRecoveryRequiresClaudeFablePool(a *Auth) bool {
+	if a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "claude") {
+		return false
+	}
+	now := time.Now()
+	if a.claudeFablePoolCooldownUntil.After(now) {
+		return true
+	}
+	for _, state := range a.ModelStates {
+		if state != nil && (state.claudeFablePoolCooldownUntil.After(now) || state.credentialQuotaShadow != nil && state.credentialQuotaShadow.claudeFablePoolCooldownUntil.After(now)) {
+			return true
+		}
+	}
+	return false
+}
+
 func claudeOverageHeaders(headers http.Header) bool {
 	signals := collectQuotaSignals("claude", headers)
 	get := func(name string) string {
@@ -77,6 +95,7 @@ func claudeOverageOwnDeadline(quota QuotaState, retry *time.Duration, now time.T
 }
 
 func (m *Manager) recordClaudeOverage(ctx context.Context, a *Auth, result Result, model string, headers http.Header, now time.Time) {
+	m.recordClaudeFablePool(ctx, a, result, model, headers, now)
 	if result.Success || a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "claude") || statusCodeFromResult(result.Error) != 429 || m.cooldownDisabledForAuth(a) || hasUnauthorizedAuthFailure(a) || shouldSkipCredentialCooldown(result.Error) || (result.Error != nil && result.Error.Code == ErrorCodeForceCooldown) || isTransientRateLimitResultError(result.Error) || !claudeOverageIdentityMatches(ctx, a) || !claudeOverageHeaders(headers) {
 		return
 	}
@@ -90,6 +109,24 @@ func (m *Manager) recordClaudeOverage(ctx context.Context, a *Auth, result Resul
 		next := claudeOverageOwnDeadline(a.Quota, result.RetryAfter, now)
 		if next.After(a.claudeOverageCooldownUntil) {
 			a.claudeOverageCooldownUntil = next
+		}
+	}
+}
+
+func (m *Manager) recordClaudeFablePool(ctx context.Context, a *Auth, result Result, model string, headers http.Header, now time.Time) {
+	if result.Success || a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "claude") || statusCodeFromResult(result.Error) != 429 || m.cooldownDisabledForAuth(a) || hasUnauthorizedAuthFailure(a) || shouldSkipCredentialCooldown(result.Error) || (result.Error != nil && result.Error.Code == ErrorCodeForceCooldown) || isTransientRateLimitResultError(result.Error) || !claudeOverageIdentityMatches(ctx, a) || !claudeFablePoolHeaders(headers) {
+		return
+	}
+	if model != "" {
+		state := ensureModelState(a, model)
+		next := claudeOverageOwnDeadline(state.Quota, result.RetryAfter, now)
+		if next.After(state.claudeFablePoolCooldownUntil) {
+			state.claudeFablePoolCooldownUntil = next
+		}
+	} else {
+		next := claudeOverageOwnDeadline(a.Quota, result.RetryAfter, now)
+		if next.After(a.claudeFablePoolCooldownUntil) {
+			a.claudeFablePoolCooldownUntil = next
 		}
 	}
 }
@@ -120,7 +157,7 @@ func retainClaudeOverageUpdate(incoming, current *Auth) bool {
 	if !strings.EqualFold(strings.TrimSpace(incoming.Provider), "claude") && !strings.EqualFold(strings.TrimSpace(current.Provider), "claude") {
 		return false
 	}
-	changed := false
+	changed := retainClaudeFablePoolUpdate(incoming, current)
 	before := incoming.claudeOverageCooldownUntil
 	if !same {
 		incoming.claudeOverageCooldownUntil = time.Time{}
@@ -150,6 +187,49 @@ func retainClaudeOverageUpdate(incoming, current *Auth) bool {
 				shadow.claudeOverageCooldownUntil = old.credentialQuotaShadow.claudeOverageCooldownUntil
 			}
 			changed = changed || !before.Equal(shadow.claudeOverageCooldownUntil)
+		}
+	}
+	return changed
+}
+
+func retainClaudeFablePoolUpdate(incoming, current *Auth) bool {
+	same := sameClaudeOverageAccount(incoming, current)
+	if incoming == nil || current == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(incoming.Provider), "claude") && !strings.EqualFold(strings.TrimSpace(current.Provider), "claude") {
+		return false
+	}
+	changed := false
+	before := incoming.claudeFablePoolCooldownUntil
+	if !same {
+		incoming.claudeFablePoolCooldownUntil = time.Time{}
+	} else if current.claudeFablePoolCooldownUntil.After(before) {
+		incoming.claudeFablePoolCooldownUntil = current.claudeFablePoolCooldownUntil
+	}
+	changed = changed || !before.Equal(incoming.claudeFablePoolCooldownUntil)
+	incoming.ModelStates = incoming.Clone().ModelStates
+	for model, state := range incoming.ModelStates {
+		if state == nil {
+			continue
+		}
+		old := current.ModelStates[model]
+		before := state.claudeFablePoolCooldownUntil
+		if !same {
+			state.claudeFablePoolCooldownUntil = time.Time{}
+		} else if old != nil && old.claudeFablePoolCooldownUntil.After(before) {
+			state.claudeFablePoolCooldownUntil = old.claudeFablePoolCooldownUntil
+		}
+		changed = changed || !before.Equal(state.claudeFablePoolCooldownUntil)
+		if state.credentialQuotaShadow != nil {
+			shadow := state.credentialQuotaShadow
+			before = shadow.claudeFablePoolCooldownUntil
+			if !same {
+				shadow.claudeFablePoolCooldownUntil = time.Time{}
+			} else if old != nil && old.credentialQuotaShadow != nil && old.credentialQuotaShadow.claudeFablePoolCooldownUntil.After(before) {
+				shadow.claudeFablePoolCooldownUntil = old.credentialQuotaShadow.claudeFablePoolCooldownUntil
+			}
+			changed = changed || !before.Equal(shadow.claudeFablePoolCooldownUntil)
 		}
 	}
 	return changed
@@ -196,4 +276,18 @@ func claudeOverageSignals(signals map[string]string) bool {
 		headers.Set(key, value)
 	}
 	return claudeOverageHeaders(headers)
+}
+
+// A standalone pool rejection has no paid-overage attribution. Explicit paid
+// overage keeps its existing, independently validated extra_usage contract.
+func claudeFablePoolHeaders(headers http.Header) bool {
+	signals := collectQuotaSignals("claude", headers)
+	return strings.EqualFold(strings.TrimSpace(signals[http.CanonicalHeaderKey("Anthropic-Ratelimit-Unified-7d_oi-Status")]), "rejected") && !claudeOverageHeaders(headers)
+}
+func claudeFablePoolSignals(signals map[string]string) bool {
+	headers := make(http.Header, len(signals))
+	for key, value := range signals {
+		headers.Set(key, value)
+	}
+	return claudeFablePoolHeaders(headers)
 }

@@ -18,20 +18,23 @@ import (
 
 // CooldownStateRecord is a persisted runtime cooldown snapshot for one auth/model pair.
 type CooldownStateRecord struct {
+	ClaudeFablePoolEvaluated bool `json:"claude_fable_pool_evaluated,omitempty"`
 	// ClaudeOverageEvaluated distinguishes a known zero marker from legacy records.
-	ClaudeOverageEvaluated                bool       `json:"claude_overage_evaluated,omitempty"`
-	ClaudeOverageCooldownUntil            time.Time  `json:"claude_overage_cooldown_until,omitempty"`
-	IndependentClaudeOverageCooldownUntil time.Time  `json:"independent_claude_overage_cooldown_until,omitempty"`
-	Provider                              string     `json:"provider,omitempty"`
-	AuthID                                string     `json:"auth_id"`
-	AuthFile                              string     `json:"-"`
-	Model                                 string     `json:"model,omitempty"`
-	Status                                string     `json:"status,omitempty"`
-	NextRetryAfter                        time.Time  `json:"next_retry_after"`
-	Reason                                string     `json:"reason,omitempty"`
-	Quota                                 QuotaState `json:"quota,omitempty"`
-	LastError                             *Error     `json:"last_error,omitempty"`
-	UpdatedAt                             time.Time  `json:"updated_at"`
+	ClaudeOverageEvaluated                  bool       `json:"claude_overage_evaluated,omitempty"`
+	ClaudeOverageCooldownUntil              time.Time  `json:"claude_overage_cooldown_until,omitempty"`
+	ClaudeFablePoolCooldownUntil            time.Time  `json:"claude_fable_pool_cooldown_until,omitempty"`
+	IndependentClaudeOverageCooldownUntil   time.Time  `json:"independent_claude_overage_cooldown_until,omitempty"`
+	IndependentClaudeFablePoolCooldownUntil time.Time  `json:"independent_claude_fable_pool_cooldown_until,omitempty"`
+	Provider                                string     `json:"provider,omitempty"`
+	AuthID                                  string     `json:"auth_id"`
+	AuthFile                                string     `json:"-"`
+	Model                                   string     `json:"model,omitempty"`
+	Status                                  string     `json:"status,omitempty"`
+	NextRetryAfter                          time.Time  `json:"next_retry_after"`
+	Reason                                  string     `json:"reason,omitempty"`
+	Quota                                   QuotaState `json:"quota,omitempty"`
+	LastError                               *Error     `json:"last_error,omitempty"`
+	UpdatedAt                               time.Time  `json:"updated_at"`
 	// IndependentState preserves a model's own cooldown beneath an
 	// auth-level credential-quota layer so a restart cannot lose the
 	// distinction and quota restoration keeps reinstate-exactly semantics.

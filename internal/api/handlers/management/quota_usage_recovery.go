@@ -17,6 +17,12 @@ func quotaUsageHasCapacity(provider string, body []byte, auth *coreauth.Auth) bo
 	}
 	switch provider {
 	case "claude":
+		// Shared windows, paid extra usage and similarly named scoped limits do not
+		// prove capacity for the opaque standalone 7d_oi header pool.
+		if coreauth.QuotaRecoveryRequiresClaudeFablePool(auth) {
+			return false
+		}
+
 		if coreauth.QuotaRecoveryRequiresClaudeExtraUsage(auth) && !quotaClaudeExtraCapacity(payload["extra_usage"]) {
 			return false
 		}
