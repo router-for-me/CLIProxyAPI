@@ -278,7 +278,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(true, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
 			translatedClaudeErr = nil
-			streamErr = statusErr{code: http.StatusBadGateway, msg: helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason)}
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
 			stopDeliverySupport()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
@@ -353,7 +353,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(p), &param, claudeInputTokens)
 				helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 				helps.CaptureTranslatedClaudeStreamError(responseFormat, chunks, &translatedClaudeErr, func(msg string) error {
-					return statusErr{code: http.StatusBadGateway, msg: msg}
+					return newGeminiTranslatedClaudeErrorStatusErr(msg)
 				})
 				var isTerminalChunk bool
 				if finishReason := ojson.GetBytesNoCopy(p, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
@@ -550,7 +550,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, []byte("[DONE]"), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
 			helps.CaptureTranslatedClaudeStreamError(responseFormat, tail, &translatedClaudeErr, func(msg string) error {
-				return statusErr{code: http.StatusBadGateway, msg: msg}
+				return newGeminiTranslatedClaudeErrorStatusErr(msg)
 			})
 			// Commit upstream output before EOF-generated completion reaches interceptors.
 			// Commit itself rejects partial streams without an upstream terminal.

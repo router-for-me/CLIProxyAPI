@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -403,57 +403,27 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			createDoc := ojson.NewDoc(payload)
 			_ = createDoc.Set("model", model)
-			if isAppend && !createDoc.Get("instructions").Exists() {
+			if (isAppend || hasLocalCompactionParent) && !createDoc.Get("instructions").Exists() {
 				metadataMu.Lock()
 				parentSettings := responseSettings[prevID]
 				metadataMu.Unlock()
-				targetSettings := parentSettings
-				if targetSettings == nil {
-					targetSettings = initial
+				// Inherit normalized settings before user rules, not the previous final body.
+				var instructions string
+				if parentSettings != nil {
+					instructions = parentSettings.unconfiguredInstructions
 				}
-				var inst ojson.Result
-				if targetSettings != nil {
-					inst = ojson.GetBytesNoCopy(targetSettings.clientBody, "instructions")
-					if !inst.Exists() {
-						inst = ojson.GetBytesNoCopy(targetSettings.originalPayload, "instructions")
-					}
+				// Preserve the legacy fallback only when the parent has neither a caller
+				// value nor a final field (including a built-in empty or payload default).
+				// Inspect final presence only; never inherit the configured text.
+				if instructions == "" && initial != nil &&
+					(parentSettings == nil || !ojson.GetBytesNoCopy(parentSettings.clientBody, "instructions").Exists()) {
+					instructions = initial.unconfiguredInstructions
 				}
-				if !inst.Exists() && initial != nil {
-					inst = ojson.GetBytesNoCopy(initial.clientBody, "instructions")
-					if !inst.Exists() {
-						inst = ojson.GetBytesNoCopy(initial.originalPayload, "instructions")
-					}
-				}
-				if inst.Exists() {
-					_ = createDoc.SetRawBytes("instructions", []byte(inst.Raw))
+				if instructions != "" {
+					_ = createDoc.SetRaw("instructions", instructions)
 				}
 			}
 			if hasLocalCompactionParent {
-				if !createDoc.Get("instructions").Exists() {
-					metadataMu.Lock()
-					parentSettings := responseSettings[prevID]
-					metadataMu.Unlock()
-					targetSettings := parentSettings
-					if targetSettings == nil {
-						targetSettings = initial
-					}
-					var inst ojson.Result
-					if targetSettings != nil {
-						inst = ojson.GetBytesNoCopy(targetSettings.clientBody, "instructions")
-						if !inst.Exists() {
-							inst = ojson.GetBytesNoCopy(targetSettings.originalPayload, "instructions")
-						}
-					}
-					if !inst.Exists() && initial != nil {
-						inst = ojson.GetBytesNoCopy(initial.clientBody, "instructions")
-						if !inst.Exists() {
-							inst = ojson.GetBytesNoCopy(initial.originalPayload, "instructions")
-						}
-					}
-					if inst.Exists() {
-						_ = createDoc.SetRawBytes("instructions", []byte(inst.Raw))
-					}
-				}
 				existingInput := createDoc.Get("input")
 				rebuiltItems := make([]string, 0, 2)
 				rebuiltItems = append(rebuiltItems, localCompactionItem)
@@ -516,21 +486,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				if inst := ojson.GetBytesNoCopy(nextReq.Payload, "instructions"); inst.Exists() {
 					_ = snapshotDoc.SetRawBytes("instructions", []byte(inst.Raw))
-				} else if initial != nil {
-					initInst := ojson.GetBytesNoCopy(initial.clientBody, "instructions")
-					if !initInst.Exists() {
-						initInst = ojson.GetBytesNoCopy(initial.originalPayload, "instructions")
-					}
-					if initInst.Exists() {
-						_ = snapshotDoc.SetRawBytes("instructions", []byte(initInst.Raw))
-					}
+				} else if initial != nil && initial.unconfiguredInstructions != "" {
+					_ = snapshotDoc.SetRaw("instructions", initial.unconfiguredInstructions)
 				}
 				if serviceTier := ojson.GetBytesNoCopy(nextReq.Payload, "service_tier"); serviceTier.Exists() {
 					_ = snapshotDoc.SetRawBytes("service_tier", []byte(serviceTier.Raw))
 				}
 				compactionSettings := &codexWebsocketPrepared{
-					to:         sdktranslator.FromString("codex"),
-					clientBody: snapshotDoc.Bytes(),
+					to:                       sdktranslator.FromString("codex"),
+					clientBody:               snapshotDoc.Bytes(),
+					unconfiguredInstructions: strings.Clone(snapshotDoc.Get("instructions").Raw),
 				}
 				metadataMu.Lock()
 				localCompactionDeliveredAny = false
@@ -910,7 +875,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				continue
 			}
 			payload = bytes.TrimSpace(payload)
-			eventType := ojson.GetBytesNoCopy(payload, "type").String()
+			eventType := helps.CodexResponseEventType(payload)
+			if eventType == "error" && strings.TrimSpace(ojson.GetBytesNoCopy(payload, "type").String()) == "" {
+				doc := ojson.NewDoc(payload)
+				_ = doc.Set("type", eventType)
+				payload = doc.Bytes()
+			}
 			metadataMu.Lock()
 			establishing := firstResponse && eventType == "response.created"
 			metadataMu.Unlock()
@@ -948,7 +918,8 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				responseID = createdResponseID
 				latestTurnResponseID = createdResponseID
-				// Retain response settings, not request history or authorization headers.
+				// Retain final settings for automatic-successor accounting, and the independent
+				// unconfigured instructions for explicit rebuilds. Drop history and credentials.
 				// In-flight steering pins its parent's settings independently of this window.
 				snapshot := *current
 				snapshot.originalPayload, snapshot.wsHeaders = nil, nil

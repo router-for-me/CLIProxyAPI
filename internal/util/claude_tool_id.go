@@ -3,12 +3,13 @@ package util
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 )
 
 const geminiClaudeToolUseIDPrefix = "cpa_gemini_"
