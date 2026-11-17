@@ -30,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/selfupdate"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
@@ -72,7 +73,8 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
-	os.Exit(run())
+	selfupdate.Startup()              // proxx: self-update start attempts, rollback, --proxx-selfcheck
+	os.Exit(selfupdate.Finish(run())) // proxx: exec a staged self-update after the graceful shutdown
 }
 
 func logStartupErrorf(format string, args ...any) {
