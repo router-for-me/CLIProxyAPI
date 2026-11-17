@@ -49,13 +49,17 @@ func claudeOverageHeaders(headers http.Header) bool {
 	get := func(name string) string {
 		return strings.ToLower(strings.TrimSpace(signals[http.CanonicalHeaderKey(name)]))
 	}
+	// Explicit paid-pool rejection is independent of shared-window capacity.
+	rejected := get("Anthropic-Ratelimit-Unified-Overage-Status") == "rejected" || get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason") != ""
+	if rejected {
+		return true
+	}
 	five, seven := get("Anthropic-Ratelimit-Unified-5h-Status"), get("Anthropic-Ratelimit-Unified-7d-Status")
 	if five == "rejected" || seven == "rejected" {
 		return false
 	}
-	rejected := get("Anthropic-Ratelimit-Unified-Overage-Status") == "rejected" || get("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason") != ""
 	claim := strings.Contains(get("Anthropic-Ratelimit-Unified-Representative-Claim"), "overage")
-	if !rejected && !(claim && get("Anthropic-Ratelimit-Unified-Status") == "rejected") {
+	if !(claim && get("Anthropic-Ratelimit-Unified-Status") == "rejected") {
 		return false
 	}
 	allowed := func(value string) bool { return value == "allowed" || value == "allowed_warning" }
