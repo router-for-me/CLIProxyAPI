@@ -230,6 +230,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	resp, errDo := httpClient.Do(req)
+	usageReceivedAt := time.Now()
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
@@ -248,7 +249,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	if routingSnapshot != nil && !routingRedirected && resp.StatusCode == http.StatusOK {
-		if schedule, ok := routingUsageSchedule(routingSnapshot.Provider, respBody, time.Now()); ok {
+		if schedule, ok := routingUsageSchedule(routingSnapshot.Provider, respBody, usageReceivedAt); ok {
 			h.authManager.RecordQuotaResetScheduleIfUnchanged(c.Request.Context(), routingSnapshot, schedule)
 		}
 	}
