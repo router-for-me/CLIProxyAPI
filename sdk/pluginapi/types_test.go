@@ -987,6 +987,65 @@ func TestUsageDetailModalityTokenCounters(t *testing.T) {
 	}
 }
 
+func TestUsageDetailCacheCreationTTLCounters(t *testing.T) {
+	int64Ptr := func(v int64) *int64 { return &v }
+	record := UsageRecord{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: UsageDetail{
+			InputTokens:           100,
+			OutputTokens:          50,
+			CacheCreationTokens:   1500,
+			TotalTokens:           1650,
+			CacheCreation5mTokens: int64Ptr(1000),
+			CacheCreation1hTokens: int64Ptr(500),
+		},
+	}
+
+	raw, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshal)
+	}
+	var decoded UsageRecord
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshal)
+	}
+	got := decoded.Detail
+	if got.CacheCreationTokens != 1500 {
+		t.Fatalf("CacheCreationTokens = %d, want 1500", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 1000 {
+		t.Fatalf("CacheCreation5mTokens = %v, want 1000", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || *got.CacheCreation1hTokens != 500 {
+		t.Fatalf("CacheCreation1hTokens = %v, want 500", got.CacheCreation1hTokens)
+	}
+
+	zeroAndNil := UsageRecord{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: UsageDetail{
+			CacheCreationTokens:   0,
+			CacheCreation5mTokens: int64Ptr(0),
+			CacheCreation1hTokens: nil,
+		},
+	}
+	rawZero, errMarshalZero := json.Marshal(zeroAndNil)
+	if errMarshalZero != nil {
+		t.Fatalf("Marshal(zeroAndNil) error = %v", errMarshalZero)
+	}
+	var decodedZero UsageRecord
+	if errUnmarshalZero := json.Unmarshal(rawZero, &decodedZero); errUnmarshalZero != nil {
+		t.Fatalf("Unmarshal(zeroAndNil) error = %v", errUnmarshalZero)
+	}
+	if decodedZero.Detail.CacheCreation5mTokens == nil || *decodedZero.Detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("CacheCreation5mTokens = %v, want explicit 0", decodedZero.Detail.CacheCreation5mTokens)
+	}
+	if decodedZero.Detail.CacheCreation1hTokens != nil {
+		t.Fatalf("CacheCreation1hTokens = %v, want nil", decodedZero.Detail.CacheCreation1hTokens)
+	}
+}
+
 func TestQuotaPayloadJSON(t *testing.T) {
 	// Test camelCase input
 	camelJSON := []byte(`{

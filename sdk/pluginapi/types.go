@@ -1924,6 +1924,10 @@ type UsageDetail struct {
 	// TotalTokens is the total token count.
 	TotalTokens int64
 
+	// CacheCreation5mTokens is the optional 5-minute TTL cache creation token count.
+	CacheCreation5mTokens *int64
+	// CacheCreation1hTokens is the optional 1-hour TTL cache creation token count.
+	CacheCreation1hTokens *int64
 	// TextInputTokens is the optional text input token count.
 	TextInputTokens *int64
 	// ImageInputTokens is the optional image input token count.
