@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
@@ -226,5 +227,94 @@ func TestCodexRateLimitShadowAndMerge(t *testing.T) {
 	merged := mergeModelState(shadow.Clone(), earlier)
 	if !merged.nonQuotaCooldownUntil.Equal(deadline) {
 		t.Fatal("newer diagnostic shortened independent Codex rate deadline")
+	}
+}
+
+func TestQuotaRecoveryCodexJSONModelStateUpdate(t *testing.T) {
+	for _, credentialScope := range []bool{false, true} {
+		t.Run(fmt.Sprintf("credential_scope=%v", credentialScope), func(t *testing.T) {
+			ctx := context.Background()
+			prior := quotaCooldownDisabled.Load()
+			quotaCooldownDisabled.Store(false)
+			t.Cleanup(func() { quotaCooldownDisabled.Store(prior) })
+			cfg := &internalconfig.Config{}
+			cfg.Codex.ModelLevelCooling = true
+			store := NewFileCooldownStateStore(t.TempDir())
+			m := NewManager(nil, nil, nil)
+			m.SetConfig(cfg)
+			m.SetCooldownStateStore(store)
+			a, err := m.Register(ctx, &Auth{ID: t.Name(), Provider: "codex", Status: StatusActive, Metadata: map[string]any{"account_id": "same", "access_token": "token", "refresh_token": "refresh"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const model = "gpt-5"
+			rate := 30 * time.Minute
+			m.MarkResult(ctx, Result{AuthID: a.ID, Provider: a.Provider, Model: model, RetryAfter: &rate, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"rate_limit_exceeded"}}`}})
+			a, _ = m.GetByID(a.ID)
+			deadline := codexRateDeadline(a, model)
+			if !deadline.After(time.Now()) {
+				t.Fatal("request-rate result did not establish a live independent deadline")
+			}
+			quota := 2 * time.Hour
+			markSubscription := func() {
+				m.MarkResult(ctx, Result{AuthID: a.ID, Provider: a.Provider, Model: model, CredentialScope: credentialScope, RetryAfter: &quota, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"usage_limit_reached"}}`}})
+			}
+			markSubscription()
+			a, _ = m.GetByID(a.ID)
+			shadow := a.ModelStates[model].credentialQuotaShadow.Clone()
+			if credentialScope && (shadow == nil || !shadow.nonQuotaCooldownUntil.Equal(deadline)) {
+				t.Fatal("credential quota did not wrap the independent request-rate block")
+			}
+			data, err := json.Marshal(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var public Auth
+			if err = json.Unmarshal(data, &public); err != nil {
+				t.Fatal(err)
+			}
+			state := public.ModelStates[model]
+			if state == nil || !state.nonQuotaCooldownUntil.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
+				t.Fatal("JSON round trip did not retain public model state while dropping private provenance")
+			}
+			if a, err = m.Update(ctx, &public); err != nil {
+				t.Fatal(err)
+			}
+			state = a.ModelStates[model]
+			if !codexRateDeadline(a, model).Equal(deadline) {
+				t.Error("JSON model-state update lost independent request-rate deadline")
+			}
+			if credentialScope {
+				if !reflect.DeepEqual(state.credentialQuotaShadow, shadow) || !state.credentialQuotaPropagated {
+					t.Error("JSON model-state update lost hidden independent layer or propagation marker")
+				}
+			}
+			if QuotaRecoveryCandidate(a) {
+				t.Error("JSON model-state update made active request-rate restriction recoverable")
+			}
+			savedBefore, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _, err := m.ResetQuotaIfUnchanged(ctx, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _ := m.GetByID(a.ID)
+			savedAfter, err := store.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != nil || !reflect.DeepEqual(a, after) || !reflect.DeepEqual(savedBefore, savedAfter) {
+				t.Fatal("healthy usage recovery cleared independent request-rate restriction after JSON update")
+			}
+			if credentialScope {
+				markSubscription()
+				a, _ = m.GetByID(a.ID)
+				if !reflect.DeepEqual(a.ModelStates[model].credentialQuotaShadow, shadow) {
+					t.Error("repeated subscription report replaced the independent layer with propagated quota")
+				}
+			}
+		})
 	}
 }

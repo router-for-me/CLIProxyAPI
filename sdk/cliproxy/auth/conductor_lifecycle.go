@@ -504,6 +504,22 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
+		} else if mode == updateModeReplace && !credChanged && strings.EqualFold(auth.Provider, "codex") && auth.Provider == existing.Provider {
+			// Public model snapshots omit private independent cooldown layers.
+			auth.ModelStates = auth.Clone().ModelStates
+			for model, state := range auth.ModelStates {
+				old := existing.ModelStates[model]
+				if state == nil || old == nil {
+					continue
+				}
+				if old.nonQuotaCooldownUntil.After(state.nonQuotaCooldownUntil) {
+					state.nonQuotaCooldownUntil = old.nonQuotaCooldownUntil
+				}
+				if state.credentialQuotaShadow == nil && isModelStateActiveCooldown(old.credentialQuotaShadow, now) {
+					state.credentialQuotaShadow = old.credentialQuotaShadow.cloneShallow()
+					state.credentialQuotaPropagated = state.credentialQuotaPropagated || old.credentialQuotaPropagated
+				}
+			}
 		}
 		if isFileSnapshot || (credChanged && mode == updateModeReplace && existing.Quota.Exceeded && existing.Quota.NextRecoverAt.After(now) && !auth.Quota.NextRecoverAt.After(now)) {
 			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
