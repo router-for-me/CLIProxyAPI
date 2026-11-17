@@ -161,3 +161,110 @@ func TestPayloadReplaceFinalizerRetryAndFilter(t *testing.T) {
 		t.Fatalf("filter did not run last: %s", out)
 	}
 }
+
+func TestPayloadReplaceRegexPatterns(t *testing.T) {
+	for _, tt := range []struct {
+		name, protocol, root, input string
+		positions                   []int
+		all                         bool
+		replacements                []config.PayloadReplacement
+		want                        map[string]string
+	}{
+		{
+			name:     "capture groups dollar escape and mixed literal cascading",
+			protocol: "openai",
+			input: `{"messages":[{"role":"system","content":"user-12 hero"},{"role":"user","content":"User-42 HERO"},{"role":"assistant","content":"user-99"},{"role":"user","content":"user-7 <debug>drop
+line</debug> keep"}]}`,
+			positions: []int{1, 2},
+			replacements: []config.PayloadReplacement{
+				{"pattern": `(?i)user-(?P<id>\d+)`, "replacement": "acct-${id}($$1)"},
+				{"pattern": `(?s)<debug>.*?</debug>\s*`, "replacement": ""},
+				{"HERO": "friend"},
+				{"$literal": "ignored"},
+			},
+			want: map[string]string{
+				"messages.0.content": "user-12 hero",
+				"messages.1.content": "acct-42($1) friend",
+				"messages.2.content": "user-99",
+				"messages.3.content": "acct-7($1) keep",
+			},
+		},
+		{
+			name:      "literal key named pattern remains literal",
+			protocol:  "claude",
+			input:     `{"messages":[{"role":"user","content":[{"type":"text","text":"pattern A"},{"type":"thinking","text":"pattern A"}]}]}`,
+			positions: []int{1},
+			replacements: []config.PayloadReplacement{
+				{"pattern": "schema"},
+			},
+			want: map[string]string{
+				"messages.0.content.0.text": "schema A",
+				"messages.0.content.1.text": "pattern A",
+			},
+		},
+		{
+			name:     "responses and antigravity layouts respect user selection and block boundaries",
+			protocol: "antigravity",
+			root:     "request",
+			input:    `{"request":{"contents":[{"role":"model","parts":[{"text":"id-1"}]},{"role":"user","parts":[{"text":"id-1 "},{"text":"id-2"},{"text":"id-3","thought":true}]}]},"text":"id-1"}`,
+			all:      true,
+			replacements: []config.PayloadReplacement{
+				{"pattern": `id-(\d+)`, "replacement": "ref-$1"},
+				{"pattern": `ref-1 ref-2`, "replacement": "CROSS_BLOCK"},
+			},
+			want: map[string]string{
+				"request.contents.0.parts.0.text": "id-1",
+				"request.contents.1.parts.0.text": "ref-1 ",
+				"request.contents.1.parts.1.text": "ref-2",
+				"request.contents.1.parts.2.text": "id-3",
+				"text":                            "id-1",
+			},
+		},
+		{
+			name:     "codex responses string and array input",
+			protocol: "codex",
+			input:    `{"input":[{"type":"function_call_output","role":"user","content":"secret-1"},{"type":"message","role":"user","content":[{"type":"input_text","text":"secret-1 secret-2"},{"type":"input_image","image_url":"secret-3"}]}]}`,
+			all:      true,
+			replacements: []config.PayloadReplacement{
+				{"pattern": `secret-\d+`, "replacement": "[redacted]"},
+			},
+			want: map[string]string{
+				"input.0.content":             "secret-1",
+				"input.1.content.0.text":      "[redacted] [redacted]",
+				"input.1.content.1.image_url": "secret-3",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Payload: config.PayloadConfig{Replace: []config.PayloadReplaceRule{{
+				Models:       []config.PayloadModelRule{{Name: "*"}},
+				Target:       config.PayloadReplaceTarget{Role: "user", Positions: tt.positions, All: tt.all},
+				Replacements: tt.replacements,
+			}}}}
+			out := ApplyPayloadConfigWithRoot(cfg, "model", tt.protocol, tt.root, []byte(tt.input), nil, "", "")
+			for path, want := range tt.want {
+				if got := ojson.GetBytes(out, path).String(); got != want {
+					t.Errorf("%s = %q, want %q; body: %s", path, got, want, out)
+				}
+			}
+		})
+	}
+
+	// No-op regex and invalid regex rules must leave input bytes untouched.
+	for _, replacements := range [][]config.PayloadReplacement{
+		{{"pattern": `nomatch-\d+`, "replacement": "x"}},
+		{{"pattern": `hero`, "replacement": "hero"}},
+		{{"pattern": `[invalid`, "replacement": "x"}},
+	} {
+		body := []byte(`{"messages":[{"role":"user","content":"hero"}]}`)
+		cfg := &config.Config{Payload: config.PayloadConfig{Replace: []config.PayloadReplaceRule{{
+			Models:       []config.PayloadModelRule{{Name: "*"}},
+			Target:       config.PayloadReplaceTarget{Role: "user", All: true},
+			Replacements: replacements,
+		}}}}
+		out := ApplyPayloadConfigWithRoot(cfg, "model", "openai", "", body, nil, "", "")
+		if !bytes.Equal(out, body) || &out[0] != &body[0] {
+			t.Fatalf("expected unchanged slice for %v, got %s", replacements, out)
+		}
+	}
+}

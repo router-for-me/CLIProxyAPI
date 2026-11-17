@@ -189,3 +189,36 @@ func TestPayloadReplaceAntigravityRebuiltAttempts(t *testing.T) {
 		}
 	}
 }
+
+func TestPayloadReplaceRegexExecutorBarrier(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{Replace: []config.PayloadReplaceRule{{
+		Models: []config.PayloadModelRule{{Name: "*", Protocol: "claude"}},
+		Target: config.PayloadReplaceTarget{Role: "user", Positions: []int{1}},
+		Replacements: []config.PayloadReplacement{
+			{"pattern": `(?i)user-(\d+)`, "replacement": "account-${1}"},
+			{"pattern": `(?s)<debug>.*?</debug>\s*`, "replacement": ""},
+		},
+	}}}}
+	hasUserText := func(content ojson.Result, want string) bool {
+		if content.Type == ojson.String {
+			return content.String() == want
+		}
+		if content.IsArray() {
+			for _, block := range content.Array() {
+				if block.Get("type").String() == "text" && block.Get("text").String() == want {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, stream := range []bool{false, true} {
+		body := executeClaudeContextManagementRequest(t, cfg, []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"<debug>trace</debug> User-42"},{"role":"user","content":"User-99"}]}`), stream)
+		if !hasUserText(ojson.GetBytes(body, "messages.0.content"), "account-42") {
+			t.Fatalf("stream=%v messages.0.content missing account-42; body: %s", stream, body)
+		}
+		if !hasUserText(ojson.GetBytes(body, "messages.1.content"), "User-99") {
+			t.Fatalf("stream=%v unselected second user changed; body: %s", stream, body)
+		}
+	}
+}

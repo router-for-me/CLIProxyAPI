@@ -5,12 +5,14 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // replacePayloadUserTextDoc edits only existing protocol-defined user text fields.
 // Changed values are collected before writes so traversal views remain valid.
-func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *config.PayloadReplaceRule, noteWrite func(string)) bool {
+func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *config.PayloadReplaceRule, ruleIndex int, noteWrite func(string)) bool {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
 	var arrayPath string
 	var gemini, responses bool
@@ -37,13 +39,51 @@ func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *conf
 			}
 		}
 	}
+	if len(rule.Replacements) == 0 {
+		return false
+	}
+	type compiledReplacement struct {
+		from, to string
+		re       *regexp.Regexp
+	}
+	var steps []compiledReplacement
+	compileSteps := func() ([]compiledReplacement, bool) {
+		if steps != nil {
+			return steps, true
+		}
+		built := make([]compiledReplacement, 0, len(rule.Replacements))
+		for i, replacement := range rule.Replacements {
+			source, target, isRegex, errResolve := replacement.Resolve()
+			if errResolve != nil {
+				return nil, false
+			}
+			step := compiledReplacement{from: source, to: target}
+			if isRegex {
+				re, errCompile := regexp.Compile(source)
+				if source == "" || errCompile != nil {
+					log.Warnf("payload.replace rule %d replacement %d skipped: invalid regex", ruleIndex+1, i+1)
+					continue
+				}
+				step.re = re
+			}
+			built = append(built, step)
+		}
+		steps = built
+		return steps, true
+	}
 	type textChange struct{ path, value string }
 	var changes []textChange
 	collectChange := func(text string, messageIndex, blockIndex int) {
+		compiled, ok := compileSteps()
+		if !ok {
+			return
+		}
 		updated := text
-		for _, replacement := range rule.Replacements {
-			for from, to := range replacement {
-				updated = strings.ReplaceAll(updated, from, to)
+		for _, step := range compiled {
+			if step.re != nil {
+				updated = step.re.ReplaceAllString(updated, step.to)
+			} else {
+				updated = strings.ReplaceAll(updated, step.from, step.to)
 			}
 		}
 		if updated == text {

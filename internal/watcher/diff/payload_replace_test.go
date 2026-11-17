@@ -36,4 +36,13 @@ func TestBuildConfigChangeDetailsPayloadReplace(t *testing.T) {
 	if changes := BuildConfigChangeDetails(updated, updated); len(changes) != 0 {
 		t.Fatalf("unchanged rules produced diff: %v", changes)
 	}
+	patternUpdated := updated.CloneForRuntime()
+	patternUpdated.Payload.Replace[0].Replacements = []config.PayloadReplacement{{"pattern": `private-\w+`, "replacement": "another-private-destination"}}
+	changes = BuildConfigChangeDetails(updated, patternUpdated)
+	if len(changes) != 1 || changes[0] != "payload.replace: updated (1 -> 1 rules)" {
+		t.Fatalf("missed pattern replacement edit: %v", changes)
+	}
+	if strings.Contains(strings.Join(changes, " "), "private") {
+		t.Fatal("diff leaked pattern text")
+	}
 }

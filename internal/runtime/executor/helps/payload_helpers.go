@@ -381,7 +381,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 				if rule.Validate() != nil || !payloadModelRulesMatchDoc(rule.Models, protocol, fromProtocol, headers, doc, root, candidates) {
 					continue
 				}
-				if replacePayloadUserTextDoc(doc, protocol, root, rule, noteRuleWrite) {
+				if replacePayloadUserTextDoc(doc, protocol, root, rule, i, noteRuleWrite) {
 					mutated = true
 				}
 			}
