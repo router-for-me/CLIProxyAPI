@@ -681,7 +681,7 @@ type PayloadConfig struct {
 	Override []PayloadRule `yaml:"override" json:"override"`
 	// OverrideRaw defines rules that always set raw JSON values, overwriting any existing values.
 	OverrideRaw []PayloadRule `yaml:"override-raw" json:"override-raw"`
-	// Replace defines ordered literal replacements in selected user messages.
+	// Replace defines ordered literal and Go RE2 regex replacements in selected strings.
 	Replace []PayloadReplaceRule `yaml:"replace" json:"replace"`
 	// Filter defines rules that remove parameters from the payload by JSON path.
 	Filter []PayloadFilterRule `yaml:"filter" json:"filter"`

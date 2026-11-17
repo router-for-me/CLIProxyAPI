@@ -356,20 +356,45 @@ requests:
   #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
-  #   replace: # Ordered literal replacements in existing user text; runs after overrides, before filter.
-  #     - models: # Same model, protocol, header, and payload conditions as other rules.
+  #   replace: # Ordered literal and Go RE2 regex replacements in existing strings; runs after overrides, before filter.
+  #     - models:
   #         - name: "*"
   #           protocol: "claude"
   #           from-protocol: "openai"
   #       target:
-  #         role: user
-  #         positions: [1, 2] # One-based user positions in the final upstream body; missing positions are skipped.
-  #         # all: true      # Select every user instead of positions (mutually exclusive).
-  #       replacements: # Each entry has exactly one non-empty string key and a string value.
+  #         role: user # system, developer, or user
+  #         positions: [1, 2] # One-based positions of the selected role in the final upstream body; missing positions are skipped.
+  #         # all: true      # Select all messages of this role instead of positions (mutually exclusive).
+  #       replacements: # Each entry is either {"source": "destination"} (literal) or {pattern, replacement} (Go RE2 regex; $1/${1} expand captures).
   #         - "you are hero": "you are fool"
   #         - "remove this phrase": ""
-  #       # Text blocks are processed separately; images, tools, and thinking are not modified.
+  #         - pattern: '(?i)\bhero\b'
+  #           replacement: "friend"
+  #         - pattern: '(?s)<debug>.*?</debug>'
+  #           replacement: ""
+  #       # Invalid regex entries are skipped with an index-only warning; other replacements still run.
+  #       # Role targets process text blocks separately; assistant replies, images, tools, and thinking are not modified.
   #       # Supported layouts: OpenAI Chat, Claude, Responses/Codex, Gemini, and Antigravity.
+  #       # system includes Claude system, Gemini systemInstruction, and Responses instructions (each counts as one message, before any system messages).
+  #       # developer merged into system during translation must be selected as system.
+  #       # Matching uses final upstream roles, not the original client roles.
+  #     - models:
+  #         - name: "*"
+  #           protocol: "codex"
+  #       target:
+  #         paths: # Alternative to role/positions/all (mutually exclusive); paths are relative to the provider payload root.
+  #           - 'tools.#(type=="function")#.description'
+  #           - "metadata.description"
+  #       replacements: # Same ordered literal and Go RE2 regex rules as role targets; $1/${1} expand captures.
+  #         - "old name": "new name"
+  #         - "remove this phrase": ""
+  #         - pattern: '(?i)user-(\d+)'
+  #           replacement: 'account-${1}'
+  #         - pattern: '(?s)<debug>.*?</debug>'
+  #           replacement: ""
+  #       # Invalid regex entries are skipped with an index-only warning; other replacements still run.
+  #       # Path targets edit only existing string nodes, regardless of role or field; missing/non-string nodes are skipped.
+  #       # Objects/arrays are not traversed recursively; duplicate resolved paths are replaced once per rule.
   #   filter: # Filter rules remove specified parameters from the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
