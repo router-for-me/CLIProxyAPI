@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/test/proxx/launchdguard"
 )
 
 // TestE2ELaunchd upgrades a proxx that runs as a real (temporary) launchd agent, under load, and checks
@@ -27,6 +28,7 @@ func TestE2ELaunchd(t *testing.T) {
 	if runtime.GOOS != "darwin" || os.Getenv("PROXX_E2E_LAUNCHD") != "1" {
 		t.Skip("set PROXX_E2E_LAUNCHD=1 on macOS to run the launchd e2e")
 	}
+	launchdguard.Protect(t) // the user's own agent must be in the same state afterwards
 	root := t.TempDir()
 	ghLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -43,8 +45,9 @@ func TestE2ELaunchd(t *testing.T) {
 	in := newInstall(t, root, bin1, upstream.URL)
 
 	label := fmt.Sprintf("io.github.iamkunal9.proxx.e2e.%d.%d", os.Getpid(), time.Now().Unix())
-	if label == "io.github.iamkunal9.proxx" || in.port == 8317 {
-		t.Fatal("refusing to use the user's proxx label or port")
+	launchdguard.RequireSafeLabel(t, label, "")
+	if in.port == 8317 {
+		t.Fatal("refusing to use the user's proxx port")
 	}
 	logPath := filepath.Join(root, "launchd.log")
 	plist := filepath.Join(root, label+".plist")

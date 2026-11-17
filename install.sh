@@ -70,15 +70,54 @@ has_systemd_user() { command -v systemctl >/dev/null 2>&1 && systemctl --user sh
 
 OS="$(uname -s)"
 
-stop_service() {
+# The installer only ever stops, replaces or removes a service that runs THIS install's binary ($BIN):
+# a service file for the same label that runs another binary (another install dir, a test run) is left
+# alone. Never bootout/stop by label alone.
+service_file() {
 	case "$OS" in
-	Darwin) [ -f "$PLIST" ] && launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1 || true ;;
-	Linux) [ -f "$UNIT" ] && has_systemd_user && systemctl --user stop proxx.service >/dev/null 2>&1 || true ;;
+	Darwin) echo "$PLIST" ;;
+	Linux) echo "$UNIT" ;;
 	esac
-	# Wait for a previous proxx process to exit so its port is free. proxx drains in-flight requests
-	# for up to 120s (server.shutdown-timeout) before it exits, so allow ~135s.
+}
+
+# owns_service: the service file exists and runs $BIN.
+owns_service() {
+	f="$(service_file)"
+	[ -n "$f" ] && [ -f "$f" ] || return 1
+	case "$OS" in
+	Darwin) grep -qF "<string>$BIN</string>" "$f" ;;
+	Linux) grep -qF "ExecStart=$BIN --config " "$f" ;;
+	*) return 1 ;;
+	esac
+}
+
+# foreign_service: a service file exists for this label but runs another binary.
+foreign_service() {
+	f="$(service_file)"
+	[ -n "$f" ] && [ -f "$f" ] && ! owns_service
+}
+
+# own_pids lists processes whose command line starts with exactly "$BIN --config " (no regex, no
+# substring: /bin/proxx must not match /usr/local/bin/proxx).
+own_pids() {
+	ps -axo pid=,args= 2>/dev/null | awk -v want="$BIN --config " '{ pid = $1; sub(/^[ \t]*[0-9]+[ \t]+/, ""); if (index($0, want) == 1) print pid }'
+}
+
+stop_service() {
+	if foreign_service; then
+		warn "leaving $(service_file) alone: it does not run $BIN"
+		return 0
+	fi
+	if owns_service; then
+		case "$OS" in
+		Darwin) launchctl bootout "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1 || true ;;
+		Linux) has_systemd_user && systemctl --user stop proxx.service >/dev/null 2>&1 || true ;;
+		esac
+	fi
+	# Wait for this install's proxx to exit so its port is free. proxx drains in-flight requests for up
+	# to 120s (server.shutdown-timeout) before it exits, so allow ~135s.
 	i=0
-	while [ "$i" -lt 270 ] && pgrep -f "$BIN --config" >/dev/null 2>&1; do
+	while [ "$i" -lt 270 ] && [ -n "$(own_pids)" ]; do
 		i=$((i + 1))
 		sleep 0.5
 	done
@@ -86,17 +125,23 @@ stop_service() {
 
 if [ -n "$UNINSTALL" ]; then
 	stop_service
-	case "$OS" in
-	Darwin) rm -f "$PLIST" ;;
-	Linux)
-		if [ -f "$UNIT" ] && has_systemd_user; then systemctl --user disable proxx.service >/dev/null 2>&1 || true; fi
-		rm -f "$UNIT"
-		has_systemd_user && systemctl --user daemon-reload || true
-		;;
-	esac
+	if owns_service; then
+		case "$OS" in
+		Darwin) rm -f "$PLIST" ;;
+		Linux)
+			if has_systemd_user; then systemctl --user disable proxx.service >/dev/null 2>&1 || true; fi
+			rm -f "$UNIT"
+			has_systemd_user && systemctl --user daemon-reload || true
+			;;
+		esac
+	fi
 	rm -f "$BIN"
 	info "proxx removed (kept $PROXX_HOME)"
 	exit 0
+fi
+
+if [ -z "$NO_SERVICE" ] && foreign_service; then
+	die "$(service_file) runs another proxx binary, not $BIN. Uninstall that one first (sh install.sh --uninstall --install-dir <its dir>), or pick another label with PROXX_SERVICE_LABEL."
 fi
 
 # --- pick the release asset for this machine ---------------------------------
@@ -155,7 +200,13 @@ tar -xzf "$TMP/$archive" -C "$TMP/x"
 [ -f "$TMP/x/proxx" ] || die "archive does not contain a proxx binary"
 
 # --- install the binary --------------------------------------------------------
-stop_service
+if [ -z "$NO_SERVICE" ]; then
+	stop_service
+elif owns_service; then
+	# --no-service never stops or restarts a service; the binary is replaced by rename, so a running one
+	# keeps working on the old version.
+	warn "the service $SERVICE_LABEL keeps running the previous version until it is restarted"
+fi
 mkdir -p "$INSTALL_DIR"
 cp "$TMP/x/proxx" "$BIN.tmp"
 chmod 755 "$BIN.tmp"

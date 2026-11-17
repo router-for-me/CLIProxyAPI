@@ -51,6 +51,17 @@ It also writes `~/.proxx/.install-method` (`script`). The service gives proxx ti
 systemd `TimeoutStopSec=130`, and launchd `ExitTimeOut 0` (launchd caps agent values at 60s, so proxx
 bounds its own shutdown instead). After installing, updates can also be done from the panel (ADR 0007).
 
+The installer only stops, replaces or removes a service whose plist/unit runs **its own** binary (`$BIN`).
+- A service file for the same label that runs another binary is left alone, and a service install over it
+  is refused.
+- `--no-service` never stops or restarts a service.
+- The stop wait matches processes whose command line starts exactly with `$BIN --config ` (it is not a
+  `pgrep -f` substring match).
+- **Tests and experiments must never run install.sh with the real `HOME` or the default label.** Use a temp
+  `HOME`, `PROXX_HOME`, `PROXX_INSTALL_DIR` and a unique `PROXX_SERVICE_LABEL`, as
+  `test/proxx/install_e2e` does. On 2026-11-17 a manual `install.sh --no-service` run with the real `HOME`
+  unloaded the developer's own agent; that is what these rules prevent.
+
 Migrating from Homebrew CLIProxyAPI: `brew services stop cliproxyapi`, then run the installer.
 
 ## Releases
@@ -216,6 +227,7 @@ PROXX_E2E=1 go test ./test/proxx/requestlogs_e2e/ -run E2E -v -count=1  # e2e: r
 go test -tags proxxe2e -count=1 -v ./test/proxx/pricing_e2e/     # e2e: builds and runs the real binary
 PROXX_E2E=1 go test ./test/proxx/selfupdate_e2e/ -run TestE2ESelfUpdate -v -count=1 -timeout 30m  # e2e: self-update (also in CI: proxx-e2e.yml)
 PROXX_E2E=1 PROXX_E2E_LAUNCHD=1 go test ./test/proxx/selfupdate_e2e/ -run TestE2ELaunchd -v -count=1  # macOS: real launchd agent (temp label/port)
+PROXX_E2E=1 PROXX_E2E_INSTALL=1 go test ./test/proxx/install_e2e/ -v -count=1  # macOS: install.sh in a temp HOME with temp labels (downloads the latest release)
 ```
 
 The e2e test builds `./cmd/server`, starts it with `--local-model` and a temp `config-version: 8`

@@ -193,7 +193,7 @@ Config writes use the generic v8 config endpoint with a raw JSON body, exactly l
 | `sdk/cliproxy/service_lifecycle.go` | `proxx.ShutdownContext(...)` instead of the 30s `context.WithTimeout` |
 | `internal/managementasset/updater.go` | `proxxPanelCompatible(data)` after decoding the panel release |
 | `.github/workflows/release.yaml` | prerelease flag for `-rc` tags; checkout + setup-go + sign/verify/upload `checksums.txt.sig` in `publish-checksums` |
-| `install.sh` (fork-owned) | `ExitTimeOut`, `TimeoutStopSec`, longer stop wait, `.install-method`, update hint, `PROXX_SERVICE_LABEL` |
+| `install.sh` (fork-owned) | `ExitTimeOut`, `TimeoutStopSec`, longer stop wait, `.install-method`, update hint, `PROXX_SERVICE_LABEL`; it only touches a service that runs its own `$BIN`, and matches exact process command lines (see the README) |
 
 ## Limitations
 - Redis RESP connections on the shared port (usage queue consumers) are not counted. They are closed at the
@@ -251,8 +251,18 @@ Config writes use the generic v8 config endpoint with a raw JSON body, exactly l
     8. An unwritable install dir reports `supported:false` and apply returns 409.
   - CI: `.github/workflows/proxx-e2e.yml` runs this on ubuntu-latest and macos-latest.
 - Real launchd: `PROXX_E2E=1 PROXX_E2E_LAUNCHD=1 go test ./test/proxx/selfupdate_e2e/ -run TestE2ELaunchd -v -count=1`.
-  It runs on macOS only, with a temporary agent label, a free port and temp dirs, and never touches the
-  user's `io.github.iamkunal9.proxx`.
+  It runs on macOS only, with a temporary agent label, a free port and temp dirs. `launchdguard.Protect`
+  fails the test if the user's `io.github.iamkunal9.proxx` agent changed state (loaded or unloaded) or its
+  plist changed.
+- install.sh: `PROXX_E2E=1 PROXX_E2E_INSTALL=1 go test ./test/proxx/install_e2e/ -v -count=1` (macOS).
+  - It always uses a temp HOME, temp dirs and unique labels, under the same guard.
+  - Safety:
+    - the stop wait ignores another install's `<other>/<bin> --config` process;
+    - a same-label service file running another binary is neither booted out nor overwritten.
+  - The old install.sh fails the safety test: it waited 2m25s on the other install's process.
+  - Service: `--no-service` writes `.install-method`. A service install has `ExitTimeOut 0` and
+    `/healthz` 200. A re-install restarts its own agent, and `--uninstall` removes it.
+  - Not in CI: hosted macOS runners have no GUI launchd domain.
 
 ## Pinning a release candidate (pre-merge release test)
 Build a binary that reads one tagged prerelease instead of "latest":
