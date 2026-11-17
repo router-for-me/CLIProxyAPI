@@ -2,10 +2,11 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // rejectDuplicateCatalogKeys fails when body contains an object with a repeated
