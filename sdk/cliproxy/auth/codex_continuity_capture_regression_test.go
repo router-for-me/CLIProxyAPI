@@ -32,17 +32,24 @@ func TestCodexQuotaCodeContinuityProvenance(t *testing.T) {
 						quotaErr := &Error{HTTPStatus: 429, Message: `{"error":{"code":"` + code + `"}}`}
 						if responseBody {
 							source := codexResponseBodyQuotaErr{status: 429, body: []byte(quotaErr.Message)}
+							if !isPositiveQuotaRejectionError(source) {
+								t.Fatal("fixture source is not a positive continuity quota rejection")
+							}
 							quotaErr = resultErrorFromError(source)
-							if quotaErr.Code != code || quotaErr.Message != "upstream 429" || quotaErr.HTTPStatus != 429 || quotaErr.Metadata != nil {
+							if quotaErr.Code != "" || quotaErr.Message != "upstream 429" || quotaErr.HTTPStatus != 429 {
 								t.Fatalf("response-body code conversion changed fields: %#v", quotaErr)
 							}
+							if quotaErr.Metadata[positiveQuotaRejectionMetadataKey] != "true" {
+								t.Error("lost original response-body quota classification")
+							}
+
 							existing := &Error{Code: "model_cooldown", Message: "preserve message", HTTPStatus: 429, Retryable: true, Metadata: map[string]string{"provider": "preserve detail"}}
 							preserved := resultErrorFromError(WithCause(existing, source))
 							if !reflect.DeepEqual(preserved, existing) {
 								t.Fatalf("existing classification changed: got %#v want %#v", preserved, existing)
 							}
 						}
-						if !isPositiveQuotaRejectionError(quotaErr) {
+						if !responseBody && !isPositiveQuotaRejectionError(quotaErr) {
 							t.Fatal("fixture is not a positive continuity quota rejection")
 						}
 						duration := time.Minute
