@@ -132,7 +132,7 @@ func (m *Manager) recordClaudeFablePool(ctx context.Context, a *Auth, result Res
 }
 
 func sameClaudeOverageAccount(a, b *Auth) bool {
-	if a == nil || b == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "claude") || a.Provider != b.Provider {
+	if a == nil || b == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "claude") || !strings.EqualFold(a.Provider, b.Provider) {
 		return false
 	}
 	known := false

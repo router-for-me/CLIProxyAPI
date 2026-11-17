@@ -277,7 +277,7 @@ func (o *overageChildOutput) Write(p []byte) (int, error) {
 }
 
 func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
-	for _, phase := range []string{"sibling", "update", "refresh", "rotation", "replacement", "replacement_restore", "restore", "later_longer", "earlier_longer", "later_longer_restore", "shadow_restore", "credential_first", "late_old_account", "late_old_account_count", "late_old_account_stream", "late_same_account", "count", "stream", "manual", "manual_auth", "manual_auth_restore", "alias_source_later", "alias_target_later", "new_failure_during_usage"} {
+	for _, phase := range []string{"sibling", "update", "provider_case", "refresh", "rotation", "replacement", "replacement_restore", "restore", "later_longer", "earlier_longer", "later_longer_restore", "shadow_restore", "credential_first", "late_old_account", "late_old_account_count", "late_old_account_stream", "late_same_account", "count", "stream", "manual", "manual_auth", "manual_auth_restore", "alias_source_later", "alias_target_later", "new_failure_during_usage"} {
 		t.Run(phase, func(t *testing.T) {
 			if child := os.Getenv("CPA_OVERAGE_CHILD_CASE"); child == "" {
 				runIsolatedOverageCase(t, phase)
@@ -476,10 +476,17 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 					t.Fatal("healthy sibling did not replace passive observation")
 				}
 			}
-			if phase == "update" || phase == "refresh" || phase == "rotation" || phase == "replacement" || phase == "replacement_restore" {
+			var providerCaseDeadline time.Time
+			if phase == "provider_case" {
+				providerCaseDeadline = fixture.overageDeadline(t, false)
+				if providerCaseDeadline.IsZero() {
+					t.Fatal("provider case fixture has no persisted causal deadline")
+				}
+			}
+			if phase == "provider_case" || phase == "update" || phase == "refresh" || phase == "rotation" || phase == "replacement" || phase == "replacement_restore" {
 				current, _ := fixture.manager.GetByID(fixture.auth.ID)
 				updated := current.Clone()
-				if phase == "update" || phase == "refresh" || phase == "rotation" {
+				if phase == "provider_case" || phase == "update" || phase == "refresh" || phase == "rotation" {
 					public, err := json.Marshal(current)
 					if err != nil {
 						t.Fatal(err)
@@ -490,6 +497,9 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 					}
 				}
 				updated.Metadata["notes"] = "ordinary edit"
+				if phase == "provider_case" {
+					updated.Provider = "ClAuDe"
+				}
 				if phase == "replacement" || phase == "replacement_restore" {
 					updated.Metadata["account_uuid"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 				}
@@ -504,6 +514,20 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 					_, err = fixture.manager.Update(fixture.ctx, updated)
 				}
 				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "provider_case" {
+				current, _ := fixture.manager.GetByID(fixture.auth.ID)
+				if current.Provider != "ClAuDe" {
+					t.Fatal("public Update did not commit provider case edit")
+				}
+				if !fixture.overageDeadline(t, false).Equal(providerCaseDeadline) {
+					t.Error("provider case update lost persisted pool deadline")
+				}
+				lowercase := current.Clone()
+				lowercase.Provider = "claude"
+				if _, err := fixture.manager.Update(fixture.ctx, lowercase); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -535,6 +559,19 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 				t.Fatal("restored independent cooldown lost overage causal deadline")
 			}
 			beforeUsage, _ := fixture.manager.GetByID(fixture.auth.ID)
+			if phase == "provider_case" {
+				if beforeUsage.Provider != "claude" {
+					t.Fatal("public Update did not restore lowercase provider")
+				}
+				if !fixture.overageDeadline(t, false).Equal(providerCaseDeadline) {
+					t.Error("provider case round trip lost persisted pool deadline")
+				}
+				fixture.usage(t)
+				afterCaseUsage, _ := fixture.manager.GetByID(fixture.auth.ID)
+				if !reflect.DeepEqual(beforeUsage, afterCaseUsage) {
+					t.Error("provider case round trip let shared usage clear retained pool cooldown")
+				}
+			}
 			recover := phase == "replacement" || phase == "replacement_restore" || strings.HasPrefix(phase, "late_old_account")
 			if coreauth.QuotaRecoveryRequiresClaudeExtraUsage(beforeUsage) == recover {
 				t.Fatalf("overage attribution crossed configuration or was lost: phase=%s", phase)
