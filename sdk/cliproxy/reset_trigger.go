@@ -177,8 +177,9 @@ func (t *resetTrigger) tick(ctx context.Context) {
 			continue
 		}
 		state := coreauth.ResetTriggerStateForAuth(auth, model, now)
+		// Keep the plan while not due: a cooldown after a failed trigger must
+		// not reset its attempts or backoff. A new idle period replaces it.
 		if !state.Due {
-			delete(t.plans, auth.ID)
 			continue
 		}
 		if plan == nil || !plan.matches(state) {

@@ -211,10 +211,22 @@ func TestResetTriggerRetriesFailuresWithBackoff(t *testing.T) {
 		return cliproxyexecutor.Response{}, errors.New("boom")
 	}
 
+	setCooldown := func(until time.Time) {
+		current, _ := manager.GetByID("a")
+		current.Unavailable = !until.IsZero()
+		current.NextRetryAfter = until
+		if _, errUpdate := manager.Update(coreauth.WithSkipPersist(ctx), current); errUpdate != nil {
+			t.Fatalf("Update: %v", errUpdate)
+		}
+	}
 	for i := 0; i < 2*resetTriggerMaxAttempts; i++ {
 		trigger.tick(ctx)
 		trigger.wg.Wait()
 		clock = clock.Add(resetTriggerRetryBackoff / 2)
+		// A cooldown that ends before the backoff must not reset the plan.
+		setCooldown(clock.Add(time.Minute))
+		trigger.tick(ctx)
+		setCooldown(time.Time{})
 		trigger.tick(ctx)
 		trigger.wg.Wait()
 		clock = clock.Add(resetTriggerRetryBackoff / 2)
