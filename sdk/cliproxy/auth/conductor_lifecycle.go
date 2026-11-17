@@ -484,6 +484,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		existingVersion = 1
 	}
 	credChanged := CredentialsChanged(existing, auth)
+	if !credChanged && strings.EqualFold(auth.Provider, "codex") && auth.Provider == existing.Provider && existing.nonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
+		auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
 	} else {

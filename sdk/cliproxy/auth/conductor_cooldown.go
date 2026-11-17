@@ -1910,6 +1910,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(result.Error) && next.After(state.nonQuotaCooldownUntil) {
 									state.nonQuotaCooldownUntil = next
 								}
+								if strings.EqualFold(auth.Provider, "codex") && !isForceResult && !quotaCodexSubscriptionError(result.Error) {
+									ownModelNonQuotaDeadline = next
+								}
 								if isForceResult {
 									if result.RetryAfter != nil || !reusedOpenWindow {
 										ownModelForceDeadline = credentialNext
@@ -4406,6 +4409,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 							ownAuthForceDeadline, _ = quotaCooldownAfterFailure(QuotaState{BackoffLevel: baseAuthBackoff}, now)
 						}
 					}
+				}
+				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !quotaCodexSubscriptionError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
+					auth.nonQuotaCooldownUntil = next
 				}
 				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
 					auth.nonQuotaCooldownUntil = next
