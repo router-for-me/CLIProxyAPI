@@ -174,6 +174,18 @@ func TestExtractSessionInfoAllClients(t *testing.T) {
 	}
 }
 
+func TestExtractSessionInfoPreviousResponseID(t *testing.T) {
+	t.Parallel()
+
+	info, ok := ExtractSessionInfo(nil, []byte(`{"model":"gpt-6-astra","previous_response_id":"resp_abc123","input":[]}`), nil)
+	if !ok {
+		t.Fatal("ExtractSessionInfo failed for Responses continuation")
+	}
+	if info.ClientType != "openai-response" || info.SessionID != "response:resp_abc123" {
+		t.Fatalf("Responses session info = %+v", info)
+	}
+}
+
 func TestExtractSessionInfoCanonicalizesPayloadParentForHeaderSessions(t *testing.T) {
 	t.Parallel()
 
