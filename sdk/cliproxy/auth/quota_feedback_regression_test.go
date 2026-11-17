@@ -121,6 +121,46 @@ func TestQuotaRecoveryCodexOnlySubscriptionFailures(t *testing.T) {
 					t.Fatal("healthy plan observation cleared unrelated cooldown")
 				}
 			}
+			// Historical version-one records retain explicit 429 attribution
+			// without independent deadline provenance. Keep the live checks
+			// above and restore this separate supported shape as well.
+			if !tc.want && tc.code == "" {
+				legacyID := a.ID + "-legacy"
+				deadline := time.Now().Add(retry)
+				store := NewFileCooldownStateStore(t.TempDir())
+				record := CooldownStateRecord{Provider: "codex", AuthID: legacyID, Model: "gpt-6.1-sol", Status: "cooling", NextRetryAfter: deadline, Reason: "quota", Quota: QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline}, LastError: &Error{HTTPStatus: 429, Message: tc.message}, UpdatedAt: time.Now()}
+				if err := store.Save(context.Background(), []CooldownStateRecord{record}); err != nil {
+					t.Fatal(err)
+				}
+				restored := NewManager(nil, nil, nil)
+				if _, err := restored.Register(context.Background(), &Auth{ID: legacyID, Provider: "codex", Status: StatusActive}); err != nil {
+					t.Fatal(err)
+				}
+				restored.SetCooldownStateStore(store)
+				if err := restored.RestoreCooldownStates(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				legacy, _ := restored.GetByID(legacyID)
+				state := legacy.ModelStates["gpt-6.1-sol"]
+				if state == nil || !state.Quota.Exceeded || state.LastError == nil || state.LastError.HTTPStatus != 429 || state.LastError.Message != tc.message || quotaCodexSubscriptionError(state.LastError) || !state.NextRetryAfter.Equal(deadline) {
+					t.Fatal("legacy restore lost explicit non-subscription 429")
+				}
+				if !legacy.nonQuotaCooldownUntil.IsZero() || !state.nonQuotaCooldownUntil.IsZero() || !legacy.forceCooldownUntil.IsZero() || !state.forceCooldownUntil.IsZero() || !legacy.quotaForceCooldownUntil.IsZero() || !state.quotaForceCooldownUntil.IsZero() || !legacy.credQuotaForceUntil.IsZero() || state.credentialQuotaShadow != nil || state.LastError.Code == ErrorCodeForceCooldown || (legacy.LastError != nil && legacy.LastError.Code == ErrorCodeForceCooldown) {
+					t.Fatal("legacy fixture did not isolate explicit error attribution")
+				}
+				if QuotaRecoveryCandidate(legacy) {
+					t.Fatal("legacy explicit Codex 429 accepted as subscription quota")
+				}
+				reset, _, err := restored.ResetQuotaIfUnchanged(context.Background(), legacy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unchanged, _ := restored.GetByID(legacyID)
+				if reset != nil || !reflect.DeepEqual(legacy, unchanged) {
+					t.Fatal("plan usage cleared legacy non-subscription Codex cooldown")
+				}
+			}
+
 		})
 	}
 }
