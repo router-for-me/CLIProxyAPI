@@ -749,12 +749,10 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
 		return
 	}
-	callbackPort, errPort := pickLoopbackPort()
-	if errPort != nil {
-		log.Errorf("Failed to pick loopback callback port: %v", errPort)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to pick callback port"})
-		return
-	}
+	// The Web UI callback arrives through the port the deployment publishes
+	// (docker-compose forwards 51121), so this path keeps the fixed port
+	// instead of an ephemeral one the browser could never reach.
+	callbackPort := antigravityCallbackPort
 
 	redirectURI := fmt.Sprintf("http://localhost:%d%s", callbackPort, antigravity.CallbackPath)
 	authURL := authSvc.BuildAuthURL(state, redirectURI, codeChallenge)

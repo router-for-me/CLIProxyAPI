@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"fmt"
 	"io"
 	"net/http"

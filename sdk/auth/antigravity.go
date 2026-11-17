@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -200,9 +203,17 @@ waitForCallback:
 	if projectID != "" {
 		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
+	refreshToken := strings.TrimSpace(tokenResp.RefreshToken)
+	if refreshToken == "" {
+		refreshToken = existingRefreshToken(cfg, email)
+		if refreshToken == "" {
+			return nil, fmt.Errorf("antigravity: no refresh token issued and none stored for %s; revoke the app's access in the Google account settings and log in again", email)
+		}
+		log.Infof("antigravity: no new refresh token issued, keeping the one already stored for %s", email)
+	}
 	return BuildAntigravityAuth(&AntigravityTokenResponse{
 		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
+		RefreshToken: refreshToken,
 		ExpiresIn:    tokenResp.ExpiresIn,
 		TokenType:    tokenResp.TokenType,
 	}, email, projectID), nil
@@ -353,6 +364,46 @@ func ExchangeAntigravityCodeWithVerifier(ctx context.Context, code, redirectURI,
 func FetchAntigravityUserInfo(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
 	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
 	return authSvc.FetchUserInfo(ctx, accessToken)
+}
+
+
+// existingRefreshToken returns the refresh token already stored for this
+// account. Re-authorizing an existing grant can legitimately return no
+// refresh_token; without carrying the stored one forward, a successful
+// re-login would save a credential that cannot refresh at all.
+func existingRefreshToken(cfg *config.Config, email string) string {
+	if cfg == nil {
+		return ""
+	}
+	dir := strings.TrimSpace(cfg.AuthDir)
+	if dir == "" || strings.TrimSpace(email) == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, errRead := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if errRead != nil || len(raw) > 1<<20 {
+			continue
+		}
+		var record struct {
+			Type         string `json:"type"`
+			Email        string `json:"email"`
+			RefreshToken string `json:"refresh_token"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &record); errUnmarshal != nil {
+			continue
+		}
+		if record.Type == "antigravity" && strings.EqualFold(strings.TrimSpace(record.Email), strings.TrimSpace(email)) && strings.TrimSpace(record.RefreshToken) != "" {
+			return record.RefreshToken
+		}
+	}
+	return ""
 }
 
 // BuildAntigravityAuth constructs an in-memory *coreauth.Auth object from token credentials and metadata.
