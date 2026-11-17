@@ -45,105 +45,120 @@ func TestQuotaRecoveryModelHeaderIdentity(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withQuotaCooldownEnabled(t)
-			ctx := context.Background()
-			m := NewManager(nil, nil, nil)
-			id, route, upstream, other := t.Name(), t.Name()+"-route", t.Name()+"-upstream", t.Name()+"-other"
-			provider := "codex"
-			if tc.claude {
-				provider = "claude"
+			phases := []bool{false}
+			if tc.alias || tc.apiAlias || tc.pool {
+				phases = append(phases, true)
 			}
-			a := &Auth{ID: id, Provider: provider, Status: StatusActive, Metadata: map[string]any{"access_token": "token-a", "account_id": "account-a"}}
-			if tc.prefix {
-				a.Prefix = "pref"
-			}
-			if tc.siwc {
-				claim := `{"https://api.openai.com/auth":{"chatgpt_account_id":"account-a"}}`
-				if tc.invalidSIWC {
-					claim = `{"https://api.openai.com/auth":{"chatgpt_account_id":"account-b"}}`
-				}
-				a.Metadata["use_siwc"] = !tc.disabledSIWC
-				a.Metadata["siwc"] = map[string]any{"access": "nested-token", "id_token": "e30." + base64.RawURLEncoding.EncodeToString([]byte(claim)) + ".sig"}
-			}
-			configured := route
-			if tc.alias {
-				m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{provider: {{Name: upstream, Alias: route, Fork: true}}})
-				configured = upstream
-			}
-			if tc.apiAlias {
-				a.Attributes = map[string]string{"api_key": "config-key"}
-				m.SetConfig(&internalconfig.Config{CodexKey: []internalconfig.CodexKey{{APIKey: "config-key", Models: []internalconfig.CodexModel{{Name: upstream, Alias: route}}}}})
-				configured = upstream
-			}
-			if tc.pool {
-				a.Attributes = map[string]string{"api_key": "config-key", "compat_name": "model-header-pool"}
-				m.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{Name: "model-header-pool", Models: []internalconfig.OpenAICompatibilityModel{{Name: upstream, Alias: route}, {Name: other, Alias: route}}}}})
-				configured = other
-			}
-			if tc.prefix {
-				route = "pref/" + route
-			}
-			if tc.suffix {
-				route += "(high)"
-			}
-			reg := registry.GetGlobalRegistry()
-			models := []*registry.ModelInfo{{ID: route}}
-			overrideID := configured
-			if tc.otherSupported {
-				overrideID = other
-				models = append(models, &registry.ModelInfo{ID: other})
-			}
-			if tc.unsupported {
-				overrideID = other
-			}
-			reg.RegisterClient(id, provider, models)
-			t.Cleanup(func() { reg.UnregisterClient(id) })
-			overrideClient := id + "-metadata"
-			reg.RegisterClient(overrideClient, provider, []*registry.ModelInfo{{ID: overrideID, Config: &registry.ModelConfig{OverrideHeader: tc.headers}}})
-			t.Cleanup(func() { reg.UnregisterClient(overrideClient) })
-			if _, err := m.Register(ctx, a); err != nil {
-				t.Fatal(err)
-			}
-			duration := time.Hour
-			model := route
-			if tc.authWideOnly {
-				model = ""
-			}
-			m.MarkResult(ctx, Result{AuthID: id, Provider: provider, Model: model, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"usage_limit_reached"}}`}, RetryAfter: &duration, CredentialScope: true})
-			if tc.storedOnly {
-				reg.UnregisterClient(id)
-			}
-			poolOffsetsBefore := make(map[string]int)
-			for key, value := range m.modelPoolOffsets {
-				poolOffsetsBefore[key] = value
-			}
-			before, _ := m.GetByID(id)
-			if QuotaRecoveryCandidate(before) == tc.invalidSIWC {
-				t.Fatal("fixture is not an otherwise recoverable quota candidate")
-			}
-			got, _, err := m.ResetQuotaIfUnchanged(ctx, before)
-			if !reflect.DeepEqual(m.modelPoolOffsets, poolOffsetsBefore) && len(m.modelPoolOffsets) != 0 {
-				t.Fatal("recovery advanced model pool rotation")
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if (got != nil) != tc.recover {
-				t.Fatalf("recovered=%v want %v", got != nil, tc.recover)
-			}
-			after, _ := m.GetByID(id)
-			if !tc.recover {
-				if !reflect.DeepEqual(after, before) {
-					t.Fatal("identity mismatch changed cooldown")
-				}
-				return
-			}
-			if after.Quota.Exceeded || after.Unavailable || !after.NextRetryAfter.IsZero() {
-				t.Fatal("matching identity cooldown was not cleared")
-			}
-			for _, state := range after.ModelStates {
-				if state != nil && (state.Quota.Exceeded || state.Unavailable || !state.NextRetryAfter.IsZero()) {
-					t.Fatal("model cooldown was not cleared")
-				}
+			for _, authWide := range phases {
+				func() {
+					ctx := context.Background()
+					m := NewManager(nil, nil, nil)
+					fixtureID := t.Name()
+					if authWide {
+						fixtureID += "-auth-wide"
+					}
+					id, route, upstream, other := fixtureID, fixtureID+"-route", fixtureID+"-upstream", fixtureID+"-other"
+					provider := "codex"
+					if tc.claude {
+						provider = "claude"
+					}
+					a := &Auth{ID: id, Provider: provider, Status: StatusActive, Metadata: map[string]any{"access_token": "token-a", "account_id": "account-a"}}
+					if tc.prefix {
+						a.Prefix = "pref"
+					}
+					if tc.siwc {
+						claim := `{"https://api.openai.com/auth":{"chatgpt_account_id":"account-a"}}`
+						if tc.invalidSIWC {
+							claim = `{"https://api.openai.com/auth":{"chatgpt_account_id":"account-b"}}`
+						}
+						a.Metadata["use_siwc"] = !tc.disabledSIWC
+						a.Metadata["siwc"] = map[string]any{"access": "nested-token", "id_token": "e30." + base64.RawURLEncoding.EncodeToString([]byte(claim)) + ".sig"}
+					}
+					configured := route
+					if tc.alias {
+						m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{provider: {{Name: upstream, Alias: route, Fork: true}}})
+						configured = upstream
+					}
+					if tc.apiAlias {
+						a.Attributes = map[string]string{"api_key": "config-key"}
+						m.SetConfig(&internalconfig.Config{CodexKey: []internalconfig.CodexKey{{APIKey: "config-key", Models: []internalconfig.CodexModel{{Name: upstream, Alias: route}}}}})
+						configured = upstream
+					}
+					if tc.pool {
+						a.Attributes = map[string]string{"api_key": "config-key", "compat_name": "model-header-pool"}
+						m.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{Name: "model-header-pool", Models: []internalconfig.OpenAICompatibilityModel{{Name: upstream, Alias: route}, {Name: other, Alias: route}}}}})
+						configured = other
+					}
+					if tc.prefix {
+						route = "pref/" + route
+					}
+					if tc.suffix {
+						route += "(high)"
+					}
+					reg := registry.GetGlobalRegistry()
+					models := []*registry.ModelInfo{{ID: route}}
+					overrideID := configured
+					if tc.otherSupported {
+						overrideID = other
+						models = append(models, &registry.ModelInfo{ID: other})
+					}
+					if tc.unsupported {
+						overrideID = other
+					}
+					reg.RegisterClient(id, provider, models)
+					t.Cleanup(func() { reg.UnregisterClient(id) })
+					overrideClient := id + "-metadata"
+					reg.RegisterClient(overrideClient, provider, []*registry.ModelInfo{{ID: overrideID, Config: &registry.ModelConfig{OverrideHeader: tc.headers}}})
+					t.Cleanup(func() { reg.UnregisterClient(overrideClient) })
+					if _, err := m.Register(ctx, a); err != nil {
+						t.Fatal(err)
+					}
+					duration := time.Hour
+					model := route
+					if tc.authWideOnly || authWide {
+						model = ""
+					}
+					m.MarkResult(ctx, Result{AuthID: id, Provider: provider, Model: model, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"usage_limit_reached"}}`}, RetryAfter: &duration, CredentialScope: true})
+					if tc.storedOnly {
+						reg.UnregisterClient(id)
+					}
+					poolOffsetsBefore := make(map[string]int)
+					for key, value := range m.modelPoolOffsets {
+						poolOffsetsBefore[key] = value
+					}
+					before, _ := m.GetByID(id)
+					if authWide && (len(before.ModelStates) != 0 || !before.Quota.Exceeded || !before.Unavailable || before.NextRetryAfter.IsZero()) {
+						t.Fatal("alias phase must have only an auth-wide quota restriction")
+					}
+					if QuotaRecoveryCandidate(before) == tc.invalidSIWC {
+						t.Fatal("fixture is not an otherwise recoverable quota candidate")
+					}
+					got, _, err := m.ResetQuotaIfUnchanged(ctx, before)
+					if !reflect.DeepEqual(m.modelPoolOffsets, poolOffsetsBefore) && len(m.modelPoolOffsets) != 0 {
+						t.Fatal("recovery advanced model pool rotation")
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					if (got != nil) != tc.recover {
+						t.Fatalf("recovered=%v want %v", got != nil, tc.recover)
+					}
+					after, _ := m.GetByID(id)
+					if !tc.recover {
+						if !reflect.DeepEqual(after, before) {
+							t.Fatal("identity mismatch changed cooldown")
+						}
+						return
+					}
+					if after.Quota.Exceeded || after.Unavailable || !after.NextRetryAfter.IsZero() {
+						t.Fatal("matching identity cooldown was not cleared")
+					}
+					for _, state := range after.ModelStates {
+						if state != nil && (state.Quota.Exceeded || state.Unavailable || !state.NextRetryAfter.IsZero()) {
+							t.Fatal("model cooldown was not cleared")
+						}
+					}
+				}()
 			}
 		})
 	}
