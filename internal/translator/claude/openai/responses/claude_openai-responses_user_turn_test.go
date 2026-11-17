@@ -74,8 +74,8 @@ func TestConvertOpenAIResponsesRequestToClaude_RefusesAnyEmptiedUserTurn(t *test
 			wantType: "input_file",
 		},
 		{
-			name:     "file url carries no bytes",
-			input:    responsesPayload("", responsesUserTurn(`{"type":"input_file","file_url":"https://example.test/a.pdf"}`)),
+			name:     "non-http file url carries no bytes",
+			input:    responsesPayload("", responsesUserTurn(`{"type":"input_file","file_url":"gs://example.test/a.pdf"}`)),
 			wantType: "input_file",
 		},
 	}

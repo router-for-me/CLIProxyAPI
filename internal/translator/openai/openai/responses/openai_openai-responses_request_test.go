@@ -2,12 +2,14 @@ package responses
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
@@ -2645,4 +2647,174 @@ func TestApplyPatchChatRequestContractAndHistory(t *testing.T) {
 	if call.Get("function.name").String() != "editor__apply_patch" || ojson.Get(call.Get("function.arguments").String(), "input").String() != "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch" || call.Get("id").String() != "c1" || result.Get("messages.1.tool_call_id").String() != "c1" || result.Get("messages.1.content").String() != "done" {
 		t.Fatalf("history mismatch: %s", result.Raw)
 	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ToolOutputFilesAndMedia(t *testing.T) {
+	t.Run("array function_call_output keeps tool message text-only and relays input_file to user message", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "gpt-5",
+			"input": [
+				{"type": "function_call", "call_id": "call_pdf", "name": "fetch_pdf", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_pdf", "output": [
+					{"type": "input_text", "text": "Loaded PDF"},
+					{"type": "input_file", "filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0xLjQK"}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		toolMsg := ojson.GetBytesNoCopy(out, "messages.1")
+		if toolMsg.Get("role").String() != "tool" || toolMsg.Get("tool_call_id").String() != "call_pdf" || toolMsg.Get("content").String() != "Loaded PDF" {
+			t.Fatalf("expected text-only tool message, got %s; out=%s", toolMsg.Raw, out)
+		}
+		userMsg := ojson.GetBytesNoCopy(out, "messages.2")
+		if userMsg.Get("role").String() != "user" {
+			t.Fatalf("expected follow-up user message, got %s; out=%s", userMsg.Raw, out)
+		}
+		content := userMsg.Get("content")
+		if !content.IsArray() || content.Get("#").Int() != 1 {
+			t.Fatalf("expected 1-part user content array, got %s; out=%s", content.Raw, out)
+		}
+		if got := content.Get("0.type").String(); got != "file" {
+			t.Fatalf("part 0 type = %q, want file; out=%s", got, out)
+		}
+		if got := content.Get("0.file.file_data").String(); got != "data:application/pdf;base64,JVBERi0xLjQK" {
+			t.Fatalf("part 0 file.file_data = %q; out=%s", got, out)
+		}
+		if got := content.Get("0.file.filename").String(); got != "report.pdf" {
+			t.Fatalf("part 0 file.filename = %q, want report.pdf; out=%s", got, out)
+		}
+	})
+
+	t.Run("parallel tool calls keep all tool messages paired before relayed user file message", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "gpt-5",
+			"input": [
+				{"type": "function_call", "call_id": "call_1", "name": "fetch_pdf", "arguments": "{}"},
+				{"type": "function_call", "call_id": "call_2", "name": "ping", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_1", "output": {"type": "input_file", "file_id": "file-123", "filename": "report.pdf"}},
+				{"type": "function_call_output", "call_id": "call_2", "output": "pong"}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.#").Int(); got != 4 {
+			t.Fatalf("messages count = %d, want 4; out=%s", got, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.1.role").String(); got != "tool" {
+			t.Fatalf("messages.1.role = %q, want tool; out=%s", got, out)
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.2.role").String(); got != "tool" {
+			t.Fatalf("messages.2.role = %q, want tool; out=%s", got, out)
+		}
+		userMsg := ojson.GetBytesNoCopy(out, "messages.3")
+		if userMsg.Get("role").String() != "user" || userMsg.Get("content.0.type").String() != "file" || userMsg.Get("content.0.file.file_id").String() != "file-123" {
+			t.Fatalf("unexpected relayed user file message: %s; out=%s", userMsg.Raw, out)
+		}
+	})
+
+	t.Run("single-object function_call_output relays input_file and input_image to user messages while keeping tool messages text-only", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "gpt-5",
+			"input": [
+				{"type": "function_call", "call_id": "call_pdf", "name": "fetch_pdf", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_pdf", "output": {"type": "input_file", "file_id": "file-123", "filename": "report.pdf"}},
+				{"type": "function_call", "call_id": "call_img", "name": "view_image", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_img", "output": {"type": "input_image", "image_url": "data:image/png;base64,AA=="}}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		pdfTool := ojson.GetBytesNoCopy(out, "messages.1")
+		if pdfTool.Get("role").String() != "tool" || pdfTool.Get("content").Type != ojson.String {
+			t.Fatalf("expected string content on pdf tool message, got %s; out=%s", pdfTool.Raw, out)
+		}
+		pdfUser := ojson.GetBytesNoCopy(out, "messages.2")
+		if pdfUser.Get("role").String() != "user" || pdfUser.Get("content.0.type").String() != "file" || pdfUser.Get("content.0.file.file_id").String() != "file-123" {
+			t.Fatalf("unexpected pdf user content: %s; out=%s", pdfUser.Raw, out)
+		}
+		imgTool := ojson.GetBytesNoCopy(out, "messages.4")
+		if imgTool.Get("role").String() != "tool" || imgTool.Get("content").Type != ojson.String {
+			t.Fatalf("expected string content on image tool message, got %s; out=%s", imgTool.Raw, out)
+		}
+		imgUser := ojson.GetBytesNoCopy(out, "messages.5")
+		if imgUser.Get("role").String() != "user" || imgUser.Get("content.0.type").String() != "image_url" || imgUser.Get("content.0.image_url.url").String() != "data:image/png;base64,AA==" {
+			t.Fatalf("unexpected image user content: %s; out=%s", imgUser.Raw, out)
+		}
+	})
+
+	t.Run("mixed file and image array keeps tool message text-only and relays both to user message", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "gpt-5",
+			"input": [
+				{"type": "function_call", "call_id": "call_mix", "name": "inspect", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_mix", "output": [
+					{"type": "input_text", "text": "Attached PDF and image"},
+					{"type": "input_file", "file_id": "file-123", "filename": "report.pdf"},
+					{"type": "input_image", "image_url": "data:image/png;base64,AA=="}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		toolMsg := ojson.GetBytesNoCopy(out, "messages.1")
+		if toolMsg.Get("role").String() != "tool" || toolMsg.Get("content").String() != "Attached PDF and image" {
+			t.Fatalf("expected text-only tool message, got %s; out=%s", toolMsg.Raw, out)
+		}
+		userMsg := ojson.GetBytesNoCopy(out, "messages.2")
+		if userMsg.Get("role").String() != "user" || userMsg.Get("content.#").Int() != 2 || userMsg.Get("content.0.type").String() != "file" || userMsg.Get("content.1.type").String() != "image_url" {
+			t.Fatalf("expected relayed user message with file and image_url, got %s; out=%s", userMsg.Raw, out)
+		}
+	})
+
+	t.Run("rejects unsupported binary modalities in function_call_output", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			raw      string
+			wantType string
+		}{
+			{
+				name:     "file_url-only input_file in array output",
+				raw:      `{"model":"gpt-5","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":[{"type":"input_file","file_url":"https://example.test/a.pdf"}]}]}`,
+				wantType: "input_file",
+			},
+			{
+				name:     "mixed valid file with unconvertible file_id image",
+				raw:      `{"model":"gpt-5","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":[{"type":"input_file","file_id":"file-document"},{"type":"input_image","file_id":"file-image","detail":"auto"}]}]}`,
+				wantType: "input_image",
+			},
+			{
+				name:     "input_audio object output",
+				raw:      `{"model":"gpt-5","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}}]}`,
+				wantType: "input_audio",
+			},
+			{
+				name:     "malformed image before input_audio still rejects",
+				raw:      `{"model":"gpt-5","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":[{"type":"input_image","detail":"low"},{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}]}]}`,
+				wantType: "input_audio",
+			},
+			{
+				name:     "input_audio before malformed image still rejects",
+				raw:      `{"model":"gpt-5","input":[{"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":[{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}},{"type":"input_image","detail":"low"}]}]}`,
+				wantType: "input_audio",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-5", []byte(tc.raw), false)
+				var unsupported *translatorcommon.UnsupportedPartError
+				if !errors.As(err, &unsupported) || unsupported.Type != tc.wantType || unsupported.StatusCode() != 400 {
+					t.Fatalf("err = %v, want UnsupportedPartError{Type:%q}", err, tc.wantType)
+				}
+			})
+		}
+	})
 }
