@@ -198,7 +198,7 @@ func TestE2ESelfUpdate(t *testing.T) {
 			long.chunks, slowChunks, long.done, swapped.Sub(longEnded).Round(time.Millisecond), maxInflight)
 
 		// Scenario 1: zero failed requests under continuous load.
-		t.Logf("scenario 1: requests sent=%d failed=%d connection-retries=%d", lg.sent.Load(), lg.failed.Load(), lg.retries.Load())
+		t.Logf("scenario 1: raw keep-alive client: requests sent=%d failed=%d retries=0 (never retries) reconnects-after-Connection:close=%d", lg.sent.Load(), lg.failed.Load(), lg.reconnects.Load())
 		if lg.failed.Load() != 0 {
 			t.Errorf("scenario 1: %d failed requests: %v", lg.failed.Load(), lg.failureSamples())
 		}

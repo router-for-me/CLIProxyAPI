@@ -117,8 +117,8 @@ func TestE2ELaunchd(t *testing.T) {
 	lg.finish()
 	pidAfter := launchdPID()
 
-	t.Logf("launchd: label=%s port=%d pid %d -> %d (status pid %d); requests sent=%d failed=%d connection-retries=%d",
-		label, in.port, pidBefore, pidAfter, ojson.Get(st, "pid").Int(), lg.sent.Load(), lg.failed.Load(), lg.retries.Load())
+	t.Logf("launchd: label=%s port=%d pid %d -> %d (status pid %d); raw keep-alive client: requests sent=%d failed=%d retries=0 (never retries) reconnects-after-Connection:close=%d",
+		label, in.port, pidBefore, pidAfter, ojson.Get(st, "pid").Int(), lg.sent.Load(), lg.failed.Load(), lg.reconnects.Load())
 	if pidAfter != pidBefore || ojson.Get(st, "pid").Int() != int64(pidBefore) {
 		t.Errorf("launchd pid changed: %d -> %d", pidBefore, pidAfter)
 	}

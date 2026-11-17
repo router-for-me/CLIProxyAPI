@@ -46,6 +46,7 @@ var (
 	drainFor          = time.Second
 	acceptSettle      = 100 * time.Millisecond
 	finalIdleWait     = 2 * time.Second
+	freshMaxAge       = 3 * time.Second
 	windowPoll        = 5 * time.Second
 )
 
@@ -604,7 +605,9 @@ func (m *manager) waitForApplyMoment(ctx context.Context, auto bool) error {
 		if err := sleepCtx(ctx, acceptSettle); err != nil {
 			return err
 		}
-		errIdle := waitIdle(ctx, finalIdleWait)
+		// Wait until nothing is in flight and every connection accepted before the pause has delivered
+		// its request (or stayed silent for freshMaxAge).
+		errIdle := waitQuiet(ctx, ln, finalIdleWait)
 		if errIdle == nil {
 			return nil
 		}
@@ -635,6 +638,22 @@ func waitIdle(ctx context.Context, max time.Duration) error {
 		case <-deadline.C:
 			return errStillBusy
 		case <-sig:
+		}
+	}
+}
+
+// waitQuiet waits up to max until no request is in flight and ln has no fresh connection.
+func waitQuiet(ctx context.Context, ln *gateListener, max time.Duration) error {
+	deadline := time.Now().Add(max)
+	for {
+		if inflight.active.Load() <= 0 && (ln == nil || ln.freshCount(freshMaxAge) == 0) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errStillBusy
+		}
+		if err := sleepCtx(ctx, 5*time.Millisecond); err != nil {
+			return err
 		}
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -532,32 +531,13 @@ func putConfig(t *testing.T, base, key, rawJSON string) {
 
 // chatResult is one proxied request.
 type chatResult struct {
-	status  int
-	chunks  int
-	done    bool
-	err     error
-	connErr bool
+	status int
+	chunks int
+	done   bool
+	err    error
 }
 
-func isConnErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	var opErr *net.OpError
-	if errors.As(err, &opErr) {
-		return true
-	}
-	msg := err.Error()
-	for _, s := range []string{"EOF", "connection reset", "connection refused", "broken pipe", "server closed idle connection"} {
-		if strings.Contains(msg, s) {
-			return true
-		}
-	}
-	return false
-}
-
-// chat sends one chat completion. A transport error before any response is a connection error
-// (the request never reached a handler); errors after the response started are failures.
+// chat sends one chat completion with a Go client (warm-up, long stream).
 func chat(client *http.Client, base, model string, stream bool) chatResult {
 	body := fmt.Sprintf(`{"model":%q,"stream":%v,"messages":[{"role":"user","content":"hi"}]}`, model, stream)
 	req, err := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", strings.NewReader(body))
@@ -568,7 +548,7 @@ func chat(client *http.Client, base, model string, stream bool) chatResult {
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return chatResult{err: err, connErr: isConnErr(err)}
+		return chatResult{err: err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	res := chatResult{status: resp.StatusCode}
@@ -600,53 +580,109 @@ func chat(client *http.Client, base, model string, stream bool) chatResult {
 	return res
 }
 
-// loadGen sends a mix of streaming and non-streaming requests at ~rps over keep-alive connections.
+// loadGen is a raw HTTP/1.1 keep-alive client that never retries: workers write requests on their own
+// net.Conn and parse responses with http.ReadResponse. Every error is a failure, including the case Go's
+// http.Transport would silently retry (a server closing a keep-alive or freshly accepted connection
+// without answering). A worker reconnects only after a response that says Connection: close (or after
+// a failure).
 type loadGen struct {
-	sent, failed, retries atomic.Int64
-	failures              sync.Map
-	stop                  chan struct{}
-	wg                    sync.WaitGroup
+	sent, failed, reconnects atomic.Int64
+	failures                 sync.Map
+	stop                     chan struct{}
+	wg                       sync.WaitGroup
 }
 
-func startLoad(base string, rps int) *loadGen {
+const (
+	loadWorkers  = 4
+	loadInterval = 150 * time.Millisecond // ~26 requests/s in total
+)
+
+func startLoad(base string, _ int) *loadGen {
 	lg := &loadGen{stop: make(chan struct{})}
-	client := &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{MaxIdleConnsPerHost: 16, IdleConnTimeout: 90 * time.Second}}
-	lg.wg.Add(1)
-	go func() {
-		defer lg.wg.Done()
-		tick := time.NewTicker(time.Second / time.Duration(rps))
-		defer tick.Stop()
-		var i int64
-		for {
-			select {
-			case <-lg.stop:
-				return
-			case <-tick.C:
-			}
-			i++
-			stream := i%3 == 0
-			lg.sent.Add(1)
-			lg.wg.Add(1)
-			go func(n int64) {
-				defer lg.wg.Done()
-				for attempt := 0; ; attempt++ {
-					res := chat(client, base, "fast", stream)
-					if res.err != nil && res.connErr && res.status == 0 && attempt < 3 {
-						lg.retries.Add(1)
-						time.Sleep(100 * time.Millisecond)
+	addr := strings.TrimPrefix(base, "http://")
+	var seq atomic.Int64
+	for w := 0; w < loadWorkers; w++ {
+		lg.wg.Add(1)
+		go func() {
+			defer lg.wg.Done()
+			var conn net.Conn
+			var br *bufio.Reader
+			defer func() {
+				if conn != nil {
+					_ = conn.Close()
+				}
+			}()
+			for {
+				select {
+				case <-lg.stop:
+					return
+				default:
+				}
+				n := seq.Add(1)
+				stream := n%3 == 0
+				lg.sent.Add(1)
+				if conn == nil {
+					c, err := net.Dial("tcp", addr)
+					if err != nil {
+						lg.fail(n, "dial: "+err.Error())
+						time.Sleep(loadInterval)
 						continue
 					}
-					ok := res.err == nil && res.status == http.StatusOK && res.done && (!stream || res.chunks == 3)
-					if !ok {
-						lg.failed.Add(1)
-						lg.failures.Store(n, fmt.Sprintf("status=%d done=%v chunks=%d err=%v", res.status, res.done, res.chunks, res.err))
-					}
-					return
+					conn, br = c, bufio.NewReader(c)
 				}
-			}(i)
-		}
-	}()
+				closeAfter, err := rawChat(conn, br, addr, stream)
+				if err != nil {
+					lg.fail(n, fmt.Sprintf("stream=%v: %v", stream, err))
+					_ = conn.Close()
+					conn = nil
+				} else if closeAfter {
+					lg.reconnects.Add(1)
+					_ = conn.Close()
+					conn = nil
+				}
+				time.Sleep(loadInterval)
+			}
+		}()
+	}
 	return lg
+}
+
+func (lg *loadGen) fail(n int64, msg string) {
+	lg.failed.Add(1)
+	lg.failures.Store(n, msg)
+}
+
+// rawChat sends one request on conn and validates the whole response. closeAfter reports a
+// Connection: close response.
+func rawChat(conn net.Conn, br *bufio.Reader, host string, stream bool) (closeAfter bool, err error) {
+	body := fmt.Sprintf(`{"model":"fast","stream":%v,"messages":[{"role":"user","content":"hi"}]}`, stream)
+	req := fmt.Sprintf("POST /v1/chat/completions HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		host, clientKey, len(body), body)
+	if _, err = io.WriteString(conn, req); err != nil {
+		return false, fmt.Errorf("write: %w", err)
+	}
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		return false, fmt.Errorf("read response: %w", err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return resp.Close, fmt.Errorf("read body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return resp.Close, fmt.Errorf("status %d: %.200s", resp.StatusCode, data)
+	}
+	if !stream {
+		if ojson.GetBytes(data, "choices.0.message.content").String() != "ok" {
+			return resp.Close, fmt.Errorf("bad body %.200s", data)
+		}
+		return resp.Close, nil
+	}
+	if c := strings.Count(string(data), "tok0"); c != 3 || !strings.Contains(string(data), "data: [DONE]") {
+		return resp.Close, fmt.Errorf("incomplete stream (%d chunks): %.300s", c, data)
+	}
+	return resp.Close, nil
 }
 
 func (lg *loadGen) finish() {

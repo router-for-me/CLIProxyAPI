@@ -595,34 +595,104 @@ func TestGateListenerPause(t *testing.T) {
 	}
 	g := newGateListener(inner)
 	defer func() { _ = g.Close() }()
-	g.setPaused(true)
-	accepted := make(chan error, 1)
+	// The accept loop is normally already blocked in Accept when the pause starts (the rc.1 bug).
+	accepted := make(chan net.Conn, 1)
 	go func() {
 		c, errAccept := g.Accept()
-		if c != nil {
-			_ = c.Close()
+		if errAccept != nil {
+			t.Errorf("accept surfaced an error: %v", errAccept)
 		}
-		accepted <- errAccept
+		accepted <- c
 	}()
+	time.Sleep(50 * time.Millisecond)
+	g.setPaused(true)
 	client, err := dial(inner.Addr().String())
 	if err != nil {
 		t.Fatalf("dial while paused (connection must queue, not be refused): %v", err)
 	}
 	defer func() { _ = client.Close() }()
 	select {
-	case <-accepted:
-		t.Fatal("accepted while paused")
-	case <-time.After(200 * time.Millisecond):
+	case c := <-accepted:
+		t.Fatalf("connection %v accepted while paused", c.RemoteAddr())
+	case <-time.After(300 * time.Millisecond):
 	}
 	g.setPaused(false)
 	select {
-	case errAccept := <-accepted:
-		if errAccept != nil {
-			t.Fatalf("accept after resume: %v", errAccept)
+	case c := <-accepted:
+		if c == nil || c.RemoteAddr().String() != client.LocalAddr().String() {
+			t.Fatalf("accepted %v after resume, want %v", c, client.LocalAddr())
 		}
+		_ = c.Close()
 	case <-time.After(5 * time.Second):
 		t.Fatal("not accepted after resume")
 	}
+	// The deadline is cleared again: a later connection is accepted normally.
+	go func() {
+		c, _ := g.Accept()
+		accepted <- c
+	}()
+	client2, err := dial(inner.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client2.Close() }()
+	select {
+	case c := <-accepted:
+		_ = c.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("not accepted after the pause ended")
+	}
+}
+
+func TestGateListenerFreshConnections(t *testing.T) {
+	inner, err := netListen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newGateListener(inner)
+	defer func() { _ = g.Close() }()
+	now := time.Now()
+	g.now = func() time.Time { return now }
+
+	client, err := dial(inner.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+	conn, err := g.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := g.freshCount(time.Second); n != 1 {
+		t.Fatalf("fresh after accept = %d, want 1", n)
+	}
+	now = now.Add(2 * time.Second)
+	if n := g.freshCount(time.Second); n != 0 {
+		t.Fatalf("silent connection older than maxAge counted: %d", n)
+	}
+	now = now.Add(-2 * time.Second)
+	g.served(client.LocalAddr().String()) // its first request reached a handler
+	if n := g.freshCount(time.Second); n != 0 {
+		t.Fatalf("fresh after request = %d, want 0", n)
+	}
+
+	client2, err := dial(inner.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client2.Close() }()
+	conn2, err := g.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := g.freshCount(time.Second); n != 1 {
+		t.Fatalf("fresh = %d, want 1", n)
+	}
+	_ = conn2.Close()
+	if n := g.freshCount(time.Second); n != 0 {
+		t.Fatalf("closed connection still fresh: %d", n)
+	}
+	_ = conn.Close()
 }
 
 func TestWaitForApplyMomentWindow(t *testing.T) {

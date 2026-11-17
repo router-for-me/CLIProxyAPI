@@ -54,6 +54,9 @@ func (t *tracker) wrap(next http.Handler) http.Handler {
 			// Last moments before a restart: do not keep this connection alive.
 			w.Header().Set("Connection", "close")
 		}
+		if r != nil {
+			noteRequest(r.RemoteAddr)
+		}
 		tw := &trackedWriter{ResponseWriter: w, t: t}
 		if r != nil && r.URL != nil && isManagementPath(r.URL.Path) {
 			ctx, cancel := context.WithCancel(r.Context())
