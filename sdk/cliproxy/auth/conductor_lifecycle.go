@@ -488,6 +488,18 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if preserveIndependentCooldown && existing.nonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
 		auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
 	}
+	if preserveIndependentCooldown {
+		if existing.forceCooldownUntil.After(auth.forceCooldownUntil) {
+			auth.forceCooldownUntil = existing.forceCooldownUntil
+		}
+		if existing.quotaForceCooldownUntil.After(auth.quotaForceCooldownUntil) {
+			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+		}
+		if existing.credQuotaForceUntil.After(auth.credQuotaForceUntil) {
+			auth.credQuotaForceUntil = existing.credQuotaForceUntil
+		}
+		auth.forceCooldownSeeded = auth.forceCooldownSeeded || existing.forceCooldownSeeded
+	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
 	} else {
@@ -516,9 +528,16 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 				if old.nonQuotaCooldownUntil.After(state.nonQuotaCooldownUntil) {
 					state.nonQuotaCooldownUntil = old.nonQuotaCooldownUntil
 				}
+				if old.forceCooldownUntil.After(state.forceCooldownUntil) {
+					state.forceCooldownUntil = old.forceCooldownUntil
+				}
+				if old.quotaForceCooldownUntil.After(state.quotaForceCooldownUntil) {
+					state.quotaForceCooldownUntil = old.quotaForceCooldownUntil
+				}
+				state.forceCooldownSeeded = state.forceCooldownSeeded || old.forceCooldownSeeded
+				state.credentialQuotaPropagated = state.credentialQuotaPropagated || old.credentialQuotaPropagated
 				if state.credentialQuotaShadow == nil && isModelStateActiveCooldown(old.credentialQuotaShadow, now) {
 					state.credentialQuotaShadow = old.credentialQuotaShadow.cloneShallow()
-					state.credentialQuotaPropagated = state.credentialQuotaPropagated || old.credentialQuotaPropagated
 				}
 			}
 		}
