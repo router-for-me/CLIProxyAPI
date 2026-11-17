@@ -1,18 +1,22 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
@@ -43,6 +47,12 @@ func TestManagementV8ClaudeOverageRecovery(t *testing.T) {
 		{name: "subscription_exhausted_extra", extra: `{"is_enabled":true,"utilization":100,"monthly_limit":1000,"used_credits":1000}`, recover: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if child := os.Getenv("CPA_OVERAGE_CHILD_CASE"); child == "" {
+				runIsolatedOverageCase(t, tc.name)
+				return
+			} else if child != tc.name {
+				t.Fatalf("OVERAGE_CHILD_INFRASTRUCTURE: selected %s, executing %s", child, tc.name)
+			}
 			usage := `{"five_hour":{"utilization":10},"seven_day":{"utilization":20}`
 			if tc.extra != "" {
 				usage += `,"extra_usage":` + tc.extra
@@ -72,6 +82,9 @@ func TestManagementV8ClaudeOverageRecovery(t *testing.T) {
 				}
 			} else if !reflect.DeepEqual(before, after) {
 				t.Fatalf("unproven overage capacity changed cooldown: before=%+v after=%+v", state, afterState)
+			}
+			if !t.Failed() {
+				fmt.Println("OVERAGE_CASE_COMPLETED:" + tc.name)
 			}
 		})
 	}
@@ -154,7 +167,7 @@ func (f *overageRouteFixture) usage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/v8/management/requests/api-call", strings.NewReader(string(body)))
+	request := httptest.NewRequest(http.MethodPost, "/v8/management/requests/api-call", strings.NewReader(string(body))).WithContext(f.ctx)
 	request.RemoteAddr = "127.0.0.1:1234"
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer test-password")
@@ -194,4 +207,51 @@ func writeOverageTestRejection(w http.ResponseWriter, overage bool) {
 	}
 	w.WriteHeader(429)
 	_, _ = io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"Fable usage window rejected."}}`)
+}
+
+// A child process owns its complete HTTP environment. The shared parent never
+// changes a package-global transport and accepts only an actual completed case.
+func runIsolatedOverageCase(t *testing.T, name string) {
+	t.Helper()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("OVERAGE_CHILD_INFRASTRUCTURE: executable: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestManagementV8ClaudeOverageRecovery$/^"+name+"$", "-test.v")
+	cmd.Env = append(os.Environ(), "CPA_OVERAGE_CHILD_CASE="+name, "GOMAXPROCS=1")
+	cmd.WaitDelay = 5 * time.Second
+	output := &overageChildOutput{}
+	cmd.Stdout, cmd.Stderr = output, output
+	err = cmd.Run()
+	if ctx.Err() != nil || output.overflow {
+		t.Fatalf("OVERAGE_CHILD_INFRASTRUCTURE: timeout=%v output_overflow=%v\n%s", ctx.Err(), output.overflow, output.String())
+	}
+	if err != nil {
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+			t.Fatalf("OVERAGE_CHILD_INFRASTRUCTURE: exit=%v\n%s", err, output.String())
+		}
+		t.Fatalf("isolated OAuth assertion failed: %v\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "OVERAGE_CASE_COMPLETED:"+name+"\n") {
+		t.Fatalf("OVERAGE_CHILD_INFRASTRUCTURE: missing actual-case completion\n%s", output.String())
+	}
+	t.Log(output.String())
+}
+
+type overageChildOutput struct {
+	bytes.Buffer
+	overflow bool
+}
+
+func (o *overageChildOutput) Write(p []byte) (int, error) {
+	remaining := 1024*1024 - o.Len()
+	n := len(p)
+	if n > remaining {
+		o.overflow = true
+		p = p[:remaining]
+	}
+	_, _ = o.Buffer.Write(p)
+	return n, nil
 }
