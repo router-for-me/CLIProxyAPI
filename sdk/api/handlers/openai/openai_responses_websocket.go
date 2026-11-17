@@ -1008,6 +1008,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var lastAttemptedAuthID string
 		var attemptedUpstreamMode string
 		var selectedAuthObserved bool
+		var selectedAuthKind atomic.Value
 		var preserveNativeOutput atomic.Bool
 		var pinnedAuthAttempted bool
 		var cliCtx context.Context
@@ -1021,6 +1022,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastAttemptedAuthID = pinnedAuthID
 			attemptedUpstreamMode = responsesWebsocketUpstreamModeUnknown
 			selectedAuthObserved = false
+			selectedAuthKind.Store("")
 			nativeRequest := util.IsCodexResponsesLiteRequest(payload, c.Request.Header)
 			preserveNativeOutput.Store(false)
 			codexDuplexStream.Store(false)
@@ -1071,6 +1073,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !ok || selectedAuth == nil {
 					return
 				}
+				selectedAuthKind.Store(selectedAuth.AuthKind())
 				attemptedUpstreamMode = upstreamModeForAuth(selectedAuth)
 				codexDuplexStream.Store(duplexInput != nil && attemptedUpstreamMode == responsesWebsocketUpstreamModeWS && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
 				preserveNativeOutput.Store(nativeRequest && strings.EqualFold(strings.TrimSpace(selectedAuth.Provider), "codex"))
@@ -1171,7 +1174,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					duplexStream: func() bool {
 						return codexDuplexStream.Load() && !cliproxyexecutor.LocalWebsocketTurnExecuted(cliCtx)
 					},
-					toolCacheTurn:      toolCacheTurn,
+					toolCacheTurn: toolCacheTurn,
+					authKind: func() string {
+						kind, _ := selectedAuthKind.Load().(string)
+						return kind
+					},
 					suppressError:      replayPinnedAuthFailure,
 					onDownstreamCommit: func() { downstreamCommitted.Store(true) },
 					localInterrupt:     localInterrupt,
