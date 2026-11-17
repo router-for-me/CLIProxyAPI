@@ -3,7 +3,6 @@ package api
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	gin "github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -536,8 +536,8 @@ func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *tes
 	}
 	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
 	apiResponse, _ := rawAPIResponse.([]byte)
-	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
-		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
 	}
 }
 
@@ -2225,9 +2225,25 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
 		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
-	serviceTiers, ok := gpt55["service_tiers"].([]any)
-	if !ok || len(serviceTiers) != 1 {
-		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	// Service tiers pass through from the catalog template, whose contents
+	// change with upstream refreshes, so compare with the template itself.
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &catalog); err != nil {
+		t.Fatalf("parse codex client catalog: %v", err)
+	}
+	var wantTiers any
+	for _, model := range catalog.Models {
+		if model["slug"] == "gpt-5.5" {
+			wantTiers = model["service_tiers"]
+		}
+	}
+	if wantTiers == nil {
+		wantTiers = []any{}
+	}
+	if got := gpt55["service_tiers"]; !reflect.DeepEqual(got, wantTiers) {
+		t.Fatalf("gpt-5.5 service_tiers = %#v, want catalog %#v", got, wantTiers)
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")
@@ -3906,7 +3922,18 @@ func (e *serverResponsesWebsocketCaptureExecutor) HttpRequest(context.Context, *
 }
 
 func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
-	server := newTestServer(t)
+	for _, requestLog := range []bool{false, true} {
+		t.Run(fmt.Sprintf("request_log=%t", requestLog), func(t *testing.T) {
+			testServerResponsesWebsocketReauthorizesEachTurn(t, requestLog)
+		})
+	}
+}
+
+func testServerResponsesWebsocketReauthorizesEachTurn(t *testing.T, requestLog bool) {
+	t.Helper()
+	server := newTestServerWithConfig(t, &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{RequestLog: requestLog},
+	})
 	provider := &revocableServerAccessProvider{}
 	server.accessManager.SetProviders([]sdkaccess.Provider{provider})
 
@@ -3927,17 +3954,16 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	var handlers sync.WaitGroup
+	var requests sync.WaitGroup
 	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handlers.Add(1)
-		defer handlers.Done()
+		requests.Add(1)
+		defer requests.Done()
 		server.engine.ServeHTTP(w, r)
 	}))
 	defer func() {
 		httpServer.Close()
-		// httptest does not wait for hijacked WebSockets. Let their handler and
-		// request logger finish before t.TempDir removes the log directory.
-		handlers.Wait()
+		// Close does not wait for hijacked WebSocket handlers or their logging middleware.
+		requests.Wait()
 	}()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
@@ -3946,7 +3972,11 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errDial != nil {
 		t.Fatalf("dial websocket: %v", errDial)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Errorf("close websocket: %v", errClose)
+		}
+	}()
 
 	turn1 := []byte(`{"type":"response.create","model":"ws-reauth-model","input":[{"type":"message","role":"user","content":"turn 1"}]}`)
 	if errWrite := conn.WriteMessage(websocket.TextMessage, turn1); errWrite != nil {
@@ -3997,4 +4027,23 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if gotCalls := wsExec.calls.Load(); gotCalls != 1 {
 		t.Fatalf("executor calls after revoked turn = %d, want 1", gotCalls)
 	}
+	t.Cleanup(func() {
+		// Deferred connection shutdown and request draining must finish before inspecting logs.
+		entries, errReadDir := os.ReadDir(filepath.Join(server.cfg.AuthDir, "logs"))
+		if errReadDir != nil {
+			t.Fatalf("read request logs: %v", errReadDir)
+		}
+		var logCount int
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".tmp") || strings.HasPrefix(entry.Name(), "request-log-parts-") {
+				t.Errorf("request log temporary entry remains after handler completion: %s", entry.Name())
+			}
+			if strings.HasSuffix(entry.Name(), ".log") {
+				logCount++
+			}
+		}
+		if logCount == 0 {
+			t.Error("expected a completed request log for the revoked credential")
+		}
+	})
 }

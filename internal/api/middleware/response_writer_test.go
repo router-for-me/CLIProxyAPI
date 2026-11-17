@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -316,12 +317,14 @@ func TestHasActionableError(t *testing.T) {
 }
 
 type recordingRequestLogger struct {
-	loggedCalls []int
-	enabled     bool
+	loggedCalls  []int
+	apiResponses [][]byte
+	enabled      bool
 }
 
 func (l *recordingRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	l.loggedCalls = append(l.loggedCalls, statusCode)
+	l.apiResponses = append(l.apiResponses, bytes.Clone(apiResponse))
 	return nil
 }
 
@@ -336,8 +339,111 @@ func (l *recordingRequestLogger) IsEnabled() bool {
 func (l *recordingRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	if force || l.enabled {
 		l.loggedCalls = append(l.loggedCalls, statusCode)
+		l.apiResponses = append(l.apiResponses, bytes.Clone(apiResponse))
 	}
 	return nil
+}
+
+type stubDeferredAPIResponse struct {
+	section []byte
+	renders int
+}
+
+func (s *stubDeferredAPIResponse) HasPayload() bool {
+	return s != nil && len(s.section) > 0
+}
+
+func (s *stubDeferredAPIResponse) RenderAPIResponse() []byte {
+	if s == nil {
+		return nil
+	}
+	s.renders++
+	return s.section
+}
+
+func TestFinalizeForceLogUsesDeferredAPIResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("error log uses deferred upstream response instead of fallback proxy error", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		stub := &stubDeferredAPIResponse{
+			section: []byte("=== API RESPONSE 1 ===\nTimestamp: 2026-11-11T00:45:05Z\n\nStatus: 502\n\nBody:\nupstream-error-body\n"),
+		}
+		c.Set(logging.DeferredAPIResponseContextKey, stub)
+		c.Set("API_RESPONSE", []byte(`{"error":{"message":"proxy synthesized error"}}`))
+
+		logger := &recordingRequestLogger{enabled: false}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			logOnErrorOnly: true,
+			statusCode:     http.StatusBadGateway,
+			requestInfo:    &RequestInfo{URL: "/v1/chat/completions", Method: http.MethodPost, Timestamp: time.Now()},
+		}
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatalf("Finalize error: %v", errFinalize)
+		}
+		if len(logger.apiResponses) != 1 {
+			t.Fatalf("logged apiResponses = %d, want 1", len(logger.apiResponses))
+		}
+		got := string(logger.apiResponses[0])
+		if !strings.Contains(got, "upstream-error-body") {
+			t.Fatalf("logged API response missing upstream body:\n%s", got)
+		}
+		if strings.Contains(got, "proxy synthesized error") {
+			t.Fatalf("logged API response should not include proxy synthesized fallback JSON:\n%s", got)
+		}
+	})
+
+	t.Run("local error without upstream attempt preserves fallback API_RESPONSE", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set(logging.DeferredAPIResponseContextKey, &stubDeferredAPIResponse{})
+		c.Set("API_RESPONSE", []byte(`{"error":{"message":"local cooldown"}}`))
+
+		logger := &recordingRequestLogger{enabled: false}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			logOnErrorOnly: true,
+			statusCode:     http.StatusTooManyRequests,
+			requestInfo:    &RequestInfo{URL: "/v1/chat/completions", Method: http.MethodPost, Timestamp: time.Now()},
+		}
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatalf("Finalize error: %v", errFinalize)
+		}
+		if len(logger.apiResponses) != 1 || !strings.Contains(string(logger.apiResponses[0]), "local cooldown") {
+			t.Fatalf("logged API response = %q, want fallback local error", logger.apiResponses)
+		}
+	})
+
+	t.Run("successful request neither logs nor renders deferred response", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		stub := &stubDeferredAPIResponse{
+			section: []byte("=== API RESPONSE 1 ===\n\nBody:\nupstream-ok\n"),
+		}
+		c.Set(logging.DeferredAPIResponseContextKey, stub)
+
+		logger := &recordingRequestLogger{enabled: false}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			logOnErrorOnly: true,
+			statusCode:     http.StatusOK,
+			requestInfo:    &RequestInfo{URL: "/v1/chat/completions", Method: http.MethodPost, Timestamp: time.Now()},
+		}
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatalf("Finalize error: %v", errFinalize)
+		}
+		if len(logger.loggedCalls) != 0 || stub.renders != 0 {
+			t.Fatalf("loggedCalls=%d renders=%d, want 0 and 0", len(logger.loggedCalls), stub.renders)
+		}
+	})
 }
 
 func TestFinalizeExcludes499FromForceLog(t *testing.T) {
@@ -448,6 +554,30 @@ func TestFinalizeLogsUnrouted404WhenUpstreamEvidenceOrPanicExists(t *testing.T) 
 		}
 		if len(logger.loggedCalls) != 1 || logger.loggedCalls[0] != http.StatusNotFound {
 			t.Fatalf("expected 1 logged call when deferred API request exists, got: %v", logger.loggedCalls)
+		}
+	})
+
+	t.Run("deferred api response recorded", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/files", nil)
+		c.Set(logging.DeferredAPIResponseContextKey, &stubDeferredAPIResponse{
+			section: []byte("=== API RESPONSE 1 ===\n"),
+		})
+
+		logger := &recordingRequestLogger{enabled: false}
+		wrapper := &ResponseWriterWrapper{
+			ResponseWriter: c.Writer,
+			logger:         logger,
+			logOnErrorOnly: true,
+			statusCode:     http.StatusNotFound,
+			requestInfo:    &RequestInfo{URL: "/v1/files", Method: http.MethodPost, Timestamp: time.Now()},
+		}
+		if errFinalize := wrapper.Finalize(c); errFinalize != nil {
+			t.Fatalf("Finalize error: %v", errFinalize)
+		}
+		if len(logger.loggedCalls) != 1 || logger.loggedCalls[0] != http.StatusNotFound {
+			t.Fatalf("expected 1 logged call when deferred API response exists, got: %v", logger.loggedCalls)
 		}
 	})
 

@@ -933,11 +933,17 @@ func TestConvertInteractionsRequestToGeminiBuiltinTools(t *testing.T) {
 		if len(tools) != 2 {
 			t.Fatalf("expected 2 tools, got %d. Output: %s", len(tools), string(out))
 		}
-		if got := tools[0].Get("google_search.mode").String(); got != "search" {
-			t.Fatalf("expected google_search.mode=search, got %s", tools[0].Raw)
+		if tools[0].Get("google_search").Exists() {
+			t.Fatalf("expected google_search wrapper omitted, got %s", tools[0].Raw)
 		}
-		if got := tools[1].Get("code_execution.sandbox").Bool(); !got {
-			t.Fatalf("expected code_execution.sandbox=true, got %s", tools[1].Raw)
+		if got := tools[0].Get("mode").String(); got != "search" {
+			t.Fatalf("expected mode=search, got %s", tools[0].Raw)
+		}
+		if tools[1].Get("code_execution").Exists() {
+			t.Fatalf("expected code_execution wrapper omitted, got %s", tools[1].Raw)
+		}
+		if got := tools[1].Get("sandbox").Bool(); !got {
+			t.Fatalf("expected sandbox=true, got %s", tools[1].Raw)
 		}
 	})
 
@@ -1465,4 +1471,279 @@ func TestConvertInteractionsResponseToGemini_ResponseFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvertGeminiRequestToInteractions_ResponseModalitiesAndImageConfig(t *testing.T) {
+	t.Run("image modality and imageConfig map to top-level response_format", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"Minimalist editorial weather card"}]}],
+			"generationConfig":{
+				"responseModalities":["IMAGE"],
+				"imageConfig":{"aspectRatio":"16:9","imageSize":"1K"},
+				"thinkingConfig":{"thinkingLevel":"minimal"}
+			}
+		}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.1-flash-lite-image", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.response_modalities").Exists() {
+			t.Fatalf("generation_config.response_modalities must be omitted, got: %s", string(out))
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.image_config").Exists() {
+			t.Fatalf("generation_config.image_config must be omitted, got: %s", string(out))
+		}
+		if ojson.GetBytesNoCopy(out, "response_modalities").Exists() {
+			t.Fatalf("response_modalities must be migrated to response_format, got: %s", string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "response_format.type").String(); got != "image" {
+			t.Fatalf("response_format.type = %q, want image; out=%s", got, string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "response_format.aspect_ratio").String(); got != "16:9" {
+			t.Fatalf("response_format.aspect_ratio = %q, want 16:9; out=%s", got, string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "response_format.image_size").String(); got != "1K" {
+			t.Fatalf("response_format.image_size = %q, want 1K; out=%s", got, string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "minimal" {
+			t.Fatalf("generation_config.thinking_level = %q, want minimal; out=%s", got, string(out))
+		}
+	})
+
+	t.Run("multiple modalities map to response_format array", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"draw and explain"}]}],
+			"generationConfig":{
+				"responseModalities":["TEXT","IMAGE"],
+				"imageConfig":{"aspectRatio":"4:3"}
+			}
+		}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.1-flash-lite-image", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		formats := ojson.GetBytesNoCopy(out, "response_format").Array()
+		if len(formats) != 2 {
+			t.Fatalf("response_format len = %d, want 2; out=%s", len(formats), string(out))
+		}
+		if got := formats[0].Get("type").String(); got != "text" {
+			t.Fatalf("response_format[0].type = %q, want text; out=%s", got, string(out))
+		}
+		if got := formats[1].Get("type").String(); got != "image" {
+			t.Fatalf("response_format[1].type = %q, want image; out=%s", got, string(out))
+		}
+		if got := formats[1].Get("aspect_ratio").String(); got != "4:3" {
+			t.Fatalf("response_format[1].aspect_ratio = %q, want 4:3; out=%s", got, string(out))
+		}
+	})
+
+	t.Run("responseMimeType and responseSchema map to text response_format preserving schema keys", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents":[{"role":"user","parts":[{"text":"json"}]}],
+			"generationConfig":{
+				"responseMimeType":"application/json",
+				"responseSchema":{"type":"object","properties":{"userName":{"type":"string"}}}
+			}
+		}`)
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.response_mime_type").Exists() {
+			t.Fatalf("generation_config.response_mime_type must be omitted, got: %s", string(out))
+		}
+		if ojson.GetBytesNoCopy(out, "generation_config.response_schema").Exists() {
+			t.Fatalf("generation_config.response_schema must be omitted, got: %s", string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "response_format.type").String(); got != "text" {
+			t.Fatalf("response_format.type = %q, want text; out=%s", got, string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "response_format.mime_type").String(); got != "application/json" {
+			t.Fatalf("response_format.mime_type = %q, want application/json; out=%s", got, string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "response_format.schema.properties.userName.type").String(); got != "string" {
+			t.Fatalf("response_format.schema.properties.userName.type = %q, want string; out=%s", got, string(out))
+		}
+	})
+}
+
+func TestConvertGeminiRequestToInteractions_GoogleSearchAndBuiltinToolOptions(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"weather"}]}],
+		"tools":[
+			{"googleSearch":{"searchTypes":{"webSearch":{},"imageSearch":{}}}},
+			{"urlContext":{"maxUrls":3}},
+			{"codeExecution":{"sandbox":true}}
+		]
+	}`)
+	out, err := ConvertGeminiRequestToInteractions("gemini-nano-banana-2.1", inputJSON, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tools := ojson.GetBytesNoCopy(out, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("expected 3 tools, got %d; out=%s", len(tools), string(out))
+	}
+
+	if got := tools[0].Get("type").String(); got != "google_search" {
+		t.Fatalf("tools[0].type = %q, want google_search; tool=%s", got, tools[0].Raw)
+	}
+	if tools[0].Get("google_search").Exists() {
+		t.Fatalf("tools[0] must not nest options under google_search; tool=%s", tools[0].Raw)
+	}
+	searchTypes := tools[0].Get("search_types").Array()
+	if len(searchTypes) != 2 || searchTypes[0].String() != "web_search" || searchTypes[1].String() != "image_search" {
+		t.Fatalf("tools[0].search_types = %s, want [web_search, image_search]; tool=%s", tools[0].Get("search_types").Raw, tools[0].Raw)
+	}
+
+	if got := tools[1].Get("type").String(); got != "url_context" {
+		t.Fatalf("tools[1].type = %q, want url_context; tool=%s", got, tools[1].Raw)
+	}
+	if tools[1].Get("url_context").Exists() {
+		t.Fatalf("tools[1] must not nest options under url_context; tool=%s", tools[1].Raw)
+	}
+	if got := tools[1].Get("max_urls").Int(); got != 3 {
+		t.Fatalf("tools[1].max_urls = %d, want 3; tool=%s", got, tools[1].Raw)
+	}
+
+	if got := tools[2].Get("type").String(); got != "code_execution" {
+		t.Fatalf("tools[2].type = %q, want code_execution; tool=%s", got, tools[2].Raw)
+	}
+	if tools[2].Get("code_execution").Exists() {
+		t.Fatalf("tools[2] must not nest options under code_execution; tool=%s", tools[2].Raw)
+	}
+	if !tools[2].Get("sandbox").Bool() {
+		t.Fatalf("tools[2].sandbox = false, want true; tool=%s", tools[2].Raw)
+	}
+}
+
+func TestConvertGeminiRequestToInteractions_FunctionResponsePartsMedia(t *testing.T) {
+	t.Run("inlineData image and PDF alongside response result", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "id": "call_1", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"id": "call_1",
+						"response": {"result": "Loaded files"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+							{"inlineData": {"mimeType": "application/pdf", "data": "JVBERi0xLjQK"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		step := ojson.GetBytesNoCopy(out, "input.1")
+		if got := step.Get("type").String(); got != "function_result" {
+			t.Fatalf("input.1.type = %q, want function_result; out=%s", got, string(out))
+		}
+		result := step.Get("result")
+		if !result.IsArray() {
+			t.Fatalf("expected function_result.result to be array, got %s; out=%s", result.Raw, string(out))
+		}
+		items := result.Array()
+		if len(items) != 3 {
+			t.Fatalf("expected 3 items (text + image + document), got %d: %s", len(items), result.Raw)
+		}
+		if items[0].Get("type").String() != "text" || items[0].Get("text").String() != "Loaded files" {
+			t.Fatalf("items[0] = %s, want text 'Loaded files'", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "image" || items[1].Get("mime_type").String() != "image/png" || items[1].Get("data").String() != "iVBORw0KGgo=" {
+			t.Fatalf("items[1] = %s, want image/png item", items[1].Raw)
+		}
+		if items[2].Get("type").String() != "document" || items[2].Get("mime_type").String() != "application/pdf" || items[2].Get("data").String() != "JVBERi0xLjQK" {
+			t.Fatalf("items[2] = %s, want application/pdf document item", items[2].Raw)
+		}
+	})
+
+	t.Run("fileData audio URI with empty response", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "fetch_audio", "id": "call_2", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "fetch_audio",
+						"id": "call_2",
+						"response": {},
+						"parts": [
+							{"fileData": {"mimeType": "audio/wav", "fileUri": "https://example.com/a.wav"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		items := ojson.GetBytesNoCopy(out, "input.1.result").Array()
+		if len(items) != 1 {
+			t.Fatalf("expected 1 audio item (no empty text item), got %d; out=%s", len(items), string(out))
+		}
+		if items[0].Get("type").String() != "audio" || items[0].Get("mime_type").String() != "audio/wav" || items[0].Get("uri").String() != "https://example.com/a.wav" {
+			t.Fatalf("items[0] = %s, want audio uri item", items[0].Raw)
+		}
+	})
+
+	t.Run("preserves sibling response fields alongside result and nested parts", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "id": "call_3", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"id": "call_3",
+						"response": {"result": "partial", "error": "second file failed"},
+						"parts": [
+							{"text": "extra note"},
+							{"inline_data": {"mime_type": "image/png", "data": "iVBORw0KGgo="}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		items := ojson.GetBytesNoCopy(out, "input.1.result").Array()
+		if len(items) != 3 {
+			t.Fatalf("expected 3 items, got %d; out=%s", len(items), string(out))
+		}
+		if items[0].Get("type").String() != "text" || !strings.Contains(items[0].Get("text").String(), "second file failed") {
+			t.Fatalf("items[0] = %s, want text preserving error field", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "text" || items[1].Get("text").String() != "extra note" {
+			t.Fatalf("items[1] = %s, want nested text 'extra note'", items[1].Raw)
+		}
+		if items[2].Get("type").String() != "image" || items[2].Get("mime_type").String() != "image/png" {
+			t.Fatalf("items[2] = %s, want image/png item", items[2].Raw)
+		}
+	})
+
+	t.Run("streaming response delta preserves functionResponse.parts", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionResponse":{"name":"read_files","id":"call_4","response":{"result":"Loaded"},"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}]}}]}}]}`)
+		events := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, chunk, &param)
+		delta := findStepDeltaPayloadByType(events, "function_result")
+		if len(delta) == 0 {
+			t.Fatalf("expected function_result step.delta event, got %d events", len(events))
+		}
+		items := ojson.GetBytesNoCopy(delta, "delta.result").Array()
+		if len(items) != 2 || items[0].Get("text").String() != "Loaded" || items[1].Get("type").String() != "image" {
+			t.Fatalf("delta.result = %s, want [text, image]", ojson.GetBytesNoCopy(delta, "delta.result").Raw)
+		}
+	})
 }

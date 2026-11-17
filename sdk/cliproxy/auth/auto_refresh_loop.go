@@ -287,6 +287,13 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 
 	if !shouldRefresh {
+		if !next.After(now) {
+			delay := l.interval
+			if delay <= 0 {
+				delay = refreshCheckInterval
+			}
+			next = now.Add(delay)
+		}
 		l.upsert(authID, next)
 		return
 	}

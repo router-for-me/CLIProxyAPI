@@ -1,11 +1,11 @@
 package helps
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
@@ -664,4 +664,45 @@ func TestDetectClaudeCodeRequestAcceptsConfiguredNativeEntrypoints(t *testing.T)
 	if unconfirmed := DetectClaudeCodeRequest(missingBetaHeaders, payload, false, cfg); unconfirmed.Confirmed || unconfirmed.StrongSignals {
 		t.Fatalf("configured entrypoint without strong signals = %#v, want unconfirmed", unconfirmed)
 	}
+}
+
+func TestDetectClaudeCodeRequestAcceptsBackgroundSessionXApp(t *testing.T) {
+	payload := claudeCodeDetectionPayload(validClaudeCodeMetadataUserID)
+
+	t.Run("messages", func(t *testing.T) {
+		headers := confirmedClaudeCodeHeaders()
+		headers.Set("X-App", "cli-bg")
+		detection := DetectClaudeCodeRequest(headers, payload, false)
+		if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient || !detection.XAppCLI {
+			t.Fatalf("detection = %#v, want confirmed native CLI for X-App: cli-bg", detection)
+		}
+	})
+
+	t.Run("count_tokens", func(t *testing.T) {
+		headers := confirmedClaudeCodeHeaders()
+		headers.Set("X-App", "cli-bg")
+		detection := DetectClaudeCodeRequest(headers, []byte(`{"messages":[]}`), true)
+		if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient || !detection.XAppCLI {
+			t.Fatalf("detection = %#v, want confirmed count_tokens for X-App: cli-bg", detection)
+		}
+	})
+
+	t.Run("measured_helper", func(t *testing.T) {
+		headers := measuredClaudeCodeHelperHeaders(claudeCodeHelperBetaProfile(true))
+		headers.Set("X-App", "cli-bg")
+		detection := DetectClaudeCodeRequest(headers, measuredClaudeCodeMinimalHelperPayload(), false)
+		if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient || !detection.HelperProfile || !detection.XAppCLI {
+			t.Fatalf("detection = %#v, want confirmed measured helper for X-App: cli-bg", detection)
+		}
+	})
+
+	t.Run("rejects_unknown_x_app", func(t *testing.T) {
+		for _, unknownApp := range []string{"cli-other", "web", "sdk"} {
+			headers := confirmedClaudeCodeHeaders()
+			headers.Set("X-App", unknownApp)
+			if detection := DetectClaudeCodeRequest(headers, payload, false); detection.Confirmed || detection.XAppCLI {
+				t.Fatalf("X-App %q detection = %#v, want unconfirmed", unknownApp, detection)
+			}
+		}
+	})
 }

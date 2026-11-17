@@ -1,13 +1,14 @@
 package executor
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestCodexQuotaErrorCredentialScope(t *testing.T) {

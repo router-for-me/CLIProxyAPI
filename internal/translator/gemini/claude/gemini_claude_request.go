@@ -117,24 +117,43 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 				if originalRole == "user" {
 					contentsResult = translatorcommon.AlignClaudeToolResults(contentsResult, precedingToolUseIDs)
 				}
-				contentsResult.ForEach(func(_, contentResult ojson.Result) bool {
+				var carrierSignatures map[int]string
+				if originalRole == "assistant" {
+					carrierSignatures = geminiClaudeCarrierSignatures(contentsResult.Array())
+				}
+				contentsResult.ForEach(func(contentIndex, contentResult ojson.Result) bool {
+					carrierSignature := carrierSignatures[int(contentIndex.Int())]
 					switch contentResult.Get("type").String() {
 					case "text":
 						text := contentResult.Get("text").String()
 						if text == "" {
 							return true
 						}
-						part := []byte(`{"text":""}`)
-						part, _ = ojson.SetBytes(part, "text", text)
-						partItems = append(partItems, part)
+						partDoc := ojson.NewDocString(`{"text":""}`)
+						_ = partDoc.Set("text", text)
+						if carrierSignature != "" {
+							_ = partDoc.Set("thoughtSignature", carrierSignature)
+						}
+						partItems = append(partItems, partDoc.Bytes())
 
 					case "thinking":
+						if contentResult.Get("thinking").String() == "" && strings.TrimSpace(contentResult.Get("signature").String()) != "" {
+							if carrierSignature != "" {
+								partDoc := ojson.NewDocString(`{"text":"","thought":true}`)
+								_ = partDoc.Set("thoughtSignature", carrierSignature)
+								partItems = append(partItems, partDoc.Bytes())
+							}
+							return true
+						}
 						if !preserveEmptyThinkingBlocks {
 							return true
 						}
 						partDoc := ojson.NewDocString(`{"text":"","thought":true,"thoughtSignature":""}`)
 						_ = partDoc.Set("text", contentResult.Get("thinking").String())
 						signature := sigcompat.GeminiReplaySignatureOrBypass(contentResult.Get("signature").String(), sigcompat.SignatureBlockKindGeminiModelPart)
+						if carrierSignature != "" {
+							signature = carrierSignature
+						}
 						_ = partDoc.Set("thoughtSignature", signature)
 						partItems = append(partItems, partDoc.Bytes())
 
@@ -149,7 +168,11 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						argsResult := ojson.Parse(functionArgs)
 						if argsResult.IsObject() && ojson.Valid(functionArgs) {
 							partDoc := ojson.NewDocString(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
-							_ = partDoc.Set("thoughtSignature", geminiClaudeThoughtSignature)
+							signature := geminiClaudeThoughtSignature
+							if carrierSignature != "" {
+								signature = carrierSignature
+							}
+							_ = partDoc.Set("thoughtSignature", signature)
 							if toolUseID != "" {
 								_ = partDoc.Set("functionCall.id", toolUseID)
 							}
@@ -195,7 +218,41 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						}
 						partItems = append(partItems, partDoc.Bytes())
 
-					case "image", "document", "container_upload":
+					case "document":
+						emitGeminiText := func(text string) {
+							partDoc := ojson.NewDocString(`{"text":""}`)
+							_ = partDoc.Set("text", text)
+							if carrierSignature != "" {
+								_ = partDoc.Set("thoughtSignature", carrierSignature)
+							}
+							partItems = append(partItems, partDoc.Bytes())
+						}
+						if docText, ok := translatorcommon.ClaudeDocumentTextBlock(contentResult); ok {
+							emitGeminiText(docText)
+							return true
+						}
+						var onImageDrop func()
+						if originalRole == "user" {
+							onImageDrop = func() { drops.Drop("image") }
+						}
+						if translatorcommon.ExpandClaudeContentDocument(
+							contentResult,
+							emitGeminiText,
+							func(img ojson.Result) ([]byte, bool) {
+								p := claudeBase64InlineData(img.Get("source"))
+								return p, p != nil
+							},
+							func(p []byte) { partItems = append(partItems, p) },
+							onImageDrop,
+						) {
+							return true
+						}
+						if part := claudeBase64InlineData(contentResult.Get("source")); part != nil {
+							partItems = append(partItems, part)
+						} else if originalRole == "user" {
+							drops.Drop("document")
+						}
+					case "image", "container_upload":
 						if part := claudeBase64InlineData(contentResult.Get("source")); part != nil {
 							partItems = append(partItems, part)
 						} else if originalRole == "user" {

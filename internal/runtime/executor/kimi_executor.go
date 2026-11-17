@@ -42,6 +42,7 @@ func NewKimiExecutor(cfg *config.Config) *KimiExecutor {
 			requestLogProvider:      "kimi",
 			upstreamModelNormalizer: normalizeKimiUpstreamModel,
 			oauthToolAliases:        &claudeOAuthToolAliasStore{},
+			threadBetas:             &helps.ClaudeThreadBetaStore{},
 		},
 		cfg: cfg,
 	}
@@ -210,18 +211,21 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
@@ -345,8 +349,11 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
@@ -507,19 +514,22 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
 	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 
 	originalRequest := req.Payload
@@ -633,11 +643,14 @@ func (e *KimiExecutor) executeResponsesStream(ctx context.Context, auth *cliprox
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err

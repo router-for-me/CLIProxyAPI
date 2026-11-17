@@ -6,12 +6,12 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"

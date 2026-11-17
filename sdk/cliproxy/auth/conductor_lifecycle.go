@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -32,21 +33,89 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// unwrapProviderExecutor follows ExecutorUnwrapper chains to the innermost
+// executor. A nil result or a cycle returns the last non-nil executor.
+// A visited bound prevents unbounded traversal on malformed chains.
+func unwrapProviderExecutor(executor ProviderExecutor) ProviderExecutor {
+	visited := make(map[ProviderExecutor]struct{})
+	for executor != nil {
+		// Only comparable values can be hashed; non-comparable innermost
+		// executors are returned directly to avoid a panic.
+		if !reflect.ValueOf(executor).Comparable() {
+			return executor
+		}
+		if _, seen := visited[executor]; seen {
+			return executor
+		}
+		visited[executor] = struct{}{}
+		unwrapper, ok := executor.(ExecutorUnwrapper)
+		if !ok || unwrapper == nil {
+			return executor
+		}
+		inner := unwrapper.Unwrap()
+		if inner == nil || sameExecutor(inner, executor) {
+			return executor
+		}
+		executor = inner
+	}
+	return nil
+}
+
+// sameExecutor reports whether two executors are the same published or owned
+// instance without panicking on non-comparable values.
+func sameExecutor(a, b ProviderExecutor) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !reflect.ValueOf(a).Comparable() || !reflect.ValueOf(b).Comparable() {
+		return false
+	}
+	return a == b
+}
+
+// ExecutorRevision returns the monotonic revision for a provider's executor
+// registration. Each RegisterExecutor and UnregisterExecutor advances it.
+func (m *Manager) ExecutorRevision(provider string) uint64 {
+	if m == nil {
+		return 0
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.executorRevisions[provider]
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
+	m.RegisterExecutorWithRevision(executor)
+}
+
+// RegisterExecutorWithRevision registers a provider executor and returns the
+// provider's executor revision captured under the same lock as publication,
+// so callers can correlate the revision with this exact registration.
+func (m *Manager) RegisterExecutorWithRevision(executor ProviderExecutor) uint64 {
 	if executor == nil {
-		return
+		return 0
 	}
 	provider := strings.TrimSpace(executor.Identifier())
 	if provider == "" {
-		return
+		return 0
 	}
 
 	var replaced ProviderExecutor
 	var toReschedule []string
+	var revision uint64
 	m.mu.Lock()
 	replaced = m.executors[provider]
 	m.executors[provider] = executor
+	if m.executorRevisions == nil {
+		m.executorRevisions = make(map[string]uint64)
+	}
+	m.executorRevisions[provider]++
+	revision = m.executorRevisions[provider]
 	for id, auth := range m.auths {
 		if auth != nil && strings.EqualFold(executorKeyFromAuth(auth), provider) {
 			toReschedule = append(toReschedule, id)
@@ -58,15 +127,33 @@ func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 		m.queueRefreshReschedule(id)
 	}
 
-	if replaced == nil || replaced == executor {
-		return
+	if replaced == nil || sameExecutor(replaced, executor) {
+		return revision
+	}
+	replacedOwned := unwrapProviderExecutor(replaced)
+	executorOwned := unwrapProviderExecutor(executor)
+	// Rewrapping the identical owned executor must not close its sessions.
+	if replacedOwned != nil && sameExecutor(replacedOwned, executorOwned) {
+		return revision
+	}
+	if replacedOwned != nil && executorOwned != nil && !sameExecutor(replacedOwned, executorOwned) {
+		if sharer, ok := replacedOwned.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executorOwned) {
+			return revision
+		}
 	}
 	if sharer, ok := replaced.(ExecutionSessionSharer); ok && sharer != nil && sharer.SharesExecutionSessionsWith(executor) {
-		return
+		return revision
 	}
 	if closer, ok := replaced.(ExecutionSessionCloser); ok && closer != nil {
 		closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+		return revision
 	}
+	if replacedOwned != nil && !sameExecutor(replacedOwned, replaced) {
+		if closer, ok := replacedOwned.(ExecutionSessionCloser); ok && closer != nil {
+			closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+		}
+	}
+	return revision
 }
 
 // UnregisterExecutor removes the executor associated with the provider key.
@@ -77,6 +164,10 @@ func (m *Manager) UnregisterExecutor(provider string) {
 	}
 	m.mu.Lock()
 	delete(m.executors, provider)
+	if m.executorRevisions == nil {
+		m.executorRevisions = make(map[string]uint64)
+	}
+	m.executorRevisions[provider]++
 	m.mu.Unlock()
 }
 
@@ -112,8 +203,11 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.UpdatedAt = now
 	cooldownStateChanged := normalizeModelStates(auth)
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	seedInitialForceCooldownDeadlines(auth)
+	if auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
+	} else if m.cooldownDisabledForAuth(auth) {
+		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	auth.EnsureIndex()
 	m.mu.Lock()
@@ -425,6 +519,12 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.Quota.ObservedAt = observation.ObservedAt
 			auth.Quota.Signals = observation.Signals
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+			auth.forceCooldownUntil = existing.forceCooldownUntil
+			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+			auth.credQuotaForceUntil = existing.credQuotaForceUntil
+			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 		}
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
@@ -452,6 +552,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					auth.Unavailable = false
 					auth.NextRetryAfter = time.Time{}
 					auth.cooldownRecordedSeq = 0
+					auth.forceCooldownUntil = time.Time{}
+					auth.quotaForceCooldownUntil = time.Time{}
+					auth.credentialRetryAfter = time.Time{}
+					auth.nonQuotaCooldownUntil = time.Time{}
 					auth.LastError = nil
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
@@ -511,6 +615,31 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.Quota.ObservedAt = observation.ObservedAt
 			auth.Quota.Signals = observation.Signals
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+			auth.forceCooldownUntil = existing.forceCooldownUntil
+			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+			auth.credQuotaForceUntil = existing.credQuotaForceUntil
+			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			auth.forceCooldownSeeded = existing.forceCooldownSeeded
+			if auth.Status == StatusActive {
+				auth.Status = existing.Status
+			}
+		} else if !credChanged && mode == updateModeReplace && existing.forceCooldownUntil.After(now) && !auth.NextRetryAfter.After(now) {
+			auth.Unavailable = existing.Unavailable
+			auth.NextRetryAfter = existing.NextRetryAfter
+			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
+			auth.forceCooldownUntil = existing.forceCooldownUntil
+			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+			auth.credQuotaForceUntil = existing.credQuotaForceUntil
+			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			auth.forceCooldownSeeded = existing.forceCooldownSeeded
+			if auth.LastError == nil && existing.LastError != nil {
+				auth.LastError = cloneError(existing.LastError)
+			}
+			if auth.StatusMessage == "" {
+				auth.StatusMessage = existing.StatusMessage
+			}
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
 			}
@@ -535,8 +664,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	}
 	auth.UpdatedAt = now
 	cooldownStateChanged = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) || cooldownStateChanged
-	if m.cooldownDisabledForAuth(auth) || auth.Disabled || auth.Status == StatusDisabled {
+	seedInitialForceCooldownDeadlines(auth)
+	if auth.Disabled || auth.Status == StatusDisabled {
 		cooldownStateChanged = clearCooldownStateForAuth(auth, now) || cooldownStateChanged
+	} else if m.cooldownDisabledForAuth(auth) {
+		cooldownStateChanged = clearDisabledCooldownStateForAuth(auth, now) || cooldownStateChanged
 	}
 	if existing.Metadata != nil {
 		if persistedHints, hasHints := existing.Metadata["antigravity_capability_hints"]; hasHints {
@@ -622,8 +754,17 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if m.scheduler != nil {
 		schedulerSnapshot = authClone.Clone()
 	}
+	shouldForgetWeighted := authClone.Disabled ||
+		authClone.Status == StatusDisabled ||
+		(authWeight(existingBeforeSave) > 0 && authWeight(authClone) <= 0) ||
+		executorKeyFromAuth(existingBeforeSave) != executorKeyFromAuth(authClone)
+	forgetEpoch := authClone.RegistrationEpoch
+	forgetGen := authClone.Generation
 	m.mu.Unlock()
 	_ = schedulerSnapshot
+	if shouldForgetWeighted {
+		m.forgetWeightedAuthUpTo(authClone.ID, forgetEpoch, forgetGen)
+	}
 	return auth.Clone(), true, cooldownStateChanged, nil
 }
 
@@ -698,6 +839,7 @@ func (m *Manager) RemoveIf(ctx context.Context, id string, predicate func(*Auth)
 	m.authEpochs[id]++
 	tombstoneEpoch := m.authEpochs[id]
 	m.mu.Unlock()
+	m.forgetWeightedAuthUpTo(id, tombstoneEpoch, ^uint64(0))
 	releaseMutation()
 
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
@@ -730,6 +872,22 @@ func (m *Manager) invalidateSessionAffinity(authID string) {
 	sel := m.Selector()
 	if invalidator, ok := sel.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
 		invalidator.InvalidateAuth(authID)
+	}
+}
+
+func (m *Manager) forgetWeightedAuthUpTo(authID string, maxEpoch, maxGen uint64) {
+	if m == nil || authID == "" {
+		return
+	}
+	sel := m.Selector()
+	if epochForgetter, ok := sel.(interface {
+		ForgetAuthUpTo(string, uint64, uint64)
+	}); ok && epochForgetter != nil {
+		epochForgetter.ForgetAuthUpTo(authID, maxEpoch, maxGen)
+		return
+	}
+	if forgetter, ok := sel.(interface{ ForgetAuth(string) }); ok && forgetter != nil {
+		forgetter.ForgetAuth(authID)
 	}
 }
 
@@ -772,6 +930,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		}
 		auth.EnsureIndex()
 		_ = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false)
+		seedInitialForceCooldownDeadlines(auth)
 		if len(auth.ModelStates) > 0 {
 			updateAggregatedAvailability(auth, now)
 		}
@@ -819,6 +978,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		for _, rt := range removedTombstones {
 			m.scheduler.RecordRemovalTombstone(rt.id, rt.epoch)
 		}
+	}
+	for _, rt := range removedTombstones {
+		m.forgetWeightedAuthUpTo(rt.id, rt.epoch, ^uint64(0))
 	}
 	m.structuralEpoch.Add(1)
 	m.syncScheduler()

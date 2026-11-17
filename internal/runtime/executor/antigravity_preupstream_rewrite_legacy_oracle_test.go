@@ -5,10 +5,10 @@ package executor
 // Do not refactor these helpers to call the production implementations.
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"

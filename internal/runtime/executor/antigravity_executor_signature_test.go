@@ -236,8 +236,8 @@ func TestAntigravitySensitiveWordsObfuscatesSystemInstructionOnly(t *testing.T) 
 	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"Use proxy safely"}]},"contents":[{"role":"user","parts":[{"text":"proxy remains unchanged"}]}]}}`)
 
 	got := executor.obfuscateSensitiveWords(payload)
-	if systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Use p\u200Broxy safely" {
-		t.Fatalf("system instruction = %q, want zero-width obfuscation", systemText)
+	if systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String(); systemText != "Use p\u034Froxy safely" {
+		t.Fatalf("system instruction = %q, want CGJ obfuscation", systemText)
 	}
 	if contentText := ojson.GetBytes(got, "request.contents.0.parts.0.text").String(); contentText != "proxy remains unchanged" {
 		t.Fatalf("content text = %q, want unchanged", contentText)
@@ -288,9 +288,208 @@ func TestAntigravityStreamObfuscatesSensitiveSystemInstruction(t *testing.T) {
 
 	body := <-captured
 	got := ojson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
-	want := "You are H\u200Bermes Agent, an intelligent AI assistant created by N\u200Bous Research."
+	want := "You are H\u034Fermes Agent, an intelligent AI assistant created by N\u034Fous R\u034Fesearch."
 	if got != want {
 		t.Fatalf("system instruction = %q, want %q; body=%s", got, want, body)
+	}
+}
+
+func TestAntigravityExecuteObfuscatesCodexIdentityWithCGJ(t *testing.T) {
+	captured := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11}}}`))
+	}))
+	defer server.Close()
+
+	executor := NewAntigravityExecutor(&config.Config{
+		Antigravity:  config.AntigravityConfig{SensitiveWords: []string{"codex", "GPT-5"}},
+		RequestRetry: 1,
+	})
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         false,
+	}
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{
+			name:    "instructions_field",
+			payload: `{"model":"gemini-4-carbon-high","instructions":"You are Codex, an agent based on GPT-5.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply only OK."}]}],"max_output_tokens":128,"stream":false}`,
+		},
+		{
+			name:    "initial_developer_message",
+			payload: `{"model":"gemini-4-carbon-high","input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"You are Codex, an agent based on GPT-5."}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply only OK."}]}],"max_output_tokens":128,"stream":false}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, errExec := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "gemini-4-carbon-high",
+				Payload: []byte(tc.payload),
+			}, opts)
+			if errExec != nil {
+				t.Fatalf("Execute() error = %v", errExec)
+			}
+			body := <-captured
+			got := ojson.GetBytes(body, "request.systemInstruction.parts.0.text").String()
+			want := "You are C\u034Fodex, an agent based on G\u034FPT-5."
+			if got != want {
+				t.Fatalf("systemInstruction = %q, want %q", got, want)
+			}
+			if strings.Contains(got, "\u200B") {
+				t.Fatalf("systemInstruction = %q, must not use U+200B", got)
+			}
+		})
+	}
+}
+
+func TestAntigravitySensitiveWordsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`antigravity:
+  sensitive-words:
+    - "Codex"
+    - "GPT-5"
+  sensitive-words-replace:
+    "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	executor := NewAntigravityExecutor(cfg)
+	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"You are Codex, an agent based on GPT-5. Avoid mentioning Codex."}]},"contents":[{"role":"user","parts":[{"text":"You are Codex, an agent based on GPT-5."}]}]}}`)
+
+	got := executor.obfuscateSensitiveWords(payload)
+	systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String()
+	wantSystem := "You are a helpful coding assistant. Avoid mentioning C\u034Fodex."
+	if systemText != wantSystem {
+		t.Fatalf("systemInstruction = %q, want %q", systemText, wantSystem)
+	}
+	contentText := ojson.GetBytes(got, "request.contents.0.parts.0.text").String()
+	if contentText != "You are Codex, an agent based on GPT-5." {
+		t.Fatalf("contents = %q, want unchanged", contentText)
+	}
+}
+
+func TestAntigravitySensitivePatternsReplaceFromYAML(t *testing.T) {
+	cfg, errParse := config.ParseConfigBytes([]byte(`antigravity:
+  sensitive-words:
+    - "omp"
+    - "RFC 2119"
+  sensitive-patterns-replace:
+    - pattern: '(?m)^RFC 2119[^\n]*\n?'
+      replacement: ""
+    - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+      replacement: ""
+    - pattern: '(?m)^You are omp[^\n]*\n?'
+      replacement: ""
+`))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	executor := NewAntigravityExecutor(cfg)
+	payload := []byte(`{"request":{"systemInstruction":{"parts":[{"text":"You are omp's trusted coding assistant.\nRFC 2119 keywords: MUST, REQUIRED.\n<system-conventions>\nRFC 2119 applies.\n</system-conventions>\nKeep this instruction for omp."}]},"contents":[{"role":"user","parts":[{"text":"You are omp's trusted coding assistant."}]}]}}`)
+
+	got := executor.obfuscateSensitiveWords(payload)
+	systemText := ojson.GetBytes(got, "request.systemInstruction.parts.0.text").String()
+	wantSystem := "Keep this instruction for o\u034Fmp."
+	if systemText != wantSystem {
+		t.Fatalf("systemInstruction = %q, want %q", systemText, wantSystem)
+	}
+	contentText := ojson.GetBytes(got, "request.contents.0.parts.0.text").String()
+	if contentText != "You are omp's trusted coding assistant." {
+		t.Fatalf("contents = %q, want unchanged", contentText)
+	}
+}
+
+func TestAntigravitySensitiveWordsReplaceOnlyPreservesToolsAndCountTokens(t *testing.T) {
+	captured := make(chan []byte, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read request body: %v", errRead)
+			return
+		}
+		captured <- body
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "countTokens") {
+			_, _ = w.Write([]byte(`{"totalTokens":42}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11}}}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			SensitiveWordsReplace: map[string]string{
+				"You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant.",
+			},
+		},
+		RequestRetry: 1,
+	}
+	executor := NewAntigravityExecutor(cfg)
+	m1 := executor.getSensitiveWordMatcher()
+	m2 := executor.getSensitiveWordMatcher()
+	if m1 == nil || m1 != m2 {
+		t.Fatal("expected cached matcher reuse when replacements are unchanged")
+	}
+
+	auth := &cliproxyauth.Auth{
+		Metadata: map[string]any{
+			"access_token": "token-123",
+			"expired":      time.Now().Add(24 * time.Hour).Format(time.RFC3339),
+			"project_id":   "project-1",
+		},
+		Attributes: map[string]string{"base_url": server.URL},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gemini-4-carbon-high",
+		Payload: []byte(`{"model":"gemini-4-carbon-high","instructions":"You are Codex, an agent based on GPT-5. Keep extra instructions intact.","tools":[{"type":"function","name":"run_codex_check","description":"Codex diagnostic tool","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}],"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"You are Codex, an agent based on GPT-5."}]}],"max_output_tokens":128,"stream":false}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	if _, errExec := executor.Execute(context.Background(), auth, req, opts); errExec != nil {
+		t.Fatalf("Execute() error = %v", errExec)
+	}
+	execBody := <-captured
+	wantInstruction := "You are a helpful coding assistant. Keep extra instructions intact."
+	if got := ojson.GetBytes(execBody, "request.systemInstruction.parts.0.text").String(); got != wantInstruction {
+		t.Fatalf("Execute systemInstruction = %q, want %q", got, wantInstruction)
+	}
+	if gotToolDesc := ojson.GetBytes(execBody, "request.tools.0.functionDeclarations.0.description").String(); gotToolDesc != "Codex diagnostic tool" {
+		t.Fatalf("tool description = %q, want unchanged", gotToolDesc)
+	}
+	if gotUser := ojson.GetBytes(execBody, "request.contents.0.parts.0.text").String(); gotUser != "You are Codex, an agent based on GPT-5." {
+		t.Fatalf("user content = %q, want unchanged", gotUser)
+	}
+
+	if _, errCount := executor.CountTokens(context.Background(), auth, req, opts); errCount != nil {
+		t.Fatalf("CountTokens() error = %v", errCount)
+	}
+	countBody := <-captured
+	if got := ojson.GetBytes(countBody, "request.systemInstruction.parts.0.text").String(); got != wantInstruction {
+		t.Fatalf("CountTokens systemInstruction = %q, want %q", got, wantInstruction)
 	}
 }
 

@@ -370,19 +370,60 @@ func (w *requestWriter) Push(target string, options *http.PushOptions) error {
 type hijackedConn struct {
 	net.Conn
 	ticket *request
+	closed sync.Once
 }
 
 func (c *hijackedConn) Close() error {
 	err := c.Conn.Close()
-	d := c.ticket.controller
-	// Hijacked sockets do not get a later net/http Closed callback.
-	d.ConnState(c.ticket.conn, http.StateClosed)
-	d.mu.Lock()
-	c.ticket.socketClosed = true
-	c.ticket.flushed = true
-	if c.ticket.returned {
-		d.dropLocked(c.ticket)
-	}
-	d.mu.Unlock()
+	c.markClosed()
 	return err
+}
+
+// NetConn lets callers that deliberately skip TLS close_notify, such as the
+// WebSocket tunnel, close the raw transport. The returned conn has no NetConn
+// of its own, so closing it still records the socket's close for the drain.
+func (c *hijackedConn) NetConn() net.Conn {
+	return &transportConn{Conn: rawConn(c.Conn), owner: c}
+}
+
+func (c *hijackedConn) markClosed() {
+	c.closed.Do(func() {
+		d := c.ticket.controller
+		// Hijacked sockets do not get a later net/http Closed callback.
+		d.ConnState(c.ticket.conn, http.StateClosed)
+		d.mu.Lock()
+		c.ticket.socketClosed = true
+		c.ticket.flushed = true
+		if c.ticket.returned {
+			d.dropLocked(c.ticket)
+		}
+		d.mu.Unlock()
+	})
+}
+
+type transportConn struct {
+	net.Conn
+	owner *hijackedConn
+}
+
+func (c *transportConn) Close() error {
+	err := c.Conn.Close()
+	c.owner.markClosed()
+	return err
+}
+
+// rawConn follows NetConn wrappers, such as TLS, down to the transport.
+func rawConn(conn net.Conn) net.Conn {
+	for range 16 {
+		wrapper, ok := conn.(interface{ NetConn() net.Conn })
+		if !ok {
+			return conn
+		}
+		inner := wrapper.NetConn()
+		if inner == nil || inner == conn {
+			return conn
+		}
+		conn = inner
+	}
+	return conn
 }

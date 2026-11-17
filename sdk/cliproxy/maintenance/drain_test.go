@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -279,6 +280,32 @@ func TestHijackedSocketCloseRemovesItsConnectionState(t *testing.T) {
 	if err := socket.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if len(d.connections) != 0 || len(d.requests) != 0 || !d.Status().Ready {
+		t.Fatal("retained closed socket state", d.Status())
+	}
+}
+
+func TestHijackedSocketRawTransportCloseRemovesItsConnectionState(t *testing.T) {
+	d := New()
+	conn, other := net.Pipe()
+	defer other.Close()
+	req := httptest.NewRequest("GET", "/v1/tunnel", nil)
+	req = req.WithContext(d.ConnContext(context.Background(), conn))
+	ticket, _ := d.admit(req)
+	ticket.hijacked = true
+	ticket.finish()
+	socket := &hijackedConn{Conn: tls.Server(conn, &tls.Config{}), ticket: ticket}
+	raw := socket.NetConn()
+	if _, wrapped := raw.(interface{ NetConn() net.Conn }); wrapped {
+		t.Fatal("raw transport must not expose another wrapper")
+	}
+	begin(t, d)
+	// Closing the raw transport skips TLS close_notify but must still release the drain.
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A later Close of the TLS wrapper must not account for the socket twice.
+	_ = socket.Close()
 	if len(d.connections) != 0 || len(d.requests) != 0 || !d.Status().Ready {
 		t.Fatal("retained closed socket state", d.Status())
 	}

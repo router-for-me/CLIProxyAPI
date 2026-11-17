@@ -379,3 +379,125 @@ func TestAPIKeyModelIsCompatUsesAuthoritativeHomeCapabilities(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyRequestThinkingReconcilesClaudeOpenAICompatToolCallReasoning(t *testing.T) {
+	toolCallWithPlaceholder := `{"model":"deepseek-v4-flash","reasoning_effort":"low","messages":[{"role":"assistant","content":"","reasoning_content":" ","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`
+	toolCallWithoutReasoning := `{"model":"deepseek-v4-flash","reasoning_effort":"none","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`
+	toolCallWithRealReasoning := `{"model":"deepseek-v4-flash","reasoning_effort":"low","messages":[{"role":"assistant","content":"","reasoning_content":"actual thought","tool_calls":[{"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}]}`
+
+	for _, tc := range []struct {
+		name          string
+		model         string
+		sourceBody    string
+		translated    string
+		fromFormat    string
+		toFormat      string
+		modelInfo     *registry.ModelInfo
+		wantExists    bool
+		wantReasoning string
+	}{
+		{
+			name:       "unsupported thinking model strips reasoning_effort and removes placeholder",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","thinking":{"type":"enabled","budget_tokens":1024}}`,
+			translated: toolCallWithPlaceholder,
+			fromFormat: "claude",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: nil,
+			},
+			wantExists: false,
+		},
+		{
+			name:       "model disallowing zero clamps none to active level and injects placeholder",
+			model:      "deepseek-v4-flash",
+			sourceBody: `{"model":"deepseek-v4-flash","thinking":{"type":"disabled"}}`,
+			translated: toolCallWithoutReasoning,
+			fromFormat: "claude",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels:      []string{"low", "medium", "high"},
+					ZeroAllowed: false,
+				},
+			},
+			wantExists:    true,
+			wantReasoning: " ",
+		},
+		{
+			name:       "real reasoning preserved when suffix disables thinking",
+			model:      "deepseek-v4-flash(none)",
+			sourceBody: `{"model":"deepseek-v4-flash(none)","thinking":{"type":"enabled","budget_tokens":1024}}`,
+			translated: toolCallWithRealReasoning,
+			fromFormat: "claude",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: true,
+				Thinking: &registry.ThinkingSupport{
+					Levels:      []string{"none", "low", "medium", "high"},
+					ZeroAllowed: true,
+				},
+			},
+			wantExists:    true,
+			wantReasoning: "actual thought",
+		},
+		{
+			name:       "non-compat model is untouched",
+			model:      "deepseek-v4-flash(high)",
+			sourceBody: `{"model":"deepseek-v4-flash(high)","thinking":{"type":"disabled"}}`,
+			translated: toolCallWithoutReasoning,
+			fromFormat: "claude",
+			toFormat:   "openai",
+			modelInfo: &registry.ModelInfo{
+				ID:       "deepseek-v4-flash",
+				IsCompat: false,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"low", "medium", "high"},
+				},
+			},
+			wantExists: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{
+				Model:   tc.model,
+				Payload: []byte(tc.sourceBody),
+				Metadata: map[string]any{
+					"cliproxy.resolved_api_key_model_info": tc.modelInfo,
+				},
+			}
+			opts := cliproxyexecutor.Options{
+				OriginalRequest: []byte(tc.sourceBody),
+			}
+
+			outBytes, errBytes := helps.ApplyRequestThinking([]byte(tc.translated), req, opts, tc.fromFormat, tc.toFormat, "openai-compatibility")
+			if errBytes != nil {
+				t.Fatalf("ApplyRequestThinking() error = %v", errBytes)
+			}
+			gotBytes := ojson.GetBytes(outBytes, "messages.0.reasoning_content")
+			if gotBytes.Exists() != tc.wantExists {
+				t.Fatalf("ApplyRequestThinking() reasoning_content exists = %v, want %v; out=%s", gotBytes.Exists(), tc.wantExists, outBytes)
+			}
+			if tc.wantExists && gotBytes.String() != tc.wantReasoning {
+				t.Fatalf("ApplyRequestThinking() reasoning_content = %q, want %q; out=%s", gotBytes.String(), tc.wantReasoning, outBytes)
+			}
+
+			doc := ojson.NewDocString(tc.translated)
+			if errDoc := helps.ApplyRequestThinkingDoc(doc, req, opts, tc.fromFormat, tc.toFormat, "openai-compatibility"); errDoc != nil {
+				t.Fatalf("ApplyRequestThinkingDoc() error = %v", errDoc)
+			}
+			gotDoc := doc.Get("messages.0.reasoning_content")
+			if gotDoc.Exists() != tc.wantExists {
+				t.Fatalf("ApplyRequestThinkingDoc() reasoning_content exists = %v, want %v; out=%s", gotDoc.Exists(), tc.wantExists, doc.String())
+			}
+			if tc.wantExists && gotDoc.String() != tc.wantReasoning {
+				t.Fatalf("ApplyRequestThinkingDoc() reasoning_content = %q, want %q; out=%s", gotDoc.String(), tc.wantReasoning, doc.String())
+			}
+		})
+	}
+}
