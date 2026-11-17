@@ -64,6 +64,50 @@ func TestQuotaRecoveryClaudeMinuteRestriction(t *testing.T) {
 				if got != nil || !reflect.DeepEqual(before, after) {
 					t.Fatal("healthy plan usage cleared an independent per-minute throttle")
 				}
+
+				// Version-one cooldown records from before deadline provenance
+				// retain the explicit minute error without independent fields.
+				// Save and restore that supported legacy shape independently
+				// of the live MarkResult checks above.
+				legacyID := a.ID + "-legacy"
+				deadline := time.Now().Add(retry)
+				store := NewFileCooldownStateStore(t.TempDir())
+				record := CooldownStateRecord{
+					Provider: "claude", AuthID: legacyID, Model: "claude-opus-5-5",
+					Status: "cooling", NextRetryAfter: deadline, Reason: "quota",
+					Quota:     QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: deadline},
+					LastError: &Error{HTTPStatus: 429, Message: string(raw)}, UpdatedAt: time.Now(),
+				}
+				if err := store.Save(context.Background(), []CooldownStateRecord{record}); err != nil {
+					t.Fatal(err)
+				}
+				restored := quotaProviderForceManager(t)
+				if _, err := restored.Register(context.Background(), &Auth{ID: legacyID, Provider: "claude", Status: StatusActive}); err != nil {
+					t.Fatal(err)
+				}
+				restored.SetCooldownStateStore(store)
+				if err := restored.RestoreCooldownStates(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				legacy, _ := restored.GetByID(legacyID)
+				legacyState := legacy.ModelStates["claude-opus-5-5"]
+				if legacyState == nil || !legacyState.Quota.Exceeded || legacyState.LastError == nil || legacyState.LastError.HTTPStatus != 429 || !quotaClaudePerMinuteError(legacyState.LastError) || !legacyState.NextRetryAfter.Equal(deadline) {
+					t.Fatal("legacy restore lost the explicit short minute restriction")
+				}
+				if !legacy.nonQuotaCooldownUntil.IsZero() || !legacyState.nonQuotaCooldownUntil.IsZero() || !effectiveAuthForceUntil(legacy).IsZero() || !effectiveCredQuotaForceUntil(legacy).IsZero() || !effectiveModelForceUntil(legacyState).IsZero() || legacyState.credentialQuotaShadow != nil {
+					t.Fatal("legacy fixture did not isolate explicit minute-error attribution")
+				}
+				if QuotaRecoveryCandidate(legacy) {
+					t.Fatal("legacy explicit minute restriction accepted as subscription quota")
+				}
+				reset, _, err := restored.ResetQuotaIfUnchanged(context.Background(), legacy)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unchanged, _ := restored.GetByID(legacyID)
+				if reset != nil || !reflect.DeepEqual(legacy, unchanged) {
+					t.Fatal("plan usage cleared the legacy explicit minute restriction")
+				}
 			}
 		})
 	}
