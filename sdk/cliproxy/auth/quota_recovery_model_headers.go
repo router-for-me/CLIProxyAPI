@@ -3,6 +3,8 @@ package auth
 import (
 	"strings"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
@@ -65,6 +67,27 @@ func (m *Manager) quotaRecoveryModelHeadersMatchLocked(auth *Auth) bool {
 				return false
 			}
 			finalizedModels = append(finalizedModels, models...)
+		}
+		// The SDK can restore its execution model after auth selection. Include
+		// both selection names and candidates as possible openai-image routes. The
+		// snapshot has no source format or body, so this is a possible builder
+		// identity, not evidence that the failed call used that format. Even
+		// DisableImageGenerationAll only guards HTTP handlers, not this SDK path.
+		for _, model := range append([]string{route, requested}, candidates...) {
+			imageModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+			if idx := strings.LastIndex(imageModel, "/"); idx >= 0 {
+				imageModel = strings.TrimSpace(imageModel[idx+1:])
+			}
+			if !internalconfig.CodexImageModelUsesDirectEndpoint(imageModel) {
+				finalizedModels = append(finalizedModels, internalconfig.ResolveCodexHostedImageBaseModel(routing.config, func(model string) bool {
+					slug := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+					if idx := strings.LastIndex(slug, "/"); idx >= 0 {
+						slug = strings.TrimSpace(slug[idx+1:])
+					}
+					return strings.HasPrefix(slug, "gpt-6") || registry.CodexClientModelUsesResponsesLite(slug)
+				}))
+				break
+			}
 		}
 		for _, model := range finalizedModels {
 			for key, value := range registry.ModelOverrideHeaders(model) {

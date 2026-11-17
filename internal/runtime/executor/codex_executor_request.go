@@ -864,17 +864,7 @@ func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *clipro
 }
 
 func resolveCodexGPTImage2BaseModel(cfg *config.Config) string {
-	if cfg == nil {
-		return codexOpenAIImagesMainModel
-	}
-	model := strings.TrimSpace(cfg.GPTImage2BaseModel)
-	if model == "" {
-		return codexOpenAIImagesMainModel
-	}
-	if !strings.HasPrefix(strings.ToLower(model), "gpt-") || isCodexResponsesLiteModel(model) {
-		return codexOpenAIImagesMainModel
-	}
-	return model
+	return config.ResolveCodexHostedImageBaseModel(cfg, isCodexResponsesLiteModel)
 }
 
 // normalizeCodexImageGenerationToolsDoc strips parameters rejected by the
