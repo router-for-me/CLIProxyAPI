@@ -1319,6 +1319,17 @@ type ExecutorRequest struct {
 	HTTPClient HostHTTPClient `json:"-"`
 }
 
+// UsageAttribution reports optional upstream credential identity
+// resolved by a plugin executor when no built-in credential was selected upfront.
+type UsageAttribution struct {
+	// AuthIndex identifies the selected credential index.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// AuthType identifies the selected credential type (e.g. "oauth", "api_key").
+	AuthType string `json:"auth_type,omitempty"`
+	// Source identifies the upstream account, project, or credential label.
+	Source string `json:"source,omitempty"`
+}
+
 // ExecutorResponse returns a non-streaming executor result.
 type ExecutorResponse struct {
 	// Payload contains the raw response body.
@@ -1327,6 +1338,8 @@ type ExecutorResponse struct {
 	Headers http.Header
 	// Metadata is an extension bag for executor-specific response data.
 	Metadata map[string]any
+	// Attribution reports optional upstream credential identity for usage tracking.
+	Attribution *UsageAttribution `json:"attribution,omitempty"`
 }
 
 // ExecutorStreamResponse returns a streaming executor result.
@@ -1335,6 +1348,8 @@ type ExecutorStreamResponse struct {
 	Headers http.Header
 	// Chunks yields streaming payload chunks until the channel closes.
 	Chunks <-chan ExecutorStreamChunk
+	// Attribution reports optional upstream credential identity for usage tracking.
+	Attribution *UsageAttribution `json:"attribution,omitempty"`
 }
 
 // ExecutorStreamChunk carries one streaming payload chunk or an error.

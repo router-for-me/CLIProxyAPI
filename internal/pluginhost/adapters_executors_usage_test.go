@@ -1308,3 +1308,118 @@ func waitPluginUsageRecord(t *testing.T, ch <-chan pluginapi.UsageRecord) plugin
 		return pluginapi.UsageRecord{}
 	}
 }
+
+func TestExecutorAdapterPropagatesAttributionAndPluginExecutorType(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("")
+	registerTestUsagePlugin(t, "test-executor-adapter-plugin-type", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "custom-plugin-id"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload:  []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+				Metadata: map[string]any{"k": "v"},
+				Attribution: &pluginapi.UsageAttribution{
+					AuthIndex: " idx-1 ",
+					AuthType:  " oauth ",
+					Source:    " acct@example.com ",
+				},
+			}, nil
+		},
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			ch := make(chan pluginapi.ExecutorStreamChunk, 1)
+			ch <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			close(ch)
+			return pluginapi.ExecutorStreamResponse{
+				Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Attribution: &pluginapi.UsageAttribution{
+					AuthIndex: "idx-stream",
+					AuthType:  "api_key",
+					Source:    "stream-acct",
+				},
+				Chunks: ch,
+			}, nil
+		},
+	}
+
+	executorRecord.plugin.Capabilities.Executor = exec
+	executorRecord.plugin.Capabilities.ExecutorInputFormats = []string{"openai"}
+	executorRecord.plugin.Capabilities.ExecutorOutputFormats = []string{"openai"}
+	host = newHostWithRecords(executorRecord)
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+
+	req := coreexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, attr, errExec := host.ExecutePluginExecutorWithAttribution(context.Background(), "custom-plugin-id", req, opts)
+	if errExec != nil {
+		t.Fatalf("ExecutePluginExecutorWithAttribution error = %v", errExec)
+	}
+	if attr == nil ||
+		attr.AuthIndex != " idx-1 " ||
+		attr.AuthType != " oauth " ||
+		attr.Source != " acct@example.com " {
+		t.Fatalf("attr = %+v", attr)
+	}
+
+	streamRes, streamAttr, errStream := host.ExecutePluginExecutorStreamWithAttribution(context.Background(), "custom-plugin-id", req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecutePluginExecutorStreamWithAttribution error = %v", errStream)
+	}
+	if streamAttr == nil ||
+		streamAttr.AuthIndex != "idx-stream" ||
+		streamAttr.AuthType != "api_key" ||
+		streamAttr.Source != "stream-acct" {
+		t.Fatalf("streamAttr = %+v", streamAttr)
+	}
+	for range streamRes.Chunks {
+	}
+
+	// Verify auth-backed executions report "plugin:<id>", preserve auth credentials, and apply source attribution.
+	auth := &coreauth.Auth{
+		ID:         "auth-1",
+		Provider:   "plugin-provider",
+		FileName:   "auth-1.json",
+		Attributes: map[string]string{coreauth.AttributeAuthKind: "oauth"},
+	}
+	if _, errAuthExec := adapter.Execute(context.Background(), auth, req, opts); errAuthExec != nil {
+		t.Fatalf("Execute(auth!=nil) error = %v", errAuthExec)
+	}
+	rec := plugin.waitRecord(t, 2*time.Second)
+	if rec.ExecutorType != "plugin:custom-plugin-id" ||
+		rec.Provider != "plugin-provider" ||
+		rec.AuthID != "auth-1" ||
+		rec.AuthIndex != auth.EnsureIndex() ||
+		rec.AuthType != "oauth" ||
+		rec.Source != "acct@example.com" {
+		t.Fatalf("auth-backed Execute rec = %+v", rec)
+	}
+
+	authStreamRes, errAuthStream := adapter.ExecuteStream(context.Background(), auth, req, opts)
+	if errAuthStream != nil {
+		t.Fatalf("ExecuteStream(auth!=nil) error = %v", errAuthStream)
+	}
+	for range authStreamRes.Chunks {
+	}
+	streamRec := plugin.waitRecord(t, 2*time.Second)
+	if streamRec.ExecutorType != "plugin:custom-plugin-id" ||
+		streamRec.Provider != "plugin-provider" ||
+		streamRec.AuthID != "auth-1" ||
+		streamRec.AuthIndex != auth.EnsureIndex() ||
+		streamRec.AuthType != "oauth" ||
+		streamRec.Source != "stream-acct" {
+		t.Fatalf("auth-backed ExecuteStream rec = %+v", streamRec)
+	}
+}
