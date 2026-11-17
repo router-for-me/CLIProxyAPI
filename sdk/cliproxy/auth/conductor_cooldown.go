@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/MoeForge/moego/regexp"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -1914,7 +1915,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(result.Error) && next.After(state.nonQuotaCooldownUntil) {
 									state.nonQuotaCooldownUntil = next
 								}
-								if strings.EqualFold(auth.Provider, "codex") && !isForceResult && !quotaCodexSubscriptionError(result.Error) {
+								if strings.EqualFold(auth.Provider, "codex") && !isForceResult && !isPositiveQuotaRejectionError(result.Error) {
 									ownModelNonQuotaDeadline = next
 								}
 								if isForceResult {
@@ -3138,6 +3139,25 @@ func resultErrorFromError(err error) *Error {
 	}
 	if resultErr.HTTPStatus == 0 {
 		resultErr.HTTPStatus = statusCodeFromError(err)
+	}
+	// Preserve an explicit quota classification carried only by ResponseBody.
+	// Keep existing codes and the public message intact; subscription reset
+	// eligibility continues to use its separate conservative classifier.
+	if resultErr.Code == "" && isPositiveQuotaRejectionError(err) {
+		var bodyProvider interface{ ResponseBody() []byte }
+		if errors.As(err, &bodyProvider) && bodyProvider != nil {
+			body := bodyProvider.ResponseBody()
+			for _, path := range []string{
+				"error.type", "type", "response.error.type", "body.error.type",
+				"error.code", "code", "response.error.code", "body.error.code",
+			} {
+				code := ojson.GetBytesNoCopy(body, path).String()
+				if isPositiveQuotaClassificationCode(code) {
+					resultErr.Code = code
+					break
+				}
+			}
+		}
 	}
 	type tosMetadataProvider interface {
 		TOSAppealMetadata() map[string]string
@@ -4414,7 +4434,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 						}
 					}
 				}
-				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !quotaCodexSubscriptionError(resultErr) {
+				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !isPositiveQuotaRejectionError(resultErr) {
 					ownAuthNonQuotaDeadline = next
 				}
 				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
