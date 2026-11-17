@@ -113,6 +113,17 @@ func TestQuotaRecoverySavedCredentialIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			rawAfterEdit, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persistedAfterEdit map[string]any
+			if err = json.Unmarshal(rawAfterEdit, &persistedAfterEdit); err != nil {
+				t.Fatal(err)
+			}
+			if persistedAfterEdit["after_rejected_recovery"] != "ordinary-edit" {
+				t.Fatal("aborted recovery watermark suppressed the ordinary edit before refresh")
+			}
 			refreshed := edited.Clone()
 			refreshed.Metadata["after_rejected_refresh"] = "refresh-edit"
 			if _, err = manager.UpdateRefreshedAuth(ctx, edited, refreshed); err != nil {
