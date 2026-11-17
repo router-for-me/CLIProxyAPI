@@ -3,10 +3,11 @@ package auth
 import (
 	"context"
 	"fmt"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"reflect"
 	"testing"
 	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestQuotaRecoveryClaudeRetainedMinute(t *testing.T) {
