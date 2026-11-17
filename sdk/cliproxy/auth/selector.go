@@ -2107,6 +2107,9 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 }
 
 func sessionAffinityLogID(id string) string {
+	if id == "" {
+		return ""
+	}
 	digest := sha256.Sum256([]byte(id))
 	return fmt.Sprintf("%x", digest[:12])
 }

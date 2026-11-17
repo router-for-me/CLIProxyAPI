@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+func TestSessionAffinityLogIDPreservesMissingIdentity(t *testing.T) {
+	if got := sessionAffinityLogID(""); got != "" {
+		t.Fatalf("missing identity logged as a real session: %q", got)
+	}
+}
+
 func TestSessionAffinityLogIDDistinguishesClaudeSessionsAndAgents(t *testing.T) {
 	ids := []string{
 		"claude:aaaaaaaa-1111-4111-8111-111111111111",
