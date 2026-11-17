@@ -87,10 +87,11 @@ jobs:
             cat "$changelog_notes_file"
           } > "$updated_notes_file"
 
+          prerelease_args=(); if [[ "$GITHUB_REF_NAME" == *-rc* ]]; then prerelease_args=(--prerelease); fi # proxx: -rc tags are prereleases, never "latest"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file" "${prerelease_args[@]}" # proxx: prerelease flag
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file"
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$updated_notes_file" "${prerelease_args[@]}" # proxx: prerelease flag
           fi
 
   build-hosted:
@@ -699,6 +700,13 @@ jobs:
       - build-linux-no-plugin
       - build-freebsd
     steps:
+      - uses: actions/checkout@v6 # proxx: cmd/proxx-sign signs checksums.txt
+        with:
+          path: src
+      - uses: actions/setup-go@v6 # proxx: cmd/proxx-sign signs checksums.txt
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: src/go.sum
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -706,6 +714,7 @@ jobs:
       - name: Publish final checksums
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROXX_RELEASE_SIGNING_KEY: ${{ secrets.PROXX_RELEASE_SIGNING_KEY }} # proxx: ed25519 seed (base64)
         run: |
           set -euo pipefail
           cd dist
@@ -716,4 +725,6 @@ jobs:
             exit 0
           fi
           sha256sum "${archives[@]}" | sort -k2 > checksums.txt
-          gh release upload "$GITHUB_REF_NAME" checksums.txt --clobber
+          go -C ../src run ./cmd/proxx-sign "$PWD/checksums.txt" > checksums.txt.sig # proxx: sign checksums.txt (self-update, ADR 0007)
+          go -C ../src run ./cmd/proxx-sign -verify "$(sed -n 's/^[[:space:]]*publicKeyB64[[:space:]]*=[[:space:]]*"\(.*\)"$/\1/p' ../src/internal/proxx/selfupdate/source.go)" "$PWD/checksums.txt" < checksums.txt.sig # proxx: the embedded key must verify it
+          gh release upload "$GITHUB_REF_NAME" checksums.txt checksums.txt.sig --clobber # proxx: + checksums.txt.sig

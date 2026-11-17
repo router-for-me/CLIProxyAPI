@@ -364,6 +364,9 @@ func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL strin
 	if err = json.Unmarshal(data, &release); err != nil {
 		return nil, "", fmt.Errorf("decode release response: %w", err)
 	}
+	if errCompat := proxxPanelCompatible(data); errCompat != nil { // proxx: skip panels that need a newer backend
+		return nil, "", errCompat
+	}
 
 	for i := range release.Assets {
 		asset := &release.Assets[i]

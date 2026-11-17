@@ -16,6 +16,9 @@ type ProxxConfig struct {
 
 	// RequestLogs configures the request log viewer (retention of request-log files).
 	RequestLogs ProxxRequestLogsConfig `yaml:"request-logs,omitempty" json:"request-logs,omitempty"`
+
+	// Update configures the self-updater (ADR 0007).
+	Update ProxxUpdateConfig `yaml:"update,omitempty" json:"update,omitempty"`
 }
 
 // DefaultProxxRequestLogsMaxTotalSizeMB is the request log retention cap when unset (10 GB).
@@ -94,4 +97,35 @@ type ProxxUsageConfig struct {
 	File string `yaml:"file,omitempty" json:"file,omitempty"`
 	// RecentLimit caps the in-memory recent-request ring buffer (default 500).
 	RecentLimit int `yaml:"recent-limit,omitempty" json:"recent-limit,omitempty"`
+}
+
+// Self-update defaults (ADR 0007).
+const (
+	DefaultProxxUpdateIntervalHours = 24
+	// DefaultProxxShutdownTimeoutSeconds is the drain budget proxx uses when server.shutdown-timeout is 0.
+	DefaultProxxShutdownTimeoutSeconds = 120
+)
+
+// ProxxUpdateConfig configures the self-updater (`proxx.update`). The update source and the signing
+// key are build-time constants and are deliberately not configurable here.
+type ProxxUpdateConfig struct {
+	// Check enables the periodic release check. Unset means true.
+	Check *bool `yaml:"check,omitempty" json:"check,omitempty"`
+	// IntervalHours is the time between periodic checks. Unset or <= 0 means 24.
+	IntervalHours *int `yaml:"interval-hours,omitempty" json:"interval-hours,omitempty"`
+	// AutoApply downloads, verifies and applies a found update at the next idle moment inside Window.
+	AutoApply bool `yaml:"auto-apply,omitempty" json:"auto-apply,omitempty"`
+	// Window limits auto-apply to "HH:MM-HH:MM" local time (may wrap midnight). Empty means any time.
+	Window string `yaml:"window,omitempty" json:"window,omitempty"`
+}
+
+// CheckEnabled resolves Check (default true).
+func (c ProxxUpdateConfig) CheckEnabled() bool { return c.Check == nil || *c.Check }
+
+// Interval resolves IntervalHours (default 24).
+func (c ProxxUpdateConfig) Interval() int {
+	if c.IntervalHours == nil || *c.IntervalHours <= 0 {
+		return DefaultProxxUpdateIntervalHours
+	}
+	return *c.IntervalHours
 }
