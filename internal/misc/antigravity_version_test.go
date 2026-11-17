@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -12,11 +13,11 @@ import (
 func overrideAntigravityVersionURLsForTest(t *testing.T, hubManifestURL string) func() {
 	t.Helper()
 
-	oldHubManifest := antigravityHubLatestManifestURL
-	antigravityHubLatestManifestURL = hubManifestURL
+	oldHubManifest := antigravityHubManifestURLOverride
+	antigravityHubManifestURLOverride = hubManifestURL
 
 	return func() {
-		antigravityHubLatestManifestURL = oldHubManifest
+		antigravityHubManifestURLOverride = oldHubManifest
 	}
 }
 
@@ -62,15 +63,23 @@ func TestAntigravityFallbackVersionMeetsBackendFloor(t *testing.T) {
 	}
 }
 
+
+// hubUserAgent builds the UA the official Hub reports for this host: real
+// OS/arch, and the newest known changelist when the version is unmapped.
+func hubUserAgent(version, cl string) string {
+	return fmt.Sprintf("antigravity/hub/%s (aidev_client; os_type=%s; arch=%s; cl=%s)",
+		version, runtime.GOOS, runtime.GOARCH, cl)
+}
+
 func TestAntigravityUserAgentUsesHubFamily(t *testing.T) {
 	for _, tc := range []struct {
 		version string
 		want    string
 	}{
-		{"2.23.0", "antigravity/hub/2.23.0 (aidev_client; os_type=darwin; arch=arm64; cl=998057262)"},
-		{"2.24.0", "antigravity/hub/2.24.0 (aidev_client; os_type=darwin; arch=arm64; cl=1000335682)"},
-		{"2.29.0", "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)"},
-		{"2.30.0", "antigravity/hub/2.30.0 (aidev_client; os_type=darwin; arch=arm64)"},
+		{"2.23.0", hubUserAgent("2.23.0", "998057262")},
+		{"2.24.0", hubUserAgent("2.24.0", "1000335682")},
+		{"2.29.0", hubUserAgent("2.29.0", "1013060670")},
+		{"2.30.0", hubUserAgent("2.30.0", antigravityHubChangelists[antigravityFallbackVersion])},
 	} {
 		t.Run(tc.version, func(t *testing.T) {
 			restore := overrideAntigravityVersionCacheForTest(t, tc.version, time.Now().Add(time.Hour))
@@ -110,7 +119,7 @@ func TestAntigravityLoadCodeAssistUserAgentUsesShortUA(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 (aidev_client; os_type=darwin; arch=arm64)"
+	want := hubUserAgent("2.2.1", antigravityHubChangelists[antigravityFallbackVersion])
 	if got := AntigravityLoadCodeAssistUserAgent(""); got != want {
 		t.Fatalf("AntigravityLoadCodeAssistUserAgent() = %q, want %q", got, want)
 	}
@@ -123,7 +132,7 @@ func TestAntigravityOnboardUserUserAgentUsesLongUA(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "2.2.1", time.Now().Add(time.Hour))
 	defer restore()
 
-	want := "antigravity/hub/2.2.1 (aidev_client; os_type=darwin; arch=arm64) google-api-nodejs-client/10.3.0"
+	want := hubUserAgent("2.2.1", antigravityHubChangelists[antigravityFallbackVersion]) + " google-api-nodejs-client/10.3.0"
 	if got := AntigravityOnboardUserUserAgent(""); got != want {
 		t.Fatalf("AntigravityOnboardUserUserAgent() = %q, want %q", got, want)
 	}

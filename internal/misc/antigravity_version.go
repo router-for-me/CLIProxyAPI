@@ -30,10 +30,17 @@ const (
 
 const antigravityHubManifestBase = "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/"
 
+// antigravityHubManifestURLOverride replaces the per-platform manifest URL when
+// non-empty. Tests use it to point the resolver at a local server.
+var antigravityHubManifestURLOverride string
+
 // antigravityHubLatestManifestURL returns the updater manifest for the host
 // platform. The official Hub reports the real OS/arch in its UA; hardcoding
 // darwin/arm64 makes a Linux or Windows host stand out.
 func antigravityHubLatestManifestURL() string {
+	if antigravityHubManifestURLOverride != "" {
+		return antigravityHubManifestURLOverride
+	}
 	switch runtime.GOOS + "/" + runtime.GOARCH {
 	case "darwin/arm64":
 		return antigravityHubManifestBase + "latest-arm64-mac.yml"
