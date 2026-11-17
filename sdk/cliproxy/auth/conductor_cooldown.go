@@ -1944,6 +1944,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							if !disableCooling {
+								independentQuota := state.Quota
+								independentQuota.BackoffLevel = backoffLevel
+								independentNext := independentRateLimitDeadline(independentQuota, result.RetryAfter, now)
 								reusedOpenWindow := false
 								var baseBackoffBefore int
 								if result.RetryAfter != nil {
@@ -1967,11 +1970,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
-								if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(result.Error) && next.After(state.nonQuotaCooldownUntil) {
-									state.nonQuotaCooldownUntil = next
+								if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(result.Error) && independentNext.After(state.nonQuotaCooldownUntil) {
+									state.nonQuotaCooldownUntil = independentNext
 								}
 								if strings.EqualFold(auth.Provider, "codex") && !isForceResult && !isCodexQuotaRejectionResult(result.Error) {
-									ownModelNonQuotaDeadline = next
+									ownModelNonQuotaDeadline = independentNext
 								}
 								if isForceResult {
 									if result.RetryAfter != nil || !reusedOpenWindow {
@@ -4471,6 +4474,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.Quota.Reason = "quota"
 			var next time.Time
 			if !disableCooling {
+				independentNext := independentRateLimitDeadline(auth.Quota, retryAfter, now)
 				if retryAfter != nil {
 					cooldown := *retryAfter
 					if cooldown < minQuotaCooldownFloor {
@@ -4495,10 +4499,10 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 					}
 				}
 				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !isCodexQuotaRejectionResult(resultErr) {
-					ownAuthNonQuotaDeadline = next
+					ownAuthNonQuotaDeadline = independentNext
 				}
-				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
-					auth.nonQuotaCooldownUntil = next
+				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && independentNext.After(auth.nonQuotaCooldownUntil) {
+					auth.nonQuotaCooldownUntil = independentNext
 				}
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
