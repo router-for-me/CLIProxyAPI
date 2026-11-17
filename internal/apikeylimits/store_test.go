@@ -2,6 +2,7 @@ package apikeylimits
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -219,5 +220,97 @@ func TestAddRejectedCountsSeparately(t *testing.T) {
 	restored.load()
 	if r := restored.Usage("k")[Total]; r.Rejected != 3 || r.RejectedReasons["api_key_expired"] != 1 {
 		t.Fatalf("restored rejections = %+v", r)
+	}
+}
+
+func TestNormalizeTokensAcrossConventions(t *testing.T) {
+	// Anthropic: input_tokens excludes cache reads/writes; the executor builds an
+	// independent breakdown.
+	claude := coreusage.Detail{
+		InputTokens: 100, CacheReadTokens: 900, CachedTokens: 900, CacheCreationTokens: 50, OutputTokens: 20,
+		TokenBreakdown: coreusage.NewIndependentTokenBreakdown(100, 900, 50, 20, 0, 1070),
+	}
+	if got := normalizeTokens(claude); got != (tokenCounts{input: 1050, cacheRead: 900, cacheWrite: 50, output: 20}) {
+		t.Fatalf("claude = %+v", got)
+	}
+	// OpenAI/Codex: input_tokens already includes cached tokens.
+	codex := coreusage.Detail{
+		InputTokens: 1000, CachedTokens: 900, CacheReadTokens: 900, OutputTokens: 20,
+		TokenBreakdown: coreusage.NewSubsetTokenBreakdown(1000, 900, 0, 20, 0, 1020),
+	}
+	if got := normalizeTokens(codex); got != (tokenCounts{input: 1000, cacheRead: 900, output: 20}) {
+		t.Fatalf("codex = %+v", got)
+	}
+	// Without a breakdown, cache fields larger than input mean they were reported separately.
+	raw := coreusage.Detail{InputTokens: 10, CacheReadTokens: 500, CacheCreationTokens: 5, OutputTokens: 3}
+	if got := normalizeTokens(raw); got != (tokenCounts{input: 515, cacheRead: 500, cacheWrite: 5, output: 3}) {
+		t.Fatalf("raw anthropic = %+v", got)
+	}
+	rawOpenAI := coreusage.Detail{InputTokens: 100, CachedTokens: 40, OutputTokens: 3}
+	if got := normalizeTokens(rawOpenAI); got != (tokenCounts{input: 100, cacheRead: 40, output: 3}) {
+		t.Fatalf("raw openai = %+v", got)
+	}
+}
+
+func TestHandleUsageClaudeCountsCacheInInput(t *testing.T) {
+	s := newTestStore(time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC))
+	s.HandleUsage(context.Background(), coreusage.Record{
+		APIKey: "k", IsNativeKey: true, Model: "claude-opus-5-5",
+		Detail: coreusage.Detail{
+			InputTokens: 100, CacheReadTokens: 900, CachedTokens: 900, CacheCreationTokens: 50, OutputTokens: 20,
+			TotalTokens:    1070,
+			TokenBreakdown: coreusage.NewIndependentTokenBreakdown(100, 900, 50, 20, 0, 1070),
+		},
+	})
+	m := s.Usage("k")[Day].Models["claude-opus-5-5"]
+	if m.InputTokens != 1050 || m.CachedTokens != 900 || m.CacheWriteTokens != 50 || m.OutputTokens != 20 || m.Tokens != 1070 {
+		t.Fatalf("claude model usage = %+v", m)
+	}
+}
+
+func TestRecordCostClaudeUsesCacheReads(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ModelPrices = []config.ModelPrice{{Model: "claude-*", Input: 10, Output: 50, CachedInput: 1}}
+	rec := coreusage.Record{Model: "claude-opus-5-5", Detail: coreusage.Detail{
+		InputTokens: 100_000, CacheReadTokens: 900_000, CachedTokens: 900_000, OutputTokens: 10_000,
+		TokenBreakdown: coreusage.NewIndependentTokenBreakdown(100_000, 900_000, 0, 10_000, 0, 1_010_000),
+	}}
+	// 100k*10 + 900k*1 + 10k*50 per 1M = 1.0 + 0.9 + 0.5 = 2.4 USD
+	if got := RecordCost(cfg, rec); got < 2.399 || got > 2.401 {
+		t.Fatalf("cost = %v, want 2.4", got)
+	}
+}
+
+func TestLoadMigratesV1AnthropicInput(t *testing.T) {
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "api-key-usage.json")
+	fp := Fingerprint("k")
+	v1 := `{"version":1,"counters":{"` + fp + `":{"total":{"start":"0001-01-01T00:00:00Z","tokens":0,"cost":0,"requests":3,` +
+		`"models":{"claude-opus-5-5":{"requests":1,"input_tokens":117,"output_tokens":5,"cached_tokens":1800000,"tokens":1800122,"cost":0},` +
+		`"gpt-6.1-sol":{"requests":1,"input_tokens":1000,"output_tokens":5,"cached_tokens":900,"tokens":1005,"cost":0},` +
+		`"other-proxy":{"requests":1,"input_tokens":10,"output_tokens":5,"cached_tokens":40,"tokens":55,"cost":0}}}}},` +
+		`"history":{"` + fp + `":{"daily":{"2026-11-17":{"claude-opus-5-5":{"requests":1,"input_tokens":117,"output_tokens":5,"cached_tokens":1800000,"tokens":1800122,"cost":0}}}}}}`
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestStore(now)
+	s.path = path
+	s.load()
+	models := s.Usage("k")[Total].Models
+	if models["claude-opus-5-5"].InputTokens != 1_800_117 || models["gpt-6.1-sol"].InputTokens != 1000 ||
+		models["other-proxy"].InputTokens != 50 {
+		t.Fatalf("migrated models = claude %+v gpt %+v other %+v", models["claude-opus-5-5"], models["gpt-6.1-sol"], models["other-proxy"])
+	}
+	if daily, _ := s.History("k"); len(daily) != 1 || daily[0].Models["claude-opus-5-5"].InputTokens != 1_800_117 {
+		t.Fatalf("migrated history = %+v", daily)
+	}
+	// Re-saving writes version 2, which must not be migrated again.
+	s.dirty = true
+	s.Flush()
+	again := newTestStore(now)
+	again.path = path
+	again.load()
+	if got := again.Usage("k")[Total].Models["claude-opus-5-5"].InputTokens; got != 1_800_117 {
+		t.Fatalf("v2 reload input = %d", got)
 	}
 }

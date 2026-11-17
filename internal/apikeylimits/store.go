@@ -35,14 +35,19 @@ var windows = []Window{Day, Week, Month, Total}
 
 // ModelCounter holds one model's usage within a window.
 type ModelCounter struct {
-	Requests        int64   `json:"requests"`
-	Failed          int64   `json:"failed,omitempty"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	CachedTokens    int64   `json:"cached_tokens,omitempty"`
-	ReasoningTokens int64   `json:"reasoning_tokens,omitempty"`
-	Tokens          int64   `json:"tokens"`
-	Cost            float64 `json:"cost"`
+	Requests int64 `json:"requests"`
+	Failed   int64 `json:"failed,omitempty"`
+	// InputTokens is all prompt input, including cache reads and cache writes,
+	// whatever the upstream's own convention (see normalizeTokens).
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	// CachedTokens is the part of InputTokens read from the prompt cache.
+	CachedTokens int64 `json:"cached_tokens,omitempty"`
+	// CacheWriteTokens is the part of InputTokens written to the prompt cache.
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
+	Tokens           int64   `json:"tokens"`
+	Cost             float64 `json:"cost"`
 }
 
 // Counter holds usage accumulated in one window.
@@ -88,14 +93,15 @@ func (c *Counter) clone() Counter {
 
 // Usage is a single request's contribution to the counters.
 type Usage struct {
-	Model           string
-	Failed          bool
-	InputTokens     int64
-	OutputTokens    int64
-	CachedTokens    int64
-	ReasoningTokens int64
-	Tokens          int64
-	Cost            float64
+	Model            string
+	Failed           bool
+	InputTokens      int64
+	OutputTokens     int64
+	CachedTokens     int64
+	CacheWriteTokens int64
+	ReasoningTokens  int64
+	Tokens           int64
+	Cost             float64
 }
 
 type keyCounters map[Window]*Counter
@@ -342,6 +348,7 @@ func addModel(models map[string]*ModelCounter, u Usage) {
 	m.InputTokens += max(u.InputTokens, 0)
 	m.OutputTokens += max(u.OutputTokens, 0)
 	m.CachedTokens += max(u.CachedTokens, 0)
+	m.CacheWriteTokens += max(u.CacheWriteTokens, 0)
 	m.ReasoningTokens += max(u.ReasoningTokens, 0)
 	m.Tokens += max(u.Tokens, 0)
 	if u.Cost > 0 {
@@ -511,20 +518,53 @@ func (s *Store) HandleUsage(_ context.Context, record coreusage.Record) {
 		cfg = cfgFn()
 	}
 	d := record.Detail
-	cached := d.CachedTokens
-	if cached <= 0 {
-		cached = d.CacheReadTokens
-	}
+	t := normalizeTokens(d)
 	s.AddUsage(record.APIKey, Usage{
-		Model:           recordModel(record),
-		Failed:          record.Failed,
-		InputTokens:     d.InputTokens,
-		OutputTokens:    d.OutputTokens,
-		CachedTokens:    cached,
-		ReasoningTokens: d.ReasoningTokens,
-		Tokens:          recordTokens(d),
-		Cost:            RecordCost(cfg, record),
+		Model:            recordModel(record),
+		Failed:           record.Failed,
+		InputTokens:      t.input,
+		OutputTokens:     t.output,
+		CachedTokens:     t.cacheRead,
+		CacheWriteTokens: t.cacheWrite,
+		ReasoningTokens:  d.ReasoningTokens,
+		Tokens:           recordTokens(d),
+		Cost:             RecordCost(cfg, record),
 	})
+}
+
+// tokenCounts is a request's token usage in one convention: input includes cache
+// reads and writes, so uncached input is input - cacheRead - cacheWrite.
+type tokenCounts struct {
+	input, cacheRead, cacheWrite, output int64
+}
+
+// normalizeTokens maps upstream usage onto tokenCounts. OpenAI-style APIs count cached
+// tokens inside input_tokens, while Anthropic reports input_tokens without cache reads
+// and writes; the executors' TokenBreakdown already reconciles both, so it wins when
+// it is valid and classified.
+func normalizeTokens(d coreusage.Detail) tokenCounts {
+	if b := d.TokenBreakdown; b.Valid() && b.Input.TotalTokens+b.Output.TotalTokens > 0 {
+		return tokenCounts{
+			input:      b.Input.TotalTokens,
+			cacheRead:  b.Input.CacheReadTokens,
+			cacheWrite: b.Input.CacheWriteTokens,
+			output:     b.Output.TotalTokens,
+		}
+	}
+	read := max(d.CacheReadTokens, 0)
+	if read == 0 {
+		read = max(d.CachedTokens, 0)
+	}
+	write := max(d.CacheCreationTokens, 0)
+	input := max(d.InputTokens, 0)
+	if read+write > input {
+		// Cache fields cannot be a subset of a smaller input: the upstream reported
+		// them separately (Anthropic style).
+		input += read + write
+	} else {
+		write = 0 // OpenAI-style input already includes everything; no separate writes.
+	}
+	return tokenCounts{input: input, cacheRead: read, cacheWrite: write, output: max(d.OutputTokens, 0)}
 }
 
 // recordModel names the model a request was served by: the resolved upstream model,
@@ -564,21 +604,19 @@ func RecordCost(cfg *config.Config, record coreusage.Record) float64 {
 	if !ok {
 		return 0
 	}
-	d := record.Detail
-	cached := d.CachedTokens
-	if cached <= 0 {
-		cached = d.CacheReadTokens
-	}
-	if cached > d.InputTokens {
-		cached = d.InputTokens
-	}
-	uncached := d.InputTokens - cached
+	t := normalizeTokens(record.Detail)
+	// Cache writes have no price of their own here; they are billed as regular input.
+	uncached := max(t.input-t.cacheRead, 0)
 	cachedPrice := price.CachedInput
 	if cachedPrice <= 0 {
 		cachedPrice = price.Input
 	}
-	return (float64(uncached)*price.Input + float64(cached)*cachedPrice + float64(d.OutputTokens)*price.Output) / 1e6
+	return (float64(uncached)*price.Input + float64(t.cacheRead)*cachedPrice + float64(t.output)*price.Output) / 1e6
 }
+
+// persistedVersion 2 stores InputTokens including cache reads and writes for every
+// upstream; version 1 stored Anthropic input without them (see migrateV1Models).
+const persistedVersion = 2
 
 type persisted struct {
 	Version  int                            `json:"version"`
@@ -601,6 +639,9 @@ func (s *Store) load() {
 	if err = json.Unmarshal(data, &state); err != nil {
 		log.WithError(err).Warn("api key limits: ignoring unreadable usage counters")
 		return
+	}
+	if state.Version < 2 {
+		migrateV1(&state)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -628,7 +669,7 @@ func (s *Store) Flush() {
 		s.mu.Unlock()
 		return
 	}
-	state := persisted{Version: 1, Counters: make(map[string]map[Window]*Counter, len(s.counters))}
+	state := persisted{Version: persistedVersion, Counters: make(map[string]map[Window]*Counter, len(s.counters))}
 	for fp, kc := range s.counters {
 		cp := make(map[Window]*Counter, len(kc))
 		for w, c := range kc {
@@ -660,5 +701,40 @@ func (s *Store) Flush() {
 		s.mu.Lock()
 		s.dirty = true
 		s.mu.Unlock()
+	}
+}
+
+// migrateV1 converts version 1 model counters, where Anthropic-style rows kept cache
+// reads outside InputTokens, to the inclusive convention. Such rows are recognized by
+// a Claude model name or by cached tokens exceeding input (impossible when inclusive).
+// Cache writes were not tracked in version 1 and cannot be recovered.
+func migrateV1(state *persisted) {
+	for _, kc := range state.Counters {
+		for _, c := range kc {
+			if c != nil {
+				migrateV1Models(c.Models)
+			}
+		}
+	}
+	for _, h := range state.History {
+		if h == nil {
+			continue
+		}
+		for _, b := range []modelBuckets{h.Daily, h.Hourly} {
+			for _, models := range b {
+				migrateV1Models(models)
+			}
+		}
+	}
+}
+
+func migrateV1Models(models map[string]*ModelCounter) {
+	for name, m := range models {
+		if m == nil || m.CachedTokens <= 0 {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(name), "claude") || m.CachedTokens > m.InputTokens {
+			m.InputTokens += m.CachedTokens
+		}
 	}
 }

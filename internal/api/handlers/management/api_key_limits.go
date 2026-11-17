@@ -10,15 +10,17 @@ import (
 )
 
 type apiKeyModelUsage struct {
-	Model           string  `json:"model"`
-	Requests        int64   `json:"requests"`
-	Failed          int64   `json:"failed"`
-	InputTokens     int64   `json:"input_tokens"`
-	OutputTokens    int64   `json:"output_tokens"`
-	CachedTokens    int64   `json:"cached_tokens"`
-	ReasoningTokens int64   `json:"reasoning_tokens"`
-	Tokens          int64   `json:"tokens"`
-	Cost            float64 `json:"cost"`
+	Model        string `json:"model"`
+	Requests     int64  `json:"requests"`
+	Failed       int64  `json:"failed"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	CachedTokens int64  `json:"cached_tokens"`
+	// CacheWriteTokens is the part of InputTokens written to the prompt cache.
+	CacheWriteTokens int64   `json:"cache_write_tokens"`
+	ReasoningTokens  int64   `json:"reasoning_tokens"`
+	Tokens           int64   `json:"tokens"`
+	Cost             float64 `json:"cost"`
 }
 
 type apiKeyWindowUsage struct {
@@ -72,15 +74,16 @@ func apiKeyModelBreakdown(counters map[string]*apikeylimits.ModelCounter) []apiK
 			continue
 		}
 		models = append(models, apiKeyModelUsage{
-			Model:           name,
-			Requests:        m.Requests,
-			Failed:          m.Failed,
-			InputTokens:     m.InputTokens,
-			OutputTokens:    m.OutputTokens,
-			CachedTokens:    m.CachedTokens,
-			ReasoningTokens: m.ReasoningTokens,
-			Tokens:          m.Tokens,
-			Cost:            m.Cost,
+			Model:            name,
+			Requests:         m.Requests,
+			Failed:           m.Failed,
+			InputTokens:      m.InputTokens,
+			OutputTokens:     m.OutputTokens,
+			CachedTokens:     m.CachedTokens,
+			CacheWriteTokens: m.CacheWriteTokens,
+			ReasoningTokens:  m.ReasoningTokens,
+			Tokens:           m.Tokens,
+			Cost:             m.Cost,
 		})
 	}
 	sort.Slice(models, func(i, j int) bool {
