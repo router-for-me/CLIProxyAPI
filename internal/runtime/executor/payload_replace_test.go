@@ -18,10 +18,14 @@ import (
 )
 
 func TestPayloadReplaceCodexTransports(t *testing.T) {
-	for _, role := range []string{"user", "developer"} {
+	for _, selector := range []string{"user", "developer", "paths"} {
+		role := selector
+		if selector == "paths" {
+			role = "user"
+		}
 		for _, transport := range []string{"http", "websocket"} {
 			for _, stream := range []bool{false, true} {
-				t.Run(role+"/"+transport+map[bool]string{false: "/execute", true: "/stream"}[stream], func(t *testing.T) {
+				t.Run(selector+"/"+transport+map[bool]string{false: "/execute", true: "/stream"}[stream], func(t *testing.T) {
 					captured := make(chan []byte, 1)
 					completed := []byte(`{"type":"response.completed","response":{"id":"resp_replace","status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +65,13 @@ func TestPayloadReplaceCodexTransports(t *testing.T) {
 						Models: []config.PayloadModelRule{{Name: "*", Protocol: "codex", FromProtocol: "responses"}},
 						Target: config.PayloadReplaceTarget{Role: role, Positions: []int{1, 2}}, Replacements: []config.PayloadReplacement{{"hero": "hero!"}},
 					}}}}
+					if selector == "paths" {
+						cfg.Payload.Replace[0].Target = config.PayloadReplaceTarget{Paths: []string{
+							`input.#(role=="user")#.content.#(type=="input_text")#.text`,
+							"input.0.content.0.text",
+							"input.1.content.0.text",
+						}}
+					}
 					var executor cliproxyauth.ProviderExecutor = NewCodexExecutor(cfg)
 					if transport == "websocket" {
 						executor = NewCodexWebsocketsExecutor(cfg)

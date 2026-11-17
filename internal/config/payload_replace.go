@@ -2,32 +2,36 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/MoeForge/moego/json"
 	"gopkg.in/yaml.v3"
 )
 
-// PayloadReplaceRule applies ordered literal and Go RE2 regex replacements to existing message text.
+// PayloadReplaceRule applies ordered literal and Go RE2 regex replacements to existing strings.
 type PayloadReplaceRule struct {
 	Models       []PayloadModelRule   `yaml:"models" json:"models"`
 	Target       PayloadReplaceTarget `yaml:"target" json:"target"`
 	Replacements []PayloadReplacement `yaml:"replacements" json:"replacements"`
 }
 
-// PayloadReplaceTarget selects one-based positions of a role in the final upstream body.
+// PayloadReplaceTarget selects either JSON paths or one-based positions of a role
+// in the final upstream body. Paths are mutually exclusive with role selectors.
 // Messages without editable text still count; a top-level system field counts as one message.
 type PayloadReplaceTarget struct {
-	Role      string `yaml:"role" json:"role"`
-	Positions []int  `yaml:"positions" json:"positions"`
-	All       bool   `yaml:"all" json:"all"`
+	Role      string   `yaml:"role" json:"role"`
+	Positions []int    `yaml:"positions" json:"positions"`
+	All       bool     `yaml:"all" json:"all"`
+	Paths     []string `yaml:"paths,omitempty" json:"paths,omitempty"`
 }
 
-// UnmarshalYAML rejects fractional positions instead of allowing YAML integer coercion.
+// UnmarshalYAML rejects fractional positions and non-string paths instead of allowing YAML coercion.
 func (t *PayloadReplaceTarget) UnmarshalYAML(node *yaml.Node) error {
 	var value struct {
 		Role      string      `yaml:"role"`
 		Positions []yaml.Node `yaml:"positions"`
 		All       bool        `yaml:"all"`
+		Paths     []yaml.Node `yaml:"paths"`
 	}
 	if errDecode := node.Decode(&value); errDecode != nil {
 		return errDecode
@@ -47,6 +51,16 @@ func (t *PayloadReplaceTarget) UnmarshalYAML(node *yaml.Node) error {
 		if errDecode := position.Decode(&target.Positions[i]); errDecode != nil {
 			return errDecode
 		}
+	}
+	if value.Paths != nil {
+		target.Paths = make([]string, len(value.Paths))
+	}
+	for i := range value.Paths {
+		path, ok := resolveYAMLStringScalar(&value.Paths[i])
+		if !ok {
+			return fmt.Errorf("payload replacement paths must be strings")
+		}
+		target.Paths[i] = path
 	}
 	*t = target
 	return nil
@@ -166,21 +180,35 @@ func (r PayloadReplacement) Resolve() (source, replacement string, isRegex bool,
 // Validate rejects unsafe implicit targets and ambiguous replacement entries.
 // Invalid regexes are skipped individually during sanitization and execution.
 func (r PayloadReplaceRule) Validate() error {
-	switch r.Target.Role {
-	case "system", "developer", "user":
-	default:
-		return fmt.Errorf("target.role must be system, developer, or user")
-	}
-	if r.Target.All {
-		if len(r.Target.Positions) != 0 {
-			return fmt.Errorf("target.all and target.positions are mutually exclusive")
+	if r.Target.Paths != nil {
+		if len(r.Target.Paths) == 0 {
+			return fmt.Errorf("target.paths must not be empty")
 		}
-	} else if len(r.Target.Positions) == 0 {
-		return fmt.Errorf("target.positions must not be empty unless target.all is true")
-	}
-	for _, position := range r.Target.Positions {
-		if position < 1 {
-			return fmt.Errorf("target.positions must contain positive one-based positions")
+		if r.Target.Role != "" || r.Target.All || len(r.Target.Positions) != 0 {
+			return fmt.Errorf("target.paths and role selectors are mutually exclusive")
+		}
+		for _, path := range r.Target.Paths {
+			if strings.TrimSpace(path) == "" {
+				return fmt.Errorf("target.paths must contain non-empty paths")
+			}
+		}
+	} else {
+		switch r.Target.Role {
+		case "system", "developer", "user":
+		default:
+			return fmt.Errorf("target.role must be system, developer, or user")
+		}
+		if r.Target.All {
+			if len(r.Target.Positions) != 0 {
+				return fmt.Errorf("target.all and target.positions are mutually exclusive")
+			}
+		} else if len(r.Target.Positions) == 0 {
+			return fmt.Errorf("target.positions must not be empty unless target.all is true")
+		}
+		for _, position := range r.Target.Positions {
+			if position < 1 {
+				return fmt.Errorf("target.positions must contain positive one-based positions")
+			}
 		}
 	}
 	if len(r.Replacements) == 0 {

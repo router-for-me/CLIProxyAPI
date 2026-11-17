@@ -45,4 +45,19 @@ func TestBuildConfigChangeDetailsPayloadReplace(t *testing.T) {
 	if strings.Contains(strings.Join(changes, " "), "private") {
 		t.Fatal("diff leaked pattern text")
 	}
+	pathsUpdated := patternUpdated.CloneForRuntime()
+	pathsUpdated.Payload.Replace[0].Target = config.PayloadReplaceTarget{Paths: []string{"metadata.private-description"}}
+	changes = BuildConfigChangeDetails(patternUpdated, pathsUpdated)
+	if len(changes) != 1 || changes[0] != "payload.replace: updated (1 -> 1 rules)" {
+		t.Fatalf("missed path target edit: %v", changes)
+	}
+	otherPaths := pathsUpdated.CloneForRuntime()
+	otherPaths.Payload.Replace[0].Target.Paths[0] = "metadata.other-private-description"
+	changes = BuildConfigChangeDetails(pathsUpdated, otherPaths)
+	if len(changes) != 1 || changes[0] != "payload.replace: updated (1 -> 1 rules)" {
+		t.Fatalf("missed path edit: %v", changes)
+	}
+	if strings.Contains(strings.Join(changes, " "), "private") {
+		t.Fatal("diff leaked target paths")
+	}
 }

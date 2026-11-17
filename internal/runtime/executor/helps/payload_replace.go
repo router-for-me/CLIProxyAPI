@@ -10,40 +10,43 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// replacePayloadTextDoc edits only existing protocol-defined text fields of the selected role.
+// replacePayloadTextDoc edits existing strings selected by paths or protocol-defined role text.
 // Changed values are collected before writes so traversal views remain valid.
 func replacePayloadTextDoc(doc *ojson.Doc, protocol, root string, rule *config.PayloadReplaceRule, ruleIndex int, noteWrite func(string)) bool {
-	switch rule.Target.Role {
-	case "system", "developer", "user":
-	default:
-		return false
-	}
-	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	pathTarget := len(rule.Target.Paths) > 0
 	var arrayPath, systemPath string
 	var gemini, responses bool
-	switch protocol {
-	case "openai":
-		arrayPath = buildPayloadPath(root, "messages")
-	case "claude":
-		arrayPath = buildPayloadPath(root, "messages")
-		systemPath = buildPayloadPath(root, "system")
-	case "codex", "responses", "response", "openai-response", "openai-responses", "meta":
-		arrayPath = buildPayloadPath(root, "input")
-		systemPath = buildPayloadPath(root, "instructions")
-		responses = true
-	case "gemini", "antigravity":
-		arrayPath = buildPayloadPath(root, "contents")
-		systemPath = buildPayloadPath(root, "systemInstruction")
-		if !doc.Get(systemPath).Exists() {
-			systemPath = buildPayloadPath(root, "system_instruction")
+	if !pathTarget {
+		switch rule.Target.Role {
+		case "system", "developer", "user":
+		default:
+			return false
 		}
-		gemini = true
-	default:
-		return false
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		switch protocol {
+		case "openai":
+			arrayPath = buildPayloadPath(root, "messages")
+		case "claude":
+			arrayPath = buildPayloadPath(root, "messages")
+			systemPath = buildPayloadPath(root, "system")
+		case "codex", "responses", "response", "openai-response", "openai-responses", "meta":
+			arrayPath = buildPayloadPath(root, "input")
+			systemPath = buildPayloadPath(root, "instructions")
+			responses = true
+		case "gemini", "antigravity":
+			arrayPath = buildPayloadPath(root, "contents")
+			systemPath = buildPayloadPath(root, "systemInstruction")
+			if !doc.Get(systemPath).Exists() {
+				systemPath = buildPayloadPath(root, "system_instruction")
+			}
+			gemini = true
+		default:
+			return false
+		}
 	}
 	var selected map[int]bool
 	lastPosition := 0
-	if !rule.Target.All {
+	if !pathTarget && !rule.Target.All {
 		selected = make(map[int]bool, len(rule.Target.Positions))
 		for _, position := range rule.Target.Positions {
 			selected[position] = true
@@ -84,12 +87,10 @@ func replacePayloadTextDoc(doc *ojson.Doc, protocol, root string, rule *config.P
 		steps = built
 		return steps, true
 	}
-	type textChange struct{ path, value string }
-	var changes []textChange
-	collectChange := func(text, basePath string, messageIndex, blockIndex int) {
+	replaceText := func(text string) string {
 		compiled, ok := compileSteps()
 		if !ok {
-			return
+			return text
 		}
 		updated := text
 		for _, step := range compiled {
@@ -99,6 +100,12 @@ func replacePayloadTextDoc(doc *ojson.Doc, protocol, root string, rule *config.P
 				updated = strings.ReplaceAll(updated, step.from, step.to)
 			}
 		}
+		return updated
+	}
+	type textChange struct{ path, value string }
+	var changes []textChange
+	collectChange := func(text, basePath string, messageIndex, blockIndex int) {
+		updated := replaceText(text)
 		if updated == text {
 			return
 		}
@@ -150,48 +157,79 @@ func replacePayloadTextDoc(doc *ojson.Doc, protocol, root string, rule *config.P
 			})
 		}
 	}
-	position := 0
-	// Top-level instructions precede explicit system messages and count as one message.
-	if rule.Target.Role == "system" && systemPath != "" {
-		if system := doc.Get(systemPath); system.Exists() {
-			position++
-			if rule.Target.All || selected[position] {
-				if gemini {
-					collectParts(system.Get("parts"), systemPath, -1)
-				} else {
-					collectContent(system, systemPath, -1)
+	if pathTarget {
+		// Resolve against one pre-write view, with indexes relative to its raw text.
+		source := doc.Get("@this")
+		source.Index = 0
+		seen := make(map[int]struct{})
+		collectPathChange := func(text ojson.Result, steps []payloadReplacePathStep) {
+			// Computed strings can reuse a source offset without being source nodes.
+			if text.Type != ojson.String || !payloadReplaceSourceChild(source, text) {
+				return
+			}
+			// Snapshot offsets identify nodes without constructing write paths.
+			if _, exists := seen[text.Index]; exists {
+				return
+			}
+			original := text.String()
+			updated := replaceText(original)
+			if updated == original {
+				seen[text.Index] = struct{}{}
+				return
+			}
+			if writePath := payloadReplaceWritePath(steps); writePath != "" {
+				// Unwritable selections must not mask a later concrete path.
+				seen[text.Index] = struct{}{}
+				changes = append(changes, textChange{path: writePath, value: updated})
+			}
+		}
+		for _, path := range rule.Target.Paths {
+			visitPayloadReplacePath(source, buildPayloadPath(root, path), collectPathChange)
+		}
+	} else {
+		position := 0
+		// Top-level instructions precede explicit system messages and count as one message.
+		if rule.Target.Role == "system" && systemPath != "" {
+			if system := doc.Get(systemPath); system.Exists() {
+				position++
+				if rule.Target.All || selected[position] {
+					if gemini {
+						collectParts(system.Get("parts"), systemPath, -1)
+					} else {
+						collectContent(system, systemPath, -1)
+					}
 				}
 			}
 		}
-	}
-	array := doc.Get(arrayPath)
-	if responses && array.Type == ojson.String {
-		if rule.Target.Role == "user" && (rule.Target.All || selected[1]) {
-			collectChange(array.String(), arrayPath, -1, -1)
-		}
-	} else if array.IsArray() && (rule.Target.All || position < lastPosition) {
-		array.ForEach(func(index, message ojson.Result) bool {
-			if !message.IsObject() || message.Get("role").String() != rule.Target.Role {
-				return true
+		array := doc.Get(arrayPath)
+		if responses && array.Type == ojson.String {
+			if rule.Target.Role == "user" && (rule.Target.All || selected[1]) {
+				collectChange(array.String(), arrayPath, -1, -1)
 			}
-			if responses {
-				if typ := message.Get("type"); typ.Exists() && (typ.Type != ojson.String || typ.String() != "message") {
+		} else if array.IsArray() && (rule.Target.All || position < lastPosition) {
+			array.ForEach(func(index, message ojson.Result) bool {
+				if !message.IsObject() || message.Get("role").String() != rule.Target.Role {
 					return true
 				}
-			}
-			position++
-			keepScanning := rule.Target.All || position < lastPosition
-			if !rule.Target.All && !selected[position] {
+				if responses {
+					if typ := message.Get("type"); typ.Exists() && (typ.Type != ojson.String || typ.String() != "message") {
+						return true
+					}
+				}
+				position++
+				keepScanning := rule.Target.All || position < lastPosition
+				if !rule.Target.All && !selected[position] {
+					return keepScanning
+				}
+				messageIndex := int(index.Int())
+				if gemini {
+					collectParts(message.Get("parts"), arrayPath, messageIndex)
+				} else {
+					collectContent(message.Get("content"), arrayPath, messageIndex)
+				}
 				return keepScanning
-			}
-			messageIndex := int(index.Int())
-			if gemini {
-				collectParts(message.Get("parts"), arrayPath, messageIndex)
-			} else {
-				collectContent(message.Get("content"), arrayPath, messageIndex)
-			}
-			return keepScanning
-		})
+			})
+		}
 	}
 	mutated := false
 	for _, change := range changes {

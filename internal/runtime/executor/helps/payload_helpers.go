@@ -375,7 +375,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 					}
 				}
 			}
-			// Replace text after overrides and before final field deletion.
+			// Replace selected strings after overrides and before final field deletion.
 			for i := range rules.Replace {
 				rule := &rules.Replace[i]
 				if rule.Validate() != nil || !payloadModelRulesMatchDoc(rule.Models, protocol, fromProtocol, headers, doc, root, candidates) {
