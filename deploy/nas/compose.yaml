@@ -1,12 +1,12 @@
 # Container Manager project: /volume1/docker/projects/fleet-controller
 # Data: /volume1/docker/fleet-controller (config, auths, logs)
-# Update: change the image tag here AND in the NAS copy at
-# /volume1/docker/projects/fleet-controller/compose.yaml (pushing this file does
-# not reach the NAS), then Container Manager > Project > Build.
+# Update: push a fleet tag. The build republishes `latest`, and Watchtower on the
+# NAS swaps the image at 02:00 and removes the old one. FLEET.md has the manual
+# steps. The NAS runs its own copy of this file; pushing this one does not reach it.
 services:
   fleet-controller:
     container_name: fleet-controller
-    image: ghcr.io/ryanzigler/cliproxyapi:v8.0.75-fleet.2
+    image: ghcr.io/ryanzigler/cliproxyapi:latest
     restart: unless-stopped
     init: true
     # DSM's Docker can't publish to the NAS loopback; Tailscale Serve proxies

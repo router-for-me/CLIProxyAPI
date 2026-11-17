@@ -41,8 +41,21 @@ run on a Synology DS218+ as the Claude and Codex account pool behind
 git tag v8.0.23-fleet.2 && git push origin v8.0.23-fleet.2
 ```
 
-Then change the tag in `/volume1/docker/projects/fleet-controller/compose.yaml` and
-rebuild the project in Container Manager.
+The build publishes the image under that tag and as `latest`. The NAS runs `latest`,
+so nothing on the NAS needs editing:
+
+- **Automatic:** Watchtower on the NAS checks every night at 02:00 (America/Chicago),
+  recreates `fleet-controller` on the new image and removes the old one.
+- **Right away:** run this on the NAS once the build has finished.
+
+  ```bash
+  cd /volume1/docker/projects/fleet-controller && sudo docker compose pull && sudo docker compose up -d && sudo docker image prune -f
+  ```
+
+- **Roll back:** set a version tag such as `v8.0.23-fleet.1` in
+  `/volume1/docker/projects/fleet-controller/compose.yaml` and run
+  `sudo docker compose up -d` there. Watchtower leaves a pinned tag alone; put `latest`
+  back to resume updates.
 
 ## Upstream updates
 
@@ -61,7 +74,8 @@ cd web && bun install && bun run lint && bun test
 
 ## NAS
 
-- **Files:** `deploy/nas/compose.yaml` is the Container Manager project file.
+- **Files:** `deploy/nas/compose.yaml` is the Container Manager project file. The NAS
+  runs its own copy in the project folder, so a change to this file has to be copied there.
 - **Folders:**
   - Data: `/volume1/docker/fleet-controller`, holding `config`, `auths`, `logs` and `keys` (the client key; not mounted).
   - Project: `/volume1/docker/projects/fleet-controller`.
