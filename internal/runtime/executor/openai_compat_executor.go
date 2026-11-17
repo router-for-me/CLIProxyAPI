@@ -1286,6 +1286,7 @@ type statusErr struct {
 	tosViolation       bool
 	tosAppealURL       string
 	tosAppealURLText   string
+	quotaExhausted     bool
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1342,6 +1343,10 @@ func (e statusErr) ErrorCode() string {
 	return ""
 }
 
+// IsQuotaExhausted marks a 429 that the upstream explicitly identified as
+// quota exhaustion with a structured code.
+func (e statusErr) IsQuotaExhausted() bool { return e.quotaExhausted }
+
 // newGeminiZeroOutputStatusErr builds a 502 error tagged with
 // ErrorCodeTransientTransport so Gemini-family zero-output failures allow
 // per-request rotation and failover without cooling healthy credentials.
@@ -1369,10 +1374,23 @@ const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		code:           status,
+		msg:            string(body),
+		retryAfter:     openAICompatRetryAfter(status, headers, body, time.Now()),
+		quotaExhausted: status == http.StatusTooManyRequests && isOpenAIInsufficientQuotaError(body),
 	}
+}
+
+// isOpenAIInsufficientQuotaError reports whether body is an OpenAI
+// insufficient_quota error: the account's billing quota is exhausted, which a
+// retry does not fix.
+func isOpenAIInsufficientQuotaError(body []byte) bool {
+	for _, path := range []string{"error.code", "error.type"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(body, path).String()), "insufficient_quota") {
+			return true
+		}
+	}
+	return false
 }
 
 // openAICompatRetryAfter preserves the provider's standard Retry-After signal.

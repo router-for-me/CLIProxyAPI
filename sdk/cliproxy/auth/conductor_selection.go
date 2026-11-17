@@ -874,6 +874,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
+	quotaExhaustedCount := 0
 	unauthorizedCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
@@ -886,6 +887,9 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 		}
 		if reason == blockReasonCooldown {
 			cooldownCount++
+			if hasQuotaExhaustionEvidence(candidate, checkModel, now) {
+				quotaExhaustedCount++
+			}
 		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
@@ -912,7 +916,10 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(candidate *Auth) string {
 				return m.selectionModelForAuth(candidate, routeModel)
 			}, now, clientHeaders...)
-			return nil, newModelCooldownErrorForCandidates(routeModel, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals)
+			// A pool is a final usage limit only when every candidate carries
+			// explicit quota-exhaustion evidence; mixed pools stay retryable.
+			quotaExhausted := quotaExhaustedCount == len(auths)
+			return nil, newModelCooldownErrorForCandidates(routeModel, providerForError, resetIn, lastCandidateErr, quotaExhausted, claudeCooldown, claudeSignals)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -1027,14 +1034,9 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorForCandidates(
-		requestedModel,
-		cooldownErr.provider,
-		cooldownErr.resetIn,
-		cooldownErr.cause,
-		cooldownErr.claudeCooldown,
-		cooldownErr.claudeSignals,
-	)
+	restored := *cooldownErr
+	restored.model = requestedModel
+	return &restored
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {

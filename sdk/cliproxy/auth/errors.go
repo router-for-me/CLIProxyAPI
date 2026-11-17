@@ -54,6 +54,20 @@ const ErrorCodeCredentialQuota = "credential_quota"
 
 const credentialQuotaErrorCode = ErrorCodeCredentialQuota
 
+// ErrorCodeQuotaExhausted marks a 429 the upstream explicitly identified as
+// quota exhaustion with a structured code (see
+// cliproxyexecutor.QuotaExhaustedError). The public status stays 429. A pool
+// cooldown is reported as a final usage limit only when every candidate
+// credential is cooling down after such a failure; unclassified 429s keep
+// their retry guidance.
+const ErrorCodeQuotaExhausted = "quota_exhausted"
+
+const quotaExhaustedErrorCode = ErrorCodeQuotaExhausted
+
+// quotaExhaustedMetadataKey retains exhaustion evidence when Code must preserve
+// another scheduling classification, such as credential_quota or force_cooldown.
+const quotaExhaustedMetadataKey = "quota_exhausted"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -146,6 +160,13 @@ func (e *Error) StatusCode() int {
 		return 0
 	}
 	return e.HTTPStatus
+}
+
+// IsQuotaExhausted reports structured upstream exhaustion evidence independently
+// of credential scope and other scheduling classifications.
+func (e *Error) IsQuotaExhausted() bool {
+	return e != nil && e.HTTPStatus == http.StatusTooManyRequests &&
+		(e.Code == quotaExhaustedErrorCode || e.Metadata[quotaExhaustedMetadataKey] == "true")
 }
 
 // IsRequestScoped reports whether the failure is tied to the current request

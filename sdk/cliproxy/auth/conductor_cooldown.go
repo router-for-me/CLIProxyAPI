@@ -586,6 +586,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			Reason:          "credential_quota",
 			NextRecoverAt:   auth.Quota.NextRecoverAt,
 			BackoffLevel:    auth.Quota.BackoffLevel,
+			Exhausted:       auth.Quota.Exhausted,
 			cooldownSignals: auth.Quota.cooldownSignals,
 		})
 		if state.NextRetryAfter.Before(auth.Quota.NextRecoverAt) {
@@ -1341,6 +1342,7 @@ func cooldownQuotaEqual(a, b QuotaState) bool {
 	return a.Exceeded == b.Exceeded &&
 		a.Reason == b.Reason &&
 		a.BackoffLevel == b.BackoffLevel &&
+		a.Exhausted == b.Exhausted &&
 		a.NextRecoverAt.Equal(b.NextRecoverAt)
 }
 
@@ -1831,6 +1833,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									backoffLevel = auth.Quota.BackoffLevel
 								}
 							}
+							// Only a structured upstream code proves quota exhaustion; an
+							// unclassified 429 is an ordinary rate limit (issue #6646). The
+							// evidence always belongs to the failure that set the deadline.
+							quotaExhausted := isQuotaExhaustedResultError(result.Error)
 							if !disableCooling {
 								reusedOpenWindow := false
 								var baseBackoffBefore int
@@ -1853,6 +1859,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									reusedOpenWindow = quotaForFailure.NextRecoverAt.After(now)
 									baseBackoffBefore = quotaForFailure.BackoffLevel
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
+									if quotaForFailure.NextRecoverAt.After(now) {
+										quotaExhausted = quotaForFailure.Exceeded && quotaForFailure.Exhausted
+									}
 								}
 								credentialNext = next
 								if isForceResult {
@@ -1870,12 +1879,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										ownModelForceDeadline, _ = quotaCooldownAfterFailure(QuotaState{BackoffLevel: baseBackoffBefore}, now)
 									}
 								}
-								if prevStateQuotaActive && (prevStateRecoverAt.After(next) || (!result.CredentialScope && result.RetryAfter == nil)) {
+								if prevStateQuotaActive && (!prevStateRecoverAt.Before(next) || (!result.CredentialScope && result.RetryAfter == nil)) {
 									next = prevStateRecoverAt
 									keptPriorStateQuota = true
 								} else if result.CredentialScope && result.RetryAfter == nil && auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
 									// quotaCooldownAfterFailure reused the open credential_quota window.
 									keptPriorStateQuota = prevStateQuotaActive && prevStateRecoverAt.Equal(next)
+								}
+								if keptPriorStateQuota {
+									quotaExhausted = state.Quota.Exhausted
 								}
 							}
 							var cooldownSignals map[string]string
@@ -1895,6 +1907,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								Reason:          "quota",
 								NextRecoverAt:   next,
 								BackoffLevel:    backoffLevel,
+								Exhausted:       quotaExhausted,
 								cooldownSignals: cooldownSignals,
 							})
 							// Non-credential own failures re-derive their independent layer
@@ -1934,11 +1947,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 										credCooldownSignals = prevAuthCredSignals
 									}
 								}
-								propagateCredentialQuotaToModelStatesLocked(auth, state, credentialNext, backoffLevel, credCooldownSignals, prevAuthCredActive, prevAuthCredRecoverAt, now)
+								credentialExhausted := isQuotaExhaustedResultError(result.Error)
+								if prevAuthCredActive && (!prevAuthCredRecoverAt.Before(credentialNext) || result.RetryAfter == nil) {
+									credentialExhausted = auth.Quota.Exhausted
+								}
+								propagateCredentialQuotaToModelStatesLocked(auth, state, credentialNext, backoffLevel, credentialExhausted, credCooldownSignals, prevAuthCredActive, prevAuthCredRecoverAt, now)
 								if !wasTerminalUnauthorized {
 									auth.Unavailable = true
 									authNext := credentialNext
-									if prevAuthCredActive && prevAuthCredRecoverAt.After(authNext) {
+									if prevAuthCredActive && !prevAuthCredRecoverAt.Before(authNext) {
 										authNext = prevAuthCredRecoverAt
 									}
 									auth.Quota.Exceeded = true
@@ -1947,9 +1964,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									auth.Quota.BackoffLevel = backoffLevel
 									auth.Quota.cooldownSignals = maps.Clone(credCooldownSignals)
 									auth.Quota.cooldownEvaluated = true
+									auth.Quota.Exhausted = credentialExhausted
 									auth.NextRetryAfter = authNext
 									if authNext.After(state.Quota.NextRecoverAt) || (prevAuthCredActive && result.RetryAfter == nil) {
 										state.Quota.NextRecoverAt = authNext
+										state.Quota.Exhausted = credentialExhausted
 										state.Quota.cooldownSignals = maps.Clone(credCooldownSignals)
 										if state.NextRetryAfter.Before(authNext) {
 											state.NextRetryAfter = authNext
@@ -2083,6 +2102,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								Reason:          "credential_quota",
 								NextRecoverAt:   auth.Quota.NextRecoverAt,
 								BackoffLevel:    auth.Quota.BackoffLevel,
+								Exhausted:       auth.Quota.Exhausted,
 								cooldownSignals: auth.Quota.cooldownSignals,
 							})
 						}
@@ -2184,7 +2204,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							if prevAuthCredActive && (prevAuthCredRecoverAt.After(auth.Quota.NextRecoverAt) || result.RetryAfter == nil) {
 								credSignals = prevAuthCredSignals
 							}
-							propagateCredentialQuotaToModelStatesLocked(auth, nil, auth.Quota.NextRecoverAt, auth.Quota.BackoffLevel, credSignals, prevAuthCredActive, prevAuthCredRecoverAt, now)
+							propagateCredentialQuotaToModelStatesLocked(auth, nil, auth.Quota.NextRecoverAt, auth.Quota.BackoffLevel, auth.Quota.Exhausted, credSignals, prevAuthCredActive, prevAuthCredRecoverAt, now)
 							for _, otherState := range auth.ModelStates {
 								if otherState != nil {
 									otherState.cooldownRecordedSeq = cooldownSeq
@@ -2527,6 +2547,10 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.Quota.NextRecoverAt.After(merged.Quota.NextRecoverAt) {
 		merged.Quota.NextRecoverAt = source.Quota.NextRecoverAt
 	}
+	// Evidence follows the side whose recovery deadline the merge kept;
+	// selection still requires it to cover the merged blocking deadline.
+	merged.Quota.Exhausted = (target.Quota.Exceeded && target.Quota.Exhausted && !target.Quota.NextRecoverAt.Before(merged.Quota.NextRecoverAt)) ||
+		(source.Quota.Exceeded && source.Quota.Exhausted && !source.Quota.NextRecoverAt.Before(merged.Quota.NextRecoverAt))
 	if source.Quota.BackoffLevel > merged.Quota.BackoffLevel {
 		merged.Quota.BackoffLevel = source.Quota.BackoffLevel
 	}
@@ -2818,6 +2842,9 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 		}
 		auth.Quota.NextRecoverAt = quotaRecover
 		auth.Quota.BackoffLevel = maxBackoffLevel
+		// The aggregate spans models with different causes; it never claims
+		// explicit exhaustion on their behalf.
+		auth.Quota.Exhausted = false
 	} else if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
 		// Retain active auth-level quota cooldown
 	} else {
@@ -2854,7 +2881,7 @@ func hasModelError(auth *Auth, now time.Time) bool {
 	return false
 }
 
-func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState, credentialNext time.Time, backoffLevel int, credCooldownSignals map[string]string, prevAuthCredActive bool, prevAuthCredRecoverAt time.Time, now time.Time) {
+func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState, credentialNext time.Time, backoffLevel int, credentialExhausted bool, credCooldownSignals map[string]string, prevAuthCredActive bool, prevAuthCredRecoverAt time.Time, now time.Time) {
 	if auth == nil {
 		return
 	}
@@ -2892,12 +2919,14 @@ func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState
 		otherState.Unavailable = true
 		otherState.Status = StatusError
 		otherQuotaNext := credentialNext
+		otherExhausted := credentialExhausted
 		otherSignals := credCooldownSignals
 		if prevAuthCredActive && prevAuthCredRecoverAt.After(otherQuotaNext) {
 			otherQuotaNext = prevAuthCredRecoverAt
 		}
-		if otherState.Quota.Exceeded && otherState.Quota.NextRecoverAt.After(otherQuotaNext) {
+		if otherState.Quota.Exceeded && !otherState.Quota.NextRecoverAt.Before(otherQuotaNext) {
 			otherQuotaNext = otherState.Quota.NextRecoverAt
+			otherExhausted = otherState.Quota.Exhausted
 			otherSignals = maps.Clone(otherState.Quota.cooldownSignals)
 		}
 		otherRetryAfter := otherQuotaNext
@@ -2912,6 +2941,7 @@ func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState
 			Reason:          "credential_quota",
 			NextRecoverAt:   otherQuotaNext,
 			BackoffLevel:    backoffLevel,
+			Exhausted:       otherExhausted,
 			cooldownSignals: otherSignals,
 		})
 	}
@@ -3086,6 +3116,7 @@ func resultErrorFromError(err error) *Error {
 			resultErr.Metadata = meta
 		}
 	}
+	quotaExhausted := resultErr.HTTPStatus == http.StatusTooManyRequests && isQuotaExhaustedError(err)
 	switch {
 	case isCredentialScopedError(err):
 		// A credential-scoped failure always stays on the credential quota path;
@@ -3099,6 +3130,9 @@ func resultErrorFromError(err error) *Error {
 			transientTransportErrorCode:
 			resultErr.Code = credentialQuotaErrorCode
 		}
+		if quotaExhausted && resultErr.Code == "" {
+			resultErr.Code = credentialQuotaErrorCode
+		}
 	case isStreamTruncatedError(err):
 		// Preserve the local truncation classification alongside the public
 		// 502 status so MarkResult can skip credential cooldown.
@@ -3108,6 +3142,13 @@ func resultErrorFromError(err error) *Error {
 		// 429 status so MarkResult cools only the reporting model until the
 		// provider retry hint instead of recording quota exhaustion.
 		resultErr.Code = transientRateLimitErrorCode
+	case quotaExhausted:
+		// Preserve the explicit quota-exhaustion classification alongside the
+		// public 429 so MarkResult can tell it from an ordinary rate limit and
+		// pool cooldowns can report a final usage limit (issue #6646).
+		if resultErr.Code == "" {
+			resultErr.Code = quotaExhaustedErrorCode
+		}
 	case isExplicitModelNotFoundError(err, ""):
 		if resultErr.Code == "" || resultErr.Code == requestScopedErrorCode {
 			resultErr.Code = "model_not_found"
@@ -3132,6 +3173,14 @@ func resultErrorFromError(err error) *Error {
 		if resultErr.Code == "" || resultErr.Code == transientTransportErrorCode {
 			resultErr.Code = transientTransportErrorCode
 		}
+	}
+	if quotaExhausted && resultErr.Code != quotaExhaustedErrorCode {
+		// Scope and exhaustion are independent: do not replace credential,
+		// force-cooldown or provider codes merely to retain quota evidence.
+		if resultErr.Metadata == nil {
+			resultErr.Metadata = make(map[string]string, 1)
+		}
+		resultErr.Metadata[quotaExhaustedMetadataKey] = "true"
 	}
 	return resultErr
 }
@@ -3647,6 +3696,26 @@ func isTransientRateLimitError(err error) bool {
 
 func isTransientRateLimitResultError(err *Error) bool {
 	return err != nil && err.Code == transientRateLimitErrorCode
+}
+
+// isQuotaExhaustedError reports whether err carries structured upstream
+// quota-exhaustion evidence. A transient capacity rejection never does.
+func isQuotaExhaustedError(err error) bool {
+	if err == nil || isTransientRateLimitError(err) {
+		return false
+	}
+	quotaErr, ok := errors.AsType[cliproxyexecutor.QuotaExhaustedError](err)
+	if ok && quotaErr != nil && quotaErr.IsQuotaExhausted() {
+		return true
+	}
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.IsQuotaExhausted()
+}
+
+// isQuotaExhaustedResultError reports whether a recorded failure is a 429 with
+// explicit upstream quota-exhaustion evidence.
+func isQuotaExhaustedResultError(err *Error) bool {
+	return err != nil && err.IsQuotaExhausted()
 }
 
 func isCredentialScopedError(err error) bool {
@@ -4324,10 +4393,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				auth.NextRetryAfter = now.Add(12 * time.Hour)
 			}
 		case 429:
+			// Evidence belongs to the failure that set the deadline; a kept or
+			// reused earlier deadline keeps its own.
+			prevExhausted := auth.Quota.Exceeded && auth.Quota.Exhausted
 			auth.StatusMessage = "quota exhausted"
 			auth.Quota.Exceeded = true
 			auth.Quota.Reason = "quota"
 			var next time.Time
+			quotaExhausted := isQuotaExhaustedResultError(resultErr)
 			if !disableCooling {
 				if retryAfter != nil {
 					cooldown := *retryAfter
@@ -4352,11 +4425,13 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 						}
 					}
 				}
-				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
+				if auth.Quota.Exceeded && !auth.Quota.NextRecoverAt.Before(next) {
 					next = auth.Quota.NextRecoverAt
+					quotaExhausted = prevExhausted
 				}
 			}
 			auth.Quota.NextRecoverAt = next
+			auth.Quota.Exhausted = quotaExhausted
 			auth.NextRetryAfter = next
 		case 408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526:
 			auth.StatusMessage = "transient upstream error"
