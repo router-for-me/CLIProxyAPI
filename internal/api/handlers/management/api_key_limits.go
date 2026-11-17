@@ -21,6 +21,57 @@ type apiKeyModelUsage struct {
 	ReasoningTokens  int64   `json:"reasoning_tokens"`
 	Tokens           int64   `json:"tokens"`
 	Cost             float64 `json:"cost"`
+	Streamed         int64   `json:"streamed"`
+	// Latency and TTFT are sums in milliseconds over the requests that reported them.
+	LatencyMs    int64 `json:"latency_ms"`
+	LatencyCount int64 `json:"latency_count"`
+	TTFTMs       int64 `json:"ttft_ms"`
+	TTFTCount    int64 `json:"ttft_count"`
+	// Efforts and Tiers list requests by reasoning effort and service tier
+	// ("default" when the client did not set one), most requests first.
+	Efforts []apiKeyDimUsage `json:"efforts"`
+	Tiers   []apiKeyDimUsage `json:"tiers"`
+}
+
+// apiKeyDimUsage is a model's usage for one reasoning effort or service tier.
+type apiKeyDimUsage struct {
+	Name            string  `json:"name"`
+	Requests        int64   `json:"requests"`
+	Failed          int64   `json:"failed"`
+	Tokens          int64   `json:"tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	Cost            float64 `json:"cost"`
+	// LatencyMs is the summed latency of the LatencyCount requests that reported one.
+	LatencyMs    int64 `json:"latency_ms"`
+	LatencyCount int64 `json:"latency_count"`
+}
+
+func apiKeyDims(dims map[string]*apikeylimits.DimCounter) []apiKeyDimUsage {
+	out := make([]apiKeyDimUsage, 0, len(dims))
+	for name, d := range dims {
+		if d == nil {
+			continue
+		}
+		out = append(out, apiKeyDimUsage{
+			Name:            name,
+			Requests:        d.Requests,
+			Failed:          d.Failed,
+			Tokens:          d.Tokens,
+			OutputTokens:    d.OutputTokens,
+			ReasoningTokens: d.ReasoningTokens,
+			Cost:            d.Cost,
+			LatencyMs:       d.LatencyMs,
+			LatencyCount:    d.LatencyCount,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Requests != out[j].Requests {
+			return out[i].Requests > out[j].Requests
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 type apiKeyWindowUsage struct {
@@ -58,7 +109,7 @@ func apiKeyHistory(buckets []apikeylimits.Bucket) []apiKeyHistoryBucket {
 	for _, b := range buckets {
 		models := make(map[string]*apikeylimits.ModelCounter, len(b.Models))
 		for name, m := range b.Models {
-			mc := m
+			mc := m.Clone()
 			models[name] = &mc
 		}
 		out = append(out, apiKeyHistoryBucket{Time: b.Time, Models: apiKeyModelBreakdown(models)})
@@ -84,6 +135,13 @@ func apiKeyModelBreakdown(counters map[string]*apikeylimits.ModelCounter) []apiK
 			ReasoningTokens:  m.ReasoningTokens,
 			Tokens:           m.Tokens,
 			Cost:             m.Cost,
+			Streamed:         m.Streamed,
+			LatencyMs:        m.LatencyMs,
+			LatencyCount:     m.LatencyCount,
+			TTFTMs:           m.TTFTMs,
+			TTFTCount:        m.TTFTCount,
+			Efforts:          apiKeyDims(m.Efforts),
+			Tiers:            apiKeyDims(m.Tiers),
 		})
 	}
 	sort.Slice(models, func(i, j int) bool {

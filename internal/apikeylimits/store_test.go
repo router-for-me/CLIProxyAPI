@@ -314,3 +314,58 @@ func TestLoadMigratesV1AnthropicInput(t *testing.T) {
 		t.Fatalf("v2 reload input = %d", got)
 	}
 }
+
+func TestHandleUsageTracksEffortTierAndLatency(t *testing.T) {
+	now := time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "api-key-usage.json")
+	s := newTestStore(now)
+	s.path = path
+	rec := func(effort, tier string, latency time.Duration, failed bool) coreusage.Record {
+		return coreusage.Record{
+			APIKey: "k", IsNativeKey: true, Model: "gpt-6.1-sol", ReasoningEffort: effort,
+			ResponseServiceTier: tier, Stream: true, Latency: latency, TTFT: latency / 4, Failed: failed,
+			Detail: coreusage.Detail{InputTokens: 100, OutputTokens: 20, ReasoningTokens: 8, TotalTokens: 120},
+		}
+	}
+	s.HandleUsage(context.Background(), rec(" High ", "priority", 4*time.Second, false))
+	s.HandleUsage(context.Background(), rec("high", "priority", 2*time.Second, true))
+	s.HandleUsage(context.Background(), rec("", "", 0, false))
+
+	m := s.Usage("k")[Day].Models["gpt-6.1-sol"]
+	if m.Streamed != 3 || m.LatencyMs != 6000 || m.LatencyCount != 2 || m.TTFTMs != 1500 || m.TTFTCount != 2 {
+		t.Fatalf("model timing = %+v", m)
+	}
+	high := m.Efforts["high"]
+	if high == nil || high.Requests != 2 || high.Failed != 1 || high.Tokens != 240 || high.ReasoningTokens != 16 ||
+		high.LatencyMs != 6000 || m.Efforts[DefaultDimValue] == nil || m.Efforts[DefaultDimValue].Requests != 1 {
+		t.Fatalf("efforts = %+v", m.Efforts)
+	}
+	if m.Tiers["priority"] == nil || m.Tiers["priority"].Requests != 2 || m.Tiers[DefaultDimValue].Requests != 1 {
+		t.Fatalf("tiers = %+v", m.Tiers)
+	}
+
+	// Snapshots and persistence keep the breakdown without sharing maps.
+	m.Efforts["high"].Requests = 99
+	if s.Usage("k")[Day].Models["gpt-6.1-sol"].Efforts["high"].Requests != 2 {
+		t.Fatal("Usage returned a shared effort counter")
+	}
+	s.Flush()
+	restored := newTestStore(now)
+	restored.path = path
+	restored.load()
+	daily, _ := restored.History("k")
+	if len(daily) != 1 || daily[0].Models["gpt-6.1-sol"].Efforts["high"].Requests != 2 {
+		t.Fatalf("restored history = %+v", daily)
+	}
+}
+
+func TestDimValuesAreCapped(t *testing.T) {
+	s := newTestStore(time.Date(2026, 11, 17, 10, 0, 0, 0, time.UTC))
+	for i := 0; i < maxDimValues+5; i++ {
+		s.AddUsage("k", Usage{Model: "m", Effort: "e" + string(rune('a'+i))})
+	}
+	efforts := s.Usage("k")[Day].Models["m"].Efforts
+	if len(efforts) != maxDimValues+1 || efforts["other"] == nil || efforts["other"].Requests != 5 {
+		t.Fatalf("efforts = %d entries, other=%+v", len(efforts), efforts["other"])
+	}
+}

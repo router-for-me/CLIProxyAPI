@@ -48,6 +48,58 @@ type ModelCounter struct {
 	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
 	Tokens           int64   `json:"tokens"`
 	Cost             float64 `json:"cost"`
+	// Streamed counts streaming requests.
+	Streamed int64 `json:"streamed,omitempty"`
+	// Latency and TTFT are sums in milliseconds over the requests that reported them.
+	LatencyMs    int64 `json:"latency_ms,omitempty"`
+	LatencyCount int64 `json:"latency_count,omitempty"`
+	TTFTMs       int64 `json:"ttft_ms,omitempty"`
+	TTFTCount    int64 `json:"ttft_count,omitempty"`
+	// Efforts and Tiers break the model down by reasoning effort and service tier.
+	Efforts map[string]*DimCounter `json:"efforts,omitempty"`
+	Tiers   map[string]*DimCounter `json:"tiers,omitempty"`
+}
+
+// DimCounter holds a model's usage for one value of a request dimension
+// (a reasoning effort level or a service tier).
+type DimCounter struct {
+	Requests        int64   `json:"requests"`
+	Failed          int64   `json:"failed,omitempty"`
+	Tokens          int64   `json:"tokens"`
+	OutputTokens    int64   `json:"output_tokens,omitempty"`
+	ReasoningTokens int64   `json:"reasoning_tokens,omitempty"`
+	Cost            float64 `json:"cost,omitempty"`
+	LatencyMs       int64   `json:"latency_ms,omitempty"`
+	LatencyCount    int64   `json:"latency_count,omitempty"`
+}
+
+// maxDimValues caps distinct values per dimension so odd client input cannot grow
+// the counters without bound; further values fold into "other".
+const maxDimValues = 16
+
+// DefaultDimValue labels requests that did not set the dimension.
+const DefaultDimValue = "default"
+
+func cloneDims(in map[string]*DimCounter) map[string]*DimCounter {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]*DimCounter, len(in))
+	for k, v := range in {
+		if v != nil {
+			c := *v
+			out[k] = &c
+		}
+	}
+	return out
+}
+
+// Clone returns a deep copy of the model counter.
+func (m *ModelCounter) Clone() ModelCounter {
+	out := *m
+	out.Efforts = cloneDims(m.Efforts)
+	out.Tiers = cloneDims(m.Tiers)
+	return out
 }
 
 // Counter holds usage accumulated in one window.
@@ -83,7 +135,7 @@ func (c *Counter) clone() Counter {
 		out.Models = make(map[string]*ModelCounter, len(c.Models))
 		for name, m := range c.Models {
 			if m != nil {
-				mc := *m
+				mc := m.Clone()
 				out.Models[name] = &mc
 			}
 		}
@@ -102,6 +154,13 @@ type Usage struct {
 	ReasoningTokens  int64
 	Tokens           int64
 	Cost             float64
+	// Effort and Tier are the request's reasoning effort and service tier; empty
+	// values count as DefaultDimValue.
+	Effort  string
+	Tier    string
+	Stream  bool
+	Latency time.Duration
+	TTFT    time.Duration
 }
 
 type keyCounters map[Window]*Counter
@@ -354,6 +413,61 @@ func addModel(models map[string]*ModelCounter, u Usage) {
 	if u.Cost > 0 {
 		m.Cost += u.Cost
 	}
+	if u.Stream {
+		m.Streamed++
+	}
+	if u.Latency > 0 {
+		m.LatencyMs += u.Latency.Milliseconds()
+		m.LatencyCount++
+	}
+	if u.TTFT > 0 {
+		m.TTFTMs += u.TTFT.Milliseconds()
+		m.TTFTCount++
+	}
+	m.Efforts = addDim(m.Efforts, u.Effort, u)
+	m.Tiers = addDim(m.Tiers, u.Tier, u)
+}
+
+// dimValue normalizes a client-supplied dimension value to a short lowercase label.
+func dimValue(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return DefaultDimValue
+	}
+	if len(v) > 24 {
+		v = v[:24]
+	}
+	return v
+}
+
+func addDim(dims map[string]*DimCounter, raw string, u Usage) map[string]*DimCounter {
+	if dims == nil {
+		dims = make(map[string]*DimCounter)
+	}
+	key := dimValue(raw)
+	if dims[key] == nil && len(dims) >= maxDimValues {
+		key = "other"
+	}
+	d := dims[key]
+	if d == nil {
+		d = &DimCounter{}
+		dims[key] = d
+	}
+	d.Requests++
+	if u.Failed {
+		d.Failed++
+	}
+	d.Tokens += max(u.Tokens, 0)
+	d.OutputTokens += max(u.OutputTokens, 0)
+	d.ReasoningTokens += max(u.ReasoningTokens, 0)
+	if u.Cost > 0 {
+		d.Cost += u.Cost
+	}
+	if u.Latency > 0 {
+		d.LatencyMs += u.Latency.Milliseconds()
+		d.LatencyCount++
+	}
+	return dims
 }
 
 func addBucket(b modelBuckets, slot string, u Usage) modelBuckets {
@@ -409,7 +523,7 @@ func snapshotBuckets(b modelBuckets) []Bucket {
 		cp := make(map[string]ModelCounter, len(models))
 		for name, m := range models {
 			if m != nil {
-				cp[name] = *m
+				cp[name] = m.Clone()
 			}
 		}
 		out = append(out, Bucket{Time: slot, Models: cp})
@@ -427,7 +541,7 @@ func cloneBuckets(b modelBuckets) modelBuckets {
 		cp := make(map[string]*ModelCounter, len(models))
 		for name, m := range models {
 			if m != nil {
-				mc := *m
+				mc := m.Clone()
 				cp[name] = &mc
 			}
 		}
@@ -506,7 +620,7 @@ func (s *Store) Check(key string, limits config.APIKeyLimits) (Exceeded, bool) {
 }
 
 // HandleUsage implements coreusage.Plugin.
-func (s *Store) HandleUsage(_ context.Context, record coreusage.Record) {
+func (s *Store) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if !record.IsNativeKey || record.APIKey == "" {
 		return
 	}
@@ -517,8 +631,12 @@ func (s *Store) HandleUsage(_ context.Context, record coreusage.Record) {
 	if cfgFn != nil {
 		cfg = cfgFn()
 	}
-	d := record.Detail
+	d := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	t := normalizeTokens(d)
+	effort := strings.TrimSpace(record.ReasoningEffort)
+	if effort == "" {
+		effort = coreusage.ReasoningEffortFromContext(ctx)
+	}
 	s.AddUsage(record.APIKey, Usage{
 		Model:            recordModel(record),
 		Failed:           record.Failed,
@@ -529,7 +647,26 @@ func (s *Store) HandleUsage(_ context.Context, record coreusage.Record) {
 		ReasoningTokens:  d.ReasoningTokens,
 		Tokens:           recordTokens(d),
 		Cost:             RecordCost(cfg, record),
+		Effort:           effort,
+		Tier:             recordTier(ctx, record),
+		Stream:           record.Stream,
+		Latency:          record.Latency,
+		TTFT:             record.TTFT,
 	})
+}
+
+// recordTier names the service tier a request ran at: the tier the upstream reported,
+// then the tier sent upstream, then the tier the client asked for.
+func recordTier(ctx context.Context, record coreusage.Record) string {
+	for _, tier := range []string{
+		record.ResponseServiceTier, record.Detail.ResponseServiceTier,
+		record.EffectiveServiceTier, record.ServiceTier, record.RequestServiceTier,
+	} {
+		if tier = strings.TrimSpace(tier); tier != "" {
+			return tier
+		}
+	}
+	return coreusage.ServiceTierFromContext(ctx)
 }
 
 // tokenCounts is a request's token usage in one convention: input includes cache
@@ -604,7 +741,7 @@ func RecordCost(cfg *config.Config, record coreusage.Record) float64 {
 	if !ok {
 		return 0
 	}
-	t := normalizeTokens(record.Detail)
+	t := normalizeTokens(coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType))
 	// Cache writes have no price of their own here; they are billed as regular input.
 	uncached := max(t.input-t.cacheRead, 0)
 	cachedPrice := price.CachedInput
