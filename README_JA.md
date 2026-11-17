@@ -20,7 +20,7 @@ CLIProxyAPI は、CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインタ�
     </tr>
     <tr>
         <td align="center"><a href="https://developers.openai.com/api/docs/models"><img src="./assets/logo/openai.svg" alt="OpenAI" width="28" height="28" /></a></td>
-        <td>OpenAI GPT-6シリーズモデル（GPT-6 Astra、GPT-6.1 Sol、GPT-6.1 Terra、GPT-6 Luna）。Codex OAuth経由でも利用できます。Astraは複雑な推論とコーディング、Solは性能とコストのバランス、Terraは視覚的推論とコンピューター操作、Lunaは大量の明確なタスクに適しています。</td>
+        <td>OpenAI GPT-6シリーズモデル（GPT-6.2 Astra、GPT-6.2 Sol、GPT-6.1 Terra、GPT-6 Luna）。CLIProxyAPIはCodex OAuthに対応しており、利用できるモデルはアカウントとプロキシのモデルカタログによって異なります。Astraは複雑な推論とコーディング、Solは性能とコストのバランス、Terraは視覚的推論とコンピューター操作、Lunaは大量の明確なタスクに適しています。</td>
     </tr>
     <tr>
         <td align="center"><a href="https://www.anthropic.com/claude"><img src="./assets/logo/claude.svg" alt="Anthropic" width="28" height="28" /></a></td>
