@@ -54,7 +54,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			if name == alias {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
@@ -401,7 +401,7 @@ func resolveUpstreamModelFromAliases(aliases []internalconfig.OAuthModelAlias, r
 			if original == "" || alias == "" || !strings.EqualFold(alias, key) {
 				continue
 			}
-			if strings.EqualFold(original, baseModel) {
+			if original == baseModel {
 				if !entry.ForceMapping {
 					return OAuthModelAliasResult{}
 				}
@@ -469,7 +469,7 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 			continue
 		}
 
-		if strings.EqualFold(targetModel, baseModel) {
+		if targetModel == baseModel {
 			if !entry.forceMapping {
 				return OAuthModelAliasResult{}
 			}

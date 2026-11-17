@@ -1055,6 +1055,7 @@ oauth:
 
   # Global OAuth model name aliases (per channel)
   # These aliases rename model IDs for both model listing and request routing.
+  # A name and alias may differ only in case; requests retain the upstream spelling.
   # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
   # NOTE: These aliases do not apply to any of the upstream groups under api-keys.
   # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping

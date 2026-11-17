@@ -1167,7 +1167,7 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	if oldID == "" || newID == "" {
 		return name
 	}
-	if strings.EqualFold(oldID, newID) {
+	if oldID == newID {
 		return name
 	}
 	if strings.EqualFold(trimmed, oldID) {
@@ -1249,7 +1249,7 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		if name == "" || alias == "" {
 			continue
 		}
-		if strings.EqualFold(name, alias) {
+		if name == alias {
 			continue
 		}
 		key := strings.ToLower(name)
@@ -1264,6 +1264,7 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 	}
 
 	out := make([]*ModelInfo, 0, len(models))
+	// A casing alias and its forked source are distinct advertised model IDs.
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		if model == nil {
@@ -1276,10 +1277,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		key := strings.ToLower(id)
 		entries := forward[key]
 		if len(entries) == 0 {
-			if _, exists := seen[key]; exists {
+			if _, exists := seen[id]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[id] = struct{}{}
 			out = append(out, model)
 			continue
 		}
@@ -1292,8 +1293,8 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			}
 		}
 		if keepOriginal {
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
+			if _, exists := seen[id]; !exists {
+				seen[id] = struct{}{}
 				out = append(out, model)
 			}
 		}
@@ -1304,10 +1305,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			if mappedID == "" {
 				continue
 			}
-			if strings.EqualFold(mappedID, id) {
+			if mappedID == id {
 				continue
 			}
-			aliasKey := strings.ToLower(mappedID)
+			aliasKey := mappedID
 			if _, exists := seen[aliasKey]; exists {
 				continue
 			}
@@ -1332,10 +1333,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 
 		if !keepOriginal && !addedAlias {
-			if _, exists := seen[key]; exists {
+			if _, exists := seen[id]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[id] = struct{}{}
 			out = append(out, model)
 		}
 	}
