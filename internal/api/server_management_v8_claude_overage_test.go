@@ -277,7 +277,7 @@ func (o *overageChildOutput) Write(p []byte) (int, error) {
 }
 
 func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
-	for _, phase := range []string{"sibling", "update", "refresh", "rotation", "replacement", "replacement_restore", "restore", "later_longer", "earlier_longer", "later_longer_restore", "shadow_restore", "late_old_account", "late_old_account_count", "late_old_account_stream", "late_same_account", "count", "stream", "manual", "manual_auth", "manual_auth_restore", "alias_source_later", "alias_target_later", "new_failure_during_usage"} {
+	for _, phase := range []string{"sibling", "update", "refresh", "rotation", "replacement", "replacement_restore", "restore", "later_longer", "earlier_longer", "later_longer_restore", "shadow_restore", "credential_first", "late_old_account", "late_old_account_count", "late_old_account_stream", "late_same_account", "count", "stream", "manual", "manual_auth", "manual_auth_restore", "alias_source_later", "alias_target_later", "new_failure_during_usage"} {
 		t.Run(phase, func(t *testing.T) {
 			if child := os.Getenv("CPA_OVERAGE_CHILD_CASE"); child == "" {
 				runIsolatedOverageCase(t, phase)
@@ -289,7 +289,7 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 			entered := make(chan int, 2)
 			releaseFirst, releaseSecond := make(chan struct{}), make(chan struct{})
 			var order atomic.Int32
-			concurrent := phase == "later_longer" || phase == "earlier_longer" || phase == "later_longer_restore" || phase == "shadow_restore" || strings.HasPrefix(phase, "late_old_account") || phase == "late_same_account" || phase == "new_failure_during_usage"
+			concurrent := phase == "later_longer" || phase == "earlier_longer" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "credential_first" || strings.HasPrefix(phase, "late_old_account") || phase == "late_same_account" || phase == "new_failure_during_usage"
 			fixture := newOverageRouteFixture(t, usage, func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
 				var request struct {
@@ -317,7 +317,7 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 					}
 				}
 				overage := true
-				if phase == "earlier_longer" && n == 1 || (phase == "later_longer" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "new_failure_during_usage") && n == 2 {
+				if (phase == "earlier_longer" || phase == "credential_first") && n == 1 || (phase == "later_longer" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "new_failure_during_usage") && n == 2 {
 					overage = false
 				}
 				if !overage {
@@ -399,7 +399,7 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 					if err := <-failures; err == nil {
 						t.Fatal("first actual rejection missing")
 					}
-					if phase != "earlier_longer" {
+					if phase != "earlier_longer" && phase != "credential_first" {
 						firstDeadline = fixture.overageDeadline(t, false)
 					}
 					close(releaseSecond)
@@ -479,6 +479,16 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 			if phase == "update" || phase == "refresh" || phase == "rotation" || phase == "replacement" || phase == "replacement_restore" {
 				current, _ := fixture.manager.GetByID(fixture.auth.ID)
 				updated := current.Clone()
+				if phase == "update" || phase == "refresh" || phase == "rotation" {
+					public, err := json.Marshal(current)
+					if err != nil {
+						t.Fatal(err)
+					}
+					updated = &coreauth.Auth{}
+					if err = json.Unmarshal(public, updated); err != nil {
+						t.Fatal(err)
+					}
+				}
 				updated.Metadata["notes"] = "ordinary edit"
 				if phase == "replacement" || phase == "replacement_restore" {
 					updated.Metadata["account_uuid"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
@@ -507,13 +517,22 @@ func TestManagementV8ClaudeOverageAttribution(t *testing.T) {
 					t.Fatal("later ordinary quota replaced overage causal deadline")
 				}
 			}
-			if phase == "shadow_restore" {
-				if fixture.overageDeadline(t, true).IsZero() {
+			var independentDeadline time.Time
+			if phase == "shadow_restore" || phase == "credential_first" {
+				independentDeadline = fixture.overageDeadline(t, true)
+				if independentDeadline.IsZero() {
 					t.Fatal("credential shadow lost overage causal deadline")
 				}
+				current, _ := fixture.manager.GetByID(fixture.auth.ID)
+				if !independentDeadline.Before(current.Quota.NextRecoverAt.Add(-30 * time.Minute)) {
+					t.Fatal("outer credential quota inflated independent overage deadline")
+				}
 			}
-			if phase == "restore" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "replacement_restore" || phase == "manual_auth_restore" {
+			if phase == "restore" || phase == "later_longer_restore" || phase == "shadow_restore" || phase == "replacement_restore" || phase == "manual_auth_restore" || phase == "credential_first" {
 				fixture.restore(t)
+			}
+			if !independentDeadline.IsZero() && !fixture.overageDeadline(t, true).Equal(independentDeadline) {
+				t.Fatal("restored independent cooldown lost overage causal deadline")
 			}
 			beforeUsage, _ := fixture.manager.GetByID(fixture.auth.ID)
 			recover := phase == "replacement" || phase == "replacement_restore" || strings.HasPrefix(phase, "late_old_account")
