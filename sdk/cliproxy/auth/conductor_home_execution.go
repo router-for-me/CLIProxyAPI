@@ -47,7 +47,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		retryRoundPending = false
 		retryRoundWaited = false
 		if isRequestTerminatedError(errExecute) || isRequestStopError(errExecute) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
+			return cliproxyexecutor.Response{}, errExecute
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExecute, attempt, providers, retryModel, maxWait, homeRetryLimit, defaultRequestRetry)
 		if !shouldRetry {

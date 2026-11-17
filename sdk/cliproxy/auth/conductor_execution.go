@@ -269,12 +269,15 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	opts, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
+	opts, pinnedThread, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return cliproxyexecutor.Response{}, errThread
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
+		if pinnedThread && errHome != nil && !isRequestStopError(errHome) {
+			return resp, claudeThreadReplayError(unwrapExecutionBoundaryError(errHome))
+		}
 		return resp, unwrapExecutionBoundaryError(errHome)
 	}
 
@@ -404,13 +407,20 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			}
 		}
 		lastErr = m.annotatePoolCooldownTerminalError(ctx, normalized, retryModel, opts, lastErr, selectionCooldownDeadline)
+		if pinnedThread {
+			lastErr = claudeThreadReplayError(lastErr)
+		}
 		if continuitySession.terminated {
 			continuitySession.terminalErr = lastErr
 			lastErr = markContinuityTerminatedError(lastErr)
 		}
 		return cliproxyexecutor.Response{}, lastErr
 	}
-	return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
+	errFinal := error(&Error{Code: "auth_not_found", Message: "no auth available"})
+	if pinnedThread {
+		errFinal = claudeThreadReplayError(errFinal)
+	}
+	return cliproxyexecutor.Response{}, errFinal
 }
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
@@ -505,7 +515,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	opts, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
+	opts, pinnedThread, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return nil, errThread
 	}
@@ -566,7 +576,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if m.HomeEnabled() && retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
-					return nil, unwrapExecutionBoundaryError(errStream)
+					errOut := unwrapExecutionBoundaryError(errStream)
+					if pinnedThread && !isRequestStopError(errStream) {
+						errOut = claudeThreadReplayError(errOut)
+					}
+					return nil, errOut
 				}
 				if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
 					return nil, errWait
@@ -682,6 +696,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		if !m.HomeEnabled() {
 			lastErr = m.annotatePoolCooldownTerminalError(ctx, normalized, retryModel, opts, lastErr, selectionCooldownDeadline)
 		}
+		if pinnedThread {
+			lastErr = claudeThreadReplayError(lastErr)
+		}
 		var bootstrapErr *streamBootstrapError
 		if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
 			streamErr := lastErr
@@ -697,7 +714,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		return nil, lastErr
 	}
-	return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	errFinal := error(&Error{Code: "auth_not_found", Message: "no auth available"})
+	if pinnedThread {
+		errFinal = claudeThreadReplayError(errFinal)
+	}
+	return nil, errFinal
 }
 
 type requestToFormatResolver interface {

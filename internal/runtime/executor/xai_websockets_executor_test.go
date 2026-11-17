@@ -2793,14 +2793,19 @@ func TestXAIWebsocketWriteFailureRecordedWithoutReconnectWhenRequestLogDisabled(
 	for _, want := range []string{
 		"=== API RESPONSE 1 ===",
 		"Status: 101",
-		"Error: send:",
-		"upstream_outcome_unknown",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
 		}
 	}
 
+	if strings.Contains(rendered, "Error:") || strings.Contains(rendered, "=== API RESPONSE 2 ===") {
+		t.Fatalf("local error fabricated an upstream response: %s", rendered)
+	}
+	diagnostics := value.(*logging.DeferredAPICapture).ResponseDiagnostics()
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0].Error.Error(), "send:") || !strings.Contains(diagnostics[0].Error.Error(), "upstream_outcome_unknown") {
+		t.Fatalf("missing local send diagnostic: %v", diagnostics)
+	}
 	if dials.Load() != 1 || writes.Load() != 1 {
 		t.Fatalf("ambiguous write retried: dials=%d writes=%d", dials.Load(), writes.Load())
 	}
@@ -2879,12 +2884,17 @@ func TestXAIWebsocketWriteFailureRecordedWithoutReconnectWhenRequestLogDisabled(
 		for _, want := range []string{
 			"=== API RESPONSE 1 ===",
 			"Status: 101",
-			"Error: send:",
-			"upstream_outcome_unknown",
 		} {
 			if !strings.Contains(subRendered, want) {
 				t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
 			}
+		}
+		if strings.Contains(subRendered, "Error:") || strings.Contains(subRendered, "=== API RESPONSE 2 ===") {
+			t.Fatalf("transport error fabricated an upstream response: %s", subRendered)
+		}
+		subDiagnostics := subVal.(*logging.DeferredAPICapture).ResponseDiagnostics()
+		if len(subDiagnostics) != 1 || !strings.Contains(subDiagnostics[0].Error.Error(), "send:") || !strings.Contains(subDiagnostics[0].Error.Error(), "upstream_outcome_unknown") {
+			t.Fatalf("missing local transport send diagnostic: %v", subDiagnostics)
 		}
 		if transportDials.Load() != 1 || transportWrites.Load() != 1 {
 			t.Fatalf("ambiguous transport write retried: dials=%d writes=%d", transportDials.Load(), transportWrites.Load())
@@ -2954,10 +2964,8 @@ func TestXAIWebsocketWriteFailureRecordedWithoutReconnectWhenRequestLogDisabled(
 				if invalid101 {
 					wantStatus = "Status: 101"
 				}
-				for _, want := range []string{wantStatus, "Error: dial:"} {
-					if !strings.Contains(initRendered, want) {
-						t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
-					}
+				if !strings.Contains(initRendered, wantStatus) || strings.Contains(initRendered, "Error: dial:") {
+					t.Fatalf("initial handshake response must contain only upstream details:\n%s", initRendered)
 				}
 			})
 		}
