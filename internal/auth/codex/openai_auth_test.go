@@ -378,3 +378,23 @@ func TestRefreshTokensWithRetry_TerminalGrantErrorsOnlyAttemptOnce(t *testing.T)
 		})
 	}
 }
+
+
+func TestUpdateTokenStoragePreservesRefreshTokenWhenRefreshOmitsIt(t *testing.T) {
+	storage := &CodexTokenStorage{RefreshToken: "existing-refresh"}
+	(&CodexAuth{}).UpdateTokenStorage(storage, &CodexTokenData{AccessToken: "new-access"})
+	if storage.RefreshToken != "existing-refresh" {
+		t.Fatalf("refresh token = %q, want the existing token kept when the refresh response omits one", storage.RefreshToken)
+	}
+	if storage.AccessToken != "new-access" {
+		t.Fatalf("access token = %q, want refreshed access token", storage.AccessToken)
+	}
+}
+
+func TestUpdateTokenStorageAppliesRotatedRefreshToken(t *testing.T) {
+	storage := &CodexTokenStorage{RefreshToken: "old-refresh"}
+	(&CodexAuth{}).UpdateTokenStorage(storage, &CodexTokenData{RefreshToken: "new-refresh"})
+	if storage.RefreshToken != "new-refresh" {
+		t.Fatalf("refresh token = %q, want rotated token applied", storage.RefreshToken)
+	}
+}

@@ -678,7 +678,11 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 //   - tokenData: The new token data to apply
 func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *ClaudeTokenData) {
 	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
+	// A refresh response may legally omit refresh_token; the existing token
+	// remains valid then and must not be overwritten with an empty value.
+	if strings.TrimSpace(tokenData.RefreshToken) != "" {
+		storage.RefreshToken = tokenData.RefreshToken
+	}
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
 	if tokenData.Email != "" {
 		storage.Email = tokenData.Email
