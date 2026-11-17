@@ -56,9 +56,17 @@ func (m *Manager) quotaRecoveryModelHeadersMatchLocked(auth *Auth) bool {
 				candidates = []string{resolved}
 			}
 		}
+		var finalizedModels []string
 		for _, model := range candidates {
 			// Executors remove the thinking suffix before building the business payload.
 			model = thinking.ParseSuffix(model).ModelName
+			models, safe := quotaRecoveryPayloadModels(routing.config, model, route, requested)
+			if !safe {
+				return false
+			}
+			finalizedModels = append(finalizedModels, models...)
+		}
+		for _, model := range finalizedModels {
 			for key, value := range registry.ModelOverrideHeaders(model) {
 				switch strings.ToLower(strings.TrimSpace(key)) {
 				case "authorization":
