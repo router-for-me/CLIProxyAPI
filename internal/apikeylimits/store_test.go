@@ -195,3 +195,29 @@ func TestHistoryBucketsAndRetention(t *testing.T) {
 		t.Fatalf("after retention daily=%+v hourly=%+v", d, h)
 	}
 }
+
+func TestAddRejectedCountsSeparately(t *testing.T) {
+	now := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "api-key-usage.json")
+	s := newTestStore(now)
+	s.path = path
+	s.AddRejected("k", "api_key_disabled")
+	s.AddRejected("k", "api_key_disabled")
+	s.AddRejected("k", "api_key_expired")
+	u := s.Usage("k")[Day]
+	if u.Rejected != 3 || u.Requests != 0 || u.RejectedReasons["api_key_disabled"] != 2 ||
+		u.LastRejectedAt == nil || !u.LastRejectedAt.Equal(now) {
+		t.Fatalf("rejections = %+v", u)
+	}
+	u.RejectedReasons["api_key_disabled"] = 99
+	if s.Usage("k")[Day].RejectedReasons["api_key_disabled"] != 2 {
+		t.Fatal("Usage returned a shared reasons map")
+	}
+	s.Flush()
+	restored := newTestStore(now)
+	restored.path = path
+	restored.load()
+	if r := restored.Usage("k")[Total]; r.Rejected != 3 || r.RejectedReasons["api_key_expired"] != 1 {
+		t.Fatalf("restored rejections = %+v", r)
+	}
+}

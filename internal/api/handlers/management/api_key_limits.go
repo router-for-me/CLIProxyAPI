@@ -28,6 +28,10 @@ type apiKeyWindowUsage struct {
 	Failed   int64              `json:"failed"`
 	ResetAt  *time.Time         `json:"reset_at,omitempty"`
 	Models   []apiKeyModelUsage `json:"models"`
+	// Rejected counts requests refused by the key policy (not included in Requests).
+	Rejected        int64            `json:"rejected"`
+	RejectedReasons map[string]int64 `json:"rejected_reasons,omitempty"`
+	LastRejectedAt  *time.Time       `json:"last_rejected_at,omitempty"`
 }
 
 type apiKeyHistoryBucket struct {
@@ -36,10 +40,11 @@ type apiKeyHistoryBucket struct {
 }
 
 type apiKeyPolicyUsage struct {
-	Key     string                       `json:"key"`
-	Name    string                       `json:"name,omitempty"`
-	Expired bool                         `json:"expired"`
-	Usage   map[string]apiKeyWindowUsage `json:"usage"`
+	Key      string                       `json:"key"`
+	Name     string                       `json:"name,omitempty"`
+	Disabled bool                         `json:"disabled"`
+	Expired  bool                         `json:"expired"`
+	Usage    map[string]apiKeyWindowUsage `json:"usage"`
 	// Daily (YYYY-MM-DD) and Hourly (YYYY-MM-DDTHH) buckets in server local time,
 	// oldest first; empty buckets are omitted.
 	Daily  []apiKeyHistoryBucket `json:"daily"`
@@ -111,6 +116,7 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 		entry := apiKeyPolicyUsage{Key: key, Usage: make(map[string]apiKeyWindowUsage, 4)}
 		if policy, ok := cfg.FindAPIKeyPolicy(key); ok {
 			entry.Name = policy.Name
+			entry.Disabled = policy.Disabled
 			entry.Expired = policy.ExpiredAt(now)
 		}
 		for window, counter := range store.Usage(key) {
@@ -120,6 +126,10 @@ func (h *Handler) GetAPIKeyPolicyUsage(c *gin.Context) {
 				Requests: counter.Requests,
 				Failed:   counter.Failed,
 				Models:   apiKeyModelBreakdown(counter.Models),
+
+				Rejected:        counter.Rejected,
+				RejectedReasons: counter.RejectedReasons,
+				LastRejectedAt:  counter.LastRejectedAt,
 			}
 			if end := apikeylimits.WindowEnd(window, now); !end.IsZero() {
 				usage.ResetAt = &end

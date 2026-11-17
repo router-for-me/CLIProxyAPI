@@ -129,12 +129,18 @@ func (env *policyTestEnv) do(t *testing.T, method, path, key, body string) *http
 
 func TestAPIKeyPolicyDisabledKeyIsRejected(t *testing.T) {
 	env := newPolicyTestEnv(t)
+	before := apikeylimits.Default().Usage("key-disabled")[apikeylimits.Total]
 	rr := env.do(t, http.MethodPost, "/v1/chat/completions", "key-disabled", `{"model":"`+env.modelOne+`","messages":[{"role":"user","content":"hi"}]}`)
 	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "api_key_disabled") {
 		t.Fatalf("status=%d body=%s, want 401 api_key_disabled", rr.Code, rr.Body.String())
 	}
 	if got := env.exec.snapshot(); len(got) != 0 {
 		t.Fatalf("disabled key reached executor: %v", got)
+	}
+	after := apikeylimits.Default().Usage("key-disabled")[apikeylimits.Total]
+	if after.Rejected != before.Rejected+1 || after.RejectedReasons["api_key_disabled"] != before.RejectedReasons["api_key_disabled"]+1 ||
+		after.LastRejectedAt == nil || after.Requests != before.Requests {
+		t.Fatalf("rejection not counted: before=%+v after=%+v", before, after)
 	}
 }
 

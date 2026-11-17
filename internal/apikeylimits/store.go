@@ -54,11 +54,26 @@ type Counter struct {
 	Failed   int64     `json:"failed,omitempty"`
 	// Models breaks the window down by upstream model name.
 	Models map[string]*ModelCounter `json:"models,omitempty"`
+	// Rejected counts requests refused by the key's policy before reaching a model
+	// (disabled, expired or over its limits); they are not part of Requests.
+	Rejected        int64            `json:"rejected,omitempty"`
+	RejectedReasons map[string]int64 `json:"rejected_reasons,omitempty"`
+	LastRejectedAt  *time.Time       `json:"last_rejected_at,omitempty"`
 }
 
-// clone returns a deep copy so callers never share the Models map with the store.
+// clone returns a deep copy so callers never share maps or pointers with the store.
 func (c *Counter) clone() Counter {
 	out := *c
+	if c.RejectedReasons != nil {
+		out.RejectedReasons = make(map[string]int64, len(c.RejectedReasons))
+		for reason, n := range c.RejectedReasons {
+			out.RejectedReasons[reason] = n
+		}
+	}
+	if c.LastRejectedAt != nil {
+		at := *c.LastRejectedAt
+		out.LastRejectedAt = &at
+	}
 	if c.Models != nil {
 		out.Models = make(map[string]*ModelCounter, len(c.Models))
 		for name, m := range c.Models {
@@ -285,6 +300,32 @@ func (s *Store) AddUsage(key string, u Usage) {
 	}
 	h.Daily = addBucket(h.Daily, now.Format(DailyLayout), hu)
 	h.Hourly = addBucket(h.Hourly, now.Format(HourlyLayout), hu)
+	s.dirty = true
+}
+
+// AddRejected records a request refused by the key's policy, with a short reason
+// code such as "api_key_disabled".
+func (s *Store) AddRejected(key, reason string) {
+	if key == "" {
+		return
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	fp := Fingerprint(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	for _, w := range windows {
+		c := s.current(fp, w, now)
+		c.Rejected++
+		if c.RejectedReasons == nil {
+			c.RejectedReasons = make(map[string]int64)
+		}
+		c.RejectedReasons[reason]++
+		at := now
+		c.LastRejectedAt = &at
+	}
 	s.dirty = true
 }
 
