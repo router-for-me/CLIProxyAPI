@@ -484,7 +484,8 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		existingVersion = 1
 	}
 	credChanged := CredentialsChanged(existing, auth)
-	if !credChanged && strings.EqualFold(auth.Provider, "codex") && auth.Provider == existing.Provider && existing.nonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
+	preserveIndependentCooldown := (!credChanged && strings.EqualFold(auth.Provider, "codex") && auth.Provider == existing.Provider) || sameClaudeOverageAccount(auth, existing)
+	if preserveIndependentCooldown && existing.nonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
 		auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
 	}
 	if credChanged {
@@ -504,7 +505,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
-		} else if mode == updateModeReplace && !credChanged && strings.EqualFold(auth.Provider, "codex") && auth.Provider == existing.Provider {
+		} else if mode == updateModeReplace && preserveIndependentCooldown {
 			// Public model snapshots omit private independent cooldown layers.
 			auth.ModelStates = auth.Clone().ModelStates
 			for model, state := range auth.ModelStates {
