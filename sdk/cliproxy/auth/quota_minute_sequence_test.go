@@ -131,3 +131,20 @@ func TestQuotaRecoveryClaudeMinuteProviderOwnership(t *testing.T) {
 		t.Fatal("Claude body attributed minute throttle to another provider")
 	}
 }
+
+func TestQuotaRecoveryClaudeMinuteAuthProviderOwnership(t *testing.T) {
+	prior := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prior) })
+	m := NewManager(nil, nil, nil)
+	a, err := m.Register(context.Background(), &Auth{ID: t.Name(), Provider: "openai", Status: StatusActive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := 45 * time.Second
+	m.MarkResult(context.Background(), Result{AuthID: a.ID, Provider: a.Provider, Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"rate_limit_error","message":"This request would exceed the requests per minute rate limit. Please try again later."}}`}, RetryAfter: &d})
+	a, _ = m.GetByID(a.ID)
+	if !a.nonQuotaCooldownUntil.IsZero() {
+		t.Fatal("Claude body attributed auth minute throttle to another provider")
+	}
+}
