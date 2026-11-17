@@ -96,6 +96,7 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		defer selection.End("session_closed")
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	logging.SetGinCPAAuthKind(c, selected.AuthKind())
 
 	upstreamURL := h.directRealtimeURL(requestedModel)
 	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, error) {

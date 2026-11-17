@@ -132,6 +132,7 @@ func (h *Handler) HandleHangup(c *gin.Context) {
 		return
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	logging.SetGinCPAAuthKind(c, selected.AuthKind())
 
 	body, errRead := readBody(c.Request.Body)
 	if errRead != nil {

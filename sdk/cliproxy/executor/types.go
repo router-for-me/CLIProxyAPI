@@ -52,6 +52,9 @@ const (
 	SelectedAuthIndexMetadataKey = "selected_auth_index"
 	// SelectedAuthIndexCallbackMetadataKey carries an optional callback invoked with the selected auth index.
 	SelectedAuthIndexCallbackMetadataKey = "selected_auth_index_callback"
+	// SelectedAuthKindCallbackMetadataKey carries an optional callback invoked with the selected auth's kind
+	// ("oauth" or "apikey"), so a client can tell a subscription login from an API key.
+	SelectedAuthKindCallbackMetadataKey = "selected_auth_kind_callback"
 	// FinalizedResponseFormatCallbackMetadataKey carries an optional callback invoked with the effective response_format after payload rules.
 	FinalizedResponseFormatCallbackMetadataKey = "finalized_response_format_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.

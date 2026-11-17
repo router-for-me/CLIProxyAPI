@@ -370,6 +370,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
 			meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey] = traceCallback
 		}
+		if kindCallback := logging.GinCPAAuthKindCallback(ginCtx); kindCallback != nil {
+			meta[coreexecutor.SelectedAuthKindCallbackMetadataKey] = kindCallback
+		}
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID

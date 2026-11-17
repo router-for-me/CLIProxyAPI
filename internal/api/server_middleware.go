@@ -25,6 +25,7 @@ import (
 
 var corsExposedResponseHeaders = []string{
 	logging.CPATraceIDHeader,
+	logging.CPAAuthKindHeader,
 	"X-CPA-VERSION",
 	"X-CPA-COMMIT",
 	"X-CPA-BUILD-DATE",

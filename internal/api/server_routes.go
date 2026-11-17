@@ -458,6 +458,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		defer releaseAttempt()
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	logging.SetGinCPAAuthKind(c, selected.AuthKind())
 
 	baseHeaders := make(http.Header)
 	baseHeaders.Set("Content-Type", "application/json")

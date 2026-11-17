@@ -258,6 +258,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	}
 	selectedIndex := selected.EnsureIndex()
 	logging.SetGinCPATraceID(c, selectedIndex)
+	logging.SetGinCPAAuthKind(c, selected.AuthKind())
 	if selection != nil {
 		defer func() {
 			if selection.Active() && !selection.Retained() {
