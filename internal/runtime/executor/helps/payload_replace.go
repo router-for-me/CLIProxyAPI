@@ -10,20 +10,33 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// replacePayloadUserTextDoc edits only existing protocol-defined user text fields.
+// replacePayloadTextDoc edits only existing protocol-defined text fields of the selected role.
 // Changed values are collected before writes so traversal views remain valid.
-func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *config.PayloadReplaceRule, ruleIndex int, noteWrite func(string)) bool {
+func replacePayloadTextDoc(doc *ojson.Doc, protocol, root string, rule *config.PayloadReplaceRule, ruleIndex int, noteWrite func(string)) bool {
+	switch rule.Target.Role {
+	case "system", "developer", "user":
+	default:
+		return false
+	}
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	var arrayPath string
+	var arrayPath, systemPath string
 	var gemini, responses bool
 	switch protocol {
-	case "openai", "claude":
+	case "openai":
 		arrayPath = buildPayloadPath(root, "messages")
+	case "claude":
+		arrayPath = buildPayloadPath(root, "messages")
+		systemPath = buildPayloadPath(root, "system")
 	case "codex", "responses", "response", "openai-response", "openai-responses", "meta":
 		arrayPath = buildPayloadPath(root, "input")
+		systemPath = buildPayloadPath(root, "instructions")
 		responses = true
 	case "gemini", "antigravity":
 		arrayPath = buildPayloadPath(root, "contents")
+		systemPath = buildPayloadPath(root, "systemInstruction")
+		if !doc.Get(systemPath).Exists() {
+			systemPath = buildPayloadPath(root, "system_instruction")
+		}
 		gemini = true
 	default:
 		return false
@@ -73,7 +86,7 @@ func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *conf
 	}
 	type textChange struct{ path, value string }
 	var changes []textChange
-	collectChange := func(text string, messageIndex, blockIndex int) {
+	collectChange := func(text, basePath string, messageIndex, blockIndex int) {
 		compiled, ok := compileSteps()
 		if !ok {
 			return
@@ -89,28 +102,76 @@ func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *conf
 		if updated == text {
 			return
 		}
-		// Build paths only for changed text; no second document lookup is needed.
-		path := arrayPath
+		// Build paths only after all replacements produce an actual text change.
+		path := basePath
 		if messageIndex >= 0 {
 			if gemini {
-				path = arrayPath + "." + strconv.Itoa(messageIndex) + ".parts." + strconv.Itoa(blockIndex) + ".text"
+				path = basePath + "." + strconv.Itoa(messageIndex) + ".parts." + strconv.Itoa(blockIndex) + ".text"
 			} else if blockIndex >= 0 {
-				path = arrayPath + "." + strconv.Itoa(messageIndex) + ".content." + strconv.Itoa(blockIndex) + ".text"
+				path = basePath + "." + strconv.Itoa(messageIndex) + ".content." + strconv.Itoa(blockIndex) + ".text"
 			} else {
-				path = arrayPath + "." + strconv.Itoa(messageIndex) + ".content"
+				path = basePath + "." + strconv.Itoa(messageIndex) + ".content"
+			}
+		} else if blockIndex >= 0 {
+			if gemini {
+				path = basePath + ".parts." + strconv.Itoa(blockIndex) + ".text"
+			} else {
+				path = basePath + "." + strconv.Itoa(blockIndex) + ".text"
 			}
 		}
 		changes = append(changes, textChange{path: path, value: updated})
 	}
+	collectContent := func(content ojson.Result, basePath string, messageIndex int) {
+		if content.Type == ojson.String {
+			collectChange(content.String(), basePath, messageIndex, -1)
+		} else if content.IsArray() {
+			content.ForEach(func(blockIndex, block ojson.Result) bool {
+				text := block.Get("text")
+				if !block.IsObject() || text.Type != ojson.String || block.Get("thought").Bool() {
+					return true
+				}
+				typ := block.Get("type").String()
+				if typ == "text" || (responses && typ == "input_text") {
+					collectChange(text.String(), basePath, messageIndex, int(blockIndex.Int()))
+				}
+				return true
+			})
+		}
+	}
+	collectParts := func(parts ojson.Result, basePath string, messageIndex int) {
+		if parts.IsArray() {
+			parts.ForEach(func(partIndex, part ojson.Result) bool {
+				text := part.Get("text")
+				if part.IsObject() && text.Type == ojson.String && !part.Get("thought").Bool() &&
+					!part.Get("functionCall").Exists() && !part.Get("functionResponse").Exists() {
+					collectChange(text.String(), basePath, messageIndex, int(partIndex.Int()))
+				}
+				return true
+			})
+		}
+	}
+	position := 0
+	// Top-level instructions precede explicit system messages and count as one message.
+	if rule.Target.Role == "system" && systemPath != "" {
+		if system := doc.Get(systemPath); system.Exists() {
+			position++
+			if rule.Target.All || selected[position] {
+				if gemini {
+					collectParts(system.Get("parts"), systemPath, -1)
+				} else {
+					collectContent(system, systemPath, -1)
+				}
+			}
+		}
+	}
 	array := doc.Get(arrayPath)
 	if responses && array.Type == ojson.String {
-		if rule.Target.All || selected[1] {
-			collectChange(array.String(), -1, -1)
+		if rule.Target.Role == "user" && (rule.Target.All || selected[1]) {
+			collectChange(array.String(), arrayPath, -1, -1)
 		}
-	} else if array.IsArray() {
-		position := 0
+	} else if array.IsArray() && (rule.Target.All || position < lastPosition) {
 		array.ForEach(func(index, message ojson.Result) bool {
-			if !message.IsObject() || message.Get("role").String() != "user" {
+			if !message.IsObject() || message.Get("role").String() != rule.Target.Role {
 				return true
 			}
 			if responses {
@@ -125,33 +186,9 @@ func replacePayloadUserTextDoc(doc *ojson.Doc, protocol, root string, rule *conf
 			}
 			messageIndex := int(index.Int())
 			if gemini {
-				if parts := message.Get("parts"); parts.IsArray() {
-					parts.ForEach(func(partIndex, part ojson.Result) bool {
-						text := part.Get("text")
-						if part.IsObject() && text.Type == ojson.String && !part.Get("thought").Bool() &&
-							!part.Get("functionCall").Exists() && !part.Get("functionResponse").Exists() {
-							collectChange(text.String(), messageIndex, int(partIndex.Int()))
-						}
-						return true
-					})
-				}
-				return keepScanning
-			}
-			content := message.Get("content")
-			if content.Type == ojson.String {
-				collectChange(content.String(), messageIndex, -1)
-			} else if content.IsArray() {
-				content.ForEach(func(blockIndex, block ojson.Result) bool {
-					text := block.Get("text")
-					if !block.IsObject() || text.Type != ojson.String || block.Get("thought").Bool() {
-						return true
-					}
-					typ := block.Get("type").String()
-					if typ == "text" || (typ == "input_text" && responses) {
-						collectChange(text.String(), messageIndex, int(blockIndex.Int()))
-					}
-					return true
-				})
+				collectParts(message.Get("parts"), arrayPath, messageIndex)
+			} else {
+				collectContent(message.Get("content"), arrayPath, messageIndex)
 			}
 			return keepScanning
 		})

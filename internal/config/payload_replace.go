@@ -7,15 +7,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// PayloadReplaceRule applies ordered literal and Go RE2 regex replacements to existing user text.
+// PayloadReplaceRule applies ordered literal and Go RE2 regex replacements to existing message text.
 type PayloadReplaceRule struct {
 	Models       []PayloadModelRule   `yaml:"models" json:"models"`
 	Target       PayloadReplaceTarget `yaml:"target" json:"target"`
 	Replacements []PayloadReplacement `yaml:"replacements" json:"replacements"`
 }
 
-// PayloadReplaceTarget selects one-based user positions in the final upstream body.
-// All user messages count, including messages without editable text.
+// PayloadReplaceTarget selects one-based positions of a role in the final upstream body.
+// Messages without editable text still count; a top-level system field counts as one message.
 type PayloadReplaceTarget struct {
 	Role      string `yaml:"role" json:"role"`
 	Positions []int  `yaml:"positions" json:"positions"`
@@ -166,8 +166,10 @@ func (r PayloadReplacement) Resolve() (source, replacement string, isRegex bool,
 // Validate rejects unsafe implicit targets and ambiguous replacement entries.
 // Invalid regexes are skipped individually during sanitization and execution.
 func (r PayloadReplaceRule) Validate() error {
-	if r.Target.Role != "user" {
-		return fmt.Errorf("target.role must be user")
+	switch r.Target.Role {
+	case "system", "developer", "user":
+	default:
+		return fmt.Errorf("target.role must be system, developer, or user")
 	}
 	if r.Target.All {
 		if len(r.Target.Positions) != 0 {

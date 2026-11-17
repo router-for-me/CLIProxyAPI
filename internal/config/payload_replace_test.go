@@ -184,7 +184,10 @@ func TestPayloadReplaceConfigValidation(t *testing.T) {
 		mutate func(*PayloadReplaceRule)
 	}{
 		{"missing role", func(r *PayloadReplaceRule) { r.Target.Role = "" }},
-		{"other role", func(r *PayloadReplaceRule) { r.Target.Role = "assistant" }},
+		{"assistant role", func(r *PayloadReplaceRule) { r.Target.Role = "assistant" }},
+		{"tool role", func(r *PayloadReplaceRule) { r.Target.Role = "tool" }},
+		{"other role", func(r *PayloadReplaceRule) { r.Target.Role = "model" }},
+		{"case sensitive role", func(r *PayloadReplaceRule) { r.Target.Role = "User" }},
 		{"missing target", func(r *PayloadReplaceRule) { r.Target.Positions = nil }},
 		{"zero", func(r *PayloadReplaceRule) { r.Target.Positions = []int{0} }},
 		{"negative", func(r *PayloadReplaceRule) { r.Target.Positions = []int{-1} }},
@@ -210,6 +213,23 @@ func TestPayloadReplaceConfigValidation(t *testing.T) {
 				t.Fatalf("sanitizer lost valid rule: %#v", cfg.Payload.Replace)
 			}
 		})
+	}
+	for _, role := range []string{"system", "developer", "user"} {
+		for _, all := range []bool{false, true} {
+			rule := valid
+			rule.Target = PayloadReplaceTarget{Role: role, All: all}
+			if !all {
+				rule.Target.Positions = []int{1, 2}
+			}
+			if errValidate := rule.Validate(); errValidate != nil {
+				t.Fatalf("role=%s all=%v: %v", role, all, errValidate)
+			}
+			cfg := &Config{Payload: PayloadConfig{Replace: []PayloadReplaceRule{rule}}}
+			cfg.SanitizePayloadRules()
+			if len(cfg.Payload.Replace) != 1 {
+				t.Fatalf("sanitizer dropped role=%s all=%v", role, all)
+			}
+		}
 	}
 	valid.Target = PayloadReplaceTarget{Role: "user", All: true}
 	valid.Replacements = []PayloadReplacement{
