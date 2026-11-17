@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -151,9 +152,10 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 }
 
 func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth *cliproxyauth.Auth, refreshToken string) (*antigravityTokenRefreshData, error) {
+	clientID, clientSecret := resolveAntigravityOAuthClient(auth)
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", clientID)
+	form.Set("client_secret", clientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -263,6 +265,25 @@ func antigravityProjectIDFromAuth(auth *cliproxyauth.Auth) string {
 		return strings.TrimSpace(pid)
 	}
 	return ""
+}
+
+func resolveAntigravityOAuthClient(auth *cliproxyauth.Auth) (string, string) {
+	if auth != nil {
+		if id, secret := metaStringValue(auth.Metadata, "client_id"), metaStringValue(auth.Metadata, "client_secret"); id != "" && secret != "" {
+			return id, secret
+		}
+		if auth.Attributes != nil {
+			id := strings.TrimSpace(auth.Attributes["client_id"])
+			secret := strings.TrimSpace(auth.Attributes["client_secret"])
+			if id != "" && secret != "" {
+				return id, secret
+			}
+		}
+	}
+	if id, secret := strings.TrimSpace(os.Getenv("ANTIGRAVITY_OAUTH_CLIENT_ID")), strings.TrimSpace(os.Getenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")); id != "" && secret != "" {
+		return id, secret
+	}
+	return antigravityClientID, antigravityClientSecret
 }
 
 func missingAntigravityProjectIDError(cause error) statusErr {
