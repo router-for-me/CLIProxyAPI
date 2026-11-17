@@ -137,7 +137,7 @@ func normalizeClaudeBetaNames(names []string) []string {
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
-// It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
+// It trims whitespace, normalizes channel keys to lower-case, drops empty and exact self-mappings,
 // allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
 func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
@@ -157,7 +157,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			if name == alias {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)

@@ -1167,7 +1167,7 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	if oldID == "" || newID == "" {
 		return name
 	}
-	if strings.EqualFold(oldID, newID) {
+	if oldID == newID {
 		return name
 	}
 	if strings.EqualFold(trimmed, oldID) {
@@ -1249,7 +1249,7 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		if name == "" || alias == "" {
 			continue
 		}
-		if strings.EqualFold(name, alias) {
+		if name == alias {
 			continue
 		}
 		key := strings.ToLower(name)
@@ -1265,6 +1265,20 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 
 	out := make([]*ModelInfo, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
+	seenSources := make(map[string]string, len(models))
+	claimID := func(id, sourceID string) bool {
+		if _, exists := seen[id]; exists {
+			return false
+		}
+		key := strings.ToLower(id)
+		// Only a source model and its aliases may share a case-insensitive lookup key.
+		if source, exists := seenSources[key]; exists && source != sourceID {
+			return false
+		}
+		seen[id] = struct{}{}
+		seenSources[key] = sourceID
+		return true
+	}
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -1276,10 +1290,9 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		key := strings.ToLower(id)
 		entries := forward[key]
 		if len(entries) == 0 {
-			if _, exists := seen[key]; exists {
+			if !claimID(id, id) {
 				continue
 			}
-			seen[key] = struct{}{}
 			out = append(out, model)
 			continue
 		}
@@ -1292,8 +1305,7 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			}
 		}
 		if keepOriginal {
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
+			if claimID(id, id) {
 				out = append(out, model)
 			}
 		}
@@ -1304,14 +1316,12 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			if mappedID == "" {
 				continue
 			}
-			if strings.EqualFold(mappedID, id) {
+			if mappedID == id {
 				continue
 			}
-			aliasKey := strings.ToLower(mappedID)
-			if _, exists := seen[aliasKey]; exists {
+			if !claimID(mappedID, id) {
 				continue
 			}
-			seen[aliasKey] = struct{}{}
 			clone := cloneModelInfoForCatalogRoute(model)
 			clone.ID = mappedID
 			if model.MetadataModelID != "" {
@@ -1332,10 +1342,9 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		}
 
 		if !keepOriginal && !addedAlias {
-			if _, exists := seen[key]; exists {
+			if !claimID(id, id) {
 				continue
 			}
-			seen[key] = struct{}{}
 			out = append(out, model)
 		}
 	}
