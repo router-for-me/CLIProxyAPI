@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/oauthflow"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -55,17 +55,17 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		return nil, fmt.Errorf("antigravity: failed to generate state: %w", err)
 	}
 
-	srv, port, cbChan, errServer := startAntigravityCallbackServer(callbackPort)
+	// The listener stays bound for the whole flow and accepts only a callback
+	// whose state matches this session. Anything else gets an answer without
+	// consuming the login, so a stray request can neither hijack nor replay it.
+	callback, errServer := oauthflow.StartCallback(state, callbackPort, "/oauth-callback")
 	if errServer != nil {
 		return nil, fmt.Errorf("antigravity: failed to start callback server: %w", errServer)
 	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-	}()
+	defer callback.Close()
+	port, cbChan := callback.Port, callback.Results
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", port)
+	redirectURI := callback.URI
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	if !opts.NoBrowser {
@@ -86,7 +86,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 
 	fmt.Println("Waiting for antigravity authentication callback...")
 
-	var cbRes callbackResult
+	var cbRes oauthflow.Result
 	timeoutTimer := time.NewTimer(5 * time.Minute)
 	defer timeoutTimer.Stop()
 
@@ -130,7 +130,7 @@ waitForCallback:
 			if parsed == nil {
 				continue
 			}
-			cbRes = callbackResult{
+			cbRes = oauthflow.Result{
 				Code:  parsed.Code,
 				State: parsed.State,
 				Error: parsed.Error,
@@ -199,51 +199,6 @@ waitForCallback:
 	}, email, projectID), nil
 }
 
-type callbackResult struct {
-	Code  string
-	Error string
-	State string
-}
-
-func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbackResult, error) {
-	if port <= 0 {
-		port = antigravity.CallbackPort
-	}
-	addr := fmt.Sprintf(":%d", port)
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-	port = listener.Addr().(*net.TCPAddr).Port
-	resultCh := make(chan callbackResult, 1)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		res := callbackResult{
-			Code:  strings.TrimSpace(q.Get("code")),
-			Error: strings.TrimSpace(q.Get("error")),
-			State: strings.TrimSpace(q.Get("state")),
-		}
-		resultCh <- res
-		if res.Code != "" && res.Error == "" {
-			_, _ = w.Write([]byte("<h1>Login successful</h1><p>You can close this window.</p>"))
-		} else {
-			_, _ = w.Write([]byte("<h1>Login failed</h1><p>Please check the CLI output.</p>"))
-		}
-	})
-
-	srv := &http.Server{Handler: mux}
-	go func() {
-		if errServe := srv.Serve(listener); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
-			log.Warnf("antigravity callback server error: %v", errServe)
-		}
-	}()
-
-	return srv, port, resultCh, nil
-}
-
-// FetchAntigravityProjectID exposes project discovery for external callers.
 func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
 	cfg := &config.Config{}
 	authSvc := antigravity.NewAntigravityAuth(cfg, httpClient)
