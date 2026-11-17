@@ -683,6 +683,12 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 										imagePartItems = append(imagePartItems, imagePartJSON)
 										continue
 									}
+									if fr.Get("type").String() == "document" {
+										if docPartJSON := claudeBase64InlineData(fr.Get("source")); docPartJSON != nil {
+											imagePartItems = append(imagePartItems, docPartJSON)
+											continue
+										}
+									}
 
 									nonImageItems = append(nonImageItems, []byte(fr.Raw))
 								}
@@ -715,6 +721,13 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									imagePartJSON, _ := ojson.SetRawBytes([]byte(`{}`), "inlineData", inlineDataDoc.Bytes())
 									_ = functionResponseDoc.SetRawBytes("parts", translatorcommon.JoinRawArray([][]byte{imagePartJSON}))
 									_ = functionResponseDoc.Set(responsePath, "")
+								} else if functionResponseResult.Get("type").String() == "document" {
+									if docPartJSON := claudeBase64InlineData(functionResponseResult.Get("source")); docPartJSON != nil {
+										_ = functionResponseDoc.SetRawBytes("parts", translatorcommon.JoinRawArray([][]byte{docPartJSON}))
+										_ = functionResponseDoc.Set(responsePath, "")
+									} else {
+										translatorcommon.SetGeminiFunctionResponseResultDoc(functionResponseDoc, responsePath, functionResponseResult)
+									}
 								} else {
 									translatorcommon.SetGeminiFunctionResponseResultDoc(functionResponseDoc, responsePath, functionResponseResult)
 								}
