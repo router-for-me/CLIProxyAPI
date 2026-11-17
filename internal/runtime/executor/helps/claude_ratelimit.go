@@ -2,7 +2,6 @@ package helps
 
 import (
 	cryptorand "crypto/rand"
-	"encoding/json"
 	"math"
 	"math/big"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 )
 

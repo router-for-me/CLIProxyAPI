@@ -35,8 +35,9 @@ func (s *GitTokenStore) RefreshClaim(ctx context.Context, key string) (claimed b
 		if _, errRand := rand.Read(nonce); errRand != nil {
 			return errRand
 		}
-		errPublish := s.publishRefreshRecord(ctx, repo, ref, fmt.Sprintf("refresh claim %x", nonce))
+		createdHash, errPublish := s.publishRefreshRecord(ctx, repo, ref, fmt.Sprintf("refresh claim %x", nonce))
 		if errPublish == nil {
+			s.refreshClaims.Store(key, createdHash)
 			claimed = true
 			return nil
 		}
@@ -80,8 +81,50 @@ func (s *GitTokenStore) RefreshRead(ctx context.Context, key string) (receipt []
 }
 
 func (s *GitTokenStore) RefreshComplete(ctx context.Context, key string, receipt []byte) error {
+	s.refreshClaims.Delete(key)
 	return s.withRefreshRepository(ctx, func(repo *git.Repository) error {
-		return s.publishRefreshRecord(ctx, repo, refreshGitRef("receipt", key), string(receipt))
+		_, errPublish := s.publishRefreshRecord(ctx, repo, refreshGitRef("receipt", key), string(receipt))
+		return errPublish
+	})
+}
+
+func (s *GitTokenStore) RefreshRelease(ctx context.Context, key string) error {
+	if s == nil {
+		return fmt.Errorf("git refresh journal is unavailable")
+	}
+	ownedVal, owned := s.refreshClaims.LoadAndDelete(key)
+	if !owned {
+		return fmt.Errorf("refresh claim is not owned by this store")
+	}
+	ownedHash, okHash := ownedVal.(plumbing.Hash)
+	if !okHash || ownedHash.IsZero() {
+		return fmt.Errorf("invalid owned refresh claim hash")
+	}
+	return s.withRefreshRepository(ctx, func(repo *git.Repository) error {
+		receiptHash, errReceipt := s.refreshRemoteRef(ctx, repo, refreshGitRef("receipt", key))
+		if errReceipt != nil {
+			return errReceipt
+		}
+		if !receiptHash.IsZero() {
+			return fmt.Errorf("refresh receipt already exists")
+		}
+		claimRef := refreshGitRef("claim", key)
+		claimHash, errClaim := s.refreshRemoteRef(ctx, repo, claimRef)
+		if errClaim != nil {
+			return errClaim
+		}
+		if claimHash != ownedHash {
+			return fmt.Errorf("refresh claim ownership changed")
+		}
+		errPush := repo.PushContext(ctx, &git.PushOptions{
+			RemoteName:    "origin",
+			ClientOptions: s.gitClientOptions(),
+			RefSpecs:      []config.RefSpec{config.RefSpec(":" + claimRef.String())},
+		})
+		if errors.Is(errPush, git.NoErrAlreadyUpToDate) {
+			return nil
+		}
+		return errPush
 	})
 }
 
@@ -149,35 +192,38 @@ func (s *GitTokenStore) refreshRemoteRef(ctx context.Context, repo *git.Reposito
 	return plumbing.ZeroHash, nil
 }
 
-func (s *GitTokenStore) publishRefreshRecord(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, message string) error {
+func (s *GitTokenStore) publishRefreshRecord(ctx context.Context, repo *git.Repository, ref plumbing.ReferenceName, message string) (plumbing.Hash, error) {
 	tree := &object.Tree{}
 	treeObject := repo.Storer.NewEncodedObject()
 	if errEncode := tree.Encode(treeObject); errEncode != nil {
-		return errEncode
+		return plumbing.ZeroHash, errEncode
 	}
 	treeHash, errTree := repo.Storer.SetEncodedObject(treeObject)
 	if errTree != nil {
-		return errTree
+		return plumbing.ZeroHash, errTree
 	}
 	signature := object.Signature{Name: "CLIProxyAPI", Email: "refresh@cliproxyapi.local", When: time.Now()}
 	commit := &object.Commit{Author: signature, Committer: signature, Message: message, TreeHash: treeHash}
 	encoded := repo.Storer.NewEncodedObject()
 	if errEncode := commit.Encode(encoded); errEncode != nil {
-		return errEncode
+		return plumbing.ZeroHash, errEncode
 	}
 	hash, errStore := repo.Storer.SetEncodedObject(encoded)
 	if errStore != nil {
-		return errStore
+		return plumbing.ZeroHash, errStore
 	}
 	// A unique local source avoids updating a tag fetched from another claimant.
 	localRef := plumbing.ReferenceName("refs/cliproxy-refresh-pending/" + hash.String())
 	if errReference := repo.Storer.SetReference(plumbing.NewHashReference(localRef, hash)); errReference != nil {
-		return errReference
+		return plumbing.ZeroHash, errReference
 	}
 	defer func() {
 		if errRemove := repo.Storer.RemoveReference(localRef); errRemove != nil {
 			log.Warnf("remove temporary refresh journal reference: %v", errRemove)
 		}
 	}()
-	return repo.PushContext(ctx, &git.PushOptions{RemoteName: "origin", ClientOptions: s.gitClientOptions(), RefSpecs: []config.RefSpec{config.RefSpec(localRef.String() + ":" + ref.String())}})
+	if errPush := repo.PushContext(ctx, &git.PushOptions{RemoteName: "origin", ClientOptions: s.gitClientOptions(), RefSpecs: []config.RefSpec{config.RefSpec(localRef.String() + ":" + ref.String())}}); errPush != nil {
+		return plumbing.ZeroHash, errPush
+	}
+	return hash, nil
 }

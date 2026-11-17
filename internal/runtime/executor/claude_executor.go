@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,10 +16,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -34,6 +37,7 @@ type ClaudeExecutor struct {
 	// oauthToolAliases is shared by every ForAPIKey copy of this executor;
 	// constructors allocate it so copies made per request reuse one store.
 	oauthToolAliases *claudeOAuthToolAliasStore
+	threadBetas      *helps.ClaudeThreadBetaStore
 }
 
 type claudeOAuthCancellationError struct {
@@ -101,6 +105,9 @@ func sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx context.Context, do
 		logClaudeSignatureSanitizeReport(ctx, baseModel, report)
 	}
 	if sanitizeClaudeWebSearchDomainsDoc(doc) {
+		changed = true
+	}
+	if sanitizeClaudeAdvisorToolModelsDoc(doc) {
 		changed = true
 	}
 	if helps.NormalizeClaudeToolCallIDsDoc(doc) {
@@ -272,6 +279,53 @@ func sanitizeClaudeWebSearchDomainsDoc(doc *ojson.Doc) bool {
 	return changed
 }
 
+// sanitizeClaudeAdvisorToolModelsDoc strips thinking suffixes from the model
+// field of advisor_* server tools so Anthropic receives a valid model ID.
+func sanitizeClaudeAdvisorToolModelsDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return false
+	}
+	type advisorModelUpdate struct {
+		path  string
+		model string
+	}
+	var updates []advisorModelUpdate
+	for idx, tool := range tools.Array() {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
+		if !strings.HasPrefix(toolType, "advisor_") {
+			continue
+		}
+		modelRes := tool.Get("model")
+		if !modelRes.Exists() || modelRes.Type != ojson.String {
+			continue
+		}
+		rawModel := strings.TrimSpace(modelRes.String())
+		if rawModel == "" {
+			continue
+		}
+		parsed := thinking.ParseSuffix(rawModel)
+		baseModel := strings.TrimSpace(parsed.ModelName)
+		if !parsed.HasSuffix || baseModel == "" {
+			continue
+		}
+		updates = append(updates, advisorModelUpdate{
+			path:  fmt.Sprintf("tools.%d.model", idx),
+			model: baseModel,
+		})
+	}
+	changed := false
+	for _, u := range updates {
+		if doc.Set(u.path, u.model) == nil {
+			changed = true
+		}
+	}
+	return changed
+}
+
 func logClaudeSignatureSanitizeReport(ctx context.Context, baseModel string, report sigcompat.SignatureSanitizeReport) {
 	if report.DroppedBlocks == 0 && report.DroppedSignatures == 0 && report.ReplacedSignatures == 0 {
 		return
@@ -342,7 +396,104 @@ func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload,
 }
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
-	return &ClaudeExecutor{cfg: cfg, oauthToolAliases: &claudeOAuthToolAliasStore{}}
+	return &ClaudeExecutor{cfg: cfg, oauthToolAliases: &claudeOAuthToolAliasStore{}, threadBetas: &helps.ClaudeThreadBetaStore{}}
+}
+
+func (e *ClaudeExecutor) prepareClaudeThreadBetas(ctx context.Context, request *http.Request, auth *cliproxyauth.Auth, body []byte, extraBetas []string, payloadBetasConfigured bool, incomingHeaders http.Header, uncloak bool, metadataSets ...map[string]any) (*helps.ClaudeThreadBetaRequest, error) {
+	if !ojson.GetBytesNoCopy(body, "thread").IsObject() {
+		return nil, nil
+	}
+	apiKey, _ := claudeCreds(auth)
+	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
+	identity := claudeDiagnosticsCredentialIdentity(auth)
+	if identity == "" {
+		identity = apiKey
+	}
+	caller := resolveClaudeMCPAliasOptions(ctx, metadataSets...).secret
+	scope := sha256.Sum256([]byte(e.upstreamRequestLogProvider() + "\x00" + request.URL.Scheme + "://" + request.URL.Host + request.URL.Path + "\x00" + identity + "\x00" + caller))
+	var hd config.ClaudeHeaderDefaults
+	if e.cfg != nil {
+		hd = e.cfg.ClaudeHeaderDefaults
+	}
+	var customBetas []string
+	betaAttrs := make(map[string]string)
+	if auth != nil && !isAnthropicUpstreamURL(request.URL) {
+		for name, value := range auth.Attributes {
+			if strings.EqualFold(name, "header:Anthropic-Beta") {
+				customBetas = append(customBetas, value)
+				betaAttrs[name] = value
+			}
+		}
+	}
+	sort.Strings(customBetas)
+	customBetaApplied := false
+	if len(customBetas) > 0 {
+		probe := (&http.Request{Header: make(http.Header)}).WithContext(request.Context())
+		util.ApplyCustomHeadersFromAttrs(probe, betaAttrs, incomingHeaders)
+		resolved := helps.HeaderValuesCaseInsensitive(probe.Header, "Anthropic-Beta")
+		customBetaApplied = len(resolved) > 0
+		customBetas = append(customBetas, strings.Join(resolved, ","))
+	}
+	policy := sha256.Sum256([]byte(fmt.Sprintf("%q\x00%q\x00%q\x00%t\x00%t", hd.AnthropicBetaStrip, hd.AnthropicBetaAppend, customBetas, uncloak, fp.UseOAuthBetas)))
+	// Literal executors need the same lazy-allocation protection as alias state.
+	claudeOAuthToolAliasStoreInitMu.Lock()
+	if e.threadBetas == nil {
+		e.threadBetas = &helps.ClaudeThreadBetaStore{}
+	}
+	store := e.threadBetas
+	claudeOAuthToolAliasStoreInitMu.Unlock()
+	// Track only body declarations that actually contribute independent flags.
+	independent := claudeRequestedBetas(strings.Join(helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta"), ","), hd.AnthropicBetaAppend)
+	actual := claudeRequestedBetas(strings.Join(helps.HeaderValuesCaseInsensitive(request.Header, "Anthropic-Beta"), ","), nil)
+	var bodyBetas []string
+	for _, beta := range extraBetas {
+		beta = strings.TrimSpace(beta)
+		credentialBeta := fp.UseOAuthBetas && (beta == claudeOAuthBeta || beta == claudeExtendedCacheTTLBeta)
+		if !customBetaApplied && actual[beta] && !independent[beta] && !credentialBeta {
+			bodyBetas = append(bodyBetas, beta)
+			independent[beta] = true
+		}
+	}
+	state, found, errBind := store.Bind(string(scope[:]), ojson.GetBytesNoCopy(body, "thread.previous_message_id").String(), request.Header, helps.ClaudeThreadBetaPolicy{Fingerprint: hex.EncodeToString(policy[:]), BodyBetas: strings.Join(bodyBetas, ","), PayloadConfigured: payloadBetasConfigured})
+	if errBind != nil {
+		return nil, errBind
+	}
+	if !found {
+		return nil, helps.ClaudeThreadBetaConflictError{}
+	}
+	// The restored profile must satisfy this final business payload on every path.
+	declared := claudeRequestedBetas(strings.Join(helps.HeaderValuesCaseInsensitive(request.Header, "Anthropic-Beta"), ","), nil)
+	for beta, needed := range map[string]bool{
+		claudeFastModeBeta:         strings.EqualFold(ojson.GetBytesNoCopy(body, "speed").String(), "fast"),
+		claudeAdvisorToolBeta:      claudeBodyHasAdvisorTool(body),
+		claudeThinkingBindingBeta:  ojson.GetBytesNoCopy(body, "thinking.block_binding").Exists(),
+		claudeExtendedCacheTTLBeta: helps.ClaudePayloadHas1hTTL(body),
+	} {
+		if needed && !declared[beta] {
+			return nil, helps.ClaudeThreadBetaConflictError{}
+		}
+	}
+	selectedAuthID := ""
+	for _, metadata := range metadataSets {
+		if selectedAuthID = metadataString(metadata, cliproxyexecutor.SelectedAuthMetadataKey); selectedAuthID != "" {
+			break
+		}
+	}
+	if auth != nil && auth.ID != "" && selectedAuthID == auth.ID && e.upstreamRequestLogProvider() == "claude" {
+		ownerScope := cliproxysession.ClaudeThreadCallerScope(helps.APIKeyFromContext(ctx), metadataSets...)
+		authID := strings.Clone(auth.ID)
+		state.OnCommit(func(messageID string) {
+			cliproxysession.RememberClaudeThreadAuth(ownerScope, messageID, authID)
+		})
+	}
+	return state, nil
+}
+
+// WithConfig rebinds configuration without discarding successful Thread state.
+// Like ForAPIKey, the copy shares pointer-owned stores and copies no mutexes.
+func (e ClaudeExecutor) WithConfig(cfg *config.Config) *ClaudeExecutor {
+	e.cfg = cfg
+	return &e
 }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }

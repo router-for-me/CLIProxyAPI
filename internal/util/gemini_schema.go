@@ -3,13 +3,13 @@ package util
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 )
 

@@ -25,7 +25,11 @@ func (s *ObjectTokenStore) RefreshClaim(ctx context.Context, key string) (bool, 
 	if errProbe := s.ensureRefreshConditionalCreate(ctx); errProbe != nil {
 		return false, errProbe
 	}
-	return s.createRefreshObject(ctx, s.refreshObjectKey(key, "claim"), []byte("pending"))
+	claimed, errClaim := s.createRefreshObject(ctx, s.refreshObjectKey(key, "claim"), []byte("pending"))
+	if errClaim == nil && claimed {
+		s.refreshClaims.Store(key, struct{}{})
+	}
+	return claimed, errClaim
 }
 
 func (s *ObjectTokenStore) RefreshRead(ctx context.Context, key string) ([]byte, error) {
@@ -53,6 +57,7 @@ func (s *ObjectTokenStore) RefreshRead(ctx context.Context, key string) ([]byte,
 }
 
 func (s *ObjectTokenStore) RefreshComplete(ctx context.Context, key string, receipt []byte) error {
+	s.refreshClaims.Delete(key)
 	created, errCreate := s.createRefreshObject(ctx, s.refreshObjectKey(key, "receipt"), receipt)
 	if errCreate != nil {
 		return errCreate
@@ -63,25 +68,72 @@ func (s *ObjectTokenStore) RefreshComplete(ctx context.Context, key string, rece
 	return nil
 }
 
+// RefreshRelease deletes a pending claim owned by this store using a single
+// unretried HTTP request. Uncertain responses fail closed without retrying so a
+// delayed or retried DELETE can never erase a successor claimant's lock.
+func (s *ObjectTokenStore) RefreshRelease(ctx context.Context, key string) error {
+	if s == nil || s.client == nil {
+		return fmt.Errorf("object refresh journal is unavailable")
+	}
+	if _, owned := s.refreshClaims.LoadAndDelete(key); !owned {
+		return fmt.Errorf("refresh claim is not owned by this store")
+	}
+	receiptExists, errReceipt := s.headRefreshObject(ctx, s.refreshObjectKey(key, "receipt"))
+	if errReceipt != nil {
+		return errReceipt
+	}
+	if receiptExists {
+		return fmt.Errorf("refresh receipt already exists")
+	}
+	return s.deleteRefreshObject(ctx, s.refreshObjectKey(key, "claim"))
+}
+
 func (s *ObjectTokenStore) refreshObjectKey(key, kind string) string {
 	return path.Join(s.cfg.Prefix, "codex-refresh", key, kind)
+}
+
+func newSingleAttemptObjectTransport() *http.Transport {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok && base != nil {
+		cloned := base.Clone()
+		cloned.DisableKeepAlives = true
+		return cloned
+	}
+	return &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		DisableKeepAlives: true,
+	}
+}
+
+func (s *ObjectTokenStore) singleAttemptRefreshRequest(ctx context.Context, method, key string, headers http.Header, data []byte) (*http.Response, error) {
+	presignedURL, errPresign := s.client.PresignHeader(ctx, method, s.cfg.Bucket, key, time.Minute, nil, headers)
+	if errPresign != nil {
+		return nil, fmt.Errorf("sign refresh journal %s: %w", method, errPresign)
+	}
+	var body io.Reader
+	if data != nil {
+		body = bytes.NewReader(data)
+	}
+	req, errRequest := http.NewRequestWithContext(ctx, method, presignedURL.String(), body)
+	if errRequest != nil {
+		return nil, fmt.Errorf("create refresh journal %s request", method)
+	}
+	if len(headers) > 0 {
+		req.Header = headers
+	}
+	transport := newSingleAttemptObjectTransport()
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport:     transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return client.Do(req)
 }
 
 func (s *ObjectTokenStore) createRefreshObject(ctx context.Context, key string, data []byte) (bool, error) {
 	headers := http.Header{"If-None-Match": []string{"*"}}
 	// The bundled minio PutObjectOptions quotes "*" as an ETag; use signed
 	// headers to send the actual HTTP wildcard, not the literal ETag "*".
-	url, errPresign := s.client.PresignHeader(ctx, http.MethodPut, s.cfg.Bucket, key, time.Minute, nil, headers)
-	if errPresign != nil {
-		return false, fmt.Errorf("sign conditional refresh journal write: %w", errPresign)
-	}
-	req, errRequest := http.NewRequestWithContext(ctx, http.MethodPut, url.String(), bytes.NewReader(data))
-	if errRequest != nil {
-		return false, fmt.Errorf("create conditional refresh journal request")
-	}
-	req.Header = headers
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, errDo := client.Do(req)
+	resp, errDo := s.singleAttemptRefreshRequest(ctx, http.MethodPut, key, headers, data)
 	if errDo != nil {
 		return false, fmt.Errorf("conditional refresh journal write outcome unknown")
 	}
@@ -97,6 +149,41 @@ func (s *ObjectTokenStore) createRefreshObject(ctx context.Context, key string, 
 		return false, fmt.Errorf("conditional refresh journal write returned HTTP %d", resp.StatusCode)
 	}
 	return true, nil
+}
+
+func (s *ObjectTokenStore) headRefreshObject(ctx context.Context, key string) (bool, error) {
+	resp, errDo := s.singleAttemptRefreshRequest(ctx, http.MethodHead, key, nil, nil)
+	if errDo != nil {
+		return false, fmt.Errorf("refresh journal receipt check outcome unknown")
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Warnf("close refresh journal head response: %v", errClose)
+		}
+	}()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, nil
+	}
+	return false, fmt.Errorf("refresh journal receipt check returned HTTP %d", resp.StatusCode)
+}
+
+func (s *ObjectTokenStore) deleteRefreshObject(ctx context.Context, key string) error {
+	resp, errDo := s.singleAttemptRefreshRequest(ctx, http.MethodDelete, key, nil, nil)
+	if errDo != nil {
+		return fmt.Errorf("refresh journal claim delete outcome unknown")
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Warnf("close refresh journal delete response: %v", errClose)
+		}
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("refresh journal claim delete returned HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *ObjectTokenStore) ensureRefreshConditionalCreate(ctx context.Context) error {

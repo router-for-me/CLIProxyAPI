@@ -15,12 +15,16 @@ var ReadSIWCSystemState = func(ctx context.Context) ([]byte, error) {
 }
 
 func siwcRefreshReadiness(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
+	return codexRefreshReadiness(ctx, "SIWC")
+}
+
+func codexRefreshReadiness(ctx context.Context, label string) error {
+	probeCtx, cancelProbe := context.WithTimeout(ctx, 2*time.Second)
+	defer cancelProbe()
 	// shortcut: checks entry state; use native sleep coordination if in-flight sleep still breaks renewal.
-	state, errState := ReadSIWCSystemState(ctx)
+	state, errState := ReadSIWCSystemState(probeCtx)
 	if errState != nil {
-		return fmt.Errorf("SIWC renewal deferred: macOS power state unavailable: %w", errState)
+		return fmt.Errorf("%s renewal deferred: macOS power state unavailable: %w: %w", label, errState, ErrSIWCRefreshDeferred)
 	}
 	foundCapabilities := false
 	var fields []string
@@ -41,7 +45,7 @@ func siwcRefreshReadiness(ctx context.Context) error {
 		if len(raw) > 200 {
 			raw = raw[:200] + "..."
 		}
-		return fmt.Errorf("SIWC renewal deferred: unexpected pmset output: %q: %w", raw, ErrSIWCRefreshDeferred)
+		return fmt.Errorf("%s renewal deferred: unexpected pmset output: %q: %w", label, raw, ErrSIWCRefreshDeferred)
 	}
-	return fmt.Errorf("SIWC renewal deferred until interactive macOS wake: missing Graphics/Network (%v): %w", fields, ErrSIWCRefreshDeferred)
+	return fmt.Errorf("%s renewal deferred until interactive macOS wake: missing Graphics/Network (%v): %w", label, fields, ErrSIWCRefreshDeferred)
 }
