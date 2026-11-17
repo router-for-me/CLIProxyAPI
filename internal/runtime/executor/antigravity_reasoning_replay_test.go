@@ -12,6 +12,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -1955,6 +1956,155 @@ func TestPrepareAntigravityGeminiReasoningReplayStillRejectsBrokenPairing(t *tes
 	}
 }
 
+func TestAntigravityReasoningReplaySkipsSymmetricGeminiAndInteractionsButKeepsAsymmetricAlias(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3-flash"
+	payload := []byte(`{"sessionId":"sess-symmetry","request":{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]}]}}`)
+	responseSSE := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},"finishReason":"STOP"}]}}`)
+
+	for _, format := range []sdktranslator.Format{sdktranslator.FormatGemini, sdktranslator.FormatInteractions} {
+		t.Run("symmetric_"+format.String(), func(t *testing.T) {
+			internalcache.ClearAntigravityReasoningReplayCache()
+			req := cliproxyexecutor.Request{Model: model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   format,
+				ResponseFormat: format,
+			}
+			_, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req, opts, payload)
+			if errPrepare != nil {
+				t.Fatalf("prepare error: %v", errPrepare)
+			}
+			if scope.valid() {
+				t.Fatalf("symmetric format %q must not allocate reasoning replay KV scope, got %+v", format, scope)
+			}
+			if acc := newAntigravityReasoningReplayAccumulator(scope, payload); acc != nil {
+				t.Fatalf("symmetric format %q must not create replay accumulator", format)
+			}
+		})
+	}
+
+	t.Run("asymmetric_claude_haiku_alias_to_gemini_3_flash", func(t *testing.T) {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		// Downstream client sends Claude /v1/messages with model="claude-haiku-4-5-20251001",
+		// which model-alias resolves to baseModel="gemini-3-flash" inside AntigravityExecutor.
+		req := cliproxyexecutor.Request{Model: model, Payload: payload}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatClaude,
+			ResponseFormat: sdktranslator.FormatClaude,
+			Metadata: map[string]any{
+				cliproxyexecutor.RequestedModelMetadataKey: "claude-haiku-4-5-20251001",
+			},
+		}
+		_, scope, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(context.Background(), model, req, opts, payload)
+		if errPrepare != nil {
+			t.Fatalf("prepare error: %v", errPrepare)
+		}
+		if !scope.valid() {
+			t.Fatal("asymmetric Claude -> Gemini alias request must allocate reasoning replay KV scope")
+		}
+		acc := newAntigravityReasoningReplayAccumulator(scope, payload)
+		if acc == nil {
+			t.Fatal("expected non-nil accumulator for asymmetric Claude -> Gemini request")
+		}
+		acc.ObserveSSELine(responseSSE)
+		acc.Commit(context.Background())
+
+		items, ok := internalcache.GetAntigravityReasoningReplayItems(scope.modelName, scope.sessionKey)
+		if !ok || len(items) == 0 {
+			t.Fatalf("expected asymmetric replay items to be persisted in KV, ok=%v len=%d", ok, len(items))
+		}
+	})
+
+	t.Run("top_level_gemini_doc_replays_asymmetric_and_skips_symmetric", func(t *testing.T) {
+		internalcache.ClearAntigravityReasoningReplayCache()
+		topLevelTurn1 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]}]}`)
+		topLevelTurn2 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_1","response":{"result":"sunny"}}}]}]}`)
+		topLevelResponse := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},"finishReason":"STOP"}]}`)
+
+		symDoc := ojson.NewDoc(topLevelTurn1)
+		symScope, _, _, errSym := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn1},
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini},
+			symDoc,
+		)
+		if errSym != nil {
+			t.Fatalf("symmetric top-level prepare error: %v", errSym)
+		}
+		if symScope.valid() {
+			t.Fatalf("symmetric top-level Gemini must not allocate replay scope, got %+v", symScope)
+		}
+
+		headers := make(http.Header)
+		headers.Set("Session-Id", "sess-non-ag-gemini")
+		asymOpts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatOpenAIResponse,
+			ResponseFormat: sdktranslator.FormatOpenAIResponse,
+			Headers:        headers,
+		}
+		doc1 := ojson.NewDoc(topLevelTurn1)
+		scope1, replayReq1, _, err1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn1},
+			asymOpts,
+			doc1,
+		)
+		if err1 != nil || !scope1.valid() {
+			t.Fatalf("asymmetric top-level prepare turn 1: scope=%+v err=%v", scope1, err1)
+		}
+		cacheAntigravityReasoningReplayFromResponse(context.Background(), scope1, replayReq1, topLevelResponse)
+
+		doc2 := ojson.NewDoc(topLevelTurn2)
+		scope2, replayReq2, changed2, err2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn2},
+			asymOpts,
+			doc2,
+		)
+		if err2 != nil || !changed2 {
+			t.Fatalf("asymmetric top-level prepare turn 2: changed=%v err=%v", changed2, err2)
+		}
+		if gotSig := doc2.Get("contents.1.parts.0.thoughtSignature").String(); gotSig != "EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX" {
+			t.Fatalf("replayed signature = %q, want native thoughtSignature", gotSig)
+		}
+		if gotRole := doc2.Get("contents.2.role").String(); gotRole != "user" {
+			t.Fatalf("non-Antigravity functionResponse role = %q, want user", gotRole)
+		}
+
+		// Turn 2 simulates Vertex stripping wire-only functionCall.id/functionResponse.id
+		// after prepareGeminiTopLevelReasoningReplayPayloadDoc; the captured replayRequestPayload
+		// from prepareGeminiTopLevelReasoningReplayPayloadDoc must still keep canonical call_id
+		// context so Turn 3 matches both call_1 and call_2 signatures.
+		helps.StripVertexOpenAIResponsesToolCallIDsDoc(doc2, asymOpts.SourceFormat.String())
+		topLevelResponse2 := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thoughtSignature":"EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg","functionCall":{"name":"get_weather","args":{"city":"Shanghai"},"id":"call_2"}}]},"finishReason":"STOP"}]}`)
+		cacheAntigravityReasoningReplayFromResponse(context.Background(), scope2, replayReq2, topLevelResponse2)
+
+		topLevelTurn3 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather for Beijing"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Beijing"},"id":"call_1"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_1","response":{"result":"sunny"}}}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Shanghai"},"id":"call_2"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_2","response":{"result":"cloudy"}}}]}]}`)
+		doc3 := ojson.NewDoc(topLevelTurn3)
+		_, _, changed3, err3 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+			context.Background(),
+			model,
+			cliproxyexecutor.Request{Model: model, Payload: topLevelTurn3},
+			asymOpts,
+			doc3,
+		)
+		if err3 != nil || !changed3 {
+			t.Fatalf("asymmetric top-level prepare turn 3: changed=%v err=%v", changed3, err3)
+		}
+		if gotSig1 := doc3.Get("contents.1.parts.0.thoughtSignature").String(); gotSig1 != "EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX" {
+			t.Fatalf("turn 3 call_1 signature = %q, want preserved signature", gotSig1)
+		}
+		if gotSig2 := doc3.Get("contents.3.parts.0.thoughtSignature").String(); gotSig2 != "EsMTCsATARFNMg/XNVix5lDpkKaHR7Xg" {
+			t.Fatalf("turn 3 call_2 signature = %q, want second signature", gotSig2)
+		}
+	})
+}
+
 func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
@@ -1980,5 +2130,176 @@ func TestPrepareAntigravityGeminiReasoningReplayDegradesWhenReplayBreaksPairing(
 	}
 	if !bytes.Equal(out, payload) {
 		t.Fatalf("out = %s, want original payload %s", out, payload)
+	}
+}
+
+func TestAntigravityStreamChunksHaveTerminalCommitEvent(t *testing.T) {
+	cases := []struct {
+		name   string
+		chunks [][]byte
+		want   bool
+	}{
+		{
+			name:   "openai responses completed",
+			chunks: [][]byte{[]byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "openai responses incomplete",
+			chunks: [][]byte{[]byte("event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "openai chat finish_reason stop",
+			chunks: [][]byte{[]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "openai chat null finish_reason",
+			chunks: [][]byte{[]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")},
+			want:   false,
+		},
+		{
+			name:   "claude message_stop",
+			chunks: [][]byte{[]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")},
+			want:   true,
+		},
+		{
+			name:   "bare done frame only",
+			chunks: [][]byte{[]byte("data: [DONE]\n\n")},
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := antigravityStreamChunksHaveTerminalCommitEvent(tc.chunks); got != tc.want {
+				t.Fatalf("antigravityStreamChunksHaveTerminalCommitEvent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAntigravityReasoningReplayAccumulatorAssemblesVertexStreamingPartialArgs(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.8-flash"
+	asymOpts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"X-Session-Id": []string{"sess-vertex-partial-args"}},
+	}
+
+	turn1 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Weather in New York?"}]}]}`)
+	doc1 := ojson.NewDoc(turn1)
+	scope1, replayReq1, _, err1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn1},
+		asymOpts,
+		doc1,
+	)
+	if err1 != nil || !scope1.valid() {
+		t.Fatalf("prepare turn 1: scope=%+v err=%v", scope1, err1)
+	}
+
+	acc := newAntigravityReasoningReplayAccumulator(scope1, replayReq1)
+	acc.ObserveSSELine([]byte(`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_ny","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}}]}}]}`))
+	acc.ObserveSSELine([]byte(`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"","thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX"}]}}]}`))
+	acc.ObserveSSELine([]byte(`data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"partialArgs":[{"jsonPath":"$.city","stringValue":"York"}],"willContinue":false}}]},"finishReason":"STOP"}]}`))
+	acc.Commit(context.Background())
+
+	turn2 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Weather in New York?"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"New York"},"id":"call_ny"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_ny","response":{"result":"sunny"}}}]}]}`)
+	doc2 := ojson.NewDoc(turn2)
+	_, _, changed2, err2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn2},
+		asymOpts,
+		doc2,
+	)
+	if err2 != nil || !changed2 {
+		t.Fatalf("prepare turn 2 after partialArgs stream: changed=%v err=%v", changed2, err2)
+	}
+	if gotSig := doc2.Get("contents.1.parts.0.thoughtSignature").String(); gotSig != "EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX" {
+		t.Fatalf("replayed signature = %q, want native signature from partialArgs stream", gotSig)
+	}
+}
+
+func TestNonVertexSanitizesReplayedVertexBareTinkSignature(t *testing.T) {
+	// Verify that a Vertex bare-Tink thoughtSignature replayed from shared KV is
+	// downgraded to skip_thought_signature_validator when post-replay non-Vertex
+	// sanitization runs (as in GeminiExecutor and AIStudioExecutor).
+	const vertexBareTinkSig = "AY89a18f0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	internalcache.ClearAntigravityReasoningReplayCache()
+	const model = "gemini-3.8-flash"
+	asymOpts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"X-Session-Id": []string{"sess-vertex-to-gemini"}},
+	}
+	turn1 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather"}]}]}`)
+	doc1 := ojson.NewDoc(turn1)
+	scope1, replayReq1, _, err1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn1},
+		asymOpts,
+		doc1,
+	)
+	if err1 != nil || !scope1.valid() {
+		t.Fatalf("prepare turn 1: scope=%+v err=%v", scope1, err1)
+	}
+	vertexResp := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + vertexBareTinkSig + `","functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_tink"}}]},"finishReason":"STOP"}]}`)
+	cacheAntigravityReasoningReplayFromResponse(context.Background(), scope1, replayReq1, vertexResp)
+
+	turn2 := []byte(`{"contents":[{"role":"user","parts":[{"text":"Call get_weather"}]},{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"name":"get_weather","args":{"city":"Tokyo"},"id":"call_tink"}}]},{"role":"user","parts":[{"functionResponse":{"name":"get_weather","id":"call_tink","response":{"result":"clear"}}}]}]}`)
+	nonVertexDoc := ojson.NewDoc(turn2)
+	_, _, changed2, err2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn2},
+		asymOpts,
+		nonVertexDoc,
+	)
+	if err2 != nil || !changed2 {
+		t.Fatalf("prepare turn 2: changed=%v err=%v", changed2, err2)
+	}
+	internalsignature.SanitizeNonVertexGeminiRequestThoughtSignaturesDoc(nonVertexDoc, "contents")
+	if got := nonVertexDoc.Get("contents.1.parts.0.thoughtSignature").String(); got != "skip_thought_signature_validator" {
+		t.Fatalf("non-Vertex post-replay sanitized signature = %q, want skip_thought_signature_validator", got)
+	}
+}
+
+func TestCountTokensReasoningReplayPeeksWithoutReservingTombstone(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const model = "gemini-3.8-flash"
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"X-Session-Id": []string{"sess-count-tokens-no-tombstone"}},
+	}
+	payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"Count tokens only"}]}]}`)
+	doc := ojson.NewDoc(payload)
+	req := cliproxyexecutor.Request{
+		Model:    model,
+		Payload:  payload,
+		Metadata: map[string]any{"action": "countTokens"},
+	}
+	scope, replayReq, changed, err := prepareGeminiTopLevelReasoningReplayPayloadDoc(context.Background(), model, req, opts, doc)
+	if err != nil || changed || len(replayReq) != 0 {
+		t.Fatalf("countTokens prepare = scope:%+v len(replayReq):%d changed:%v err:%v", scope, len(replayReq), changed, err)
+	}
+	// A subsequent real generation turn must still be able to cache best-effort
+	// without being blocked by an unclosed countTokens reservation.
+	item := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"targetOccurrence":0,"thoughtSignature":"EmcKZQFpFH0THU+YNRY5uVwt/0bo2hFo1RmXsMhlX9FCg2n6GssBe5sMV37KB6OrgeKKEP9fxN261QX"}`)
+	if !internalcache.CacheAntigravityReasoningReplayItems(model, scope.sessionKey, [][]byte{item}) {
+		t.Fatal("failed to cache replay item after countTokens peek")
+	}
+	got, ok := internalcache.GetAntigravityReasoningReplayItems(model, scope.sessionKey)
+	if !ok || len(got) != 1 {
+		t.Fatalf("GetAntigravityReasoningReplayItems after countTokens peek = %v, ok=%v", got, ok)
 	}
 }

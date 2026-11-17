@@ -4,9 +4,10 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
-// ClaudeToolResultImage represents a base64-encoded image extracted from a Claude
-// tool_result content block. Callers emit it as a provider-specific inline data
-// part so that image bytes do not bloat the textual function response result.
+// ClaudeToolResultImage represents a base64-encoded media block (image or document)
+// extracted from a Claude tool_result content block. Callers emit it as a
+// provider-specific inline data part so that media bytes do not bloat the textual
+// function response result.
 type ClaudeToolResultImage struct {
 	MimeType string
 	Data     string
@@ -49,12 +50,12 @@ func ConvertClaudeToolResult(block ojson.Result) ClaudeToolResult {
 //   - string             -> plain string result (no double-encoding)
 //   - single non-image   -> raw JSON result (structure preserved)
 //   - multiple non-image -> raw JSON array result
-//   - base64 image block -> separated into Images (emitted as inline data parts)
-//   - object             -> raw JSON result, or image -> Images with empty result
+//   - base64 media block -> separated into Images (image or document emitted as inline data parts)
+//   - object             -> raw JSON result, or media -> Images with empty result
 //   - absent/empty       -> empty string result
 //
-// Unlike Antigravity, image blocks without base64 data are dropped rather than
-// emitted as empty inline data parts, matching the Gemini image part guards.
+// Unlike Antigravity, image/document blocks without base64 data are dropped rather than
+// emitted as empty inline data parts, matching the Gemini inline data part guards.
 func ConvertClaudeToolResultContent(content ojson.Result) ClaudeToolResult {
 	switch {
 	case content.Type == ojson.String:
@@ -65,7 +66,7 @@ func ConvertClaudeToolResultContent(content ojson.Result) ClaudeToolResult {
 		lastNonImageRaw := ""
 		filteredDoc := ojson.NewDoc([]byte(`[]`))
 		content.ForEach(func(_, block ojson.Result) bool {
-			if isClaudeBase64Image(block) {
+			if isClaudeBase64Media(block) {
 				if img, ok := claudeImageFromBlock(block); ok {
 					images = append(images, img)
 				}
@@ -85,7 +86,7 @@ func ConvertClaudeToolResultContent(content ojson.Result) ClaudeToolResult {
 			return ClaudeToolResult{Images: images}
 		}
 	case content.IsObject():
-		if isClaudeBase64Image(content) {
+		if isClaudeBase64Media(content) {
 			if img, ok := claudeImageFromBlock(content); ok {
 				return ClaudeToolResult{Images: []ClaudeToolResultImage{img}}
 			}
@@ -99,20 +100,26 @@ func ConvertClaudeToolResultContent(content ojson.Result) ClaudeToolResult {
 	}
 }
 
-// isClaudeBase64Image reports whether a content block is a base64-encoded image block.
-func isClaudeBase64Image(block ojson.Result) bool {
-	return block.Get("type").String() == "image" && block.Get("source.type").String() == "base64"
+// isClaudeBase64Media reports whether a content block is a base64-encoded image or document block.
+func isClaudeBase64Media(block ojson.Result) bool {
+	blockType := block.Get("type").String()
+	return (blockType == "image" || blockType == "document") && block.Get("source.type").String() == "base64"
 }
 
-// claudeImageFromBlock extracts image data from a base64 image block. It returns false
-// when the block carries no base64 data, so empty inline data parts are not emitted.
+// claudeImageFromBlock extracts inline media data from a base64 image or document block.
+// It returns false when the block carries no base64 data (or no media_type for documents),
+// so empty inline data parts are not emitted.
 func claudeImageFromBlock(block ojson.Result) (ClaudeToolResultImage, bool) {
 	data := block.Get("source.data").String()
 	if data == "" {
 		return ClaudeToolResultImage{}, false
 	}
+	mimeType := block.Get("source.media_type").String()
+	if block.Get("type").String() == "document" && mimeType == "" {
+		return ClaudeToolResultImage{}, false
+	}
 	return ClaudeToolResultImage{
-		MimeType: block.Get("source.media_type").String(),
+		MimeType: mimeType,
 		Data:     data,
 	}, true
 }

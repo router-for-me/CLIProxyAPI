@@ -3,10 +3,10 @@ package logging
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 )
@@ -224,6 +224,7 @@ func (w *homeStreamingLogWriter) Close() error {
 	}
 
 	responsePayload := w.responseBody.Bytes()
+	apiErrors, diagnostics := splitResponseDiagnostics(w.apiResponseErrors)
 
 	var buf bytes.Buffer
 	upstreamTransport := inferUpstreamTransport(w.apiRequest, nil, w.apiResponse, nil, w.apiWebsocketTime, nil, nil)
@@ -236,13 +237,13 @@ func (w *homeStreamingLogWriter) Close() error {
 	if errWrite := writeAPISection(&buf, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPIErrorResponses(&buf, w.apiResponseErrors); errWrite != nil {
+	if errWrite := writeAPIErrorResponses(&buf, apiErrors); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPISection(&buf, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTS); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeResponseSection(&buf, w.responseStatus, w.statusWritten, w.responseHeaders, bytes.NewReader(responsePayload), nil, false); errWrite != nil {
+	if errWrite := writeResponseSection(&buf, w.responseStatus, w.statusWritten, w.responseHeaders, bytes.NewReader(responsePayload), nil, false, diagnostics); errWrite != nil {
 		return errWrite
 	}
 
@@ -256,4 +257,16 @@ func (w *homeStreamingLogWriter) Close() error {
 		return errMarshal
 	}
 	return client.RPushRequestLog(context.Background(), raw)
+}
+
+func (w *homeStreamingLogWriter) Discard() error {
+	if w == nil {
+		return nil
+	}
+	if w.chunkChan != nil {
+		close(w.chunkChan)
+		<-w.doneChan
+		w.chunkChan = nil
+	}
+	return nil
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -95,6 +96,11 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 			defer cancel()
 			input := make(chan core.WebsocketInput, 8)
 			ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
+			ctx = coreusage.WithRequestedModelAlias(ctx, t.Name())
+			ctx = coreusage.WithHomeSelection(ctx, coreusage.HomeSelection{Model: "home-route"})
+			capture := &codexResponseModelUsageCapture{alias: t.Name(), records: make(chan coreusage.Record, 8)}
+			coreusage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() { coreusage.RegisterNamedPlugin(t.Name(), codexResponseModelNoopUsagePlugin{}) })
 			exec := NewCodexWebsocketsExecutor(&config.Config{Codex: config.CodexConfig{ResponseSteering: true}})
 			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 			auth := &cliproxyauth.Auth{ID: "A", Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL, "websockets": "true"}}
@@ -160,6 +166,17 @@ func TestCodexDuplexSteeringLifecycle(t *testing.T) {
 			}
 			if connections.Load() != 1 {
 				t.Fatalf("connections=%d", connections.Load())
+			}
+			ids := make(map[string]bool)
+			for turn := range 3 {
+				record := capture.await(t)
+				if record.HomeSelection == nil || record.HomeSelection.Reused != (turn > 0) || record.HomeSelection.Model != "home-route" {
+					t.Fatalf("turn %d accounting=%+v", turn, record.HomeSelection)
+				}
+				if ids[record.RequestID] {
+					t.Fatal("duplex responses share an execution ID")
+				}
+				ids[record.RequestID] = true
 			}
 			for _, key := range []string{"accepted", "boundary", "pending", "successor", "failed"} {
 				if !seen[key] {
@@ -572,5 +589,69 @@ func TestCodexDuplexQueuedCreateDoesNotBlockSubsequentSteer(t *testing.T) {
 	case <-serverDone:
 	case <-time.After(3 * time.Second):
 		t.Fatal("server did not finish")
+	}
+}
+
+func TestCodexDuplexNativeAliasContinuationUsesRealModel(t *testing.T) {
+	frames := make(chan []byte, 3)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, errUpgrade := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if errUpgrade != nil {
+			t.Error(errUpgrade)
+			return
+		}
+		defer func() {
+			if errClose := c.Close(); errClose != nil {
+				t.Errorf("close upstream websocket: %v", errClose)
+			}
+		}()
+		for i := 0; i < 3; i++ {
+			_, frame, errRead := c.ReadMessage()
+			if errRead != nil {
+				return
+			}
+			frames <- frame
+			for _, payload := range []string{`{"type":"response.created","response":{"id":"r1"}}`, `{"type":"response.completed","response":{"id":"r1","output":[]}}`} {
+				if errWrite := c.WriteMessage(websocket.TextMessage, []byte(payload)); errWrite != nil {
+					t.Error(errWrite)
+					return
+				}
+			}
+		}
+		_, _, _ = c.ReadMessage()
+	}))
+	defer upstream.Close()
+	cfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "test-key", BaseURL: upstream.URL, Models: []config.CodexModel{{Name: "real-model", IsCompat: false}}}}}
+	cfg.Codex.ResponseSteering = true
+	cfg.CodexResponseSteering = true
+	exec := NewCodexWebsocketsExecutor(cfg)
+	defer exec.CloseExecutionSession("native-alias-session")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	input := make(chan core.WebsocketInput, 1)
+	ctx = core.WithWebsocketInput(core.WithDownstreamWebsocket(ctx), input)
+	stream, errStream := exec.ExecuteStream(ctx, &cliproxyauth.Auth{ID: "native-alias-account", Provider: "codex", Attributes: map[string]string{"api_key": "test-key", "base_url": upstream.URL, "websockets": "true"}}, core.Request{Model: "real-model", Payload: []byte(`{"model":"client-alias","input":[]}`)}, core.Options{SourceFormat: sdktranslator.FromString("codex"), Metadata: map[string]any{core.ExecutionSessionMetadataKey: "native-alias-session"}})
+	if errStream != nil {
+		t.Fatal(errStream)
+	}
+	for turn := 0; turn < 3; turn++ {
+		for {
+			chunk, ok := <-stream.Chunks
+			if !ok || chunk.Err != nil {
+				t.Fatalf("turn %d stream closed or failed: %v", turn, chunk.Err)
+			}
+			if ojson.GetBytes(chunk.Payload, "type").String() == "response.completed" {
+				break
+			}
+		}
+		frame := <-frames
+		if got := ojson.GetBytes(frame, "model").String(); got != "real-model" {
+			t.Fatalf("turn %d model = %q, want real-model; frame=%s", turn, got, frame)
+		}
+		if turn == 0 {
+			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","model":"client-alias","previous_response_id":"r1","input":"follow up"}`)}
+		} else if turn == 1 {
+			input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","previous_response_id":"r1","input":"follow up again"}`)}
+		}
 	}
 }

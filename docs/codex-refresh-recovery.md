@@ -1,6 +1,6 @@
 # Codex refresh recovery
 
-A lost refresh response does not establish whether the provider consumed the refresh token. CLIProxyAPI records a claim **before** sending a Codex or local SIWC refresh request. Transport failures, unreadable or invalid successful responses, and HTTP responses without a qualified no-effect contract stop replay. A 429 or 5xx status alone is not such a contract. Redirects cannot replay refresh POSTs.
+A lost refresh response does not establish whether the provider consumed the refresh token. CLIProxyAPI records a claim **before** sending a Codex or local SIWC refresh request. Failures proven to occur before any request bytes can be written (request creation, DNS resolution, TCP/proxy dial, HTTP proxy `CONNECT`, and origin TLS handshake prior to connection handoff) release the pending claim so the grant can be retried later; on macOS, maintenance wakes lacking interactive power capabilities also defer renewal before claiming. Ambiguous post-connection transport failures, unreadable or invalid successful responses, and HTTP responses without a qualified no-effect contract keep the claim and stop replay. A 429 or 5xx status alone is not such a contract. Redirects cannot replay refresh POSTs.
 
 ## Recovery
 

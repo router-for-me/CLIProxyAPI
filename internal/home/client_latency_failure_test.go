@@ -92,7 +92,7 @@ func TestClusterLatencyPingFailureBetweenReceives(t *testing.T) {
 			t.Fatalf("failed PING was not invalidated: %+v", samples)
 		}
 		// The new ACK cannot silently keep the old lifetime alive, even if reception wins the race.
-		event, errReceive := receiveSubscriptionEvent(ctx, pubsub, sampler, time.Second)
+		event, errReceive := receiveSubscriptionEvent(ctx, pubsub, sampler, time.Now().Add(time.Second))
 		if errReceive == nil || isTimeoutError(errReceive) || event != nil {
 			t.Fatalf("replacement ACK was accepted: event=%v error=%v", event, errReceive)
 		}
