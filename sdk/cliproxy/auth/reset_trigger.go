@@ -45,7 +45,9 @@ func ResetTriggerStateForAuth(auth *Auth, model string, now time.Time) ResetTrig
 	for i := range windows {
 		window := &windows[i]
 		if window.Duration >= longQuotaWindowMinDuration {
-			if longWindowExhausted(*window, now) {
+			// Model-scoped windows such as Claude "7d_oi" do not block the
+			// cheap trigger model; only shared weekly windows do.
+			if !strings.Contains(window.Name, "_") && longWindowExhausted(*window, now) {
 				return ResetTriggerState{}
 			}
 			continue

@@ -18,6 +18,9 @@ func TestResetTriggerStateForAuth(t *testing.T) {
 
 	exhausted := claudeQuotaSignals(lapsed, weekly)
 	exhausted["Anthropic-Ratelimit-Unified-7d-Status"] = "rejected"
+	modelScoped := claudeQuotaSignals(lapsed, weekly)
+	modelScoped["Anthropic-Ratelimit-Unified-7d_oi-Status"] = "rejected"
+	modelScoped["Anthropic-Ratelimit-Unified-7d_oi-Reset"] = strconv.FormatInt(weekly.Unix(), 10)
 
 	codexSignals := map[string]string{
 		"X-Codex-Primary-Window-Minutes":   "300",
@@ -44,6 +47,7 @@ func TestResetTriggerStateForAuth(t *testing.T) {
 		{name: "claude active 5h", auth: claudeAuth(claudeQuotaSignals(now.Add(time.Hour), weekly))},
 		{name: "claude without snapshot", auth: claudeAuth(nil), wantDue: true},
 		{name: "claude weekly rejected", auth: claudeAuth(exhausted)},
+		{name: "claude model-scoped weekly rejected", auth: claudeAuth(modelScoped), wantDue: true, wantIdle: lapsed, wantGroup: "5h"},
 		{name: "claude api key", auth: &Auth{ID: "k", Provider: "claude", Attributes: map[string]string{AttributeAPIKey: "sk"}}},
 		{name: "claude disabled", auth: func() *Auth { a := claudeAuth(nil); a.Disabled = true; return a }()},
 		{name: "claude cooling down", auth: func() *Auth {
