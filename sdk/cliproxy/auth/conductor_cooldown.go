@@ -1907,6 +1907,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
+								if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(result.Error) && next.After(state.nonQuotaCooldownUntil) {
+									state.nonQuotaCooldownUntil = next
+								}
 								if isForceResult {
 									if result.RetryAfter != nil || !reusedOpenWindow {
 										ownModelForceDeadline = credentialNext
@@ -4403,6 +4406,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 							ownAuthForceDeadline, _ = quotaCooldownAfterFailure(QuotaState{BackoffLevel: baseAuthBackoff}, now)
 						}
 					}
+				}
+				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && next.After(auth.nonQuotaCooldownUntil) {
+					auth.nonQuotaCooldownUntil = next
 				}
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
