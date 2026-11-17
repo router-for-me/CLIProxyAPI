@@ -68,6 +68,19 @@ func (m *Manager) quotaRecoveryModelHeadersMatchLocked(auth *Auth) bool {
 			}
 			finalizedModels = append(finalizedModels, models...)
 		}
+		// Legacy direct-image builders remove routing prefixes and thinking
+		// suffixes and lowercase builtin header-selection names. Check this
+		// possible identity alongside the original names. A snapshot has no
+		// request format/body or SDK-restored execution model to exclude it.
+		for _, model := range append([]string{route, requested}, candidates...) {
+			directModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+			if idx := strings.LastIndex(directModel, "/"); idx >= 0 {
+				directModel = strings.TrimSpace(directModel[idx+1:])
+			}
+			if internalconfig.CodexImageModelUsesDirectEndpoint(directModel) {
+				finalizedModels = append(finalizedModels, strings.ToLower(directModel))
+			}
+		}
 		// The SDK can restore its execution model after auth selection. Include
 		// both selection names and candidates as possible openai-image routes. The
 		// snapshot has no source format or body, so this is a possible builder
