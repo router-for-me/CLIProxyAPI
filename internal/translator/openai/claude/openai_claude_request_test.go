@@ -1940,3 +1940,296 @@ func TestConvertClaudeRequestToOpenAI_MidConversationToolAdditionAppendsToTools(
 		t.Fatalf("ConvertOpenAIResponseToClaudeNonStream tool name = %q, want SubagentHandback; resp=%s", got, claudeResp)
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_ToolResultDocumentRelayedAsFilePart(t *testing.T) {
+	t.Run("array text and pdf document", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_pdf", "content": [
+					{"type": "text", "text": "Loaded sample.pdf"},
+					{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}}
+				]}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != "Loaded sample.pdf" {
+			t.Fatalf("tool message content = %q, want Loaded sample.pdf", got)
+		}
+		relay := messages[2]
+		if relay.Get("role").String() != "user" {
+			t.Fatalf("relay role = %q, want user", relay.Get("role").String())
+		}
+		filePart := relay.Get("content.1")
+		if filePart.Get("type").String() != "file" || filePart.Get("file.file_data").String() != "data:application/pdf;base64,JVBERi0xLjQK" {
+			t.Fatalf("relay file part = %s, want file part with PDF data URL", filePart.Raw)
+		}
+	})
+
+	t.Run("array pdf document only", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_pdf", "content": [
+					{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}}
+				]}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != toolResultDocumentPlaceholder {
+			t.Fatalf("tool message content = %q, want %q", got, toolResultDocumentPlaceholder)
+		}
+		if got := messages[2].Get("content.0.text").String(); got != toolResultDocumentRelayNotice {
+			t.Fatalf("relay notice = %q, want %q", got, toolResultDocumentRelayNotice)
+		}
+		filePart := messages[2].Get("content.1")
+		if filePart.Get("type").String() != "file" || filePart.Get("file.file_data").String() != "data:application/pdf;base64,JVBERi0xLjQK" {
+			t.Fatalf("relay file part = %s, want file part with PDF data URL", filePart.Raw)
+		}
+	})
+
+	t.Run("singleton object pdf document", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_pdf", "content": {
+					"type": "document",
+					"source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}
+				}}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != toolResultDocumentPlaceholder {
+			t.Fatalf("tool message content = %q, want %q", got, toolResultDocumentPlaceholder)
+		}
+		if got := messages[2].Get("content.0.text").String(); got != toolResultDocumentRelayNotice {
+			t.Fatalf("relay notice = %q, want %q", got, toolResultDocumentRelayNotice)
+		}
+		filePart := messages[2].Get("content.1")
+		if filePart.Get("type").String() != "file" || filePart.Get("file.file_data").String() != "data:application/pdf;base64,JVBERi0xLjQK" {
+			t.Fatalf("relay file part = %s, want file part with PDF data URL", filePart.Raw)
+		}
+	})
+
+	t.Run("mixed image and pdf document relayed together", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_mix", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_mix", "content": [
+					{"type": "text", "text": "Loaded files"},
+					{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}},
+					{"type": "document", "filename": "sample.pdf", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}}
+				]}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != "Loaded files" {
+			t.Fatalf("tool message content = %q, want Loaded files", got)
+		}
+		relayContent := messages[2].Get("content").Array()
+		if len(relayContent) != 3 {
+			t.Fatalf("expected 3 relay parts, got %d: %s", len(relayContent), messages[2].Get("content").Raw)
+		}
+		if got := relayContent[0].Get("text").String(); got != toolResultMediaRelayNotice {
+			t.Fatalf("relay[0] = %q, want %q", got, toolResultMediaRelayNotice)
+		}
+		if relayContent[1].Get("type").String() != "image_url" {
+			t.Fatalf("relay[1] = %s, want image_url", relayContent[1].Raw)
+		}
+		if relayContent[2].Get("type").String() != "file" || relayContent[2].Get("file.filename").String() != "sample.pdf" {
+			t.Fatalf("relay[2] = %s, want file with sample.pdf", relayContent[2].Raw)
+		}
+	})
+
+	t.Run("unconvertible document does not leak raw base64", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_bad", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_bad", "content": {
+					"type": "document",
+					"source": {"type": "base64", "media_type": "application/pdf", "data": "not-valid-base64!!!"}
+				}}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != toolResultUnsupportedDocumentPlaceholder {
+			t.Fatalf("tool message content = %q, want %q", got, toolResultUnsupportedDocumentPlaceholder)
+		}
+	})
+
+	t.Run("mixed text and unconvertible document surfaces placeholder instead of silent drop", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_mix_bad", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_mix_bad", "content": [
+					{"type": "text", "text": "Partial output"},
+					{"type": "document", "source": {"type": "file", "file_id": "file-123"}}
+				]}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %s", len(messages), out)
+		}
+		want := "Partial output\n\n" + toolResultUnsupportedDocumentPlaceholder
+		if got := messages[1].Get("content").String(); got != want {
+			t.Fatalf("tool message content = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("mixed valid document and unconvertible document relays valid and flags unsupported", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_two_docs", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_two_docs", "content": [
+					{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjQK"}},
+					{"type": "document", "source": {"type": "file", "file_id": "file-123"}}
+				]}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != toolResultUnsupportedDocumentPlaceholder {
+			t.Fatalf("tool message content = %q, want %q", got, toolResultUnsupportedDocumentPlaceholder)
+		}
+		filePart := messages[2].Get("content.1")
+		if filePart.Get("type").String() != "file" || filePart.Get("file.file_data").String() != "data:application/pdf;base64,JVBERi0xLjQK" {
+			t.Fatalf("relay file part = %s, want valid PDF file part", filePart.Raw)
+		}
+	})
+
+	t.Run("array text-source document preserves text", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_text_doc", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_text_doc", "content": [
+					{"type": "document", "title": "notes.txt", "source": {"type": "text", "media_type": "text/plain", "data": "ORANGE-42"}}
+				]}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %s", len(messages), out)
+		}
+		got := messages[1].Get("content").String()
+		if !strings.Contains(got, "ORANGE-42") || !strings.Contains(got, "notes.txt") {
+			t.Fatalf("tool message content = %q, want ORANGE-42 and notes.txt", got)
+		}
+	})
+
+	t.Run("singleton text-source document preserves text", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_text_doc", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_text_doc", "content": {
+					"type": "document",
+					"source": {"type": "text", "media_type": "text/plain", "data": "ORANGE-42"}
+				}}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("expected 2 messages, got %d: %s", len(messages), out)
+		}
+		if got := messages[1].Get("content").String(); got != "ORANGE-42" {
+			t.Fatalf("tool message content = %q, want ORANGE-42", got)
+		}
+	})
+
+	t.Run("content-source document preserves text and relays images", func(t *testing.T) {
+		inputJSON := `{
+			"model": "gpt-5",
+			"messages": [
+				{"role": "assistant", "content": [{"type": "tool_use", "id": "call_content_doc", "name": "read_file", "input": {}}]},
+				{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_content_doc", "content": {
+					"type": "document",
+					"title": "report",
+					"source": {
+						"type": "content",
+						"content": [
+							{"type": "text", "text": "Summary line"},
+							{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="}}
+						]
+					}
+				}}]}
+			]
+		}`
+		out, err := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+		if err != nil {
+			t.Fatalf("ConvertClaudeRequestToOpenAI error: %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("expected 3 messages, got %d: %s", len(messages), out)
+		}
+		got := messages[1].Get("content").String()
+		if !strings.Contains(got, "Document: report") || !strings.Contains(got, "Summary line") {
+			t.Fatalf("tool message content = %q, want header + Summary line", got)
+		}
+		if gotImg := messages[2].Get("content.1.image_url.url").String(); gotImg != "data:image/png;base64,aGVsbG8=" {
+			t.Fatalf("relayed image = %q, want data URL", gotImg)
+		}
+	})
+}
