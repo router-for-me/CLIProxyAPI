@@ -408,6 +408,9 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+		if decideAntigravity429(body).kind == antigravity429DecisionSoftRetry {
+			err.transientRateLimit = true
+		}
 	} else if statusCode == http.StatusForbidden {
 		if violation := parseAntigravityTOSViolation(body); violation != nil {
 			err.tosViolation = true
