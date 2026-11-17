@@ -1696,7 +1696,6 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				modelKey = m.resolveMarkResultModelKeyLocked(auth, modelKey, result.RouteModel)
 			}
 		}
-		m.recordClaudeOverage(ctx, auth, result, modelKey, responseHeaders, now)
 		modelState := existingModelState(auth, modelKey)
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
@@ -1824,6 +1823,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
+					m.recordClaudeOverage(ctx, auth, result, modelKey, responseHeaders, now)
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
@@ -2245,6 +2245,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						}
 					}
+					m.recordClaudeOverage(ctx, auth, result, "", responseHeaders, now)
 					ownAuthForceDeadline, ownAuthRetryDeadline := applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 					cooldownSeq := m.currentExecutionSeq()
 					isQuota429 := !disableCooling &&
