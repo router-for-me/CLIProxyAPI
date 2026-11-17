@@ -244,6 +244,19 @@ routing:
   # startup and rewritten at most once per minute when it changed. Do not place it inside
   # auth-dir. Empty (default) disables persistence; the history then lives in memory only.
   # state-file: "state/routing-state.json"
+  # Start idle short quota windows (Claude "5h", Codex primary) of Claude/Codex OAuth
+  # credentials with one tiny request a random delay after they reset. soonest-reset routing
+  # sends traffic to one credential, so the other credentials' five-hour windows would
+  # otherwise stay idle and their quota would go unused. Credentials without any quota
+  # snapshot get one trigger too, so their reset times become known. Disabled, cooling-down,
+  # and API-key credentials, credentials whose weekly window is exhausted, and Home mode are
+  # skipped. Failures retry every 15m, at most 3 times per idle window. Settings hot-reload.
+  # reset-trigger:
+  #   enabled: false
+  #   claude-model: "claude-haiku-5-5" # default
+  #   codex-model: "gpt-5.6-luna"      # default
+  #   min-delay: "30s" # random delay after the reset, lower bound (default 30s)
+  #   max-delay: "5m"  # upper bound (default 5m)
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

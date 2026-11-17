@@ -102,6 +102,7 @@ func (s *Service) Run(ctx context.Context) error {
 			auths:           s.coreManager.List(),
 		})
 		s.startRoutingState(ctx)
+		s.startResetTrigger(ctx)
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
@@ -375,6 +376,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 
+		s.stopResetTrigger()
 		s.stopRoutingState()
 
 		if s.pluginHost != nil {

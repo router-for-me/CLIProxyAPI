@@ -586,6 +586,26 @@ type RoutingConfig struct {
 	// paths resolve against the config file directory. Empty disables
 	// persistence; the history is then kept in memory only. Read at startup.
 	StateFile string `yaml:"state-file,omitempty" json:"state-file,omitempty"`
+
+	// ResetTrigger starts idle short (five-hour style) quota windows of Claude
+	// and Codex OAuth credentials with a cheap request shortly after they reset.
+	ResetTrigger ResetTriggerConfig `yaml:"reset-trigger,omitempty" json:"reset-trigger,omitempty"`
+}
+
+// ResetTriggerConfig configures routing.reset-trigger.
+type ResetTriggerConfig struct {
+	// Enabled turns the trigger loop on. Default: false.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// ClaudeModel is the model used for Claude trigger requests.
+	// Default: "claude-haiku-5-5".
+	ClaudeModel string `yaml:"claude-model,omitempty" json:"claude-model,omitempty"`
+	// CodexModel is the model used for Codex trigger requests.
+	// Default: "gpt-5.6-luna".
+	CodexModel string `yaml:"codex-model,omitempty" json:"codex-model,omitempty"`
+	// MinDelay and MaxDelay bound the random delay between a window reset and
+	// its trigger request. Defaults: "30s" and "5m".
+	MinDelay string `yaml:"min-delay,omitempty" json:"min-delay,omitempty"`
+	MaxDelay string `yaml:"max-delay,omitempty" json:"max-delay,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

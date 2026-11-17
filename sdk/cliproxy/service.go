@@ -56,6 +56,9 @@ type Service struct {
 	// routingState samples quota history and persists routing state.
 	routingState *routingStatePersister
 
+	// resetTrigger starts idle short quota windows with cheap requests.
+	resetTrigger *resetTrigger
+
 	// tokenProvider handles loading token-based clients.
 	tokenProvider TokenClientProvider
 
