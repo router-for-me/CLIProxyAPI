@@ -592,6 +592,9 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 	if status == http.StatusTooManyRequests && msg != nil && msg.Error != nil {
 		var cooldown interface{ IsModelCooldown() bool }
 		if errors.As(msg.Error, &cooldown) && cooldown != nil && cooldown.IsModelCooldown() {
+			if retryAfter == "" {
+				retryAfter = usageLimitResetSeconds(msg.Error)
+			}
 			if seconds, errParse := strconv.ParseInt(retryAfter, 10, 64); errParse == nil && seconds > 0 {
 				delay := retryAfter + "s"
 				if seconds <= (1<<63-1)/int64(time.Second) {
@@ -612,6 +615,25 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
 	}
 	return response
+}
+
+// usageLimitResetSeconds returns the remaining reset time of a final usage limit
+// that wraps an upstream error. Such an error carries no Retry-After, so the
+// message still tells the user when the quota resets.
+func usageLimitResetSeconds(err error) string {
+	limit, ok := errors.AsType[interface {
+		error
+		IsUsageLimitReached() bool
+		RetryAfter() *time.Duration
+	}](err)
+	if !ok || limit == nil || !limit.IsUsageLimitReached() {
+		return ""
+	}
+	remaining := limit.RetryAfter()
+	if remaining == nil || *remaining <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(int64((*remaining+time.Second-1)/time.Second), 10)
 }
 
 func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {

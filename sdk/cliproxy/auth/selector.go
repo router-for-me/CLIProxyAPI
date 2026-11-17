@@ -127,8 +127,13 @@ const QuotaExhaustedCooldownThreshold = 5 * time.Minute
 
 // IsUsageLimitReachedError reports whether err is a model cooldown in which every
 // candidate credential has explicit upstream quota-exhaustion evidence and the
-// earliest recovery is more than QuotaExhaustedCooldownThreshold away.
+// earliest recovery is more than QuotaExhaustedCooldownThreshold away. It covers
+// the selection-time cooldown and the terminal upstream 429 of a cooling pool.
 func IsUsageLimitReachedError(err error) bool {
+	var poolCooldown *poolCooldownTerminalError
+	if errors.As(err, &poolCooldown) && poolCooldown != nil {
+		return poolCooldown.IsUsageLimitReached()
+	}
 	var cooldown *modelCooldownError
 	return errors.As(err, &cooldown) && cooldown.IsUsageLimitReached()
 }
