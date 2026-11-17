@@ -925,7 +925,8 @@ func TestCaptureRequestInfoBoundsZstdExpansionWithoutAConfiguredLimit(t *testing
 // window is past the bound, so the raw bytes are logged and nothing large is allocated.
 func TestCaptureRequestInfoDoesNotDecodeASingleSegmentBomb(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	// compress >= 1.18 only picks single-segment frames by itself when the input fits the window, so force it.
+	encoder, errNewWriter := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBestCompression), zstd.WithSingleSegment(true))
 	if errNewWriter != nil {
 		t.Fatal(errNewWriter)
 	}
