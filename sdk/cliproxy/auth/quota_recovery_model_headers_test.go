@@ -80,12 +80,12 @@ func TestQuotaRecoveryModelHeaderIdentity(t *testing.T) {
 						configured = upstream
 					}
 					if tc.apiAlias {
-						a.Attributes = map[string]string{"api_key": "config-key"}
-						m.SetConfig(&internalconfig.Config{CodexKey: []internalconfig.CodexKey{{APIKey: "config-key", Models: []internalconfig.CodexModel{{Name: upstream, Alias: route}}}}})
+						a.Attributes = map[string]string{"api_key": "token-a"}
+						m.SetConfig(&internalconfig.Config{CodexKey: []internalconfig.CodexKey{{APIKey: "token-a", Models: []internalconfig.CodexModel{{Name: upstream, Alias: route}}}}})
 						configured = upstream
 					}
 					if tc.pool {
-						a.Attributes = map[string]string{"api_key": "config-key", "compat_name": "model-header-pool"}
+						a.Attributes = map[string]string{"api_key": "token-a", "compat_name": "model-header-pool"}
 						m.SetConfig(&internalconfig.Config{OpenAICompatibility: []internalconfig.OpenAICompatibility{{Name: "model-header-pool", Models: []internalconfig.OpenAICompatibilityModel{{Name: upstream, Alias: route}, {Name: other, Alias: route}}}}})
 						configured = other
 					}

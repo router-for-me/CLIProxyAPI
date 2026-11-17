@@ -18,6 +18,12 @@ func quotaRecoverySIWCAccountMatches(auth *Auth) bool {
 	account = strings.TrimSpace(account)
 	token, _ := auth.Metadata["access_token"].(string)
 	token = strings.TrimSpace(token)
+	// Ordinary inference gives a nonempty API-key attribute precedence over
+	// metadata, while the canonical usage probe inspects the outer token.
+	// Codex clients can select this path even when SIWC is enabled.
+	if apiKey := auth.Attributes["api_key"]; apiKey != "" && apiKey != token {
+		return false
+	}
 	if provider == "codex" && IsCodexUseSIWC(auth) {
 		if account == "" {
 			return false
