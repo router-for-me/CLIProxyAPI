@@ -48,7 +48,7 @@ func TestPayloadReplaceDeferredWrites(t *testing.T) {
 					Replacements: []config.PayloadReplacement{{"grow": grown}, {"shrink": ""}, {"escaped": escaped}},
 				}
 				var writes []string
-				if !replacePayloadUserTextDoc(doc, scenario.protocol, scenario.root, rule, func(path string) { writes = append(writes, path) }) {
+				if !replacePayloadTextDoc(doc, scenario.protocol, scenario.root, rule, 0, func(path string) { writes = append(writes, path) }) {
 					t.Fatal("expected text changes")
 				}
 				if !reflect.DeepEqual(writes, scenario.changed) {
@@ -67,10 +67,13 @@ func TestPayloadReplaceNoOpDoesNotTrackWrites(t *testing.T) {
 		{{"absent": "replacement"}},
 		{{"hero": "hero"}},
 		{{"hero": "fool"}, {"fool": "hero"}},
+		{{"pattern": `missing-\d+`, "replacement": "x"}},
+		{{"pattern": `(he)(ro)`, "replacement": "$1$2"}},
+		{{"pattern": `[invalid`, "replacement": "x"}},
 	} {
 		doc := ojson.NewDocString(`{"messages":[{"role":"user","content":"hero"}]}`)
 		rule := &config.PayloadReplaceRule{Target: config.PayloadReplaceTarget{Role: "user", All: true}, Replacements: replacements}
-		changed := replacePayloadUserTextDoc(doc, "openai", "", rule, func(path string) { t.Errorf("no-op tracked write: %s", path) })
+		changed := replacePayloadTextDoc(doc, "openai", "", rule, 0, func(path string) { t.Errorf("no-op tracked write: %s", path) })
 		if changed || doc.Get("messages.0.content").String() != "hero" {
 			t.Fatal("no-op changed the document")
 		}

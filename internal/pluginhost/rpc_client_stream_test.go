@@ -125,3 +125,78 @@ func waitForStreamCallbackPlugin(t *testing.T, client *streamCallbackPluginClien
 		t.Fatal("plugin stream method was not called")
 	}
 }
+
+type staticStreamClient struct {
+	resp rpcExecutorStreamResponse
+}
+
+func (c *staticStreamClient) Call(_ context.Context, method string, _ []byte) ([]byte, error) {
+	if method != pluginabi.MethodExecutorExecuteStream {
+		return nil, fmt.Errorf("unexpected method %s", method)
+	}
+	return marshalRPCResult(c.resp)
+}
+
+func (c *staticStreamClient) Shutdown() {}
+
+func TestRPCExecuteStreamPropagatesAttribution(t *testing.T) {
+	wantAttr := &pluginapi.UsageAttribution{
+		AuthIndex: "idx-stream-1",
+		AuthType:  "oauth",
+		Source:    "acct-stream@example.com",
+	}
+
+	t.Run("inline chunks", func(t *testing.T) {
+		host := New()
+		adapter := &rpcPluginAdapter{
+			id:   "stream-attr",
+			host: host,
+			client: &staticStreamClient{
+				resp: rpcExecutorStreamResponse{
+					Headers:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Chunks:      []pluginapi.ExecutorStreamChunk{{Payload: []byte("data: ok\n\n")}},
+					Attribution: wantAttr,
+				},
+			},
+		}
+
+		res, errStream := adapter.ExecuteStream(context.Background(), pluginapi.ExecutorRequest{Stream: true})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		if res.Attribution == nil || *res.Attribution != *wantAttr {
+			t.Fatalf("res.Attribution = %+v, want %+v", res.Attribution, wantAttr)
+		}
+		for range res.Chunks {
+		}
+	})
+
+	t.Run("async stream", func(t *testing.T) {
+		host := New()
+		adapter := &rpcPluginAdapter{
+			id:   "stream-attr-async",
+			host: host,
+			client: &staticStreamClient{
+				resp: rpcExecutorStreamResponse{
+					Headers:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Attribution: wantAttr,
+				},
+			},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		res, errStream := adapter.ExecuteStream(ctx, pluginapi.ExecutorRequest{Stream: true})
+		if errStream != nil {
+			t.Fatalf("ExecuteStream() error = %v", errStream)
+		}
+		t.Cleanup(func() {
+			cancel()
+			for range res.Chunks {
+			}
+		})
+		if res.Attribution == nil || *res.Attribution != *wantAttr {
+			t.Fatalf("res.Attribution = %+v, want %+v", res.Attribution, wantAttr)
+		}
+	})
+}

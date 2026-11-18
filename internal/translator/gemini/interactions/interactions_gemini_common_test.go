@@ -1616,3 +1616,134 @@ func TestConvertGeminiRequestToInteractions_GoogleSearchAndBuiltinToolOptions(t 
 		t.Fatalf("tools[2].sandbox = false, want true; tool=%s", tools[2].Raw)
 	}
 }
+
+func TestConvertGeminiRequestToInteractions_FunctionResponsePartsMedia(t *testing.T) {
+	t.Run("inlineData image and PDF alongside response result", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "id": "call_1", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"id": "call_1",
+						"response": {"result": "Loaded files"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+							{"inlineData": {"mimeType": "application/pdf", "data": "JVBERi0xLjQK"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		step := ojson.GetBytesNoCopy(out, "input.1")
+		if got := step.Get("type").String(); got != "function_result" {
+			t.Fatalf("input.1.type = %q, want function_result; out=%s", got, string(out))
+		}
+		result := step.Get("result")
+		if !result.IsArray() {
+			t.Fatalf("expected function_result.result to be array, got %s; out=%s", result.Raw, string(out))
+		}
+		items := result.Array()
+		if len(items) != 3 {
+			t.Fatalf("expected 3 items (text + image + document), got %d: %s", len(items), result.Raw)
+		}
+		if items[0].Get("type").String() != "text" || items[0].Get("text").String() != "Loaded files" {
+			t.Fatalf("items[0] = %s, want text 'Loaded files'", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "image" || items[1].Get("mime_type").String() != "image/png" || items[1].Get("data").String() != "iVBORw0KGgo=" {
+			t.Fatalf("items[1] = %s, want image/png item", items[1].Raw)
+		}
+		if items[2].Get("type").String() != "document" || items[2].Get("mime_type").String() != "application/pdf" || items[2].Get("data").String() != "JVBERi0xLjQK" {
+			t.Fatalf("items[2] = %s, want application/pdf document item", items[2].Raw)
+		}
+	})
+
+	t.Run("fileData audio URI with empty response", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "fetch_audio", "id": "call_2", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "fetch_audio",
+						"id": "call_2",
+						"response": {},
+						"parts": [
+							{"fileData": {"mimeType": "audio/wav", "fileUri": "https://example.com/a.wav"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		items := ojson.GetBytesNoCopy(out, "input.1.result").Array()
+		if len(items) != 1 {
+			t.Fatalf("expected 1 audio item (no empty text item), got %d; out=%s", len(items), string(out))
+		}
+		if items[0].Get("type").String() != "audio" || items[0].Get("mime_type").String() != "audio/wav" || items[0].Get("uri").String() != "https://example.com/a.wav" {
+			t.Fatalf("items[0] = %s, want audio uri item", items[0].Raw)
+		}
+	})
+
+	t.Run("preserves sibling response fields alongside result and nested parts", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "id": "call_3", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"id": "call_3",
+						"response": {"result": "partial", "error": "second file failed"},
+						"parts": [
+							{"text": "extra note"},
+							{"inline_data": {"mime_type": "image/png", "data": "iVBORw0KGgo="}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		items := ojson.GetBytesNoCopy(out, "input.1.result").Array()
+		if len(items) != 3 {
+			t.Fatalf("expected 3 items, got %d; out=%s", len(items), string(out))
+		}
+		if items[0].Get("type").String() != "text" || !strings.Contains(items[0].Get("text").String(), "second file failed") {
+			t.Fatalf("items[0] = %s, want text preserving error field", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "text" || items[1].Get("text").String() != "extra note" {
+			t.Fatalf("items[1] = %s, want nested text 'extra note'", items[1].Raw)
+		}
+		if items[2].Get("type").String() != "image" || items[2].Get("mime_type").String() != "image/png" {
+			t.Fatalf("items[2] = %s, want image/png item", items[2].Raw)
+		}
+	})
+
+	t.Run("streaming response delta preserves functionResponse.parts", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionResponse":{"name":"read_files","id":"call_4","response":{"result":"Loaded"},"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}]}}]}}]}`)
+		events := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, chunk, &param)
+		delta := findStepDeltaPayloadByType(events, "function_result")
+		if len(delta) == 0 {
+			t.Fatalf("expected function_result step.delta event, got %d events", len(events))
+		}
+		items := ojson.GetBytesNoCopy(delta, "delta.result").Array()
+		if len(items) != 2 || items[0].Get("text").String() != "Loaded" || items[1].Get("type").String() != "image" {
+			t.Fatalf("delta.result = %s, want [text, image]", ojson.GetBytesNoCopy(delta, "delta.result").Raw)
+		}
+	})
+}
