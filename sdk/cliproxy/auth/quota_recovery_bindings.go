@@ -155,7 +155,7 @@ func preserveQuotaRecoveryBindings(auth, previous *Auth, now time.Time) {
 		if state.Quota.Exceeded {
 			state.Quota.recoveryBindings = mergeQuotaRecoveryBindings(now, state.Quota.recoveryBindings, old.Quota.recoveryBindings)
 		}
-		if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) && state.credentialQuotaShadow == nil && old.credentialQuotaShadow != nil && isModelStateActiveCooldown(old.credentialQuotaShadow, now) && len(mergeQuotaRecoveryBindings(now, old.credentialQuotaShadow.Quota.recoveryBindings)) > 0 {
+		if state.Quota.Exceeded && state.Quota.NextRecoverAt.After(now) && state.credentialQuotaShadow == nil && old.credentialQuotaShadow != nil && isModelStateActiveCooldown(old.credentialQuotaShadow, now) {
 			state.credentialQuotaShadow = old.credentialQuotaShadow.cloneShallow()
 			state.credentialQuotaPropagated = old.credentialQuotaPropagated
 		}
