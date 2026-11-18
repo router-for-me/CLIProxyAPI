@@ -44,7 +44,7 @@
   padding: 0 8px;
   border-radius: $radius-full;
   color: var(--text-secondary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
@@ -120,7 +120,7 @@
     .cm-editor {
       height: 100%;
       font-size: 13px;
-      font-family: $font-mono;
+      @include font-mono;
       background: transparent;
     }
 

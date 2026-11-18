@@ -152,7 +152,7 @@ $field-radius: 10px;
 }
 
 .mono {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
 }
 

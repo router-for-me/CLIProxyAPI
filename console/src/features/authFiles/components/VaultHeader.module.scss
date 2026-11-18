@@ -32,7 +32,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 4px 8px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;

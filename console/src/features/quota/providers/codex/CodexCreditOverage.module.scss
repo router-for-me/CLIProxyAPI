@@ -31,7 +31,7 @@
 }
 
 .confirmedAt {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);

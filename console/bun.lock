@@ -7,6 +7,7 @@
       "dependencies": {
         "@codemirror/lang-yaml": "^6.1.3",
         "@codemirror/merge": "^6.12.3",
+        "@fontsource-variable/recursive": "5.2.8",
         "@noble/hashes": "^2.4.0",
         "@uiw/react-codemirror": "^4.25.12",
         "axios": "1.20.0",
@@ -116,6 +117,8 @@
     "@eslint/object-schema": ["@eslint/object-schema@3.0.5", "", {}, "sha512-vqTaUEgxzm+YDSdElad6PiRoX4t8VGDjCtt05zn4nU810UIx/uNEV7/lZJ6KwFThKZOzOxzXy48da+No7HZaMw=="],
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.7.3", "", { "dependencies": { "@eslint/core": "^1.2.1", "levn": "^0.4.1" } }, "sha512-IkO+/KEUvwbVpiURZg+P7zF74z5Jxe0UgJxVni+RtoHQ6IZieXaO02kmadomap/q+l6bc/jdPGGqTjhuZnuz1Q=="],
+
+    "@fontsource-variable/recursive": ["@fontsource-variable/recursive@5.2.8", "", {}, "sha512-LEq6XtuWtjmNTRFQEctx+RUPiQegsjOaCF++ASVoMoGEW4gNjbaKZJJo/NiR12eWxT4LaTKonTgrmEci0oVcSw=="],
 
     "@humanfs/core": ["@humanfs/core@0.19.1", "", {}, "sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA=="],
 

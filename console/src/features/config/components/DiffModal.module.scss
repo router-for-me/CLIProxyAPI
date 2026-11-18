@@ -1,7 +1,6 @@
 @use '../../../styles/variables' as *;
 @use '../../../styles/mixins' as *;
 
-$diff-mono: $font-mono;
 $diff-font-size: 12px;
 $diff-line-height: 20px;
 $diff-gutter-width: 50px;
@@ -69,7 +68,7 @@ $diff-hunk-color: #388bfd;
 .fileName {
   font-size: 13px;
   font-weight: 600;
-  font-family: $diff-mono;
+  @include font-mono;
   color: var(--text-primary);
 }
 
@@ -80,7 +79,7 @@ $diff-hunk-color: #388bfd;
   gap: $spacing-sm;
   font-size: 12px;
   font-weight: 700;
-  font-family: $diff-mono;
+  @include font-mono;
 }
 
 .statAdditions {
@@ -117,7 +116,7 @@ $diff-hunk-color: #388bfd;
   flex: 1;
   min-height: 0;
   overflow: auto;
-  font-family: $diff-mono;
+  @include font-mono;
   font-size: $diff-font-size;
   line-height: $diff-line-height;
 }

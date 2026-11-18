@@ -179,7 +179,7 @@
 .apiKeyIndex {
   min-width: 26px;
   color: var(--text-tertiary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
@@ -203,7 +203,7 @@
 .apiKeyValue {
   overflow: hidden;
   color: var(--text-secondary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -480,7 +480,7 @@
 .payloadJsonInput {
   min-height: 112px;
   resize: vertical;
-  font-family: $font-mono;
+  @include font-mono;
 }
 
 .payloadParamError {

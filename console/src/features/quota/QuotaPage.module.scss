@@ -213,7 +213,7 @@
 }
 
 .pageInfo {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;

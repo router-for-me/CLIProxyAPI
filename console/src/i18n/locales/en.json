@@ -2481,8 +2481,6 @@
     "view_cards": "Cards",
     "show_emails": "Show emails",
     "hide_emails": "Hide emails",
-    "credentials": "{{count}} credentials",
-    "of_capacity": "of {{capacity}}%",
     "not_loaded": "Not loaded yet",
     "no_reset_pending": "No reset pending",
     "available": "available",
@@ -2503,6 +2501,13 @@
     "cache_hit": "{{percent}}% read from cache",
     "cache_read": "{{tokens}} read",
     "cache_write": "{{tokens}} written",
-    "cache_hint": "Input tokens this account served from prompt cache in the last hour. Lots of writes and few reads means threads are switching accounts."
+    "cache_hint": "Input tokens this account served from prompt cache in the last hour. Lots of writes and few reads means threads are switching accounts.",
+    "runway_title": "Resets this week",
+    "runway_caption": "Each mark is an account, placed at its weekly reset and filled by what it has left. The proxy spends from the left.",
+    "runway_now": "Now",
+    "runway_unseen": "Unseen",
+    "runway_left_of": "left of {{capacity}}%",
+    "runway_marker": "{{name}}: {{percent}}% left, resets {{when}}",
+    "runway_marker_unseen": "{{name}}: {{percent}}% left, reset not seen yet"
   }
 }

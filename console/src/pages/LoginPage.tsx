@@ -11,7 +11,7 @@ import { prefersReducedMotion } from '@/hooks/motion';
 import { detectApiBaseFromLocation, normalizeApiBase } from '@/utils/connection';
 import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
-import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
+import { PAPA_MARK_SVG } from '@/assets/papaMark';
 import type { ApiError } from '@/types';
 import { LegacyBackendError } from '@/services/api/legacyBackendProbe';
 import { DotMatrixHero } from './login/DotMatrixHero';
@@ -255,7 +255,7 @@ export function LoginPage() {
         {!showSplash && (
           <header className={styles.topBar}>
             <div className={styles.brandMark}>
-              <img src={INLINE_LOGO_JPEG} alt="" className={styles.brandLogo} />
+              <img src={PAPA_MARK_SVG} alt="" className={styles.brandLogo} />
               <span className={styles.brandName} title={LOGIN_BRAND_NAME}>
                 {LOGIN_BRAND_NAME}
               </span>
@@ -277,7 +277,7 @@ export function LoginPage() {
         <main className={styles.main}>
           {showSplash ? (
             <div className={styles.splash} role="status" aria-live="polite">
-              <img src={INLINE_LOGO_JPEG} alt="" className={styles.splashLogo} />
+              <img src={PAPA_MARK_SVG} alt="" className={styles.splashLogo} />
               <div className={styles.splashText}>
                 <h1 className={styles.splashTitle}>{t('splash.title')}</h1>
                 <p className={styles.splashSubtitle}>{t('splash.subtitle')}</p>

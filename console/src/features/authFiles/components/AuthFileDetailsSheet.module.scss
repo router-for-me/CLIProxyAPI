@@ -34,7 +34,7 @@
 }
 
 .label {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -46,7 +46,7 @@
   width: 100%;
   box-sizing: border-box;
   resize: vertical;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-secondary);
@@ -70,7 +70,7 @@
   margin: 0;
   max-height: 240px;
   overflow: auto;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   line-height: 1.55;
   color: var(--text-secondary);

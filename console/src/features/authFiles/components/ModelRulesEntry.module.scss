@@ -14,7 +14,7 @@
 
 .label {
   margin: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -92,7 +92,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 2px 7px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -145,7 +145,7 @@
   border-radius: 50%;
   border: 1px solid var(--border-color);
   background: var(--floating-surface, var(--bg-secondary));
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 650;
   color: var(--text-secondary);

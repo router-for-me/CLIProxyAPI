@@ -45,9 +45,28 @@ $z-notification: 3000;
 
 // 字体
 $font-family:
-  -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell',
-  'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  'Recursive Variable',
+  -apple-system,
+  BlinkMacSystemFont,
+  'Segoe UI',
+  'Roboto',
+  'Helvetica Neue',
+  sans-serif;
 
 $font-mono:
-  ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', 'Fira Code', Menlo, Consolas,
-  'Liberation Mono', monospace;
+  'Recursive Variable', ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas,
+  monospace;
+
+// Recursive's monospace is an axis of the same family, so mono text needs both lines.
+@mixin font-mono {
+  font-family: $font-mono;
+  font-variation-settings: 'MONO' 1;
+}
+
+// Page titles: heavy and slightly casual, the console's one typographic flourish.
+@mixin font-display {
+  font-family: $font-family;
+  font-variation-settings: 'CASL' 0.6;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+}

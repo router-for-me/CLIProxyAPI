@@ -69,7 +69,7 @@
     padding: 0 3px;
     border-radius: 4px;
     background: color-mix(in srgb, currentColor 14%, transparent);
-    font-family: $font-mono;
+    @include font-mono;
     font-size: 0.95em;
   }
 

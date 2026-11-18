@@ -2481,8 +2481,6 @@
     "view_cards": "카드",
     "show_emails": "이메일 표시",
     "hide_emails": "이메일 숨기기",
-    "credentials": "자격 증명 {{count}}개",
-    "of_capacity": "/ {{capacity}}%",
     "not_loaded": "아직 불러오지 않음",
     "no_reset_pending": "예정된 초기화 없음",
     "available": "사용 가능",
@@ -2503,6 +2501,13 @@
     "cache_hit": "{{percent}}% 캐시에서 읽음",
     "cache_read": "{{tokens}} 읽음",
     "cache_write": "{{tokens}} 기록",
-    "cache_hint": "지난 1시간 동안 이 계정이 프롬프트 캐시에서 읽은 입력 토큰입니다. 기록이 많고 읽기가 적으면 스레드가 계정을 오가고 있다는 뜻입니다."
+    "cache_hint": "지난 1시간 동안 이 계정이 프롬프트 캐시에서 읽은 입력 토큰입니다. 기록이 많고 읽기가 적으면 스레드가 계정을 오가고 있다는 뜻입니다.",
+    "runway_title": "이번 주 초기화",
+    "runway_caption": "각 표시는 계정이며, 주간 초기화 시점에 놓이고 남은 할당량만큼 채워집니다. 프록시는 왼쪽부터 사용합니다.",
+    "runway_now": "지금",
+    "runway_unseen": "미확인",
+    "runway_left_of": "남음 / {{capacity}}%",
+    "runway_marker": "{{name}}: {{percent}}% 남음, {{when}} 초기화",
+    "runway_marker_unseen": "{{name}}: {{percent}}% 남음, 초기화 시점 미확인"
   }
 }

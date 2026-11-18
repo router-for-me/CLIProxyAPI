@@ -2487,8 +2487,6 @@
     "view_cards": "Thẻ",
     "show_emails": "Hiện email",
     "hide_emails": "Ẩn email",
-    "credentials": "{{count}} thông tin xác thực",
-    "of_capacity": "trên {{capacity}}%",
     "not_loaded": "Chưa tải",
     "no_reset_pending": "Không có lần đặt lại",
     "available": "khả dụng",
@@ -2509,6 +2507,13 @@
     "cache_hit": "{{percent}}% đọc từ bộ nhớ đệm",
     "cache_read": "đọc {{tokens}}",
     "cache_write": "ghi {{tokens}}",
-    "cache_hint": "Token đầu vào tài khoản này lấy từ bộ nhớ đệm prompt trong giờ qua. Ghi nhiều, đọc ít nghĩa là các luồng đang đổi tài khoản."
+    "cache_hint": "Token đầu vào tài khoản này lấy từ bộ nhớ đệm prompt trong giờ qua. Ghi nhiều, đọc ít nghĩa là các luồng đang đổi tài khoản.",
+    "runway_title": "Đặt lại tuần này",
+    "runway_caption": "Mỗi dấu là một tài khoản, đặt tại lần đặt lại hằng tuần và tô theo hạn mức còn lại. Proxy dùng từ bên trái.",
+    "runway_now": "Bây giờ",
+    "runway_unseen": "Chưa thấy",
+    "runway_left_of": "còn lại trên {{capacity}}%",
+    "runway_marker": "{{name}}: còn {{percent}}%, đặt lại {{when}}",
+    "runway_marker_unseen": "{{name}}: còn {{percent}}%, chưa thấy thời điểm đặt lại"
   }
 }

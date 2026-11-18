@@ -98,7 +98,7 @@
 
 /* 校验错误徽章：mono 数字，失败色（数据墨水走 --viz-*） */
 .tabBadge {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;

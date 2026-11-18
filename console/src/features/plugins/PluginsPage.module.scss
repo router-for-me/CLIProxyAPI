@@ -95,7 +95,7 @@
   max-width: min(420px, 100%);
   overflow: hidden;
   color: var(--text-tertiary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   text-overflow: ellipsis;
 }

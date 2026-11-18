@@ -40,7 +40,7 @@
 
 .status {
   min-width: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;

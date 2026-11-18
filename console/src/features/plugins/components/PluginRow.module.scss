@@ -140,7 +140,7 @@
   min-width: 0;
   max-width: 100%;
   color: var(--text-tertiary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   @include text-ellipsis;
 }

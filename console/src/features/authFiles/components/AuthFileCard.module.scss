@@ -109,7 +109,7 @@
 /* 无账号线索时主行回落到文件名，沿用 mono 语汇。
    必须声明在 .account 之后——两者同为单类选择器，letter-spacing 靠源序决胜。 */
 .accountMono {
-  font-family: $font-mono;
+  @include font-mono;
   letter-spacing: -0.01em;
 }
 
@@ -117,7 +117,7 @@
    overflow-wrap + -webkit-box 的组合与本文件 .warning span 同配方。 */
 .fileName {
   margin: -4px 0 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   line-height: 1.45;
   color: var(--text-tertiary);
@@ -175,7 +175,7 @@
 }
 
 .healthLabel {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.12em;
@@ -187,7 +187,7 @@
   display: inline-flex;
   align-items: baseline;
   gap: 8px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -246,7 +246,7 @@
 }
 
 .statusRate {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
@@ -283,7 +283,7 @@
   border: 1px solid var(--border-color);
   box-shadow: var(--floating-shadow);
   pointer-events: none;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   line-height: 1.5;
 }
@@ -330,7 +330,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 4px 7px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
@@ -384,7 +384,7 @@
 }
 
 .siwcExpires {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);

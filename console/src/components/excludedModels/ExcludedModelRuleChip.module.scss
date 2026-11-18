@@ -14,7 +14,7 @@
   padding: 4px 5px 4px 9px;
   border-radius: $radius-full;
   color: var(--text-primary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   line-height: 1.5;
 }

@@ -205,7 +205,7 @@
   height: auto;
   min-height: 80px;
   resize: vertical;
-  font-family: $font-mono;
+  @include font-mono;
   line-height: 1.5;
 }
 
@@ -309,7 +309,7 @@
   margin: 0;
   margin-top: 2px;
   font-size: 12px;
-  font-family: $font-mono;
+  @include font-mono;
   color: var(--text-primary);
   word-break: break-word;
 }
@@ -410,13 +410,13 @@
 
 .sponsorSummaryKey {
   max-width: 140px;
-  font-family: $font-mono;
+  @include font-mono;
   color: var(--text-primary);
 }
 
 .sponsorSummaryUrl {
   max-width: min(360px, 45vw);
-  font-family: $font-mono;
+  @include font-mono;
   color: var(--muted-foreground);
 }
 
@@ -534,7 +534,7 @@
   color: var(--text-primary);
 
   small {
-    font-family: $font-mono;
+    @include font-mono;
     font-size: 11px;
     line-height: 1.4;
     color: var(--muted-foreground);
@@ -576,7 +576,7 @@
 }
 
 .sponsorProtocolUrl {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   line-height: 1.4;
   color: var(--muted-foreground);
@@ -840,7 +840,7 @@
 }
 
 .discoveryName {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   word-break: break-all;
 }
@@ -1059,7 +1059,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: $font-mono;
+  @include font-mono;
   color: var(--text-primary);
 }
 

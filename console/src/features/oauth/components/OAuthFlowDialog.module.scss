@@ -107,7 +107,7 @@
 }
 
 .headingCaption {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -154,7 +154,7 @@
 
 .proxyValue {
   min-width: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   letter-spacing: 0.02em;
   color: var(--text-secondary);
@@ -239,7 +239,7 @@
   border-radius: 50%;
   border: 1px solid var(--border-primary);
   background: var(--bg-primary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
@@ -276,7 +276,7 @@
   padding: 1px 7px;
   border-radius: 999px;
   border: 1px solid var(--border-color);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 500;
   letter-spacing: 0.03em;
@@ -309,7 +309,7 @@
 .urlText {
   flex: 1;
   min-width: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   line-height: 1;
   @include text-ellipsis;
@@ -362,7 +362,7 @@
   border-radius: 10px;
   border: 1px dashed var(--border-primary);
   background: var(--bg-secondary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 22px;
   font-weight: 600;
   line-height: 1.2;
@@ -385,7 +385,7 @@
   height: 36px;
   padding: 0 12px;
   border-radius: 10px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
 
   &:disabled {
@@ -522,7 +522,7 @@
   gap: 9px;
   min-width: 0;
   margin: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.01em;

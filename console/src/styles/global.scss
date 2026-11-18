@@ -10,6 +10,9 @@
 @use './layout.scss';
 
 body {
+  font-variation-settings:
+    'MONO' 0,
+    'CASL' 0;
   background-color: var(--bg-secondary);
   color: var(--text-primary);
   transition:
@@ -45,3 +48,11 @@ body.modal-open .content {
   }
 }
 
+// Page titles carry the console's one typographic flourish: Recursive leaning casual.
+h1 {
+  font-variation-settings: 'CASL' 0.6;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary-color) 32%, transparent);
+}

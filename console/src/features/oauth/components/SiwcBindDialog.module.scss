@@ -17,7 +17,7 @@
 .legend {
   margin-bottom: 8px;
   padding: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -123,13 +123,13 @@
 }
 
 .optionNameMono {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   letter-spacing: -0.01em;
 }
 
 .optionMeta {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-tertiary);
@@ -204,7 +204,7 @@
 
 .summaryLabel {
   flex-shrink: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.06em;

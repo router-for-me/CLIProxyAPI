@@ -122,7 +122,7 @@ $cell-height: 36px;
   justify-content: flex-end;
   min-width: 18px;
   color: var(--text-tertiary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }
@@ -154,7 +154,7 @@ $cell-height: 36px;
   max-height: 160px;
   padding-block: calc((#{$cell-height} - 2px - 1.45em) / 2);
   line-height: 1.45;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   resize: vertical;
   field-sizing: content;

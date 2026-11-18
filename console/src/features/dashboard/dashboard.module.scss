@@ -133,7 +133,7 @@
 
 .heroMeta {
   margin: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
   letter-spacing: 0.02em;
   color: var(--text-secondary);
@@ -267,7 +267,7 @@
 }
 
 .heroPanelLabel {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
@@ -283,7 +283,7 @@
   border-radius: $radius-full;
   border: 1px solid color-mix(in srgb, var(--viz-success) 35%, transparent);
   background: color-mix(in srgb, var(--viz-success) 8%, transparent);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.14em;
@@ -305,7 +305,7 @@
 
 /* 遥测数字统一等宽：这是 CLI 代理，mono 是它的母语 */
 .heroFigure {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: clamp(42px, 5.6vw, 62px);
   line-height: 1.05;
   font-weight: 600;
@@ -315,7 +315,7 @@
 }
 
 .heroPanelMeta {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -350,7 +350,7 @@
   gap: 6px;
 
   b {
-    font-family: $font-mono;
+    @include font-mono;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
@@ -434,7 +434,7 @@
 }
 
 .statValue {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 28px;
   line-height: 1.1;
   font-weight: 600;
@@ -470,7 +470,7 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.12em;
@@ -576,7 +576,7 @@
 
 /* 列表按流量排序，位次是真实信息 */
 .fleetRank {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-quaternary);
@@ -623,7 +623,7 @@
 }
 
 .fleetTotal {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
@@ -642,7 +642,7 @@
 }
 
 .fleetRateValue {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -710,7 +710,7 @@
   }
 
   b {
-    font-family: $font-mono;
+    @include font-mono;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
@@ -760,7 +760,7 @@
   color: var(--text-secondary);
 
   b {
-    font-family: $font-mono;
+    @include font-mono;
     color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
@@ -804,7 +804,7 @@
 }
 
 .specMono {
-  font-family: $font-mono;
+  @include font-mono;
   font-weight: 500;
   font-size: 12px;
 }

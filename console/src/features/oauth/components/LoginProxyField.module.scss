@@ -95,7 +95,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -188,7 +188,7 @@
   height: 36px;
   padding: 0 12px;
   border-radius: 10px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
 
   &[aria-invalid='true'] {

@@ -1,5 +1,5 @@
 /**
- * Ledger view of the quota page: provider summary cards over one dense row per
+ * Ledger view of the quota page: the reset runway over one dense row per
  * credential, ordered the way papa-proxy's reset-first routing spends them.
  */
 
@@ -9,12 +9,7 @@ import type { TFunction } from 'i18next';
 import { IconRefreshCw } from '@/components/ui/icons';
 import { useNow } from '@/hooks/useNow';
 import type { ResolvedTheme } from '@/types';
-import {
-  getAuthFileIcon,
-  getThemeSurfaceIconBackground,
-  getTypeLabel,
-  isThemeSurfaceIconProvider,
-} from '@/features/authFiles/constants';
+import { getTypeLabel } from '@/features/authFiles/constants';
 import { buildResetDisplay, resolveResetMs } from '@/utils/quota';
 import type { CacheTokens } from '@/services/api/cacheStats';
 import { normalizeRecentRequestAuthIndex } from '@/utils/recentRequests';
@@ -32,8 +27,8 @@ import {
   type LedgerMeter,
   type LedgerProvider,
   type LedgerRow,
-  type LedgerSummary,
 } from './ledgerModel';
+import { QuotaRunway } from './QuotaRunway';
 import { useCacheStats } from './useCacheStats';
 import styles from './QuotaLedger.module.scss';
 
@@ -60,22 +55,6 @@ const tone = (remaining: number | null) =>
 
 const percent = (value: number | null) => (value === null ? '--' : `${Math.round(value)}%`);
 
-function ProviderIcon({ type, theme }: { type: string; theme: ResolvedTheme }) {
-  const src = getAuthFileIcon(type, theme);
-  return (
-    <span
-      className={styles.providerIcon}
-      style={
-        isThemeSurfaceIconProvider(type)
-          ? { background: getThemeSurfaceIconBackground(theme) }
-          : undefined
-      }
-    >
-      {src ? <img src={src} alt="" /> : type.slice(0, 1).toUpperCase()}
-    </span>
-  );
-}
-
 /** `in 1 day · 09/13, 13:00`, relative first like the rest of the ledger. */
 function ResetLine({
   atMs,
@@ -96,63 +75,6 @@ function ResetLine({
       {display.relative && <span className={styles.resetRelative}>{display.relative}</span>}
       <span className={styles.resetAbsolute}>{display.absolute}</span>
     </span>
-  );
-}
-
-function SummaryCard({
-  summary,
-  theme,
-  now,
-  t,
-}: {
-  summary: LedgerSummary;
-  theme: ResolvedTheme;
-  now: number;
-  t: TFunction;
-}) {
-  return (
-    <article className={styles.summaryCard}>
-      <header className={styles.summaryHead}>
-        <ProviderIcon type={summary.provider} theme={theme} />
-        <span className={styles.summaryName}>{getTypeLabel(t, summary.provider)}</span>
-        <span className={styles.summaryCount}>
-          {t('ledger.credentials', { count: summary.credentialCount })}
-        </span>
-      </header>
-      <div className={styles.summaryLabel}>
-        {summary.primaryLabelKey ? t(summary.primaryLabelKey) : t('ledger.not_loaded')}
-      </div>
-      <div className={styles.summaryFigure}>
-        <span className={styles.summaryValue}>
-          {summary.remainingTotal === null ? '--' : `${Math.round(summary.remainingTotal)}%`}
-        </span>
-        <span className={styles.summaryOf}>
-          {t('ledger.of_capacity', { capacity: summary.capacity || summary.credentialCount * 100 })}
-        </span>
-      </div>
-      <div className={styles.segments} aria-hidden="true">
-        {summary.segments.map((value, index) => (
-          <span key={index} className={styles.segment}>
-            <span
-              className={`${styles.segmentFill} ${tone(value)}`}
-              style={{ width: `${value ?? 0}%` }}
-            />
-          </span>
-        ))}
-      </div>
-      <ResetLine
-        atMs={summary.soonestResetAtMs}
-        label={summary.soonestResetLabel}
-        now={now}
-        empty={t('ledger.no_reset_pending')}
-      />
-      {summary.secondary && (
-        <footer className={styles.summaryFoot}>
-          <span>{t(summary.secondary.labelKey)}</span>
-          <strong>{Math.round(summary.secondary.remainingTotal)}%</strong>
-        </footer>
-      )}
-    </article>
   );
 }
 
@@ -367,17 +289,12 @@ export function QuotaLedger(props: QuotaLedgerProps) {
 
   return (
     <section className={styles.ledger} aria-label={t('ledger.title')}>
-      <div className={styles.summaries}>
-        {groups.map((group) => (
-          <SummaryCard
-            key={group.provider}
-            summary={group.summary}
-            theme={props.resolvedTheme}
-            now={now}
-            t={t}
-          />
-        ))}
-      </div>
+      <QuotaRunway
+        lanes={groups}
+        now={now}
+        showEmails={props.showEmails}
+        resolvedTheme={props.resolvedTheme}
+      />
       {groups.map((group) => (
         <div key={group.provider} className={styles.group}>
           <h2 className={styles.groupTitle}>

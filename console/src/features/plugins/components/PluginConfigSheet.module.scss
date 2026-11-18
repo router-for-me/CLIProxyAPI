@@ -99,7 +99,7 @@
   padding: 10px 12px;
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
   line-height: 1.5;
 
@@ -165,7 +165,7 @@
 }
 
 .mono {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   overflow-wrap: anywhere;
 }

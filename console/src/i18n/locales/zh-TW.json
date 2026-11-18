@@ -2502,8 +2502,6 @@
     "view_cards": "卡片",
     "show_emails": "顯示信箱",
     "hide_emails": "隱藏信箱",
-    "credentials": "{{count}} 個憑證",
-    "of_capacity": "/ {{capacity}}%",
     "not_loaded": "尚未載入",
     "no_reset_pending": "無待重置",
     "available": "可用",
@@ -2524,6 +2522,13 @@
     "cache_hit": "{{percent}}% 命中快取",
     "cache_read": "讀取 {{tokens}}",
     "cache_write": "寫入 {{tokens}}",
-    "cache_hint": "此帳號近 1 小時從提示快取讀取的輸入 token。寫入多、讀取少表示對話在切換帳號。"
+    "cache_hint": "此帳號近 1 小時從提示快取讀取的輸入 token。寫入多、讀取少表示對話在切換帳號。",
+    "runway_title": "本週重置",
+    "runway_caption": "每個標記是一個帳號，位於其每週重置時間，填充量為剩餘額度。代理從左側開始使用。",
+    "runway_now": "現在",
+    "runway_unseen": "未觀測",
+    "runway_left_of": "剩餘，共 {{capacity}}%",
+    "runway_marker": "{{name}}：剩餘 {{percent}}%，{{when}}重置",
+    "runway_marker_unseen": "{{name}}：剩餘 {{percent}}%，尚未觀測到重置時間"
   }
 }

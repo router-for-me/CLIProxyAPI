@@ -144,7 +144,7 @@
 }
 
 .filterItemLabel {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
   word-break: break-all;
 }

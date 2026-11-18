@@ -106,7 +106,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 500;
   line-height: 1.4;

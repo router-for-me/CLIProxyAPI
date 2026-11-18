@@ -173,7 +173,7 @@ $label-x: $tier-pad + 1px + $index-size + 10px; // where tier names begin
 }
 
 .modelProgress {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
@@ -266,7 +266,7 @@ $label-x: $tier-pad + 1px + $index-size + 10px; // where tier names begin
   height: $index-size;
   border-radius: 50%;
   background: var(--bg-tertiary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -285,7 +285,7 @@ $label-x: $tier-pad + 1px + $index-size + 10px; // where tier names begin
 
 .tierPriority,
 .tierPriorityChanged {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
@@ -538,7 +538,7 @@ $label-x: $tier-pad + 1px + $index-size + 10px; // where tier names begin
     border: 1px solid var(--border-color);
     border-radius: 8px;
     background: var(--bg-secondary);
-    font-family: $font-mono;
+    @include font-mono;
     font-size: 13px;
     font-variant-numeric: tabular-nums;
     color: var(--text-primary);
@@ -602,7 +602,7 @@ $label-x: $tier-pad + 1px + $index-size + 10px; // where tier names begin
     border: 1px solid var(--border-color);
     border-radius: 8px;
     background: var(--bg-secondary);
-    font-family: $font-mono;
+    @include font-mono;
     font-size: 13px;
     color: var(--text-primary);
     text-align: right;
@@ -616,7 +616,7 @@ $label-x: $tier-pad + 1px + $index-size + 10px; // where tier names begin
 
 .weightLabel {
   @include text-ellipsis;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   color: var(--text-secondary);
 }

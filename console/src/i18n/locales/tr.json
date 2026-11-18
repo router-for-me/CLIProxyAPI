@@ -2481,8 +2481,6 @@
     "view_cards": "Kartlar",
     "show_emails": "E-postaları göster",
     "hide_emails": "E-postaları gizle",
-    "credentials": "{{count}} kimlik bilgisi",
-    "of_capacity": "/ {{capacity}}%",
     "not_loaded": "Henüz yüklenmedi",
     "no_reset_pending": "Bekleyen sıfırlama yok",
     "available": "kullanılabilir",
@@ -2503,6 +2501,13 @@
     "cache_hit": "%{{percent}} önbellekten okundu",
     "cache_read": "{{tokens}} okundu",
     "cache_write": "{{tokens}} yazıldı",
-    "cache_hint": "Bu hesabın son bir saatte istem önbelleğinden okuduğu giriş tokenları. Çok yazma ve az okuma, konuşmaların hesap değiştirdiği anlamına gelir."
+    "cache_hint": "Bu hesabın son bir saatte istem önbelleğinden okuduğu giriş tokenları. Çok yazma ve az okuma, konuşmaların hesap değiştirdiği anlamına gelir.",
+    "runway_title": "Bu haftaki sıfırlamalar",
+    "runway_caption": "Her işaret bir hesaptır; haftalık sıfırlama anına yerleşir ve kalan kotası kadar dolar. Proxy soldan başlayarak kullanır.",
+    "runway_now": "Şimdi",
+    "runway_unseen": "Görülmedi",
+    "runway_left_of": "kaldı, toplam {{capacity}}%",
+    "runway_marker": "{{name}}: %{{percent}} kaldı, {{when}} sıfırlanır",
+    "runway_marker_unseen": "{{name}}: %{{percent}} kaldı, sıfırlama henüz görülmedi"
   }
 }

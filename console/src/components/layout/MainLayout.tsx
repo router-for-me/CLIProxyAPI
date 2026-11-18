@@ -31,7 +31,7 @@ import {
   IconSidebarSystem,
   IconChevronDown,
 } from '@/components/ui/icons';
-import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
+import { PAPA_MARK_SVG } from '@/assets/papaMark';
 import {
   useAuthStore,
   useLoginTransitionStore,
@@ -1154,7 +1154,7 @@ export function MainLayout() {
         >
           <div className="sidebar-header">
             <div className="sidebar-brand" title={fullBrandName}>
-              <img src={INLINE_LOGO_JPEG} alt="Papa Proxy logo" className="sidebar-brand-logo" />
+              <img src={PAPA_MARK_SVG} alt="Papa Proxy logo" className="sidebar-brand-logo" />
               {showSidebarLabels && (
                 <span className="sidebar-brand-text">
                   <span className="sidebar-brand-title">{abbrBrandName}</span>

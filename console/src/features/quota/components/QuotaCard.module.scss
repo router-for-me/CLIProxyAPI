@@ -77,7 +77,7 @@
 
 .fileName {
   min-width: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -195,7 +195,7 @@
 }
 
 .idleHint {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   line-height: 1.5;
   text-align: center;

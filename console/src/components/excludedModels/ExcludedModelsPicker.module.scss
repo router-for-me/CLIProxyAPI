@@ -257,7 +257,7 @@
 .rowId {
   overflow: hidden;
   color: var(--text-primary);
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -430,7 +430,7 @@
 
   code {
     color: var(--text-secondary);
-    font-family: $font-mono;
+    @include font-mono;
   }
 }
 

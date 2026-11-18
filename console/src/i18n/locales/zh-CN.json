@@ -2474,8 +2474,6 @@
     "view_cards": "卡片",
     "show_emails": "显示邮箱",
     "hide_emails": "隐藏邮箱",
-    "credentials": "{{count}} 个凭证",
-    "of_capacity": "/ {{capacity}}%",
     "not_loaded": "尚未加载",
     "no_reset_pending": "无待重置",
     "available": "可用",
@@ -2496,6 +2494,13 @@
     "cache_hit": "{{percent}}% 命中缓存",
     "cache_read": "读取 {{tokens}}",
     "cache_write": "写入 {{tokens}}",
-    "cache_hint": "此账号近 1 小时从提示缓存读取的输入 token。写入多、读取少说明对话在切换账号。"
+    "cache_hint": "此账号近 1 小时从提示缓存读取的输入 token。写入多、读取少说明对话在切换账号。",
+    "runway_title": "本周重置",
+    "runway_caption": "每个标记是一个账号，位于其每周重置时间，填充量为剩余额度。代理从左侧开始使用。",
+    "runway_now": "现在",
+    "runway_unseen": "未观测",
+    "runway_left_of": "剩余，共 {{capacity}}%",
+    "runway_marker": "{{name}}：剩余 {{percent}}%，{{when}}重置",
+    "runway_marker_unseen": "{{name}}：剩余 {{percent}}%，尚未观测到重置时间"
   }
 }

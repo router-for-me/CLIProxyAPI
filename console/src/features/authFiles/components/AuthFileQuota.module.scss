@@ -25,7 +25,7 @@ $quota-font-size: 11.5px;
 }
 
 .quotaMessage {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 400;
   line-height: 1.5;
@@ -132,7 +132,7 @@ button.quotaMessageAction {
   align-items: baseline;
   gap: 6px;
   flex-shrink: 0;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
@@ -164,7 +164,7 @@ button.quotaMessageAction {
 }
 
 .quotaAmount {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -223,14 +223,14 @@ button.quotaMessageAction {
 }
 
 .codexPlanValue {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 600;
   color: var(--text-secondary);
 }
 
 .premiumPlanValue {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 650;
   color: var(--amber-text);
@@ -243,7 +243,7 @@ button.quotaMessageAction {
  * 浅色取青玉墨 #4f5a3c（对白底约 7:1）；深色取羊脂白 #e6dec4，
  * 两者都是玉的颜色，与 amber 的金色明确区分。 */
 .elitePlanValue {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 650;
   color: #4f5a3c;
@@ -275,7 +275,7 @@ button.quotaMessageAction {
 }
 
 .antigravityQuotaGroupTitle {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 600;
   letter-spacing: 0.1em;
@@ -295,7 +295,7 @@ button.quotaMessageAction {
 }
 
 .codexResetCreditsTitle {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: $quota-font-size;
   font-weight: 600;
   letter-spacing: 0.1em;
@@ -333,7 +333,7 @@ button.quotaMessageAction {
   flex-shrink: 0;
   margin-left: auto;
   white-space: nowrap;
-  font-family: $font-mono;
+  @include font-mono;
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
 }

@@ -29,7 +29,7 @@
 .primarySub {
   font-size: 12px;
   color: var(--muted-foreground);
-  font-family: $font-mono;
+  @include font-mono;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -41,7 +41,7 @@
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12px;
   color: var(--muted-foreground);
   overflow: hidden;

@@ -112,7 +112,7 @@
   align-items: baseline;
   flex-wrap: wrap;
   gap: 4px 8px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -312,7 +312,7 @@
   flex-shrink: 0;
   min-width: 18px;
   text-align: right;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -347,7 +347,7 @@
     border: 0;
     padding: 0;
     background: none;
-    font-family: $font-mono;
+    @include font-mono;
     font-size: 12px;
     color: var(--text-primary);
 
@@ -429,7 +429,7 @@
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
@@ -528,7 +528,7 @@
 
 .ledgerHead {
   padding-block: 0 6px;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -573,7 +573,7 @@
   border-color: transparent;
   border-radius: 8px;
   background: transparent;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 12.5px;
   text-overflow: ellipsis;
 
@@ -599,7 +599,7 @@
 
 .arrow {
   text-align: center;
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 13px;
   color: var(--text-quaternary);
   user-select: none;
@@ -850,7 +850,7 @@
       left: 8px;
       top: 50%;
       transform: translateY(-50%);
-      font-family: $font-mono;
+      @include font-mono;
       font-size: 13px;
       color: var(--text-quaternary);
     }

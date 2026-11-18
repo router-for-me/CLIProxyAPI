@@ -1,128 +1,9 @@
-/* Ledger view: summary strip + dense per-credential rows. */
+/* Ledger view: the runway over dense per-account rows. */
 
 .ledger {
   display: flex;
   flex-direction: column;
   gap: 36px;
-}
-
-/* ---------- Summary strip ---------- */
-
-.summaries {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  border: 1px solid var(--border-color);
-  border-radius: 14px;
-  overflow: hidden;
-  background: var(--bg-secondary);
-}
-
-.summaryCard {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 20px 22px;
-  min-width: 0;
-
-  & + & {
-    border-left: 1px solid var(--border-color);
-  }
-}
-
-.summaryHead {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-
-.summaryName {
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.summaryCount {
-  margin-left: auto;
-  font-size: 13px;
-  color: var(--text-tertiary);
-}
-
-.summaryLabel {
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.summaryFigure {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.summaryValue {
-  font-size: 30px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-.summaryOf {
-  font-size: 14px;
-  color: var(--text-secondary);
-}
-
-.segments {
-  display: flex;
-  gap: 4px;
-  margin: 6px 0 4px;
-}
-
-.segment {
-  flex: 1;
-  height: 4px;
-  border-radius: $radius-full;
-  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
-  overflow: hidden;
-}
-
-.segmentFill {
-  display: block;
-  height: 100%;
-  border-radius: $radius-full;
-}
-
-.summaryFoot {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-color);
-  font-size: 13px;
-  color: var(--text-secondary);
-
-  strong {
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
-  }
-}
-
-.providerIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
-
-  img {
-    width: 18px;
-    height: 18px;
-    object-fit: contain;
-  }
 }
 
 /* ---------- Groups and rows ---------- */
@@ -176,7 +57,7 @@
 }
 
 .name {
-  font-family: $font-mono;
+  @include font-mono;
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
@@ -401,15 +282,6 @@
 }
 
 @media (max-width: $breakpoint-mobile) {
-  .summaries {
-    grid-template-columns: 1fr;
-  }
-
-  .summaryCard + .summaryCard {
-    border-left: 0;
-    border-top: 1px solid var(--border-color);
-  }
-
   .meters {
     grid-template-columns: 1fr;
     gap: 16px;
