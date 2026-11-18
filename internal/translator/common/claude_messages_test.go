@@ -1,6 +1,7 @@
 package common
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -180,4 +181,36 @@ func TestAlignClaudeToolResults(t *testing.T) {
 			t.Fatalf("aligned = %s, want %s", aligned.Raw, input.Raw)
 		}
 	})
+}
+
+func TestClaudeDocumentHelpers(t *testing.T) {
+	textDoc := ojson.Parse(`{"type":"document","title":"note.txt","context":"ctx","source":{"type":"text","media_type":"text/plain","data":"ORANGE-42"}}`)
+	got, ok := ClaudeDocumentTextBlock(textDoc)
+	if !ok || !strings.Contains(got, "Document: note.txt") || !strings.Contains(got, "Context: ctx") || !strings.Contains(got, "ORANGE-42") {
+		t.Fatalf("ClaudeDocumentTextBlock = (%q, %v)", got, ok)
+	}
+
+	plainDoc := ojson.Parse(`{"type":"document","source":{"type":"text","media_type":"text/plain","data":"plain"}}`)
+	if got, ok := ClaudeDocumentTextBlock(plainDoc); !ok || got != "plain" {
+		t.Fatalf("plain ClaudeDocumentTextBlock = (%q, %v)", got, ok)
+	}
+
+	emptyTextDoc := ojson.Parse(`{"type":"document","title":"empty.txt","source":{"type":"text","media_type":"text/plain","data":"   "}}`)
+	if _, ok := ClaudeDocumentTextBlock(emptyTextDoc); ok {
+		t.Fatal("expected whitespace-only text document to return false")
+	}
+
+	var texts []string
+	var drops int
+	badContentDoc := ojson.Parse(`{"type":"document","title":"bad","source":{"type":"content","content":[{"type":"image","source":{"type":"file","file_id":"f1"}}]}}`)
+	ok = ExpandClaudeContentDocument(
+		badContentDoc,
+		func(s string) { texts = append(texts, s) },
+		func(ojson.Result) ([]byte, bool) { return nil, false },
+		func([]byte) {},
+		func() { drops++ },
+	)
+	if ok || len(texts) != 0 || drops != 1 {
+		t.Fatalf("badContentDoc = ok:%v texts:%v drops:%d", ok, texts, drops)
+	}
 }

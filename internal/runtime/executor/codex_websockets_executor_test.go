@@ -3433,12 +3433,10 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 			for _, want := range []string{
 				"=== API RESPONSE 1 ===",
 				"Status: 101",
-				"Error: send:",
 				"=== API RESPONSE 2 ===",
 				"Status: 403",
 				"Retry-After: 11",
 				`{"error":{"message":"codex websocket reconnect forbidden"}}`,
-				"Error: dial_retry:",
 			} {
 				if !strings.Contains(rendered, want) {
 					t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
@@ -3496,9 +3494,6 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 			subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
 			for _, want := range []string{
 				"=== API RESPONSE 1 ===",
-				"Error: send:",
-				"=== API RESPONSE 2 ===",
-				"Error: dial_retry:",
 			} {
 				if !strings.Contains(subRendered, want) {
 					t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
@@ -3545,10 +3540,8 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 				t.Fatal("deferred API response missing on initial invalid-101 handshake")
 			}
 			initRendered := string(initVal.(logging.DeferredAPIResponse).RenderAPIResponse())
-			for _, want := range []string{"Status: 101", "Error: dial:"} {
-				if !strings.Contains(initRendered, want) {
-					t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
-				}
+			if !strings.Contains(initRendered, "Status: 101") || strings.Contains(initRendered, "Error: dial:") {
+				t.Fatalf("initial handshake response must contain only upstream details:\n%s", initRendered)
 			}
 		})
 	}

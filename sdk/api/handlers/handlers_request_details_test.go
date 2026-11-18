@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"

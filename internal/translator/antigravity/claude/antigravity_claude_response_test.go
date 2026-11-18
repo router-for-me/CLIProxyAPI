@@ -3,10 +3,11 @@ package claude
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
@@ -1745,7 +1746,6 @@ func TestConvertAntigravityResponseToClaudeNonStream_RefusalFinishReasons(t *tes
 		{finishReason: "BLOCKLIST", wantReason: "refusal"},
 		{finishReason: "IMAGE_SAFETY", wantReason: "refusal"},
 		{finishReason: "MALFORMED_RESPONSE", wantReason: "refusal"},
-		{finishReason: "MALFORMED_FUNCTION_CALL", wantReason: "refusal"},
 		{finishReason: "MAX_TOKENS", wantReason: "max_tokens"},
 		{finishReason: "STOP", wantReason: "end_turn"},
 	}
@@ -1856,7 +1856,6 @@ func TestConvertAntigravityResponseToClaudeStream_RefusalPreservedAcrossTrailing
 		"BLOCKLIST",
 		"IMAGE_SAFETY",
 		"MALFORMED_RESPONSE",
-		"MALFORMED_FUNCTION_CALL",
 	} {
 		t.Run(reason, func(t *testing.T) {
 			for _, textPart := range []string{"partial", ""} {

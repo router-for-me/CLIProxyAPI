@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -1144,6 +1145,12 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(ctx context.Context, sel
 	return current, false, nil
 }
 
+// RefreshAfterUnauthorized refreshes a local credential once after an upstream 401
+// using the same rejection-marking and single-refresh rules as request execution.
+func (m *Manager) RefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
+	return m.tryRefreshAfterUnauthorized(ctx, auth, execErr, alreadyTried, clientHeaders...)
+}
+
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
@@ -1391,6 +1398,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.LastError = refreshAccessError(current, msg, accessTokenRejected, wasTerminalUnauthorized)
 			if current.LastError.Code == "refresh_outcome_unknown" {
 				current.StatusMessage = current.LastError.Message
+				if current.Status != StatusDisabled {
+					// Job completion reschedules this recovery state, so retain a positive delay.
+					current.NextRefreshAfter = checkNow.Add(refreshCheckInterval)
+				}
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {
@@ -1408,7 +1419,8 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
 	now := time.Now()
-	refreshCanceled := (errors.Is(err, context.Canceled) || errors.Is(err, codex.ErrSIWCRefreshDeferred)) && !codex.IsRefreshOutcomeUnknown(err)
+	isRefreshDeferred := errors.Is(err, baseauth.ErrRefreshDeferred) || errors.Is(err, codex.ErrSIWCRefreshDeferred)
+	refreshCanceled := (errors.Is(err, context.Canceled) || isRefreshDeferred) && !codex.IsRefreshOutcomeUnknown(err)
 	if refreshCanceled {
 		var partitions interface {
 			OuterRefreshError() error
@@ -1416,7 +1428,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 		if errors.As(err, &partitions) {
 			for _, partitionErr := range []error{partitions.OuterRefreshError(), partitions.SIWCRefreshError()} {
-				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
+				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, baseauth.ErrRefreshDeferred) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
 					refreshCanceled = false
 					break
 				}
@@ -1426,7 +1438,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if refreshCanceled {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		backoff := time.Second
-		if errors.Is(err, codex.ErrSIWCRefreshDeferred) {
+		if isRefreshDeferred {
 			backoff = refreshCheckInterval
 		}
 		retryAfter := now.Add(backoff)

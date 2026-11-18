@@ -129,6 +129,19 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if contents.IsArray() {
 		items := contents.Array()
 		previousRole := ""
+		pendingTurnCallCount := 0
+		var pendingToolAudioRelay []codexGeminiToolAudioGroup
+		flushPendingToolAudioRelay := func() {
+			if len(pendingToolAudioRelay) == 0 {
+				return
+			}
+			relayItems := buildCodexGeminiToolAudioRelayItems(pendingToolAudioRelay)
+			msgDoc := ojson.NewDocString(`{"type":"message","role":"user","content":[]}`)
+			_ = msgDoc.SetRawBytes("content", translatorcommon.JoinRawArray(relayItems))
+			inputItems = append(inputItems, msgDoc.Bytes())
+			pendingToolAudioRelay = nil
+		}
+
 		for i := 0; i < len(items); i++ {
 			item := items[i]
 			parts := item.Get("parts")
@@ -138,6 +151,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 			role := translatorcommon.NormalizeGeminiTurnRole(item.Get("role").String(), parts, previousRole)
 			previousRole = role
+			hasTurnFR := translatorcommon.GeminiPartsHaveFunctionResponse(parts)
+			if !hasTurnFR {
+				pendingTurnCallCount = 0
+				flushPendingToolAudioRelay()
+			}
 			parr := parts.Array()
 			var pendingThoughtSummaryParts [][]byte
 			for j := 0; j < len(parr); j++ {
@@ -233,18 +251,17 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					_ = fnDoc.Set("call_id", id)
 					pendingCallIDs = append(pendingCallIDs, id)
 					inputItems = append(inputItems, fnDoc.Bytes())
+					pendingTurnCallCount++
 					continue
 				}
 
 				// function response from user
 				if fr := translatorcommon.GeminiPartFunctionResponse(p); fr.Exists() {
-					fnoDoc := ojson.NewDocString(`{"type":"function_call_output"}`)
-					// Prefer a string result if present; otherwise embed the raw response as a string
-					if res := fr.Get("response.result"); res.Exists() {
-						_ = fnoDoc.Set("output", res.String())
-					} else if resp := fr.Get("response"); resp.Exists() {
-						_ = fnoDoc.Set("output", resp.Raw)
+					if pendingTurnCallCount > 0 {
+						pendingTurnCallCount--
 					}
+					fnoDoc := ojson.NewDocString(`{"type":"function_call_output"}`)
+					audioItems := setCodexFunctionCallOutputFromGemini(fnoDoc, fr)
 					// attach the oldest queued call_id to pair the response
 					// with its call. If the queue is empty, generate a new id.
 					var id string
@@ -259,12 +276,23 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						callCounter++
 						id = fmt.Sprintf("call_gemini_%016d", callCounter)
 					}
+					if len(audioItems) > 0 {
+						pendingToolAudioRelay = append(pendingToolAudioRelay, codexGeminiToolAudioGroup{
+							toolName: fr.Get("name").String(),
+							callID:   id,
+							items:    audioItems,
+						})
+					}
 					_ = fnoDoc.Set("call_id", id)
 					inputItems = append(inputItems, fnoDoc.Bytes())
 					continue
 				}
 			}
+			if pendingTurnCallCount == 0 {
+				flushPendingToolAudioRelay()
+			}
 		}
+		flushPendingToolAudioRelay()
 	}
 
 	translatorcommon.SetRawArrayItemsDoc(outDoc, "input", inputItems)
@@ -529,6 +557,159 @@ func normalizeGeminiCodexServiceTier(serviceTier ojson.Result) string {
 	return ""
 }
 
+type codexGeminiToolAudioGroup struct {
+	toolName string
+	callID   string
+	items    [][]byte
+}
+
+func buildCodexGeminiToolAudioRelayItems(groups []codexGeminiToolAudioGroup) [][]byte {
+	if len(groups) == 1 {
+		var notice string
+		g := groups[0]
+		switch {
+		case g.toolName != "" && g.callID != "":
+			notice = fmt.Sprintf("Audio returned by tool %s (%s):", g.toolName, g.callID)
+		case g.toolName != "":
+			notice = fmt.Sprintf("Audio returned by tool %s:", g.toolName)
+		case g.callID != "":
+			notice = fmt.Sprintf("Audio returned by tool call %s:", g.callID)
+		default:
+			notice = "Audio returned by the preceding tool call(s):"
+		}
+		noticeDoc := ojson.NewDocString(`{"type":"input_text","text":""}`)
+		_ = noticeDoc.Set("text", notice)
+		relayItems := make([][]byte, 0, len(g.items)+1)
+		relayItems = append(relayItems, noticeDoc.Bytes())
+		relayItems = append(relayItems, g.items...)
+		return relayItems
+	}
+	noticeDoc := ojson.NewDocString(`{"type":"input_text","text":"Audio returned by the preceding tool call(s):"}`)
+	totalAudio := 0
+	for _, group := range groups {
+		totalAudio += len(group.items)
+	}
+	relayItems := make([][]byte, 0, totalAudio+len(groups)+1)
+	relayItems = append(relayItems, noticeDoc.Bytes())
+	for _, group := range groups {
+		var label string
+		switch {
+		case group.toolName != "" && group.callID != "":
+			label = fmt.Sprintf("Tool %s (%s):", group.toolName, group.callID)
+		case group.toolName != "":
+			label = fmt.Sprintf("Tool %s:", group.toolName)
+		case group.callID != "":
+			label = fmt.Sprintf("Tool call %s:", group.callID)
+		default:
+			label = "Tool:"
+		}
+		labelDoc := ojson.NewDocString(`{"type":"input_text","text":""}`)
+		_ = labelDoc.Set("text", label)
+		relayItems = append(relayItems, labelDoc.Bytes())
+		relayItems = append(relayItems, group.items...)
+	}
+	return relayItems
+}
+
+func isEmptyGeminiCodexResponseObject(v ojson.Result) bool {
+	if !v.Exists() {
+		return true
+	}
+	if v.IsObject() {
+		empty := true
+		v.ForEach(func(_, _ ojson.Result) bool {
+			empty = false
+			return false
+		})
+		return empty
+	}
+	return strings.TrimSpace(v.Raw) == ""
+}
+
+func geminiCodexResponseHasOnlyResultKey(responseField ojson.Result) bool {
+	if !responseField.IsObject() {
+		return false
+	}
+	hasResult := false
+	onlyResult := true
+	responseField.ForEach(func(key, _ ojson.Result) bool {
+		if key.String() == "result" {
+			hasResult = true
+			return true
+		}
+		onlyResult = false
+		return false
+	})
+	return hasResult && onlyResult
+}
+
+func setCodexFunctionCallOutputFromGemini(fnoDoc *ojson.Doc, fr ojson.Result) [][]byte {
+	res := fr.Get("response.result")
+	resp := fr.Get("response")
+	hasBaseText := false
+	baseText := ""
+	if res.Exists() && geminiCodexResponseHasOnlyResultKey(resp) {
+		baseText = res.String()
+		hasBaseText = strings.TrimSpace(baseText) != ""
+	} else if !isEmptyGeminiCodexResponseObject(resp) {
+		baseText = resp.Raw
+		hasBaseText = true
+	}
+
+	var nestedItems [][]byte
+	var relayedAudioItems [][]byte
+	if frParts := fr.Get("parts"); frParts.Exists() && frParts.IsArray() {
+		for _, nested := range frParts.Array() {
+			if t := nested.Get("text"); t.Exists() {
+				if strings.TrimSpace(t.String()) != "" {
+					partDoc := ojson.NewDocString(`{"type":"input_text","text":""}`)
+					_ = partDoc.Set("text", t.String())
+					nestedItems = append(nestedItems, partDoc.Bytes())
+				}
+				continue
+			}
+			if contentPart, ok := codexContentPartFromGeminiInlineData(nested); ok {
+				// Codex function_call_output.output only allows input_text, input_image, and input_file.
+				// Audio parts are relayed as a user message after the contiguous tool outputs.
+				if ojson.GetBytesNoCopy(contentPart, "type").String() == "input_audio" {
+					relayedAudioItems = append(relayedAudioItems, contentPart)
+				} else {
+					nestedItems = append(nestedItems, contentPart)
+				}
+				continue
+			}
+			if contentPart, ok := codexContentPartFromGeminiFileData(nested); ok {
+				nestedItems = append(nestedItems, contentPart)
+				continue
+			}
+		}
+	}
+
+	if len(nestedItems) > 0 {
+		outputItems := make([][]byte, 0, len(nestedItems)+1)
+		if hasBaseText {
+			textDoc := ojson.NewDocString(`{"type":"input_text","text":""}`)
+			_ = textDoc.Set("text", baseText)
+			outputItems = append(outputItems, textDoc.Bytes())
+		}
+		outputItems = append(outputItems, nestedItems...)
+		_ = fnoDoc.SetRawBytes("output", translatorcommon.JoinRawArray(outputItems))
+		return relayedAudioItems
+	}
+
+	// Prefer a string result if present; otherwise embed the raw response as a string.
+	if res.Exists() && geminiCodexResponseHasOnlyResultKey(resp) {
+		_ = fnoDoc.Set("output", res.String())
+	} else if resp.Exists() && !isEmptyGeminiCodexResponseObject(resp) {
+		_ = fnoDoc.Set("output", resp.Raw)
+	} else if len(relayedAudioItems) > 0 {
+		_ = fnoDoc.Set("output", "[Tool returned audio content; the audio follows in the next user message.]")
+	} else if resp.Exists() {
+		_ = fnoDoc.Set("output", resp.Raw)
+	}
+	return relayedAudioItems
+}
+
 func codexContentPartFromGeminiInlineData(part ojson.Result) ([]byte, bool) {
 	inlineData := part.Get("inlineData")
 	if !inlineData.Exists() {
@@ -557,8 +738,12 @@ func codexContentPartFromGeminiInlineData(part ojson.Result) ([]byte, bool) {
 		_ = contentPartDoc.Set("input_audio.format", codexInputAudioFormatFromMIME(mimeType))
 		return contentPartDoc.Bytes(), true
 	default:
+		fileData := data
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(fileData)), "data:") {
+			fileData = fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+		}
 		contentPartDoc := ojson.NewDocString(`{"type":"input_file","file_data":"","filename":""}`)
-		_ = contentPartDoc.Set("file_data", data)
+		_ = contentPartDoc.Set("file_data", fileData)
 		_ = contentPartDoc.Set("filename", codexFileNameFromMIME(mimeType))
 		return contentPartDoc.Bytes(), true
 	}

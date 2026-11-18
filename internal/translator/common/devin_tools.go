@@ -1,8 +1,9 @@
 package common
 
 import (
-	"regexp"
 	"strings"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 // IsDevinCodexAppAutomationUpdate reports whether a tool declaration corresponds

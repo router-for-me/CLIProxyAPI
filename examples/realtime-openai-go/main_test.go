@@ -3,14 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/gorilla/websocket"
 )
