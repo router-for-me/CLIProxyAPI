@@ -5,7 +5,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestBuildXAISpeechPayloadMapsOpenAIVoice(t *testing.T) {
@@ -16,19 +16,19 @@ func TestBuildXAISpeechPayloadMapsOpenAIVoice(t *testing.T) {
 	if format != "mp3" {
 		t.Fatalf("format = %q, want mp3", format)
 	}
-	if gjson.GetBytes(payload, "text").String() != "Hello" {
+	if ojson.GetBytesNoCopy(payload, "text").String() != "Hello" {
 		t.Fatalf("text = %s", payload)
 	}
-	if gjson.GetBytes(payload, "voice_id").String() != "ara" {
+	if ojson.GetBytesNoCopy(payload, "voice_id").String() != "ara" {
 		t.Fatalf("voice_id = %s", payload)
 	}
-	if gjson.GetBytes(payload, "language").String() != "auto" {
+	if ojson.GetBytesNoCopy(payload, "language").String() != "auto" {
 		t.Fatalf("language = %s", payload)
 	}
-	if gjson.GetBytes(payload, "output_format").Exists() {
+	if ojson.GetBytesNoCopy(payload, "output_format").Exists() {
 		t.Fatalf("mp3 should omit output_format: %s", payload)
 	}
-	if gjson.GetBytes(payload, "model").Exists() {
+	if ojson.GetBytesNoCopy(payload, "model").Exists() {
 		t.Fatalf("upstream payload should omit model: %s", payload)
 	}
 }
@@ -41,16 +41,16 @@ func TestBuildXAISpeechPayloadWavAndSpeed(t *testing.T) {
 	if format != "wav" {
 		t.Fatalf("format = %q, want wav", format)
 	}
-	if gjson.GetBytes(payload, "voice_id").String() != "luna" {
+	if ojson.GetBytesNoCopy(payload, "voice_id").String() != "luna" {
 		t.Fatalf("voice_id = %s", payload)
 	}
-	if gjson.GetBytes(payload, "language").String() != "zh" {
+	if ojson.GetBytesNoCopy(payload, "language").String() != "zh" {
 		t.Fatalf("language = %s", payload)
 	}
-	if gjson.GetBytes(payload, "speed").Float() != 1.25 {
+	if ojson.GetBytesNoCopy(payload, "speed").Float() != 1.25 {
 		t.Fatalf("speed = %s", payload)
 	}
-	if gjson.GetBytes(payload, "output_format.codec").String() != "wav" || gjson.GetBytes(payload, "output_format.sample_rate").Int() != 24000 {
+	if ojson.GetBytesNoCopy(payload, "output_format.codec").String() != "wav" || ojson.GetBytesNoCopy(payload, "output_format.sample_rate").Int() != 24000 {
 		t.Fatalf("output_format = %s", payload)
 	}
 }
@@ -63,10 +63,10 @@ func TestBuildXAISpeechPayloadNativePCMKeepsSampleRate(t *testing.T) {
 	if format != "pcm" {
 		t.Fatalf("format = %q, want pcm", format)
 	}
-	if gjson.GetBytes(payload, "voice_id").String() != "eve" {
+	if ojson.GetBytesNoCopy(payload, "voice_id").String() != "eve" {
 		t.Fatalf("voice_id = %s", payload)
 	}
-	if gjson.GetBytes(payload, "output_format.sample_rate").Int() != 16000 {
+	if ojson.GetBytesNoCopy(payload, "output_format.sample_rate").Int() != 16000 {
 		t.Fatalf("sample_rate = %s", payload)
 	}
 }
@@ -89,7 +89,7 @@ func TestBuildXAISpeechPayloadRejects(t *testing.T) {
 				if err != nil {
 					t.Fatalf("buildXAISpeechPayload() error = %v", err)
 				}
-				if gjson.GetBytes(payload, "speed").Exists() {
+				if ojson.GetBytesNoCopy(payload, "speed").Exists() {
 					t.Fatalf("speed should be omitted: %s", payload)
 				}
 				return
@@ -146,5 +146,31 @@ func TestSpeechResponseContentType(t *testing.T) {
 	}
 	if got := speechResponseContentType("pcm", "audio/L16; rate=24000"); got != "audio/L16; rate=24000" {
 		t.Fatalf("audio upstream = %q", got)
+	}
+}
+
+func TestSpeechOutputFormatClonesAgainstInputBufferMutation(t *testing.T) {
+	rawWav := []byte(`{"input":"hello","response_format":"wav"}`)
+	formatWav, outputWav, errWav := speechOutputFormat(rawWav)
+	if errWav != nil {
+		t.Fatalf("speechOutputFormat(wav) error = %v", errWav)
+	}
+	for i := range rawWav {
+		rawWav[i] = 'x'
+	}
+	if formatWav != "wav" || outputWav["codec"] != "wav" {
+		t.Fatalf("after buffer mutation: format=%q codec=%v, want wav", formatWav, outputWav["codec"])
+	}
+
+	rawPCM := []byte(`{"input":"hello","output_format":{"codec":"pcm","sample_rate":16000}}`)
+	_, formatPCM, errPCM := buildXAISpeechPayload(rawPCM)
+	if errPCM != nil {
+		t.Fatalf("buildXAISpeechPayload(pcm) error = %v", errPCM)
+	}
+	for i := range rawPCM {
+		rawPCM[i] = 'x'
+	}
+	if formatPCM != "pcm" {
+		t.Fatalf("after buffer mutation: format=%q, want pcm", formatPCM)
 	}
 }

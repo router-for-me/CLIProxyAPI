@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -17,14 +18,13 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 	"github.com/tiktoken-go/tokenizer"
 )
 
 type metaPreparedRequest struct {
 	applyPatch      *helps.ApplyPatchResponsesState
 	baseModel       string
+	effectiveModel  string
 	from            sdktranslator.Format
 	responseFormat  sdktranslator.Format
 	to              sdktranslator.Format
@@ -46,50 +46,87 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	isCompat := helps.APIKeyModelIsCompat(req)
 	targetModel := resolveMetaSignatureTargetModel(baseModel, req, opts)
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, targetModel, originalPayload, stream, isCompat)
-	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
+	origDoc := ojson.NewDoc(originalTranslated)
+	origChanged := helps.SetStringIfDifferentDoc(origDoc, "model", baseModel)
+	if syncMetaPromptCacheRetentionDoc(origDoc, originalPayload) {
+		origChanged = true
+	}
+	if origChanged {
+		originalTranslated = origDoc.Bytes()
+	}
 	body, err := helps.TranslateRequestReturningError(ctx, opts.Headers, e.cfg, from, to, targetModel, bytes.Clone(req.Payload), stream, isCompat)
 	if err != nil {
 		return nil, err
 	}
 
-	var errThinking error
-	body, errThinking = helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
-	if errThinking != nil {
+	doc := ojson.NewDoc(body)
+	if errThinking := helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); errThinking != nil {
 		return nil, errThinking
 	}
 
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body = helps.SetBoolIfDifferent(body, "stream", stream)
-	body, _ = sjson.DeleteBytes(body, "generate")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body, _ = sjson.DeleteBytes(body, "client_metadata")
+	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	helps.SetBoolIfDifferentDoc(doc, "stream", stream)
+	_ = doc.Delete("generate")
+	syncMetaPromptCacheRetentionDoc(doc, req.Payload)
+	_ = doc.Delete("safety_identifier")
+	_ = doc.Delete("stream_options")
+	_ = doc.Delete("client_metadata")
 	applyPatch := helps.NewApplyPatchResponsesState(from, originalPayload, originalTranslated)
-	var errNormalizePatch error
-	body, errNormalizePatch = helps.NormalizeApplyPatchResponsesRequest(body, originalPayload)
-	if errNormalizePatch != nil {
+	if errNormalizePatch := helps.NormalizeApplyPatchResponsesRequestDoc(doc, originalPayload); errNormalizePatch != nil {
 		return nil, errNormalizePatch
 	}
-	body = normalizeCodexInstructions(body)
+	normalizeCodexInstructionsDoc(doc)
 	baseURL, _ := metaCreds(auth)
-	body = sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx, "meta executor", body, baseURL)
-	body = helps.SanitizeMetaWebSearchTools(body)
-	body = helps.NormalizeCodexToolIntegerTypes(body, opts.Headers)
-	body = helps.EnsureMetaMuseToolNamespace(body)
+	sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURLDoc(ctx, "meta executor", doc, baseURL)
+	helps.SanitizeMetaWebSearchToolsDoc(doc)
+	helps.NormalizeCodexToolIntegerTypesDoc(doc, opts.Headers)
+	helps.EnsureMetaMuseToolNamespaceDoc(doc)
 
-	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, e.Identifier(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
+	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, e.Identifier(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
+	effectiveModel := strings.TrimSpace(doc.Get("model").String())
+	if effectiveModel == "" {
+		effectiveModel = baseModel
+	}
+	body = doc.Bytes()
 	return &metaPreparedRequest{
 		applyPatch:      applyPatch,
 		baseModel:       baseModel,
+		effectiveModel:  effectiveModel,
 		from:            from,
 		responseFormat:  responseFormat,
 		to:              to,
 		originalPayload: originalPayload,
 		body:            body,
 	}, nil
+}
+
+// syncMetaPromptCacheRetentionDoc preserves an explicit non-empty string
+// prompt_cache_retention supplied by the caller without injecting a default,
+// and removes null, blank, or non-string values before user payload rules run.
+func syncMetaPromptCacheRetentionDoc(doc *ojson.Doc, source []byte) bool {
+	if doc == nil {
+		return false
+	}
+	if retention := extractMetaPromptCacheRetention(source); retention != "" {
+		return helps.SetStringIfDifferentDoc(doc, "prompt_cache_retention", retention)
+	}
+	if !doc.Get("prompt_cache_retention").Exists() {
+		return false
+	}
+	return doc.Delete("prompt_cache_retention") == nil
+}
+
+func extractMetaPromptCacheRetention(source []byte) string {
+	if len(source) == 0 {
+		return ""
+	}
+	val := ojson.GetBytesNoCopy(source, "prompt_cache_retention")
+	if val.Type != ojson.String {
+		return ""
+	}
+	return strings.TrimSpace(val.String())
 }
 
 func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
@@ -128,7 +165,7 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if errRequest != nil {
 		return resp, errRequest
 	}
-	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
+	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers, prepared.effectiveModel)
 	e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
@@ -146,11 +183,11 @@ func (e *MetaExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	if errRead != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
-	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 	reporter.ObserveResponseModel(data)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
@@ -202,14 +239,14 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			continue
 		}
 		eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
-		eventType := gjson.GetBytes(eventData, "type").String()
+		eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 		if isMetaSubscriptionUsageEvent(eventType, eventData) {
 			filteringSubscriptionUsage = false
 			continue
 		}
 		if filteringSubscriptionUsage {
 			if eventType == "" {
-				if gjson.ValidBytes(eventData) {
+				if ojson.ValidBytes(eventData) {
 					filteringSubscriptionUsage = false
 				}
 				continue
@@ -226,7 +263,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 			return metaCompletedTranslation{}, errBridge
 		}
 		for _, eventData := range events {
-			eventType := gjson.GetBytes(eventData, "type").String()
+			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			switch eventType {
 			case "response.output_item.done":
 				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
@@ -386,10 +423,14 @@ func applyMetaClientIdentity(req *http.Request) {
 	req.Header.Set("X-Tbh-Thread-Id", sessionID)
 	req.Header.Set("X-Tbh-Root-Session-Id", sessionID)
 	req.Header.Set("X-Tbh-Agent-Role", "main")
-	req.Header.Set("X-Tbh-Contributor-Mode", "1")
 }
 
-func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header) {
+func isMetaContributorModel(model string) bool {
+	base := strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	return strings.HasSuffix(strings.ToLower(base), "-contributor")
+}
+
+func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token string, stream bool, clientHeaders http.Header, model ...string) {
 	req.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -397,6 +438,12 @@ func applyMetaAPIHeaders(req *http.Request, auth *cliproxyauth.Auth, token strin
 		req.Header.Del("Authorization")
 	}
 	applyMetaClientIdentity(req)
+	for _, m := range model {
+		if isMetaContributorModel(m) {
+			req.Header.Set("X-Tbh-Contributor-Mode", "1")
+			break
+		}
+	}
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 		req.Header.Set("Cache-Control", "no-cache")
@@ -421,7 +468,7 @@ func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
 	if eventType == metaSubscriptionUsageEventType {
 		return true
 	}
-	if eventType == "" && len(eventData) > 0 && gjson.GetBytes(eventData, "subscription").IsObject() {
+	if eventType == "" && len(eventData) > 0 && ojson.GetBytesNoCopy(eventData, "subscription").IsObject() {
 		return true
 	}
 	return false
@@ -449,12 +496,12 @@ func wrapMetaUpstreamError(statusCode int, body []byte) error {
 }
 
 func metaStreamEventError(eventData []byte) error {
-	eventType := gjson.GetBytes(eventData, "type").String()
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 	if eventType != "error" && eventType != "response.failed" {
 		return nil
 	}
 	statusCode := http.StatusBadGateway
-	if code := int(gjson.GetBytes(eventData, "error.code").Int()); code >= 400 && code <= 599 {
+	if code := int(ojson.GetBytesNoCopy(eventData, "error.code").Int()); code >= 400 && code <= 599 {
 		statusCode = code
 	}
 	return wrapMetaUpstreamError(statusCode, eventData)
@@ -462,16 +509,16 @@ func metaStreamEventError(eventData []byte) error {
 
 func metaAsCompletedEvent(data []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(data)
-	if !gjson.ValidBytes(trimmed) {
+	if !ojson.ValidBytes(trimmed) {
 		return nil, false
 	}
-	root := gjson.ParseBytes(trimmed)
+	root := util.ParseGJSONBytesNoCopy(trimmed)
 	switch root.Get("type").String() {
 	case "response.completed", "response.incomplete":
 		return trimmed, true
 	}
 	if root.Get("object").String() == "response" || root.Get("output").Exists() {
-		wrapped, errSet := sjson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)
+		wrapped, errSet := ojson.SetRawBytes([]byte(`{"type":"response.completed"}`), "response", trimmed)
 		if errSet != nil {
 			return nil, false
 		}

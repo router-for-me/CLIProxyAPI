@@ -7,7 +7,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const (
@@ -112,7 +112,7 @@ func (a *VertexPartialArgsAssembler) setError(err error) {
 
 // IsVertexStreamingFunctionCall reports whether a Gemini/Vertex functionCall object
 // uses streaming arguments (partialArgs or willContinue).
-func IsVertexStreamingFunctionCall(fc gjson.Result) bool {
+func IsVertexStreamingFunctionCall(fc ojson.Result) bool {
 	if !fc.Exists() || !fc.IsObject() {
 		return false
 	}
@@ -137,13 +137,13 @@ func IsVertexStreamingFunctionCall(fc gjson.Result) bool {
 
 // VertexFunctionCallWillContinue reports whether a functionCall chunk indicates that
 // subsequent chunks will follow for the same function call.
-func VertexFunctionCallWillContinue(fc gjson.Result) bool {
+func VertexFunctionCallWillContinue(fc ojson.Result) bool {
 	return fc.Get("willContinue").Bool() || fc.Get("will_continue").Bool()
 }
 
 // PushFunctionCall processes one functionCall chunk and returns the newly emitted JSON
 // argument delta and whether the function call has completed cleanly.
-func (a *VertexPartialArgsAssembler) PushFunctionCall(fc gjson.Result) (string, bool) {
+func (a *VertexPartialArgsAssembler) PushFunctionCall(fc ojson.Result) (string, bool) {
 	if a.err != nil {
 		return "", false
 	}
@@ -160,7 +160,7 @@ func (a *VertexPartialArgsAssembler) PushFunctionCall(fc gjson.Result) (string, 
 			a.setError(errors.New("vertex partialArgs must be an array"))
 			return "", false
 		}
-		partialArgs.ForEach(func(_, item gjson.Result) bool {
+		partialArgs.ForEach(func(_, item ojson.Result) bool {
 			a.pushPartialArg(item)
 			return a.err == nil
 		})
@@ -188,8 +188,8 @@ func (a *VertexPartialArgsAssembler) PushFunctionCall(fc gjson.Result) (string, 
 			var rawBuf strings.Builder
 			a.serializeNode(a.root, &rawBuf)
 			cleaned := a.cleaner(rawBuf.String())
-			if gjson.Valid(cleaned) {
-				a.pruneHeldNodes(a.root, gjson.Parse(cleaned))
+			if ojson.Valid(cleaned) {
+				a.pruneHeldNodes(a.root, ojson.Parse(cleaned))
 			} else {
 				a.clearHeldFlags(a.root)
 			}
@@ -283,7 +283,7 @@ func (a *VertexPartialArgsAssembler) findNode(segments []pathSegment) *vertexAST
 	return curr
 }
 
-func (a *VertexPartialArgsAssembler) pushPartialArg(item gjson.Result) {
+func (a *VertexPartialArgsAssembler) pushPartialArg(item ojson.Result) {
 	if !item.IsObject() {
 		a.setError(errors.New("vertex partialArgs element must be an object"))
 		return
@@ -324,9 +324,9 @@ func (a *VertexPartialArgsAssembler) pushPartialArg(item gjson.Result) {
 		nullRes = item.Get("null_value")
 	}
 
-	hasString := strRes.Exists() && strRes.Type != gjson.Null
-	hasNumber := numRes.Exists() && numRes.Type != gjson.Null
-	hasBool := boolRes.Exists() && boolRes.Type != gjson.Null
+	hasString := strRes.Exists() && strRes.Type != ojson.Null
+	hasNumber := numRes.Exists() && numRes.Type != ojson.Null
+	hasBool := boolRes.Exists() && boolRes.Type != ojson.Null
 	hasNull := nullRes.Exists() && !hasString && !hasNumber && !hasBool
 	hasAnyValue := hasString || hasNumber || hasBool || hasNull
 
@@ -565,8 +565,8 @@ func (a *VertexPartialArgsAssembler) isKeyRemovedByCleaner(path []pathSegment, p
 	probeJSON := buildSegmentProbeJSON(path, probeKey)
 	cleaned := a.cleaner(probeJSON)
 	removed := false
-	if gjson.Valid(cleaned) {
-		removed = !segmentProbeKeyExists(gjson.Parse(cleaned), path, probeKey)
+	if ojson.Valid(cleaned) {
+		removed = !segmentProbeKeyExists(ojson.Parse(cleaned), path, probeKey)
 	}
 	a.closedEmptyCache[cacheKey] = removed
 	return removed
@@ -591,7 +591,7 @@ func buildSegmentProbeJSON(path []pathSegment, probeKey string) string {
 	return inner
 }
 
-func segmentProbeKeyExists(cur gjson.Result, path []pathSegment, probeKey string) bool {
+func segmentProbeKeyExists(cur ojson.Result, path []pathSegment, probeKey string) bool {
 	for _, seg := range path {
 		if seg.kind == segmentArrayIndex {
 			arr := cur.Array()
@@ -696,7 +696,7 @@ func (a *VertexPartialArgsAssembler) serializeNode(n *vertexASTNode, out *string
 	}
 }
 
-func (a *VertexPartialArgsAssembler) pruneHeldNodes(n *vertexASTNode, cleaned gjson.Result) {
+func (a *VertexPartialArgsAssembler) pruneHeldNodes(n *vertexASTNode, cleaned ojson.Result) {
 	if n == nil {
 		return
 	}
@@ -729,7 +729,7 @@ func (a *VertexPartialArgsAssembler) pruneHeldNodes(n *vertexASTNode, cleaned gj
 				continue
 			}
 			elem.holdUntilFinish = false
-			var cleanedElem gjson.Result
+			var cleanedElem ojson.Result
 			if i < len(cleanedArr) {
 				cleanedElem = cleanedArr[i]
 			}
@@ -878,16 +878,16 @@ func (a *VertexPartialArgsAssembler) emitNode(node *vertexASTNode, final bool) b
 	return false
 }
 
-func formatVertexJSONNumber(res gjson.Result) string {
-	if res.Type == gjson.Number {
+func formatVertexJSONNumber(res ojson.Result) string {
+	if res.Type == ojson.Number {
 		raw := strings.TrimSpace(res.Raw)
 		if raw != "" {
 			return raw
 		}
 	}
-	if res.Type == gjson.String {
+	if res.Type == ojson.String {
 		s := strings.TrimSpace(res.String())
-		if s != "" && gjson.Valid(s) && gjson.Parse(s).Type == gjson.Number {
+		if s != "" && ojson.Valid(s) && ojson.Parse(s).Type == ojson.Number {
 			return s
 		}
 	}
@@ -1108,7 +1108,7 @@ func NewVertexStreamingToolCall(rawName, name, upstreamID, id string, index int)
 }
 
 // CanContinueWith reports whether fc belongs to this in-progress streaming tool call.
-func (c *VertexStreamingToolCall) CanContinueWith(fc gjson.Result) bool {
+func (c *VertexStreamingToolCall) CanContinueWith(fc ojson.Result) bool {
 	if c == nil || c.Assembler == nil || !fc.Exists() || !fc.IsObject() {
 		return false
 	}
@@ -1134,7 +1134,7 @@ func (c *VertexStreamingToolCall) CanContinueWith(fc gjson.Result) bool {
 
 // CanAcceptContinuation reports whether fc's partialArgs can continue the current
 // in-progress argument tree without overwriting any already-completed leaf value.
-func (a *VertexPartialArgsAssembler) CanAcceptContinuation(fc gjson.Result) bool {
+func (a *VertexPartialArgsAssembler) CanAcceptContinuation(fc ojson.Result) bool {
 	if a == nil || a.err != nil {
 		return false
 	}
@@ -1149,7 +1149,7 @@ func (a *VertexPartialArgsAssembler) CanAcceptContinuation(fc gjson.Result) bool
 		return false
 	}
 	compatible := true
-	partialArgs.ForEach(func(_, item gjson.Result) bool {
+	partialArgs.ForEach(func(_, item ojson.Result) bool {
 		if !item.IsObject() {
 			compatible = false
 			return false
@@ -1187,9 +1187,9 @@ func (a *VertexPartialArgsAssembler) CanAcceptContinuation(fc gjson.Result) bool
 		if !nullRes.Exists() {
 			nullRes = item.Get("null_value")
 		}
-		hasString := strRes.Exists() && strRes.Type != gjson.Null
-		hasNumber := numRes.Exists() && numRes.Type != gjson.Null
-		hasBool := boolRes.Exists() && boolRes.Type != gjson.Null
+		hasString := strRes.Exists() && strRes.Type != ojson.Null
+		hasNumber := numRes.Exists() && numRes.Type != ojson.Null
+		hasBool := boolRes.Exists() && boolRes.Type != ojson.Null
 		hasNull := nullRes.Exists() && !hasString && !hasNumber && !hasBool
 		hasAnyValue := hasString || hasNumber || hasBool || hasNull
 		if !hasAnyValue && !innerWillContinue {

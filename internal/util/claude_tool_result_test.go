@@ -3,7 +3,7 @@ package util
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertClaudeToolResult_PreservesErrorFlag(t *testing.T) {
@@ -20,7 +20,7 @@ func TestConvertClaudeToolResult_PreservesErrorFlag(t *testing.T) {
 		{"number", `{"is_error":1,"content":"permission denied"}`, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ConvertClaudeToolResult(gjson.Parse(tt.block))
+			got := ConvertClaudeToolResult(ojson.Parse(tt.block))
 			if got.IsError != tt.isError {
 				t.Errorf("IsError = %v, want %v", got.IsError, tt.isError)
 			}
@@ -96,6 +96,34 @@ func TestConvertClaudeToolResultContent(t *testing.T) {
 			wantImages: 1,
 		},
 		{
+			name:       "TextAndDocument",
+			wrapper:    `{"content":[{"type":"text","text":"alpha"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}`,
+			wantResult: `{"type":"text","text":"alpha"}`,
+			wantRaw:    true,
+			wantImages: 1,
+		},
+		{
+			name:       "DocumentOnly",
+			wrapper:    `{"content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]}`,
+			wantResult: "",
+			wantRaw:    false,
+			wantImages: 1,
+		},
+		{
+			name:       "ObjectDocument",
+			wrapper:    `{"content":{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}}`,
+			wantResult: "",
+			wantRaw:    false,
+			wantImages: 1,
+		},
+		{
+			name:       "DocumentWithoutDataDropped",
+			wrapper:    `{"content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf"}}]}`,
+			wantResult: "",
+			wantRaw:    false,
+			wantImages: 0,
+		},
+		{
 			name:       "AbsentContent",
 			wrapper:    `{}`,
 			wantResult: "",
@@ -106,7 +134,7 @@ func TestConvertClaudeToolResultContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ConvertClaudeToolResultContent(gjson.Get(tt.wrapper, "content"))
+			got := ConvertClaudeToolResultContent(ojson.Get(tt.wrapper, "content"))
 			if got.Result != tt.wantResult {
 				t.Errorf("Result = %q, want %q", got.Result, tt.wantResult)
 			}
@@ -121,7 +149,7 @@ func TestConvertClaudeToolResultContent(t *testing.T) {
 }
 
 func TestConvertClaudeToolResultContent_ImageFields(t *testing.T) {
-	content := gjson.Get(`{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}`, "content")
+	content := ojson.Get(`{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}`, "content")
 	got := ConvertClaudeToolResultContent(content)
 	if len(got.Images) != 1 {
 		t.Fatalf("expected 1 image, got %d", len(got.Images))

@@ -798,3 +798,118 @@ func TestClaudeExecutor_AuthManager_OverageSpendCapFirstRequestAllowsOpus_Issue5
 		t.Fatalf("Opus upstream attempts = %d, want 1", got)
 	}
 }
+
+func TestClaudeExecutor_AuthManager_FableOnlyRejectionWithout5hHeadersAllowsOpus_Issue7197(t *testing.T) {
+	var fableAttempts, opusAttempts atomic.Int32
+	weeklyReset := strconv.FormatInt(time.Now().Add(6*24*time.Hour).Unix(), 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			http.Error(w, "failed to read sanitized test request", http.StatusBadRequest)
+			return
+		}
+		switch {
+		case strings.Contains(string(body), `"model":"claude-fable-5-1"`):
+			fableAttempts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "546534")
+			w.Header().Set("X-Should-Retry", "true")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Representative-Claim", "seven_day_overage_included")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Utilization", "0.62")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Reset", weeklyReset)
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Utilization", "1.0")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Surpassed-Threshold", "1.0")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", weeklyReset)
+			w.Header().Set("Anthropic-Ratelimit-Unified-Overage-Status", "rejected")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Overage-Disabled-Reason", "out_of_credits")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Fallback-Percentage", "0.5")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Reset", weeklyReset)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}`))
+		case strings.Contains(string(body), `"model":"claude-opus-5-5"`):
+			opusAttempts.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Anthropic-Ratelimit-Unified-Status", "allowed")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+			w.Header().Set("Anthropic-Ratelimit-Unified-7d-Utilization", "0.62")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"msg-opus-ok","type":"message","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+		default:
+			http.Error(w, "unexpected sanitized test model", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(NewClaudeExecutor(&config.Config{DisableCooling: false}))
+
+	auth := &cliproxyauth.Auth{
+		ID:       uuid.NewString() + "-issue-7197-no-5h",
+		Provider: "claude",
+		Attributes: map[string]string{
+			"api_key":  "sanitized-test-key",
+			"base_url": server.URL,
+		},
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-fable-5-1"}, {ID: "claude-opus-5-5"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	payloadFable := []byte(`{"model":"claude-fable-5-1","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)
+	_, errFable := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   "claude-fable-5-1",
+		Payload: payloadFable,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errFable == nil {
+		t.Fatal("expected Fable request to be rate limited")
+	}
+	if got := fableAttempts.Load(); got != 1 {
+		t.Fatalf("Fable upstream attempts = %d, want 1", got)
+	}
+
+	updatedAuth, ok := manager.GetByID(auth.ID)
+	if !ok || updatedAuth == nil {
+		t.Fatal("auth not found")
+	}
+	if updatedAuth.Quota.Reason == "credential_quota" {
+		t.Fatalf("auth Quota.Reason = credential_quota; want non-credential_quota")
+	}
+
+	fableState := updatedAuth.ModelStates["claude-fable-5-1"]
+	if fableState == nil {
+		t.Fatal("fable model state not found")
+	}
+	if fableState.Quota.NextRecoverAt.IsZero() || !fableState.Quota.NextRecoverAt.After(time.Now()) {
+		t.Fatal("fable model cooldown should be set in the future via exponential backoff")
+	}
+	if fableState.Quota.NextRecoverAt.After(time.Now().Add(10 * time.Minute)) {
+		t.Fatalf("fable model cooldown was %v; want exponential backoff (<10m), not ~6d weekly reset", fableState.Quota.NextRecoverAt)
+	}
+
+	payloadOpus := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)
+	_, errOpus := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{
+		Model:   "claude-opus-5-5",
+		Payload: payloadOpus,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if errOpus != nil {
+		t.Fatalf("expected Opus to succeed on the same credential, got: %v", errOpus)
+	}
+	if got := opusAttempts.Load(); got != 1 {
+		t.Fatalf("Opus upstream attempts = %d, want 1", got)
+	}
+
+	afterOpusAuth, ok := manager.GetByID(auth.ID)
+	if !ok || afterOpusAuth == nil {
+		t.Fatal("auth not found after Opus request")
+	}
+	if afterOpusAuth.Unavailable {
+		t.Fatalf("auth remained unavailable after Opus succeeded; want unavailable = false")
+	}
+}

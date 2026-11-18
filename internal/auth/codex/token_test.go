@@ -1,10 +1,11 @@
 package codex
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestSaveTokenToFile_PreservesCustomMetadata(t *testing.T) {

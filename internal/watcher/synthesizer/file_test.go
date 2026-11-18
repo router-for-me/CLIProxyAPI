@@ -2,8 +2,6 @@ package synthesizer
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -12,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"

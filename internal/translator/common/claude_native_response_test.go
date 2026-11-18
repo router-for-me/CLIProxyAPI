@@ -2,13 +2,13 @@ package common_test
 
 import (
 	"context"
-	"encoding/json"
 	"reflect"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	chat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/chat-completions"
 	responses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestClaudeNativeResponseNonStreamModelAndContent(t *testing.T) {
@@ -42,7 +42,7 @@ func TestClaudeNativeResponseNonStreamModelAndContent(t *testing.T) {
 			for _, request := range []string{`{}`, `{"model":"request-alias"}`} {
 				t.Run(request, func(t *testing.T) {
 					out := provider.convert(context.Background(), "executor-alias", []byte(request), []byte(request), raw, nil)
-					root := gjson.ParseBytes(out)
+					root := util.ParseGJSONBytesNoCopy(out)
 					for path, want := range map[string]string{"model": "claude-native", "id": "msg_native", provider.textPath: text, provider.thinkPath: text} {
 						if got := root.Get(path).String(); got != want {
 							t.Errorf("%s = %q, want %q", path, got, want)

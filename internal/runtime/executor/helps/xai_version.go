@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -153,7 +153,7 @@ func FetchXAINPMLatestVersion(ctx context.Context, client *http.Client) (string,
 		return "", fmt.Errorf("read npm registry response: %w", errRead)
 	}
 
-	version := strings.TrimSpace(gjson.GetBytes(body, "version").String())
+	version := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(body, "version").String()))
 	if version == "" {
 		return "", errors.New("version not found in npm response")
 	}

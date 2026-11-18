@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
@@ -84,9 +84,9 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 				t.Fatalf("Execute error: %v", errExecute)
 			}
 
-			toolContent := gjson.GetBytes(gotBody, "messages.1.content")
+			toolContent := ojson.GetBytes(gotBody, "messages.1.content")
 			if tt.wantString {
-				if toolContent.Type != gjson.String {
+				if toolContent.Type != ojson.String {
 					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
 				}
 				want := "image inspected\n\n[image omitted: unsupported by upstream]"
@@ -97,7 +97,7 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 					t.Fatalf("text-only model still received an image_url part:\n%s", string(gotBody))
 				}
 			} else {
-				if toolContent.Type != gjson.String {
+				if toolContent.Type != ojson.String {
 					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
 				}
 				if toolContent.String() != "image inspected" {

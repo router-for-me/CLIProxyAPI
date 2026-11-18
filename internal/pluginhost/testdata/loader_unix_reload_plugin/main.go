@@ -34,27 +34,12 @@ extern int cliproxyPluginCall(char*, uint8_t*, size_t, cliproxy_buffer*);
 extern void cliproxyPluginFree(void*, size_t);
 extern void cliproxyPluginShutdown(void);
 
-// The marker lets the host test distinguish a freshly mapped image from a
-// reused image after the plugin file is replaced under the same path.
-#ifndef PLUGIN_VERSION
-#define PLUGIN_VERSION 1
-#endif
-
-static const char* cliproxyTestMarker(void) {
-#if PLUGIN_VERSION == 2
-	return "v2";
-#else
-	return "v1";
-#endif
-}
-
-static int cliproxyTestFailInit(void) {
-#if PLUGIN_VERSION == 3
-	return 1;
-#else
-	return 0;
-#endif
-}
+// Keep side-effecting constructors and mutable C state in hooks.c so cgo
+// does not duplicate static definitions into both _cgo_export.c and main.cgo2.c.
+extern const char* cliproxyTestMarker(void);
+extern int cliproxyTestFailInit(void);
+extern void cliproxyTestStoreHost(const void* host);
+extern void cliproxyTestOnShutdown(void);
 */
 import "C"
 
@@ -73,15 +58,14 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 	if plugin == nil {
 		return 1
 	}
+	C.cliproxyTestStoreHost(unsafe.Pointer(host))
 	if failInit {
-		_ = host
 		return 7
 	}
 	plugin.abi_version = 1
 	plugin.call = C.cliproxy_plugin_call_fn(C.cliproxyPluginCall)
 	plugin.free_buffer = C.cliproxy_plugin_free_fn(C.cliproxyPluginFree)
 	plugin.shutdown = C.cliproxy_plugin_shutdown_fn(C.cliproxyPluginShutdown)
-	_ = host
 	return 0
 }
 
@@ -119,6 +103,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
 	shutdownCalls.Add(1)
+	C.cliproxyTestOnShutdown()
 }
 
 func main() {}

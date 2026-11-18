@@ -8,11 +8,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestOpenAICompatExecutorPreservesResponsesInstructionRoles(t *testing.T) {
@@ -64,7 +64,7 @@ func TestOpenAICompatExecutorPreservesResponsesInstructionRoles(t *testing.T) {
 				t.Fatal(errExec)
 			}
 			body := <-bodies
-			messages := gjson.GetBytes(body, "messages").Array()
+			messages := ojson.GetBytes(body, "messages").Array()
 			wantRoles := []string{"system", "developer", "user", "developer", "assistant", "tool", "developer", "user"}
 			wantTexts := []string{"base instructions", "mode: plan", "mode: default is only user text", "mode: default", "", "read-only result", "mode: plan", "continue"}
 			if len(messages) != len(wantRoles) {

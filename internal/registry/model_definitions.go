@@ -12,6 +12,9 @@ const (
 	codexBuiltinImage25FlareModelID    = "gpt-image-2.5-flare"
 	codexBuiltinImage25SunburstModelID = "gpt-image-2.5-sunburst"
 	codexBuiltinImage25ModelID         = "gpt-image-2.5"
+	codexBuiltinImage26FlareModelID    = "gpt-image-2.6-flare"
+	codexBuiltinImage26SunburstModelID = "gpt-image-2.6-sunburst"
+	codexBuiltinImage26ModelID         = "gpt-image-2.6"
 	xaiBuiltinImageModelID             = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID      = "grok-imagine-image-quality"
 	xaiBuiltinImage20ModelID           = "grok-imagine-image-2.0"
@@ -255,6 +258,9 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 		codexBuiltinImage25FlareModelInfo(),
 		codexBuiltinImage25SunburstModelInfo(),
 		codexBuiltinImage25ModelInfo(),
+		codexBuiltinImage26FlareModelInfo(),
+		codexBuiltinImage26SunburstModelInfo(),
+		codexBuiltinImage26ModelInfo(),
 	)
 }
 
@@ -329,6 +335,42 @@ func codexBuiltinImage25ModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2.5",
 		Version:     codexBuiltinImage25ModelID,
+	}
+}
+
+func codexBuiltinImage26FlareModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage26FlareModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.6 Flare",
+		Version:     codexBuiltinImage26FlareModelID,
+	}
+}
+
+func codexBuiltinImage26SunburstModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage26SunburstModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.6 Sunburst",
+		Version:     codexBuiltinImage26SunburstModelID,
+	}
+}
+
+func codexBuiltinImage26ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage26ModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 2.6",
+		Version:     codexBuiltinImage26ModelID,
 	}
 }
 

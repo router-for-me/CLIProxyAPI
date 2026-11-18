@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // TestMergeResponsesWebsocketInputDropsReplayedContentTokenCount guards issue #7146:
@@ -33,7 +33,7 @@ func TestMergeResponsesWebsocketInputDropsReplayedContentTokenCount(t *testing.T
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
 
-	input := gjson.GetBytes(normalized, "input").Array()
+	input := ojson.GetBytesNoCopy(normalized, "input").Array()
 	if len(input) != 11 {
 		t.Fatalf("merged input len = %d, want 11: %s", len(input), normalized)
 	}
@@ -86,7 +86,7 @@ func TestMergeResponsesWebsocketInputDropsReplayedContentTokenCount(t *testing.T
 
 	nullPassthrough := input[7]
 	if !nullPassthrough.Get("internal_chat_message_metadata_passthrough").Exists() ||
-		nullPassthrough.Get("internal_chat_message_metadata_passthrough").Type != gjson.Null {
+		nullPassthrough.Get("internal_chat_message_metadata_passthrough").Type != ojson.Null {
 		t.Fatalf("null passthrough must stay untouched: %s", nullPassthrough.Raw)
 	}
 
@@ -95,7 +95,7 @@ func TestMergeResponsesWebsocketInputDropsReplayedContentTokenCount(t *testing.T
 		t.Fatalf("emptied passthrough must be dropped beside duplicate members: %s", duplicateOther.Raw)
 	}
 	duplicateTags := make([]string, 0, 2)
-	duplicateOther.ForEach(func(key, value gjson.Result) bool {
+	duplicateOther.ForEach(func(key, value ojson.Result) bool {
 		if key.String() == "tag" {
 			duplicateTags = append(duplicateTags, value.String())
 		}
@@ -135,7 +135,7 @@ func TestResponsesWebsocketToolCacheSanitizesTransactionalLifecycle(t *testing.T
 	turn.commit()
 
 	repaired := repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, []byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"function_call_output","call_id":"call-2","output":"ok"}]}`))
-	input := gjson.GetBytes(repaired, "input").Array()
+	input := ojson.GetBytesNoCopy(repaired, "input").Array()
 	if len(input) != 4 {
 		t.Fatalf("repaired input len = %d, want 4: %s", len(input), repaired)
 	}
@@ -162,7 +162,7 @@ func TestResponsesWebsocketToolCachePreservesClientItems(t *testing.T) {
 	raw := []byte(`{"input":[{"type":"function_call","id":"fc-next","call_id":"call-1","name":"lookup","arguments":"{}"}]}`)
 	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
 
-	input := gjson.GetBytes(repaired, "input").Array()
+	input := ojson.GetBytesNoCopy(repaired, "input").Array()
 	if len(input) != 2 {
 		t.Fatalf("repaired input len = %d, want 2: %s", len(input), repaired)
 	}
@@ -184,7 +184,7 @@ func TestResponsesWebsocketToolCachePreservesTransactionalClientItems(t *testing
 	turn.commit()
 
 	repaired := repairResponsesWebsocketToolCallsWithoutRecording(sessionKey, []byte(`{"input":[{"type":"function_call","id":"fc-next","call_id":"call-1","name":"lookup","arguments":"{}"}]}`))
-	input := gjson.GetBytes(repaired, "input").Array()
+	input := ojson.GetBytesNoCopy(repaired, "input").Array()
 	if len(input) != 2 || input[1].Get("internal_chat_message_metadata_passthrough.content_token_count").Int() != 42 || input[1].Get("internal_chat_message_metadata_passthrough.turn_id").String() != "client" {
 		t.Fatalf("transactional client output must not be sanitized: %s", repaired)
 	}
@@ -223,7 +223,7 @@ func TestResponsesWebsocketToolCacheStripsContentTokenCount(t *testing.T) {
 	raw := []byte(`{"input":[{"type":"function_call_output","call_id":"call-1","output":"ok"},{"type":"function_call_output","call_id":"call-2","output":"ok"}]}`)
 	repaired := repairResponsesWebsocketToolCallsWithCaches(outputCache, callCache, sessionKey, raw)
 
-	input := gjson.GetBytes(repaired, "input").Array()
+	input := ojson.GetBytesNoCopy(repaired, "input").Array()
 	if len(input) != 4 {
 		t.Fatalf("repaired input len = %d, want 4: %s", len(input), repaired)
 	}

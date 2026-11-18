@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestJoinRawArray(t *testing.T) {
@@ -56,8 +56,14 @@ func TestSetRawArrayItems(t *testing.T) {
 			if string(got) != test.want {
 				t.Fatalf("SetRawArrayItems() = %s, want %s", got, test.want)
 			}
+			doc := ojson.NewDocString(test.data)
+			SetRawArrayItemsDoc(doc, test.path, test.items)
+			if gotDoc := doc.String(); gotDoc != test.want {
+				t.Fatalf("SetRawArrayItemsDoc() = %s, want %s", gotDoc, test.want)
+			}
 		})
 	}
+	SetRawArrayItemsDoc(nil, "items", [][]byte{[]byte(`{"id":1}`)})
 }
 
 func TestSetStringWithoutHTMLEscape(t *testing.T) {
@@ -130,14 +136,25 @@ func TestSetStringWithoutHTMLEscape(t *testing.T) {
 			}
 
 			// Verify that the JSON parses back and decodes to the exact same value (round-trip)
-			res := gjson.GetBytes(got, tc.path)
+			res := ojson.GetBytesNoCopy(got, tc.path)
 			if !res.Exists() {
 				t.Fatalf("path %q does not exist in result: %s", tc.path, string(got))
 			}
 			if res.String() != tc.value {
 				t.Fatalf("round-trip value mismatch: got %q, want %q", res.String(), tc.value)
 			}
+
+			doc := ojson.NewDocString(tc.data)
+			if errDoc := SetStringWithoutHTMLEscapeDoc(doc, tc.path, tc.value); errDoc != nil {
+				t.Fatalf("SetStringWithoutHTMLEscapeDoc() error: %v", errDoc)
+			}
+			if gotDoc := doc.String(); gotDoc != tc.want {
+				t.Fatalf("SetStringWithoutHTMLEscapeDoc() = %s, want %s", gotDoc, tc.want)
+			}
 		})
+	}
+	if errNil := SetStringWithoutHTMLEscapeDoc(nil, "arguments", "val"); errNil != nil {
+		t.Fatalf("SetStringWithoutHTMLEscapeDoc(nil) error: %v", errNil)
 	}
 }
 

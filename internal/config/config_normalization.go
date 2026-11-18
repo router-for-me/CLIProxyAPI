@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/regexp"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
@@ -58,12 +59,14 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
-// configured Claude fingerprint baseline values, normalizes the beta override
-// lists, and resets an unknown client-request-id mode to the default.
+// configured Claude fingerprint baseline values, normalizes the native
+// entrypoint and beta override lists, and resets an unknown client-request-id
+// mode to the default.
 func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	if cfg == nil {
 		return
 	}
+	cfg.ClaudeHeaderDefaults.NativeEntrypoints = normalizeClaudeEntrypointNames(cfg.ClaudeHeaderDefaults.NativeEntrypoints)
 	cfg.ClaudeHeaderDefaults.AnthropicBetaStrip = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaStrip)
 	cfg.ClaudeHeaderDefaults.AnthropicBetaAppend = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaAppend)
 	mode := strings.ToLower(strings.TrimSpace(cfg.ClaudeHeaderDefaults.ClientRequestID))
@@ -81,6 +84,31 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
 	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
+}
+
+// normalizeClaudeEntrypointNames trims and lowercases entrypoint names,
+// dropping empty and duplicate entries while keeping the configured order.
+func normalizeClaudeEntrypointNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // normalizeClaudeBetaNames trims beta names and drops empty and duplicate
@@ -129,7 +157,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			if name == alias {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
@@ -352,6 +380,82 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	return out
 }
 
+// NormalizeSensitiveWordsReplace trims replacement target keys, drops blank keys,
+// and preserves replacement values (including empty strings for phrase deletion).
+func NormalizeSensitiveWordsReplace(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make(map[string]string, len(in))
+	for _, rawKey := range keys {
+		trimmedKey := strings.TrimSpace(rawKey)
+		if trimmedKey == "" {
+			continue
+		}
+		if _, exists := out[trimmedKey]; exists && rawKey != trimmedKey {
+			continue
+		}
+		out[trimmedKey] = in[rawKey]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeSensitivePatternsReplace validates Go RE2 regex rules, logs and drops
+// invalid or blank patterns, and preserves replacement values (including empty strings).
+func NormalizeSensitivePatternsReplace(in []SensitivePatternRule) []SensitivePatternRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SensitivePatternRule, 0, len(in))
+	for i, rule := range in {
+		if strings.TrimSpace(rule.Pattern) == "" {
+			continue
+		}
+		if _, errCompile := regexp.Compile(rule.Pattern); errCompile != nil {
+			log.WithFields(log.Fields{
+				"rule_index": i + 1,
+				"pattern":    rule.Pattern,
+				"error":      errCompile,
+			}).Warn("sensitive-patterns-replace rule dropped: invalid regex")
+			continue
+		}
+		out = append(out, SensitivePatternRule{
+			Pattern:     rule.Pattern,
+			Replacement: rule.Replacement,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// SanitizeAntigravity normalizes Antigravity sensitive-word settings.
+func (cfg *Config) SanitizeAntigravity() {
+	if cfg == nil {
+		return
+	}
+	cfg.Antigravity.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cfg.Antigravity.SensitiveWordsReplace)
+	cfg.Antigravity.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cfg.Antigravity.SensitivePatternsReplace)
+}
+
+// SanitizeDevin normalizes Devin sensitive-word settings.
+func (cfg *Config) SanitizeDevin() {
+	if cfg == nil {
+		return
+	}
+	cfg.Devin.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cfg.Devin.SensitiveWordsReplace)
+	cfg.Devin.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cfg.Devin.SensitivePatternsReplace)
+}
+
 // NormalizeCloakConfig trims strings and removes blank sensitive words.
 func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
 	if cloak == nil {
@@ -373,6 +477,8 @@ func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
 	} else {
 		cloak.SensitiveWords = nil
 	}
+	cloak.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cloak.SensitiveWordsReplace)
+	cloak.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cloak.SensitivePatternsReplace)
 	return cloak
 }
 

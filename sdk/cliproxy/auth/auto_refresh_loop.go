@@ -287,6 +287,13 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 
 	if !shouldRefresh {
+		if !next.After(now) {
+			delay := l.interval
+			if delay <= 0 {
+				delay = refreshCheckInterval
+			}
+			next = now.Add(delay)
+		}
 		l.upsert(authID, next)
 		return
 	}
@@ -428,6 +435,19 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 
 	if !auth.NextRefreshAfter.IsZero() && now.Before(auth.NextRefreshAfter) {
 		return auth.NextRefreshAfter, true
+	}
+
+	if authHasUnchangedRejectedRefreshToken(auth) {
+		if auth.HasValidAccessToken(now) {
+			if exp, ok := auth.AccessTokenExpirationTime(); ok && !exp.IsZero() && exp.After(now) {
+				return exp, true
+			}
+			return time.Time{}, false
+		}
+		if auth.Disabled || auth.Status == StatusDisabled {
+			return time.Time{}, false
+		}
+		return now, true
 	}
 
 	if siwcDueAt, hasSIWC, _ := CodexSIWCNeedsRefresh(auth, now); hasSIWC {

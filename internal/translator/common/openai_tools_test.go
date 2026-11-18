@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestAlignOpenAIToolCallMessages(t *testing.T) {
@@ -62,24 +62,24 @@ func TestAlignOpenAIToolCallMessages(t *testing.T) {
 		// 6: user "final prompt"
 		roles := make([]string, len(got))
 		for i, m := range got {
-			roles[i] = gjson.GetBytes(m, "role").String()
+			roles[i] = ojson.GetBytesNoCopy(m, "role").String()
 		}
 		wantRoles := []string{"user", "assistant", "tool", "tool", "assistant", "user", "user"}
 		if !reflect.DeepEqual(roles, wantRoles) {
 			t.Fatalf("unexpected roles: got %v, want %v", roles, wantRoles)
 		}
 
-		if gjson.GetBytes(got[2], "tool_call_id").String() != "call_b" {
-			t.Errorf("got[2] tool_call_id = %s, want call_b", gjson.GetBytes(got[2], "tool_call_id").String())
+		if ojson.GetBytesNoCopy(got[2], "tool_call_id").String() != "call_b" {
+			t.Errorf("got[2] tool_call_id = %s, want call_b", ojson.GetBytesNoCopy(got[2], "tool_call_id").String())
 		}
-		if gjson.GetBytes(got[3], "tool_call_id").String() != "call_a" {
-			t.Errorf("got[3] tool_call_id = %s, want call_a", gjson.GetBytes(got[3], "tool_call_id").String())
+		if ojson.GetBytesNoCopy(got[3], "tool_call_id").String() != "call_a" {
+			t.Errorf("got[3] tool_call_id = %s, want call_a", ojson.GetBytesNoCopy(got[3], "tool_call_id").String())
 		}
-		if gjson.GetBytes(got[4], "reasoning_content").String() != "step 1" {
-			t.Errorf("got[4] reasoning_content = %s, want step 1", gjson.GetBytes(got[4], "reasoning_content").String())
+		if ojson.GetBytesNoCopy(got[4], "reasoning_content").String() != "step 1" {
+			t.Errorf("got[4] reasoning_content = %s, want step 1", ojson.GetBytesNoCopy(got[4], "reasoning_content").String())
 		}
-		if gjson.GetBytes(got[5], "content").String() != "system reminder" {
-			t.Errorf("got[5] content = %s, want system reminder", gjson.GetBytes(got[5], "content").String())
+		if ojson.GetBytesNoCopy(got[5], "content").String() != "system reminder" {
+			t.Errorf("got[5] content = %s, want system reminder", ojson.GetBytesNoCopy(got[5], "content").String())
 		}
 	})
 
@@ -195,17 +195,17 @@ func TestAlignOpenAIToolCallMessages(t *testing.T) {
 		}
 		roles := make([]string, len(got))
 		for i, m := range got {
-			roles[i] = gjson.GetBytes(m, "role").String()
+			roles[i] = ojson.GetBytesNoCopy(m, "role").String()
 		}
 		wantRoles := []string{"assistant", "tool", "user", "assistant", "tool", "user"}
 		if !reflect.DeepEqual(roles, wantRoles) {
 			t.Fatalf("unexpected roles: got %v, want %v", roles, wantRoles)
 		}
-		if gjson.GetBytes(got[1], "tool_call_id").String() != "call_1" {
-			t.Errorf("got[1] tool_call_id = %s, want call_1", gjson.GetBytes(got[1], "tool_call_id").String())
+		if ojson.GetBytesNoCopy(got[1], "tool_call_id").String() != "call_1" {
+			t.Errorf("got[1] tool_call_id = %s, want call_1", ojson.GetBytesNoCopy(got[1], "tool_call_id").String())
 		}
-		if gjson.GetBytes(got[4], "tool_call_id").String() != "call_2" {
-			t.Errorf("got[4] tool_call_id = %s, want call_2", gjson.GetBytes(got[4], "tool_call_id").String())
+		if ojson.GetBytesNoCopy(got[4], "tool_call_id").String() != "call_2" {
+			t.Errorf("got[4] tool_call_id = %s, want call_2", ojson.GetBytesNoCopy(got[4], "tool_call_id").String())
 		}
 	})
 }

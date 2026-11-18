@@ -1,10 +1,10 @@
 package helps
 
 import (
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func testVertexBareTinkInteractionsSignature() string {
@@ -20,12 +20,12 @@ func TestSanitizeGeminiInteractionsUnsupportedInputIDs_ScopesVertexBareTink(t *t
 	body := []byte(`{"input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"thought","signature":"` + sig + `"}]}`)
 
 	public := SanitizeGeminiInteractionsUnsupportedInputIDs(body, false)
-	if gjson.GetBytes(public, `input.#(type=="thought")`).Exists() {
+	if ojson.GetBytes(public, `input.#(type=="thought")`).Exists() {
 		t.Fatalf("public Interactions endpoint must drop the Vertex bare-Tink thought: %s", public)
 	}
 
 	vertex := SanitizeGeminiInteractionsUnsupportedInputIDs(body, true)
-	if got := gjson.GetBytes(vertex, `input.#(type=="thought").signature`).String(); got != sig {
+	if got := ojson.GetBytes(vertex, `input.#(type=="thought").signature`).String(); got != sig {
 		t.Fatalf("Vertex Interactions endpoint must keep the bare-Tink signature, got %q", got)
 	}
 }

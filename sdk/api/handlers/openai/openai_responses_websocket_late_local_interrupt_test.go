@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
-	"github.com/tidwall/gjson"
 )
 
 // Once a terminal payload (completion or failure) has been written
@@ -130,7 +130,7 @@ func testForwardResponsesWebsocketRejectsLocalInterruptAfterTerminal(t *testing.
 	if errRead != nil {
 		t.Fatalf("read terminal message: %v", errRead)
 	}
-	if got := gjson.GetBytes(payload, "type").String(); got != terminalType {
+	if got := ojson.GetBytesNoCopy(payload, "type").String(); got != terminalType {
 		t.Fatalf("payload type = %s, want %s", got, terminalType)
 	}
 

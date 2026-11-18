@@ -6,13 +6,13 @@ package config
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"gopkg.in/yaml.v3"
 )
 

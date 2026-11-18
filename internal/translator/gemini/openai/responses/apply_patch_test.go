@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const geminiPatchRequest = `{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}]}`
@@ -19,7 +19,7 @@ func TestGeminiApplyPatchCompleteArgumentsLifecycle(t *testing.T) {
 	out := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.1-pro", []byte(geminiPatchRequest), nil, raw, &param)
 	out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.1-pro", []byte(geminiPatchRequest), nil, []byte(`[DONE]`), &param)...)
 	var delta strings.Builder
-	var done, item, final gjson.Result
+	var done, item, final ojson.Result
 	for _, chunk := range out {
 		kind, ev := parseSSEEvent(t, chunk)
 		switch kind {
@@ -98,7 +98,7 @@ func TestGeminiApplyPatchCompleteSnapshotMatrix(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			var param any
-			var events []gjson.Result
+			var events []ojson.Result
 			for _, input := range test.inputs {
 				for _, chunk := range ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini", []byte(geminiPatchRequest), nil, input, &param) {
 					_, ev := parseSSEEvent(t, chunk)
@@ -147,7 +147,7 @@ func TestGeminiApplyPatchWinningDeclarationAndNegativeCompatibility(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			raw := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + test.upstream + `","args":` + test.args + `}}]},"finishReason":"STOP"}]}`)
 			out := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini", []byte(test.request), nil, raw, nil)
-			item := gjson.GetBytes(out, "output.0")
+			item := ojson.GetBytesNoCopy(out, "output.0")
 			if item.Get("type").String() != test.wantType || item.Get("input").String() != test.wantInput {
 				t.Fatalf("compatibility changed: %s", out)
 			}
@@ -199,9 +199,9 @@ func TestGeminiApplyPatchHistoryPreservesWhitespaceAndToolPair(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch"}]}],"input":[{"type":"custom_tool_call","call_id":"c1","namespace":"functions","name":"apply_patch","input":"  *** Begin Patch\n*** Add File: 中.txt\n+😀\n*** End Patch\n "},{"type":"custom_tool_call_output","call_id":"c1","output":"ok"},{"role":"user","type":"message","content":"continue"}]}`)
 	out, _ := ConvertOpenAIResponsesRequestToGemini("gemini-3.1-pro-preview", request, false)
 	want := "  *** Begin Patch\n*** Add File: 中.txt\n+😀\n*** End Patch\n "
-	var call, result gjson.Result
-	gjson.GetBytes(out, "contents").ForEach(func(_, content gjson.Result) bool {
-		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
+	var call, result ojson.Result
+	ojson.GetBytesNoCopy(out, "contents").ForEach(func(_, content ojson.Result) bool {
+		content.Get("parts").ForEach(func(_, part ojson.Result) bool {
 			if part.Get("functionCall").Exists() {
 				call = part.Get("functionCall")
 			}
@@ -222,7 +222,7 @@ func TestGeminiApplyPatchDoesNotRebindOrdinaryFunctionCalls(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"first"},{"type":"function","name":"second"}]}`)
 	for _, name := range []string{"first", "second"} {
 		chunks := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini", request, nil, []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"reused","name":"`+name+`","args":{"n":1}}}]}}]}`), &param)
-		var item gjson.Result
+		var item ojson.Result
 		for _, chunk := range chunks {
 			kind, ev := parseSSEEvent(t, chunk)
 			if kind == "response.output_item.done" {
@@ -239,7 +239,7 @@ func TestGeminiApplyPatchDistinctUnkeyedCompleteCalls(t *testing.T) {
 	var param any
 	raw := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"functions__apply_patch","args":{"input":"a"}}},{"functionCall":{"name":"functions__apply_patch","args":{"input":"b"}}}]},"finishReason":"STOP"}]}`)
 	inputs := map[string]string{}
-	var final gjson.Result
+	var final ojson.Result
 	streamEvents := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini", []byte(geminiPatchRequest), nil, raw, &param)
 	streamEvents = append(streamEvents, ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini", []byte(geminiPatchRequest), nil, []byte("[DONE]"), &param)...)
 	for _, chunk := range streamEvents {

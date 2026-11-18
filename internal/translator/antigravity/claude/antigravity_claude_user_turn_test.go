@@ -3,11 +3,12 @@ package claude
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const userTurnUpload = `{"type":"container_upload","file_id":"file-1"}`
@@ -49,7 +50,7 @@ func TestConvertClaudeRequestToAntigravity_RefusesAnyEmptiedUserTurn(t *testing.
 			if got, want := err.Error(), "unsupported content part: "+tc.wantType; got != want {
 				t.Fatalf("error text = %q, want %q", got, want)
 			}
-			if !gjson.ValidBytes(body) {
+			if !ojson.ValidBytes(body) {
 				t.Fatalf("body is not JSON: %q", body)
 			}
 		})
@@ -62,7 +63,7 @@ func TestConvertClaudeRequestToAntigravity_KeepsTurnWithTextBesideAttachment(t *
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got := gjson.GetBytes(body, "request.contents.2.parts.0.text").String(); got != "keep me" {
+	if got := ojson.GetBytesNoCopy(body, "request.contents.2.parts.0.text").String(); got != "keep me" {
 		t.Fatalf("text was lost: %s", body)
 	}
 }
@@ -73,7 +74,7 @@ func TestConvertClaudeRequestToAntigravity_Base64DocumentBecomesInlineData(t *te
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	inlineData := gjson.GetBytes(body, "request.contents.2.parts.0.inlineData")
+	inlineData := ojson.GetBytesNoCopy(body, "request.contents.2.parts.0.inlineData")
 	if inlineData.Get("mimeType").String() != "application/pdf" || inlineData.Get("data").String() != "JVBERi0xLjQK" {
 		t.Fatalf("inlineData = %s, body = %s", inlineData.Raw, body)
 	}
@@ -81,7 +82,7 @@ func TestConvertClaudeRequestToAntigravity_Base64DocumentBecomesInlineData(t *te
 
 func TestConvertClaudeRequestToAntigravity_ExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := []byte(`{"model":"m","messages":[{"role":"user","content":[` + userTurnUpload + `]}]}`)
-	if body, _ := ConvertClaudeRequestToAntigravity("m", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertClaudeRequestToAntigravity("m", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }
@@ -139,7 +140,7 @@ func TestClaudeToAntigravityUnrepresentableImageBesideTextStillSucceeds(t *testi
 		if envelope.Err != nil {
 			t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 		}
-		parts := gjson.GetBytes(envelope.Body, "request.contents.2.parts").Array()
+		parts := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts").Array()
 		if len(parts) != 1 || parts[0].Get("text").String() != "keep me" {
 			t.Fatalf("text was lost or an image leaked: %s", envelope.Body)
 		}
@@ -155,7 +156,7 @@ func TestClaudeToAntigravityBase64ImageOnlyTurnStaysInlineData(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	inlineData := gjson.GetBytes(envelope.Body, "request.contents.2.parts.0.inlineData")
+	inlineData := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts.0.inlineData")
 	if inlineData.Get("mimeType").String() != "image/png" || inlineData.Get("data").String() != "aGVsbG8=" {
 		t.Fatalf("inlineData = %s, body = %s", inlineData.Raw, envelope.Body)
 	}
@@ -174,12 +175,59 @@ func TestClaudeToAntigravityRealTextBesideWhitespaceAndAnImageStillSucceeds(t *t
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
 	found := false
-	for _, part := range gjson.GetBytes(envelope.Body, "request.contents.2.parts").Array() {
+	for _, part := range ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts").Array() {
 		if part.Get("text").String() == "keep me" {
 			found = true
 		}
 	}
 	if !found {
 		t.Fatalf("text was lost: %s", envelope.Body)
+	}
+}
+
+func TestClaudeToAntigravityDocumentTextAndContentSources(t *testing.T) {
+	envelope := claudeImageTurnToAntigravity(`{"type":"document","title":"note.txt","context":"secret note","source":{"type":"text","media_type":"text/plain","data":"Secret codeword: ORANGE-42"}},{"type":"text","text":"What is the secret codeword?"}`)
+	if envelope.Err != nil {
+		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
+	}
+	parts := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("got %d parts, want 2: %s", len(parts), envelope.Body)
+	}
+	docText := parts[0].Get("text").String()
+	if !strings.Contains(docText, "note.txt") || !strings.Contains(docText, "secret note") || !strings.Contains(docText, "ORANGE-42") {
+		t.Fatalf("document text was dropped or missing metadata: %q", docText)
+	}
+
+	contentEnv := claudeImageTurnToAntigravity(`{"type":"document","title":"bundle","context":"mixed","source":{"type":"content","content":[{"type":"text","text":"inside doc"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}}`)
+	if contentEnv.Err != nil {
+		t.Fatalf("content document err = %v, body = %s", contentEnv.Err, contentEnv.Body)
+	}
+	cParts := ojson.GetBytesNoCopy(contentEnv.Body, "request.contents.2.parts").Array()
+	if len(cParts) < 2 {
+		t.Fatalf("expected header/text and image parts, got %d: %s", len(cParts), contentEnv.Body)
+	}
+	var sawText, sawImage bool
+	for _, p := range cParts {
+		if strings.Contains(p.Get("text").String(), "inside doc") {
+			sawText = true
+		}
+		if p.Get("inlineData.mimeType").String() == "image/png" && p.Get("inlineData.data").String() == "aGVsbG8=" {
+			sawImage = true
+		}
+	}
+	if !sawText || !sawImage {
+		t.Fatalf("content document lost parts (sawText=%v, sawImage=%v): %s", sawText, sawImage, contentEnv.Body)
+	}
+
+	emptyTextEnv := claudeImageTurnToAntigravity(`{"type":"document","title":"empty.txt","source":{"type":"text","media_type":"text/plain","data":"  "}}`)
+	var unsupported *translatorcommon.UnsupportedPartError
+	if !errors.As(emptyTextEnv.Err, &unsupported) || unsupported.Type != "document" || unsupported.StatusCode() != 400 {
+		t.Fatalf("empty text document err = %v, want unsupported document; body = %s", emptyTextEnv.Err, emptyTextEnv.Body)
+	}
+
+	badContentEnv := claudeImageTurnToAntigravity(`{"type":"document","title":"bad","source":{"type":"content","content":[{"type":"image","source":{"type":"file","file_id":"f1"}}]}}`)
+	if !errors.As(badContentEnv.Err, &unsupported) || unsupported.Type != "image" || unsupported.StatusCode() != 400 {
+		t.Fatalf("unrepresentable content image err = %v, want unsupported image; body = %s", badContentEnv.Err, badContentEnv.Body)
 	}
 }

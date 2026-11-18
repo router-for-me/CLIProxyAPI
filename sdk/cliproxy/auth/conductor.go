@@ -56,6 +56,14 @@ type ExecutionSessionSharer interface {
 	SharesExecutionSessionsWith(other ProviderExecutor) bool
 }
 
+// ExecutorUnwrapper exposes the underlying executor for wrappers so reuse and
+// session-lifecycle decisions can consult the service-owned executor even when
+// a wrapper hides its concrete type. Wrappers should return their immediate
+// inner executor; the manager follows the chain.
+type ExecutorUnwrapper interface {
+	Unwrap() ProviderExecutor
+}
+
 // AuthExecutionSessionCloser allows executors to release execution sessions
 // associated with a removed credential without tearing down other credentials' sessions.
 type AuthExecutionSessionCloser interface {
@@ -91,6 +99,10 @@ type Result struct {
 	SkipQuotaObservation bool
 	// AccessToken captures the active access token under which the request was executed.
 	AccessToken string
+	// RefreshToken captures the refresh credential associated with the request,
+	// used to distinguish a same-account OAuth token rotation from a genuine
+	// credential replacement when evaluating result staleness.
+	RefreshToken string
 	// CredentialVersion captures the credential version under which the request was executed.
 	CredentialVersion uint64
 	// RegistrationEpoch captures the registration epoch under which the request was executed.
@@ -116,6 +128,13 @@ type PluginScheduler interface {
 // that opt into receiving candidates across all priority tiers.
 type PluginSchedulerAcrossPriorities interface {
 	SchedulerWantsAcrossPriorities() bool
+}
+
+// PluginSchedulerContinuity is an optional interface implemented by schedulers
+// that evaluate bounded pre-admission and pre-output-429 continuity for Codex requests.
+type PluginSchedulerContinuity interface {
+	HasSchedulerContinuity() bool
+	EvaluateSchedulerContinuity(context.Context, pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error)
 }
 
 type pluginSchedulerState interface {
@@ -172,10 +191,12 @@ type resultPolicyHolder struct {
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
+	inFlightTracker           *inFlightTracker
 	store                     Store
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor
+	executorRevisions         map[string]uint64
 	selector                  Selector
 	hook                      Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
@@ -194,6 +215,8 @@ type Manager struct {
 	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
+	// continuityClock overrides time.Now and timer waiting in unit tests.
+	continuityClock continuityClock
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
 	homeRuntimeAuths map[string]map[string]*Auth
 	// homeRuntimeAuthOwners prevents a stale selection from clearing a replacement auth.
@@ -258,9 +281,11 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
+		inFlightTracker:       newInFlightTracker(),
 		store:                 store,
 		authLoadGate:          semaphore.NewWeighted(math.MaxInt64),
 		executors:             make(map[string]ProviderExecutor),
+		executorRevisions:     make(map[string]uint64),
 		selector:              selector,
 		hook:                  hook,
 		auths:                 make(map[string]*Auth),

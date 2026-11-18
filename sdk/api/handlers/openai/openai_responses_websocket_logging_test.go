@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
@@ -23,7 +24,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	"github.com/tidwall/gjson"
 )
 
 type websocketLoggingExecutor struct {
@@ -116,7 +116,7 @@ func TestResponsesWebsocketRequestLoggingLifecycle(t *testing.T) {
 				if errRead != nil {
 					t.Fatal(errRead)
 				}
-				if got := gjson.GetBytes(data, "type").String(); got != want {
+				if got := ojson.GetBytesNoCopy(data, "type").String(); got != want {
 					t.Fatalf("event = %q, want %q", got, want)
 				}
 			}
@@ -149,7 +149,7 @@ func TestResponsesWebsocketRequestLoggingLifecycle(t *testing.T) {
 			assertNoCapture()
 			send(payload)
 			if _, data, errRead := conn.ReadMessage(); errRead == nil {
-				if gjson.GetBytes(data, "type").String() != "error" {
+				if ojson.GetBytesNoCopy(data, "type").String() != "error" {
 					t.Fatalf("failed upstream returned %s", data)
 				}
 			} else {

@@ -8,11 +8,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // Model the tool-bearing rejection observed on the live Meta endpoint. Testing
@@ -28,7 +28,7 @@ func TestMetaExecutor_MuseToolsReachUpstream(t *testing.T) {
 						w.WriteHeader(http.StatusBadRequest)
 						return
 					}
-					tools := gjson.GetBytes(body, "tools").Array()
+					tools := ojson.GetBytes(body, "tools").Array()
 					if len(tools) != 2 || tools[1].Get("type").String() != "namespace" || tools[1].Get("name").String() != "muse" || tools[1].Get("tools.0.name").String() != "submit_reminder_decision" {
 						w.WriteHeader(http.StatusForbidden)
 						_, _ = io.WriteString(w, `{"error":{"code":"client_attestation_denied"}}`)
@@ -82,10 +82,10 @@ func TestMetaExecutor_MuseToolsPayloadRulesRemainFinal(t *testing.T) {
 						t.Error(err)
 					}
 					if remove {
-						if gjson.GetBytes(body, "tools").Exists() {
+						if ojson.GetBytes(body, "tools").Exists() {
 							t.Errorf("filtered tools were restored: %s", body)
 						}
-					} else if gjson.GetBytes(body, "tools.1.name").String() != "muse" || gjson.GetBytes(body, "tools.1.description").String() != "configured namespace" || gjson.GetBytes(body, "tools.0.description").String() != "configured caller" {
+					} else if ojson.GetBytes(body, "tools.1.name").String() != "muse" || ojson.GetBytes(body, "tools.1.description").String() != "configured namespace" || ojson.GetBytes(body, "tools.0.description").String() != "configured caller" {
 						t.Errorf("namespace did not honor final payload override: %s", body)
 					}
 					writeMetaResponsesOK(w, "ok")

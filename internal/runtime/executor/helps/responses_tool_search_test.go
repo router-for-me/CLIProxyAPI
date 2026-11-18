@@ -3,7 +3,7 @@ package helps
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestResponsesHasToolSearch(t *testing.T) {
@@ -90,11 +90,11 @@ func TestStripResponsesToolSearch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := StripResponsesToolSearch([]byte(tc.payload))
 			if tc.wantTools != "" {
-				if raw := gjson.GetBytes(got, "tools").Raw; raw != tc.wantTools {
+				if raw := ojson.GetBytes(got, "tools").Raw; raw != tc.wantTools {
 					t.Fatalf("tools = %s, want %s", raw, tc.wantTools)
 				}
 			}
-			if raw := gjson.GetBytes(got, "input").Raw; raw != tc.wantInput {
+			if raw := ojson.GetBytes(got, "input").Raw; raw != tc.wantInput {
 				t.Fatalf("input = %s, want %s", raw, tc.wantInput)
 			}
 		})

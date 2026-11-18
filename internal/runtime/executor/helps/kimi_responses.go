@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ResolveKimiBaseURL resolves the upstream API base URL for Kimi API requests based on auth.
@@ -55,12 +54,12 @@ func ResolveKimiClaudeBaseURL(auth *cliproxyauth.Auth) string {
 	return strings.TrimSuffix(baseURL, "/v1")
 }
 
-func isResponsesToolCall(item gjson.Result) bool {
+func isResponsesToolCall(item ojson.Result) bool {
 	t := strings.TrimSpace(item.Get("type").String())
 	return t == "function_call" || t == "custom_tool_call"
 }
 
-func isResponsesToolOutput(item gjson.Result) bool {
+func isResponsesToolOutput(item ojson.Result) bool {
 	t := strings.TrimSpace(item.Get("type").String())
 	return t == "function_call_output" || t == "custom_tool_call_output"
 }
@@ -71,22 +70,38 @@ func isResponsesToolOutput(item gjson.Result) bool {
 // This function defers intervening non-tool items until all outputs for the current batch
 // of function calls have been emitted, keeping the outputs contiguous.
 func NormalizeKimiResponsesInput(body []byte) ([]byte, error) {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
+	if len(body) == 0 || !ojson.ValidBytes(body) {
 		return body, nil
 	}
-
-	input := gjson.GetBytes(body, "input")
-	if !input.Exists() || !input.IsArray() {
+	doc := ojson.NewDoc(body)
+	changed, errNorm := NormalizeKimiResponsesInputDoc(doc)
+	if errNorm != nil {
+		return body, errNorm
+	}
+	if !changed {
 		return body, nil
+	}
+	return doc.Bytes(), nil
+}
+
+// NormalizeKimiResponsesInputDoc normalizes the input array for Kimi Responses API requests in place on doc.
+func NormalizeKimiResponsesInputDoc(doc *ojson.Doc) (bool, error) {
+	if doc == nil || doc.Len() == 0 {
+		return false, nil
+	}
+
+	input := doc.Get("input")
+	if !input.Exists() || !input.IsArray() {
+		return false, nil
 	}
 
 	items := input.Array()
 	if len(items) == 0 {
-		return body, nil
+		return false, nil
 	}
 
 	reordered := false
-	result := make([]gjson.Result, 0, len(items))
+	result := make([]ojson.Result, 0, len(items))
 
 	for i := 0; i < len(items); {
 		if !isResponsesToolCall(items[i]) {
@@ -138,8 +153,8 @@ func NormalizeKimiResponsesInput(body []byte) ([]byte, error) {
 		}
 
 		if remainingNeeded == 0 && lastMatchingIdx >= endCalls {
-			matchingOutputs := make([]gjson.Result, 0, callIDCount)
-			interveningItems := make([]gjson.Result, 0)
+			matchingOutputs := make([]ojson.Result, 0, callIDCount)
+			interveningItems := make([]ojson.Result, 0)
 			consumed := make(map[string]int, len(callIDs))
 			for k, v := range callIDs {
 				consumed[k] = v
@@ -172,7 +187,7 @@ func NormalizeKimiResponsesInput(body []byte) ([]byte, error) {
 	}
 
 	if !reordered {
-		return body, nil
+		return false, nil
 	}
 
 	rebuilt := make([]string, 0, len(result))
@@ -180,9 +195,8 @@ func NormalizeKimiResponsesInput(body []byte) ([]byte, error) {
 		rebuilt = append(rebuilt, it.Raw)
 	}
 
-	updated, errSet := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(rebuilt, ",")+"]"))
-	if errSet != nil {
-		return body, fmt.Errorf("normalize kimi responses input: %w", errSet)
+	if errSet := doc.SetRaw("input", "["+strings.Join(rebuilt, ",")+"]"); errSet != nil {
+		return false, fmt.Errorf("normalize kimi responses input: %w", errSet)
 	}
-	return updated, nil
+	return true, nil
 }

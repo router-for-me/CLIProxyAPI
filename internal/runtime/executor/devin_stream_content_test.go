@@ -3,16 +3,16 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -39,10 +39,10 @@ func TestDevinStreamEmitsContentBeforeThinkingCloses(t *testing.T) {
 					}
 					for _, line := range strings.Split(string(chunk.Payload), "\n") {
 						data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-						if !gjson.Valid(data) {
+						if !ojson.Valid(data) {
 							continue
 						}
-						event := gjson.Parse(data)
+						event := ojson.Parse(data)
 						var text string
 						switch format {
 						case sdktranslator.FormatOpenAI:
@@ -121,8 +121,8 @@ func devinContentTestFrame(field protowire.Number, text string) []byte {
 	return helps.WrapConnectEnvelope(protowire.AppendString(frame, text))
 }
 
-func devinContentTestEvents(out <-chan cliproxyexecutor.StreamChunk) ([]gjson.Result, []error) {
-	var events []gjson.Result
+func devinContentTestEvents(out <-chan cliproxyexecutor.StreamChunk) ([]ojson.Result, []error) {
+	var events []ojson.Result
 	var errs []error
 	for len(out) > 0 {
 		chunk := <-out
@@ -131,8 +131,8 @@ func devinContentTestEvents(out <-chan cliproxyexecutor.StreamChunk) ([]gjson.Re
 		}
 		for _, line := range strings.Split(string(chunk.Payload), "\n") {
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
-			if gjson.Valid(data) {
-				events = append(events, gjson.Parse(data))
+			if ojson.Valid(data) {
+				events = append(events, ojson.Parse(data))
 			}
 		}
 	}
@@ -163,7 +163,7 @@ func TestDevinStreamContentLateSignatures(t *testing.T) {
 						tailSignature = signature[20:]
 					}
 					prefix.Write(devinContentTestFrame(3, "甲"))
-					var events []gjson.Result
+					var events []ojson.Result
 					checkpointReached := false
 					checkpoint := devinContentCheckpointReader(func(_ []byte) (int, error) {
 						checkpointReached = true
@@ -211,7 +211,7 @@ func TestDevinStreamContentLateSignatures(t *testing.T) {
 					if (len(errs) == 1) != wantError || len(errs) > 1 {
 						t.Errorf("stream errors = %v, want exactly one error: %v", errs, wantError)
 					}
-					var reasoningDone, completedReasoning gjson.Result
+					var reasoningDone, completedReasoning ojson.Result
 					doneCount, messageDoneCount, completedCount, failedCount := 0, 0, 0, 0
 					var text strings.Builder
 					for _, event := range events {

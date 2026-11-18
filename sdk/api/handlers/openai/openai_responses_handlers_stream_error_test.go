@@ -480,6 +480,12 @@ func TestForwardResponsesStreamExposesTerminalErrors(t *testing.T) {
 			wantExposed: true,
 		},
 		{
+			name:        "bio policy behind bad gateway status",
+			status:      http.StatusBadGateway,
+			message:     `{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
+			wantExposed: true,
+		},
+		{
 			name:        "context length exceeded behind bad gateway status",
 			status:      http.StatusBadGateway,
 			message:     `{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window."}}`,
@@ -1162,4 +1168,23 @@ func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
 			t.Fatal("expected nil pre-FT keepalive channel when send-keepalive-before-ft is false")
 		}
 	})
+}
+
+func TestResponsesSSEPayloadErrorMessage_ImageGenerationUserErrorMapsToBadRequest(t *testing.T) {
+	payloads := [][]byte{
+		[]byte(`{"type":"response.failed","response":{"status":"failed","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}}`),
+		[]byte(`{"type":"error","error":{"type":"image_generation_user_error","code":"invalid_value","message":"Complexity 'medium' is not supported for this image model.","param":"complexity"}}`),
+	}
+	for _, payload := range payloads {
+		errMsg := responsesSSEPayloadErrorMessage(payload)
+		if errMsg == nil {
+			t.Fatalf("expected non-nil ErrorMessage for %s", payload)
+		}
+		if errMsg.StatusCode != http.StatusBadRequest {
+			t.Fatalf("StatusCode = %d, want %d for payload %s", errMsg.StatusCode, http.StatusBadRequest, payload)
+		}
+		if !strings.Contains(errMsg.Error.Error(), "/v1/images/generations") || !strings.Contains(errMsg.Error.Error(), "gpt-5.4-mini") {
+			t.Fatalf("expected remediation guidance in error message, got %q", errMsg.Error.Error())
+		}
+	}
 }

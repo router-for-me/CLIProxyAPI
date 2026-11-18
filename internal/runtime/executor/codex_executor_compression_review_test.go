@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexImageCompressionRejectedFallback(t *testing.T) {
@@ -42,7 +42,7 @@ func TestCodexImageCompressionRejectedFallback(t *testing.T) {
 						if !direct && !bytes.Equal(wire, firstPlain) {
 							t.Error("retry changed the final business payload")
 						}
-						if got := gjson.GetBytes(wire, "audit").Raw; got != `["once"]` {
+						if got := ojson.GetBytes(wire, "audit").Raw; got != `["once"]` {
 							t.Errorf("payload rules must run exactly once: audit=%s", got)
 						}
 						if got := req.Header.Get("Authorization"); got != "Bearer test-oauth" {

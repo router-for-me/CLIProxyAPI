@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
-	"github.com/tidwall/gjson"
 )
 
 type responsesToolIdentity struct {
@@ -24,7 +24,7 @@ type responsesToolIndex struct {
 	custom       map[string]struct{}
 }
 
-func newResponsesToolIndex(root gjson.Result) *responsesToolIndex {
+func newResponsesToolIndex(root ojson.Result) *responsesToolIndex {
 	idx := &responsesToolIndex{
 		byChat:     make(map[string]responsesToolDeclaration),
 		byIdentity: make(map[responsesToolIdentity]string),
@@ -99,6 +99,14 @@ func (idx *responsesToolIndex) applyIdentity(item []byte, qualifiedName, itemPat
 	return translatorcommon.SetResponsesToolCallIdentity(item, name, namespace, itemPath)
 }
 
+func (idx *responsesToolIndex) applyIdentityDoc(doc *ojson.Doc, qualifiedName, itemPath string) {
+	name, namespace := strings.TrimSpace(qualifiedName), ""
+	if d, ok := idx.byChat[name]; ok {
+		name, namespace = d.localName, d.namespace
+	}
+	translatorcommon.SetResponsesToolCallIdentityDoc(doc, name, namespace, itemPath)
+}
+
 func (idx *responsesToolIndex) singleCustomName() (string, bool) {
 	if len(idx.custom) == 1 {
 		for name := range idx.custom {
@@ -120,6 +128,8 @@ func (idx *responsesToolIndex) chatTools() [][]byte {
 			convert = convertResponsesCustomToolToOpenAIChat
 		} else if d.shell {
 			convert = convertResponsesShellToolToOpenAIChat
+		} else if d.search {
+			convert = convertResponsesToolSearchToolToOpenAIChat
 		}
 		if tool, ok := convert(d.tool, d.chatName); ok {
 			merged = append(merged, tool)

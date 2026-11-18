@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
 )
 
 func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -52,7 +52,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if errRequest != nil {
 		return nil, errRequest
 	}
-	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers)
+	applyMetaAPIHeaders(httpReq, enriched, token, true, opts.Headers, prepared.effectiveModel)
 	e.recordMetaRequest(ctx, enriched, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, enriched, 0)
@@ -68,11 +68,11 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("meta executor: close response body error: %v", errClose)
 		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 			return nil, errRead
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		return nil, wrapMetaUpstreamError(httpResp.StatusCode, data)
 	}
@@ -179,7 +179,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				continue
 			}
 			eventData := bytes.TrimSpace(trimmedLine[len(dataTag):])
-			eventType := gjson.GetBytes(eventData, "type").String()
+			eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 			if isMetaSubscriptionUsageEvent(eventType, eventData) {
 				pendingEventLine = nil
 				filteringSubscriptionUsage = false
@@ -189,7 +189,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			if filteringSubscriptionUsage {
 				if eventType == "" {
 					pendingEventLine = nil
-					if gjson.ValidBytes(eventData) {
+					if ojson.ValidBytes(eventData) {
 						filteringSubscriptionUsage = false
 					}
 					skipFilteredBlankLine = true

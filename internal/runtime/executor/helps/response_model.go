@@ -3,8 +3,8 @@ package helps
 import (
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -35,85 +35,130 @@ func extractResponseModelEvent(payload []byte, provider string) (model string, t
 
 // extractClaudeResponseModelEvent extracts the response model from an Anthropic Claude response.
 func extractClaudeResponseModelEvent(data []byte) (model string, terminal bool) {
-	eventType := gjson.GetBytes(data, "type").String()
+	eventType := ojson.GetBytesNoCopy(data, "type").String()
 	switch eventType {
 	case "message_start":
-		m := gjson.GetBytes(data, "message.model")
-		if m.Type == gjson.String {
+		m := ojson.GetBytesNoCopy(data, "message.model")
+		if m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, false
+				return strings.Clone(s), false
 			}
+		}
+		return "", false
+	case "content_block_start":
+		if ojson.GetBytesNoCopy(data, "content_block.type").String() == "fallback" {
+			m := ojson.GetBytesNoCopy(data, "content_block.to.model")
+			if m.Type == ojson.String {
+				s := strings.TrimSpace(m.String())
+				if len(s) <= maxResponseModelLength {
+					return strings.Clone(s), false
+				}
+			}
+		}
+		return "", false
+	case "message_delta":
+		if s := extractClaudeFallbackIterationModel(ojson.GetBytesNoCopy(data, "usage.iterations")); s != "" {
+			return s, false
 		}
 		return "", false
 	case "message_stop":
 		return "", true
 	case "message":
-		m := gjson.GetBytes(data, "model")
-		if m.Type == gjson.String {
+		if s := extractClaudeFallbackIterationModel(ojson.GetBytesNoCopy(data, "usage.iterations")); s != "" {
+			return s, true
+		}
+		m := ojson.GetBytesNoCopy(data, "model")
+		if m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, true
+				return strings.Clone(s), true
 			}
 		}
 		return "", true
 	default:
-		if !gjson.ValidBytes(data) {
+		if !ojson.ValidBytes(data) {
 			return "", false
 		}
-		if m := gjson.GetBytes(data, "message.model"); m.Type == gjson.String {
+		if m := ojson.GetBytesNoCopy(data, "message.model"); m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, false
+				return strings.Clone(s), false
 			}
-		} else if m := gjson.GetBytes(data, "model"); m.Type == gjson.String {
+		} else if m := ojson.GetBytesNoCopy(data, "model"); m.Type == ojson.String {
 			s := strings.TrimSpace(m.String())
 			if len(s) <= maxResponseModelLength {
-				return s, false
+				return strings.Clone(s), false
 			}
 		}
 		return "", false
 	}
 }
 
-// extractGeminiResponseModelEvent extracts the response model from a Google Gemini / Vertex / AIStudio response.
-func extractGeminiResponseModelEvent(data []byte) (model string, terminal bool) {
-	if !gjson.ValidBytes(data) {
-		return "", false
-	}
-	m := gjson.GetBytes(data, "response.modelVersion")
-	if !m.Exists() || m.Type != gjson.String {
-		m = gjson.GetBytes(data, "modelVersion")
-	}
-	if !m.Exists() || m.Type != gjson.String {
-		m = gjson.GetBytes(data, "interaction.model")
-	}
-	if !m.Exists() || m.Type != gjson.String {
-		m = gjson.GetBytes(data, "model")
+func extractClaudeFallbackIterationModel(iterations ojson.Result) string {
+	if !iterations.Exists() || !iterations.IsArray() {
+		return ""
 	}
 	var served string
-	if m.Type == gjson.String {
+	for _, it := range iterations.Array() {
+		if it.Get("type").String() != "fallback_message" {
+			continue
+		}
+		m := it.Get("model")
+		if m.Type != ojson.String {
+			continue
+		}
+		s := strings.TrimSpace(m.String())
+		if s != "" && len(s) <= maxResponseModelLength {
+			served = s
+		}
+	}
+	if served == "" {
+		return ""
+	}
+	return strings.Clone(served)
+}
+
+// extractGeminiResponseModelEvent extracts the response model from a Google Gemini / Vertex / AIStudio response.
+func extractGeminiResponseModelEvent(data []byte) (model string, terminal bool) {
+	if !ojson.ValidBytes(data) {
+		return "", false
+	}
+	m := ojson.GetBytesNoCopy(data, "response.modelVersion")
+	if !m.Exists() || m.Type != ojson.String {
+		m = ojson.GetBytesNoCopy(data, "modelVersion")
+	}
+	if !m.Exists() || m.Type != ojson.String {
+		m = ojson.GetBytesNoCopy(data, "interaction.model")
+	}
+	if !m.Exists() || m.Type != ojson.String {
+		m = ojson.GetBytesNoCopy(data, "model")
+	}
+	var served string
+	if m.Type == ojson.String {
 		served = strings.TrimSpace(m.String())
 		if len(served) > maxResponseModelLength {
 			served = ""
+		} else {
+			served = strings.Clone(served)
 		}
 	}
-	cand := gjson.GetBytes(data, "candidates.0.finishReason")
+	cand := ojson.GetBytesNoCopy(data, "candidates.0.finishReason")
 	if !cand.Exists() {
-		cand = gjson.GetBytes(data, "response.candidates.0.finishReason")
+		cand = ojson.GetBytesNoCopy(data, "response.candidates.0.finishReason")
 	}
 	terminal = cand.Exists() && cand.String() != ""
 	if !terminal {
-		objectType := gjson.GetBytes(data, "object").String()
-		finishReason := gjson.GetBytes(data, "choices.0.finish_reason").String()
+		objectType := ojson.GetBytesNoCopy(data, "object").String()
+		finishReason := ojson.GetBytesNoCopy(data, "choices.0.finish_reason").String()
 		terminal = objectType == "chat.completion" || finishReason != ""
 	}
 	if !terminal {
-		eventType := gjson.GetBytes(data, "event_type").String()
+		eventType := ojson.GetBytesNoCopy(data, "event_type").String()
 		if eventType == "" {
-			eventType = gjson.GetBytes(data, "type").String()
+			eventType = ojson.GetBytesNoCopy(data, "type").String()
 		}
-		status := gjson.GetBytes(data, "interaction.status").String()
+		status := ojson.GetBytesNoCopy(data, "interaction.status").String()
 		terminal = isInteractionsTerminal(eventType, status)
 	}
 	return served, terminal
@@ -121,64 +166,64 @@ func extractGeminiResponseModelEvent(data []byte) (model string, terminal bool) 
 
 // extractGenericResponseModelEvent extracts the response model from standard JSON / SSE responses.
 func extractGenericResponseModelEvent(data []byte) (model string, terminal bool) {
-	if !gjson.ValidBytes(data) {
+	if !ojson.ValidBytes(data) {
 		return "", false
 	}
-	if m := gjson.GetBytes(data, "response.model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "response.model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			eventType := gjson.GetBytes(data, "type").String()
+			eventType := ojson.GetBytesNoCopy(data, "type").String()
 			terminal := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete"
-			return served, terminal
+			return strings.Clone(served), terminal
 		}
 	}
-	if m := gjson.GetBytes(data, "interaction.model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "interaction.model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			eventType := gjson.GetBytes(data, "event_type").String()
+			eventType := ojson.GetBytesNoCopy(data, "event_type").String()
 			if eventType == "" {
-				eventType = gjson.GetBytes(data, "type").String()
+				eventType = ojson.GetBytesNoCopy(data, "type").String()
 			}
-			status := gjson.GetBytes(data, "interaction.status").String()
+			status := ojson.GetBytesNoCopy(data, "interaction.status").String()
 			terminal := isInteractionsTerminal(eventType, status)
-			return served, terminal
+			return strings.Clone(served), terminal
 		}
 	}
-	if m := gjson.GetBytes(data, "modelVersion"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "modelVersion"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			cand := gjson.GetBytes(data, "candidates.0.finishReason")
-			return served, cand.Exists() && cand.String() != ""
+			cand := ojson.GetBytesNoCopy(data, "candidates.0.finishReason")
+			return strings.Clone(served), cand.Exists() && cand.String() != ""
 		}
 	}
-	if m := gjson.GetBytes(data, "response.modelVersion"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "response.modelVersion"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			cand := gjson.GetBytes(data, "response.candidates.0.finishReason")
-			return served, cand.Exists() && cand.String() != ""
+			cand := ojson.GetBytesNoCopy(data, "response.candidates.0.finishReason")
+			return strings.Clone(served), cand.Exists() && cand.String() != ""
 		}
 	}
-	if m := gjson.GetBytes(data, "message.model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "message.model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			return served, false
+			return strings.Clone(served), false
 		}
 	}
-	if m := gjson.GetBytes(data, "model"); m.Type == gjson.String {
+	if m := ojson.GetBytesNoCopy(data, "model"); m.Type == ojson.String {
 		served := strings.TrimSpace(m.String())
 		if len(served) <= maxResponseModelLength {
-			objectType := gjson.GetBytes(data, "object").String()
-			finishReason := gjson.GetBytes(data, "choices.0.finish_reason").String()
-			status := gjson.GetBytes(data, "status").String()
+			objectType := ojson.GetBytesNoCopy(data, "object").String()
+			finishReason := ojson.GetBytesNoCopy(data, "choices.0.finish_reason").String()
+			status := ojson.GetBytesNoCopy(data, "status").String()
 			terminal := objectType == "chat.completion" || finishReason != "" || status == "completed" || status == "incomplete"
-			return served, terminal
+			return strings.Clone(served), terminal
 		}
 	}
-	eventType := gjson.GetBytes(data, "event_type").String()
+	eventType := ojson.GetBytesNoCopy(data, "event_type").String()
 	if eventType == "" {
-		eventType = gjson.GetBytes(data, "type").String()
+		eventType = ojson.GetBytesNoCopy(data, "type").String()
 	}
-	status := gjson.GetBytes(data, "interaction.status").String()
+	status := ojson.GetBytesNoCopy(data, "interaction.status").String()
 	if isInteractionsTerminal(eventType, status) || eventType == "message_stop" {
 		return "", true
 	}
@@ -206,24 +251,24 @@ func extractCodexResponseModelEvent(payload []byte) (model string, terminal bool
 	}
 	// The event type is checked before the payload is validated, so the hot path
 	// (output deltas) stays a single cheap lookup.
-	carriesModel, terminal := codexResponseModelEventKind(gjson.GetBytes(data, "type").String())
+	carriesModel, terminal := codexResponseModelEventKind(ojson.GetBytesNoCopy(data, "type").String())
 	if !carriesModel {
 		return "", false
 	}
-	if !gjson.ValidBytes(data) {
+	if !ojson.ValidBytes(data) {
 		return "", false
 	}
 	// The value is upstream-controlled: reject non-string and oversized names
 	// rather than propagating them into logs and usage records.
-	modelResult := gjson.GetBytes(data, "response.model")
-	if modelResult.Type != gjson.String {
+	modelResult := ojson.GetBytesNoCopy(data, "response.model")
+	if modelResult.Type != ojson.String {
 		return "", terminal
 	}
 	model = strings.TrimSpace(modelResult.String())
 	if len(model) > maxResponseModelLength {
 		return "", terminal
 	}
-	return model, terminal
+	return strings.Clone(model), terminal
 }
 
 // codexResponseModelEventKind reports whether a codex event embeds the authoritative

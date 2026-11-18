@@ -5,8 +5,8 @@ import (
 
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 
+	"github.com/MoeForge/moego/ojson"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestIssue6897_GeminiToolParametersPreserveRefSiblingConstraints(t *testing.T) {
@@ -32,7 +32,7 @@ func TestIssue6897_GeminiToolParametersPreserveRefSiblingConstraints(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := sdktranslator.TranslateRequest(tc.format, sdktranslator.FormatGemini, "gemini-3-flash", []byte(tc.body), false)
-			parameters := gjson.GetBytes(out, "tools.0.functionDeclarations.0.parametersJsonSchema")
+			parameters := ojson.GetBytesNoCopy(out, "tools.0.functionDeclarations.0.parametersJsonSchema")
 			if parameters.Get("properties.x.allOf.0.minLength").Int() != 5 || parameters.Get("properties.x.minLength").Int() != 1 {
 				t.Fatalf("translated tool parameters lost the reference conjunction: %s", out)
 			}
@@ -90,7 +90,7 @@ func TestIssue7149_GeminiToolParametersNumericConstraintsNormalizedAcrossTargets
 	for _, tc := range targets {
 		t.Run(tc.name, func(t *testing.T) {
 			out := sdktranslator.TranslateRequest(sdktranslator.FormatGemini, tc.to, "gemini-2.5-pro", []byte(geminiBody), false)
-			schema := gjson.GetBytes(out, tc.schemaPath)
+			schema := ojson.GetBytesNoCopy(out, tc.schemaPath)
 			if !schema.Exists() {
 				t.Fatalf("expected schema at %s, got: %s", tc.schemaPath, out)
 			}
@@ -107,14 +107,14 @@ func TestIssue7149_GeminiToolParametersNumericConstraintsNormalizedAcrossTargets
 				{"properties.Items.items.minLength", 2},
 			} {
 				got := schema.Get(check.path)
-				if got.Type != gjson.Number || got.Int() != check.want {
+				if got.Type != ojson.Number || got.Int() != check.want {
 					t.Errorf("[%s] %s = %s (type %v), want number %d; schema=%s", tc.name, check.path, got.Raw, got.Type, check.want, schema.Raw)
 				}
 			}
-			if got := schema.Get("properties.Message.enum.0"); got.Type != gjson.String || got.String() != "1" {
+			if got := schema.Get("properties.Message.enum.0"); got.Type != ojson.String || got.String() != "1" {
 				t.Errorf("[%s] enum.0 = %s (type %v), want string \"1\"", tc.name, got.Raw, got.Type)
 			}
-			if got := schema.Get("properties.Message.default"); got.Type != gjson.String || got.String() != "1" {
+			if got := schema.Get("properties.Message.default"); got.Type != ojson.String || got.String() != "1" {
 				t.Errorf("[%s] default = %s (type %v), want string \"1\"", tc.name, got.Raw, got.Type)
 			}
 		})

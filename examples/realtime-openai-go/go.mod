@@ -3,6 +3,7 @@ module github.com/router-for-me/CLIProxyAPI/v7/examples/realtime-openai-go
 go 1.26.0
 
 require (
+	github.com/MoeForge/moego v0.1.0-alpha.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/openai/openai-go/v3 v3.50.0
 )
@@ -13,3 +14,5 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 )
+
+replace github.com/MoeForge/moego => github.com/router-for-me/moego v0.1.3

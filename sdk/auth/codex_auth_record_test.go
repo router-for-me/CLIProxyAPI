@@ -1,10 +1,11 @@
 package auth
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )

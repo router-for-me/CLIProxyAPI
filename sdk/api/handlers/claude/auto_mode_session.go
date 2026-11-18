@@ -2,77 +2,104 @@ package claude
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+)
+
+const (
+	autoModeSessionCapacity = 4096
+	autoModeSessionTTL      = 24 * time.Hour
+	autoModeMaxModelBytes   = 256
 )
 
 type autoModeSessionModel struct {
 	model string
 	seen  time.Time
 }
+
 type autoModeSessionModels struct {
 	mu      sync.Mutex
 	entries map[[32]byte]autoModeSessionModel
 }
 
-// Routing remembers only model names, never transcripts or raw credentials.
-// Unrecognized requests and sessions without a main request retain native routing.
-func (s *autoModeSessionModels) route(headers http.Header, body []byte, now time.Time) []byte {
+func (s *autoModeSessionModels) route(headers http.Header, provider, principal string, body []byte, now time.Time) []byte {
+	if provider == "" || principal == "" {
+		return body
+	}
 	session := headers.Get("X-Claude-Code-Session-Id")
 	if session == "" {
-		metadata := gjson.GetBytes(body, "metadata.user_id").String()
-		session = gjson.Get(metadata, "session_id").String()
+		metadata := ojson.GetBytesNoCopy(body, "metadata.user_id").String()
+		session = ojson.Get(metadata, "session_id").String()
 	}
 	if session == "" || len(session) > 256 {
 		return body
 	}
-	key := sha256.Sum256([]byte(headers.Get("Authorization") + "\x00" + headers.Get("X-Api-Key") + "\x00" + session))
-	class := headers.Get("X-Claude-Code-Request-Class")
-	model := gjson.GetBytes(body, "model").String()
+	key := sha256.Sum256(fmt.Appendf(nil, "%q:%q:%q", provider, principal, session))
+	switch headers.Get("X-Claude-Code-Request-Class") {
+	case "main":
+		model := ojson.GetBytesNoCopy(body, "model")
+		if name := model.String(); model.Type == ojson.String && name != "" && len(name) <= autoModeMaxModelBytes {
+			s.remember(key, name, now)
+		}
+	case "auxiliary":
+		if ojson.GetBytesNoCopy(body, "tools.#").Int() != 0 ||
+			ojson.GetBytesNoCopy(body, "messages.#").Int() != 1 ||
+			ojson.GetBytesNoCopy(body, "messages.0.role").String() != "user" ||
+			!strings.HasPrefix(ojson.GetBytesNoCopy(body, "messages.0.content.0.text").String(), "<transcript>\n") {
+			return body
+		}
+		if model := s.lookup(key, now); model != "" {
+			doc := ojson.NewDoc(body)
+			if err := doc.Set("model", model); err == nil {
+				return doc.Bytes()
+			}
+		}
+	}
+	return body
+}
+
+func (s *autoModeSessionModels) remember(key [32]byte, model string, now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if s.entries == nil {
 		s.entries = make(map[[32]byte]autoModeSessionModel)
 	}
-	if class == "main" && model != "" {
-		if len(s.entries) >= 4096 {
-			var oldest [32]byte
-			oldestTime := now
-			for k, v := range s.entries {
-				if now.Sub(v.seen) > 24*time.Hour {
-					delete(s.entries, k)
-				} else if v.seen.Before(oldestTime) {
-					oldest, oldestTime = k, v.seen
-				}
-			}
-			if len(s.entries) >= 4096 {
-				delete(s.entries, oldest)
+	if _, exists := s.entries[key]; !exists && len(s.entries) >= autoModeSessionCapacity {
+		var oldest [32]byte
+		var oldestTime time.Time
+		var foundOldest bool
+		for k, entry := range s.entries {
+			if now.Sub(entry.seen) > autoModeSessionTTL {
+				delete(s.entries, k)
+			} else if !foundOldest || entry.seen.Before(oldestTime) {
+				oldest, oldestTime, foundOldest = k, entry.seen, true
 			}
 		}
-		s.entries[key] = autoModeSessionModel{model, now}
-		return body
+		if len(s.entries) >= autoModeSessionCapacity {
+			delete(s.entries, oldest)
+		}
 	}
-	// Never reinterpret ordinary auxiliary work as a permission classifier.
-	if class != "auxiliary" || gjson.GetBytes(body, "tools.#").Int() != 0 || gjson.GetBytes(body, "messages.#").Int() != 1 || gjson.GetBytes(body, "messages.0.role").String() != "user" {
-		return body
-	}
-	first := gjson.GetBytes(body, "messages.0.content.0.text").String()
-	if !strings.HasPrefix(first, "<transcript>\n") {
-		return body
-	}
+	// Avoid retaining the request backing buffer through a no-copy JSON result.
+	s.entries[key] = autoModeSessionModel{model: strings.Clone(model), seen: now}
+}
+
+func (s *autoModeSessionModels) lookup(key [32]byte, now time.Time) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	entry, ok := s.entries[key]
-	if !ok || now.Sub(entry.seen) > 24*time.Hour {
+	if !ok {
+		return ""
+	}
+	if now.Sub(entry.seen) > autoModeSessionTTL {
 		delete(s.entries, key)
-		return body
+		return ""
 	}
-	updated, err := sjson.SetBytes(body, "model", entry.model)
-	if err != nil {
-		return body
-	}
-	return updated
+	return entry.model
 }

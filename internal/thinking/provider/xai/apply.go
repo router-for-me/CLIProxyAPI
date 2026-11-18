@@ -14,7 +14,10 @@ type Applier struct {
 	codex.Applier
 }
 
-var _ thinking.ProviderApplier = (*Applier)(nil)
+var (
+	_ thinking.ProviderApplier    = (*Applier)(nil)
+	_ thinking.ProviderDocApplier = (*Applier)(nil)
+)
 
 // NewApplier creates a new xAI thinking applier.
 func NewApplier() *Applier {

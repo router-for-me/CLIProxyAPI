@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	auth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	translator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
@@ -118,7 +118,7 @@ func TestCodexDuplexLaterCredentialFailure(t *testing.T) {
 							}
 							continue
 						}
-						event := gjson.GetBytes(chunk.Payload, "type").String()
+						event := ojson.GetBytes(chunk.Payload, "type").String()
 						if event == "response.created" && queued {
 							input <- core.WebsocketInput{Payload: []byte(`{"type":"response.create","input":[]}`)}
 						}

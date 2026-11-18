@@ -3,7 +3,6 @@ package management
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
@@ -998,6 +998,23 @@ func (h *Handler) mergeExistingAuthFileMetadata(record *coreauth.Auth) {
 	}
 }
 
+type targetedOAuthSaveContextKey struct{}
+
+func withTargetedOAuthSave(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, targetedOAuthSaveContextKey{}, true)
+}
+
+func isTargetedOAuthSave(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	targeted, _ := ctx.Value(targetedOAuthSaveContextKey{}).(bool)
+	return targeted
+}
+
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {
 	if record == nil {
 		return "", fmt.Errorf("token record is nil")
@@ -1007,16 +1024,22 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
-	legacyClaudeCredential, errLegacy := claudeauth.FindMatchingLegacyCredential(ctx, store, record)
-	if errLegacy != nil {
-		return "", errLegacy
-	}
-	if legacyClaudeCredential != nil {
-		coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
-	}
-	legacyXAICredential, errLegacyXAI := xaiauth.FindMatchingLegacyCredential(ctx, store, record)
-	if errLegacyXAI != nil {
-		return "", errLegacyXAI
+	var legacyClaudeCredential *coreauth.Auth
+	var legacyXAICredential *coreauth.Auth
+	if !isTargetedOAuthSave(ctx) {
+		var errLegacy error
+		legacyClaudeCredential, errLegacy = claudeauth.FindMatchingLegacyCredential(ctx, store, record)
+		if errLegacy != nil {
+			return "", errLegacy
+		}
+		if legacyClaudeCredential != nil {
+			coreauth.MergeExistingAuthMetadata(record, legacyClaudeCredential.Metadata)
+		}
+		var errLegacyXAI error
+		legacyXAICredential, errLegacyXAI = xaiauth.FindMatchingLegacyCredential(ctx, store, record)
+		if errLegacyXAI != nil {
+			return "", errLegacyXAI
+		}
 	}
 	adoptXAICredential := legacyXAICredential != nil &&
 		strings.EqualFold(strings.TrimSpace(record.Provider), "xai") &&
@@ -1092,7 +1115,7 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				AuthDir:          authDir,
 				Now:              time.Now(),
 				IDGenerator:      synthesizer.NewStableIDGenerator(),
-				PluginAuthParser: h.pluginHost,
+				PluginAuthParser: h.pluginHostSnapshot(),
 			}, savedPath, data)
 			if errSynthesize != nil {
 				return savedPath, fmt.Errorf("synthesize persisted auth failed: %w", errSynthesize)

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
 )
 
 func TestExtractCodexReasoningEffortWithConfigurationUpdate(t *testing.T) {
@@ -149,7 +151,7 @@ func TestExtractCodexReasoningEffortWithConfigurationUpdateTargetRouting(t *test
 			name = "supported"
 		}
 		t.Run(name, func(t *testing.T) {
-			info := &registry.ModelInfo{ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: supported, Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high", "xhigh"}}}
+			info := &registry.ModelInfo{ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: supported, Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}}
 			body, err := thinking.ApplyThinkingWithModelInfoAndSummary([]byte(source), []byte(source), "opaque-route(high)", "openai-response", "codex", "codex", info, thinking.SummaryConfig{})
 			if err != nil {
 				t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
@@ -164,10 +166,10 @@ func TestExtractCodexReasoningEffortWithConfigurationUpdateTargetRouting(t *test
 			if got := thinking.ExtractTranslatedReasoningEffort(body, "codex"); got != want {
 				t.Fatalf("final effort = %q, want %q; body=%s", got, want, body)
 			}
-			if got := gjson.GetBytes(body, "reasoning.effort").String(); got != "high" {
+			if got := ojson.GetBytes(body, "reasoning.effort").String(); got != "high" {
 				t.Fatalf("final top-level effort = %q, want high; body=%s", got, body)
 			}
-			if hasUpdate := gjson.GetBytes(body, "input.0.type").String() == "configuration_update"; hasUpdate != supported {
+			if hasUpdate := ojson.GetBytes(body, "input.0.type").String() == "configuration_update"; hasUpdate != supported {
 				t.Fatalf("final update present = %t, want %t; body=%s", hasUpdate, supported, body)
 			}
 		})
@@ -301,19 +303,19 @@ func TestApplyConfigurationUpdateRouting(t *testing.T) {
 				t.Fatalf("body changed: got %s, want %s", applied, body)
 			}
 			if !tc.skipEffort {
-				if got := gjson.GetBytes(applied, "reasoning.effort").String(); got != tc.wantEffort {
+				if got := ojson.GetBytes(applied, "reasoning.effort").String(); got != tc.wantEffort {
 					t.Errorf("reasoning.effort = %q, want %q; body=%s", got, tc.wantEffort, applied)
 				}
 			}
-			if tc.wantInput != "" && gjson.GetBytes(applied, "input").Raw != tc.wantInput {
-				t.Errorf("input = %s, want %s; body=%s", gjson.GetBytes(applied, "input").Raw, tc.wantInput, applied)
+			if tc.wantInput != "" && ojson.GetBytes(applied, "input").Raw != tc.wantInput {
+				t.Errorf("input = %s, want %s; body=%s", ojson.GetBytes(applied, "input").Raw, tc.wantInput, applied)
 			}
-			if gjson.GetBytes(body, "reasoning.summary").Exists() {
-				if got := gjson.GetBytes(applied, "reasoning.summary").String(); got != "auto" {
+			if ojson.GetBytes(body, "reasoning.summary").Exists() {
+				if got := ojson.GetBytes(applied, "reasoning.summary").String(); got != "auto" {
 					t.Errorf("reasoning.summary = %q, want auto; body=%s", got, applied)
 				}
 			}
-			if gjson.GetBytes(body, "reasoning.other").Exists() && gjson.GetBytes(applied, "reasoning.other").Int() != 7 {
+			if ojson.GetBytes(body, "reasoning.other").Exists() && ojson.GetBytes(applied, "reasoning.other").Int() != 7 {
 				t.Errorf("reasoning.other changed: %s", applied)
 			}
 			if tc.supported && tc.suffix != "" {
@@ -346,6 +348,7 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 	tests := []struct {
 		name         string
 		body         string
+		wantBody     string
 		wantEffort   string
 		wantLevel    thinking.ThinkingLevel
 		wantMode     thinking.ThinkingMode
@@ -377,9 +380,10 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel,
 		},
 		{
-			name:       "update disables thinking",
+			name:       "unsupported none uses minimum effort",
 			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
-			wantEffort: "none", wantMode: thinking.ModeNone, wantBaseline: thinking.LevelHigh,
+			wantBody:   `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`,
+			wantEffort: "low", wantLevel: thinking.LevelLow, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
 		},
 	}
 	for _, tc := range tests {
@@ -406,8 +410,12 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 					if err != nil {
 						t.Fatalf("ApplyThinking() error = %v", err)
 					}
-					if !bytes.Equal(applied, body) {
-						t.Fatalf("native Responses body changed: got %s, want %s", applied, body)
+					wantBody := body
+					if tc.wantBody != "" {
+						wantBody = []byte(tc.wantBody)
+					}
+					if !bytes.Equal(applied, wantBody) {
+						t.Fatalf("native Responses body = %s, want %s", applied, wantBody)
 					}
 					if got := thinking.ExtractTranslatedReasoningEffort(applied, "codex"); got != tc.wantEffort {
 						t.Errorf("effective effort = %q, want %q", got, tc.wantEffort)
@@ -451,13 +459,13 @@ func TestApplyThinkingPreservesCodexTopLevelReasoningEffortBaseline(t *testing.T
 	}
 
 	// Verify top-level request baseline is preserved for upstream prompt caching.
-	if gotTopEffort := gjson.GetBytes(applied, "reasoning.effort").String(); gotTopEffort != "xhigh" {
+	if gotTopEffort := ojson.GetBytes(applied, "reasoning.effort").String(); gotTopEffort != "xhigh" {
 		t.Fatalf("ApplyThinking() top-level reasoning.effort = %q, want %q", gotTopEffort, "xhigh")
 	}
-	if gotSummary := gjson.GetBytes(applied, "reasoning.summary").String(); gotSummary != "auto" {
+	if gotSummary := ojson.GetBytes(applied, "reasoning.summary").String(); gotSummary != "auto" {
 		t.Fatalf("ApplyThinking() reasoning.summary = %q, want %q", gotSummary, "auto")
 	}
-	if gotInputEffort := gjson.GetBytes(applied, "input.0.reasoning.effort").String(); gotInputEffort != "low" {
+	if gotInputEffort := ojson.GetBytes(applied, "input.0.reasoning.effort").String(); gotInputEffort != "low" {
 		t.Fatalf("ApplyThinking() input[0].reasoning.effort = %q, want %q", gotInputEffort, "low")
 	}
 
@@ -465,5 +473,26 @@ func TestApplyThinkingPreservesCodexTopLevelReasoningEffortBaseline(t *testing.T
 	effort := thinking.ExtractTranslatedReasoningEffort(applied, "codex")
 	if effort != "low" {
 		t.Fatalf("ExtractTranslatedReasoningEffort(applied) = %q, want %q", effort, "low")
+	}
+}
+
+func TestCrossMethodDocMutationsAndThinking(t *testing.T) {
+	raw := []byte(`{"model":"gpt-5","reasoning_effort":"low","extra":"remove_me"}`)
+	doc := ojson.NewDoc(raw)
+	if errSet := doc.Set("model", "gpt-5"); errSet != nil {
+		t.Fatalf("doc.Set error: %v", errSet)
+	}
+	if errThink := thinking.ApplyThinkingDoc(doc, "gpt-5(high)", "openai", "openai", "openai"); errThink != nil {
+		t.Fatalf("ApplyThinkingDoc error: %v", errThink)
+	}
+	if got := doc.Get("reasoning_effort").String(); got != "high" {
+		t.Fatalf("doc.Get(reasoning_effort) = %q, want high", got)
+	}
+	if errDel := util.DeleteJSONDocIfExists(doc, "extra"); errDel != nil {
+		t.Fatalf("DeleteJSONDocIfExists error: %v", errDel)
+	}
+	out := doc.Bytes()
+	if ojson.GetBytesNoCopy(out, "extra").Exists() {
+		t.Fatalf("expected extra to be deleted in %s", string(out))
 	}
 }

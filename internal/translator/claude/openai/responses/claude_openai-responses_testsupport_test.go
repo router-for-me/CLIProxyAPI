@@ -3,7 +3,7 @@ package responses
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // claudeAssistantBlockTypes returns the content block types of the last Claude
@@ -11,12 +11,12 @@ import (
 func claudeAssistantBlockTypes(t *testing.T, claudeReq []byte) []string {
 	t.Helper()
 	var kinds []string
-	gjson.GetBytes(claudeReq, "messages").ForEach(func(_, m gjson.Result) bool {
+	ojson.GetBytesNoCopy(claudeReq, "messages").ForEach(func(_, m ojson.Result) bool {
 		if m.Get("role").String() != "assistant" {
 			return true
 		}
 		kinds = kinds[:0]
-		m.Get("content").ForEach(func(_, b gjson.Result) bool {
+		m.Get("content").ForEach(func(_, b ojson.Result) bool {
 			kinds = append(kinds, b.Get("type").String())
 			return true
 		})
