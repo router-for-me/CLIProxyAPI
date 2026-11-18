@@ -5,8 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestDeleteJSONBytesIfExistsMatchesSJSON(t *testing.T) {
@@ -20,7 +19,7 @@ func TestDeleteJSONBytesIfExistsMatchesSJSON(t *testing.T) {
 		"missing",
 		`a\.b`,
 	} {
-		want, errWant := sjson.DeleteBytes(bytes.Clone(doc), path)
+		want, errWant := ojson.DeleteBytes(bytes.Clone(doc), path)
 		got, errGot := DeleteJSONBytesIfExists(bytes.Clone(doc), path)
 		if (errWant != nil) != (errGot != nil) || !bytes.Equal(got, want) {
 			t.Fatalf("path %q: got %s (%v), want %s (%v)", path, got, errGot, want, errWant)
@@ -50,10 +49,10 @@ func TestDeleteJSONBytesIfExistsMissingPathReturnsInput(t *testing.T) {
 func TestDeleteJSONBytesIfExistsPresentLargeValueAllocation(t *testing.T) {
 	doc := []byte(`{"request":{"contents":"hi","generationConfig":{"thinkingConfig":{"includeThoughts":"` + strings.Repeat("x", 1<<20) + `"}}}}`)
 	const path = "request.generationConfig.thinkingConfig.includeThoughts"
-	if !gjson.ValidBytes(doc) {
+	if !ojson.ValidBytes(doc) {
 		t.Fatal("fixture is not valid JSON")
 	}
-	want, errWant := sjson.DeleteBytes(bytes.Clone(doc), path)
+	want, errWant := ojson.DeleteBytes(bytes.Clone(doc), path)
 	got, errGot := DeleteJSONBytesIfExists(bytes.Clone(doc), path)
 	if errWant != nil || errGot != nil || !bytes.Equal(got, want) {
 		t.Fatalf("delete result differs from sjson: got %q (%v), want %q (%v)", got, errGot, want, errWant)
@@ -62,7 +61,7 @@ func TestDeleteJSONBytesIfExistsPresentLargeValueAllocation(t *testing.T) {
 	sjsonAllocs := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			_, _ = sjson.DeleteBytes(doc, path)
+			_, _ = ojson.DeleteBytes(doc, path)
 		}
 	}).AllocedBytesPerOp()
 
@@ -74,8 +73,32 @@ func TestDeleteJSONBytesIfExistsPresentLargeValueAllocation(t *testing.T) {
 	}).AllocedBytesPerOp()
 
 	// GetGJSONBytesNoCopy ensures that checking existence of a 1 MiB value
-	// does not copy its Raw string (which gjson.GetBytes would).
+	// does not copy its Raw string (which ojson.GetBytes would).
 	if helperAllocs > sjsonAllocs+1024 {
 		t.Fatalf("present large value: helper allocated %d B/op, sjson allocated %d B/op; want difference <= 1024", helperAllocs, sjsonAllocs)
+	}
+}
+
+func TestDeleteJSONDocIfExists(t *testing.T) {
+	if errNil := DeleteJSONDocIfExists(nil, "extra"); errNil != nil {
+		t.Fatalf("DeleteJSONDocIfExists(nil) error: %v", errNil)
+	}
+	emptyDoc := ojson.NewDoc(nil)
+	if errSet := emptyDoc.Set("a", 1); errSet != nil {
+		t.Fatalf("emptyDoc.Set error: %v", errSet)
+	}
+	if errMissing := DeleteJSONDocIfExists(emptyDoc, "missing"); errMissing != nil {
+		t.Fatalf("DeleteJSONDocIfExists(missing) error: %v", errMissing)
+	}
+	doc := ojson.NewDoc([]byte(`{"keep":"yes","extra":"remove_me"}`))
+	if errDel := DeleteJSONDocIfExists(doc, "extra"); errDel != nil {
+		t.Fatalf("DeleteJSONDocIfExists(extra) error: %v", errDel)
+	}
+	out := doc.Bytes()
+	if ojson.GetBytesNoCopy(out, "extra").Exists() {
+		t.Fatalf("expected extra to be deleted in %s", string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "keep").String(); got != "yes" {
+		t.Fatalf("keep = %q, want yes", got)
 	}
 }

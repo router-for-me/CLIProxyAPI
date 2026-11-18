@@ -8,13 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestClaudePayloadConditionsEvaluateOnceAtFinalBarrier(t *testing.T) {
@@ -30,10 +30,10 @@ func TestClaudePayloadConditionsEvaluateOnceAtFinalBarrier(t *testing.T) {
 	}}
 	for _, stream := range []bool{false, true} {
 		body := executeClaudeContextManagementRequest(t, cfg, []byte(`{"model":"claude-opus-5","max_tokens":100,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"second"},{"role":"user","content":"third"}]}`), stream)
-		if gjson.GetBytes(body, "max_tokens").Int() != 200 || gjson.GetBytes(body, "temperature").Float() != 0.2 || gjson.GetBytes(body, "top_p").Float() != 0.4 || !gjson.GetBytes(body, "diagnostics.user").Bool() {
+		if ojson.GetBytes(body, "max_tokens").Int() != 200 || ojson.GetBytes(body, "temperature").Float() != 0.2 || ojson.GetBytes(body, "top_p").Float() != 0.4 || !ojson.GetBytes(body, "diagnostics.user").Bool() {
 			t.Fatalf("conditional rule lost fields (stream=%v): %s", stream, body)
 		}
-		if gjson.GetBytes(body, "messages.#").Int() != 2 {
+		if ojson.GetBytes(body, "messages.#").Int() != 2 {
 			t.Fatalf("conditional filter applied more than once (stream=%v): %s", stream, body)
 		}
 	}
@@ -98,7 +98,7 @@ func TestAIStudioCountPayloadAfterCleanup(t *testing.T) {
 		}
 		body := <-captured
 		for _, field := range []string{"generationConfig", "tools", "safetySettings"} {
-			if gjson.GetBytes(body, field).Exists() != configured {
+			if ojson.GetBytes(body, field).Exists() != configured {
 				t.Fatalf("count cleanup precedence for %s: %s", field, body)
 			}
 		}
@@ -153,10 +153,10 @@ func TestCodexDuplexSteerPayloadBarrier(t *testing.T) {
 			for {
 				select {
 				case body := <-captured:
-					if gjson.GetBytes(body, "type").String() != "response.steer" || gjson.GetBytes(body, "previous_response_id").String() != "parent" {
+					if ojson.GetBytes(body, "type").String() != "response.steer" || ojson.GetBytes(body, "previous_response_id").String() != "parent" {
 						t.Fatalf("steer framing changed: %s", body)
 					}
-					if filter && gjson.GetBytes(body, "input").Exists() || !filter && gjson.GetBytes(body, "input").String() != "configured" {
+					if filter && ojson.GetBytes(body, "input").Exists() || !filter && ojson.GetBytes(body, "input").String() != "configured" {
 						t.Fatalf("steer payload bypassed config: %s", body)
 					}
 					cancel()
@@ -188,15 +188,15 @@ func TestClaudePayloadConditionsObserveBuiltinThinkingRemoval(t *testing.T) {
 		}}
 		payload := []byte(`{"model":"claude-opus-5","max_tokens":100,"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"},"tools":[{"name":"lookup","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`)
 		body := executeClaudeContextManagementRequest(t, cfg, payload, stream)
-		if gjson.GetBytes(body, "thinking").Exists() {
+		if ojson.GetBytes(body, "thinking").Exists() {
 			t.Fatalf("builtin did not remove forced-tool thinking: %s", body)
 		}
 		for _, prefix := range []string{"default", "default_raw", "override", "override_raw"} {
-			if !gjson.GetBytes(body, prefix+"_matched").Bool() || gjson.GetBytes(body, prefix+"_unmatched").Exists() {
+			if !ojson.GetBytes(body, prefix+"_matched").Bool() || ojson.GetBytes(body, prefix+"_unmatched").Exists() {
 				t.Fatalf("%s matched pre-builtin conditions (stream=%v): %s", prefix, stream, body)
 			}
 		}
-		if gjson.GetBytes(body, "metadata").Exists() || !gjson.GetBytes(body, "system").Exists() {
+		if ojson.GetBytes(body, "metadata").Exists() || !ojson.GetBytes(body, "system").Exists() {
 			t.Fatalf("filters matched pre-builtin conditions (stream=%v): %s", stream, body)
 		}
 	}

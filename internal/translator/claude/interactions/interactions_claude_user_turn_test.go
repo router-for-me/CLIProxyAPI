@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -40,7 +40,7 @@ func requireMediaRefusal(t *testing.T, envelope sdktranslator.RequestEnvelope, w
 	if got, want := envelope.Err.Error(), "unsupported content part: "+wantType; got != want {
 		t.Fatalf("error text = %q, want %q", got, want)
 	}
-	if !gjson.ValidBytes(envelope.Body) {
+	if !ojson.ValidBytes(envelope.Body) {
 		t.Fatalf("body is not JSON: %q", envelope.Body)
 	}
 }
@@ -52,10 +52,10 @@ func TestInteractionsToClaudeURIOnlyDocumentBecomesAURLSource(t *testing.T) {
 			if envelope.Err != nil {
 				t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 			}
-			if got := gjson.GetBytes(envelope.Body, "messages.#").Int(); got != 3 {
+			if got := ojson.GetBytesNoCopy(envelope.Body, "messages.#").Int(); got != 3 {
 				t.Fatalf("messages = %d, want 3: %s", got, envelope.Body)
 			}
-			part := gjson.GetBytes(envelope.Body, "messages.2.content.0")
+			part := ojson.GetBytesNoCopy(envelope.Body, "messages.2.content.0")
 			if part.Get("type").String() != "document" || part.Get("source.type").String() != "url" || part.Get("source.url").String() != "https://example.test/a.pdf" {
 				t.Fatalf("part = %s, body = %s", part.Raw, envelope.Body)
 			}
@@ -68,7 +68,7 @@ func TestInteractionsToClaudeURIOnlyImageBecomesAURLSource(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	part := gjson.GetBytes(envelope.Body, "messages.2.content.0")
+	part := ojson.GetBytesNoCopy(envelope.Body, "messages.2.content.0")
 	if part.Get("type").String() != "image" || part.Get("source.type").String() != "url" || part.Get("source.url").String() != "https://example.test/a.png" {
 		t.Fatalf("part = %s, body = %s", part.Raw, envelope.Body)
 	}
@@ -79,7 +79,7 @@ func TestInteractionsToClaudeInlineDocumentStaysBase64(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	part := gjson.GetBytes(envelope.Body, "messages.2.content.0")
+	part := ojson.GetBytesNoCopy(envelope.Body, "messages.2.content.0")
 	if part.Get("source.type").String() != "base64" || part.Get("source.media_type").String() != "application/pdf" || part.Get("source.data").String() != "JVBERi0xLjQK" {
 		t.Fatalf("part = %s, body = %s", part.Raw, envelope.Body)
 	}
@@ -124,7 +124,7 @@ func TestInteractionsToClaudeUnrepresentableMediaBesideTextStillSucceeds(t *test
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	content := gjson.GetBytes(envelope.Body, "messages.2.content").Array()
+	content := ojson.GetBytesNoCopy(envelope.Body, "messages.2.content").Array()
 	if len(content) != 1 || content[0].Get("text").String() != "keep me" {
 		t.Fatalf("text was lost or media leaked: %s", envelope.Body)
 	}
@@ -135,7 +135,7 @@ func TestInteractionsToClaudeFlatContentInputKeepsTextBesideMedia(t *testing.T) 
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "messages.0.content.0.text").String(); got != "Describe this" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "messages.0.content.0.text").String(); got != "Describe this" {
 		t.Fatalf("text was lost: %s", envelope.Body)
 	}
 }
@@ -145,7 +145,7 @@ func TestInteractionsToClaudeFlatContentInputConvertsAndRefusesBareMedia(t *test
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "messages.2.content.0.source.url").String(); got != "https://example.test/a.pdf" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "messages.2.content.0.source.url").String(); got != "https://example.test/a.pdf" {
 		t.Fatalf("bare document was lost: %s", envelope.Body)
 	}
 	requireMediaRefusal(t, interactionsToClaudeEnvelope(`{"model":"m","input":[`+interactionsHistory+`,`+videoByURI+`]}`), "video")
@@ -178,7 +178,7 @@ func TestInteractionsToClaudeAssistantStepEndsTheUserTurn(t *testing.T) {
 
 func TestInteractionsToClaudeExportedWrapperKeepsAJSONBody(t *testing.T) {
 	input := []byte(`{"model":"m","input":[{"type":"user_input","content":[` + videoByURI + `]}]}`)
-	if body, _ := ConvertInteractionsRequestToClaude("m", input, false); !gjson.ValidBytes(body) {
+	if body, _ := ConvertInteractionsRequestToClaude("m", input, false); !ojson.ValidBytes(body) {
 		t.Fatalf("body is not JSON: %q", body)
 	}
 }
@@ -215,7 +215,7 @@ func TestInteractionsToClaudeInlineAudioBesideTextSendsTheTextWithoutAPlaceholde
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	content := gjson.GetBytes(envelope.Body, "messages.2.content").Array()
+	content := ojson.GetBytesNoCopy(envelope.Body, "messages.2.content").Array()
 	if len(content) != 1 || content[0].Get("text").String() != "keep me" {
 		t.Fatalf("text was lost or a placeholder leaked: %s", envelope.Body)
 	}
@@ -226,7 +226,7 @@ func TestInteractionsToClaudeAssistantMediaKeepsThePlaceholder(t *testing.T) {
 	if envelope.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
 	}
-	if got := gjson.GetBytes(envelope.Body, "messages.1.content.0.text").String(); got != "[audio content omitted]" {
+	if got := ojson.GetBytesNoCopy(envelope.Body, "messages.1.content.0.text").String(); got != "[audio content omitted]" {
 		t.Fatalf("assistant placeholder = %q, body = %s", got, envelope.Body)
 	}
 }
@@ -236,14 +236,14 @@ func TestInteractionsToClaudeInlineAndURLDocumentsStillConvert(t *testing.T) {
 	if inline.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", inline.Err, inline.Body)
 	}
-	if got := gjson.GetBytes(inline.Body, "messages.2.content.0.source.type").String(); got != "base64" {
+	if got := ojson.GetBytesNoCopy(inline.Body, "messages.2.content.0.source.type").String(); got != "base64" {
 		t.Fatalf("inline document = %s", inline.Body)
 	}
 	byURL := interactionsFinalTurnToClaude(pdfByURI)
 	if byURL.Err != nil {
 		t.Fatalf("envelope.Err = %v, body = %s", byURL.Err, byURL.Body)
 	}
-	if got := gjson.GetBytes(byURL.Body, "messages.2.content.0.source.url").String(); got != "https://example.test/a.pdf" {
+	if got := ojson.GetBytesNoCopy(byURL.Body, "messages.2.content.0.source.url").String(); got != "https://example.test/a.pdf" {
 		t.Fatalf("url document = %s", byURL.Body)
 	}
 }

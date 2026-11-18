@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/sjson"
 )
 
 func (m *Manager) executeHome(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, countTokens bool) (cliproxyexecutor.Response, error) {
@@ -46,7 +46,7 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		retryRoundPending = false
 		retryRoundWaited = false
 		if isRequestTerminatedError(errExecute) || isRequestStopError(errExecute) {
-			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
+			return cliproxyexecutor.Response{}, errExecute
 		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithHomeRetryLimit(ctx, opts, errExecute, attempt, providers, retryModel, maxWait, homeRetryLimit, defaultRequestRetry)
 		if !shouldRetry {
@@ -135,7 +135,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		clearSchedulerSelectionID(opts.Metadata)
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, "")
-		execCtx = newUpstreamAttemptContext(execCtx)
+		execCtx = coreusage.WithHomeSelection(execCtx, coreusage.HomeSelection{
+			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
+		})
+		execCtx = m.newUpstreamAttemptContext(execCtx)
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
@@ -174,7 +177,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			continue
 		}
 		for _, upstreamModel := range models {
-			execCtx = newUpstreamAttemptContext(execCtx)
+			execCtx = m.newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
@@ -275,7 +278,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if isCredentialScopedError(errExecute) {
 				result.CredentialScope = true
 			}
-			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.runtimeConfigSnapshot())
+			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.requestScopedErrorConfig(execCtx))
 			applyRequestScopedActionToResult(action, okAction, &result)
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
@@ -367,7 +370,7 @@ func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth,
 	if !cliproxyexecutor.DownstreamWebsocket(ctx) || authWebsocketsEnabled(auth) || len(req.Payload) == 0 {
 		return req
 	}
-	updated, errDelete := sjson.DeleteBytes(req.Payload, "generate")
+	updated, errDelete := ojson.DeleteBytes(req.Payload, "generate")
 	if errDelete != nil {
 		return req
 	}

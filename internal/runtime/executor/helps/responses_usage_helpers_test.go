@@ -5,26 +5,26 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestEnsureResponsesUsageDetails_NonStreamJSON(t *testing.T) {
 	raw := []byte(`{"id":"resp_1","object":"response","status":"completed","usage":{"input_tokens":84,"output_tokens":16,"total_tokens":100}}`)
 	got := EnsureResponsesUsageDetails(raw)
 
-	if !gjson.GetBytes(got, "usage.output_tokens_details").Exists() {
+	if !ojson.GetBytes(got, "usage.output_tokens_details").Exists() {
 		t.Fatalf("expected usage.output_tokens_details to exist, got %s", string(got))
 	}
-	if gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int() != 0 {
-		t.Fatalf("expected usage.output_tokens_details.reasoning_tokens == 0, got %d", gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int())
+	if ojson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+		t.Fatalf("expected usage.output_tokens_details.reasoning_tokens == 0, got %d", ojson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int())
 	}
-	if !gjson.GetBytes(got, "usage.input_tokens_details").Exists() {
+	if !ojson.GetBytes(got, "usage.input_tokens_details").Exists() {
 		t.Fatalf("expected usage.input_tokens_details to exist, got %s", string(got))
 	}
-	if gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int() != 0 {
-		t.Fatalf("expected usage.input_tokens_details.cached_tokens == 0, got %d", gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int())
+	if ojson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int() != 0 {
+		t.Fatalf("expected usage.input_tokens_details.cached_tokens == 0, got %d", ojson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int())
 	}
 }
 
@@ -32,17 +32,17 @@ func TestEnsureResponsesUsageDetails_NonStreamJSONWithDataSubstring(t *testing.T
 	raw := []byte(`{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","content":[{"type":"text","text":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUg"}]}],"usage":{"input_tokens":84,"output_tokens":16,"total_tokens":100}}`)
 	got := EnsureResponsesUsageDetails(raw)
 
-	if !gjson.GetBytes(got, "usage.output_tokens_details").Exists() {
+	if !ojson.GetBytes(got, "usage.output_tokens_details").Exists() {
 		t.Fatalf("expected usage.output_tokens_details to exist, got %s", string(got))
 	}
-	if gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int() != 0 {
-		t.Fatalf("expected usage.output_tokens_details.reasoning_tokens == 0, got %d", gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int())
+	if ojson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+		t.Fatalf("expected usage.output_tokens_details.reasoning_tokens == 0, got %d", ojson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int())
 	}
-	if !gjson.GetBytes(got, "usage.input_tokens_details").Exists() {
+	if !ojson.GetBytes(got, "usage.input_tokens_details").Exists() {
 		t.Fatalf("expected usage.input_tokens_details to exist, got %s", string(got))
 	}
-	if gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int() != 0 {
-		t.Fatalf("expected usage.input_tokens_details.cached_tokens == 0, got %d", gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int())
+	if ojson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int() != 0 {
+		t.Fatalf("expected usage.input_tokens_details.cached_tokens == 0, got %d", ojson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int())
 	}
 }
 
@@ -54,17 +54,17 @@ func TestEnsureResponsesUsageDetails_SSEData(t *testing.T) {
 		t.Fatalf("expected data: prefix preserved, got %s", string(got))
 	}
 	jsonBody := bytes.TrimPrefix(got, []byte("data: "))
-	if !gjson.GetBytes(jsonBody, "response.usage.output_tokens_details").Exists() {
+	if !ojson.GetBytes(jsonBody, "response.usage.output_tokens_details").Exists() {
 		t.Fatalf("expected response.usage.output_tokens_details to exist, got %s", string(got))
 	}
-	if gjson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
-		t.Fatalf("expected reasoning_tokens == 0, got %d", gjson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int())
+	if ojson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+		t.Fatalf("expected reasoning_tokens == 0, got %d", ojson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int())
 	}
-	if !gjson.GetBytes(jsonBody, "response.usage.input_tokens_details").Exists() {
+	if !ojson.GetBytes(jsonBody, "response.usage.input_tokens_details").Exists() {
 		t.Fatalf("expected response.usage.input_tokens_details to exist, got %s", string(got))
 	}
-	if gjson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
-		t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int())
+	if ojson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
+		t.Fatalf("expected cached_tokens == 0, got %d", ojson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int())
 	}
 }
 
@@ -79,17 +79,17 @@ func TestEnsureResponsesUsageDetails_SSEEventDataMultiLine(t *testing.T) {
 	for _, line := range bytes.Split(got, []byte("\n")) {
 		if bytes.HasPrefix(line, []byte("data: ")) {
 			jsonBody := bytes.TrimPrefix(line, []byte("data: "))
-			if !gjson.GetBytes(jsonBody, "response.usage.output_tokens_details").Exists() {
+			if !ojson.GetBytes(jsonBody, "response.usage.output_tokens_details").Exists() {
 				t.Fatalf("expected response.usage.output_tokens_details to exist in multi-line frame, got %s", string(got))
 			}
-			if gjson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
-				t.Fatalf("expected reasoning_tokens == 0, got %d", gjson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int())
+			if ojson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+				t.Fatalf("expected reasoning_tokens == 0, got %d", ojson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int())
 			}
-			if !gjson.GetBytes(jsonBody, "response.usage.input_tokens_details").Exists() {
+			if !ojson.GetBytes(jsonBody, "response.usage.input_tokens_details").Exists() {
 				t.Fatalf("expected response.usage.input_tokens_details to exist in multi-line frame, got %s", string(got))
 			}
-			if gjson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
-				t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int())
+			if ojson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
+				t.Fatalf("expected cached_tokens == 0, got %d", ojson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int())
 			}
 		}
 	}
@@ -100,11 +100,11 @@ func TestEnsureResponsesUsageDetails_PreservesExistingDetails(t *testing.T) {
 	got := EnsureResponsesUsageDetails(raw)
 
 	jsonBody := bytes.TrimPrefix(got, []byte("data: "))
-	if gjson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int() != 2 {
-		t.Fatalf("expected reasoning_tokens == 2, got %d", gjson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int())
+	if ojson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int() != 2 {
+		t.Fatalf("expected reasoning_tokens == 2, got %d", ojson.GetBytes(jsonBody, "response.usage.output_tokens_details.reasoning_tokens").Int())
 	}
-	if gjson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int() != 3 {
-		t.Fatalf("expected cached_tokens == 3, got %d", gjson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int())
+	if ojson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int() != 3 {
+		t.Fatalf("expected cached_tokens == 3, got %d", ojson.GetBytes(jsonBody, "response.usage.input_tokens_details.cached_tokens").Int())
 	}
 }
 
@@ -112,11 +112,11 @@ func TestEnsureResponsesUsageDetails_HandlesNullOrEmptyDetails(t *testing.T) {
 	raw := []byte(`{"id":"resp_1","usage":{"input_tokens":10,"input_tokens_details":null,"output_tokens":4,"output_tokens_details":{},"total_tokens":14}}`)
 	got := EnsureResponsesUsageDetails(raw)
 
-	if gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int() != 0 {
-		t.Fatalf("expected reasoning_tokens == 0, got %d", gjson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int())
+	if ojson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+		t.Fatalf("expected reasoning_tokens == 0, got %d", ojson.GetBytes(got, "usage.output_tokens_details.reasoning_tokens").Int())
 	}
-	if gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int() != 0 {
-		t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int())
+	if ojson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int() != 0 {
+		t.Fatalf("expected cached_tokens == 0, got %d", ojson.GetBytes(got, "usage.input_tokens_details.cached_tokens").Int())
 	}
 }
 
@@ -186,19 +186,19 @@ func TestTranslateStreamWithClaudeInputTokens_OpenAICompatTranslation_PatchesRes
 		for _, line := range bytes.Split(ch, []byte("\n")) {
 			if bytes.HasPrefix(line, []byte("data: ")) {
 				payload := bytes.TrimPrefix(line, []byte("data: "))
-				if gjson.GetBytes(payload, "type").String() == "response.completed" {
+				if ojson.GetBytes(payload, "type").String() == "response.completed" {
 					foundCompleted = true
-					if !gjson.GetBytes(payload, "response.usage.output_tokens_details").Exists() {
+					if !ojson.GetBytes(payload, "response.usage.output_tokens_details").Exists() {
 						t.Fatalf("expected output_tokens_details to exist on translated response.completed: %s", string(ch))
 					}
-					if gjson.GetBytes(payload, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
-						t.Fatalf("expected reasoning_tokens == 0, got %d", gjson.GetBytes(payload, "response.usage.output_tokens_details.reasoning_tokens").Int())
+					if ojson.GetBytes(payload, "response.usage.output_tokens_details.reasoning_tokens").Int() != 0 {
+						t.Fatalf("expected reasoning_tokens == 0, got %d", ojson.GetBytes(payload, "response.usage.output_tokens_details.reasoning_tokens").Int())
 					}
-					if !gjson.GetBytes(payload, "response.usage.input_tokens_details").Exists() {
+					if !ojson.GetBytes(payload, "response.usage.input_tokens_details").Exists() {
 						t.Fatalf("expected input_tokens_details to exist on translated response.completed: %s", string(ch))
 					}
-					if gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
-						t.Fatalf("expected cached_tokens == 0, got %d", gjson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int())
+					if ojson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int() != 0 {
+						t.Fatalf("expected cached_tokens == 0, got %d", ojson.GetBytes(payload, "response.usage.input_tokens_details.cached_tokens").Int())
 					}
 				}
 			}

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertGeminiResponseToOpenAICompletionTokensIncludeThoughts(t *testing.T) {
@@ -16,7 +16,7 @@ func TestConvertGeminiResponseToOpenAICompletionTokensIncludeThoughts(t *testing
 	if len(result) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(result))
 	}
-	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
+	completionTokens := ojson.GetBytesNoCopy(result[0], "usage.completion_tokens")
 	if !completionTokens.Exists() || completionTokens.Int() != 47 {
 		t.Fatalf("completion_tokens = %s, want present with value 47. Output: %s", completionTokens.Raw, result[0])
 	}
@@ -26,7 +26,7 @@ func TestConvertGeminiResponseToOpenAINonStreamCompletionTokensIncludeThoughts(t
 	response := []byte(`{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}`)
 
 	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
-	completionTokens := gjson.GetBytes(result, "usage.completion_tokens")
+	completionTokens := ojson.GetBytesNoCopy(result, "usage.completion_tokens")
 	if !completionTokens.Exists() || completionTokens.Int() != 42 {
 		t.Fatalf("completion_tokens = %s, want present with value 42. Output: %s", completionTokens.Raw, result)
 	}
@@ -41,7 +41,7 @@ func TestGeminiFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	if len(result1) != 1 {
 		t.Fatalf("expected 1 result from chunk1, got %d", len(result1))
 	}
-	fr1 := gjson.GetBytes(result1[0], "choices.0.finish_reason")
+	fr1 := ojson.GetBytesNoCopy(result1[0], "choices.0.finish_reason")
 	if fr1.Exists() && fr1.String() != "" && fr1.Type.String() != "Null" {
 		t.Fatalf("expected null finish_reason on tool chunk, got %v", fr1.String())
 	}
@@ -54,11 +54,11 @@ func TestGeminiFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	if len(result3) != 1 {
 		t.Fatalf("expected 1 result from chunk3, got %d", len(result3))
 	}
-	fr3 := gjson.GetBytes(result3[0], "choices.0.finish_reason").String()
+	fr3 := ojson.GetBytesNoCopy(result3[0], "choices.0.finish_reason").String()
 	if fr3 != "tool_calls" {
 		t.Fatalf("expected finish_reason tool_calls, got %s", fr3)
 	}
-	nfr3 := gjson.GetBytes(result3[0], "choices.0.native_finish_reason").String()
+	nfr3 := ojson.GetBytesNoCopy(result3[0], "choices.0.native_finish_reason").String()
 	if nfr3 != "stop" {
 		t.Fatalf("expected native_finish_reason stop, got %s", nfr3)
 	}
@@ -68,13 +68,13 @@ func TestConvertGeminiResponseToOpenAINonStream_EmptyTextProducesEmptyString(t *
 	response := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"text":"","thought":true}]},"finishReason":"STOP"}]}`)
 	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
 
-	content := gjson.GetBytes(result, "choices.0.message.content")
-	if !content.Exists() || content.String() != "" || content.Type == gjson.Null {
+	content := ojson.GetBytesNoCopy(result, "choices.0.message.content")
+	if !content.Exists() || content.String() != "" || content.Type == ojson.Null {
 		t.Fatalf("expected content to be empty string \"\", got %v (type %v)", content.Value(), content.Type)
 	}
 
-	reasoning := gjson.GetBytes(result, "choices.0.message.reasoning_content")
-	if !reasoning.Exists() || reasoning.String() != "" || reasoning.Type == gjson.Null {
+	reasoning := ojson.GetBytesNoCopy(result, "choices.0.message.reasoning_content")
+	if !reasoning.Exists() || reasoning.String() != "" || reasoning.Type == ojson.Null {
 		t.Fatalf("expected reasoning_content to be empty string \"\", got %v (type %v)", reasoning.Value(), reasoning.Type)
 	}
 }
@@ -86,7 +86,7 @@ func TestConvertGeminiResponseToOpenAINonStream_AudioTranscriptionPartProducesCo
 	response := []byte(`{"candidates":[{"content":{"parts":[{"text":""},{"audioTranscription":{"text":"Hello world"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":185,"totalTokenCount":185}}`)
 	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
 
-	content := gjson.GetBytes(result, "choices.0.message.content")
+	content := ojson.GetBytesNoCopy(result, "choices.0.message.content")
 	if !content.Exists() || content.String() != "Hello world" {
 		t.Fatalf("expected content to carry the transcript, got %v. Output: %s", content.Raw, result)
 	}
@@ -96,7 +96,7 @@ func TestConvertGeminiResponseToOpenAINonStream_SingleAudioTranscriptionPart(t *
 	response := []byte(`{"candidates":[{"content":{"parts":[{"audioTranscription":{"text":"Single transcription part"}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":185,"totalTokenCount":185}}`)
 	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
 
-	content := gjson.GetBytes(result, "choices.0.message.content")
+	content := ojson.GetBytesNoCopy(result, "choices.0.message.content")
 	if !content.Exists() || content.String() != "Single transcription part" {
 		t.Fatalf("expected content to carry the transcript, got %v. Output: %s", content.Raw, result)
 	}
@@ -112,7 +112,7 @@ func TestConvertGeminiResponseToOpenAI_AudioTranscriptionPartStreamsContent(t *t
 		t.Fatalf("expected 1 result, got %d", len(result))
 	}
 
-	content := gjson.GetBytes(result[0], "choices.0.delta.content")
+	content := ojson.GetBytesNoCopy(result[0], "choices.0.delta.content")
 	if !content.Exists() || content.String() != "Testing one two three." {
 		t.Fatalf("expected delta.content to carry the transcript, got %v. Output: %s", content.Raw, result[0])
 	}
@@ -122,7 +122,7 @@ func TestConvertGeminiResponseToOpenAINonStream_TextPrecedenceOverAudioTranscrip
 	response := []byte(`{"candidates":[{"content":{"parts":[{"text":"explicit text","audioTranscription":{"text":"ignored transcription"}}]},"finishReason":"STOP"}]}`)
 	result := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, response, nil)
 
-	content := gjson.GetBytes(result, "choices.0.message.content")
+	content := ojson.GetBytesNoCopy(result, "choices.0.message.content")
 	if !content.Exists() || content.String() != "explicit text" {
 		t.Fatalf("expected content to prioritize explicit text, got %v. Output: %s", content.Raw, result)
 	}
@@ -142,7 +142,7 @@ func TestConvertGeminiResponseToOpenAI_PinsSanitizedNameMapPerStream(t *testing.
 	if len(out) != 1 {
 		t.Fatalf("expected 1 chunk output, got %d", len(out))
 	}
-	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
+	if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp/search" {
 		t.Fatalf("restored tool name = %q, want mcp/search", got)
 	}
 
@@ -154,7 +154,7 @@ func TestConvertGeminiResponseToOpenAI_PinsSanitizedNameMapPerStream(t *testing.
 	if len(outNil) != 1 {
 		t.Fatalf("expected 1 chunk output, got %d", len(outNil))
 	}
-	if got := gjson.GetBytes(outNil[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp_search" {
+	if got := ojson.GetBytesNoCopy(outNil[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "mcp_search" {
 		t.Fatalf("tool name = %q, want mcp_search (must not rebuild nil SanitizedNameMap on later chunks)", got)
 	}
 }
@@ -198,6 +198,12 @@ func TestConvertGeminiResponseToOpenAI_NonStopFinishReasonsMapToContentFilter(t 
 			wantFinishReason: "content_filter",
 			wantNativeReason: "prohibited_content",
 		},
+		{
+			name:             "MAX_TOKENS",
+			upstreamReason:   "MAX_TOKENS",
+			wantFinishReason: "length",
+			wantNativeReason: "max_tokens",
+		},
 	}
 
 	for _, tc := range cases {
@@ -208,10 +214,10 @@ func TestConvertGeminiResponseToOpenAI_NonStopFinishReasonsMapToContentFilter(t 
 			if len(out) != 1 {
 				t.Fatalf("expected 1 chunk, got %d", len(out))
 			}
-			if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != tc.wantFinishReason {
+			if got := ojson.GetBytesNoCopy(out[0], "choices.0.finish_reason").String(); got != tc.wantFinishReason {
 				t.Fatalf("stream finish_reason = %q, want %q; payload=%s", got, tc.wantFinishReason, out[0])
 			}
-			if got := gjson.GetBytes(out[0], "choices.0.native_finish_reason").String(); got != tc.wantNativeReason {
+			if got := ojson.GetBytesNoCopy(out[0], "choices.0.native_finish_reason").String(); got != tc.wantNativeReason {
 				t.Fatalf("stream native_finish_reason = %q, want %q; payload=%s", got, tc.wantNativeReason, out[0])
 			}
 		})
@@ -219,10 +225,10 @@ func TestConvertGeminiResponseToOpenAI_NonStopFinishReasonsMapToContentFilter(t 
 		t.Run("nonstream/"+tc.name, func(t *testing.T) {
 			raw := []byte(`{"candidates":[{"content":{"role":"model"},"finishReason":"` + tc.upstreamReason + `"}],"usageMetadata":{"promptTokenCount":481701,"candidatesTokenCount":16,"totalTokenCount":482881},"modelVersion":"gemini-4-argon","responseId":"EAjaaoCDC_Ooq8YP3f-2wAQ"}`)
 			out := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-4-argon", nil, nil, raw, nil)
-			if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != tc.wantFinishReason {
+			if got := ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String(); got != tc.wantFinishReason {
 				t.Fatalf("non-stream finish_reason = %q, want %q; payload=%s", got, tc.wantFinishReason, out)
 			}
-			if got := gjson.GetBytes(out, "choices.0.native_finish_reason").String(); got != tc.wantNativeReason {
+			if got := ojson.GetBytesNoCopy(out, "choices.0.native_finish_reason").String(); got != tc.wantNativeReason {
 				t.Fatalf("non-stream native_finish_reason = %q, want %q; payload=%s", got, tc.wantNativeReason, out)
 			}
 		})
@@ -248,7 +254,7 @@ func TestConvertGeminiResponseToOpenAI_FinishReasonWithoutInlineUsage(t *testing
 
 		var terminals [][]byte
 		for _, c := range all {
-			if gjson.GetBytes(c, "choices.0.finish_reason").Value() != nil {
+			if ojson.GetBytesNoCopy(c, "choices.0.finish_reason").Value() != nil {
 				terminals = append(terminals, c)
 			}
 		}
@@ -256,13 +262,13 @@ func TestConvertGeminiResponseToOpenAI_FinishReasonWithoutInlineUsage(t *testing
 			t.Fatalf("expected exactly 1 chunk with non-null finish_reason, got %d; chunks=%q", len(terminals), all)
 		}
 		terminal := terminals[0]
-		if got := gjson.GetBytes(terminal, "choices.0.finish_reason").String(); got != "content_filter" {
+		if got := ojson.GetBytesNoCopy(terminal, "choices.0.finish_reason").String(); got != "content_filter" {
 			t.Fatalf("finish_reason = %q, want content_filter; payload=%s", got, terminal)
 		}
-		if got := gjson.GetBytes(terminal, "choices.0.native_finish_reason").String(); got != "malformed_response" {
+		if got := ojson.GetBytesNoCopy(terminal, "choices.0.native_finish_reason").String(); got != "malformed_response" {
 			t.Fatalf("native_finish_reason = %q, want malformed_response; payload=%s", got, terminal)
 		}
-		if got := gjson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 100 {
+		if got := ojson.GetBytesNoCopy(terminal, "usage.prompt_tokens").Int(); got != 100 {
 			t.Fatalf("usage.prompt_tokens = %d, want 100; payload=%s", got, terminal)
 		}
 	})
@@ -280,7 +286,7 @@ func TestConvertGeminiResponseToOpenAI_FinishReasonWithoutInlineUsage(t *testing
 
 		var terminals [][]byte
 		for _, c := range all {
-			if gjson.GetBytes(c, "choices.0.finish_reason").Value() != nil {
+			if ojson.GetBytesNoCopy(c, "choices.0.finish_reason").Value() != nil {
 				terminals = append(terminals, c)
 			}
 		}
@@ -288,13 +294,13 @@ func TestConvertGeminiResponseToOpenAI_FinishReasonWithoutInlineUsage(t *testing
 			t.Fatalf("expected exactly 1 chunk with non-null finish_reason on [DONE], got %d; chunks=%q", len(terminals), all)
 		}
 		terminal := terminals[0]
-		if got := gjson.GetBytes(terminal, "choices.0.finish_reason").String(); got != "content_filter" {
+		if got := ojson.GetBytesNoCopy(terminal, "choices.0.finish_reason").String(); got != "content_filter" {
 			t.Fatalf("finish_reason = %q, want content_filter; payload=%s", got, terminal)
 		}
-		if got := gjson.GetBytes(terminal, "choices.0.native_finish_reason").String(); got != "malformed_response" {
+		if got := ojson.GetBytesNoCopy(terminal, "choices.0.native_finish_reason").String(); got != "malformed_response" {
 			t.Fatalf("native_finish_reason = %q, want malformed_response; payload=%s", got, terminal)
 		}
-		if got := gjson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 200 {
+		if got := ojson.GetBytesNoCopy(terminal, "usage.prompt_tokens").Int(); got != 200 {
 			t.Fatalf("usage.prompt_tokens = %d, want 200; payload=%s", got, terminal)
 		}
 		if extraDone := ConvertGeminiResponseToOpenAI(ctx, "gemini-4-argon", nil, nil, []byte("[DONE]"), &param); len(extraDone) != 0 {
@@ -311,10 +317,10 @@ func TestConvertGeminiResponseToOpenAI_FinishReasonWithoutInlineUsage(t *testing
 		if len(done) != 1 {
 			t.Fatalf("expected 1 terminal chunk on [DONE], got %d (out1=%q done=%q)", len(done), out1, done)
 		}
-		if got := gjson.GetBytes(done[0], "choices.0.finish_reason").String(); got != "content_filter" {
+		if got := ojson.GetBytesNoCopy(done[0], "choices.0.finish_reason").String(); got != "content_filter" {
 			t.Fatalf("finish_reason = %q, want content_filter; payload=%s", got, done[0])
 		}
-		if got := gjson.GetBytes(done[0], "choices.0.native_finish_reason").String(); got != "safety" {
+		if got := ojson.GetBytesNoCopy(done[0], "choices.0.native_finish_reason").String(); got != "safety" {
 			t.Fatalf("native_finish_reason = %q, want safety; payload=%s", got, done[0])
 		}
 	})
@@ -330,7 +336,7 @@ func TestConvertGeminiResponseToOpenAI_ParallelToolCallsAcrossChunks(t *testing.
 	var ids []string
 	for _, chunk := range [][]byte{chunk1, chunk2} {
 		for _, out := range ConvertGeminiResponseToOpenAI(ctx, "gemini-3-flash", nil, nil, chunk, &param) {
-			for _, tc := range gjson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
+			for _, tc := range ojson.GetBytesNoCopy(out, "choices.0.delta.tool_calls").Array() {
 				indices = append(indices, tc.Get("index").Int())
 				ids = append(ids, tc.Get("id").String())
 			}
@@ -362,7 +368,7 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 	for chunkIdx, chunk := range chunks {
 		outs := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, chunk, &param)
 		for _, out := range outs {
-			tcs := gjson.GetBytes(out, "choices.0.delta.tool_calls")
+			tcs := ojson.GetBytesNoCopy(out, "choices.0.delta.tool_calls")
 			if !tcs.Exists() || !tcs.IsArray() {
 				continue
 			}
@@ -413,10 +419,10 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 		var finishReason string
 		for _, ch := range streamChunks {
 			for _, out := range ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, ch, &p) {
-				if fr := gjson.GetBytes(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != gjson.Null {
+				if fr := ojson.GetBytesNoCopy(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != ojson.Null {
 					finishReason = fr.String()
 				}
-				for _, tc := range gjson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
+				for _, tc := range ojson.GetBytesNoCopy(out, "choices.0.delta.tool_calls").Array() {
 					idx := tc.Get("index").Int()
 					if id := tc.Get("id").String(); id != "" {
 						idsByIndex[idx] = id
@@ -446,14 +452,14 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 		var p1 any
 		cPing := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"ping","willContinue":false}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7},"modelVersion":"gemini-2.5-pro","responseId":"resp-ping"}`)
 		outs1 := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, cPing, &p1)
-		if got := gjson.GetBytes(outs1[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "{}" {
+		if got := ojson.GetBytesNoCopy(outs1[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "{}" {
 			t.Fatalf("ping arguments = %q, want {}", got)
 		}
 
 		var p2 any
 		cArgs := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"get_weather","args":{"city":"Paris"},"partialArgs":[]}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7},"modelVersion":"gemini-2.5-pro","responseId":"resp-args"}`)
 		outs2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, cArgs, &p2)
-		if got := gjson.GetBytes(outs2[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"city":"Paris"}` {
+		if got := ojson.GetBytesNoCopy(outs2[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"city":"Paris"}` {
 			t.Fatalf("args fallback = %q", got)
 		}
 	})
@@ -470,13 +476,13 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 		var idCount int
 		for _, ch := range chunks {
 			for _, out := range ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, ch, &p) {
-				for _, tc := range gjson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
+				for _, tc := range ojson.GetBytesNoCopy(out, "choices.0.delta.tool_calls").Array() {
 					if tc.Get("id").String() != "" {
 						idCount++
 					}
 					argBuf.WriteString(tc.Get("function.arguments").String())
 				}
-				if fr := gjson.GetBytes(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != gjson.Null {
+				if fr := ojson.GetBytesNoCopy(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != ojson.Null {
 					finishReason = fr.String()
 				}
 			}
@@ -505,10 +511,10 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 		var finishReason string
 		for _, ch := range chunks {
 			for _, out := range ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, ch, &p) {
-				for _, tc := range gjson.GetBytes(out, "choices.0.delta.tool_calls").Array() {
+				for _, tc := range ojson.GetBytesNoCopy(out, "choices.0.delta.tool_calls").Array() {
 					argBuf.WriteString(tc.Get("function.arguments").String())
 				}
-				if fr := gjson.GetBytes(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != gjson.Null {
+				if fr := ojson.GetBytesNoCopy(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != ojson.Null {
 					finishReason = fr.String()
 				}
 			}
@@ -530,7 +536,7 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 		all = append(all, ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, c2, &p)...)
 		all = append(all, ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, []byte("[DONE]"), &p)...)
 		for _, out := range all {
-			if fr := gjson.GetBytes(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != gjson.Null {
+			if fr := ojson.GetBytesNoCopy(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != ojson.Null {
 				t.Fatalf("unexpected finish_reason when call_a never completed: %s", out)
 			}
 		}
@@ -543,9 +549,225 @@ func TestConvertGeminiResponseToOpenAI_VertexStreamingPartialArgs(t *testing.T) 
 		doneOuts := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, []byte("[DONE]"), &p)
 		all := append(outs, doneOuts...)
 		for _, out := range all {
-			if fr := gjson.GetBytes(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != gjson.Null {
+			if fr := ojson.GetBytesNoCopy(out, "choices.0.finish_reason"); fr.Exists() && fr.Type != ojson.Null {
 				t.Fatalf("unexpected finish_reason on interrupted tool call stream: %s", out)
 			}
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAI_InputBufferReuse(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	buf := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"modelVersion":"gemini-2.5-flash","responseId":"resp_buf_1"}`)
+	ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, buf, &param)
+	for i := range buf {
+		buf[i] = 'X'
+	}
+	done := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-flash", nil, nil, []byte("[DONE]"), &param)
+	if len(done) != 1 {
+		t.Fatalf("expected 1 terminal chunk on [DONE], got %d", len(done))
+	}
+	if got := ojson.GetBytesNoCopy(done[0], "id").String(); got != "resp_buf_1" {
+		t.Fatalf("id = %q, want resp_buf_1", got)
+	}
+	if got := ojson.GetBytesNoCopy(done[0], "model").String(); got != "gemini-2.5-flash" {
+		t.Fatalf("model = %q, want gemini-2.5-flash", got)
+	}
+	if got := ojson.GetBytesNoCopy(done[0], "choices.0.finish_reason").String(); got != "stop" {
+		t.Fatalf("finish_reason = %q, want stop; payload=%s", got, done[0])
+	}
+}
+
+func TestConvertGeminiResponseToOpenAI_MultiPartThoughtAndTrailingSignature(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("thought followed by empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing the request..."},{"thought":true,"text":"","thoughtSignature":"EjQK..."}]}}]}`)
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Analyzing the request..." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Analyzing the request...", out[0])
+		}
+		if content := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content"); content.Type != ojson.Null {
+			t.Fatalf("delta.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out[0])
+		}
+		if role := ojson.GetBytesNoCopy(out[0], "choices.0.delta.role").String(); role != "assistant" {
+			t.Fatalf("delta.role = %q, want assistant; payload=%s", role, out[0])
+		}
+	})
+
+	t.Run("thought followed by non-thought empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"Analyzing the request..."},{"text":"","thoughtSignature":"EjQK..."}]}}]}`)
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Analyzing the request..." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Analyzing the request...", out[0])
+		}
+		if content := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content"); content.Type != ojson.Null {
+			t.Fatalf("delta.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out[0])
+		}
+	})
+
+	t.Run("visible text followed by empty-text thoughtSignature part", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"parts":[{"text":"Final answer"},{"text":"","thoughtSignature":"EjQK..."}]}}]}`)
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "Final answer" {
+			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Final answer", out[0])
+		}
+		if reasoning := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content"); reasoning.Type != ojson.Null {
+			t.Fatalf("delta.reasoning_content = %s (type %v), want null; payload=%s", reasoning.Raw, reasoning.Type, out[0])
+		}
+	})
+
+	t.Run("multiple thought parts and multiple text parts in same chunk", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"Step 1. "},{"thought":true,"text":"Step 2."},{"text":"Hello "},{"text":"world"}]}}]}`)
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-2.5-pro", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("expected 1 chunk, got %d", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Step 1. Step 2." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Step 1. Step 2.", out[0])
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.content").String(); got != "Hello world" {
+			t.Fatalf("delta.content = %q, want %q; payload=%s", got, "Hello world", out[0])
+		}
+	})
+
+	t.Run("non-stream pure thoughtSignature carrier with empty text does not emit empty string", func(t *testing.T) {
+		raw := []byte(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"Thinking..."},{"text":"","thoughtSignature":"EjQK..."},{"functionCall":{"name":"get_time","args":{"tz":"UTC"}}}]},"finishReason":"STOP"}]}`)
+		out := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-2.5-pro", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "choices.0.message.reasoning_content").String(); got != "Thinking..." {
+			t.Fatalf("message.reasoning_content = %q, want %q; payload=%s", got, "Thinking...", out)
+		}
+		if content := ojson.GetBytesNoCopy(out, "choices.0.message.content"); content.Type != ojson.Null {
+			t.Fatalf("message.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out)
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAINonStream_SkipsThoughtInlineDataImages(t *testing.T) {
+	ctx := context.Background()
+	raw := []byte(`{
+		"candidates": [{
+			"index": 0,
+			"content": {
+				"role": "model",
+				"parts": [
+					{"thought": true, "text": "**Rendering objects realistically** I'm focusing on the apple."},
+					{"thought": true, "inlineData": {"mimeType": "image/png", "data": "RFJBRlRfSU1BR0U="}},
+					{"thought": true, "text": "**Refining Image Details** Adjusting highlights."},
+					{"inlineData": {"mimeType": "image/png", "data": "RklOQUxfSU1BR0U="}, "thoughtSignature": "EjQKDg=="}
+				]
+			},
+			"finishReason": "STOP"
+		}],
+		"usageMetadata": {
+			"promptTokenCount": 12,
+			"candidatesTokenCount": 1120,
+			"thoughtsTokenCount": 584,
+			"totalTokenCount": 1716
+		}
+	}`)
+
+	out := ConvertGeminiResponseToOpenAINonStream(ctx, "gemini-3-pro-image", nil, nil, raw, nil)
+
+	if content := ojson.GetBytesNoCopy(out, "choices.0.message.content"); content.Type != ojson.Null {
+		t.Fatalf("message.content = %s (type %v), want null; payload=%s", content.Raw, content.Type, out)
+	}
+	wantReasoning := "**Rendering objects realistically** I'm focusing on the apple.**Refining Image Details** Adjusting highlights."
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.reasoning_content").String(); got != wantReasoning {
+		t.Fatalf("message.reasoning_content = %q, want %q; payload=%s", got, wantReasoning, out)
+	}
+	images := ojson.GetBytesNoCopy(out, "choices.0.message.images").Array()
+	if len(images) != 1 {
+		t.Fatalf("len(message.images) = %d, want 1; payload=%s", len(images), out)
+	}
+	if got := images[0].Get("index").Int(); got != 0 {
+		t.Fatalf("message.images[0].index = %d, want 0; payload=%s", got, out)
+	}
+	if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
+		t.Fatalf("message.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("multi-frame stream drops thought image frame without null delta", func(t *testing.T) {
+		var param any
+
+		chunk0 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"**Rendering objects realistically** "}]}}],"cpaUsageMetadata":{"promptTokenCount":12},"modelVersion":"gemini-3-pro-image","responseId":"resp_7566"}`)
+		out0 := ConvertGeminiResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, chunk0, &param)
+		if len(out0) != 1 {
+			t.Fatalf("chunk0 count = %d, want 1", len(out0))
+		}
+		if ojson.GetBytesNoCopy(out0[0], "choices.0.delta.images").Exists() {
+			t.Fatalf("unexpected delta.images in chunk0: %s", out0[0])
+		}
+
+		chunk1 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"inlineData":{"mimeType":"image/png","data":"RFJBRlRfSU1BR0U="}}]}}],"cpaUsageMetadata":{"promptTokenCount":12},"modelVersion":"gemini-3-pro-image","responseId":"resp_7566"}`)
+		out1 := ConvertGeminiResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, chunk1, &param)
+		if len(out1) != 0 {
+			t.Fatalf("standalone thought inlineData chunk must not emit delta.images or all-null delta, got %d chunk(s): %s", len(out1), out1[0])
+		}
+
+		chunk2 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"**Refining Image Details**"}]}}],"cpaUsageMetadata":{"promptTokenCount":12},"modelVersion":"gemini-3-pro-image","responseId":"resp_7566"}`)
+		out2 := ConvertGeminiResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, chunk2, &param)
+		if len(out2) != 1 {
+			t.Fatalf("chunk2 count = %d, want 1", len(out2))
+		}
+
+		chunk3 := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"inlineData":{"mimeType":"image/png","data":"RklOQUxfSU1BR0U="},"thoughtSignature":"EjQKDg=="}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":1120,"thoughtsTokenCount":584,"totalTokenCount":1716},"modelVersion":"gemini-3-pro-image","responseId":"resp_7566"}`)
+		out3 := ConvertGeminiResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, chunk3, &param)
+		if len(out3) != 1 {
+			t.Fatalf("chunk3 count = %d, want 1", len(out3))
+		}
+		images := ojson.GetBytesNoCopy(out3[0], "choices.0.delta.images").Array()
+		if len(images) != 1 {
+			t.Fatalf("len(delta.images) = %d, want 1; payload=%s", len(images), out3[0])
+		}
+		if got := images[0].Get("index").Int(); got != 0 {
+			t.Fatalf("delta.images[0].index = %d, want 0; payload=%s", got, out3[0])
+		}
+		if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
+			t.Fatalf("delta.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out3[0])
+		}
+		if got := ojson.GetBytesNoCopy(out3[0], "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("finish_reason = %q, want stop; payload=%s", got, out3[0])
+		}
+	})
+
+	t.Run("single-frame multi-part candidate emits only non-thought image at index 0", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Drafting. "},{"thought":true,"inline_data":{"mime_type":"image/png","data":"RFJBRlRfSU1BR0U="}},{"thought":true,"text":"Refining."},{"inlineData":{"mimeType":"image/png","data":"RklOQUxfSU1BR0U="}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"thoughtsTokenCount":50,"totalTokenCount":160}}`)
+		out := ConvertGeminiResponseToOpenAI(ctx, "gemini-nano-banana-2.1", nil, nil, chunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("chunk count = %d, want 1", len(out))
+		}
+		if got := ojson.GetBytesNoCopy(out[0], "choices.0.delta.reasoning_content").String(); got != "Drafting. Refining." {
+			t.Fatalf("delta.reasoning_content = %q, want %q; payload=%s", got, "Drafting. Refining.", out[0])
+		}
+		images := ojson.GetBytesNoCopy(out[0], "choices.0.delta.images").Array()
+		if len(images) != 1 {
+			t.Fatalf("len(delta.images) = %d, want 1; payload=%s", len(images), out[0])
+		}
+		if got := images[0].Get("index").Int(); got != 0 {
+			t.Fatalf("delta.images[0].index = %d, want 0; payload=%s", got, out[0])
+		}
+		if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
+			t.Fatalf("delta.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out[0])
 		}
 	})
 }

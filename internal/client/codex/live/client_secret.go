@@ -2,8 +2,6 @@ package live
 
 import (
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 )

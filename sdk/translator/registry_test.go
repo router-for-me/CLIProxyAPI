@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
-	"github.com/tidwall/gjson"
 )
 
 type fakePluginHooks struct {
@@ -121,7 +121,7 @@ func TestTranslateRequest_FallbackNormalizesModel(t *testing.T) {
 			input := []byte(tt.payload)
 			got := r.TranslateRequest(Format("a"), Format("b"), tt.model, input, false)
 
-			gotModel := gjson.GetBytes(got, "model").String()
+			gotModel := ojson.GetBytesNoCopy(got, "model").String()
 			if gotModel != tt.wantModel {
 				t.Errorf("model = %q, want %q", gotModel, tt.wantModel)
 			}
@@ -132,11 +132,11 @@ func TestTranslateRequest_FallbackNormalizesModel(t *testing.T) {
 
 			// Verify other fields are preserved.
 			for _, key := range []string{"input", "stream"} {
-				orig := gjson.Get(tt.payload, key)
+				orig := ojson.Get(tt.payload, key)
 				if !orig.Exists() {
 					continue
 				}
-				after := gjson.GetBytes(got, key)
+				after := ojson.GetBytesNoCopy(got, key)
 				if orig.Raw != after.Raw {
 					t.Errorf("field %q changed: got %s, want %s", key, after.Raw, orig.Raw)
 				}
@@ -157,7 +157,7 @@ func TestTranslateRequest_RegisteredTransformTakesPrecedence(t *testing.T) {
 	input := []byte(`{"model":"copilot/gpt-5-mini","input":"ping"}`)
 	got := r.TranslateRequest(from, to, "gpt-5-mini", input, false)
 
-	gotModel := gjson.GetBytes(got, "model").String()
+	gotModel := ojson.GetBytesNoCopy(got, "model").String()
 	if gotModel != "from-transform" {
 		t.Errorf("expected registered transform to take precedence, got model = %q", gotModel)
 	}
@@ -257,7 +257,7 @@ func TestTranslateRequest_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) {
 	missingNative.SetPluginHooks(missingHooks)
 
 	gotMissing := missingNative.TranslateRequest(from, to, "resolved", []byte(`{"model":"prefixed/resolved"}`), false)
-	if gjson.GetBytes(gotMissing, "model").String() != "plugin-request" {
+	if ojson.GetBytesNoCopy(gotMissing, "model").String() != "plugin-request" {
 		t.Fatalf("plugin request translator was not used, got %s", gotMissing)
 	}
 	if !hasCall(missingHooks.calls, "translate-request") {
@@ -275,7 +275,7 @@ func TestTranslateRequest_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) {
 	}, ResponseTransform{})
 
 	gotNative := withNative.TranslateRequest(from, to, "resolved", []byte(`{"model":"prefixed/resolved"}`), false)
-	if gjson.GetBytes(gotNative, "model").String() != "native-request" {
+	if ojson.GetBytesNoCopy(gotNative, "model").String() != "native-request" {
 		t.Fatalf("native request transformer was not preserved, got %s", gotNative)
 	}
 	if hasCall(nativeHooks.calls, "translate-request") {
@@ -296,7 +296,7 @@ func TestTranslateNonStream_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) 
 	missingNative.SetPluginHooks(missingHooks)
 
 	gotMissing := missingNative.TranslateNonStream(ctx, from, to, "model", nil, nil, []byte(`{"output":"raw"}`), nil)
-	if gjson.GetBytes(gotMissing, "output").String() != "plugin-response" {
+	if ojson.GetBytesNoCopy(gotMissing, "output").String() != "plugin-response" {
 		t.Fatalf("plugin response translator was not used, got %s", gotMissing)
 	}
 	if !hasCall(missingHooks.calls, "translate-response") {
@@ -316,7 +316,7 @@ func TestTranslateNonStream_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) 
 	})
 
 	gotNative := withNative.TranslateNonStream(ctx, from, to, "model", nil, nil, []byte(`{"output":"raw"}`), nil)
-	if gjson.GetBytes(gotNative, "output").String() != "native-response" {
+	if ojson.GetBytesNoCopy(gotNative, "output").String() != "native-response" {
 		t.Fatalf("native response transformer was not preserved, got %s", gotNative)
 	}
 	if hasCall(nativeHooks.calls, "translate-response") {
@@ -384,7 +384,7 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 	})
 
 	withoutMetadata := r.TranslateRequest(from, to, "home-model", []byte(`{"input":"hello"}`), false)
-	if gjson.GetBytes(withoutMetadata, "source").String() != "native" {
+	if ojson.GetBytesNoCopy(withoutMetadata, "source").String() != "native" {
 		t.Fatalf("without metadata used unexpected transform: %s", withoutMetadata)
 	}
 	withMetadata, err := NewPipeline(r).TranslateRequest(context.Background(), from, to, RequestEnvelope{
@@ -393,7 +393,7 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipeline translation failed: %v", err)
 	}
-	if gjson.GetBytes(withMetadata.Body, "source").String() != "model-info" {
+	if ojson.GetBytesNoCopy(withMetadata.Body, "source").String() != "model-info" {
 		t.Fatalf("envelope metadata was not used: %s", withMetadata.Body)
 	}
 	if withMetadata.ModelInfo != modelInfo {
@@ -411,7 +411,7 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 		customWithMetadata := r.TranslateRequestEnvelope(context.Background(), from, to, RequestEnvelope{
 			Format: from, Model: "home-model", Body: payload, ModelInfo: modelInfo,
 		})
-		if gjson.GetBytes(customWithMetadata.Body, "source").String() != "custom" {
+		if ojson.GetBytesNoCopy(customWithMetadata.Body, "source").String() != "custom" {
 			t.Fatalf("request metadata bypassed custom transform for %s: %s", payload, customWithMetadata.Body)
 		}
 	}

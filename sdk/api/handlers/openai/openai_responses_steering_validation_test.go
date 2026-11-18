@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -17,7 +18,6 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
@@ -49,7 +49,7 @@ func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
 		}
 		read()
 		write(`{"type":"response.created","response":{"id":"first","output":[]}}`)
-		if p := read(); gjson.GetBytes(p, "type").String() != "response.steer" {
+		if p := read(); ojson.GetBytesNoCopy(p, "type").String() != "response.steer" {
 			t.Errorf("expected corrected steering, got %s", p)
 			return
 		}
@@ -57,7 +57,7 @@ func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
 		write(`{"type":"response.completed","response":{"id":"first","output":[]}}`)
 		write(`{"type":"response.created","response":{"id":"steered","previous_response_id":"first","output":[]}}`)
 		write(`{"type":"response.completed","response":{"id":"steered","output":[]}}`)
-		if p := read(); gjson.GetBytes(p, "type").String() != "response.create" {
+		if p := read(); ojson.GetBytesNoCopy(p, "type").String() != "response.create" {
 			t.Errorf("expected corrected create, got %s", p)
 			return
 		}
@@ -105,24 +105,24 @@ func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
 		if e != nil {
 			t.Fatalf("local validation closed the established socket: %v", e)
 		}
-		switch gjson.GetBytes(p, "type").String() {
+		switch ojson.GetBytesNoCopy(p, "type").String() {
 		case "response.created":
-			if gjson.GetBytes(p, "response.id").String() == "first" && errorsSeen != 0 {
+			if ojson.GetBytesNoCopy(p, "response.id").String() == "first" && errorsSeen != 0 {
 				t.Fatal("local error preceded bootstrap")
 			}
 		case "error":
 			errorsSeen++
-			if gjson.GetBytes(p, "status").Int() != 400 || gjson.GetBytes(p, "error.type").String() != "invalid_request_error" {
+			if ojson.GetBytesNoCopy(p, "status").Int() != 400 || ojson.GetBytesNoCopy(p, "error.type").String() != "invalid_request_error" {
 				t.Fatalf("invalid error envelope: %s", p)
 			}
 			switch errorsSeen {
 			case 1:
-				if !strings.Contains(gjson.GetBytes(p, "error.message").String(), "JSON") {
+				if !strings.Contains(ojson.GetBytesNoCopy(p, "error.message").String(), "JSON") {
 					t.Errorf("missing JSON validation message: %s", p)
 				}
 				send(`{"type":"unsupported.request"}`)
 			case 2:
-				if !strings.Contains(gjson.GetBytes(p, "error.message").String(), "unsupported") {
+				if !strings.Contains(ojson.GetBytesNoCopy(p, "error.message").String(), "unsupported") {
 					t.Errorf("missing type validation message: %s", p)
 				}
 				send(`{"type":"response.steer","steering_id":"corrected","input":[{"role":"user","content":[{"type":"input_text","text":"continue"}]}]}`)
@@ -132,9 +132,9 @@ func TestResponsesSteeringLocalValidationRecovery(t *testing.T) {
 		case "response.steer.accepted":
 			accepted = true
 		case "response.completed":
-			if gjson.GetBytes(p, "response.id").String() == "first" {
+			if ojson.GetBytesNoCopy(p, "response.id").String() == "first" {
 				send(create)
-			} else if gjson.GetBytes(p, "response.id").String() == "second" {
+			} else if ojson.GetBytesNoCopy(p, "response.id").String() == "second" {
 				completed = true
 			}
 		}

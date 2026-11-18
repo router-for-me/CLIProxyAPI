@@ -104,6 +104,28 @@ func TestV8ExampleLoadsAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestV8ShutdownTimeoutParse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"v8 nested", "server:\n  shutdown-timeout: 15\n", 15},
+		{"legacy top-level", "shutdown-timeout: 7\n", 7},
+		{"absent defaults to zero", "server:\n  port: 8317\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := ParseConfigBytes([]byte(tc.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.ShutdownTimeoutSeconds != tc.want {
+				t.Fatalf("ShutdownTimeoutSeconds = %d, want %d", cfg.ShutdownTimeoutSeconds, tc.want)
+			}
+		})
+	}
+}
+
 func TestV8PresencePrecedenceAndCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name, raw string
@@ -442,6 +464,48 @@ debug: true
 	}
 	if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
 		t.Fatalf("expected no warnings for purely known configuration, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+	}
+
+	// Silent normalization collects sections without emitting warnings until explicitly flushed.
+	hook.Reset()
+	hookBuf.Reset()
+	silentOut, silentChanged, commented, errSilent := NormalizeConfigLayoutSilent(raw, true)
+	if errSilent != nil || !silentChanged {
+		t.Fatalf("NormalizeConfigLayoutSilent() changed=%v err=%v", silentChanged, errSilent)
+	}
+	if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
+		t.Fatalf("expected no warnings during silent normalization, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+	}
+	if len(commented) != 2 || !strings.Contains(string(silentOut), "# some-obsolete-legacy-block:") {
+		t.Fatalf("unexpected silent normalization output: commented=%v out=%s", commented, string(silentOut))
+	}
+	WarnUnrecognizedV8Sections(commented)
+	if !strings.Contains(hookBuf.String(), "HOOK: some-obsolete-legacy-block") || !strings.Contains(hookBuf.String(), "HOOK: another-legacy-key") {
+		t.Fatalf("expected WarnUnrecognizedV8Sections to flush collected warnings, got: %s", hookBuf.String())
+	}
+
+	// SaveConfigPreserveComments must not emit migration warnings when writing fails.
+	if os.Geteuid() != 0 {
+		hook.Reset()
+		hookBuf.Reset()
+		roPath := filepath.Join(t.TempDir(), "readonly-config.yaml")
+		if errWriteRO := os.WriteFile(roPath, raw, 0o600); errWriteRO != nil {
+			t.Fatal(errWriteRO)
+		}
+		roCfg, errLoadRO := LoadConfig(roPath)
+		if errLoadRO != nil {
+			t.Fatal(errLoadRO)
+		}
+		if errChmod := os.Chmod(roPath, 0o400); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		t.Cleanup(func() { _ = os.Chmod(roPath, 0o600) })
+		if errSaveRO := SaveConfigPreserveComments(roPath, roCfg, true); errSaveRO == nil {
+			t.Fatal("expected SaveConfigPreserveComments to fail on read-only file")
+		}
+		if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
+			t.Fatalf("expected no migration warnings when SaveConfigPreserveComments fails to write, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+		}
 	}
 }
 
@@ -931,5 +995,35 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
 				t.Fatalf("second load changed the persisted hash or settings: %v", err)
 			}
 		})
+	}
+}
+
+func TestV8ExampleDocumentsSessionAffinityCompactionGuidance(t *testing.T) {
+	example, errRead := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	var doc yaml.Node
+	if errUnmarshal := yaml.Unmarshal(example, &doc); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	routing := yamlPath(doc.Content[0], "routing")
+	if routing == nil {
+		t.Fatal("config.example.yaml is missing routing block")
+	}
+	idx := findMapKeyIndex(routing, "session-affinity")
+	if idx < 0 {
+		t.Fatal("config.example.yaml is missing routing.session-affinity")
+	}
+	comment := routing.Content[idx].HeadComment
+	for _, required := range []string{
+		"Merkle LCP prefix/compaction matching",
+		"2 shared trailing turns",
+		"replaces all earlier turns with a summary",
+		"send X-Session-ID",
+	} {
+		if !strings.Contains(comment, required) {
+			t.Fatalf("routing.session-affinity comment in config.example.yaml is missing %q; got:\n%s", required, comment)
+		}
 	}
 }

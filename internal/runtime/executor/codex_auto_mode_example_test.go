@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestClaudeAutoModeExample(t *testing.T) {
@@ -102,7 +102,7 @@ func TestClaudeAutoModeExample(t *testing.T) {
 				} else if _, errExecute := executor.Execute(context.Background(), codexOAuthTestAuth(upstream.URL), req, opts); errExecute != nil {
 					t.Fatal(errExecute)
 				}
-				if effort := gjson.GetBytes(<-captured, "reasoning.effort").String(); effort != tt.want {
+				if effort := ojson.GetBytesNoCopy(<-captured, "reasoning.effort").String(); effort != tt.want {
 					t.Fatalf("upstream effort = %q, want %q", effort, tt.want)
 				}
 			})

@@ -91,9 +91,31 @@ func TestSanitizeDevinToolDescription(t *testing.T) {
 		t.Errorf("SanitizeDevinToolDescription(write_stdin) does not contain 'to a existing unified exec session': %q", sanitizedStdin)
 	}
 
-	otherDesc := "Writes characters to an existing unified exec session and returns recent output."
-	sanitizedOther := SanitizeDevinToolDescription("other_tool", otherDesc)
-	if sanitizedOther != otherDesc {
-		t.Errorf("SanitizeDevinToolDescription(other_tool) modified unrelated tool: %q", sanitizedOther)
+	codeModeExecDesc := "Run JavaScript code to orchestrate/compose tool calls\n" +
+		"### exec_command\nRuns a command in a PTY, returning output or a session ID for ongoing interaction.\n" +
+		"### write_stdin\nWrites characters to an existing unified exec session and returns recent output.\n"
+	for _, toolName := range []string{"exec", "functions__exec", "other_tool"} {
+		sanitized := SanitizeDevinToolDescription(toolName, codeModeExecDesc)
+		if !strings.Contains(sanitized, "an session ID") {
+			t.Errorf("SanitizeDevinToolDescription(%s) does not contain 'an session ID': %q", toolName, sanitized)
+		}
+		if !strings.Contains(sanitized, "to a existing unified exec session") {
+			t.Errorf("SanitizeDevinToolDescription(%s) does not contain 'to a existing unified exec session': %q", toolName, sanitized)
+		}
+	}
+
+	mixedDesc := "First occurrence: returning output or an session ID for ongoing interaction.\n" +
+		"Second occurrence: returning output or a session ID for ongoing interaction.\n" +
+		"First stdin: Writes characters to a existing unified exec session and returns recent output.\n" +
+		"Second stdin: Writes characters to an existing unified exec session and returns recent output."
+	sanitizedMixed := SanitizeDevinToolDescription("functions__exec", mixedDesc)
+	if strings.Contains(sanitizedMixed, "a session ID") || strings.Contains(sanitizedMixed, "to an existing unified") {
+		t.Errorf("SanitizeDevinToolDescription(functions__exec) left raw phrase in mixed description: %q", sanitizedMixed)
+	}
+
+	unrelatedDesc := "Writes arbitrary input to a process"
+	sanitizedUnrelated := SanitizeDevinToolDescription("other_tool", unrelatedDesc)
+	if sanitizedUnrelated != unrelatedDesc {
+		t.Errorf("SanitizeDevinToolDescription(other_tool) modified unrelated description: %q", sanitizedUnrelated)
 	}
 }

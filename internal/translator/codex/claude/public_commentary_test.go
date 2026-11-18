@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestVisiblePublicCommentaryPreservesReasoningAndFinalAnswer(t *testing.T) {
@@ -53,11 +53,11 @@ func TestVisibleCommentaryNonStreamContext(t *testing.T) {
 	raw := []byte(`{"type":"response.completed","response":{"id":"r","model":"gpt-6.1-sol","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"Reasoning summary"}],"encrypted_content":"sig"},{"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Public progress"}]},{"type":"message","phase":"final_answer","content":[{"type":"output_text","text":"Final answer"}]}],"usage":{"input_tokens":5,"output_tokens":7}}}`)
 	var param any
 	out := ConvertCodexResponseToClaudeNonStream(ctx, "", []byte(`{"messages":[]}`), nil, raw, &param)
-	content := gjson.GetBytes(out, "content").Array()
+	content := ojson.GetBytesNoCopy(out, "content").Array()
 	if len(content) != 4 || content[0].Get("type").String() != "thinking" || content[1].Get("signature").String() != codexCommentarySignatureMarker || content[2].Get("text").String() != "Public progress" || content[3].Get("text").String() != "Final answer" {
 		t.Fatalf("non-stream progress/reasoning/final blocks changed: %s", out)
 	}
-	if gjson.GetBytes(out, "usage.output_tokens").Int() != 7 {
+	if ojson.GetBytesNoCopy(out, "usage.output_tokens").Int() != 7 {
 		t.Fatalf("mirroring must not inflate model token accounting: %s", out)
 	}
 }
@@ -69,7 +69,7 @@ func TestVisibleCommentaryReplayDefaultPreservesRepeatedFinal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(gjson.GetBytes(out, "input").Array()) != 2 {
+	if len(ojson.GetBytesNoCopy(out, "input").Array()) != 2 {
 		t.Fatalf("default mode changed existing replay semantics: %s", out)
 	}
 }
@@ -83,7 +83,7 @@ func TestVisibleCommentaryReplayContextPreservesAdjacentFinalText(t *testing.T) 
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}
-	items := gjson.GetBytes(result.Body, "input").Array()
+	items := ojson.GetBytesNoCopy(result.Body, "input").Array()
 	if len(items) != 3 || items[0].Get("phase").String() != "commentary" || items[1].Get("content.0.text").String() != "Actual final answer" || items[2].Get("content.0.text").String() != "What are the agents doing?" {
 		t.Fatalf("mirror removal lost final text or user steering: %s", result.Body)
 	}
@@ -96,7 +96,7 @@ func TestVisibleCommentaryReplayAcrossAssistantMessageBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(gjson.GetBytes(out, "input").Array()) != 2 || gjson.GetBytes(out, "input.1.content.0.text").String() != "Final" {
+	if len(ojson.GetBytesNoCopy(out, "input").Array()) != 2 || ojson.GetBytesNoCopy(out, "input.1.content.0.text").String() != "Final" {
 		t.Fatalf("split native history replay did not preserve exactly one progress: %s", out)
 	}
 }
@@ -108,7 +108,7 @@ func TestVisibleCommentaryReplayKeepsPhaseWithoutDuplicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := gjson.GetBytes(body, "input").Array()
+	items := ojson.GetBytesNoCopy(body, "input").Array()
 	if len(items) != 4 || items[0].Get("phase").String() != "commentary" || items[1].Get("type").String() != "function_call" || items[3].Get("content.0.text").String() != "User asks: what are the agents doing?" {
 		t.Fatalf("replay lost phase, tool call, or user steering: %s", body)
 	}

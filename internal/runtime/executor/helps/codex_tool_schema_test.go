@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestNormalizeCodexToolSchemas_ComplexOneOfSimplified_PreservesProperties(t *testing.T) {
@@ -51,7 +51,7 @@ func TestNormalizeCodexToolSchemas_ComplexOneOfSimplified_PreservesProperties(t 
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	// Complex oneOf must be removed from action property
 	if tool.Get("parameters.properties.action.oneOf").Exists() {
 		t.Fatalf("expected oneOf to be removed from action property, got: %s", tool.Get("parameters").Raw)
@@ -107,7 +107,7 @@ func TestNormalizeCodexToolSchemas_DottedPropertyName(t *testing.T) {
 	out := NormalizeCodexToolSchemas(input)
 
 	// Ensure properties contains "my.action", NOT nested object "my": {"action": ...}
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	dottedProp := tool.Get(`parameters.properties.my\.action`)
 	if !dottedProp.Exists() {
 		t.Fatalf("expected my.action property to exist with escaped key, got parameters: %s", tool.Get("parameters").Raw)
@@ -149,7 +149,7 @@ func TestNormalizeCodexToolSchemas_ColonPropertyName(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	colonProp := tool.Get(`parameters.properties.\:action`)
 	if !colonProp.Exists() {
 		t.Fatalf("expected :action property to exist with escaped colon, got parameters: %s", tool.Get("parameters").Raw)
@@ -187,7 +187,7 @@ func TestNormalizeCodexToolSchemas_NumericDuplicateConstNotTouched(t *testing.T)
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if !tool.Get("parameters.properties.val.oneOf").Exists() {
 		t.Fatalf("oneOf with numeric duplicates (1 and 1.0) must NOT be transformed to enum")
 	}
@@ -219,7 +219,7 @@ func TestNormalizeCodexToolSchemas_LargeIntegerPrecisionPreserved(t *testing.T) 
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if tool.Get("parameters.properties.id.oneOf").Exists() {
 		t.Fatalf("oneOf should be deleted")
 	}
@@ -255,7 +255,7 @@ func TestNormalizeCodexToolSchemas_UnicodeDuplicateConstNotTouched(t *testing.T)
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if !tool.Get("parameters.properties.val.oneOf").Exists() {
 		t.Fatalf("oneOf with duplicate semantic values must NOT be transformed to enum")
 	}
@@ -286,7 +286,7 @@ func TestNormalizeCodexToolSchemas_TypePreservingComparison(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if !tool.Get("parameters.properties.val.oneOf").Exists() {
 		t.Fatalf("oneOf must NOT be deleted when enum strings do not match const numbers")
 	}
@@ -319,7 +319,7 @@ func TestNormalizeCodexToolSchemas_BothOneOfAndAnyOfUntouched(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if !tool.Get("parameters.properties.val.oneOf").Exists() || !tool.Get("parameters.properties.val.anyOf").Exists() {
 		t.Fatalf("compound oneOf+anyOf property must not be modified")
 	}
@@ -350,7 +350,7 @@ func TestNormalizeCodexToolSchemas_MigratesConstBranchesToEnum(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if tool.Get("parameters.properties.mode.oneOf").Exists() {
 		t.Fatalf("oneOf should be deleted")
 	}
@@ -386,7 +386,7 @@ func TestNormalizeCodexToolSchemas_NonMatchingEnumNotTouched(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if !tool.Get("parameters.properties.status.oneOf").Exists() {
 		t.Fatalf("oneOf should NOT be removed when enum set does not match const values set")
 	}
@@ -422,7 +422,7 @@ func TestNormalizeCodexToolSchemas_NonConstUnionNotTouched(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if !tool.Get("parameters.properties.data.oneOf").Exists() {
 		t.Fatalf("non-const oneOf must remain untouched")
 	}
@@ -448,7 +448,7 @@ func TestNormalizeCodexToolSchemas_SimpleToolPreserved(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	if tool.Get("parameters.properties.query.type").String() != "string" {
 		t.Fatalf("simple tool should not be modified, got: %s", tool.Get("parameters").Raw)
 	}
@@ -484,7 +484,7 @@ func TestNormalizeCodexToolSchemas_NamespaceToolSimplified(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	nestedTool := gjson.GetBytes(out, "tools.0.tools.0")
+	nestedTool := ojson.GetBytes(out, "tools.0.tools.0")
 	if nestedTool.Get("parameters.properties.action.oneOf").Exists() {
 		t.Fatalf("nested tool oneOf should be simplified")
 	}
@@ -519,7 +519,7 @@ func TestNormalizeCodexToolSchemas_StripsUnsupportedUnicodePropertyEscapePattern
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	params := tool.Get("parameters")
 
 	// Unsupported pattern must be removed
@@ -581,7 +581,7 @@ func TestNormalizeCodexToolSchemas_StripsOctalNULPatternEscape(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	params := gjson.GetBytes(out, "tools.0.parameters")
+	params := ojson.GetBytes(out, "tools.0.parameters")
 
 	// The octal NUL pattern must be removed, while the rest of the item schema stays.
 	if params.Get("properties.file_paths.items.pattern").Exists() {
@@ -649,7 +649,7 @@ func TestNormalizeCodexToolSchemas_PreservesNonSchemaPatternKeys(t *testing.T) {
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	params := tool.Get("parameters")
 
 	// Real schema pattern must be removed
@@ -720,7 +720,7 @@ func TestNormalizeCodexToolSchemas_CoversAllSchemaKeywordLocations(t *testing.T)
 
 	out := NormalizeCodexToolSchemas(input)
 
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	params := tool.Get("parameters")
 
 	// All subschemas in schema-aware locations must have their incompatible patterns stripped
@@ -800,7 +800,7 @@ func TestNormalizeCodexToolSchemas_JSONUnicodeEscapeBypassPrevention(t *testing.
 	}`)
 
 	out := NormalizeCodexToolSchemas(input)
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	params := tool.Get("parameters")
 
 	if params.Get("properties.p1.pattern").Exists() {
@@ -838,7 +838,7 @@ func TestNormalizeCodexToolSchemas_PatternPropertiesKeySanitization(t *testing.T
 	}`)
 
 	out := NormalizeCodexToolSchemas(input)
-	tool := gjson.GetBytes(out, "tools.0")
+	tool := ojson.GetBytes(out, "tools.0")
 	params := tool.Get("parameters")
 
 	// Key with \p{L}+ must be removed
@@ -967,7 +967,7 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 	t.Run("non-codex user agent preserves numbers", func(t *testing.T) {
 		headers := http.Header{"User-Agent": []string{"curl/8.7.1"}}
 		out := NormalizeCodexToolIntegerTypes(input, headers)
-		if got := gjson.GetBytes(out, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(out, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("expected number for non-codex, got: %s", got)
 		}
 	})
@@ -976,8 +976,8 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0 (Mac OS 26.5.2; arm64)"}}
 		out := NormalizeCodexToolIntegerTypes(input, headers)
 
-		toolMap := make(map[string]gjson.Result)
-		for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		toolMap := make(map[string]ojson.Result)
+		for _, tool := range ojson.GetBytes(out, "tools").Array() {
 			toolMap[tool.Get("name").String()] = tool
 		}
 
@@ -1014,7 +1014,7 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}
 
 		// Check additional_tools under input
-		addToolType := gjson.GetBytes(out, "input.0.tools.0.parameters.properties.yield_time_ms.type").Array()
+		addToolType := ojson.GetBytes(out, "input.0.tools.0.parameters.properties.yield_time_ms.type").Array()
 		if len(addToolType) != 2 || addToolType[0].String() != "integer" || addToolType[1].String() != "null" {
 			t.Errorf("additional_tools yield_time_ms type = %v, want [integer null]", addToolType)
 		}
@@ -1037,7 +1037,7 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}`)
 		headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0"}}
 		out := NormalizeCodexToolIntegerTypes(dupInput, headers)
-		arr := gjson.GetBytes(out, "tools.0.parameters.properties.duration_ms.type").Array()
+		arr := ojson.GetBytes(out, "tools.0.parameters.properties.duration_ms.type").Array()
 		if len(arr) != 2 || arr[0].String() != "integer" || arr[1].String() != "null" {
 			t.Errorf("deduplicated type = %v, want [integer null]", arr)
 		}
@@ -1060,10 +1060,10 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}`)
 		headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0"}}
 		out := NormalizeCodexToolIntegerTypes(claudeInput, headers)
-		if got := gjson.GetBytes(out, "tools.0.input_schema.properties.yield_time_ms.type").String(); got != "integer" {
+		if got := ojson.GetBytes(out, "tools.0.input_schema.properties.yield_time_ms.type").String(); got != "integer" {
 			t.Errorf("claude tool yield_time_ms type = %q, want integer", got)
 		}
-		if got := gjson.GetBytes(out, "tools.0.input_schema.properties.timeout_ms.type").String(); got != "integer" {
+		if got := ojson.GetBytes(out, "tools.0.input_schema.properties.timeout_ms.type").String(); got != "integer" {
 			t.Errorf("claude tool timeout_ms type = %q, want integer", got)
 		}
 	})
@@ -1088,7 +1088,7 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}`)
 		headers := http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}}
 		out := NormalizeCodexToolIntegerTypes(geminiInput, headers)
-		if got := gjson.GetBytes(out, "tools.0.function_declarations.0.parameters.properties.duration_ms.type").String(); got != "integer" {
+		if got := ojson.GetBytes(out, "tools.0.function_declarations.0.parameters.properties.duration_ms.type").String(); got != "integer" {
 			t.Errorf("gemini tool duration_ms type = %q, want integer", got)
 		}
 	})
@@ -1116,21 +1116,21 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}`)
 		headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0"}}
 		out := NormalizeCodexToolIntegerTypes(schemaInput, headers)
-		if !gjson.GetBytes(out, "tools.0.parameters.properties.regex_field.pattern").Exists() {
+		if !ojson.GetBytes(out, "tools.0.parameters.properties.regex_field.pattern").Exists() {
 			t.Errorf("NormalizeCodexToolIntegerTypes should not strip pattern")
 		}
-		if !gjson.GetBytes(out, "tools.0.parameters.properties.choice_field.oneOf").Exists() {
+		if !ojson.GetBytes(out, "tools.0.parameters.properties.choice_field.oneOf").Exists() {
 			t.Errorf("NormalizeCodexToolIntegerTypes should not modify oneOf")
 		}
 	})
 
 	t.Run("nil or empty headers leaves payload untouched", func(t *testing.T) {
 		outNil := NormalizeCodexToolIntegerTypes(input, nil)
-		if got := gjson.GetBytes(outNil, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(outNil, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("expected nil headers to preserve number, got: %s", got)
 		}
 		outEmpty := NormalizeCodexToolIntegerTypes(input, http.Header{})
-		if got := gjson.GetBytes(outEmpty, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+		if got := ojson.GetBytes(outEmpty, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 			t.Fatalf("expected empty headers to preserve number, got: %s", got)
 		}
 	})
@@ -1182,8 +1182,8 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}`)
 		headers := http.Header{"User-Agent": []string{"codex-tui/0.154.0"}}
 		out := NormalizeCodexToolIntegerTypes(mcpInput, headers)
-		toolMap := make(map[string]gjson.Result)
-		for _, tool := range gjson.GetBytes(out, "tools").Array() {
+		toolMap := make(map[string]ojson.Result)
+		for _, tool := range ojson.GetBytes(out, "tools").Array() {
 			toolMap[tool.Get("name").String()] = tool
 		}
 		// mcp__server__sleep must remain number
@@ -1224,7 +1224,7 @@ func TestNormalizeCodexToolIntegerTypes_CodexClientToolFieldTypes(t *testing.T) 
 		}`)
 		headers := http.Header{"User-Agent": []string{"codex-desktop/0.159.0"}}
 		out := NormalizeCodexToolIntegerTypes(geminiInput, headers)
-		if got := gjson.GetBytes(out, "tools.0.functionDeclarations.0.parametersJsonSchema.properties.yield_time_ms.type").String(); got != "integer" {
+		if got := ojson.GetBytes(out, "tools.0.functionDeclarations.0.parametersJsonSchema.properties.yield_time_ms.type").String(); got != "integer" {
 			t.Errorf("gemini parametersJsonSchema yield_time_ms type = %q, want integer", got)
 		}
 	})
@@ -1246,7 +1246,7 @@ func TestNormalizeCodexToolSchemas_DoesNotNormalizeIntegerTypes(t *testing.T) {
 		]
 	}`)
 	out := NormalizeCodexToolSchemas(input)
-	if got := gjson.GetBytes(out, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
+	if got := ojson.GetBytes(out, "tools.0.parameters.properties.yield_time_ms.type").String(); got != "number" {
 		t.Fatalf("expected number, got: %s", got)
 	}
 }
@@ -1333,7 +1333,7 @@ func TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds(t *testing.T) {
 	}`)
 
 	out := NormalizeCodexToolSchemas(input)
-	params := gjson.GetBytes(out, "tools.0.parameters")
+	params := ojson.GetBytes(out, "tools.0.parameters")
 	optsProps := params.Get("properties.options.properties")
 
 	// Issue #6579 reproduction: u64::MAX bound dropped, minimum: 0 and type preserved.

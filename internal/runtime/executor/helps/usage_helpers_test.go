@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -25,7 +26,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -590,8 +591,8 @@ func TestParseInteractionsUsageNormalizesCacheWriteAlias(t *testing.T) {
 }
 
 func TestParseInteractionsUsageIncludesToolUseTokens(t *testing.T) {
-	detail := ParseInteractionsUsage([]byte(`{"usage":{"total_input_tokens":2,"total_output_tokens":6,"total_thought_tokens":3,"total_tool_use_tokens":4,"total_tokens":15}}`))
-	if detail.InputTokens != 6 || detail.OutputTokens != 6 || detail.ReasoningTokens != 3 || detail.TotalTokens != 15 {
+	detail := ParseInteractionsUsage([]byte(`{"usage":{"total_input_tokens":2,"input_tokens_by_modality":[{"modality":"text","tokens":2}],"total_output_tokens":6,"total_thought_tokens":3,"total_tool_use_tokens":4,"total_tokens":15}}`))
+	if detail.InputTokens != 6 || detail.OutputTokens != 6 || detail.ReasoningTokens != 3 || detail.TotalTokens != 15 || detail.TextInputTokens == nil || *detail.TextInputTokens != 2 {
 		t.Fatalf("detail = %+v", detail)
 	}
 	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete ||
@@ -1505,6 +1506,93 @@ func TestFailFromErrorsCarriesStreamTruncatedCode(t *testing.T) {
 	}
 }
 
+func TestFailFromErrorsCarriesRequestScopedCode(t *testing.T) {
+	errRequest := cliproxyauth.NewRequestScopedError("Use /v1/images/generations for forced image generation.", http.StatusBadRequest)
+	for _, err := range []error{errRequest, fmt.Errorf("validate payload: %w", errRequest)} {
+		fail := failFromErrors(err)
+		if fail.Code != usage.FailureRequestScopedCode || fail.StatusCode != http.StatusBadRequest {
+			t.Fatalf("request-scoped classification lost during usage reporting: %+v", fail)
+		}
+	}
+	plain := failFromErrors(&cliproxyauth.Error{HTTPStatus: http.StatusBadRequest, Message: "model_not_found"})
+	if plain.Code != "" {
+		t.Fatalf("upstream model rejection gained request-scoped classification: %+v", plain)
+	}
+
+	rules := []config.RequestScopedErrorRule{
+		{
+			Status: http.StatusNotFound,
+			Match:  []string{"model_not_found"},
+			Action: cliproxyauth.RequestScopedActionStop,
+		},
+		{
+			Status: http.StatusBadRequest,
+			Match:  []string{"force_cool_marker"},
+			Action: cliproxyauth.RequestScopedActionStopAndCooldown,
+		},
+	}
+	authWithMetadataRules := &cliproxyauth.Auth{
+		ID:       "auth-rule-test",
+		Provider: "codex",
+		Metadata: map[string]any{"request_scoped_errors": rules},
+	}
+	reporter := NewUsageReporter(context.Background(), "codex", "gpt-5.4", authWithMetadataRules)
+	var errNotFound error = &cliproxyauth.Error{HTTPStatus: http.StatusNotFound, Message: "model_not_found"}
+	failMatched := reporter.failFromErrors(context.Background(), errNotFound)
+	if failMatched.Code != usage.FailureRequestScopedCode || failMatched.StatusCode != http.StatusNotFound {
+		t.Fatalf("matched request-scoped rule must set fail.Code=%q, got %+v", usage.FailureRequestScopedCode, failMatched)
+	}
+
+	var errForceCool error = &cliproxyauth.Error{HTTPStatus: http.StatusBadRequest, Message: "force_cool_marker"}
+	failCooldown := reporter.failFromErrors(context.Background(), errForceCool)
+	if failCooldown.Code != usage.FailureForceCooldownCode {
+		t.Fatalf("cooldown action rule must set fail.Code=%q, got %+v", usage.FailureForceCooldownCode, failCooldown)
+	}
+
+	// A configured cooldown rule must also override an error that intrinsically implements RequestScopedError.
+	reqScopedForceCool := cliproxyauth.NewRequestScopedError("force_cool_marker", http.StatusBadRequest)
+	if failOverride := reporter.failFromErrors(context.Background(), reqScopedForceCool); failOverride.Code != usage.FailureForceCooldownCode {
+		t.Fatalf("cooldown rule must override intrinsic RequestScopedError: got %+v", failOverride)
+	}
+
+	// Mutating the caller's slice after NewUsageReporter must not affect the reporter's snapshot.
+	rules[0].Match[0] = "mutated_after_creation"
+	failIsolated := reporter.failFromErrors(context.Background(), errNotFound)
+	if failIsolated.Code != usage.FailureRequestScopedCode {
+		t.Fatalf("reporter rule snapshot was mutated by caller slice modification: %+v", failIsolated)
+	}
+
+	oauthAuth := &cliproxyauth.Auth{
+		ID:         "oauth-rule-test",
+		Provider:   "codex",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	cfg := &config.Config{
+		OAuthRequestScopedErrors: map[string][]config.RequestScopedErrorRule{
+			"codex": {
+				{
+					Status: http.StatusNotFound,
+					Match:  []string{"endpoint_unsupported"},
+					Action: cliproxyauth.RequestScopedActionContinue,
+				},
+			},
+		},
+	}
+	ctxWithCfg := cliproxyauth.WithRequestScopedErrorConfig(context.Background(), cfg)
+	oauthReporter := NewUsageReporter(ctxWithCfg, "codex", "gpt-5.4", oauthAuth)
+	// Updating token fingerprint with an OAuth auth that has no per-auth metadata rules
+	// must preserve the OAuth rules resolved from the context config at reporter creation.
+	oauthReporter.UpdateAccessTokenFingerprint(&cliproxyauth.Auth{
+		ID:         "oauth-rule-test",
+		Provider:   "codex",
+		Attributes: map[string]string{"auth_kind": "oauth", "api_key": "rotated-token"},
+	})
+	failOAuth := oauthReporter.failFromErrors(ctxWithCfg, &cliproxyauth.Error{HTTPStatus: http.StatusNotFound, Message: "endpoint_unsupported"})
+	if failOAuth.Code != usage.FailureRequestScopedCode {
+		t.Fatalf("OAuth request-scoped rule from context config must set fail.Code=%q after token update, got %+v", usage.FailureRequestScopedCode, failOAuth)
+	}
+}
+
 func TestParseClaudeUsageExtractsCacheTTLServerToolsIterationsAndCost(t *testing.T) {
 	var buffer StreamUsageBuffer
 	lineStart := []byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-opus-5-5","usage":{"input_tokens":4,"cache_creation_input_tokens":3036,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":3036},"output_tokens":16,"service_tier":"standard","inference_geo":"global","speed":"standard"}}}`)
@@ -1552,13 +1640,13 @@ func TestParseClaudeUsageExtractsCacheTTLServerToolsIterationsAndCost(t *testing
 }
 
 func TestParseGeminiAndAntigravityUsageWithModalitiesAndTools(t *testing.T) {
-	payload := []byte(`{"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON","code":"print(1)"}},{"functionCall":{"name":"lookup","args":{"q":"a"}}},{"inlineData":{"mimeType":"image/png","data":"AA=="}}]},"groundingMetadata":{"webSearchQueries":["gemini pricing","vertex grounding"],"groundingChunks":[{"web":{"uri":"https://a.example"}},{"web":{"uri":"https://b.example"}},{"retrievedContext":{"uri":"gs://b/doc"}}]},"urlContextMetadata":{"urlMetadata":[{"retrievedUrl":"https://c.example"}]}}],"usageMetadata":{"promptTokenCount":1000,"cachedContentTokenCount":400,"candidatesTokenCount":300,"thoughtsTokenCount":120,"toolUsePromptTokenCount":50,"totalTokenCount":1470,"trafficType":"ON_DEMAND_PRIORITY","promptTokensDetails":[{"modality":"TEXT","tokenCount":800},{"modality":"IMAGE","tokenCount":150},{"modality":"DOCUMENT","tokenCount":50}],"cacheTokensDetails":[{"modality":"TEXT","tokenCount":400}],"candidatesTokensDetails":[{"modality":"TEXT","tokenCount":100},{"modality":"IMAGE","tokenCount":200}]}}`)
+	payload := []byte(`{"candidates":[{"content":{"parts":[{"executableCode":{"language":"PYTHON","code":"print(1)"}},{"functionCall":{"name":"lookup","args":{"q":"a"}}},{"inlineData":{"mimeType":"image/png","data":"AA=="}}]},"groundingMetadata":{"webSearchQueries":["gemini pricing","vertex grounding"],"groundingChunks":[{"web":{"uri":"https://a.example"}},{"web":{"uri":"https://b.example"}},{"retrievedContext":{"uri":"gs://b/doc"}}]},"urlContextMetadata":{"urlMetadata":[{"retrievedUrl":"https://c.example"}]}}],"usageMetadata":{"promptTokenCount":1000,"cachedContentTokenCount":400,"candidatesTokenCount":300,"thoughtsTokenCount":120,"toolUsePromptTokenCount":50,"totalTokenCount":1470,"trafficType":"ON_DEMAND_PRIORITY","promptTokensDetails":[{"modality":"TEXT","tokenCount":800},{"modality":"IMAGE","tokenCount":150},{"modality":"DOCUMENT","tokenCount":50}],"cacheTokensDetails":[{"modality":"TEXT","tokenCount":300},{"modality":"IMAGE","tokenCount":100}],"candidatesTokensDetails":[{"modality":"TEXT","tokenCount":100},{"modality":"IMAGE","tokenCount":200}]}}`)
 	detail := ParseGeminiUsage(payload)
 	ApplyGeminiRequestImageConfig(&detail, []byte(`{"generationConfig":{"imageConfig":{"aspectRatio":"16:9","imageSize":"2K"}}}`))
 	if detail.InputTokens != 1050 || detail.OutputTokens != 300 || detail.ReasoningTokens != 120 || detail.TotalTokens != 1470 {
 		t.Fatalf("unexpected Gemini token totals: %+v", detail)
 	}
-	if detail.TextInputTokens == nil || *detail.TextInputTokens != 800 || detail.ImageInputTokens == nil || *detail.ImageInputTokens != 150 || detail.FileInputTokens == nil || *detail.FileInputTokens != 50 || detail.CachedTextTokens == nil || *detail.CachedTextTokens != 400 {
+	if detail.TextInputTokens == nil || *detail.TextInputTokens != 800 || detail.ImageInputTokens == nil || *detail.ImageInputTokens != 150 || detail.FileInputTokens == nil || *detail.FileInputTokens != 50 || detail.CachedTextTokens == nil || *detail.CachedTextTokens != 300 || detail.CachedImageTokens == nil || *detail.CachedImageTokens != 100 {
 		t.Fatalf("unexpected Gemini input modalities: %+v", detail)
 	}
 	if detail.TextOutputTokens == nil || *detail.TextOutputTokens != 100 || detail.ImageOutputTokens == nil || *detail.ImageOutputTokens != 200 {
@@ -1852,9 +1940,9 @@ func TestStripUsageMetadataPreservesToolArguments(t *testing.T) {
 				prefix = "response."
 			}
 			out, changed := StripUsageMetadataFromJSON([]byte(raw))
-			if !changed || !gjson.ValidBytes(out) || gjson.GetBytes(out, prefix+"usageMetadata").Exists() ||
-				gjson.GetBytes(out, prefix+"cpaUsageMetadata.promptTokenCount").Int() != 5 ||
-				gjson.GetBytes(out, prefix+"candidates.0.content.parts.0.functionCall.args.usageMetadata.value").Int() != 1 {
+			if !changed || !ojson.ValidBytes(out) || ojson.GetBytes(out, prefix+"usageMetadata").Exists() ||
+				ojson.GetBytes(out, prefix+"cpaUsageMetadata.promptTokenCount").Int() != 5 ||
+				ojson.GetBytes(out, prefix+"candidates.0.content.parts.0.functionCall.args.usageMetadata.value").Int() != 1 {
 				t.Fatalf("metadata rename changed the wrong field: %s", out)
 			}
 		})
@@ -2076,5 +2164,84 @@ func TestObserveResponsesStreamPreservesOutputItemDoneToolUsageWhenCompletedOutp
 	pd, pok := pluginBuf.Detail()
 	if !pok || pd.ToolUsageDetails == nil || pd.ToolUsageDetails.ToolCallsRequested == nil || *pd.ToolUsageDetails.ToolCallsRequested != 1 {
 		t.Fatalf("ObservePluginExecutorStreamUsage lost output_item.done tool usage: %+v", pd.ToolUsageDetails)
+	}
+}
+
+func TestImageDetailsCloneStringsFromReusableBuffer(t *testing.T) {
+	reqBuf := []byte(`{"size":"1024x1024","quality":"high","background":"transparent","output_format":"png","response_format":"b64_json","mime_type":"image/png","input_fidelity":"high"}`)
+	reqDetails := ParseRequestImageDetails(reqBuf)
+	for i := range reqBuf {
+		reqBuf[i] = 'X'
+	}
+	if reqDetails == nil || reqDetails.Size != "1024x1024" || reqDetails.Quality != "high" || reqDetails.Background != "transparent" || reqDetails.OutputFormat != "png" || reqDetails.ResponseFormat != "b64_json" || reqDetails.MimeType != "image/png" || reqDetails.InputFidelity != "high" {
+		t.Fatalf("ParseRequestImageDetails corrupted after buffer overwrite: %+v", reqDetails)
+	}
+
+	toolReqBuf := []byte(`{"tools":[{"type":"image_generation","size":"1536x1024","quality":"medium","background":"opaque","output_format":"webp"}]}`)
+	toolDetails := ParseRequestImageDetails(toolReqBuf)
+	for i := range toolReqBuf {
+		toolReqBuf[i] = 'X'
+	}
+	if toolDetails == nil || toolDetails.Size != "1536x1024" || toolDetails.Quality != "medium" || toolDetails.Background != "opaque" || toolDetails.OutputFormat != "webp" {
+		t.Fatalf("ParseRequestImageDetails (tool) corrupted after buffer overwrite: %+v", toolDetails)
+	}
+
+	streamBuf := []byte(`data: {"type":"image_generation.completed","size":"1024x1536","quality":"high","background":"transparent","output_format":"png","usage":{"input_tokens":5,"output_tokens":10,"total_tokens":15}}`)
+	var b StreamUsageBuffer
+	b.ObserveOpenAIStream(streamBuf)
+	for i := range streamBuf {
+		streamBuf[i] = 'X'
+	}
+	d, ok := b.Detail()
+	if !ok || d.ImageDetails == nil || d.ImageDetails.Size != "1024x1536" || d.ImageDetails.Quality != "high" || d.ImageDetails.Background != "transparent" || d.ImageDetails.OutputFormat != "png" {
+		t.Fatalf("ObserveOpenAIStream ImageDetails corrupted after buffer overwrite: %+v", d.ImageDetails)
+	}
+}
+
+type customUsageExecutorType struct{}
+
+func (*customUsageExecutorType) Identifier() string        { return "custom-prov" }
+func (*customUsageExecutorType) UsageExecutorType() string { return "plugin:custom-prov" }
+
+func TestUsageReporterApplyPluginExecutorAttribution(t *testing.T) {
+	ctx := usage.WithAPIKey(context.Background(), "sk-client-fallback")
+	reporter := NewUsageReporter(ctx, "my-plugin", "gpt-5.4", nil)
+	reporter.ApplyPluginExecutorAttribution("my-plugin", nil)
+
+	before := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if before.ExecutorType != "plugin:my-plugin" {
+		t.Fatalf("before.ExecutorType = %q, want %q", before.ExecutorType, "plugin:my-plugin")
+	}
+	if before.Source != "sk-client-fallback" {
+		t.Fatalf("before.Source = %q, want client fallback", before.Source)
+	}
+
+	reporter.ApplyPluginExecutorAttribution("my-plugin", &pluginapi.UsageAttribution{
+		AuthIndex: " idx-1 ",
+		AuthType:  " oauth ",
+		Source:    " acct@example.com ",
+	})
+	// Subsequent calls must not overwrite already-populated auth attribution fields.
+	reporter.ApplyPluginExecutorAttribution("my-plugin", &pluginapi.UsageAttribution{
+		AuthIndex: "idx-2",
+		AuthType:  "api_key",
+	})
+
+	after := reporter.buildRecord(usage.Detail{TotalTokens: 2}, false)
+	if after.Provider != "my-plugin" ||
+		after.ExecutorType != "plugin:my-plugin" ||
+		after.AuthIndex != "idx-1" ||
+		after.AuthType != "oauth" ||
+		after.Source != "acct@example.com" {
+		t.Fatalf("after record = %+v", after)
+	}
+
+	execReporter := NewExecutorUsageReporter(context.Background(), &customUsageExecutorType{}, "gpt-5.4", nil)
+	execRec := execReporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if execRec.ExecutorType != "plugin:custom-prov" {
+		t.Fatalf("execRec.ExecutorType = %q, want %q", execRec.ExecutorType, "plugin:custom-prov")
+	}
+	if PluginExecutorType("") != "" || PluginExecutorType("  ") != "" || PluginExecutorType(" my-plugin ") != "plugin:my-plugin" {
+		t.Fatalf("unexpected PluginExecutorType values")
 	}
 }

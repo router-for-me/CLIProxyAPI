@@ -38,7 +38,16 @@ func (e *claudeFastRequestError) Unwrap() error {
 }
 
 func (e *claudeFastRequestError) StatusCode() int {
-	if e == nil || (e.status >= http.StatusOK && e.status < http.StatusMultipleChoices) {
+	if e == nil {
+		return 0
+	}
+	if e.status <= 0 || (e.status >= http.StatusOK && e.status < http.StatusMultipleChoices) {
+		var statusCoder interface{ StatusCode() int }
+		if errors.As(e.cause, &statusCoder) && statusCoder != nil {
+			if code := statusCoder.StatusCode(); code > 0 {
+				return code
+			}
+		}
 		return 0
 	}
 	return e.status

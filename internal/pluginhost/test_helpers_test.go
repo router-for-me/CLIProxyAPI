@@ -2,13 +2,13 @@ package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -54,6 +54,8 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 	switch method {
 	case pluginabi.MethodPluginRegister:
 		return l.callLifecycle(request, false)
+	case pluginabi.MethodPluginQuiesce:
+		return marshalRPCError("unknown_method", "unknown method "+method), nil
 	case pluginabi.MethodPluginReconfigure:
 		return l.callLifecycle(request, true)
 	case pluginabi.MethodThinkingIdentifier:
@@ -161,10 +163,22 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		}
 		var primary string
 		var identifiers []string
+		var entries []rpcAuthProviderEntry
 		if l.active.Capabilities.AuthProvider != nil {
 			primary = l.active.Capabilities.AuthProvider.Identifier()
 			if multi, okMulti := l.active.Capabilities.AuthProvider.(interface{ Identifiers() []string }); okMulti {
 				identifiers = append(identifiers, multi.Identifiers()...)
+			}
+			if withEntries, okEntries := l.active.Capabilities.AuthProvider.(interface {
+				AuthEntries() []pluginapi.AuthProviderEntry
+			}); okEntries {
+				for _, entry := range withEntries.AuthEntries() {
+					entries = append(entries, rpcAuthProviderEntry{
+						Identifier: entry.Identifier,
+						Name:       entry.Name,
+						Logo:       entry.Logo,
+					})
+				}
 			}
 		}
 		for _, prov := range l.active.Capabilities.AuthProviders {
@@ -180,8 +194,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			if multi, okMulti := prov.(interface{ Identifiers() []string }); okMulti {
 				identifiers = append(identifiers, multi.Identifiers()...)
 			}
+			if withEntries, okEntries := prov.(interface {
+				AuthEntries() []pluginapi.AuthProviderEntry
+			}); okEntries {
+				for _, entry := range withEntries.AuthEntries() {
+					entries = append(entries, rpcAuthProviderEntry{
+						Identifier: entry.Identifier,
+						Name:       entry.Name,
+						Logo:       entry.Logo,
+					})
+				}
+			}
 		}
-		return marshalRPCResult(rpcIdentifierResponse{Identifier: primary, Identifiers: identifiers})
+		return marshalRPCResult(rpcIdentifierResponse{Identifier: primary, Identifiers: identifiers, Entries: entries})
 	case pluginabi.MethodAuthLoginStart:
 		if l.active.Capabilities.AuthProvider == nil {
 			return nil, fmt.Errorf("missing auth provider")
@@ -224,6 +249,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		resp, errPick := l.active.Capabilities.Scheduler.Pick(ctx, req)
 		if errPick != nil {
 			return nil, errPick
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodSchedulerContinuity:
+		if l.active.Capabilities.SchedulerContinuity == nil {
+			return nil, fmt.Errorf("missing scheduler continuity")
+		}
+		var req pluginapi.SchedulerContinuityRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errEval := l.active.Capabilities.SchedulerContinuity.Continuity(ctx, req)
+		if errEval != nil {
+			return nil, errEval
 		}
 		return marshalRPCResult(resp)
 	case pluginabi.MethodModelRoute:

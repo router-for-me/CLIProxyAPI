@@ -58,6 +58,9 @@ type RegisteredPluginInfo = internalpluginhost.RegisteredPluginInfo
 // RegisteredPluginMenu describes a plugin-owned resource menu entry.
 type RegisteredPluginMenu = internalpluginhost.RegisteredPluginMenu
 
+// AuthProviderEntry describes user-facing display metadata for one OAuth login entry.
+type AuthProviderEntry = pluginapi.AuthProviderEntry
+
 // Host wraps the internal plugin host behind a public SDK surface.
 type Host struct {
 	inner *internalpluginhost.Host
@@ -123,6 +126,14 @@ func (h *Host) ParseAuths(ctx context.Context, req pluginapi.AuthParseRequest) (
 		return nil, false, nil
 	}
 	return h.inner.ParseAuths(ctx, req)
+}
+
+// ParseAuthsWithDefaultAuthDir parses plugin auth records using defaultAuthDir when AuthData.ID is empty.
+func (h *Host) ParseAuthsWithDefaultAuthDir(ctx context.Context, req pluginapi.AuthParseRequest, defaultAuthDir string) ([]*coreauth.Auth, bool, error) {
+	if h == nil || h.inner == nil {
+		return nil, false, nil
+	}
+	return h.inner.ParseAuthsWithDefaultAuthDir(ctx, req, defaultAuthDir)
 }
 
 // ModelsForAuth lets plugin model providers discover auth-bound models.
@@ -215,6 +226,19 @@ func (h *Host) HasScheduler() bool {
 // candidates across all priority tiers.
 func (h *Host) SchedulerWantsAcrossPriorities() bool {
 	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
+}
+
+// HasSchedulerContinuity reports whether the active scheduler supports bounded continuity evaluation.
+func (h *Host) HasSchedulerContinuity() bool {
+	return h != nil && h.inner != nil && h.inner.HasSchedulerContinuity()
+}
+
+// EvaluateSchedulerContinuity invokes the active scheduler plugin's Continuity callback.
+func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	if h == nil || h.inner == nil {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	return h.inner.EvaluateSchedulerContinuity(ctx, req)
 }
 
 // RegisteredPlugins returns active plugin metadata from the current runtime snapshot.

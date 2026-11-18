@@ -27,15 +27,16 @@ type Snapshot struct {
 
 // RegisteredPluginInfo describes a plugin that is active in the current runtime snapshot.
 type RegisteredPluginInfo struct {
-	ID             string
-	Priority       int
-	Metadata       pluginapi.Metadata
-	SupportsOAuth  bool
-	OAuthProvider  string
-	OAuthProviders []string
-	SupportsQuota  bool
-	QuotaProvider  string
-	Menus          []RegisteredPluginMenu
+	ID                   string
+	Priority             int
+	Metadata             pluginapi.Metadata
+	SupportsOAuth        bool
+	OAuthProvider        string
+	OAuthProviders       []string
+	OAuthProviderEntries []pluginapi.AuthProviderEntry
+	SupportsQuota        bool
+	QuotaProvider        string
+	Menus                []RegisteredPluginMenu
 }
 
 // RegisteredPluginMenu describes a plugin-owned resource menu entry.
@@ -80,10 +81,12 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 		hasOAuth := hasRecordAuthProvider(record)
 		oauthProvider := ""
 		var oauthProviders []string
+		var oauthProviderEntries []pluginapi.AuthProviderEntry
 		if hasOAuth && !h.isPluginFused(record.id) {
-			if identifiers, okIdentifiers := h.callRecordAuthProviderIdentifiers(record); okIdentifiers && len(identifiers) > 0 {
+			if identifiers, entries, okIdentifiers := h.callRecordAuthProviderMetadata(record); okIdentifiers && len(identifiers) > 0 {
 				oauthProvider = identifiers[0]
 				oauthProviders = identifiers
+				oauthProviderEntries = entries
 			}
 		}
 		quotaProvider := record.plugin.Capabilities.QuotaProvider
@@ -94,15 +97,16 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 			}
 		}
 		out = append(out, RegisteredPluginInfo{
-			ID:             record.id,
-			Priority:       record.priority,
-			Metadata:       clonePluginMetadata(record.meta),
-			SupportsOAuth:  hasOAuth,
-			OAuthProvider:  oauthProvider,
-			OAuthProviders: oauthProviders,
-			SupportsQuota:  quotaProvider != nil,
-			QuotaProvider:  quotaIdentifier,
-			Menus:          menusByPlugin[record.id],
+			ID:                   record.id,
+			Priority:             record.priority,
+			Metadata:             clonePluginMetadata(record.meta),
+			SupportsOAuth:        hasOAuth,
+			OAuthProvider:        oauthProvider,
+			OAuthProviders:       oauthProviders,
+			OAuthProviderEntries: oauthProviderEntries,
+			SupportsQuota:        quotaProvider != nil,
+			QuotaProvider:        quotaIdentifier,
+			Menus:                menusByPlugin[record.id],
 		})
 	}
 	return out

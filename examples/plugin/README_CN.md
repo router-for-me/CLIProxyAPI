@@ -161,6 +161,11 @@ make -C examples/plugin build
 
 构建产物会写入 `examples/plugin/bin`。
 
+在 CI 构建机（例如 `ubuntu-latest`）上编译用于跨机器分发的预编译 `c-shared` 动态库插件时，请显式锁定最低 CPU 指令集基线，避免构建机默认生成的高阶指令集（如 AVX/AVX2/AVX-512）在不支持相应扩展的宿主机或虚拟化环境中触发 `SIGILL`：
+
+- `amd64`：`GOAMD64=v1 CGO_CFLAGS="-march=x86-64"`
+- `arm64`：`GOARM64=v8.0 CGO_CFLAGS="-march=armv8-a"`
+
 ## 说明
 
 `protocol-format` 使用最小执行器承载，因为格式声明属于执行器能力。

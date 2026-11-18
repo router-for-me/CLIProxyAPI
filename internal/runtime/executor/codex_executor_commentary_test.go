@@ -10,12 +10,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorCommentaryConfigStreamAndNonStream(t *testing.T) {
@@ -30,7 +30,7 @@ func TestCodexExecutorCommentaryConfigStreamAndNonStream(t *testing.T) {
 						t.Error(errRead)
 						return
 					}
-					requestItems.Store(int64(len(gjson.GetBytes(body, "input").Array())))
+					requestItems.Store(int64(len(ojson.GetBytes(body, "input").Array())))
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, errWrite := io.WriteString(w, `data: {"type":"response.created","response":{"id":"r","model":"gpt-6.1-sol"}}
 
@@ -74,7 +74,7 @@ data: {"type":"response.completed","response":{"id":"r","model":"gpt-6.1-sol","s
 							if !strings.HasPrefix(line, "data: ") {
 								continue
 							}
-							item := gjson.Parse(strings.TrimPrefix(line, "data: "))
+							item := ojson.Parse(strings.TrimPrefix(line, "data: "))
 							if item.Get("delta.type").String() == "text_delta" {
 								text.WriteString(item.Get("delta.text").String())
 							}
@@ -85,12 +85,12 @@ data: {"type":"response.completed","response":{"id":"r","model":"gpt-6.1-sol","s
 					if err != nil {
 						t.Fatal(err)
 					}
-					for _, block := range gjson.GetBytes(result.Payload, "content").Array() {
+					for _, block := range ojson.GetBytes(result.Payload, "content").Array() {
 						if block.Get("type").String() == "text" {
 							text.WriteString(block.Get("text").String())
 						}
 					}
-					if gjson.GetBytes(result.Payload, "usage.output_tokens").Int() != 7 {
+					if ojson.GetBytes(result.Payload, "usage.output_tokens").Int() != 7 {
 						t.Fatal("display mirroring changed output token accounting")
 					}
 				}

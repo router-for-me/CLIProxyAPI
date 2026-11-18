@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 const claudeRaceProbeOAuthKey = "sk-ant-oat-beta-policy"
@@ -154,7 +154,7 @@ func TestClaudeExecutor_ContextManagementNeverLeaksToOtherUpstreams(t *testing.T
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := gjson.GetBytes(upstreamBody, "context_management"); got.Exists() {
+	if got := ojson.GetBytes(upstreamBody, "context_management"); got.Exists() {
 		t.Fatalf("non-Anthropic upstream received context_management = %s", got.Raw)
 	}
 }

@@ -2,18 +2,18 @@ package executor
 
 import (
 	"context"
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func validCodexReasoningEncryptedContentForTest() string {
@@ -63,22 +63,22 @@ func TestCodexExecutorDropsInvalidReasoningEncryptedContentFromFinalRequest(t *t
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
+	if ojson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
 		t.Fatalf("invalid reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "input.0.id").Exists() {
+	if ojson.GetBytes(gotBody, "input.0.id").Exists() {
 		t.Fatalf("invalid reasoning id should be stripped under store=false default; body=%s", string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
+	if ojson.GetBytes(gotBody, "input.1.encrypted_content").Exists() {
 		t.Fatalf("non-string reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
 	}
-	if gjson.GetBytes(gotBody, "input.1.id").Exists() {
+	if ojson.GetBytes(gotBody, "input.1.id").Exists() {
 		t.Fatalf("non-string reasoning id should be stripped under store=false default; body=%s", string(gotBody))
 	}
-	if got := gjson.GetBytes(gotBody, "input.2.encrypted_content").String(); got != validEncryptedContent {
+	if got := ojson.GetBytes(gotBody, "input.2.encrypted_content").String(); got != validEncryptedContent {
 		t.Fatalf("valid reasoning encrypted_content = %q, want preserved", got)
 	}
-	if got := gjson.GetBytes(gotBody, "input.3.encrypted_content").String(); got != "leave-message-alone" {
+	if got := ojson.GetBytes(gotBody, "input.3.encrypted_content").String(); got != "leave-message-alone" {
 		t.Fatalf("non-reasoning encrypted_content = %q, want untouched", got)
 	}
 }
@@ -109,7 +109,7 @@ func TestCodexExecutorExecuteStreamDropsInvalidReasoningEncryptedContentFromFina
 	}
 	for range result.Chunks {
 	}
-	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
+	if ojson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
 		t.Fatalf("invalid stream reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
 	}
 }
@@ -139,7 +139,7 @@ func TestCodexExecutorCompactDropsInvalidReasoningEncryptedContentFromFinalReque
 	if err != nil {
 		t.Fatalf("Execute compact error: %v", err)
 	}
-	if gjson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
+	if ojson.GetBytes(gotBody, "input.0.encrypted_content").Exists() {
 		t.Fatalf("invalid compact reasoning encrypted_content exists, want removed; body=%s", string(gotBody))
 	}
 }
@@ -198,7 +198,7 @@ func TestCodexExecutorPreservesReasoningTextForCompatModelInResponsesRequest(t *
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	reasoningItem := gjson.GetBytes(gotBody, "input.0")
+	reasoningItem := ojson.GetBytes(gotBody, "input.0")
 	if !reasoningItem.Exists() || reasoningItem.Get("type").String() != "reasoning" {
 		t.Fatalf("expected reasoning item at input.0, got: %s", string(gotBody))
 	}
@@ -266,7 +266,7 @@ func TestCodexExecutorExecuteStreamPreservesReasoningTextForCompatModelInRespons
 	for range streamResult.Chunks {
 	}
 
-	reasoningItem := gjson.GetBytes(gotBody, "input.0")
+	reasoningItem := ojson.GetBytes(gotBody, "input.0")
 	if !reasoningItem.Exists() || reasoningItem.Get("type").String() != "reasoning" {
 		t.Fatalf("expected reasoning item at input.0, got: %s", string(gotBody))
 	}
@@ -333,7 +333,7 @@ func TestCodexExecutorCompactPreservesReasoningTextForCompatModelInResponsesRequ
 		t.Fatalf("Execute compact error: %v", err)
 	}
 
-	reasoningItem := gjson.GetBytes(gotBody, "input.0")
+	reasoningItem := ojson.GetBytes(gotBody, "input.0")
 	if !reasoningItem.Exists() || reasoningItem.Get("type").String() != "reasoning" {
 		t.Fatalf("expected reasoning item at input.0, got: %s", string(gotBody))
 	}
@@ -401,11 +401,11 @@ func TestCodexExecutorHonorsAuthoritativeResolvedModelInfoIsCompatFalse(t *testi
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	content := gjson.GetBytes(gotBody, "input.0.content")
+	content := ojson.GetBytes(gotBody, "input.0.content")
 	if !content.Exists() || !content.IsArray() || len(content.Array()) != 0 {
 		t.Fatalf("content should be cleared to [] when authoritative IsCompat is false; body=%s", string(gotBody))
 	}
-	if gotSummary := gjson.GetBytes(gotBody, "input.0.summary.0.text").String(); gotSummary != "should be promoted and cleared" {
+	if gotSummary := ojson.GetBytes(gotBody, "input.0.summary.0.text").String(); gotSummary != "should be promoted and cleared" {
 		t.Fatalf("summary should have promoted reasoning_text; body=%s", string(gotBody))
 	}
 }
@@ -472,7 +472,7 @@ func TestCodexExecutorDisambiguatesConfigIndex(t *testing.T) {
 		t.Fatalf("Execute error: %v", err)
 	}
 
-	content := gjson.GetBytes(gotBody, "input.0.content")
+	content := ojson.GetBytes(gotBody, "input.0.content")
 	if !content.Exists() || !content.IsArray() || len(content.Array()) == 0 {
 		t.Fatalf("expected index 1 (IsCompat:true) to preserve content; body=%s", string(gotBody))
 	}

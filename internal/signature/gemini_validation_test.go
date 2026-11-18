@@ -1,13 +1,14 @@
 package signature
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"google.golang.org/protobuf/encoding/protowire"
 )

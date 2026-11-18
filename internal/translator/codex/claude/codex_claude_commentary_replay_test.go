@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // The internal commentary marker is an implementation contract between the
@@ -20,7 +20,7 @@ func TestConvertCodexResponseToClaudeNonStream_CommentaryCarriesInternalMarker(t
 	],"usage":{"input_tokens":1,"output_tokens":1}}}`)
 	var param any
 	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, raw, &param)
-	content := gjson.GetBytes(out, "content").Array()
+	content := ojson.GetBytesNoCopy(out, "content").Array()
 	if len(content) != 2 {
 		t.Fatalf("expected 2 content blocks, got %s", out)
 	}
@@ -78,7 +78,7 @@ func TestConvertClaudeRequestToCodex_CommentaryMarkerRestoresCommentaryMessage(t
 		if strings.Contains(string(result), testCommentaryMarkerSignature) {
 			t.Fatalf("stream=%v: internal marker leaked into upstream request: %s", stream, result)
 		}
-		inputs := gjson.GetBytes(result, "input").Array()
+		inputs := ojson.GetBytesNoCopy(result, "input").Array()
 		if len(inputs) != 4 {
 			t.Fatalf("stream=%v: got %d input items, want 4: %s", stream, len(inputs), result)
 		}
@@ -124,7 +124,7 @@ func TestConvertClaudeRequestToCodex_CommentaryMarkerBeforeToolUseSurvivesToolRo
 	if strings.Contains(string(result), testCommentaryMarkerSignature) {
 		t.Fatalf("internal marker leaked into upstream request: %s", result)
 	}
-	inputs := gjson.GetBytes(result, "input").Array()
+	inputs := ojson.GetBytesNoCopy(result, "input").Array()
 	if len(inputs) != 4 {
 		t.Fatalf("got %d input items, want 4: %s", len(inputs), result)
 	}
@@ -146,7 +146,7 @@ func TestConvertClaudeRequestToCodex_CommentaryMarkerRoundTripFromResponse(t *te
 	],"usage":{"input_tokens":1,"output_tokens":1}}}`)
 	var param any
 	claudeResponse := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, raw, &param)
-	content := gjson.GetBytes(claudeResponse, "content").Raw
+	content := ojson.GetBytesNoCopy(claudeResponse, "content").Raw
 
 	replay := []byte(`{"model":"gpt-6.1-sol","messages":[{"role":"user","content":"First turn"},{"role":"assistant","content":` + content + `},{"role":"user","content":"Next turn"}]}`)
 	result, errConvert := ConvertClaudeRequestToCodex("gpt-6.1-sol", replay, false)
@@ -171,7 +171,7 @@ func TestConvertClaudeRequestToCodexWithCompat_CommentaryMarkerRestoresTextNotRe
 	if strings.Contains(string(result), testCommentaryMarkerSignature) {
 		t.Fatalf("internal marker leaked into upstream request: %s", result)
 	}
-	inputs := gjson.GetBytes(result, "input").Array()
+	inputs := ojson.GetBytesNoCopy(result, "input").Array()
 	if len(inputs) != 1 {
 		t.Fatalf("got %d input items, want 1: %s", len(inputs), result)
 	}

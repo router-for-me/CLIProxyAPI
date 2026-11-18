@@ -65,6 +65,9 @@ func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
 
 func resetCodexRefreshGroupForTest() {
 	codexRefreshGroup = singleflight.Group{}
+	processRefreshJournal.mu.Lock()
+	processRefreshJournal.receipts = nil
+	processRefreshJournal.mu.Unlock()
 }
 
 func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
@@ -340,10 +343,10 @@ func TestRefreshTokensWithRetry_TerminalGrantErrorsOnlyAttemptOnce(t *testing.T)
 			wantCalls:  1,
 		},
 		{
-			name:       "transient_503_retries",
+			name:       "unqualified_503_does_not_retry",
 			statusCode: http.StatusServiceUnavailable,
 			body:       `{"error":"service_unavailable"}`,
-			wantCalls:  2,
+			wantCalls:  1,
 		},
 	}
 

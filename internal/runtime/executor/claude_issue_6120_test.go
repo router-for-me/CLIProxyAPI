@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // TestClaudeExecutor_DirectMessagesOAuthDefaultsToCloak_Issue6120 verifies Option A for Issue #6120:
@@ -30,7 +30,7 @@ func TestClaudeExecutor_DirectMessagesOAuthDefaultsToCloak_Issue6120(t *testing.
 	if !cloaked {
 		t.Fatal("applyCloaking() cloaked = false, want true (Issue #6120: unconfirmed OAuth direct Messages callers must be cloaked by default)")
 	}
-	if !gjson.GetBytes(gotPayload, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
+	if !ojson.GetBytes(gotPayload, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
 		t.Fatal("expected cloaked payload to contain Claude Code CLI identity system block")
 	}
 
@@ -77,7 +77,7 @@ func TestClaudeExecutor_DirectMessagesOAuthDefaultsToCloak_Issue6120(t *testing.
 	if !strings.Contains(betas, "claude-code-20250219") || !strings.Contains(betas, "oauth-2025-04-20") {
 		t.Fatalf("Anthropic-Beta = %q, want claude-code-20250219 and oauth-2025-04-20 for cloaked OAuth", betas)
 	}
-	if !gjson.GetBytes(seenBody, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
+	if !ojson.GetBytes(seenBody, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
 		t.Fatal("expected upstream body to contain Claude Code CLI identity system block")
 	}
 }
@@ -136,7 +136,7 @@ func TestClaudeExecutor_DirectMessagesOAuthDefaultsToCloakStream_Issue6120(t *te
 	if !strings.Contains(betas, "claude-code-20250219") || !strings.Contains(betas, "oauth-2025-04-20") {
 		t.Fatalf("streaming Anthropic-Beta = %q, want claude-code-20250219 and oauth-2025-04-20", betas)
 	}
-	if !gjson.GetBytes(seenBody, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
+	if !ojson.GetBytes(seenBody, "system.#(text==\"You are Claude Code, Anthropic's official CLI for Claude.\")").Exists() {
 		t.Fatal("expected streaming upstream body to contain Claude Code CLI identity system block")
 	}
 }

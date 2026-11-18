@@ -655,6 +655,21 @@ func TestHandlerProvidersForExecutionRejectsImageOnlyModelOnProviderRoute(t *tes
 			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.5-sunburst"},
 		},
 		{
+			name:          "target-model-image-2.6",
+			originalModel: "original-model",
+			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.6"},
+		},
+		{
+			name:          "target-model-image-2.6-flare",
+			originalModel: "original-model",
+			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.6-flare"},
+		},
+		{
+			name:          "target-model-image-2.6-sunburst",
+			originalModel: "original-model",
+			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2.6-sunburst"},
+		},
+		{
 			name:          "target-model-thinking-suffix",
 			originalModel: "original-model",
 			decision:      modelRouteDecision{Provider: "claude", Model: "gpt-image-2(auto)"},

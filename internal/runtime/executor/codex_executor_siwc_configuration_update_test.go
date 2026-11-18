@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // SIWC (Sign in with ChatGPT) subscriptions reject configuration_update input
@@ -78,10 +78,10 @@ func TestStripCodexSIWCUnsupportedFieldsConfigurationUpdates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := stripCodexSIWCUnsupportedFields([]byte(tc.body), false)
-			if input := gjson.GetBytes(got, "input").Raw; input != tc.wantInput {
+			if input := ojson.GetBytes(got, "input").Raw; input != tc.wantInput {
 				t.Fatalf("input = %s, want %s; body=%s", input, tc.wantInput, got)
 			}
-			if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != tc.wantEffort {
+			if effort := ojson.GetBytes(got, "reasoning.effort").String(); effort != tc.wantEffort {
 				t.Fatalf("reasoning.effort = %q, want %q; body=%s", effort, tc.wantEffort, got)
 			}
 		})
@@ -90,10 +90,10 @@ func TestStripCodexSIWCUnsupportedFieldsConfigurationUpdates(t *testing.T) {
 	t.Run("summary and other reasoning fields are preserved", func(t *testing.T) {
 		body := `{"reasoning":{"effort":"medium","summary":"auto","other":7},"input":[{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"user","content":"hi"}]}`
 		got := stripCodexSIWCUnsupportedFields([]byte(body), false)
-		if summary := gjson.GetBytes(got, "reasoning.summary").String(); summary != "auto" {
+		if summary := ojson.GetBytes(got, "reasoning.summary").String(); summary != "auto" {
 			t.Fatalf("reasoning.summary = %q, want auto; body=%s", summary, got)
 		}
-		if other := gjson.GetBytes(got, "reasoning.other").Int(); other != 7 {
+		if other := ojson.GetBytes(got, "reasoning.other").Int(); other != 7 {
 			t.Fatalf("reasoning.other = %d, want 7; body=%s", other, got)
 		}
 	})
@@ -142,12 +142,12 @@ func assertCodexSIWCUpdateStripped(t *testing.T, gotBody []byte, wantEffort stri
 	if len(gotBody) == 0 {
 		t.Fatal("upstream body was not captured")
 	}
-	for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+	for _, item := range ojson.GetBytes(gotBody, "input").Array() {
 		if item.Get("type").String() == "configuration_update" {
 			t.Fatalf("SIWC upstream body still contains configuration_update: %s", gotBody)
 		}
 	}
-	if effort := gjson.GetBytes(gotBody, "reasoning.effort").String(); effort != wantEffort {
+	if effort := ojson.GetBytes(gotBody, "reasoning.effort").String(); effort != wantEffort {
 		t.Fatalf("SIWC upstream reasoning.effort = %q, want %q; body=%s", effort, wantEffort, gotBody)
 	}
 }
@@ -256,7 +256,7 @@ func TestCodexWebsocketsExecuteUseSIWCStripsConfigurationUpdates(t *testing.T) {
 	select {
 	case gotBody := <-captured:
 		assertCodexSIWCUpdateStripped(t, gotBody, "high")
-		if cacheKey := gjson.GetBytes(gotBody, "prompt_cache_key").String(); cacheKey != codexSIWCUpdatePromptCacheKey {
+		if cacheKey := ojson.GetBytes(gotBody, "prompt_cache_key").String(); cacheKey != codexSIWCUpdatePromptCacheKey {
 			t.Fatalf("prompt_cache_key = %q, want %q; body=%s", cacheKey, codexSIWCUpdatePromptCacheKey, gotBody)
 		}
 	case <-time.After(5 * time.Second):
@@ -367,7 +367,7 @@ func TestCodexExecutorWithoutSIWCKeepsConfigurationUpdates(t *testing.T) {
 	}
 
 	updates := 0
-	for _, item := range gjson.GetBytes(gotBody, "input").Array() {
+	for _, item := range ojson.GetBytes(gotBody, "input").Array() {
 		if item.Get("type").String() == "configuration_update" {
 			updates++
 		}
@@ -375,7 +375,7 @@ func TestCodexExecutorWithoutSIWCKeepsConfigurationUpdates(t *testing.T) {
 	if updates != 2 {
 		t.Fatalf("non-SIWC upstream configuration_update count = %d, want 2; body=%s", updates, gotBody)
 	}
-	if effort := gjson.GetBytes(gotBody, "reasoning.effort").String(); effort != "medium" {
+	if effort := ojson.GetBytes(gotBody, "reasoning.effort").String(); effort != "medium" {
 		t.Fatalf("non-SIWC upstream reasoning.effort = %q, want pinned %q; body=%s", effort, "medium", gotBody)
 	}
 }

@@ -278,3 +278,30 @@ func TestRecoverDevinBareApplyPatch(t *testing.T) {
 		})
 	}
 }
+
+func TestDevinApplyPatchDiagnosticsHasPatchActivity(t *testing.T) {
+	if (*DevinApplyPatchDiagnostics)(nil).HasPatchActivity() {
+		t.Fatal("nil diagnostics reported patch activity")
+	}
+
+	d := NewDevinApplyPatchDiagnostics([]byte(devinDiagnosticPatchRequest))
+	if d.HasPatchActivity() {
+		t.Fatal("empty diagnostics reported patch activity")
+	}
+
+	d.Observe(0, DevinToolCallDelta{Name: "shell", Arguments: `{"cmd":"ls"}`})
+	if d.HasPatchActivity() {
+		t.Fatal("non-patch tool call reported patch activity")
+	}
+
+	d.Observe(1, DevinToolCallDelta{Name: "apply_patch", Arguments: `{"input":"*** Begin Patch"}`})
+	if !d.HasPatchActivity() {
+		t.Fatal("apply_patch tool call did not report patch activity")
+	}
+
+	dUnnamed := NewDevinApplyPatchDiagnostics([]byte(devinDiagnosticPatchRequest))
+	dUnnamed.Observe(0, DevinToolCallDelta{InvalidJSONStr: "*** Begin Patch"})
+	if !dUnnamed.HasPatchActivity() {
+		t.Fatal("unnamed tool call did not report patch activity")
+	}
+}

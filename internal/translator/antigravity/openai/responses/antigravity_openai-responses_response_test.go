@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 func TestConvertAntigravityResponseToOpenAIResponsesNonStream_PreservesOpenAITools(t *testing.T) {
@@ -66,23 +67,23 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStream_PreservesOpenAIToo
 		nil,
 	)
 
-	if !gjson.ValidBytes(output) {
+	if !ojson.ValidBytes(output) {
 		t.Fatalf("converter returned invalid JSON: %s", output)
 	}
-	if got := gjson.GetBytes(output, "tools.0.type").String(); got != "function" {
+	if got := ojson.GetBytesNoCopy(output, "tools.0.type").String(); got != "function" {
 		t.Fatalf("tools.0.type = %q, want function; output=%s", got, output)
 	}
-	if gjson.GetBytes(output, "tools.0.functionDeclarations").Exists() {
+	if ojson.GetBytesNoCopy(output, "tools.0.functionDeclarations").Exists() {
 		t.Fatalf("OpenAI response contains Gemini-native functionDeclarations: %s", output)
 	}
-	if got := gjson.GetBytes(output, "output.0.type").String(); got != "function_call" {
+	if got := ojson.GetBytesNoCopy(output, "output.0.type").String(); got != "function_call" {
 		t.Fatalf("output.0.type = %q, want function_call; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "output.0.name").String(); got != "get_weather" {
+	if got := ojson.GetBytesNoCopy(output, "output.0.name").String(); got != "get_weather" {
 		t.Fatalf("output.0.name = %q, want get_weather; output=%s", got, output)
 	}
-	arguments := gjson.GetBytes(output, "output.0.arguments").String()
-	if !gjson.Valid(arguments) || gjson.Get(arguments, "city").String() != "Tokyo" {
+	arguments := ojson.GetBytesNoCopy(output, "output.0.arguments").String()
+	if !ojson.Valid(arguments) || ojson.Get(arguments, "city").String() != "Tokyo" {
 		t.Fatalf("output.0.arguments = %q, want JSON arguments with city Tokyo; output=%s", arguments, output)
 	}
 }
@@ -125,19 +126,19 @@ func TestConvertAntigravityResponseToOpenAIResponses_RestoresAdditionalNamespace
 		nil,
 	)
 
-	if !gjson.ValidBytes(output) {
+	if !ojson.ValidBytes(output) {
 		t.Fatalf("invalid JSON output: %s", output)
 	}
-	if got := gjson.GetBytes(output, "output.0.type").String(); got != "custom_tool_call" {
+	if got := ojson.GetBytesNoCopy(output, "output.0.type").String(); got != "custom_tool_call" {
 		t.Fatalf("output.0.type = %q, want custom_tool_call; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "output.0.name").String(); got != "exec" {
+	if got := ojson.GetBytesNoCopy(output, "output.0.name").String(); got != "exec" {
 		t.Fatalf("output.0.name = %q, want exec", got)
 	}
-	if got := gjson.GetBytes(output, "output.0.namespace").String(); got != "functions" {
+	if got := ojson.GetBytesNoCopy(output, "output.0.namespace").String(); got != "functions" {
 		t.Fatalf("output.0.namespace = %q, want functions", got)
 	}
-	if got := gjson.GetBytes(output, "output.0.input").String(); got != "pwd" {
+	if got := ojson.GetBytesNoCopy(output, "output.0.input").String(); got != "pwd" {
 		t.Fatalf("output.0.input = %q, want pwd", got)
 	}
 }
@@ -187,7 +188,7 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStream_WebSearch(t *testi
 		nil,
 	)
 
-	parsed := gjson.ParseBytes(output)
+	parsed := util.ParseGJSONBytesNoCopy(output)
 	outputs := parsed.Get("output").Array()
 	if len(outputs) != 2 {
 		t.Fatalf("expected 2 outputs, got %d: %s", len(outputs), output)
@@ -227,14 +228,14 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStream_WebSearch(t *testi
 func TestAntigravityApplyPatchReuse(t *testing.T) {
 	request := []byte(`{"tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch","format":{"type":"grammar","definition":"start: patch"}}]}],"input":"patch"}`)
 	translated, _ := ConvertOpenAIResponsesRequestToAntigravity("gemini-3.1-pro-preview", request, false)
-	declaration := gjson.GetBytes(translated, "request.tools.0.functionDeclarations.0")
+	declaration := ojson.GetBytesNoCopy(translated, "request.tools.0.functionDeclarations.0")
 	if declaration.Get("name").String() != "functions__apply_patch" || !strings.Contains(declaration.Get("description").String(), "*** Begin Patch") || declaration.Get("parametersJsonSchema.properties.input.type").String() != "string" || !declaration.Get("parametersJsonSchema.additionalProperties").Exists() || declaration.Get("parametersJsonSchema.additionalProperties").Bool() {
 		t.Fatalf("missing declaration: %s", translated)
 	}
 	raw := []byte(`{"response":{"responseId":"patch","candidates":[{"content":{"parts":[{"functionCall":{"name":"functions__apply_patch","args":{"input":"  *** Begin Patch\n*** End Patch\n "}}}]},"finishReason":"STOP"}]}}`)
 	want := "  *** Begin Patch\n*** End Patch\n "
 	nonStream := ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "gemini", request, translated, raw, nil)
-	if gjson.GetBytes(nonStream, "output.0.input").String() != want || gjson.GetBytes(nonStream, "output.0.namespace").String() != "functions" {
+	if ojson.GetBytesNoCopy(nonStream, "output.0.input").String() != want || ojson.GetBytesNoCopy(nonStream, "output.0.namespace").String() != "functions" {
 		t.Fatalf("wrong input: %s", nonStream)
 	}
 	var param any
@@ -247,7 +248,7 @@ func TestAntigravityApplyPatchReuse(t *testing.T) {
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
-			ev := gjson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			ev := ojson.Parse(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			switch ev.Get("type").String() {
 			case "response.custom_tool_call_input.delta":
 				delta.WriteString(ev.Get("delta").String())

@@ -3,7 +3,6 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -19,7 +20,6 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type executorManager interface {
@@ -43,6 +43,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	registrations := h.snapshotModelRegistrations()
 	selectedModels := make(map[string][]*registry.ModelInfo)
 	providerModels := make(map[string][]*registry.ModelInfo)
+	staticAppendProviderModels := make(map[string][]*registry.ModelInfo)
 	claimedModels := make(map[string]struct{})
 	claimedProviders := make(map[string]string)
 	for _, registration := range registrations {
@@ -50,6 +51,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			continue
 		}
 		appendModelsForProvider(providerModels, registration.provider, registration.models)
+		appendModelsForProvider(staticAppendProviderModels, registration.provider, registration.models)
 		// Reserve native catalog models before plugin arbitration, independently of
 		// credential publication or exclusions. This preserves native priority without
 		// publishing availability, which remains credential-bound.
@@ -72,9 +74,13 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 		if !okProvider {
 			continue
 		}
+		if !executorScopeAllowsStaticModels(record.plugin.Capabilities) {
+			continue
+		}
 		registration := h.modelRegistration(record.id)
 		if h.providerHasNativeExecutor(manager, provider) {
 			appendModelsForProvider(providerModels, provider, registration.models)
+			appendModelsForProvider(staticAppendProviderModels, provider, registration.models)
 			continue
 		}
 		if len(registration.models) == 0 {
@@ -101,6 +107,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	}
 
 	seenProviders := make(map[string]struct{})
+	seenCatalogProviders := make(map[string]struct{})
 	nextProviders := make(map[string]struct{})
 	nextModelClients := make(map[string]struct{})
 	executorRegistrations := make([]executorRegistration, 0)
@@ -111,61 +118,105 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			continue
 		}
 
-		provider, okProvider := h.executorProvider(record, executor)
-		if !okProvider {
-			continue
-		}
+		allowsStatic := executorScopeAllowsStaticModels(record.plugin.Capabilities)
 		registration := h.modelRegistration(record.id)
-		if len(registration.models) > 0 && len(selectedModels[record.id]) == 0 {
-			continue
-		}
-		if _, seenProvider := seenProviders[provider]; seenProvider {
-			continue
-		}
-		seenProviders[provider] = struct{}{}
-		if h.providerHasNativeExecutor(manager, provider) {
+		if allowsStatic && len(registration.models) > 0 && len(selectedModels[record.id]) == 0 {
 			continue
 		}
 
-		nextProviders[provider] = struct{}{}
-		executorRegistrations = append(executorRegistrations, newExecutorAdapterRegistration(h, record, provider, executor))
-		appendModelsForProvider(providerModels, provider, selectedModels[record.id])
-		if len(selectedModels[record.id]) > 0 {
-			clientID := pluginExecutorModelClientID(record.id, provider)
-			modelClientRegistrations = append(modelClientRegistrations, modelClientRegistration{
-				clientID: clientID,
-				provider: provider,
-				models:   selectedModels[record.id],
-			})
-			nextModelClients[clientID] = struct{}{}
+		provider, okProvider := h.executorProvider(record, executor)
+		if h.isPluginFused(record.id) {
+			continue
 		}
-		if executorScopeAllowsOAuthModels(record.plugin.Capabilities) && hasRecordAuthProvider(record) {
-			if authIDs, okAuthIDs := h.callRecordAuthProviderIdentifiers(record); okAuthIDs {
-				for _, authID := range authIDs {
-					if authID == "" || authID == provider {
-						continue
+		if okProvider {
+			if _, seenProvider := seenProviders[provider]; !seenProvider {
+				seenProviders[provider] = struct{}{}
+				if !h.providerHasNativeExecutor(manager, provider) {
+					nextProviders[provider] = struct{}{}
+					executorRegistrations = append(executorRegistrations, newExecutorAdapterRegistration(h, record, provider, executor))
+					if allowsStatic {
+						appendModelsForProvider(providerModels, provider, selectedModels[record.id])
+						appendModelsForProvider(staticAppendProviderModels, provider, selectedModels[record.id])
+						if len(selectedModels[record.id]) > 0 {
+							clientID := pluginExecutorModelClientID(record.id, provider)
+							modelClientRegistrations = append(modelClientRegistrations, modelClientRegistration{
+								clientID: clientID,
+								provider: provider,
+								models:   selectedModels[record.id],
+							})
+							nextModelClients[clientID] = struct{}{}
+						}
 					}
-					if _, seenAuthProvider := seenProviders[authID]; seenAuthProvider {
-						continue
-					}
-					seenProviders[authID] = struct{}{}
-					if h.providerHasNativeExecutor(manager, authID) {
-						continue
-					}
-					nextProviders[authID] = struct{}{}
-					executorRegistrations = append(executorRegistrations, newExecutorAdapterRegistration(h, record, authID, executor))
 				}
 			}
 		}
+		if !allowsStatic {
+			for _, reg := range h.pluginRegistrations(record.id) {
+				if _, seenCatalog := seenCatalogProviders[reg.provider]; seenCatalog {
+					continue
+				}
+				seenCatalogProviders[reg.provider] = struct{}{}
+				appendModelsForProvider(providerModels, reg.provider, reg.models)
+				if !reg.hasModelProvider {
+					appendModelsForProvider(staticAppendProviderModels, reg.provider, reg.models)
+				}
+			}
+		}
+		for _, authID := range h.recordOAuthExecutorProviders(record) {
+			if authID == "" || authID == provider {
+				continue
+			}
+			if _, seenAuthProvider := seenProviders[authID]; seenAuthProvider {
+				continue
+			}
+			seenProviders[authID] = struct{}{}
+			if h.providerHasNativeExecutor(manager, authID) {
+				continue
+			}
+			nextProviders[authID] = struct{}{}
+			executorRegistrations = append(executorRegistrations, newExecutorAdapterRegistration(h, record, authID, executor))
+		}
 	}
-	h.commitExecutorState(snap, manager, modelRegistry, providerModels, executorRegistrations, nextProviders, modelClientRegistrations, nextModelClients)
+	h.commitExecutorState(snap, manager, modelRegistry, providerModels, staticAppendProviderModels, executorRegistrations, nextProviders, modelClientRegistrations, nextModelClients)
+}
+
+func (h *Host) recordOAuthExecutorProviders(record capabilityRecord) []string {
+	if h == nil || !executorScopeAllowsOAuthModels(record.plugin.Capabilities) || !hasRecordAuthProvider(record) {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	appendProvider := func(raw string) {
+		id := normalizeProviderID(raw)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if authIDs, okAuthIDs := h.callRecordAuthProviderIdentifiers(record); okAuthIDs {
+		for _, authID := range authIDs {
+			appendProvider(authID)
+		}
+	}
+	for _, prov := range recordAuthProviders(record) {
+		if credIDs, okCredIDs := h.callAuthProviderCredentialProviders(record.id, prov); okCredIDs {
+			for _, credID := range credIDs {
+				appendProvider(credID)
+			}
+		}
+	}
+	return out
 }
 
 func pluginExecutorModelClientID(pluginID, provider string) string {
 	return "plugin:" + pluginID + ":" + provider + ":executor"
 }
 
-func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, modelRegistry modelRegistry, providerModels map[string][]*registry.ModelInfo, registrations []executorRegistration, nextProviders map[string]struct{}, modelClientRegistrations []modelClientRegistration, nextModelClients map[string]struct{}) {
+func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, modelRegistry modelRegistry, providerModels, staticAppendProviderModels map[string][]*registry.ModelInfo, registrations []executorRegistration, nextProviders map[string]struct{}, modelClientRegistrations []modelClientRegistration, nextModelClients map[string]struct{}) {
 	if h == nil || manager == nil {
 		return
 	}
@@ -179,6 +230,10 @@ func (h *Host) commitExecutorState(snap *Snapshot, manager executorManager, mode
 	h.providerModels = make(map[string][]*registryModelInfo, len(providerModels))
 	for provider, models := range providerModels {
 		h.providerModels[provider] = cloneRegistryModels(models)
+	}
+	h.staticAppendProviderModels = make(map[string][]*registryModelInfo, len(staticAppendProviderModels))
+	for provider, models := range staticAppendProviderModels {
+		h.staticAppendProviderModels[provider] = cloneRegistryModels(models)
 	}
 
 	staleProviders := make([]string, 0)
@@ -229,14 +284,15 @@ func newExecutorAdapterRegistration(h *Host, record capabilityRecord, provider s
 	return executorRegistration{
 		provider: provider,
 		adapter: &executorAdapter{
-			host:          h,
-			pluginID:      record.id,
-			path:          record.path,
-			version:       record.version,
-			provider:      provider,
-			executor:      executor,
-			inputFormats:  normalizeExecutorFormats(record.plugin.Capabilities.ExecutorInputFormats),
-			outputFormats: normalizeExecutorFormats(record.plugin.Capabilities.ExecutorOutputFormats),
+			host:              h,
+			pluginID:          record.id,
+			path:              record.path,
+			version:           record.version,
+			provider:          provider,
+			usageExecutorType: helps.PluginExecutorType(record.id),
+			executor:          executor,
+			inputFormats:      normalizeExecutorFormats(record.plugin.Capabilities.ExecutorInputFormats),
+			outputFormats:     normalizeExecutorFormats(record.plugin.Capabilities.ExecutorOutputFormats),
 		},
 	}
 }
@@ -315,17 +371,32 @@ func (h *Host) modelRegistration(pluginID string) pluginModelRegistration {
 	return registration
 }
 
+func (h *Host) pluginRegistrations(pluginID string) []pluginModelRegistration {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pluginRegistrationsLocked(pluginID)
+}
+
 func (h *Host) executorProvider(record capabilityRecord, executor pluginapi.ProviderExecutor) (string, bool) {
 	if h == nil || !h.recordCurrent(record) {
 		return "", false
 	}
-	provider := h.modelProvider(record.id)
+	var provider string
+	if executorScopeAllowsStaticModels(record.plugin.Capabilities) {
+		provider = h.modelProvider(record.id)
+	}
 	if provider == "" {
 		identifier, okIdentifier := h.callExecutorIdentifier(record.id, executor)
 		if !okIdentifier {
 			return "", false
 		}
 		provider = identifier
+	}
+	if provider == "" {
+		provider = h.modelProvider(record.id)
 	}
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	return provider, provider != ""
@@ -405,6 +476,23 @@ func (h *Host) ModelsForProvider(provider string) []*registry.ModelInfo {
 	return cloneRegistryModels(h.providerModels[provider])
 }
 
+// StaticAppendModelsForProvider returns static plugin models eligible to be
+// appended to credential registrations when per-auth ModelProvider did not handle them.
+// OAuth-scoped ModelProvider executors keep their StaticModels catalog-only so
+// unfiltered or unaliased static models are never appended onto credentials.
+func (h *Host) StaticAppendModelsForProvider(provider string) []*registry.ModelInfo {
+	if h == nil {
+		return nil
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return cloneRegistryModels(h.staticAppendProviderModels[provider])
+}
+
 func (h *Host) HasExecutorCandidateProvider(provider string) bool {
 	if h == nil {
 		return false
@@ -422,13 +510,9 @@ func (h *Host) HasExecutorCandidateProvider(provider string) bool {
 		if okCandidate && candidate == provider {
 			return true
 		}
-		if executorScopeAllowsOAuthModels(record.plugin.Capabilities) && hasRecordAuthProvider(record) {
-			if authIDs, okAuthIDs := h.callRecordAuthProviderIdentifiers(record); okAuthIDs {
-				for _, authID := range authIDs {
-					if authID == provider {
-						return true
-					}
-				}
+		for _, authID := range h.recordOAuthExecutorProviders(record) {
+			if authID == provider {
+				return true
 			}
 		}
 	}
@@ -486,14 +570,15 @@ func (h *Host) modelProvidersForPlugin(pluginID string) []string {
 }
 
 type executorAdapter struct {
-	host          *Host
-	pluginID      string
-	path          string
-	version       string
-	provider      string
-	executor      pluginapi.ProviderExecutor
-	inputFormats  []sdktranslator.Format
-	outputFormats []sdktranslator.Format
+	host              *Host
+	pluginID          string
+	path              string
+	version           string
+	provider          string
+	usageExecutorType string
+	executor          pluginapi.ProviderExecutor
+	inputFormats      []sdktranslator.Format
+	outputFormats     []sdktranslator.Format
 }
 
 func (a *executorAdapter) Identifier() string {
@@ -501,6 +586,16 @@ func (a *executorAdapter) Identifier() string {
 		return ""
 	}
 	return a.provider
+}
+
+func (a *executorAdapter) UsageExecutorType() string {
+	if a == nil {
+		return ""
+	}
+	if a.usageExecutorType != "" {
+		return a.usageExecutorType
+	}
+	return helps.PluginExecutorType(a.pluginID)
 }
 
 type preparedExecutorCall struct {
@@ -553,13 +648,14 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 	hasPluginThinkingTarget := modelInfo != nil ||
 		registry.LookupModelInfo(baseModel, a.provider) != nil ||
 		thinking.GetProviderApplier(a.provider) != nil
-	if hasPluginThinkingTarget && baseModel != "" && gjson.GetBytes(nativeReq.Payload, "model").Exists() {
-		nativeReq.Payload = helps.SetStringIfDifferent(nativeReq.Payload, "model", baseModel)
-	}
 	originalTranslated := nativeReq.Payload
-	if len(nativeReq.Payload) > 0 {
-		body, errThinking := helps.ApplyRequestThinkingWithModelInfo(
-			nativeReq.Payload,
+	doc := ojson.NewDoc(nativeReq.Payload)
+	if hasPluginThinkingTarget && baseModel != "" && doc.Get("model").Exists() {
+		_ = helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	}
+	if doc.Len() > 0 {
+		if errThinking := helps.ApplyRequestThinkingWithModelInfoDoc(
+			doc,
 			req,
 			opts,
 			inputRequested.String(),
@@ -567,11 +663,9 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 			a.provider,
 			modelInfo,
 			updatesChanged,
-		)
-		if errThinking != nil {
+		); errThinking != nil {
 			return preparedExecutorCall{}, errThinking
 		}
-		nativeReq.Payload = body
 	}
 	// User payload rules are the last host-side mutation before the plugin sees
 	// the request, matching on the suffix-free model like the built-in executors
@@ -590,8 +684,11 @@ func (a *executorAdapter) prepareExecutorCall(req coreexecutor.Request, opts cor
 				root = "request"
 			}
 			finalize := helps.NewPayloadFinalizer(cfg, a.provider, baseModel, inputFormat.String(), root, originalTranslated, req, finalizeOpts)
-			nativeReq.Payload = finalize(nativeReq.Payload)
+			helps.FinalizePayloadDoc(helps.WithPayloadFinalizer(context.Background(), finalize), doc)
 		}
+	}
+	if doc.Len() > 0 {
+		nativeReq.Payload = doc.Bytes()
 	}
 	if hasPluginThinkingTarget {
 		nativeReq.Model = baseModel
@@ -620,9 +717,11 @@ func (a *executorAdapter) lookupPluginModelInfo(baseModel string) *registry.Mode
 			return model
 		}
 	}
-	for _, model := range a.host.modelRegistration(a.pluginID).models {
-		if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), baseModel) {
-			return model
+	for _, reg := range a.host.pluginRegistrations(a.pluginID) {
+		for _, model := range reg.models {
+			if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), baseModel) {
+				return model
+			}
 		}
 	}
 	return nil
@@ -713,6 +812,27 @@ func (h *Host) hasResponseTranslator() bool {
 	return false
 }
 
+// hasResponseTranslationHooks reports whether any active plugin can rewrite a
+// streaming response through the translator registry hooks (before/after
+// normalizers or a response translator). When none exists, a same-format
+// stream without a registered native translator is forwarded unchanged instead
+// of entering TranslateStream only to fall back to the original payload.
+func (h *Host) hasResponseTranslationHooks() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) {
+			continue
+		}
+		caps := record.plugin.Capabilities
+		if caps.ResponseTranslator != nil || caps.ResponseBeforeTranslator != nil || caps.ResponseAfterTranslator != nil {
+			return true
+		}
+	}
+	return false
+}
+
 func executorNativeStreamResponseTranslatorExists(from, to sdktranslator.Format) bool {
 	if from == "" || to == "" || from == to {
 		return true
@@ -750,14 +870,39 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 }
 
 func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
-	if prepared.requestedFormat == "" || (prepared.outputFormat == prepared.requestedFormat && prepared.requestedFormat != sdktranslator.FormatOpenAIResponse) {
+	// Same-format streams still go through stream translation when a registered
+	// same-format translator exists: it normalizes SSE framing (for example
+	// stripping the "data:" prefix and dropping "[DONE]" for chat-completions),
+	// matching what the built-in executors produce. Returning the channel
+	// unchanged for those formats let framed plugin chunks reach handlers that
+	// add their own "data:" prefix, emitting a doubled "data: data:" prefix.
+	// That case first passes through an SSE deframer so input may be split or
+	// coalesced at arbitrary byte boundaries; see deframeExecutorSSEChunks.
+	//
+	// Other same-format streams must not enter TranslateStream unconditionally:
+	// its plugin hooks (response before/after normalizers and, without a native
+	// translator, the plugin response translator) run even when no native
+	// translator exists, so the payload would no longer be forwarded verbatim.
+	// When no such hook capability is installed, those streams keep the
+	// previous untouched behavior; when one is installed, or for every
+	// cross-format stream, translation runs as before.
+	if prepared.requestedFormat == "" {
 		return in
 	}
 	if in == nil {
 		return nil
 	}
+	sameFormat := prepared.outputFormat == prepared.requestedFormat
+	// Responses always enters translation so its usage-details normalization
+	// in translateExecutorStreamPayload keeps running for same-format streams.
+	if sameFormat && prepared.requestedFormat != sdktranslator.FormatOpenAIResponse && !sdktranslator.HasStreamResponseTransformer(prepared.outputFormat, prepared.requestedFormat) && !a.host.hasResponseTranslationHooks() {
+		return in
+	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if sameFormat && sdktranslator.HasStreamResponseTransformer(prepared.outputFormat, prepared.requestedFormat) {
+		in = deframeExecutorSSEChunks(ctx, in)
 	}
 	out := make(chan pluginapi.ExecutorStreamChunk)
 	go func() {
@@ -789,13 +934,6 @@ func (a *executorAdapter) translateExecutorStreamChunks(ctx context.Context, pre
 }
 
 func (a *executorAdapter) translateExecutorStreamPayload(ctx context.Context, prepared preparedExecutorCall, payload []byte, param *any) [][]byte {
-	if prepared.requestedFormat != "" && prepared.outputFormat == prepared.requestedFormat {
-		out := payload
-		if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
-			out = helps.EnsureResponsesUsageDetails(out)
-		}
-		return [][]byte{out}
-	}
 	originalRequest := prepared.opts.OriginalRequest
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
@@ -856,9 +994,14 @@ func sendExecutorPluginStreamChunk(ctx context.Context, out chan<- pluginapi.Exe
 	}
 }
 
-func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, err error) {
+func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	resp, _, err := a.executeWithAttribution(ctx, auth, req, opts)
+	return resp, err
+}
+
+func (a *executorAdapter) executeWithAttribution(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (resp coreexecutor.Response, attribution *pluginapi.UsageAttribution, err error) {
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
-		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+		return coreexecutor.Response{}, nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 
 	var reporter *helps.UsageReporter
@@ -874,6 +1017,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
 			resp = coreexecutor.Response{}
+			attribution = nil
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
 			if reporter != nil {
 				reporter.PublishFailure(ctx, err)
@@ -887,7 +1031,7 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 
 	prepared, errPrepare := a.prepareExecutorCall(req, opts)
 	if errPrepare != nil {
-		return coreexecutor.Response{}, errPrepare
+		return coreexecutor.Response{}, nil, errPrepare
 	}
 
 	if reporter != nil {
@@ -897,10 +1041,11 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 
 	pluginResp, errExecute := a.executor.Execute(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecute != nil {
-		return coreexecutor.Response{}, errExecute
+		return coreexecutor.Response{}, nil, errExecute
 	}
 
 	if reporter != nil {
+		reporter.ApplyPluginExecutorAttribution(a.pluginID, pluginResp.Attribution)
 		reporter.RecordFirstPacket()
 		detail := helps.ParsePluginExecutorResponseUsage(prepared.outputFormat.String(), pluginResp.Payload)
 		reporter.Publish(ctx, detail)
@@ -911,12 +1056,17 @@ func (a *executorAdapter) Execute(ctx context.Context, auth *coreauth.Auth, req 
 		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
 		Metadata: cloneAnyMap(pluginResp.Metadata),
 		Headers:  cloneHeader(pluginResp.Headers),
-	}, nil
+	}, pluginResp.Attribution, nil
 }
 
-func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (result *coreexecutor.StreamResult, err error) {
+func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	result, _, err := a.executeStreamWithAttribution(ctx, auth, req, opts)
+	return result, err
+}
+
+func (a *executorAdapter) executeStreamWithAttribution(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (result *coreexecutor.StreamResult, attribution *pluginapi.UsageAttribution, err error) {
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
-		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
+		return nil, nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 
 	var reporter *helps.UsageReporter
@@ -932,6 +1082,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
 			result = nil
+			attribution = nil
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
 			if reporter != nil {
 				reporter.PublishFailure(ctx, err)
@@ -945,7 +1096,7 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 
 	prepared, errPrepare := a.prepareExecutorCall(req, opts)
 	if errPrepare != nil {
-		return nil, errPrepare
+		return nil, nil, errPrepare
 	}
 
 	if reporter != nil {
@@ -955,14 +1106,17 @@ func (a *executorAdapter) ExecuteStream(ctx context.Context, auth *coreauth.Auth
 
 	pluginResp, errExecuteStream := a.executor.ExecuteStream(ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts))
 	if errExecuteStream != nil {
-		return nil, errExecuteStream
+		return nil, nil, errExecuteStream
 	}
 
+	if reporter != nil {
+		reporter.ApplyPluginExecutorAttribution(a.pluginID, pluginResp.Attribution)
+	}
 	chunks := a.observeAndTranslateExecutorStream(ctx, prepared, pluginResp.Chunks, reporter)
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
 		Chunks:  chunks,
-	}, nil
+	}, pluginResp.Attribution, nil
 }
 
 func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context, prepared preparedExecutorCall, in <-chan pluginapi.ExecutorStreamChunk, reporter *helps.UsageReporter) <-chan coreexecutor.StreamChunk {
@@ -1101,6 +1255,7 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth
+	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
 	}
@@ -1135,8 +1290,9 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		}
 		data.Attributes = attributes
 	}
-	preserveAuthOAuthProviderMetadata(&data, auth)
+	preserveAuthOAuthProviderMetadata(&data, auth, explicitPortalHint)
 	preserveFileAuthPriority(&data, auth)
+	preserveAuthDisabledState(&data, auth)
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
 	}
@@ -1206,7 +1362,7 @@ func (a *executorAdapter) CountTokens(ctx context.Context, auth *coreauth.Auth, 
 
 func pluginExecutorTokenCount(format sdktranslator.Format, payload []byte) (int64, bool) {
 	for _, path := range []string{"choices", "content", "candidates", "output", "response.output"} {
-		if gjson.GetBytes(payload, path).Exists() {
+		if ojson.GetBytesNoCopy(payload, path).Exists() {
 			return 0, false
 		}
 	}
@@ -1216,8 +1372,8 @@ func pluginExecutorTokenCount(format sdktranslator.Format, payload []byte) (int6
 		paths = []string{"totalTokens", "usageMetadata.promptTokenCount", "input_tokens", "total_tokens"}
 	}
 	for _, path := range paths {
-		value := gjson.GetBytes(payload, path)
-		if value.Exists() && value.Type == gjson.Number {
+		value := ojson.GetBytesNoCopy(payload, path)
+		if value.Exists() && value.Type == ojson.Number {
 			count, errParse := strconv.ParseInt(value.Raw, 10, 64)
 			if errParse == nil && count >= 0 {
 				return count, true

@@ -7,13 +7,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFromAPIKey(t *testing.T) {
@@ -41,7 +41,7 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	}
 
 	expectedKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:test-api-key")).String()
-	gotKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	gotKey := ojson.GetBytes(body, "prompt_cache_key").String()
 	if gotKey != expectedKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", gotKey, expectedKey)
 	}
@@ -63,7 +63,7 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_StablePromptCacheKeyFrom
 	if errRead2 != nil {
 		t.Fatalf("read request body (second call): %v", errRead2)
 	}
-	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
+	gotKey2 := ojson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != expectedKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, expectedKey)
 	}
@@ -84,7 +84,7 @@ func TestCodexExecutorCacheHelper_UsesDerivedSessionUUID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cacheHelper error: %v", err)
 	}
-	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
+	if got := ojson.GetBytes(body, "prompt_cache_key").String(); got != expectedKey {
 		t.Fatalf("prompt_cache_key = %q, want %q", got, expectedKey)
 	}
 	if got := httpReq.Header.Get("Session-Id"); got != expectedKey {
@@ -134,8 +134,8 @@ func TestCodexExecutorCacheHelper_ClaudeUsesClaudeCodeSessionID(t *testing.T) {
 	if errRead != nil {
 		t.Fatalf("read second request body: %v", errRead)
 	}
-	firstKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
-	secondKey := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	firstKey := ojson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondKey := ojson.GetBytes(secondBody, "prompt_cache_key").String()
 	if firstKey == "" {
 		t.Fatalf("first prompt_cache_key is empty; body=%s", string(firstBody))
 	}
@@ -166,7 +166,7 @@ func TestCodexExecutorCacheHelper_ClaudeRejectsBareUserID(t *testing.T) {
 	if errRead != nil {
 		t.Fatalf("read request body: %v", errRead)
 	}
-	if got := gjson.GetBytes(body, "prompt_cache_key").String(); got != "" {
+	if got := ojson.GetBytes(body, "prompt_cache_key").String(); got != "" {
 		t.Fatalf("bare metadata.user_id must not create prompt_cache_key, got %q; body=%s", got, string(body))
 	}
 	if got := httpReq.Header["Session-Id"]; len(got) != 0 {
@@ -227,8 +227,8 @@ func TestCodexExecutorCacheHelper_ClaudeUsesSessionHeader(t *testing.T) {
 	if errRead != nil {
 		t.Fatalf("read second request body: %v", errRead)
 	}
-	firstKey := gjson.GetBytes(firstBody, "prompt_cache_key").String()
-	secondKey := gjson.GetBytes(secondBody, "prompt_cache_key").String()
+	firstKey := ojson.GetBytes(firstBody, "prompt_cache_key").String()
+	secondKey := ojson.GetBytes(secondBody, "prompt_cache_key").String()
 	if firstKey == "" {
 		t.Fatalf("first prompt_cache_key is empty; body=%s", string(firstBody))
 	}
@@ -258,7 +258,7 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	if errReadRoot != nil {
 		t.Fatalf("read root body: %v", errReadRoot)
 	}
-	rootKey := gjson.GetBytes(rootBody, "prompt_cache_key").String()
+	rootKey := ojson.GetBytes(rootBody, "prompt_cache_key").String()
 
 	childRequest, _, errChild := executor.cacheHelper(context.Background(), sdktranslator.FromString("claude"), url, req, rawJSON, nil, childHeaders)
 	if errChild != nil {
@@ -268,7 +268,7 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	if errReadChild != nil {
 		t.Fatalf("read child body: %v", errReadChild)
 	}
-	childKey := gjson.GetBytes(childBody, "prompt_cache_key").String()
+	childKey := ojson.GetBytes(childBody, "prompt_cache_key").String()
 	if rootKey == "" || childKey == "" || rootKey == childKey {
 		t.Fatalf("agent prompt keys are not isolated: root=%q child=%q", rootKey, childKey)
 	}
@@ -283,7 +283,7 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	if errReadAlias != nil {
 		t.Fatalf("read alias body: %v", errReadAlias)
 	}
-	if aliasKey := gjson.GetBytes(aliasBody, "prompt_cache_key").String(); aliasKey != childKey {
+	if aliasKey := ojson.GetBytes(aliasBody, "prompt_cache_key").String(); aliasKey != childKey {
 		t.Fatalf("resolved model key fragmented by request alias: first=%q alias=%q", childKey, aliasKey)
 	}
 
@@ -291,7 +291,7 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	if errWebsocket != nil {
 		t.Fatalf("websocket prompt cache error: %v", errWebsocket)
 	}
-	if websocketKey := gjson.GetBytes(websocketBody, "prompt_cache_key").String(); websocketKey != childKey {
+	if websocketKey := ojson.GetBytes(websocketBody, "prompt_cache_key").String(); websocketKey != childKey {
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
 	}
 }

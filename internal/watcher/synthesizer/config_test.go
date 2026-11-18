@@ -1340,3 +1340,158 @@ func TestConfigSynthesizer_RequestScopedErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigSynthesizer_ConnectionPoolOverride pins the per-credential pool opt-in:
+// the override declared on an API-key entry must reach the auth record so the
+// generic proxy client can pool just that credential.
+func TestConfigSynthesizer_ConnectionPoolOverride(t *testing.T) {
+	enabled := true
+	maxIdle := 4
+	cfg := &config.Config{
+		CodexKey: []config.CodexKey{{
+			APIKey:   "ollama-key",
+			BaseURL:  "https://ollama.com/v1",
+			ProxyURL: "direct",
+			ConnectionPool: &config.ProxyConnectionPoolConfig{
+				Enabled:             &enabled,
+				IdleConnTimeout:     "300s",
+				MaxIdleConnsPerHost: &maxIdle,
+			},
+		}},
+		ClaudeKey: []config.ClaudeKey{{APIKey: "claude-key", BaseURL: "https://api.anthropic.com"}},
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var codexAuth, claudeAuth *coreauth.Auth
+	for _, a := range auths {
+		switch {
+		case a.Provider == "codex":
+			codexAuth = a
+		case a.Provider == "claude":
+			claudeAuth = a
+		}
+	}
+	if codexAuth == nil || claudeAuth == nil {
+		t.Fatalf("missing synthesised auths: codex=%v claude=%v", codexAuth, claudeAuth)
+	}
+	pool := codexAuth.ProxyConnectionPool
+	if pool == nil {
+		t.Fatal("codex override did not reach the auth record")
+	}
+	if pool.Enabled == nil || !*pool.Enabled || pool.IdleConnTimeout != "300s" || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("unexpected override: %+v", pool)
+	}
+	if claudeAuth.ProxyConnectionPool != nil {
+		t.Fatal("entry without a connection-pool block must stay unpooled")
+	}
+	// The override must be copied, never aliased to live config values.
+	*pool.Enabled = false
+	if !enabled {
+		t.Fatal("auth override aliases the config pointer")
+	}
+}
+
+// TestConfigSynthesizer_OpenAICompatConnectionPoolMerge pins field-level inheritance
+// for OpenAI-compatible keys: a per-key block only replaces the fields it sets.
+func TestConfigSynthesizer_OpenAICompatConnectionPoolMerge(t *testing.T) {
+	groupEnabled := true
+	groupMax := 2
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			Name:    "compat",
+			BaseURL: "https://compat.example.com",
+			ConnectionPool: &config.ProxyConnectionPoolConfig{
+				Enabled:             &groupEnabled,
+				IdleConnTimeout:     "300s",
+				MaxIdleConnsPerHost: &groupMax,
+			},
+			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+				{APIKey: "inherits"},
+				{APIKey: "partial", ConnectionPool: &config.ProxyConnectionPoolConfig{IdleConnTimeout: "60s"}},
+			},
+		}},
+	}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	byKey := map[string]*coreauth.ProxyConnectionPoolOverride{}
+	for _, a := range auths {
+		byKey[a.Attributes["api_key"]] = a.ProxyConnectionPool
+	}
+	inherits := byKey["inherits"]
+	if inherits == nil || inherits.Enabled == nil || !*inherits.Enabled || inherits.IdleConnTimeout != "300s" {
+		t.Fatalf("key without an override must inherit the group block: %+v", inherits)
+	}
+	if inherits.MaxIdleConnsPerHost == nil || *inherits.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("inheriting key lost max-idle: %+v", inherits)
+	}
+	partial := byKey["partial"]
+	if partial == nil || partial.Enabled == nil || !*partial.Enabled {
+		t.Fatalf("partial override must keep the group's enabled value: %+v", partial)
+	}
+	if partial.IdleConnTimeout != "60s" {
+		t.Fatalf("partial override idle = %q, want 60s", partial.IdleConnTimeout)
+	}
+	if partial.MaxIdleConnsPerHost == nil || *partial.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("partial override must inherit max-idle-conns-per-host: %+v", partial)
+	}
+}
+
+// TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn pins that writing the block
+// without fields requests the pool defaults. Dropping it during synthesis disabled
+// pooling for `connection-pool: {}` and for keys inheriting an empty group block.
+func TestConfigSynthesizer_EmptyConnectionPoolBlockOptsIn(t *testing.T) {
+	cfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey:         "empty-block",
+		BaseURL:        "https://ollama.com/v1",
+		ProxyURL:       "direct",
+		ConnectionPool: &config.ProxyConnectionPoolConfig{},
+	}}}
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      cfg,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auths = %d, want 1", len(auths))
+	}
+	if auths[0].ProxyConnectionPool == nil {
+		t.Fatal("an empty connection-pool block is still an opt-in and must reach the auth record")
+	}
+	if enabled := auths[0].ProxyConnectionPool.Enabled; enabled != nil {
+		t.Fatalf("empty block must leave enabled unset (defaults to on), got %v", *enabled)
+	}
+
+	// An OpenAI-compatible provider with no API keys still synthesizes one auth
+	// record (e.g. a local Ollama/vLLM daemon) and must inherit the group pool block.
+	keyless := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
+		Name:           "local-ollama",
+		BaseURL:        "http://127.0.0.1:11434/v1",
+		ConnectionPool: &config.ProxyConnectionPoolConfig{},
+	}}}
+	keylessAuths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config:      keyless,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(keylessAuths) != 1 || keylessAuths[0].ProxyConnectionPool == nil {
+		t.Fatalf("keyless OpenAI-compatible entry lost its group connection-pool block: %+v", keylessAuths)
+	}
+}

@@ -4,21 +4,20 @@ import (
 	"context"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 type updateNormalizingHooks struct{ effort string }
 
 func (h *updateNormalizingHooks) NormalizeRequest(_ context.Context, _, _ sdktranslator.Format, _ string, body []byte, _ bool) []byte {
 	if h.effort == "" {
-		out, _ := sjson.DeleteBytes(body, "input.0")
+		out, _ := ojson.DeleteBytes(body, "input.0")
 		return out
 	}
-	out, _ := sjson.SetBytes(body, "input.0.reasoning.effort", h.effort)
+	out, _ := ojson.SetBytes(body, "input.0.reasoning.effort", h.effort)
 	return out
 }
 func (*updateNormalizingHooks) TranslateRequest(context.Context, sdktranslator.Format, sdktranslator.Format, string, []byte, bool) ([]byte, bool) {
@@ -48,10 +47,10 @@ func TestXAIResponsesPluginNormalizationOverridesOldSourceUpdate(t *testing.T) {
 			if errPrepare != nil {
 				t.Fatal(errPrepare)
 			}
-			if got := gjson.GetBytes(prepared.body, "reasoning.effort").String(); got != tc.want {
+			if got := ojson.GetBytes(prepared.body, "reasoning.effort").String(); got != tc.want {
 				t.Fatalf("effort = %q, want %q; body=%s", got, tc.want, prepared.body)
 			}
-			if len(gjson.GetBytes(prepared.body, "input").Array()) != 1 {
+			if len(ojson.GetBytes(prepared.body, "input").Array()) != 1 {
 				t.Fatalf("plugin-normalized update was restored: %s", prepared.body)
 			}
 		})

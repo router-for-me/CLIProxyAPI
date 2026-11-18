@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // ApplyPatchUpstreamErrorMessage deliberately excludes upstream JSON and patch text.
@@ -19,7 +19,7 @@ func TranslatedClaudeErrorPayload(responseFormat sdktranslator.Format, out []byt
 	if responseFormat != sdktranslator.FormatClaude || len(out) == 0 {
 		return "", false
 	}
-	if gjson.GetBytes(out, "type").String() != "error" {
+	if ojson.GetBytesNoCopy(out, "type").String() != "error" {
 		return "", false
 	}
 	return string(out), true
@@ -37,7 +37,7 @@ func TranslatedClaudeStreamErrorPayload(responseFormat sdktranslator.Format, lin
 			if len(payload) == 0 {
 				continue
 			}
-			if gjson.GetBytes(payload, "type").String() == "error" {
+			if ojson.GetBytesNoCopy(payload, "type").String() == "error" {
 				return string(payload), true
 			}
 		}

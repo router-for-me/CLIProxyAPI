@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -19,7 +20,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.T) {
@@ -36,7 +36,7 @@ func TestAIStudioTranslateRequestPreservesSummaryFromOriginalRequest(t *testing.
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	if !gjson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+	if !ojson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
 		t.Fatalf("original request summary intent was lost: %s", payload)
 	}
 }
@@ -57,10 +57,10 @@ func TestAIStudioTranslateRequestNormalizesThinkingLevel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "HIGH" {
+	if got := ojson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "HIGH" {
 		t.Fatalf("thinkingLevel = %q, want HIGH; payload=%s", got, payload)
 	}
-	if !gjson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+	if !ojson.GetBytes(payload, "generationConfig.thinkingConfig.includeThoughts").Bool() {
 		t.Fatalf("includeThoughts was lost: %s", payload)
 	}
 }
@@ -80,7 +80,7 @@ func TestAIStudioTranslateRequestPayloadOverrideWinsThinkingNormalization(t *tes
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	if got := gjson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
+	if got := ojson.GetBytes(payload, "generationConfig.thinkingConfig.thinkingLevel").String(); got != "medium" {
 		t.Fatalf("thinkingLevel = %q, want medium; payload=%s", got, payload)
 	}
 }
@@ -108,7 +108,7 @@ func TestNormalizeAIStudioThinkingLevel(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := []byte(fmt.Sprintf(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":%s}},"marker":true}`, test.levelJSON))
 			output := normalizeAIStudioThinkingLevel(input)
-			level := gjson.GetBytes(output, "generationConfig.thinkingConfig.thinkingLevel")
+			level := ojson.GetBytes(output, "generationConfig.thinkingConfig.thinkingLevel")
 			if got := level.String(); got != test.want {
 				t.Fatalf("thinkingLevel = %q, want %q; payload=%s", got, test.want, output)
 			}
@@ -128,7 +128,7 @@ func TestAIStudioTranslateRequestPrependsLeadingUserForIssue4959ResponsesHistory
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	assertIssue4959LeadingUserContents(t, gjson.GetBytes(body.payload, "contents").Array())
+	assertIssue4959LeadingUserContents(t, ojson.GetBytes(body.payload, "contents").Array())
 }
 
 func TestAIStudioTranslateRequestAppendsTrailingUserForTrailingModelTurn(t *testing.T) {
@@ -143,7 +143,7 @@ func TestAIStudioTranslateRequestAppendsTrailingUserForTrailingModelTurn(t *test
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	contents := gjson.GetBytes(body.payload, "contents").Array()
+	contents := ojson.GetBytes(body.payload, "contents").Array()
 	if len(contents) != 3 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" || contents[2].Get("role").String() != "user" {
 		t.Fatalf("contents roles malformed: %s", body.payload)
 	}
@@ -166,7 +166,7 @@ func TestAIStudioTranslateRequestCountTokensPreservesTrailingModelTurn(t *testin
 	if err != nil {
 		t.Fatalf("translateRequest() error = %v", err)
 	}
-	contents := gjson.GetBytes(body.payload, "contents").Array()
+	contents := ojson.GetBytes(body.payload, "contents").Array()
 	if len(contents) != 2 || contents[0].Get("role").String() != "user" || contents[1].Get("role").String() != "model" {
 		t.Fatalf("countTokens contents roles malformed: %s", body.payload)
 	}
@@ -645,7 +645,7 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *tes
 	if !okStatus || status.StatusCode() != http.StatusBadGateway {
 		t.Fatalf("Execute() error = %T %v, want status 502", errExec, errExec)
 	}
-	if got := gjson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
+	if got := ojson.Get(errExec.Error(), "error.type").String(); got != "api_error" {
 		t.Fatalf("Execute() error.type = %q, want api_error. Error: %s", got, errExec.Error())
 	}
 	assertMalformedFunctionCallFailedUsage(t, capture.records)
@@ -668,11 +668,15 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *tes
 			t.Fatalf("%s ExecuteStream() chunk.Err = nil, want 502 error propagated", mode)
 		}
 		streamText := combined.String()
-		if strings.Contains(streamText, `"stop_reason":"refusal"`) {
-			t.Fatalf("%s stream unexpectedly emitted stop_reason refusal:\n%s", mode, streamText)
+		if strings.TrimSpace(streamText) != "" {
+			t.Fatalf("%s stream unexpectedly emitted payload before bootstrap retryable error:\n%s", mode, streamText)
 		}
-		if !strings.Contains(streamText, "event: error\n") || !strings.Contains(streamText, `"type": "api_error"`) && !strings.Contains(streamText, `"type":"api_error"`) {
-			t.Fatalf("%s stream missing retryable api_error event:\n%s", mode, streamText)
+		streamStatus, okStreamStatus := streamErr.(interface{ StatusCode() int })
+		if !okStreamStatus || streamStatus.StatusCode() != http.StatusBadGateway {
+			t.Fatalf("%s ExecuteStream() chunk.Err = %T %v, want status 502", mode, streamErr, streamErr)
+		}
+		if got := ojson.Get(streamErr.Error(), "error.type").String(); got != "api_error" {
+			t.Fatalf("%s ExecuteStream() chunk.Err error.type = %q, want api_error; err=%s", mode, got, streamErr.Error())
 		}
 		assertMalformedFunctionCallFailedUsage(t, capture.records)
 	}
@@ -760,7 +764,8 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsCondu
 
 			exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
 			auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio", Status: cliproxyauth.StatusActive}
-			manager := cliproxyauth.NewManager(nil, nil, nil)
+			resultHook := &malformedFunctionCallResultHook{authID: auth.ID, results: make(chan cliproxyauth.Result, 1)}
+			manager := cliproxyauth.NewManager(nil, nil, resultHook)
 			manager.RegisterExecutor(exec)
 			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 				t.Fatalf("Register() error = %v", errRegister)
@@ -796,13 +801,7 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsCondu
 				}
 			}
 			assertMalformedFunctionCallFailedUsage(t, capture.records)
-			updated, okAuth := manager.GetByID(auth.ID)
-			if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
-				t.Fatalf("expected conductor to record failure on model state after client cancel on error event, got %+v", updated)
-			}
-			if updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus != http.StatusBadGateway {
-				t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
-			}
+			assertMalformedFunctionCallConductorResultUncooled(t, manager, auth.ID, "gemini-4-argon", resultHook.results)
 			if errClient := <-clientDone; errClient != nil {
 				t.Fatal(errClient)
 			}

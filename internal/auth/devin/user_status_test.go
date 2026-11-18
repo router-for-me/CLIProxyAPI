@@ -3,7 +3,6 @@ package devin
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
