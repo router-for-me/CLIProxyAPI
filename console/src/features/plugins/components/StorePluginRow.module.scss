@@ -1,0 +1,244 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 商店行：与已安装行共用 PluginRow.module.scss 的网格、logo、标题与按钮，
+ * 这里只加三行文本（描述 / 元信息）与右侧单一主操作位。
+ * ============================================================ */
+
+.row {
+  align-items: start;
+}
+
+.text,
+.skeletonText {
+  gap: 6px;
+  padding-top: 1px;
+}
+
+// ─── Description ────────────────────────────────────────
+
+.descriptionBlock {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.description {
+  @include text-ellipsis-multiline(2);
+
+  max-width: 72ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.descriptionExpanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: initial;
+}
+
+.descriptionToggle {
+  @include button-reset;
+
+  border-radius: $radius-sm;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  transition: color var(--dur-hover) ease;
+
+  &:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    &:hover {
+      color: var(--text-primary);
+    }
+  }
+}
+
+// ─── Metadata ───────────────────────────────────────────
+
+// Every item carries its own leading separator; the inner row is shifted left by one separator
+// width and the outer box clips it, so whichever item starts a line never shows a stray dot.
+$meta-separator: 15px;
+
+.meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.metaInner {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 4px;
+  margin-left: -$meta-separator;
+}
+
+.metaItem {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+
+  &::before {
+    content: '·';
+    display: inline-block;
+    width: $meta-separator;
+    color: var(--text-quaternary);
+    text-align: center;
+  }
+}
+
+.metaWarning {
+  color: var(--amber-text);
+}
+
+.tags {
+  display: inline-flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-left: $meta-separator;
+}
+
+.tagItem {
+  padding: 0 6px;
+  border-radius: $radius-sm;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+// ─── Actions ────────────────────────────────────────────
+
+.actions {
+  // Line the action column up with the title line rather than the row's centre, so expanding
+  // a description never moves the button.
+  margin-top: 4px;
+
+  @include mobile {
+    margin-top: 0;
+  }
+}
+
+.installedState {
+  display: inline-flex;
+  min-width: 80px;
+  height: 28px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-left: 10px;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+
+  svg {
+    color: var(--success-color);
+  }
+
+  @include mobile {
+    margin-left: auto;
+  }
+}
+
+.skeletonPill {
+  display: inline-flex;
+  margin-left: 10px;
+
+  @include mobile {
+    margin-left: auto;
+  }
+}
+
+.links {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+// ─── Card layout ────────────────────────────────────────
+// Same markup as the list row. The text block dissolves into the card's grid so the description
+// and metadata run the full card width under the logo + title line, and the actions become a
+// footer pinned to the bottom, which keeps footers level across a row of unequal cards.
+
+.card {
+  grid-template-columns: 40px minmax(0, 1fr);
+  grid-template-rows: auto auto auto 1fr;
+  gap: 0 12px;
+  padding: $spacing-md;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+
+  .text {
+    display: contents;
+
+    > :first-child {
+      align-self: center;
+      flex-wrap: wrap;
+      row-gap: 2px;
+    }
+  }
+
+  .skeletonText {
+    align-self: center;
+  }
+
+  .descriptionBlock,
+  .meta,
+  .actions {
+    grid-column: 1 / -1;
+  }
+
+  .descriptionBlock {
+    grid-row: 2;
+    margin-top: 12px;
+  }
+
+  .description {
+    max-width: none;
+    -webkit-line-clamp: 3;
+  }
+
+  .descriptionExpanded {
+    -webkit-line-clamp: initial;
+  }
+
+  .meta {
+    grid-row: 3;
+    margin-top: 10px;
+  }
+
+  .actions {
+    grid-row: 4;
+    align-self: end;
+    margin: 14px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+  }
+
+  .links {
+    // Pull the first icon's glyph onto the card's text edge.
+    margin: 0 auto 0 -8px;
+  }
+
+  @include mobile {
+    padding: 12px;
+  }
+}

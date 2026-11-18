@@ -1,0 +1,124 @@
+@use '../../../styles/mixins' as *;
+
+%copy-base {
+  @include button-reset;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  &:active {
+    transform: scale(0.94);
+  }
+
+  &[data-copied='true'] {
+    color: var(--viz-success);
+  }
+}
+
+.icon {
+  @extend %copy-base;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.labeled {
+  @extend %copy-base;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .icon:hover,
+  .labeled:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .icon[data-copied='true']:hover,
+  .labeled[data-copied='true']:hover {
+    color: var(--viz-success);
+  }
+}
+
+/* 两个图标叠放交叉淡入，轻微缩放 + 模糊遮住换形的接缝 */
+.glyphs {
+  position: relative;
+  display: grid;
+  width: 14px;
+  height: 14px;
+
+  > svg {
+    grid-area: 1 / 1;
+    transition:
+      opacity 180ms var(--ease-out-strong, ease-out),
+      transform 180ms var(--ease-out-strong, ease-out),
+      filter 180ms var(--ease-out-strong, ease-out);
+  }
+}
+
+.checkGlyph {
+  opacity: 0;
+  transform: scale(0.6);
+  filter: blur(2px);
+}
+
+[data-copied='true'] .copyGlyph {
+  opacity: 0;
+  transform: scale(0.6);
+  filter: blur(2px);
+}
+
+[data-copied='true'] .checkGlyph {
+  opacity: 1;
+  transform: scale(1);
+  filter: none;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon,
+  .labeled {
+    transition: none;
+  }
+
+  .icon:active,
+  .labeled:active {
+    transform: none;
+  }
+
+  .glyphs > svg {
+    transition: opacity 120ms ease;
+    transform: none;
+    filter: none;
+  }
+}

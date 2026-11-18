@@ -1,0 +1,535 @@
+@use 'sass:list';
+@use 'sass:map';
+@use '../../../styles/mixins' as *;
+@use '../sponsor' as *;
+
+/* ============================================================
+ * 赞助商品牌卡（Kimi）—— 一张卡，两个站点入口。
+ *
+ * 光效：无中心流体。
+ * 旋转 conic 光束必然暴露旋转中心（转角处扫得快、长边扫得慢）。这里改成三团光池各自漂移：
+ * x / y / 形变拆成三条独立动画（individual transform 属性 translate / transform / scale，
+ * 全部走合成线程），周期两两互不整除，合成轨迹是不重复的 Lissajous 曲线、且永不停顿。
+ * 同一组光池渲染两次：.field 是光晕底，.rim 被遮罩成 1px 描边 —— 边框亮在哪里，
+ * 完全由光池此刻漂到哪里决定。
+ * ============================================================ */
+
+/* 光池色：只取品牌蓝一族（亮蓝 / 天蓝 / 深蓝），叠加处自然混出明暗起伏 */
+$sponsor-sky: #5cb8ff;
+
+/*
+ * 轨迹参数（百分比相对光池自身尺寸）：
+ * x 摆幅约等于半张卡宽，y 摆幅让光池中心越过上下边 —— 上下边框才会被交替点亮。
+ * 周期 / 相位互不整除且各自错开，任何时刻三团光都不会同步。
+ */
+$light-pools: (
+  a: (
+    color: $sponsor-blue,
+    x: (
+      -100%,
+      62%,
+    ),
+    y: (
+      -46%,
+      34%,
+    ),
+    tx: 23s,
+    ty: 9.5s,
+    ts: 14s,
+    dx: -6s,
+    dy: -2s,
+  ),
+  b: (
+    color: $sponsor-sky,
+    x: (
+      98%,
+      -58%,
+    ),
+    y: (
+      40%,
+      -40%,
+    ),
+    tx: 29s,
+    ty: 12.5s,
+    ts: 17s,
+    dx: -19s,
+    dy: -8s,
+  ),
+  c: (
+    color: $sponsor-blue-strong,
+    x: (
+      -30%,
+      104%,
+    ),
+    y: (
+      -38%,
+      46%,
+    ),
+    tx: 37s,
+    ty: 8s,
+    ts: 21s,
+    dx: -11s,
+    dy: -5s,
+  ),
+);
+
+$card-radius: 16px;
+$card-padding: 16px;
+$site-radius: 12px;
+
+.card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: $card-padding;
+  border-radius: $card-radius;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, #{$sponsor-blue} 7%, var(--bg-primary)),
+    var(--bg-primary) 72%
+  );
+  /* 底边框用 inset 阴影画：.rim 以同样的 1px 带叠在它上面（overflow 会裁掉真实 border 外侧） */
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, #{$sponsor-blue} 16%, var(--border-color)),
+    0 14px 32px -26px sponsor-tint(55%);
+  animation: sponsor-card-in 0.45s var(--ease-out-strong, ease-out) backwards;
+  animation-delay: var(--card-delay, 0ms);
+}
+
+@keyframes sponsor-card-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+}
+
+/* ---------- 光层 ---------- */
+
+.field,
+.rim {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* 光晕底：内部只透出一层薄光，靠边 22px 渐强 —— 给描边光一圈向内的柔和泛光 */
+.field {
+  opacity: 0.5;
+  $field-mask:
+    linear-gradient(rgb(0 0 0 / 0.3) 0 0),
+    linear-gradient(to right, #000, transparent 22px, transparent calc(100% - 22px), #000),
+    linear-gradient(to bottom, #000, transparent 22px, transparent calc(100% - 22px), #000);
+  -webkit-mask: $field-mask;
+  mask: $field-mask;
+}
+
+/* 描边光：只保留与底边框重合的 1px 环 */
+.rim {
+  padding: 1px;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+}
+
+.pool {
+  $size: max(48%, 240px);
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: $size;
+  aspect-ratio: 8 / 5;
+  /* margin 百分比以容器宽度为基准，与 width 同基准，正好把光池中心对齐到卡片中心 */
+  margin: calc(#{$size} * -5 / 16) 0 0 calc(#{$size} / -2);
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    var(--pool-color) 0%,
+    color-mix(in srgb, var(--pool-color) 52%, transparent) 40%,
+    color-mix(in srgb, var(--pool-color) 16%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+/* 描边只有 1px：光池核心放宽、衰减放缓，细线上才读得出亮度起伏 */
+.rim .pool {
+  background: radial-gradient(
+    closest-side,
+    var(--pool-color) 0%,
+    color-mix(in srgb, var(--pool-color) 80%, transparent) 45%,
+    color-mix(in srgb, var(--pool-color) 28%, transparent) 78%,
+    transparent 100%
+  );
+}
+
+@each $name, $pool in $light-pools {
+  $x: map.get($pool, x);
+  $y: map.get($pool, y);
+
+  .pool[data-pool='#{$name}'] {
+    --pool-color: #{map.get($pool, color)};
+    /* 静止构图（减弱动效时停在这里）：取轨迹中点 */
+    translate: calc((#{list.nth($x, 1)} + #{list.nth($x, 2)}) / 2) 0;
+    animation:
+      sponsor-pool-#{$name}-x map.get($pool, tx) ease-in-out map.get($pool, dx) infinite alternate,
+      sponsor-pool-#{$name}-y map.get($pool, ty) ease-in-out map.get($pool, dy) infinite alternate,
+      sponsor-pool-morph map.get($pool, ts) ease-in-out map.get($pool, dx) infinite alternate;
+  }
+
+  @keyframes sponsor-pool-#{$name}-x {
+    from {
+      translate: list.nth($x, 1) 0;
+    }
+    to {
+      translate: list.nth($x, 2) 0;
+    }
+  }
+
+  @keyframes sponsor-pool-#{$name}-y {
+    from {
+      transform: translateY(list.nth($y, 1));
+    }
+    to {
+      transform: translateY(list.nth($y, 2));
+    }
+  }
+}
+
+/* 非等比形变：光池在漂移中被拉长、压扁，读起来是流体而不是一颗移动的圆点 */
+@keyframes sponsor-pool-morph {
+  from {
+    scale: 1.2 0.86;
+  }
+  to {
+    scale: 0.86 1.16;
+  }
+}
+
+/* ---------- 头部：品牌 ---------- */
+
+.head,
+.sites {
+  position: relative;
+  z-index: 1;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 2px 2px 0;
+}
+
+/* 图标自带圆角方块：不再加底色和投影，边缘保持锐利 */
+.glyph {
+  display: block;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+}
+
+.headText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  color: var(--text-primary);
+}
+
+/* 说明允许换行：「两站账号互不相通」是关键信息，窄屏不能被省略号吃掉 */
+.caption {
+  margin: 0;
+  text-wrap: pretty;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+/* ---------- 站点入口 ---------- */
+
+.sites {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr));
+  gap: 10px;
+}
+
+/* 站点面：半透纸面让光晕隐约透过；整块是 OAuth 入口（stretched button），注册药丸浮在其上 */
+.site {
+  position: relative;
+  container-type: inline-size;
+  border-radius: $site-radius;
+  border: 1px solid color-mix(in srgb, #{$sponsor-blue} 18%, var(--border-color));
+  background: color-mix(in srgb, var(--bg-primary) 80%, transparent);
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  /* 只在按下登录目标时回弹；按注册药丸不带动整块 */
+  &:has(.siteMain:active) {
+    transform: scale(0.985);
+  }
+}
+
+.siteBody {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: 'text link trail';
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 12px 12px 12px 16px;
+}
+
+.siteText {
+  grid-area: text;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.siteMain {
+  @include button-reset;
+  @include text-ellipsis;
+  display: block;
+  max-width: 100%;
+  text-align: left;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+
+  /* 点击目标铺满站点面（定位参照 .site） */
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: $site-radius;
+  }
+
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible::after {
+    outline: 2px solid #{$sponsor-blue};
+    outline-offset: 2px;
+  }
+}
+
+.siteMeta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.domain {
+  @include text-ellipsis;
+  min-width: 0;
+}
+
+.status {
+  @include text-ellipsis;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.statusDot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.site[data-status='waiting'] {
+  border-color: color-mix(in srgb, #{$sponsor-blue} 55%, var(--border-color));
+
+  .status {
+    color: sponsor-ink();
+  }
+
+  .statusDot {
+    animation: sponsor-dot-breathe 1.6s ease-in-out infinite;
+  }
+}
+
+.site[data-status='success'] .status {
+  color: var(--viz-success);
+}
+
+.site[data-status='error'] .status {
+  color: var(--viz-failure);
+}
+
+@keyframes sponsor-dot-breathe {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* 注册药丸：开放平台推广是可见按钮，而不是一行小字 */
+.signUp {
+  grid-area: link;
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid sponsor-tint(34%);
+  background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+  color: sponsor-ink();
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:active {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #{$sponsor-blue};
+    outline-offset: 2px;
+  }
+}
+
+/* 实心蓝「+」：添加一个凭证 */
+.trail {
+  grid-area: trail;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #{$sponsor-blue};
+  color: #fff;
+  box-shadow: 0 8px 18px -10px sponsor-tint(90%);
+  transition: background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  /* :has(.siteMain:hover)：悬停注册药丸时站点面保持不动，两个目标的反馈互不串扰 */
+  .site:has(.siteMain:hover) {
+    transform: translateY(-1px);
+    border-color: color-mix(in srgb, #{$sponsor-blue} 46%, var(--border-color));
+    background: color-mix(in srgb, var(--bg-primary) 90%, transparent);
+    box-shadow: 0 14px 28px -20px sponsor-tint(80%);
+  }
+
+  .site:has(.siteMain:hover) .trail {
+    background: #{$sponsor-blue-strong};
+  }
+
+  .site:has(.siteMain:active) {
+    transform: scale(0.985);
+  }
+
+  .signUp:hover {
+    border-color: sponsor-tint(58%);
+    background: sponsor-tint(10%);
+  }
+}
+
+/* 站点面过窄（窄屏或侧栏展开）：注册药丸落到第二行，站点名不被挤压 */
+@container (max-width: 380px) {
+  .siteBody {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'text trail'
+      'link link';
+    row-gap: 10px;
+  }
+
+  .signUp {
+    justify-self: start;
+  }
+}
+
+/* ---------- 主题 ---------- */
+
+:global([data-theme='dark']) {
+  .card {
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, #{$sponsor-blue} 10%, var(--bg-primary)),
+      var(--bg-primary) 72%
+    );
+  }
+
+  .field {
+    opacity: 0.6;
+  }
+
+  .site {
+    background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+  }
+}
+
+@include mobile {
+  .card {
+    padding: 14px;
+  }
+}
+
+/* 减弱动效：光池停在静止构图，光效仍在，只是不再流动 */
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .pool[data-pool],
+  .site[data-status='waiting'] .statusDot {
+    animation: none;
+  }
+
+  .site,
+  .signUp {
+    transition:
+      border-color var(--dur-hover, 200ms) ease,
+      background-color var(--dur-hover, 200ms) ease,
+      box-shadow var(--dur-hover, 200ms) ease;
+  }
+
+  .site:has(.siteMain:active),
+  .site:has(.siteMain:hover),
+  .signUp:active {
+    transform: none;
+  }
+}

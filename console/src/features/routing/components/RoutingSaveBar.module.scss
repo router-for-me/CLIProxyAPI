@@ -1,0 +1,165 @@
+@use '../../../styles/mixins' as *;
+
+/*
+ * Floating save bar, portalled to the body. RoutingSaveBar.tsx sets the dock's left/width to
+ * the policy column (or centres it over the layout once the panel stacks). Visuals follow the
+ * config page's FloatingSaveBar: glass surface, mono status, quiet discard, ink save pill.
+ */
+
+.dock {
+  position: fixed;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  left: 0;
+  right: 0;
+  width: min(560px, calc(100vw - 24px));
+  margin: 0 auto; /* fallback centring until the column is measured */
+  z-index: $z-dropdown;
+  pointer-events: none;
+}
+
+.bar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 10px 10px 10px 16px;
+  border-radius: 16px;
+  --glass-blur: 14px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-backdrop-filter);
+  box-shadow: var(--shadow-lg);
+
+  &[data-leaving] {
+    pointer-events: none;
+  }
+}
+
+.status {
+  min-width: 0;
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--amber-text);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.savePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: $radius-full;
+  padding: 9px 16px;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    transform var(--dur-press) var(--ease-out-strong),
+    background-color var(--dur-hover) var(--ease-out-strong),
+    box-shadow var(--dur-hover) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+.ghostAction {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: $radius-full;
+  padding: 9px 12px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 550;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color var(--dur-hover) var(--ease-out-strong),
+    transform var(--dur-press) var(--ease-out-strong);
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .savePill:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text-primary) 86%, var(--bg-secondary));
+    box-shadow: 0 12px 26px color-mix(in srgb, var(--text-primary) 22%, transparent);
+  }
+
+  .ghostAction:hover:not(:disabled) {
+    color: var(--text-primary);
+  }
+}
+
+@include mobile {
+  .bar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .status {
+    padding: 2px 4px 0;
+  }
+
+  .actions {
+    margin-left: 0;
+
+    > * {
+      flex: 1;
+      justify-content: center;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .savePill,
+  .ghostAction {
+    transition: none;
+  }
+
+  .savePill:active:not(:disabled),
+  .ghostAction:active:not(:disabled) {
+    transform: none;
+  }
+}

@@ -1,0 +1,70 @@
+@use '../../../styles/mixins' as *;
+@use '../../../styles/variables' as *;
+
+.wrap {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.scroll {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.head {
+  background: var(--muted-bg);
+
+  th {
+    color: var(--muted-foreground);
+    font-weight: 500;
+    font-size: 12px;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: middle;
+  }
+
+  th.alignRight {
+    text-align: right;
+  }
+}
+
+.body {
+  background: var(--bg-primary);
+}
+
+.row {
+  transition: background-color $transition-fast;
+
+  td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+
+  &:hover td {
+    background: color-mix(in srgb, var(--accent-bg) 50%, transparent);
+  }
+
+  &.selected td {
+    background: var(--primary-8);
+  }
+}
+
+.body .row:last-child td {
+  border-bottom: none;
+}
+
+.alignRight {
+  text-align: right;
+}

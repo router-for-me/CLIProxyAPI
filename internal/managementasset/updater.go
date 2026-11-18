@@ -118,6 +118,9 @@ func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
 	if cfg.RemoteManagement.DisableAutoUpdatePanel {
 		return "disable-auto-update-panel is enabled", true
 	}
+	if UseEmbeddedPanel() {
+		return "serving the built-in console", true
+	}
 	return "", false
 }
 

@@ -1,0 +1,227 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 模型规则入口：两扇整块可点的「门」。
+ * 认证文件页只展示摘要并负责带路，规则本身在全宽工作台里查看与编辑。
+ * ============================================================ */
+
+.entry {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.label {
+  margin: 0;
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.doors {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.door {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 14px 14px 14px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-primary);
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    border-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:active:not(:disabled) {
+    transform: scale(0.985);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    cursor: default;
+  }
+}
+
+.glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  border-radius: 11px;
+  background: var(--text-primary);
+  color: var(--bg-secondary);
+}
+
+.copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.meta {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 7px;
+  font-family: $font-mono;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
+.metaItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.metaDot {
+  color: var(--text-quaternary);
+  user-select: none;
+}
+
+.door[data-state='loading'] .meta,
+.door[data-state='unsupported'] .meta {
+  color: var(--text-tertiary);
+}
+
+.door[data-state='unsupported'] .glyph {
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+}
+
+.door[data-state='load'] .meta {
+  color: var(--viz-failure);
+}
+
+/* ---------- 已配置 provider 的图标叠放 ---------- */
+
+.providers {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding-left: 6px;
+}
+
+.provider {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: -6px;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  background: var(--floating-surface, var(--bg-secondary));
+  font-family: $font-mono;
+  font-size: 10.5px;
+  font-weight: 650;
+  color: var(--text-secondary);
+
+  img {
+    width: 14px;
+    height: 14px;
+    object-fit: contain;
+  }
+}
+
+.providerMore {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* 入口箭头：复用 IconChevronLeft 并水平翻转，指向「进入」的方向 */
+.chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  color: var(--text-quaternary);
+  transition:
+    transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.door:not([data-state='load']) .chevron svg {
+  transform: scaleX(-1);
+}
+
+.door:disabled .chevron {
+  visibility: hidden;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .door:hover:not(:disabled) {
+    border-color: var(--border-hover);
+    background: var(--floating-surface, var(--bg-primary));
+    box-shadow: 0 10px 24px color-mix(in srgb, var(--text-primary) 7%, transparent);
+
+    .chevron {
+      color: var(--text-primary);
+    }
+  }
+
+  /* 箭头朝进入方向轻推，预告点击后的去向 */
+  .door[data-state='ready']:hover .chevron {
+    transform: translateX(3px);
+  }
+}
+
+@include mobile {
+  .providers {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .door,
+  .chevron {
+    transition: none;
+  }
+
+  .door:active:not(:disabled),
+  .door[data-state='ready']:hover .chevron {
+    transform: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .door {
+    background: var(--bg-primary);
+    border-color: var(--border-primary);
+  }
+}

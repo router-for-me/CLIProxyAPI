@@ -1,0 +1,767 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 额度卡片 body 的全页外衣（类型化契约见 features/quota/types.ts）。
+ *
+ * 两段构成：
+ * 1. 额度行 / 水位条 / Antigravity 分组 —— mono 遥测风，与紧凑外衣同族；
+ * 2. 套餐徽章区（.codexPlan* 起至文件末尾）—— 定稿资产：premium = 金卡，
+ *    flagship = 和田玉金镶玉（2026-11-01 起替代液态铂金）；含暗色 / HDR /
+ *    减动效冻结帧 / 移动端降级。**改配方等于重设计已验收的徽章**，须先确认。
+ * ============================================================ */
+
+/* ---------- 额度行 ---------- */
+
+.quotaRow {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.quotaRowHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.quotaModel {
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  @include text-ellipsis;
+}
+
+/* The extra-usage state describes this label, not the credential. */
+.claudeExtraUsageTitle {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+
+  // Override the mobile label width so the state can stay alongside it.
+  .quotaModel {
+    width: auto;
+  }
+}
+
+.claudeExtraUsageStatus {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+/* 遥测：mono + 等宽数字，刷新时数字不跳位 */
+.quotaMeta {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-shrink: 0;
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
+
+/* 百分比穿墨色而非填充色 —— 文字不承担状态编码，颜色留给水位条 */
+.quotaPercent {
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.quotaReset {
+  color: var(--text-quaternary);
+}
+
+/* Countdown beside the absolute reset time. The separator is a pseudo-element
+   so the two spans stay independently styleable (the relative half turns
+   warning-coloured when this is the row that recovers first). */
+.quotaResetRelative {
+  color: var(--text-tertiary);
+
+  &::before {
+    content: '·';
+    margin: 0 4px;
+    color: var(--text-quaternary);
+  }
+}
+
+.quotaResetRelativeSoon {
+  color: var(--warning-text);
+  font-weight: 600;
+}
+
+.quotaAmount {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
+.quotaMessage {
+  font-family: $font-mono;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  text-align: center;
+  padding: 6px 4px;
+}
+
+/* ---------- 水位条（QuotaMeter）----------
+ * 轨道退居背景（8% 墨色），填充按剩余量三档着色；
+ * percent === null 时宽度为 0 —— 未知不着色。 */
+
+.quotaBar {
+  height: 6px;
+  border-radius: $radius-full;
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+  overflow: hidden;
+}
+
+.quotaBarFill {
+  height: 100%;
+  border-radius: $radius-full;
+  /* 刷新时平滑重定向到新水位（可中断） */
+  transition: width 360ms var(--ease-out-strong, ease);
+  /* 数据到达是本页的高潮时刻：水位逐行铺开（每行 40ms 级差）。
+   * 走 scaleX 而非 width，避免与上面的 width 过渡互相抢夺同一属性。 */
+  transform-origin: left center;
+  animation: quota-meter-fill 480ms var(--ease-out-strong, ease-out) both;
+  animation-delay: calc(var(--meter-index, 0) * 40ms);
+}
+
+@keyframes quota-meter-fill {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+.quotaBarFillHigh {
+  background: var(--viz-success);
+}
+
+.quotaBarFillMedium {
+  background: var(--quota-medium-color);
+}
+
+.quotaBarFillLow {
+  background: var(--viz-failure);
+}
+
+/* ---------- Antigravity 分组 ---------- */
+
+.antigravityQuotaGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+
+  & + & {
+    margin-top: 3px;
+    padding-top: 9px;
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 80%, transparent);
+  }
+}
+
+/* 只剩标题（分组说明在标题后的 InfoTip 里）：单行，图标与小号大写标题居中对齐 */
+.antigravityQuotaGroupHeader {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  line-height: 1.4;
+}
+
+.antigravityQuotaGroupTitle {
+  font-family: $font-mono;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+@include mobile {
+  .quotaRowHeader {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .quotaModel {
+    width: 100%;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .quotaBarFill {
+    transition: none;
+    animation: none;
+  }
+}
+
+/* ---------- Compact layout: glance card ----------
+ * QuotaCard sets data-quota-glance in the Compact layout. A glance keeps the plan and one line
+ * per limit (name, percent, bar); reset times, amounts, credit lists and the group InfoTips
+ * stay in the full card, which the card's details toggle opens. */
+
+[data-quota-glance] {
+  .quotaRow {
+    gap: 3px;
+  }
+
+  /* A glance row is only a name and a percent: keep it on one line on phones too. */
+  .quotaRowHeader {
+    flex-direction: row;
+    align-items: baseline;
+  }
+
+  .quotaModel {
+    width: auto;
+    @include text-ellipsis;
+  }
+
+  // Keep status/error notices visible: they can warn that displayed quotas are stale.
+  .quotaReset,
+  .quotaResetRelative,
+  .quotaAmount,
+  .codexResetCredits,
+  .antigravityQuotaGroupHeader [data-info-tip],
+  .codexPlanLabel,
+  .codexPlanItem:not([data-quota-plan]) {
+    display: none;
+  }
+
+  /* Own rule: a browser without :has() drops only this one, not the rules above. */
+  .codexPlan:not(:has([data-quota-plan])) {
+    display: none;
+  }
+}
+
+/* ============================================================
+ * 以下至文件末尾：套餐徽章定稿区块（逐字节搬迁，禁止改动）
+ * ============================================================ */
+
+.codexPlan {
+  display: flex;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.codexPlanItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.codexPlanLabel {
+  color: var(--text-tertiary);
+  flex: 0 0 auto;
+}
+
+.codexPlanValue {
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: capitalize;
+  min-width: 0;
+}
+
+.codexResetCredits {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.codexResetCreditsTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+.codexResetCreditRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px $spacing-sm;
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: $radius-sm;
+  background-color: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+  font-size: 12px;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.codexResetCreditRowSoon {
+  border-color: var(--warning-border);
+  background-color: var(--warning-bg);
+}
+
+.codexResetCreditLabel {
+  color: var(--text-tertiary);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.codexResetCreditTime {
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+  margin-left: auto;
+}
+
+.codexResetCreditsError {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--warning-text);
+  background-color: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-radius: $radius-sm;
+  padding: $spacing-xs $spacing-sm;
+}
+
+.codexPlanSeparator {
+  width: 1px;
+  height: 12px;
+  background-color: var(--border-color);
+}
+
+.premiumPlanValue {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  overflow: visible;
+  isolation: isolate;
+  background:
+    radial-gradient(
+      circle at 18% 24%,
+      rgba(255, 255, 255, 0.96) 0%,
+      rgba(255, 255, 255, 0.72) 18%,
+      rgba(255, 255, 255, 0) 42%
+    ),
+    linear-gradient(135deg, #fff9e3 0%, #ffe07f 52%, #e0aa14 100%);
+  border: 1px solid rgba(217, 165, 22, 0.72);
+  box-shadow:
+    0 1px 3px rgba(133, 92, 0, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.22) inset,
+    0 0 16px rgba(255, 214, 98, 0.28);
+  color: #6b4b00;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+  text-transform: capitalize;
+
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -6px -9px;
+    border-radius: inherit;
+    background: radial-gradient(
+      circle at 18% 22%,
+      rgba(255, 255, 255, 0.9) 0%,
+      rgba(255, 237, 158, 0.58) 32%,
+      rgba(255, 215, 91, 0) 72%
+    );
+    --glass-blur: 9px;
+    filter: var(--glass-filter);
+    opacity: 0.75;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  @media (dynamic-range: high) {
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        color(display-p3 1 0.99 0.94) 0%,
+        color(display-p3 1 0.97 0.82 / 0.82) 18%,
+        color(display-p3 1 0.95 0.7 / 0) 42%
+      ),
+      linear-gradient(
+        135deg,
+        color(display-p3 1 0.98 0.88),
+        color(display-p3 0.99 0.86 0.34),
+        color(display-p3 0.92 0.68 0.05)
+      );
+    border-color: color(display-p3 0.9 0.73 0.12 / 0.85);
+    box-shadow:
+      0 1px 4px color(display-p3 0.45 0.28 0 / 0.22),
+      0 0 0 1px color(display-p3 1 0.98 0.86 / 0.3) inset,
+      0 0 18px color(display-p3 1 0.89 0.2 / 0.36);
+    color: color(display-p3 0.43 0.3 0);
+  }
+
+  @supports (color: #{'color(rec2100-linear 1 1 1)'}) {
+    @media (dynamic-range: high) {
+      dynamic-range-limit: no-limit;
+      box-shadow:
+        0 1px 4px color(display-p3 0.45 0.28 0 / 0.22),
+        0 0 0 1px color(display-p3 1 0.98 0.86 / 0.3) inset,
+        0 0 14px color(display-p3 1 0.89 0.2 / 0.36),
+        0 0 30px #{'color(rec2100-linear 3.6 2.9 0.7 / 0.48)'};
+
+      &::before {
+        background: radial-gradient(
+          circle at 18% 22%,
+          #{'color(rec2100-linear 6.5 6.2 5.4 / 0.92)'} 0%,
+          #{'color(rec2100-linear 2.4 2 0.6 / 0.62)'} 34%,
+          #{'color(rec2100-linear 1 0.85 0.12 / 0)'} 76%
+        );
+        opacity: 0.92;
+      }
+    }
+  }
+}
+
+:global([data-theme='dark']) .premiumPlanValue {
+  background:
+    radial-gradient(
+      circle at 18% 24%,
+      rgba(255, 229, 138, 0.32) 0%,
+      rgba(255, 214, 98, 0.18) 18%,
+      rgba(255, 214, 98, 0) 44%
+    ),
+    linear-gradient(135deg, #4f3d0b 0%, #6e5510 48%, #8f6d10 100%);
+  border-color: rgba(226, 180, 50, 0.7);
+  box-shadow:
+    0 1px 6px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 220, 120, 0.16) inset,
+    0 0 18px rgba(255, 196, 44, 0.22);
+  color: #fff0a8;
+  text-shadow: 0 0 10px rgba(255, 212, 79, 0.22);
+
+  &::before {
+    background: radial-gradient(
+      circle at 18% 24%,
+      rgba(255, 229, 138, 0.42) 0%,
+      rgba(255, 197, 66, 0.28) 34%,
+      rgba(255, 187, 0, 0) 74%
+    );
+    opacity: 0.8;
+  }
+
+  @media (dynamic-range: high) {
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        color(display-p3 1 0.89 0.38 / 0.38) 0%,
+        color(display-p3 1 0.82 0.2 / 0.2) 18%,
+        color(display-p3 1 0.82 0.2 / 0) 44%
+      ),
+      linear-gradient(
+        135deg,
+        color(display-p3 0.33 0.25 0.04),
+        color(display-p3 0.48 0.36 0.08),
+        color(display-p3 0.62 0.46 0.09)
+      );
+    border-color: color(display-p3 0.78 0.6 0.16 / 0.78);
+    box-shadow:
+      0 1px 8px color(display-p3 0 0 0 / 0.32),
+      0 0 0 1px color(display-p3 0.95 0.8 0.24 / 0.18) inset,
+      0 0 20px color(display-p3 1 0.76 0.1 / 0.28);
+    color: color(display-p3 1 0.93 0.58);
+  }
+
+  @supports (color: #{'color(rec2100-linear 1 1 1)'}) {
+    @media (dynamic-range: high) {
+      dynamic-range-limit: no-limit;
+      box-shadow:
+        0 1px 8px color(display-p3 0 0 0 / 0.32),
+        0 0 0 1px color(display-p3 0.95 0.8 0.24 / 0.18) inset,
+        0 0 16px color(display-p3 1 0.76 0.1 / 0.28),
+        0 0 28px #{'color(rec2100-linear 4.8 3.5 0.45 / 0.4)'};
+
+      &::before {
+        background: radial-gradient(
+          circle at 18% 24%,
+          #{'color(rec2100-linear 5.6 4.1 0.75 / 0.64)'} 0%,
+          #{'color(rec2100-linear 2.2 1.5 0.2 / 0.34)'} 34%,
+          #{'color(rec2100-linear 1.2 0.9 0.06 / 0)'} 74%
+        );
+        opacity: 0.95;
+      }
+    }
+  }
+}
+
+/* 旗舰档 —— 和田玉 · 金镶玉（2026-11-01 起替代液态铂金）。
+ * 与金卡（premiumPlanValue）的档差：金卡是一整枚金，旗舰是「金只做镶边，主体是玉」。
+ *
+ * 玉之所以像玉，靠的是这些细节（背景自上而下 + ::after 纹理）：
+ *   1. 抛光点：左上一粒很小的亮点 —— 玉面是抛过光的；
+ *   2. 油脂光泽：上方一块宽而软的反光 —— 羊脂玉的光是蜡质的「润」，不是镜面的「亮」；
+ *   3. 次表面透光：光像从玉肉里透出来，极缓游移（14s 往返）；
+ *   4. 底部聚光：光穿过玉肉在底缘聚出一汪亮色，是「透」的关键；
+ *   5. 棉：两处白色絮点；
+ *   6. 糖色：右下一抹极淡的赭色籽料皮，天然料的记号；
+ *   7. 玉肉：青白羊脂底 —— 一丝青灰是和田白玉与象牙、珍珠的分界，纯奶白会读成塑料；
+ *   8. 纹理（::after）：分形噪声的玉肉斑驳 + 一根发丝细的石纹，正片叠底压进玉面。
+ * 金边：2px 斜面金（上亮下暗），金与玉之间一道细「口」线（inset），像镶嵌的包边。
+ * 两主题玉体同为浅色 —— 暗卡上羊脂玉本身就是柔光源，只压暗一档免得刺眼。 */
+@property --jade-light-x {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 40%;
+}
+
+.elitePlanValue {
+  --jade-ink: #33402b;
+  --jade-ink-shadow: 0 1px 0 rgba(255, 255, 246, 0.7);
+  --jade-glint: rgba(255, 255, 255, 0.95);
+  --jade-sheen: rgba(255, 255, 255, 0.9);
+  --jade-sheen-soft: rgba(255, 255, 255, 0.2);
+  --jade-glow: rgba(255, 255, 246, 0.9);
+  --jade-caustic: rgba(252, 255, 238, 0.95);
+  --jade-cotton: rgba(255, 255, 250, 0.7);
+  --jade-sugar: rgba(190, 118, 50, 0.5);
+  --jade-body-hi: #fbfbf3;
+  --jade-body: #e7e8d2;
+  --jade-body-edge: #c3c6a3;
+  --jade-texture-opacity: 0.45;
+  --jade-gold: linear-gradient(
+    180deg,
+    #fbeebf 0%,
+    #e2bf63 34%,
+    #b48a2c 62%,
+    #8d6a1f 80%,
+    #d6b25a 100%
+  );
+  --jade-seat: rgba(110, 82, 24, 0.34);
+  --jade-halo: rgba(232, 204, 128, 0.42);
+  --jade-shadow: rgba(96, 74, 22, 0.3);
+  --jade-rim-glow: rgba(214, 172, 74, 0.32);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  /* 2px 金边，内边距各收 1px，外径与金卡等高 */
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  overflow: visible;
+  isolation: isolate;
+  border: 2px solid transparent;
+  background:
+    radial-gradient(7% 22% at 23% 24%, var(--jade-glint) 0%, transparent 100%) padding-box,
+    radial-gradient(
+        90% 58% at 36% 0%,
+        var(--jade-sheen) 0%,
+        var(--jade-sheen-soft) 46%,
+        transparent 72%
+      )
+      padding-box,
+    radial-gradient(48% 100% at var(--jade-light-x) 58%, var(--jade-glow) 0%, transparent 72%)
+      padding-box,
+    radial-gradient(64% 46% at 50% 112%, var(--jade-caustic) 0%, transparent 80%) padding-box,
+    radial-gradient(14% 34% at 72% 36%, var(--jade-cotton) 0%, transparent 100%) padding-box,
+    radial-gradient(10% 26% at 13% 68%, var(--jade-cotton) 0%, transparent 100%) padding-box,
+    radial-gradient(40% 110% at 104% 108%, var(--jade-sugar) 0%, transparent 76%) padding-box,
+    radial-gradient(
+        140% 170% at 50% 40%,
+        var(--jade-body-hi) 20%,
+        var(--jade-body) 60%,
+        var(--jade-body-edge) 100%
+      )
+      padding-box,
+    var(--jade-gold) border-box;
+  background-repeat: no-repeat;
+  animation: jadeWarmth 14s ease-in-out infinite alternate;
+  box-shadow:
+    inset 0 0 0 0.5px var(--jade-seat),
+    inset 0 1px 1px rgba(255, 255, 255, 0.85),
+    inset 0 -1.5px 3px rgba(132, 130, 86, 0.22),
+    0 1px 3px var(--jade-shadow),
+    0 0 10px var(--jade-rim-glow);
+  color: var(--jade-ink);
+  text-shadow: var(--jade-ink-shadow);
+  text-transform: capitalize;
+
+  /* 温润光晕：静止的暖白柔光，与金卡同一套 blur 构造但不呼吸 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -6px -9px;
+    border-radius: inherit;
+    background: radial-gradient(
+      circle at 40% 40%,
+      var(--jade-halo) 0%,
+      rgba(240, 226, 180, 0.22) 40%,
+      rgba(240, 226, 180, 0) 74%
+    );
+    --glass-blur: 9px;
+    filter: var(--glass-filter);
+    opacity: 0.8;
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  /* 玉肉纹理：分形噪声斑驳（青灰）+ 一根发丝石纹，正片叠底压在玉面上、文字之下。
+   * 内联 SVG，不引外部资源（单文件构建）。 */
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 30' preserveAspectRatio='none'%3E%3Cfilter id='m' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.045 0.13' numOctaves='2' seed='11'/%3E%3CfeColorMatrix values='0 0 0 0 0.6 0 0 0 0 0.63 0 0 0 0 0.5 1.7 0 0 0 -0.84'/%3E%3C/filter%3E%3Crect width='100' height='30' filter='url(%23m)'/%3E%3Cpath d='M-4 23 C 20 15 44 26 66 13 S 94 5 106 8' fill='none' stroke='rgb(140 136 98)' stroke-opacity='0.28' stroke-width='0.25'/%3E%3C/svg%3E")
+      center / 100% 100% no-repeat;
+    mix-blend-mode: multiply;
+    opacity: var(--jade-texture-opacity);
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  /* P3 屏：金边多一档彩度（暖金有色域外的彩度可扩，玉体是低彩度，无需扩） */
+  @media (dynamic-range: high) {
+    --jade-gold: linear-gradient(
+      180deg,
+      color(display-p3 0.99 0.94 0.74) 0%,
+      color(display-p3 0.9 0.74 0.33) 34%,
+      color(display-p3 0.71 0.53 0.14) 62%,
+      color(display-p3 0.55 0.41 0.1) 80%,
+      color(display-p3 0.85 0.69 0.3) 100%
+    );
+  }
+}
+
+@keyframes jadeWarmth {
+  from {
+    --jade-light-x: 30%;
+  }
+  to {
+    --jade-light-x: 70%;
+  }
+}
+
+/* 暗色：玉体压暗一档、光晕收敛；金边压暗避免在深底上刺眼。 */
+:global([data-theme='dark']) .elitePlanValue {
+  --jade-ink: #2e3a26;
+  --jade-ink-shadow: 0 1px 0 rgba(252, 252, 240, 0.45);
+  --jade-glint: rgba(255, 255, 255, 0.85);
+  --jade-sheen: rgba(255, 255, 255, 0.58);
+  --jade-sheen-soft: rgba(255, 255, 255, 0.1);
+  --jade-glow: rgba(248, 248, 232, 0.8);
+  --jade-caustic: rgba(246, 250, 228, 0.8);
+  --jade-cotton: rgba(252, 252, 244, 0.55);
+  --jade-sugar: rgba(178, 108, 46, 0.5);
+  --jade-body-hi: #ecebdd;
+  --jade-body: #d8d8c0;
+  --jade-body-edge: #b6b993;
+  --jade-gold: linear-gradient(
+    180deg,
+    #efdca0 0%,
+    #cfa94f 34%,
+    #9c7524 62%,
+    #74561a 80%,
+    #c39f4c 100%
+  );
+  --jade-halo: rgba(236, 214, 150, 0.3);
+  --jade-shadow: rgba(0, 0, 0, 0.45);
+  --jade-rim-glow: rgba(214, 172, 74, 0.26);
+
+  &::before {
+    opacity: 0.7;
+  }
+}
+
+/* 减动效：玉光停在居中的一帧 —— 静态也是完成品。 */
+@media (prefers-reduced-motion: reduce) {
+  .elitePlanValue,
+  :global([data-theme='dark']) .elitePlanValue {
+    animation: none;
+    --jade-light-x: 50%;
+  }
+}
+
+/* 高对比：去掉光泽、絮与纹理，只留实色玉体 + 实色金边。 */
+@media (prefers-contrast: more) {
+  .elitePlanValue {
+    background:
+      linear-gradient(var(--jade-body), var(--jade-body)) padding-box,
+      linear-gradient(#8d6a1f, #8d6a1f) border-box;
+    text-shadow: none;
+
+    &::before,
+    &::after {
+      content: none;
+    }
+  }
+}
+
+@include mobile {
+  .premiumPlanValue {
+    overflow: hidden;
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        rgba(255, 255, 255, 0.88) 0%,
+        rgba(255, 255, 255, 0.58) 18%,
+        rgba(255, 255, 255, 0) 42%
+      ),
+      linear-gradient(135deg, #fff9e3 0%, #ffe07f 52%, #e0aa14 100%);
+    box-shadow:
+      0 1px 3px rgba(133, 92, 0, 0.16),
+      0 0 0 1px rgba(255, 255, 255, 0.22) inset,
+      0 0 10px rgba(255, 214, 98, 0.22);
+
+    &::before {
+      content: none;
+    }
+  }
+
+  :global([data-theme='dark']) .premiumPlanValue {
+    background:
+      radial-gradient(
+        circle at 18% 24%,
+        rgba(255, 229, 138, 0.28) 0%,
+        rgba(255, 214, 98, 0.14) 18%,
+        rgba(255, 214, 98, 0) 44%
+      ),
+      linear-gradient(135deg, #4f3d0b 0%, #6e5510 48%, #8f6d10 100%);
+    box-shadow:
+      0 1px 6px rgba(0, 0, 0, 0.28),
+      0 0 0 1px rgba(255, 220, 120, 0.16) inset,
+      0 0 10px rgba(255, 196, 44, 0.18);
+  }
+
+  // 玉徽章移动端：与金卡同一刀 —— 砍模糊光晕层；
+  // 玉光游移只是一个渐变中心的重绘，~70×20px 成本可忽略，保留。
+  .elitePlanValue {
+    overflow: hidden;
+
+    &::before {
+      content: none;
+    }
+  }
+}

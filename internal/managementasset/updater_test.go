@@ -85,6 +85,7 @@ func TestAutoUpdateSkipReason(t *testing.T) {
 		name       string
 		cfg        *config.Config
 		wantReason string
+		staticPath string
 		wantSkip   bool
 	}{
 		{
@@ -118,8 +119,15 @@ func TestAutoUpdateSkipReason(t *testing.T) {
 			wantSkip:   true,
 		},
 		{
-			name:       "enabled",
+			name:       "built-in console",
 			cfg:        &config.Config{},
+			wantReason: "serving the built-in console",
+			wantSkip:   true,
+		},
+		{
+			name:       "enabled with a custom panel path",
+			cfg:        &config.Config{},
+			staticPath: t.TempDir(),
 			wantReason: "",
 			wantSkip:   false,
 		},
@@ -127,6 +135,7 @@ func TestAutoUpdateSkipReason(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MANAGEMENT_STATIC_PATH", tt.staticPath)
 			gotReason, gotSkip := autoUpdateSkipReason(tt.cfg)
 			if gotReason != tt.wantReason || gotSkip != tt.wantSkip {
 				t.Fatalf("autoUpdateSkipReason() = (%q, %t), want (%q, %t)", gotReason, gotSkip, tt.wantReason, tt.wantSkip)

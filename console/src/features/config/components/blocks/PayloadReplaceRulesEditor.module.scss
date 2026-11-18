@@ -1,0 +1,657 @@
+/* 文本替换：一条规则读作一句话——「对这些模型 / 在这些目标里 / 把 A 换成 B」。
+   三段用发丝线分隔而不是套盒子；操作收成图标，让字面量本身成为每一行的主角。
+   动效只碰 transform / opacity，时长与曲线全部取自主题 tokens。 */
+
+$ease: var(--ease-out-strong, ease-out);
+$press: var(--dur-press, 160ms);
+$hover: var(--dur-hover, 200ms);
+$tool-size: 28px;
+$tools-width: $tool-size * 3 + 2px * 2;
+$index-width: 136px;
+$arrow-width: 14px;
+$pair-columns: $index-width minmax(0, 1fr) $arrow-width minmax(0, 1fr) $tools-width;
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lede {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* ---------- 规则 ---------- */
+
+.rules,
+.pairList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rules {
+  gap: 12px;
+}
+
+.rule {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-secondary) 64%, transparent);
+  transition:
+    border-color $hover $ease,
+    opacity $hover $ease,
+    transform $hover $ease;
+
+  &[data-invalid='true'] {
+    border-color: var(--destructive-30);
+  }
+
+  /* 新增 / 重排落位时轻轻浮入：位移很小，只为交代「它在这里」。 */
+  @starting-style {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.ruleHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 8px 6px 16px;
+}
+
+.ruleTitle {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.ruleNumber {
+  font-variant-numeric: tabular-nums;
+}
+
+.band {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.bandLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.count {
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: $radius-full;
+  background: var(--count-badge-bg);
+  color: var(--count-badge-text);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: center;
+}
+
+.hint {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ---------- 校验提示 ---------- */
+
+.notice {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 16px 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--destructive-10);
+}
+
+.noticeMessage {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--error-color);
+  font-size: 12.5px;
+  line-height: 1.5;
+
+  svg {
+    flex: none;
+    margin-top: 2px;
+  }
+}
+
+.noticeRecovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-left: 22px;
+
+  p {
+    flex: 1 1 260px;
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+}
+
+/* ---------- 图标操作 ---------- */
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: $tool-size;
+  height: $tool-size;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition:
+    color $hover $ease,
+    background-color $hover $ease,
+    transform $press $ease;
+
+  svg {
+    display: block;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.94);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+    color: var(--text-primary);
+  }
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.32;
+  }
+}
+
+/* 删除平时与其他操作同色，指向它时才亮出危险色。 */
+.toolRemove:focus-visible {
+  color: var(--error-color);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tool:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+
+  .toolRemove:hover:not(:disabled) {
+    background: var(--destructive-10);
+    color: var(--error-color);
+  }
+}
+
+/* ---------- 作用范围 ---------- */
+
+.target {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.segmented {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  flex: none;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-tertiary);
+
+  &[data-disabled='true'] {
+    opacity: 0.55;
+  }
+}
+
+/* 滑块先于文字移动：选中态是「被拿过去」的，而不是两处各自变色。 */
+.segmentedThumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  border-radius: 7px;
+  background: var(--floating-surface, var(--bg-primary));
+  box-shadow: var(--shadow);
+  transition: transform $hover $ease;
+
+  .segmented[data-side='end'] & {
+    transform: translateX(100%);
+  }
+}
+
+/* 深色主题下浮起表面与槽底只差一档亮度，阴影又看不见：改用提亮 + 发丝描边把滑块托出来。 */
+:global([data-theme='dark']) .segmentedThumb {
+  background: color-mix(in srgb, var(--text-primary) 13%, var(--bg-tertiary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 10%, transparent);
+}
+
+.segment {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 14px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: center;
+  cursor: pointer;
+  transition: color $hover $ease;
+
+  input {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+
+  &:has(input:checked) {
+    color: var(--text-primary);
+  }
+
+  &:has(input:focus-visible) {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+  }
+
+  &:has(input:disabled) {
+    cursor: not-allowed;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .segment:hover:not(:has(input:disabled)) {
+    color: var(--text-primary);
+  }
+}
+
+.targetChoice {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.positions:global(.input) {
+  flex: 0 1 180px;
+  width: auto;
+  min-width: 96px;
+  min-height: 36px;
+  padding: 7px 10px;
+  font-family: $font-mono;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  transition:
+    opacity $hover $ease,
+    border-color $transition-fast,
+    box-shadow $transition-fast;
+
+  @starting-style {
+    opacity: 0;
+  }
+}
+
+/* ---------- 替换项 ---------- */
+
+.pairs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pairsHead,
+.pair {
+  display: grid;
+  grid-template-columns: $pair-columns;
+  column-gap: 8px;
+}
+
+.pairsHead {
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.pairList {
+  gap: 6px;
+}
+
+.pair {
+  align-items: start;
+  transition:
+    opacity $hover $ease,
+    transform $hover $ease;
+
+  @starting-style {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  /* DOM 顺序是 序号 / 源 / 目标 / 箭头 / 操作（让 Tab 直接从源跳到目标），视觉上箭头居中。 */
+  > .operand[data-operand='from'] {
+    grid-column: 2;
+  }
+
+  > .operand[data-operand='to'] {
+    grid-column: 4;
+  }
+
+  > .arrow {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  > .tools {
+    grid-column: 5;
+    grid-row: 1;
+    margin-top: 4px;
+  }
+}
+
+.pairIndex,
+.arrow {
+  color: var(--text-quaternary);
+}
+
+.pairIndex {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+
+  > span {
+    min-width: 2ch;
+    text-align: right;
+  }
+
+  > div {
+    min-width: 0;
+  }
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 36px;
+  text-align: right;
+}
+
+.arrow {
+  margin-top: 11px;
+}
+
+.operand {
+  display: block;
+  grid-row: 1;
+  min-width: 0;
+}
+
+/* 列头在窄屏消失，由每个输入框自带的小标题接替。 */
+.operandCaption {
+  display: none;
+  margin-bottom: 4px;
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* 字面量不裁剪空白：等宽 + pre-wrap，让首尾空格看得见。 */
+.literal:global(.input) {
+  display: block;
+  min-height: 36px;
+  max-height: 220px;
+  padding: 7px 10px;
+  font-family: $font-mono;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  resize: vertical;
+  field-sizing: content;
+}
+
+.add {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  min-height: 30px;
+  /* 与源文本列左缘对齐：序号列 + 列间距 − 自身内边距。 */
+  margin-left: $index-width;
+  padding: 4px 10px 4px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    color $hover $ease,
+    background-color $hover $ease,
+    transform $press $ease;
+
+  svg {
+    display: block;
+    flex: none;
+  }
+
+  &:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 1px;
+    color: var(--text-primary);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .add:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+}
+
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 720px) {
+  .ruleHead {
+    padding-left: 14px;
+  }
+
+  .band {
+    padding: 12px 14px 14px;
+  }
+
+  .notice {
+    margin: 0 14px 12px;
+  }
+
+  .segmented {
+    display: grid;
+    flex: 1 1 100%;
+  }
+
+  .positions:global(.input) {
+    flex: 1 1 100%;
+  }
+
+  .pairsHead {
+    display: none;
+  }
+
+  .pairList {
+    gap: 0;
+  }
+
+  /* 窄屏：序号与操作占一行，源 / 目标上下堆叠。 */
+  .pair {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: 6px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border-color);
+
+    &:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    > .tools {
+      grid-column: 2;
+      grid-row: 1;
+      margin-top: 0;
+    }
+
+    > .operand[data-operand='from'] {
+      grid-column: 1 / -1;
+      grid-row: 2;
+    }
+
+    > .operand[data-operand='to'] {
+      grid-column: 1 / -1;
+      grid-row: 3;
+    }
+
+    > .arrow {
+      display: none;
+    }
+  }
+
+  .pairIndex {
+    grid-column: 1;
+    line-height: $tool-size;
+    text-align: left;
+  }
+
+  .operandCaption {
+    display: block;
+  }
+
+  .add {
+    margin-left: -8px;
+  }
+}
+
+/* 触屏放大命中区，视觉密度不变的前提下保证可点。 */
+@media (pointer: coarse) {
+  .tool {
+    width: 36px;
+    height: 36px;
+  }
+
+  .add {
+    min-height: 36px;
+  }
+}
+
+@media (pointer: coarse) and (min-width: 721px) {
+  .pairsHead,
+  .pair {
+    grid-template-columns: $index-width minmax(0, 1fr) $arrow-width minmax(0, 1fr) 112px;
+  }
+}
+
+/* ---------- 无障碍 ---------- */
+
+/* 降级只去掉位移，颜色与透明度的状态变化保留。 */
+@media (prefers-reduced-motion: reduce) {
+  .rule,
+  .pair {
+    transition: opacity $hover linear;
+
+    @starting-style {
+      transform: none;
+    }
+  }
+
+  .segmentedThumb {
+    transition: none;
+  }
+
+  .tool,
+  .add {
+    transition:
+      color $hover linear,
+      background-color $hover linear;
+
+    &:active:not(:disabled) {
+      transform: none;
+    }
+  }
+}
+
+@media (prefers-contrast: more) {
+  .tool,
+  .pairIndex,
+  .arrow,
+  .hint,
+  .pairsHead {
+    color: var(--text-secondary);
+  }
+
+  .segmented {
+    border-color: var(--border-primary);
+  }
+}

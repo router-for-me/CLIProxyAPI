@@ -1,0 +1,80 @@
+# v8 visual editor fixture; all keys are fictitious.
+config-version: 8
+server:
+  host: localhost
+  port: 8317
+  commercial-mode: false
+  tls:
+    enable: false
+    cert: fixture.pem
+management:
+  allow-remote: false
+  panel-github-repository: https://example.test/panel
+access:
+  api-keys: [fixture-client]
+api-keys:
+  codex:
+    - name: fixture-group
+      headers: {X-Fixture: upstream}
+      keys:
+        - api-key: fixture-upstream
+          weight: 0
+  claude:
+    - keys: [{api-key: fixture-claude}]
+routing:
+  strategy: weighted-round-robin
+  force-model-prefix: false
+  retry:
+    request-retry: 0
+    max-retry-credentials: 0
+    max-retry-interval: 0
+  cooldown:
+    disable-cooling: false
+requests:
+  proxy-url: http://fixture.test
+  streaming:
+    keepalive-seconds: 0
+    bootstrap-retries: 0
+  nonstream-keepalive-interval: 0
+  payload:
+    future-section: {enabled: false}
+    default:
+      - models:
+          - name: fixture-model
+            future-model: keep
+        params: {temperature: 0}
+        future-rule: keep
+oauth:
+  auth-dir: ./fixture-auth
+  auth-auto-refresh-workers: 0
+  providers:
+    aistudio: {ws-auth: false}
+    codex:
+      header-defaults: {user-agent: fixture-oauth-agent}
+      future-option: keep
+    claude:
+      header-defaults: {stabilize-device-profile: false}
+    antigravity:
+      signature-cache-enabled: false
+      signature-bypass-strict: false
+      antigravity-credits: false
+      sensitive-words: [fixture-word]
+    devin:
+      sensitive-words: [fixture-devin]
+multimedia:
+  disable-image-generation: false
+  gpt-image-2-base-model: fixture-base
+observability:
+  logs:
+    debug: false
+    logging-to-file: false
+    logs-max-total-size-mb: 0
+    error-logs-max-files: 0
+  usage:
+    usage-statistics-enabled: false
+    redis-usage-queue-retention-seconds: 60
+plugins:
+  enabled: false
+  configs:
+    fixture: {unknown: keep}
+future-root: {unknown: keep}

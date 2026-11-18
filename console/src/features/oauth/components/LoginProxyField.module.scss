@@ -1,0 +1,261 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 登录代理：页头与画廊之间的次要胶囊。与提供商磁贴同一家族（1px 边框 /
+ * 82% 透感纸面），但更矮更小，始终是可选项、不与磁贴抢主次。
+ * 有值时胶囊常驻显示（脱敏后的）代理并带状态色描边，避免忘了它还开着。
+ *
+ * 左缘与页头文字、磁贴对齐：祖先 .page-transition 是 overflow: hidden，
+ * 且恰好裁在内容边上，所以这里不能有负外边距，焦点环也只能画在胶囊内侧。
+ * ============================================================ */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.toggle {
+  @include button-reset;
+  /* 边框色按状态切换；hover / 展开时由 ::after 叠层淡入，只动 opacity */
+  --chip-border: var(--border-color);
+  --chip-border-strong: var(--border-hover);
+
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--chip-border);
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-primary);
+  transition: transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: inherit;
+    border: 1px solid var(--chip-border-strong);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+  }
+
+  &[aria-expanded='true']::after {
+    opacity: 1;
+  }
+
+  &:focus {
+    outline: none;
+  }
+
+  /* 内收焦点环：外扩会被 .page-transition 在左缘裁掉 */
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .toggle:hover::after {
+    opacity: 1;
+  }
+
+  .clear:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+  }
+}
+
+.toggleIcon {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.toggleLabel {
+  flex-shrink: 0;
+  letter-spacing: -0.005em;
+}
+
+.toggleStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-family: $font-mono;
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--text-tertiary);
+}
+
+.statusText {
+  @include text-ellipsis;
+  min-width: 0;
+}
+
+.statusDot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.chevron {
+  flex-shrink: 0;
+  margin-left: -1px;
+  color: var(--text-tertiary);
+  transition: transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+.toggle[aria-expanded='true'] .chevron {
+  transform: rotate(180deg);
+}
+
+/* 有值：描边略向成功绿偏、代理用绿字标出「正在生效」；无效同理偏向失败红 */
+.root[data-active] .toggle {
+  --chip-border: color-mix(in srgb, var(--viz-success) 38%, var(--border-color));
+  --chip-border-strong: color-mix(in srgb, var(--viz-success) 62%, var(--border-color));
+}
+
+.root[data-active] .toggleStatus {
+  color: var(--viz-success);
+}
+
+.root[data-invalid] .toggle {
+  --chip-border: color-mix(in srgb, var(--viz-failure) 42%, var(--border-color));
+  --chip-border-strong: color-mix(in srgb, var(--viz-failure) 66%, var(--border-color));
+}
+
+.root[data-invalid] .toggleStatus {
+  color: var(--viz-failure);
+}
+
+/* ---------- 展开面板 ---------- */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 560px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  animation: login-proxy-in var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &[hidden] {
+    display: none;
+  }
+}
+
+@keyframes login-proxy-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0);
+  }
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-family: $font-mono;
+  font-size: 12px;
+
+  &[aria-invalid='true'] {
+    border-color: var(--viz-failure);
+  }
+}
+
+.clear {
+  @include button-reset;
+  flex-shrink: 0;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:focus {
+    outline: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  color: var(--viz-failure);
+}
+
+@keyframes login-proxy-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* 减弱动态：去掉位移/缩放/旋转，保留短促的淡入淡出帮助理解状态变化 */
+@media (prefers-reduced-motion: reduce) {
+  .panel {
+    animation-name: login-proxy-fade;
+  }
+
+  .toggle,
+  .clear,
+  .chevron {
+    transition: none;
+  }
+
+  .toggle::after {
+    transition: opacity var(--dur-hover, 200ms) ease;
+  }
+
+  .toggle:active,
+  .clear:active {
+    transform: none;
+  }
+}

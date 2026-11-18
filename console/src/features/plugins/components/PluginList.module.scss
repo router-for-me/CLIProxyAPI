@@ -1,0 +1,145 @@
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * 两个视图共用的列表容器与视图内提示（错误 / 安全说明 / 源错误）。
+ * 提示一律是安静的单块：发丝边框、正文色，不用整块着色的横幅。
+ * ============================================================ */
+
+.listArea {
+  min-width: 0;
+}
+
+.list {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-lg;
+  background: var(--bg-primary);
+}
+
+// Store cards: wide enough that a card still shows name, description, metadata and action.
+.grid {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+  gap: 12px;
+}
+
+// ─── Error ──────────────────────────────────────────────
+
+.errorBox {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-md;
+  padding: 12px $spacing-md;
+  border: 1px solid var(--destructive-30);
+  border-radius: $radius-md;
+  background: var(--bg-error-light);
+  color: var(--danger-color);
+  font-size: 14px;
+  line-height: 1.5;
+
+  span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  :global(.btn) {
+    flex-shrink: 0;
+  }
+
+  @include mobile {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+// ─── Notes ──────────────────────────────────────────────
+
+.note,
+.sourceErrors {
+  min-width: 0;
+  padding: 12px $spacing-md;
+  border: 1px solid var(--border-color);
+  border-radius: $radius-md;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: var(--text-secondary);
+
+  svg {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--text-tertiary);
+  }
+
+  > div {
+    min-width: 0;
+  }
+
+  p {
+    margin: 2px 0 0;
+  }
+
+  strong {
+    display: block;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+}
+
+.sourceErrors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-secondary);
+
+  ul {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding: 0 0 0 21px;
+    list-style: none;
+  }
+
+  li {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+  }
+
+  li span {
+    color: var(--text-primary);
+    font-weight: 500;
+    overflow-wrap: anywhere;
+  }
+
+  small {
+    color: var(--text-tertiary);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+}
+
+.sourceErrorsTitle {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-primary);
+  font-weight: 600;
+
+  svg {
+    flex-shrink: 0;
+    margin-top: 3px;
+    color: var(--amber-color);
+  }
+}
