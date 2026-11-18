@@ -180,6 +180,7 @@ func TestCountClaudeInputTokensExcludesMultimediaAndControlFields(t *testing.T) 
         "temperature":0.8,
         "top_p":0.9,
         "thinking":{"type":"enabled","budget_tokens":4096},
+        "output_config":{"effort":"high"},
         "stream":true
     }`)
 
@@ -193,6 +194,46 @@ func TestCountClaudeInputTokensExcludesMultimediaAndControlFields(t *testing.T) 
 	}
 	if excludedCount != baseCount {
 		t.Fatalf("count with excluded fields = %d, want %d", excludedCount, baseCount)
+	}
+}
+
+func TestCollectClaudeInputTokenSegmentsIncludesOutputConfigFormat(t *testing.T) {
+	base := []byte(`{"messages":[{"role":"user","content":"Hello."}]}`)
+	withFormat := []byte(`{
+        "messages":[{"role":"user","content":"Hello."}],
+        "output_config":{
+            "effort":"high",
+            "format":{
+                "type":"json_schema",
+                "schema":{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}
+            }
+        }
+    }`)
+
+	segments, err := collectClaudeInputTokenSegments(withFormat)
+	if err != nil {
+		t.Fatalf("collectClaudeInputTokenSegments() error = %v", err)
+	}
+	joined := "\n" + strings.Join(segments, "\n") + "\n"
+	for _, want := range []string{
+		"json_schema",
+		`{"type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}`,
+	} {
+		if !strings.Contains(joined, "\n"+want+"\n") {
+			t.Errorf("segments missing %q: %#v", want, segments)
+		}
+	}
+
+	baseCount, errBase := CountClaudeInputTokens(base)
+	if errBase != nil {
+		t.Fatalf("CountClaudeInputTokens(base) error = %v", errBase)
+	}
+	formatCount, errFormat := CountClaudeInputTokens(withFormat)
+	if errFormat != nil {
+		t.Fatalf("CountClaudeInputTokens(withFormat) error = %v", errFormat)
+	}
+	if formatCount <= baseCount {
+		t.Fatalf("CountClaudeInputTokens(withFormat) = %d, want > base %d", formatCount, baseCount)
 	}
 }
 

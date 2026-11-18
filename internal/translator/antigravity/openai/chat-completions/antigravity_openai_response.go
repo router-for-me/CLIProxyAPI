@@ -206,6 +206,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				_ = templateDoc.Set("choices.0.delta.role", "assistant")
 				_ = templateDoc.SetRawBytes("choices.0.delta.tool_calls.-1", fcDoc.Bytes())
 			} else if inlineDataResult.Exists() {
+				if partResult.Get("thought").Bool() {
+					continue
+				}
 				data := inlineDataResult.Get("data").String()
 				if data == "" {
 					continue
@@ -278,9 +281,11 @@ func hasAntigravityResponsePayload(rawJSON []byte) bool {
 					return true
 				}
 				for _, part := range cand.Get("content.parts").Array() {
+					hasVisibleInlineData := !part.Get("thought").Bool() &&
+						(part.Get("inlineData.data").String() != "" || part.Get("inline_data.data").String() != "")
 					if part.Get("text").String() != "" ||
 						part.Get("functionCall").Exists() || part.Get("function_call").Exists() ||
-						part.Get("inlineData").Exists() || part.Get("inline_data").Exists() ||
+						hasVisibleInlineData ||
 						part.Get("fileData").Exists() || part.Get("file_data").Exists() ||
 						part.Get("executableCode").Exists() || part.Get("executable_code").Exists() ||
 						part.Get("codeExecutionResult").Exists() || part.Get("code_execution_result").Exists() {
