@@ -101,6 +101,16 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	return h.getRequestDetailsWithOptions(modelName, false, false)
 }
 
+// HasExclusiveModelProvider reports whether a model has an unambiguous local
+// route. A dynamic router or Home owns its routing decision, so neither qualifies.
+func (h *BaseAPIHandler) HasExclusiveModelProvider(modelName, provider string) bool {
+	if h == nil || modelRoutersEnabled(h.modelRouterHost(), "") {
+		return false
+	}
+	providers, _, err := h.getRequestDetails(modelName)
+	return err == nil && len(providers) == 1 && providers[0] == provider
+}
+
 func validateNativeInteractionsExecution(entryProtocol string, execOptions modelExecutionOptions, routeDecision modelRouteDecision) *interfaces.ErrorMessage {
 	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
 	if forcedProvider == "" || entryProtocol != Interactions {
