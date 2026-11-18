@@ -3,10 +3,11 @@ package pluginhost
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestHostPickAuthUsesHighestPrioritySchedulerOnly(t *testing.T) {
@@ -202,6 +203,150 @@ func TestHostPickAuthAllowsKnownBuiltinDelegates(t *testing.T) {
 				t.Fatalf("PickAuth() DelegateBuiltin = %q, want %q", resp.DelegateBuiltin, delegate)
 			}
 		})
+	}
+}
+
+func TestHostPickAuthTerminalRejection(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "scheduler",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:      true,
+				Reject:       true,
+				RejectCode:   "quota_exceeded",
+				RejectReason: "all candidates exceed quota",
+			}, nil
+		})}},
+	})
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+	if errPick != nil {
+		t.Fatalf("PickAuth() error = %v, want nil", errPick)
+	}
+	if !handled {
+		t.Fatal("PickAuth() handled = false, want true")
+	}
+	if !resp.Reject {
+		t.Fatal("PickAuth() resp.Reject = false, want true")
+	}
+	if resp.RejectCode != "quota_exceeded" {
+		t.Fatalf("PickAuth() RejectCode = %q, want quota_exceeded", resp.RejectCode)
+	}
+	if resp.RejectReason != "all candidates exceed quota" {
+		t.Fatalf("PickAuth() RejectReason = %q, want all candidates exceed quota", resp.RejectReason)
+	}
+}
+
+func TestHostPickAuthTerminalRejectionWhitespaceDefaults(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "scheduler",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:      true,
+				Reject:       true,
+				RejectCode:   "   ",
+				RejectReason: "\t  \n",
+			}, nil
+		})}},
+	})
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1"))
+	if errPick != nil {
+		t.Fatalf("PickAuth() error = %v, want nil", errPick)
+	}
+	if !handled || !resp.Reject {
+		t.Fatalf("PickAuth() handled=%v, reject=%v, want true/true", handled, resp.Reject)
+	}
+	if resp.RejectCode != "auth_unavailable" {
+		t.Fatalf("PickAuth() RejectCode = %q, want auth_unavailable", resp.RejectCode)
+	}
+	if resp.RejectReason != "scheduler rejected candidate selection" {
+		t.Fatalf("PickAuth() RejectReason = %q, want scheduler rejected candidate selection", resp.RejectReason)
+	}
+}
+
+func TestHostSchedulerWantsAcrossPriorities(t *testing.T) {
+	hostDefault := newHostWithRecords(capabilityRecord{
+		id:       "default-sched",
+		priority: 1,
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, nil
+			}),
+			SchedulerAcrossPriorities: false,
+		}},
+	})
+	if hostDefault.SchedulerWantsAcrossPriorities() {
+		t.Fatal("hostDefault.SchedulerWantsAcrossPriorities() = true, want false")
+	}
+
+	hostAcross := newHostWithRecords(capabilityRecord{
+		id:       "across-sched",
+		priority: 1,
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				return pluginapi.SchedulerPickResponse{}, nil
+			}),
+			SchedulerAcrossPriorities: true,
+		}},
+	})
+	if !hostAcross.SchedulerWantsAcrossPriorities() {
+		t.Fatal("hostAcross.SchedulerWantsAcrossPriorities() = false, want true")
+	}
+
+	var nilHost *Host
+	if nilHost.SchedulerWantsAcrossPriorities() {
+		t.Fatal("nilHost.SchedulerWantsAcrossPriorities() = true, want false")
+	}
+}
+
+func TestHostPickAuthPreservesExcludeCandidatesWhenUnhandled(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "scheduler",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:           false,
+				ExcludeCandidates: []string{" auth-1 ", "", "auth-2", "auth-1"},
+			}, nil
+		})}},
+	})
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1", "auth-2", "auth-3"))
+	if errPick != nil {
+		t.Fatalf("PickAuth() error = %v, want nil", errPick)
+	}
+	if handled {
+		t.Fatal("PickAuth() handled = true, want false")
+	}
+	if !slices.Equal(resp.ExcludeCandidates, []string{"auth-1", "auth-2"}) {
+		t.Fatalf("PickAuth() ExcludeCandidates = %v, want [auth-1 auth-2]", resp.ExcludeCandidates)
+	}
+}
+
+func TestHostPickAuthNormalizesExcludeCandidatesWithDelegateBuiltin(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "scheduler",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{Scheduler: schedulerFunc(func(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+			return pluginapi.SchedulerPickResponse{
+				Handled:           true,
+				DelegateBuiltin:   pluginapi.SchedulerBuiltinRoundRobin,
+				ExcludeCandidates: []string{" auth-1 ", " ", "auth-1"},
+			}, nil
+		})}},
+	})
+
+	resp, handled, errPick := host.PickAuth(context.Background(), schedulerRequest("auth-1", "auth-2"))
+	if errPick != nil {
+		t.Fatalf("PickAuth() error = %v, want nil", errPick)
+	}
+	if !handled {
+		t.Fatal("PickAuth() handled = false, want true")
+	}
+	if resp.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+		t.Fatalf("PickAuth() DelegateBuiltin = %q, want %q", resp.DelegateBuiltin, pluginapi.SchedulerBuiltinRoundRobin)
+	}
+	if !slices.Equal(resp.ExcludeCandidates, []string{"auth-1"}) {
+		t.Fatalf("PickAuth() ExcludeCandidates = %v, want [auth-1]", resp.ExcludeCandidates)
 	}
 }
 

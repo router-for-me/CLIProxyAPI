@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"bufio"
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
@@ -13,9 +12,9 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -41,6 +40,7 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	requestTimestamp time.Time,
 	apiResponseTimestamp time.Time,
 ) error {
+	apiResponseErrors, diagnostics := splitResponseDiagnostics(apiResponseErrors)
 	if requestTimestamp.IsZero() {
 		requestTimestamp = time.Now()
 	}
@@ -66,12 +66,13 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 		return errWrite
 	}
 	if isWebsocketTranscript {
-		// Intentionally omit the generic downstream HTTP response section for websocket
-		// transcripts. The durable session exchange is captured in WEBSOCKET TIMELINE,
-		// and appending a one-off upgrade response snapshot would dilute that transcript.
-		return nil
+		// Keep websocket exchanges in their timelines; include only local diagnostics here.
+		if len(diagnostics) == 0 {
+			return nil
+		}
+		return writeResponseSection(w, 0, false, nil, nil, nil, true, diagnostics)
 	}
-	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true)
+	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true, diagnostics)
 }
 
 func writeRequestInfoWithBody(
@@ -311,7 +312,7 @@ func writeAPISectionWithSource(w io.Writer, sectionHeader string, sectionPrefix 
 		}
 	}
 	tracker := &trailingNewlineTrackingWriter{writer: w}
-	if errWrite := source.WriteTo(tracker); errWrite != nil {
+	if _, errWrite := source.WriteTo(tracker); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeSectionSpacing(w, tracker.trailingNewlines); errWrite != nil {
@@ -330,13 +331,31 @@ func writePreformattedAPISectionWithSource(w io.Writer, sectionHeader string, se
 		}
 	}
 	tracker := &trailingNewlineTrackingWriter{writer: w}
-	if errWrite := source.WriteTo(tracker); errWrite != nil {
+	if _, errWrite := source.WriteTo(tracker); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeSectionSpacing(w, tracker.trailingNewlines); errWrite != nil {
 		return errWrite
 	}
 	return nil
+}
+
+// splitResponseDiagnostics separates log-only local failures from API errors without
+// changing the logger interfaces or treating a recovered attempt as a failed response.
+func splitResponseDiagnostics(entries []*interfaces.ErrorMessage) ([]*interfaces.ErrorMessage, []string) {
+	var apiErrors []*interfaces.ErrorMessage
+	var diagnostics []string
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		if diagnostic, ok := entry.Error.(responseDiagnostic); ok {
+			diagnostics = append(diagnostics, string(diagnostic))
+		} else {
+			apiErrors = append(apiErrors, entry)
+		}
+	}
+	return apiErrors, diagnostics
 }
 
 func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMessage) error {
@@ -367,7 +386,7 @@ func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMe
 	return nil
 }
 
-func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, responseReader io.Reader, decompressErr error, trailingNewline bool) error {
+func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, responseReader io.Reader, decompressErr error, trailingNewline bool, diagnostics []string) error {
 	if _, errWrite := io.WriteString(w, "=== RESPONSE ===\n"); errWrite != nil {
 		return errWrite
 	}
@@ -377,7 +396,22 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 		}
 	}
 
-	if responseHeaders != nil {
+	for _, diagnostic := range diagnostics {
+		if _, errWrite := fmt.Fprintf(w, "Error: %s\n", diagnostic); errWrite != nil {
+			return errWrite
+		}
+	}
+
+	// Diagnostic-only websocket sections have no HTTP headers or body to display.
+	if statusWritten || responseHeaders != nil || responseReader != nil {
+		if _, errWrite := io.WriteString(w, "\nHeaders:\n"); errWrite != nil {
+			return errWrite
+		}
+		if len(responseHeaders) == 0 {
+			if _, errWrite := io.WriteString(w, "<none>\n"); errWrite != nil {
+				return errWrite
+			}
+		}
 		for key, values := range responseHeaders {
 			for _, value := range values {
 				if _, errWrite := io.WriteString(w, fmt.Sprintf("%s: %s\n", key, value)); errWrite != nil {
@@ -385,21 +419,13 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 				}
 			}
 		}
-	}
-
-	var bufferedReader *bufio.Reader
-	if responseReader != nil {
-		bufferedReader = bufio.NewReader(responseReader)
-	}
-	if !responseBodyStartsWithLeadingNewline(bufferedReader) {
-		if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
+		if _, errWrite := io.WriteString(w, "\nBody:\n"); errWrite != nil {
 			return errWrite
 		}
-	}
-
-	if bufferedReader != nil {
-		if _, errCopy := io.Copy(w, bufferedReader); errCopy != nil {
-			return errCopy
+		if responseReader != nil {
+			if _, errCopy := io.Copy(w, responseReader); errCopy != nil {
+				return errCopy
+			}
 		}
 	}
 	if decompressErr != nil {
@@ -414,19 +440,6 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 		}
 	}
 	return nil
-}
-
-func responseBodyStartsWithLeadingNewline(reader *bufio.Reader) bool {
-	if reader == nil {
-		return false
-	}
-	if peeked, _ := reader.Peek(2); len(peeked) >= 2 && peeked[0] == '\r' && peeked[1] == '\n' {
-		return true
-	}
-	if peeked, _ := reader.Peek(1); len(peeked) >= 1 && peeked[0] == '\n' {
-		return true
-	}
-	return false
 }
 
 // formatLogContent creates the complete log content for non-streaming requests.
@@ -446,6 +459,7 @@ func responseBodyStartsWithLeadingNewline(reader *bufio.Reader) bool {
 // Returns:
 //   - string: The formatted log content
 func (l *FileRequestLogger) formatLogContent(url, method string, headers map[string][]string, body, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, response []byte, status int, responseHeaders map[string][]string, apiResponseErrors []*interfaces.ErrorMessage) string {
+	apiResponseErrors, diagnostics := splitResponseDiagnostics(apiResponseErrors)
 	var content strings.Builder
 	isWebsocketTranscript := hasSectionPayload(websocketTimeline)
 	downstreamTransport := inferDownstreamTransport(headers, websocketTimeline, nil)
@@ -518,24 +532,33 @@ func (l *FileRequestLogger) formatLogContent(url, method string, headers map[str
 	}
 
 	if isWebsocketTranscript {
-		// Mirror writeNonStreamingLog: websocket transcripts end with the dedicated
-		// timeline sections instead of a generic downstream HTTP response block.
+		if len(diagnostics) > 0 {
+			content.WriteString("=== RESPONSE ===\n")
+			for _, diagnostic := range diagnostics {
+				content.WriteString(fmt.Sprintf("Error: %s\n", diagnostic))
+			}
+		}
 		return content.String()
 	}
 
 	// Response section
 	content.WriteString("=== RESPONSE ===\n")
 	content.WriteString(fmt.Sprintf("Status: %d\n", status))
+	for _, diagnostic := range diagnostics {
+		content.WriteString(fmt.Sprintf("Error: %s\n", diagnostic))
+	}
 
-	if responseHeaders != nil {
-		for key, values := range responseHeaders {
-			for _, value := range values {
-				content.WriteString(fmt.Sprintf("%s: %s\n", key, value))
-			}
+	content.WriteString("\nHeaders:\n")
+	if len(responseHeaders) == 0 {
+		content.WriteString("<none>\n")
+	}
+	for key, values := range responseHeaders {
+		for _, value := range values {
+			content.WriteString(fmt.Sprintf("%s: %s\n", key, value))
 		}
 	}
 
-	content.WriteString("\n")
+	content.WriteString("\nBody:\n")
 	content.Write(response)
 	content.WriteString("\n")
 

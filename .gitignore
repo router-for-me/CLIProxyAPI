@@ -30,6 +30,9 @@ auths/*
 
 # Documentation
 docs/*
+!docs/management-api-v8.md
+!docs/websocket-tunnel.md
+!docs/websocket-tunnel_CN.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

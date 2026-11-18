@@ -1,13 +1,15 @@
 package pluginstore
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 )
 
 const (
@@ -228,6 +230,10 @@ func applyPluginStoreAuthForClient(headers http.Header, resolved []ResolvedAuthC
 	}
 	item, ok := matchingAuthConfig(auth, requestURL, kind)
 	if !ok {
+		if token := githubauth.TokenForURL(requestURL); token != "" {
+			headers.Set("Authorization", "Bearer "+token)
+			return true, nil
+		}
 		return false, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {

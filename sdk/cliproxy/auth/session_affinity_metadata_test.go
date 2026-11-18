@@ -2,13 +2,14 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type failExecutor struct {
@@ -267,5 +268,21 @@ func TestSessionAffinityOnResultWithMismatchedNamespaceFailsToUnbind(t *testing.
 	// Verify mixedKey is cleanly removed
 	if _, ok := affinity.cache.Get(mixedKey); ok {
 		t.Fatalf("expected mixed key to be removed after OnResult with propagated namespace")
+	}
+}
+
+func TestSessionCacheCapacityBounding(t *testing.T) {
+	t.Parallel()
+
+	maxEntries := 10
+	cache := NewSessionCacheWithCapacity(time.Hour, maxEntries)
+	defer cache.Stop()
+
+	for i := 0; i < 20; i++ {
+		cache.Set(fmt.Sprintf("session-%d", i), fmt.Sprintf("auth-%d", i))
+	}
+
+	if cache.Len() > maxEntries {
+		t.Fatalf("cache.Len() = %d, want <= %d", cache.Len(), maxEntries)
 	}
 }

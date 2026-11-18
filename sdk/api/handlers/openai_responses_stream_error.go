@@ -1,59 +1,96 @@
 package handlers
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/MoeForge/moego/ojson"
 )
 
 type openAIResponsesStreamErrorChunk struct {
-	Type           string `json:"type"`
-	Code           string `json:"code"`
-	Message        string `json:"message"`
-	SequenceNumber int    `json:"sequence_number"`
+	Type           string         `json:"type"`
+	Error          map[string]any `json:"error"`
+	SequenceNumber int            `json:"sequence_number"`
 }
 
-type openAIResponsesStreamFailedChunk struct {
-	Type           string                              `json:"type"`
-	SequenceNumber int                                 `json:"sequence_number"`
-	Response       openAIResponsesStreamFailedResponse `json:"response"`
+// openAIResponsesStreamErrorClass pairs the OpenAI error code and the OpenAI
+// error type that a given HTTP status is reported as.
+//
+// The two are kept together deliberately. They are halves of one classification
+// and a client reads both: the code names the condition, the type says whose
+// fault it was and therefore whether a retry is allowed. Deriving them in two
+// places let them contradict each other, which is how a Codex stream that was
+// cut in transit came to be reported with the retryable code "request_timeout"
+// alongside the type "invalid_request_error" — a type that tells every
+// downstream consumer the request was malformed and must not be replayed.
+type openAIResponsesStreamErrorClass struct {
+	code      string
+	errorType string
 }
 
-type openAIResponsesStreamFailedResponse struct {
-	Status string         `json:"status"`
-	Error  map[string]any `json:"error"`
+const (
+	openAIResponsesClientErrorType = "invalid_request_error"
+	openAIResponsesServerErrorType = "server_error"
+)
+
+// openAIResponsesStreamErrorClasses holds the statuses that do not follow the
+// plain "4xx is the caller's fault, 5xx is ours" split.
+//
+// StatusRequestTimeout is the reason this table exists. A Codex stream that ends
+// before response.completed is surfaced with that status, and the request itself
+// was well formed: the connection failed, so the caller may replay it.
+var openAIResponsesStreamErrorClasses = map[int]openAIResponsesStreamErrorClass{
+	http.StatusUnauthorized:    {code: "invalid_api_key", errorType: openAIResponsesClientErrorType},
+	http.StatusForbidden:       {code: "insufficient_quota", errorType: openAIResponsesClientErrorType},
+	http.StatusTooManyRequests: {code: "rate_limit_exceeded", errorType: openAIResponsesClientErrorType},
+	http.StatusNotFound:        {code: "model_not_found", errorType: openAIResponsesClientErrorType},
+	http.StatusRequestTimeout:  {code: "request_timeout", errorType: openAIResponsesServerErrorType},
+}
+
+func openAIResponsesStreamErrorClassFor(status int) openAIResponsesStreamErrorClass {
+	if class, ok := openAIResponsesStreamErrorClasses[status]; ok {
+		return class
+	}
+	if status >= http.StatusInternalServerError {
+		return openAIResponsesStreamErrorClass{code: "internal_server_error", errorType: openAIResponsesServerErrorType}
+	}
+	if status >= http.StatusBadRequest {
+		return openAIResponsesStreamErrorClass{code: "invalid_request_error", errorType: openAIResponsesClientErrorType}
+	}
+	return openAIResponsesStreamErrorClass{code: "unknown_error", errorType: openAIResponsesClientErrorType}
 }
 
 func openAIResponsesStreamErrorCode(status int) string {
-	switch status {
-	case http.StatusUnauthorized:
-		return "invalid_api_key"
-	case http.StatusForbidden:
-		return "insufficient_quota"
-	case http.StatusTooManyRequests:
-		return "rate_limit_exceeded"
-	case http.StatusNotFound:
-		return "model_not_found"
-	case http.StatusRequestTimeout:
-		return "request_timeout"
-	default:
-		if status >= http.StatusInternalServerError {
-			return "internal_server_error"
-		}
-		if status >= http.StatusBadRequest {
-			return "invalid_request_error"
-		}
-		return "unknown_error"
-	}
+	return openAIResponsesStreamErrorClassFor(status).code
+}
+
+func openAIResponsesStreamErrorType(status int) string {
+	return openAIResponsesStreamErrorClassFor(status).errorType
 }
 
 // BuildOpenAIResponsesStreamErrorChunk builds an OpenAI Responses streaming error chunk.
-//
-// Important: OpenAI's HTTP error bodies are shaped like {"error":{...}}; those are valid for
-// non-streaming responses, but streaming clients validate SSE `data:` payloads against a union
-// of chunks that requires a top-level `type` field.
+// It matches the official responses streaming event shape where the error details are nested.
 func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNumber int) []byte {
+	doc := ojson.NewDocString(`{"type":"error","error":{},"sequence_number":0}`)
+	populateOpenAIResponsesStreamErrorChunkDoc(doc, "error", status, errText, sequenceNumber)
+	if data := doc.Bytes(); len(data) > 0 {
+		return data
+	}
+	return []byte(`{"type":"error","error":{"type":"server_error","code":"internal_server_error","message":"internal error","param":null},"sequence_number":0}`)
+}
+
+// BuildOpenAIResponsesStreamFailedChunk builds the terminal Responses event used by official Codex clients.
+// It is intentionally separate from BuildOpenAIResponsesStreamErrorChunk so existing clients keep the legacy shape.
+func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceNumber int) []byte {
+	doc := ojson.NewDocString(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{}}}`)
+	populateOpenAIResponsesStreamErrorChunkDoc(doc, "response.error", status, errText, sequenceNumber)
+	if data := doc.Bytes(); len(data) > 0 {
+		return data
+	}
+	return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"type":"server_error","code":"internal_server_error","message":"internal error"}}}`)
+}
+
+func populateOpenAIResponsesStreamErrorChunkDoc(doc *ojson.Doc, errorPath string, status int, errText string, sequenceNumber int) {
 	if status <= 0 {
 		status = http.StatusInternalServerError
 	}
@@ -67,124 +104,114 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	}
 
 	code := openAIResponsesStreamErrorCode(status)
-
-	trimmed := strings.TrimSpace(errText)
-	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
-			if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) == "error" {
-				if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
-				}
-				if v, ok := payload["code"]; ok && v != nil {
-					if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-						code = strings.TrimSpace(c)
-					} else {
-						code = strings.TrimSpace(fmt.Sprint(v))
-					}
-				}
-				if v, ok := payload["sequence_number"].(float64); ok && sequenceNumber == 0 {
-					sequenceNumber = int(v)
-				}
-			}
-			if e, ok := payload["error"].(map[string]any); ok {
-				if m, ok := e["message"].(string); ok && strings.TrimSpace(m) != "" {
-					message = strings.TrimSpace(m)
-				}
-				if v, ok := e["code"]; ok && v != nil {
-					if c, ok := v.(string); ok && strings.TrimSpace(c) != "" {
-						code = strings.TrimSpace(c)
-					} else {
-						code = strings.TrimSpace(fmt.Sprint(v))
-					}
-				}
-			}
-		}
-	}
-
 	if strings.TrimSpace(code) == "" {
 		code = "unknown_error"
 	}
 
-	data, err := json.Marshal(openAIResponsesStreamErrorChunk{
-		Type:           "error",
-		Code:           code,
-		Message:        message,
-		SequenceNumber: sequenceNumber,
-	})
-	if err == nil {
-		return data
-	}
+	errorType := openAIResponsesStreamErrorType(status)
+	var paramRaw string
+	hasParam := false
 
-	// Extremely defensive fallback.
-	data, _ = json.Marshal(openAIResponsesStreamErrorChunk{
-		Type:           "error",
-		Code:           "internal_server_error",
-		Message:        message,
-		SequenceNumber: sequenceNumber,
-	})
-	if len(data) > 0 {
-		return data
-	}
-	return []byte(`{"type":"error","code":"internal_server_error","message":"internal error","sequence_number":0}`)
-}
+	trimmed := strings.TrimSpace(errText)
+	if trimmed != "" && ojson.Valid(trimmed) {
+		root := ojson.Parse(trimmed)
+		if root.IsObject() {
+			if seqNode := root.Get("sequence_number"); seqNode.Type == ojson.Number {
+				sequenceNumber = int(seqNode.Int())
+			}
+			_ = doc.Set("sequence_number", sequenceNumber)
 
-func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
-	var payload map[string]any
-	if errUnmarshal := json.Unmarshal([]byte(strings.TrimSpace(errText)), &payload); errUnmarshal == nil {
-		if errorDetail, ok := payload["error"].(map[string]any); ok {
-			return errorDetail
-		}
-		if response, ok := payload["response"].(map[string]any); ok {
-			if errorDetail, ok := response["error"].(map[string]any); ok {
-				return errorDetail
+			hasScalarMessage := false
+			for _, path := range []string{"error", "response.error", "body.error"} {
+				errNode := root.Get(path)
+				if !errNode.Exists() || errNode.Type == ojson.Null {
+					continue
+				}
+				if errNode.IsObject() {
+					_ = doc.SetRaw(errorPath, errNode.Raw)
+					applyOpenAIResponsesNestedErrorCodeDoc(doc, errorPath)
+					return
+				}
+				if errNode.Type == ojson.String && !hasScalarMessage {
+					if scalar := strings.TrimSpace(errNode.String()); scalar != "" {
+						message = scalar
+					} else {
+						message = http.StatusText(status)
+					}
+					hasScalarMessage = true
+				}
+			}
+
+			if msgNode := root.Get("message"); msgNode.Type == ojson.String && strings.TrimSpace(msgNode.String()) != "" {
+				message = strings.TrimSpace(msgNode.String())
+			}
+			hasTopLevelCode := false
+			if codeNode := root.Get("code"); codeNode.Exists() && codeNode.Type != ojson.Null {
+				if c := strings.TrimSpace(codeNode.String()); c != "" {
+					code = c
+					hasTopLevelCode = true
+				}
+			}
+			if hasTopLevelCode && !hasScalarMessage && strings.TrimSpace(root.Get("message").String()) == "" {
+				fallback := openAIResponsesPolicyFallbackMessage(code)
+				if fallback == "" {
+					fallback = code
+				}
+				message = fallback
+			}
+			if typeNode := root.Get("type"); typeNode.Type == ojson.String {
+				if t := strings.TrimSpace(typeNode.String()); t != "" && t != "error" && t != "response.failed" && t != "response.error" {
+					errorType = t
+				}
+			}
+			if paramNode := root.Get("param"); paramNode.Exists() {
+				paramRaw = paramNode.Raw
+				hasParam = true
 			}
 		}
 	}
 
-	errorType := "invalid_request_error"
-	if status >= http.StatusInternalServerError {
-		errorType = "server_error"
-	}
-	return map[string]any{
-		"type":    errorType,
-		"code":    code,
-		"message": message,
+	_ = doc.Set("sequence_number", sequenceNumber)
+	_ = doc.SetRaw(errorPath, `{"type":"","code":"","message":"","param":null}`)
+	_ = doc.Set(errorPath+".type", errorType)
+	_ = doc.Set(errorPath+".code", code)
+	_ = doc.Set(errorPath+".message", message)
+	if hasParam {
+		_ = doc.SetRaw(errorPath+".param", paramRaw)
 	}
 }
 
-// BuildOpenAIResponsesStreamFailedChunk builds the terminal Responses event used by official Codex clients.
-// It is intentionally separate from BuildOpenAIResponsesStreamErrorChunk so existing clients keep the legacy shape.
-func BuildOpenAIResponsesStreamFailedChunk(status int, errText string, sequenceNumber int) []byte {
-	if status <= 0 {
-		status = http.StatusInternalServerError
+func openAIResponsesPolicyFallbackMessage(code string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "bio_policy":
+		return "This content was flagged for possible biological risk."
+	case "cyber_policy", "cyber_policy_violation":
+		return "This request has been flagged for possible cybersecurity risk."
+	case "misalignment_policy_violation":
+		return "This request was blocked due to a misalignment policy violation."
+	case "invalid_prompt":
+		return "Invalid request."
+	default:
+		return ""
 	}
-	if sequenceNumber < 0 {
-		sequenceNumber = 0
-	}
+}
 
-	legacyChunk := BuildOpenAIResponsesStreamErrorChunk(status, errText, sequenceNumber)
-	var legacyPayload openAIResponsesStreamErrorChunk
-	if errUnmarshal := json.Unmarshal(legacyChunk, &legacyPayload); errUnmarshal != nil {
-		legacyPayload.Code = openAIResponsesStreamErrorCode(status)
-		legacyPayload.Message = http.StatusText(status)
-		legacyPayload.SequenceNumber = sequenceNumber
+func applyOpenAIResponsesNestedErrorCodeDoc(doc *ojson.Doc, errorPath string) {
+	if codeNode := doc.Get(errorPath + ".code"); codeNode.Exists() && codeNode.Type != ojson.Null {
+		if code := strings.TrimSpace(codeNode.String()); code != "" {
+			if strings.TrimSpace(doc.Get(errorPath+".message").String()) == "" {
+				fallback := openAIResponsesPolicyFallbackMessage(code)
+				if fallback == "" {
+					fallback = code
+				}
+				_ = doc.Set(errorPath+".message", fallback)
+			}
+			return
+		}
 	}
-	if sequenceNumber == 0 && legacyPayload.SequenceNumber > 0 {
-		sequenceNumber = legacyPayload.SequenceNumber
+	// Anthropic reports input overflow by message only; Responses clients key on this code.
+	if doc.Get(errorPath+".type").String() == "invalid_request_error" &&
+		strings.HasPrefix(doc.Get(errorPath+".message").String(), "prompt is too long") {
+		_ = doc.Set(errorPath+".code", "context_length_exceeded")
 	}
-
-	data, errMarshal := json.Marshal(openAIResponsesStreamFailedChunk{
-		Type:           "response.failed",
-		SequenceNumber: sequenceNumber,
-		Response: openAIResponsesStreamFailedResponse{
-			Status: "failed",
-			Error:  openAIResponsesStreamFailedErrorDetail(status, errText, legacyPayload.Code, legacyPayload.Message),
-		},
-	})
-	if errMarshal == nil {
-		return data
-	}
-
-	return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","error":{"type":"server_error","code":"internal_server_error","message":"internal error"}}}`)
 }

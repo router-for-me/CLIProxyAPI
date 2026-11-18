@@ -1,7 +1,6 @@
 package management
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,11 +9,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/htmlsanitize"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/htmlsanitize"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,18 +25,23 @@ type pluginListResponse struct {
 }
 
 type pluginListEntry struct {
-	ID               string                  `json:"id"`
-	Path             string                  `json:"path"`
-	Configured       bool                    `json:"configured"`
-	Registered       bool                    `json:"registered"`
-	Enabled          bool                    `json:"enabled"`
-	EffectiveEnabled bool                    `json:"effective_enabled"`
-	SupportsOAuth    bool                    `json:"supports_oauth"`
-	OAuthProvider    string                  `json:"oauth_provider"`
-	Logo             string                  `json:"logo"`
-	ConfigFields     []pluginConfigFieldInfo `json:"config_fields"`
-	Menus            []pluginMenuInfo        `json:"menus"`
-	Metadata         *pluginMetadataInfo     `json:"metadata"`
+	ID                   string                         `json:"id"`
+	Path                 string                         `json:"path"`
+	Configured           bool                           `json:"configured"`
+	Registered           bool                           `json:"registered"`
+	Priority             *int                           `json:"priority,omitempty"`
+	Enabled              bool                           `json:"enabled"`
+	EffectiveEnabled     bool                           `json:"effective_enabled"`
+	SupportsOAuth        bool                           `json:"supports_oauth"`
+	OAuthProvider        string                         `json:"oauth_provider"`
+	OAuthProviders       []string                       `json:"oauth_providers,omitempty"`
+	OAuthProviderEntries []pluginOAuthProviderEntryInfo `json:"oauth_provider_entries,omitempty"`
+	SupportsQuota        bool                           `json:"supports_quota"`
+	QuotaProvider        string                         `json:"quota_provider,omitempty"`
+	Logo                 string                         `json:"logo"`
+	ConfigFields         []pluginConfigFieldInfo        `json:"config_fields"`
+	Menus                []pluginMenuInfo               `json:"menus"`
+	Metadata             *pluginMetadataInfo            `json:"metadata"`
 }
 
 type pluginMetadataInfo struct {
@@ -49,10 +54,17 @@ type pluginMetadataInfo struct {
 }
 
 type pluginConfigFieldInfo struct {
+	Default     any      `json:"default"`
 	Name        string   `json:"name"`
 	Type        string   `json:"type"`
 	EnumValues  []string `json:"enum_values"`
 	Description string   `json:"description"`
+}
+
+type pluginOAuthProviderEntryInfo struct {
+	Identifier string `json:"identifier"`
+	Name       string `json:"name"`
+	Logo       string `json:"logo"`
 }
 
 type pluginMenuInfo struct {
@@ -115,13 +127,23 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		}
 		entries[id] = entry
 	}
+	v8Request := isManagementV8PluginsRequest(c)
 	if host != nil {
 		for _, info := range host.RegisteredPlugins() {
 			entry := entries[info.ID]
 			entry.ID = htmlsanitize.String(info.ID)
 			entry.Registered = true
+			if v8Request {
+				// Expose runtime snapshot priority on v8; the deprecated v0 route keeps its frozen response shape.
+				priority := info.Priority
+				entry.Priority = &priority
+			}
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.OAuthProvider = htmlsanitize.String(info.OAuthProvider)
+			entry.OAuthProviders = pluginOAuthProviders(info.OAuthProviders)
+			entry.OAuthProviderEntries = pluginOAuthProviderEntries(info.OAuthProviderEntries)
+			entry.SupportsQuota = info.SupportsQuota
+			entry.QuotaProvider = htmlsanitize.String(info.QuotaProvider)
 			entry.Logo = htmlsanitize.String(info.Metadata.Logo)
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			entry.Menus = pluginMenus(info.Menus)
@@ -153,6 +175,17 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 		PluginsDir:     htmlsanitize.String(pluginsDir),
 		Plugins:        out,
 	})
+}
+
+func isManagementV8PluginsRequest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	if c.GetBool(ConfigV8ContextKey) {
+		return true
+	}
+	return c.Request != nil && c.Request.URL != nil &&
+		(c.Request.URL.Path == "/v8/management/plugins" || c.Request.URL.Path == "/v8/management/plugins/")
 }
 
 // GetPluginConfig returns the preserved plugins.configs.<id> object as JSON.
@@ -381,7 +414,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 	h.mu.Lock()
 	delete(h.cfg.Plugins.Configs, id)
 	if configured {
-		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); errSave != nil {
+		if errSave := config.SaveConfigPreserveComments(h.configFilePath, h.cfg, c.GetBool(ConfigV8ContextKey)); errSave != nil {
 			h.mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error":        "config_save_failed",
@@ -465,8 +498,31 @@ func pluginConfigFields(fields []pluginapi.ConfigField) []pluginConfigFieldInfo 
 		out = append(out, pluginConfigFieldInfo{
 			Name:        htmlsanitize.String(field.Name),
 			Type:        htmlsanitize.String(string(field.Type)),
+			Default:     htmlsanitize.JSONValue(field.Default),
 			EnumValues:  htmlsanitize.Strings(field.EnumValues),
 			Description: htmlsanitize.String(field.Description),
+		})
+	}
+	return out
+}
+
+func pluginOAuthProviders(providers []string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	return htmlsanitize.Strings(providers)
+}
+
+func pluginOAuthProviderEntries(entries []pluginapi.AuthProviderEntry) []pluginOAuthProviderEntryInfo {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]pluginOAuthProviderEntryInfo, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, pluginOAuthProviderEntryInfo{
+			Identifier: htmlsanitize.String(entry.Identifier),
+			Name:       htmlsanitize.String(entry.Name),
+			Logo:       htmlsanitize.String(entry.Logo),
 		})
 	}
 	return out

@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type mockCustomErrorExecutor struct {
@@ -55,6 +56,28 @@ type customStatusError struct {
 	code       int
 	msg        string
 	retryAfter *time.Duration
+}
+
+func TestUnwrapExecutionBoundaryErrorRemovesInternalMarkers(t *testing.T) {
+	t.Parallel()
+
+	base := &Error{Code: "request_failed", Message: "request failed", HTTPStatus: http.StatusBadRequest}
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "attempt inside stop", err: wrapRequestStopError(markUpstreamExecutionAttempt(base))},
+		{name: "stop inside attempt", err: markUpstreamExecutionAttempt(wrapRequestStopError(base))},
+		{name: "scheduler reject", err: wrapSchedulerRejectError(base)},
+		{name: "attempt inside round scheduler reject", err: markRoundEndedBySchedulerReject(markUpstreamExecutionAttempt(base))},
+		{name: "round scheduler reject inside attempt", err: markUpstreamExecutionAttempt(markRoundEndedBySchedulerReject(base))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := unwrapExecutionBoundaryError(test.err); got != base {
+				t.Fatalf("unwrapExecutionBoundaryError() = %T/%v, want original %T/%v", got, got, base, base)
+			}
+		})
+	}
 }
 
 func (e customStatusError) StatusCode() int {
@@ -123,6 +146,7 @@ func TestRequestScopedErrors_ActionStop(t *testing.T) {
 		identifier: "claude",
 		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 			execCount++
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			return cliproxyexecutor.Response{}, customStatusError{
 				code: 400,
 				msg:  `{"error": {"message": "maximum_context_length exceeded"}}`,
@@ -134,6 +158,9 @@ func TestRequestScopedErrors_ActionStop(t *testing.T) {
 	resp, errExec := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
 	if errExec == nil {
 		t.Fatalf("expected error, got resp: %+v", resp)
+	}
+	if _, okStatus := errExec.(customStatusError); !okStatus {
+		t.Fatalf("Execute() error = %T/%v, want original customStatusError", errExec, errExec)
 	}
 	// Action: stop should return immediately on the first credential and not rotate to auth2.
 	if execCount != 1 {
@@ -515,6 +542,7 @@ func TestRequestScopedErrors_Stream_ActionStop(t *testing.T) {
 		identifier: "claude",
 		streamFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 			execCount++
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			return nil, customStatusError{code: 400, msg: "stream_context_overflow"}
 		},
 	}
@@ -523,6 +551,9 @@ func TestRequestScopedErrors_Stream_ActionStop(t *testing.T) {
 	_, errStream := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
 	if errStream == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if _, okStatus := errStream.(customStatusError); !okStatus {
+		t.Fatalf("ExecuteStream() error = %T/%v, want original customStatusError", errStream, errStream)
 	}
 	if execCount != 1 {
 		t.Fatalf("execCount = %d, want 1 (should stop immediately)", execCount)
@@ -754,6 +785,7 @@ func TestRequestScopedErrors_CountTokens_StopAndCooldown(t *testing.T) {
 	exec := &mockCustomErrorExecutor{
 		identifier: "claude",
 		countFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
 			return cliproxyexecutor.Response{}, customStatusError{
 				code: 404,
 				msg:  "count_endpoint_cooldown",
@@ -765,6 +797,9 @@ func TestRequestScopedErrors_CountTokens_StopAndCooldown(t *testing.T) {
 	_, errCount := m.ExecuteCount(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-3"}, cliproxyexecutor.Options{})
 	if errCount == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if _, okStatus := errCount.(customStatusError); !okStatus {
+		t.Fatalf("ExecuteCount() error = %T/%v, want original customStatusError", errCount, errCount)
 	}
 
 	a1, _ := m.GetByID("auth-count-1")
@@ -1253,5 +1288,53 @@ func TestRequestScopedErrors_ResponseBodyProvider_MatchesUnderlyingPayload(t *te
 	a1, _ := m.GetByID("auth-fast-wrapped-1")
 	if !a1.Unavailable || a1.NextRetryAfter.IsZero() {
 		t.Fatal("expected auth1 to be in cooldown when matching ResponseBody()")
+	}
+}
+
+func TestHomeExecutionAttachesRequestScopedErrorConfigToContext(t *testing.T) {
+	cfg := &internalconfig.Config{
+		Home: internalconfig.HomeConfig{Enabled: true},
+		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
+			"codex": {
+				{
+					Status: http.StatusNotFound,
+					Match:  []string{"model_not_found_on_route"},
+					Action: RequestScopedActionStop,
+				},
+			},
+		},
+	}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(cfg)
+
+	var observedAction string
+	var observedMatched bool
+	exec := &mockCustomErrorExecutor{
+		identifier: "codex",
+		executeFn: func(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+			err := customStatusError{code: http.StatusNotFound, msg: "model_not_found_on_route"}
+			observedAction, observedMatched = MatchRequestScopedErrorAction(auth, err, RequestScopedErrorConfigFromContext(ctx))
+			return cliproxyexecutor.Response{}, err
+		},
+	}
+	m.RegisterExecutor(exec)
+
+	executions := executionregistry.New()
+	dispatcher := &accountedHomeExecutionDispatcher{
+		auths: []Auth{{
+			ID:         "home-oauth-1",
+			Provider:   "codex",
+			Status:     StatusActive,
+			Attributes: map[string]string{"auth_kind": "oauth"},
+		}},
+	}
+	m.PublishHomeDispatch(dispatcher, executions, 1)
+
+	_, errExec := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5.4"}, cliproxyexecutor.Options{})
+	if errExec == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !observedMatched || observedAction != RequestScopedActionStop {
+		t.Fatalf("executor context did not match request-scoped rule: matched=%v action=%q", observedMatched, observedAction)
 	}
 }

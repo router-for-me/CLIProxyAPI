@@ -2,8 +2,6 @@ package live
 
 import (
 	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 )
 
 const (
@@ -212,7 +213,7 @@ func (h *Handler) CreateClientSecret(c *gin.Context) {
 	}
 	body, errRead := readClientSecretBody(c.Request.Body)
 	if errRead != nil {
-		status := http.StatusBadRequest
+		status := clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest)
 		if errors.Is(errRead, errBodyTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
@@ -237,7 +238,7 @@ func (h *Handler) CreateLegacySession(c *gin.Context) {
 	}
 	body, errRead := readClientSecretBody(c.Request.Body)
 	if errRead != nil {
-		status := http.StatusBadRequest
+		status := clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest)
 		if errors.Is(errRead, errBodyTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}

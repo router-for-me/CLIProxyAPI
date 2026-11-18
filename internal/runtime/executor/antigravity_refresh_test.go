@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -39,6 +39,60 @@ func useAntigravityRefreshTestTransport(t *testing.T, targetHost string) {
 	t.Cleanup(func() {
 		antigravityBaseTransport = originalBase
 		antigravityTransports.Purge()
+	})
+}
+
+func TestAntigravityEnsureAccessTokenUsesFiveMinuteSafetyWindow(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	now := time.Now()
+
+	t.Run("uses token outside safety window", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Metadata: map[string]any{
+			"access_token": "still-valid-access",
+			"expired":      now.Add(antigravityRequestTokenSafetyWindow + time.Minute).Format(time.RFC3339),
+		}}
+
+		token, updated, errToken := executor.ensureAccessToken(context.Background(), auth)
+		if errToken != nil {
+			t.Fatalf("ensureAccessToken() error = %v", errToken)
+		}
+		if token != "still-valid-access" || updated != nil {
+			t.Fatalf("ensureAccessToken() = %q, %#v, want existing token and nil update", token, updated)
+		}
+	})
+
+	t.Run("uses relative expiry with issued_at seconds", func(t *testing.T) {
+		issuedAt := now.Add(-10 * time.Minute).Truncate(time.Second)
+		auth := &cliproxyauth.Auth{Metadata: map[string]any{
+			"access_token": "relative-expiry-access",
+			"expires_in":   3600,
+			"issued_at":    issuedAt.Unix(),
+		}}
+
+		token, updated, errToken := executor.ensureAccessToken(context.Background(), auth)
+		if errToken != nil {
+			t.Fatalf("ensureAccessToken() error = %v", errToken)
+		}
+		if token != "relative-expiry-access" || updated != nil {
+			t.Fatalf("ensureAccessToken() = %q, %#v, want existing token and nil update", token, updated)
+		}
+	})
+
+	t.Run("refreshes token inside safety window", func(t *testing.T) {
+		auth := &cliproxyauth.Auth{Metadata: map[string]any{
+			"access_token": "expiring-access",
+			"expired":      now.Add(antigravityRequestTokenSafetyWindow - time.Minute).Format(time.RFC3339),
+		}}
+
+		token, updated, errToken := executor.ensureAccessToken(context.Background(), auth)
+		if errToken == nil || !strings.Contains(errToken.Error(), "missing refresh token") {
+			t.Fatalf("ensureAccessToken() error = %v, want refresh attempt", errToken)
+		}
+		if token != "" || updated != nil {
+			t.Fatalf("ensureAccessToken() = %q, %#v, want empty result after failed refresh", token, updated)
+		}
 	})
 }
 
@@ -143,5 +197,27 @@ func TestAntigravityRefresh_DeduplicatesConcurrentRefresh(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
 		t.Fatalf("expected both refresh callers to share a single upstream token call, got %d", got)
+	}
+	// Finish optional background work before restoring the test-only transport.
+	for _, auth := range []*cliproxyauth.Auth{authA, authB} {
+		if value, ok := antigravityCreditsHintRefreshByID.Load(auth.ID); ok {
+			state := value.(*antigravityCreditsHintRefreshState)
+			waitForAntigravityCreditsRefresh(t, state)
+		}
+	}
+}
+
+func waitForAntigravityCreditsRefresh(t *testing.T, state *antigravityCreditsHintRefreshState) {
+	t.Helper()
+	state.mu.Lock()
+	task := state.task
+	state.mu.Unlock()
+	if task == nil {
+		return
+	}
+	select {
+	case <-task.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("background credits refresh did not finish before test transport cleanup")
 	}
 }

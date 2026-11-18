@@ -3,8 +3,8 @@ package diff
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -205,6 +205,14 @@ func TestComputeOtherModelHashesIncludeForceMapping(t *testing.T) {
 	}
 	if ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m"}}) == ComputeGeminiModelsHash([]config.GeminiModel{{Name: "m", ForceMapping: true}}) {
 		t.Fatal("Gemini force-mapping did not change model hash")
+	}
+}
+
+func TestComputeOpenAICompatModelsHashIncludesUseMaxCompletionTokens(t *testing.T) {
+	withoutMCT := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m"}})
+	withMCT := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "m", UseMaxCompletionTokens: true}})
+	if withoutMCT == "" || withoutMCT == withMCT {
+		t.Fatalf("use-max-completion-tokens must change model hash: %q / %q", withoutMCT, withMCT)
 	}
 }
 

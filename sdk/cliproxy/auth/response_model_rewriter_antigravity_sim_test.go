@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	gemresponses "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/openai/responses"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	gemresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/openai/responses"
 )
 
 func antigravityLiveSSEChunks(t *testing.T) [][]byte {
@@ -95,12 +95,12 @@ func parseCompletedFromSSE(payload []byte) bool {
 			continue
 		}
 		line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if gjson.Get(line, "type").String() == "response.completed" {
+		if ojson.Get(line, "type").String() == "response.completed" {
 			return true
 		}
 	}
 	trim := strings.TrimSpace(string(payload))
-	if strings.HasPrefix(trim, "{") && gjson.Get(trim, "type").String() == "response.completed" {
+	if strings.HasPrefix(trim, "{") && ojson.Get(trim, "type").String() == "response.completed" {
 		return true
 	}
 	return false

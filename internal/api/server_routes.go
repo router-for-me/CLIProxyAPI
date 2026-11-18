@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,24 +11,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
-	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
-	claudemodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/claude/models"
-	codexlive "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/live"
-	codexmodels "github.com/router-for-me/CLIProxyAPI/v7/internal/client/codex/models"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/client/grokbuild"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers/openai"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
+	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
+	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
+	codexmodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/models"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/musecode"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/gemini"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -56,13 +60,20 @@ func (s *Server) setupRoutes() {
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(s.handlers)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(s.handlers)
+	openaiResponsesHandlers.AccessManager = s.accessManager
 	s.codexLiveHandler = codexlive.NewHandler(s.handlers.AuthManager, s.cfg)
+	s.museCodeHandler = musecode.NewHandler(s.handlers.AuthManager, s.cfg)
+	s.museCodeHandler.SetModelListHooks(s.loadMuseCodeHomeModels, s.writeModelListResponse)
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		v1.GET("/models/*model", func(c *gin.Context) {
+			c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
+			s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
+		})
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
@@ -72,6 +83,8 @@ func (s *Server) setupRoutes() {
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
 		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
 		v1.GET("/videos/:request_id", openaiHandlers.XAIVideosRetrieve)
+		v1.POST("/audio/speech", openaiHandlers.AudioSpeech)
+		v1.POST("/tts", openaiHandlers.XAITTS)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
 		v1.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
@@ -80,6 +93,11 @@ func (s *Server) setupRoutes() {
 		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/live", s.codexLiveHandler.Handle)
 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
+	}
+
+	s.engine.GET("/v1/tunnel", s.handleWebsocketTunnel)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodTrace, http.MethodConnect} {
+		s.engine.Handle(method, "/v1/tunnel", s.handleWebsocketTunnel)
 	}
 
 	realtimeAuth := realtimeAuthMiddleware(s.accessManager, s.codexLiveHandler)
@@ -117,6 +135,16 @@ func (s *Server) setupRoutes() {
 		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
 	}
 
+	// Muse Code CLI direct endpoints (beside /v1)
+	museCode := s.engine.Group("/muse-code")
+	museCode.Use(AuthMiddleware(s.accessManager))
+	{
+		museCode.GET("/models", s.museCodeHandler.HandleModels)
+		museCode.GET("/config", s.museCodeHandler.Handle)
+		museCode.POST("/search", s.museCodeHandler.Handle)
+		museCode.POST("/browser_open", s.museCodeHandler.Handle)
+	}
+
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
@@ -150,7 +178,9 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "anthropic", state, code, errStr)
+			if cfg := s.getConfig(); cfg != nil {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(cfg.AuthDir, "anthropic", state, code, errStr)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -164,7 +194,12 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "codex", state, code, errStr)
+			if cfg := s.getConfig(); cfg != nil {
+				if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(cfg.AuthDir, "codex", state, code, errStr); errors.Is(errWrite, managementHandlers.ErrSIWCCallbackRequiresV8) {
+					c.JSON(http.StatusConflict, gin.H{"error": "SIWC callbacks require /v8/management/oauth/callback"})
+					return
+				}
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
@@ -178,11 +213,41 @@ func (s *Server) setupRoutes() {
 			errStr = c.Query("error_description")
 		}
 		if state != "" {
-			_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(s.cfg.AuthDir, "antigravity", state, code, errStr)
+			if cfg := s.getConfig(); cfg != nil {
+				_, _ = managementHandlers.WriteOAuthCallbackFileForPendingSession(cfg.AuthDir, "antigravity", state, code, errStr)
+			}
 		}
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.String(http.StatusOK, oauthCallbackSuccessHTML)
 	})
+
+	devinCallbackHandler := func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		code := strings.TrimSpace(c.Query("code"))
+		state := strings.TrimSpace(c.Query("state"))
+		errStr := strings.TrimSpace(c.Query("error"))
+		if errStr == "" {
+			errStr = strings.TrimSpace(c.Query("error_description"))
+		}
+		if code == "" && errStr == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "code or error is required"})
+			return
+		}
+		cfg := s.getConfig()
+		authDir := ""
+		if cfg != nil {
+			authDir = cfg.AuthDir
+		}
+		if _, errWrite := managementHandlers.WriteOAuthCallbackFileForPendingSession(authDir, "devin", state, code, errStr); errWrite != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired OAuth callback"})
+			return
+		}
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, oauthCallbackSuccessHTML)
+	}
+
+	s.engine.GET("/callback", devinCallbackHandler)
+	s.engine.GET("/devin/callback", devinCallbackHandler)
 
 	// Management routes are registered lazily by registerManagementRoutes when a secret is configured.
 }
@@ -194,8 +259,10 @@ func (s *Server) codexAlphaSearchModelRouterHost() handlers.PluginModelRouterHos
 	if s.pluginHost != nil {
 		return s.pluginHost
 	}
-	if s.handlers != nil && s.handlers.ModelRouterHost != nil {
-		return s.handlers.ModelRouterHost
+	if s.handlers != nil {
+		if host := s.handlers.ModelRouterHostSnapshot(); host != nil {
+			return host
+		}
 	}
 	return nil
 }
@@ -332,6 +399,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		selectionHeaders.Set("X-Session-ID", sessionID)
 	}
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
+	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionHeaders, body, nil)
 	selectionModel, errRoute := s.codexAlphaSearchSelectionModel(ctx, c, body, strings.TrimSpace(routing.Model))
 	if errRoute != nil {
 		log.WithError(errRoute).Warn("codex alpha search: model router returned an unsupported target")
@@ -363,6 +431,19 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
 		return
+	}
+	if selection != nil && selection.CanonicalSessionID != "" {
+		meta := logging.GetClientRequestMetadata(ctx)
+		meta.SessionID = selection.CanonicalSessionID
+		if selection.ParentSessionID != "" {
+			meta.ParentSessionID = selection.ParentSessionID
+		} else {
+			meta.ParentSessionID = ""
+		}
+		if meta.SessionID == meta.ParentSessionID {
+			meta.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, meta)
 	}
 	var releaseAttempt func()
 	if selection != nil {
@@ -420,7 +501,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			return nil, errRequest
 		}
 		authType, authValue := current.AccountInfo()
-		helps.RecordAPIRequest(ctx, s.cfg, helps.UpstreamRequestLog{
+		helps.RecordAPIRequest(ctx, s.getConfig(), helps.UpstreamRequestLog{
 			URL:       upstreamURL,
 			Method:    http.MethodPost,
 			Headers:   req.Header.Clone(),
@@ -441,6 +522,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		c.JSON(clienterror.HTTPStatusFromErrorOr(errCtx, http.StatusRequestTimeout), gin.H{"error": errCtx.Error()})
 		return
 	}
+	cfg := s.getConfig()
 	resp, err := performRequest(selected)
 	if err != nil {
 		if errors.Is(err, errMissingBaseURL) {
@@ -453,45 +535,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		if selection != nil {
 			selection.End("request_failed")
 		}
-		helps.RecordAPIResponseError(ctx, s.cfg, err)
+		helps.RecordAPIResponseError(ctx, cfg, err)
 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": err.Error()})
 		return
-	}
-	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
-		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-		helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("codex alpha search: close unauthorized response body error: %v", errClose)
-		}
-		refreshed, didRefresh, errRefresh := s.handlers.AuthManager.RefreshHomeSelectionAfterUnauthorized(ctx, selection, selected)
-		if errRefresh != nil {
-			selection.End("refresh_failed")
-			c.JSON(clienterror.HTTPStatusFromErrorOr(errRefresh, http.StatusServiceUnavailable), gin.H{"error": errRefresh.Error()})
-			return
-		}
-		if !didRefresh || refreshed == nil {
-			selection.End("refresh_unavailable")
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
-			return
-		}
-		selected = refreshed
-		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		resp, err = performRequest(selected)
-		if err != nil {
-			if errors.Is(err, errMissingBaseURL) {
-				selection.End("missing_base_url")
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
-				return
-			}
-			selection.End("retry_failed")
-			helps.RecordAPIResponseError(ctx, s.cfg, err)
-			c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": err.Error()})
-			return
-		}
-		if resp.StatusCode == http.StatusUnauthorized {
-			s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-		}
 	}
 	closeResponseBody := func() error {
 		errClose := resp.Body.Close()
@@ -502,6 +548,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	}
 	if selection != nil {
 		if errBind := selection.Bind(closeResponseBody); errBind != nil {
+			if resp.StatusCode == http.StatusUnauthorized {
+				s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
+			}
 			selection.End("response_bind_failed")
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
 			return
@@ -510,14 +559,22 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 	} else {
 		defer func() { _ = closeResponseBody() }()
 	}
-	helps.RecordAPIResponseMetadata(ctx, s.cfg, resp.StatusCode, resp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header.Clone())
 	upstreamBody, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, s.cfg, err)
+		helps.AppendAPIResponseChunk(ctx, cfg, upstreamBody)
+		if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+			s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
+		}
+		helps.RecordAPIResponseError(ctx, cfg, err)
 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway), gin.H{"error": "Failed to read Codex search response"})
 		return
 	}
-	helps.AppendAPIResponseChunk(ctx, s.cfg, upstreamBody)
+	helps.AppendAPIResponseChunk(ctx, cfg, upstreamBody)
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
+		log.WithField("status", resp.StatusCode).Warnf("codex alpha search upstream request failed: %s", logging.SafeDiagnosticForLog(string(upstreamBody)))
+	}
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		c.Header("Content-Type", contentType)
 	}
@@ -526,9 +583,12 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
-// The handler is served as-is without additional middleware beyond the standard stack already configured.
+// Home mode does not support AI Studio and must not expose its websocket gateway.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	if s == nil || s.engine == nil || handler == nil {
+		return
+	}
+	if cfg := s.getConfig(); cfg != nil && cfg.Home.Enabled {
 		return
 	}
 	trimmed := strings.TrimSpace(path)
@@ -549,6 +609,10 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	authMiddleware := AuthMiddleware(s.accessManager)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
+			middleware.CaptureAuthenticatedRequestBody(c)
+			if c.IsAborted() {
+				return
+			}
 			c.Next()
 			return
 		}
@@ -560,6 +624,15 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	}
 
 	s.engine.GET(trimmed, conditionalAuth, finalHandler)
+}
+
+func (s *Server) handleWebsocketTunnel(c *gin.Context) {
+	if s == nil || s.tunnelHub == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "tunnel hub unavailable"})
+		return
+	}
+	s.tunnelHub.ServeHTTP(c.Writer, c.Request)
+	c.Abort()
 }
 
 // isAnthropicModelsRequest reports whether a /v1/models request should be served in
@@ -583,16 +656,18 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			return
 		}
 
+		cfg := s.getConfig()
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
-			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
-				s.handleHomeCodexClientModels(c)
+			clientVersion := c.Query("client_version")
+			if cfg != nil && cfg.Home.Enabled {
+				s.handleHomeCodexClientModels(c, clientVersion)
 				return
 			}
 			openaiHandler.OpenAIModels(c)
 			return
 		}
 
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		if cfg != nil && cfg.Home.Enabled {
 			s.handleHomeModels(c)
 			return
 		}
@@ -639,7 +714,7 @@ func grokModelsFromRegistryInfos(infos []*registry.ModelInfo) []grokbuild.ModelI
 
 func (s *Server) handleGrokModels(c *gin.Context) {
 	var models []grokbuild.ModelInfo
-	if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+	if cfg := s.getConfig(); cfg != nil && cfg.Home.Enabled {
 		entries, ok := s.loadHomeModelEntries(c)
 		if !ok {
 			return
@@ -648,45 +723,309 @@ func (s *Server) handleGrokModels(c *gin.Context) {
 	} else {
 		models = grokModelsFromRegistryInfos(registry.GetGlobalRegistry().GetAvailableModelInfos())
 	}
-	c.JSON(http.StatusOK, grokbuild.BuildResponse(models))
+	s.writeModelListResponse(c, "openai", grokbuild.BuildResponse(models))
+}
+
+func (s *Server) writeModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	if s != nil && s.handlers != nil {
+		s.handlers.WriteModelListResponse(c, sourceFormat, payload)
+		return
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // handleHomeCodexClientModels builds the Codex client catalog from Home model IDs.
 // Template metadata still comes from the local/remote codex_client_models catalog.
-func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
+func (s *Server) handleHomeCodexClientModels(c *gin.Context, clientVersion string) {
 	entries, ok := s.loadHomeModelEntries(c)
 	if !ok {
 		return
 	}
 
+	cfg := s.getConfig()
 	models := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		model := map[string]any{
-			"id":     entry.id,
-			"object": "model",
-		}
-		if entry.created > 0 {
-			model["created"] = entry.created
-		}
-		if entry.ownedBy != "" {
-			model["owned_by"] = entry.ownedBy
-		}
-		if entry.displayName != "" {
-			model["display_name"] = entry.displayName
-			model["description"] = entry.displayName
-		}
-		if entry.maxCompletionTokens > 0 {
-			model["max_completion_tokens"] = entry.maxCompletionTokens
-		}
-		models = append(models, model)
+		models = append(models, formatHomeCodexModelWithSettings(entry, cfg))
 	}
 
-	c.JSON(http.StatusOK, codexmodels.BuildResponse(models, nil, s.cfg.Codex.OptimizeMultiAgentV2))
+	var webSearchCapabilityForModel codexmodels.WebSearchCapabilityForModelFunc
+	if clientVersion == "cpa" {
+		webSearchCapabilityForModel = homeWebSearchCapabilityForModel(entries)
+	}
+	var manager *auth.Manager
+	if s.handlers != nil {
+		manager = s.handlers.AuthManager
+	}
+	var applyPatchCapabilityForModel codexmodels.ApplyPatchCapabilityForModelFunc
+	if cfg != nil && cfg.Client.Codex.EnableApplyPatch {
+		applyPatchCapabilityForModel = homeApplyPatchCapabilityForModel(entries, manager)
+	}
+	optimizeMultiAgentV2 := cfg != nil && cfg.Client.Codex.OptimizeMultiAgentV2
+	var payload map[string]any
+	if responsesclaude.ClientToolSearchEnabled() {
+		payload = codexmodels.BuildResponseForClientWithSearchToolRoutes(models, nil, homeProvidersForModel(entries), webSearchCapabilityForModel, applyPatchCapabilityForModel, homeToolSearchCapabilityForModel(entries), optimizeMultiAgentV2, clientVersion)
+	} else {
+		// upstream.claude.tool-search off keeps the catalog that predates
+		// tool_search, which never consulted Home routes for search support.
+		payload = codexmodels.BuildResponseForClientWithToolCapabilities(models, nil, webSearchCapabilityForModel, applyPatchCapabilityForModel, nil, optimizeMultiAgentV2, clientVersion)
+	}
+	body, errMarshal := codexmodels.MarshalCompact(payload)
+	if errMarshal != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMarshal.Error()})
+		return
+	}
+	s.writeModelListResponse(c, "openai", body)
+}
+
+// homeApplyPatchCapabilityForModel uses only Home's exact public routing evidence,
+// never the local model registry or the template's metadata model ID.
+func homeApplyPatchCapabilityForModel(entries []homeModelEntry, manager *auth.Manager) codexmodels.ApplyPatchCapabilityForModelFunc {
+	providersForModel := homeProvidersForModel(entries)
+	return func(id string) bool {
+		return manager.SupportsApplyPatchForProviders(providersForModel(id))
+	}
+}
+
+// homeProvidersForModel returns Home's routing providers for an exact public
+// model ID. An empty entry stands for an unknown route so it can veto support.
+func homeProvidersForModel(entries []homeModelEntry) codexmodels.ProvidersForModelFunc {
+	providersByID := make(map[string][]string, len(entries))
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.id)
+		providersByID[id] = append(providersByID[id], entry.providers...)
+		if len(entry.providers) == 0 {
+			providersByID[id] = append(providersByID[id], "")
+		}
+		// The decoder omits empty section names from providers, but an unknown
+		// route must still veto support when combined with a known section.
+		for _, route := range entry.nativeCapabilityRoutes {
+			if strings.TrimSpace(route.Provider) == "" {
+				providersByID[id] = append(providersByID[id], "")
+			}
+		}
+	}
+	return func(id string) []string {
+		return providersByID[strings.TrimSpace(id)]
+	}
+}
+
+// homeToolSearchCapabilityForModel trusts Home's per-route tool_search flag and
+// requires it on every route of the model. A Home that predates the flag never
+// enables native tool search.
+func homeToolSearchCapabilityForModel(entries []homeModelEntry) codexmodels.ToolSearchCapabilityForModelFunc {
+	routesByID := make(map[string][]registry.NativeCapabilityRoute, len(entries))
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.id)
+		routesByID[id] = append(routesByID[id], entry.nativeCapabilityRoutes...)
+	}
+	return func(id string) bool {
+		routes := routesByID[strings.TrimSpace(id)]
+		if len(routes) == 0 {
+			return false
+		}
+		for _, route := range routes {
+			if route.NativeCapabilities == nil || route.NativeCapabilities.ToolSearch == nil || !*route.NativeCapabilities.ToolSearch {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+func homeWebSearchCapabilityForModel(entries []homeModelEntry) codexmodels.WebSearchCapabilityForModelFunc {
+	routesByID := make(map[string][]registry.NativeCapabilityRoute, len(entries))
+	for _, entry := range entries {
+		routesByID[entry.id] = append([]registry.NativeCapabilityRoute(nil), entry.nativeCapabilityRoutes...)
+	}
+	return func(id string) *bool {
+		return registry.ResolveResponsesWebSearchCapability(routesByID[strings.TrimSpace(id)])
+	}
+}
+
+func formatHomeCodexModel(entry homeModelEntry) map[string]any {
+	model := map[string]any{
+		"id":     entry.id,
+		"object": "model",
+	}
+	if entry.created > 0 {
+		model["created"] = entry.created
+	}
+	if entry.ownedBy != "" {
+		model["owned_by"] = entry.ownedBy
+	}
+	for _, p := range entry.providers {
+		if strings.EqualFold(p, "devin") {
+			model["type"] = "devin"
+			break
+		}
+	}
+	if entry.displayName != "" {
+		model["display_name"] = entry.displayName
+		model["description"] = entry.displayName
+	}
+	if entry.contextLength > 0 {
+		model["context_length"] = entry.contextLength
+	}
+	if entry.maxContextLength > 0 {
+		model["max_context_length"] = entry.maxContextLength
+	}
+	if entry.maxCompletionTokens > 0 {
+		model["max_completion_tokens"] = entry.maxCompletionTokens
+	}
+	if entry.thinking != nil {
+		model["thinking"] = entry.thinking
+	}
+	return model
+}
+
+func formatHomeCodexModelWithSettings(entry homeModelEntry, cfg *config.Config) map[string]any {
+	model := formatHomeCodexModel(entry)
+	if maxCtx := resolveHomeModelMaxContextLength(entry, cfg); maxCtx > 0 && maxCtx != entry.maxContextLength {
+		model["max_context_length"] = maxCtx
+	}
+	return model
+}
+
+func normalizeHomeProviderChannel(provider string) string {
+	channel := strings.ToLower(strings.TrimSpace(provider))
+	switch channel {
+	case "codex", "codex-free", "codex-plus", "codex-team", "codex-pro":
+		return "codex"
+	default:
+		return channel
+	}
+}
+
+func resolveHomeRouteMaxContextLength(modelID, metadataModelID, modelName, provider string, baseMaxContextLength int, cfg *config.Config) int {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return baseMaxContextLength
+	}
+	channel := normalizeHomeProviderChannel(provider)
+	if channel == "" {
+		return baseMaxContextLength
+	}
+	if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
+		if setting := config.ResolveOAuthModelSetting(channelSettings, modelID, metadataModelID, modelName); setting != nil && setting.MaxContextLength > 0 {
+			return setting.MaxContextLength
+		}
+	}
+	return baseMaxContextLength
+}
+
+func resolveHomeModelMaxContextLength(entry homeModelEntry, cfg *config.Config) int {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return entry.maxContextLength
+	}
+	if len(entry.routes) > 0 {
+		routes := append([]homeModelRoute(nil), entry.routes...)
+		sort.SliceStable(routes, func(i, j int) bool {
+			ci := normalizeHomeProviderChannel(routes[i].provider)
+			cj := normalizeHomeProviderChannel(routes[j].provider)
+			if ci == "codex" && cj != "codex" {
+				return true
+			}
+			if cj == "codex" && ci != "codex" {
+				return false
+			}
+			return ci < cj
+		})
+		for _, route := range routes {
+			channel := normalizeHomeProviderChannel(route.provider)
+			if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
+				if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, route.metadataModelID, route.modelName); setting != nil && setting.MaxContextLength > 0 {
+					return setting.MaxContextLength
+				}
+			}
+		}
+		return entry.maxContextLength
+	}
+	providers := append([]string(nil), entry.providers...)
+	sort.SliceStable(providers, func(i, j int) bool {
+		ci := normalizeHomeProviderChannel(providers[i])
+		cj := normalizeHomeProviderChannel(providers[j])
+		if ci == "codex" && cj != "codex" {
+			return true
+		}
+		if cj == "codex" && ci != "codex" {
+			return false
+		}
+		return ci < cj
+	})
+	for _, p := range providers {
+		channel := normalizeHomeProviderChannel(p)
+		if channelSettings, okChannel := cfg.OAuthSettings[channel]; okChannel {
+			if setting := config.ResolveOAuthModelSetting(channelSettings, entry.id, entry.metadataModelID, entry.modelName); setting != nil && setting.MaxContextLength > 0 {
+				return setting.MaxContextLength
+			}
+		}
+	}
+	return entry.maxContextLength
+}
+
+func (s *Server) loadMuseCodeHomeModels(c *gin.Context) ([]musecode.ModelInput, bool) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return nil, false
+	}
+	cfg := s.getConfig()
+	inputs := make([]musecode.ModelInput, 0, len(entries))
+	for _, entry := range entries {
+		routes := make([]musecode.ModelRoute, 0, len(entry.routes))
+		for _, route := range entry.routes {
+			routeType := route.modelType
+			if routeType == "" && route.provider == "openai-image" {
+				routeType = "openai-image"
+			}
+			routes = append(routes, musecode.ModelRoute{
+				Provider:                  route.provider,
+				MetadataModelID:           route.metadataModelID,
+				Created:                   route.created,
+				OwnedBy:                   route.ownedBy,
+				Type:                      routeType,
+				DisplayName:               route.displayName,
+				Description:               route.description,
+				ContextLength:             route.contextLength,
+				MaxContextLength:          resolveHomeRouteMaxContextLength(entry.id, route.metadataModelID, route.modelName, route.provider, route.maxContextLength, cfg),
+				MaxCompletionTokens:       route.maxCompletionTokens,
+				Thinking:                  route.thinking,
+				ExplicitThinking:          route.hasThinking,
+				SupportedInputModalities:  append([]string(nil), route.supportedInputModalities...),
+				ExplicitInputModalities:   route.hasInputModalities,
+				SupportedOutputModalities: append([]string(nil), route.supportedOutputModalities...),
+				HasOutputModalities:       route.hasOutputModalities,
+			})
+		}
+		modelType := entry.modelType
+		if modelType == "" && len(entry.providers) == 1 && entry.providers[0] == "openai-image" {
+			modelType = "openai-image"
+		}
+		metadataID := entry.metadataModelID
+		if len(routes) > 0 {
+			metadataID = ""
+		}
+		inputs = append(inputs, musecode.ModelInput{
+			ID:                        entry.id,
+			MetadataModelID:           metadataID,
+			Created:                   entry.created,
+			OwnedBy:                   entry.ownedBy,
+			Type:                      modelType,
+			DisplayName:               entry.displayName,
+			Description:               entry.description,
+			ContextLength:             entry.contextLength,
+			MaxContextLength:          resolveHomeModelMaxContextLength(entry, cfg),
+			MaxCompletionTokens:       entry.maxCompletionTokens,
+			Thinking:                  entry.thinking,
+			SupportedInputModalities:  append([]string(nil), entry.supportedInputModalities...),
+			SupportedOutputModalities: append([]string(nil), entry.supportedOutputModalities...),
+			Routes:                    routes,
+		})
+	}
+	return inputs, true
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		if cfg := s.getConfig(); cfg != nil && cfg.Home.Enabled {
 			s.handleHomeGeminiModels(c)
 			return
 		}
@@ -697,7 +1036,7 @@ func (s *Server) geminiModelsHandler(geminiHandler *gemini.GeminiAPIHandler) gin
 
 func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+		if cfg := s.getConfig(); cfg != nil && cfg.Home.Enabled {
 			s.handleHomeGeminiModel(c)
 			return
 		}
@@ -706,13 +1045,44 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.GeminiAPIHandler) gin.Ha
 	}
 }
 
+type homeModelRoute struct {
+	provider                  string
+	modelName                 string
+	metadataModelID           string
+	created                   int64
+	ownedBy                   string
+	modelType                 string
+	displayName               string
+	description               string
+	contextLength             int
+	maxContextLength          int
+	maxCompletionTokens       int
+	thinking                  *registry.ThinkingSupport
+	hasThinking               bool
+	supportedInputModalities  []string
+	hasInputModalities        bool
+	supportedOutputModalities []string
+	hasOutputModalities       bool
+}
+
 type homeModelEntry struct {
-	id                  string
-	created             int64
-	ownedBy             string
-	displayName         string
-	contextLength       int
-	maxCompletionTokens int
+	id                        string
+	modelName                 string
+	metadataModelID           string
+	created                   int64
+	ownedBy                   string
+	modelType                 string
+	displayName               string
+	description               string
+	contextLength             int
+	maxContextLength          int
+	maxCompletionTokens       int
+	thinking                  *registry.ThinkingSupport
+	supportedInputModalities  []string
+	supportedOutputModalities []string
+	providers                 []string
+	nativeCapabilityRoutes    []registry.NativeCapabilityRoute
+	routes                    []homeModelRoute
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -724,8 +1094,9 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	isClaude := isAnthropicModelsRequest(c)
 
 	if isClaude {
-		disableCloaking := s.cfg != nil && s.cfg.ClaudeCode.DisableCloakingModelList
-		c.JSON(http.StatusOK, claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
+		cfg := s.getConfig()
+		disableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
+		s.writeModelListResponse(c, "claude", claudemodels.BuildResponse(formatHomeClaudeModels(entries), disableCloaking))
 		return
 	}
 
@@ -743,7 +1114,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		}
 		filtered = append(filtered, model)
 	}
-	c.JSON(http.StatusOK, gin.H{
+	s.writeModelListResponse(c, "openai", gin.H{
 		"object": "list",
 		"data":   filtered,
 	})
@@ -791,7 +1162,7 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	s.writeModelListResponse(c, "gemini", gin.H{
 		"models": formatHomeGeminiModels(entries),
 	})
 }
@@ -886,12 +1257,19 @@ func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
 	if displayName == "" {
 		displayName = entry.id
 	}
-	return map[string]any{
+	model := map[string]any{
 		"name":                       name,
 		"displayName":                displayName,
 		"description":                displayName,
 		"supportedGenerationMethods": []string{"generateContent"},
 	}
+	if entry.contextLength > 0 {
+		model["inputTokenLimit"] = entry.contextLength
+	}
+	if entry.maxCompletionTokens > 0 {
+		model["outputTokenLimit"] = entry.maxCompletionTokens
+	}
+	return model
 }
 
 func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
@@ -977,54 +1355,240 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 	if err := json.Unmarshal(raw, &bySection); err != nil {
 		return nil, fmt.Errorf("parse home models payload: %w", err)
 	}
-	if len(bySection) == 0 {
-		return nil, fmt.Errorf("home models payload has no sections")
+	if bySection == nil {
+		return nil, fmt.Errorf("home models payload is not an object")
+	}
+	// The error envelope must never be interpreted as a provider model section.
+	if _, hasError := bySection["error"]; hasError {
+		return nil, fmt.Errorf("home models payload contains an error envelope")
 	}
 
-	seen := make(map[string]struct{})
+	sections := make([]string, 0, len(bySection))
+	for section := range bySection {
+		sections = append(sections, section)
+	}
+	sort.Strings(sections)
+
+	indexByID := make(map[string]int)
 	out := make([]homeModelEntry, 0, 256)
-	for _, models := range bySection {
+	hasModelRecords := false
+	for _, section := range sections {
+		models := bySection[section]
+		if models == nil {
+			return nil, fmt.Errorf("home models section %q is null", section)
+		}
+		hasModelRecords = hasModelRecords || len(models) > 0
+		provider := strings.ToLower(strings.TrimSpace(section))
 		for _, model := range models {
+			rawName, _ := model["name"].(string)
+			rawName = strings.TrimSpace(rawName)
+			trimmedName := strings.TrimPrefix(rawName, "models/")
 			id, _ := model["id"].(string)
 			id = strings.TrimSpace(id)
 			if id == "" {
-				name, _ := model["name"].(string)
-				name = strings.TrimSpace(name)
-				id = strings.TrimPrefix(name, "models/")
+				id = trimmedName
 			}
 			if id == "" {
 				continue
 			}
-			if _, ok := seen[id]; ok {
-				continue
+			metadataModelID := ""
+			if trimmedName != "" && trimmedName != id {
+				metadataModelID = trimmedName
 			}
-			seen[id] = struct{}{}
-
+			nativeCapabilities := homeModelNativeCapabilities(model)
+			route := registry.NativeCapabilityRoute{
+				Provider:           provider,
+				NativeCapabilities: nativeCapabilities,
+			}
+			created := homeModelInt64Value(model, "created")
 			ownedBy, _ := model["owned_by"].(string)
 			ownedBy = strings.TrimSpace(ownedBy)
+			modelType, _ := model["type"].(string)
+			modelType = strings.TrimSpace(modelType)
 			displayName, _ := model["display_name"].(string)
 			displayName = strings.TrimSpace(displayName)
 			if displayName == "" {
 				displayName, _ = model["displayName"].(string)
 				displayName = strings.TrimSpace(displayName)
 			}
+			description, _ := model["description"].(string)
+			description = strings.TrimSpace(description)
+			contextLength := int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens"))
+			maxContextLength := int(homeModelInt64Value(model, "max_context_length", "maxContextLength"))
+			maxCompletionTokens := int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens"))
+			thinking, hasThinking := homeModelThinkingSupport(model)
+			inputModalities, hasInputModalities := homeModelStringSlice(model, "supportedInputModalities", "supported_input_modalities")
+			outputModalities, hasOutputModalities := homeModelStringSlice(model, "supportedOutputModalities", "supported_output_modalities")
+			modelRoute := homeModelRoute{
+				provider:                  provider,
+				modelName:                 rawName,
+				metadataModelID:           metadataModelID,
+				created:                   created,
+				ownedBy:                   ownedBy,
+				modelType:                 modelType,
+				displayName:               displayName,
+				description:               description,
+				contextLength:             contextLength,
+				maxContextLength:          maxContextLength,
+				maxCompletionTokens:       maxCompletionTokens,
+				thinking:                  thinking,
+				hasThinking:               hasThinking,
+				supportedInputModalities:  inputModalities,
+				hasInputModalities:        hasInputModalities,
+				supportedOutputModalities: outputModalities,
+				hasOutputModalities:       hasOutputModalities,
+			}
 
+			if index, ok := indexByID[id]; ok {
+				out[index].providers = appendUniqueHomeProvider(out[index].providers, provider)
+				out[index].nativeCapabilityRoutes = append(out[index].nativeCapabilityRoutes, route)
+				out[index].routes = append(out[index].routes, modelRoute)
+				if out[index].modelName == "" && rawName != "" {
+					out[index].modelName = rawName
+				}
+				if out[index].metadataModelID == "" && metadataModelID != "" {
+					out[index].metadataModelID = metadataModelID
+				}
+				if out[index].created <= 0 && created > 0 {
+					out[index].created = created
+				}
+				if out[index].ownedBy == "" && ownedBy != "" {
+					out[index].ownedBy = ownedBy
+				}
+				if out[index].modelType == "" && modelType != "" {
+					out[index].modelType = modelType
+				}
+				if out[index].displayName == "" && displayName != "" {
+					out[index].displayName = displayName
+				}
+				if out[index].description == "" && description != "" {
+					out[index].description = description
+				}
+				if out[index].contextLength <= 0 && contextLength > 0 {
+					out[index].contextLength = contextLength
+				}
+				if out[index].maxContextLength <= 0 && maxContextLength > 0 {
+					out[index].maxContextLength = maxContextLength
+				}
+				if out[index].maxCompletionTokens <= 0 && maxCompletionTokens > 0 {
+					out[index].maxCompletionTokens = maxCompletionTokens
+				}
+				if out[index].thinking == nil && thinking != nil {
+					out[index].thinking = thinking
+				}
+				if len(out[index].supportedInputModalities) == 0 && len(inputModalities) > 0 {
+					out[index].supportedInputModalities = inputModalities
+				}
+				if len(out[index].supportedOutputModalities) == 0 && len(outputModalities) > 0 {
+					out[index].supportedOutputModalities = outputModalities
+				}
+				continue
+			}
+
+			indexByID[id] = len(out)
 			out = append(out, homeModelEntry{
-				id:                  id,
-				created:             homeModelInt64Value(model, "created"),
-				ownedBy:             ownedBy,
-				displayName:         displayName,
-				contextLength:       int(homeModelInt64Value(model, "context_length", "contextLength", "inputTokenLimit", "max_input_tokens")),
-				maxCompletionTokens: int(homeModelInt64Value(model, "max_completion_tokens", "maxCompletionTokens", "outputTokenLimit", "max_tokens")),
+				id:                        id,
+				modelName:                 rawName,
+				metadataModelID:           metadataModelID,
+				created:                   created,
+				ownedBy:                   ownedBy,
+				modelType:                 modelType,
+				displayName:               displayName,
+				description:               description,
+				contextLength:             contextLength,
+				maxContextLength:          maxContextLength,
+				maxCompletionTokens:       maxCompletionTokens,
+				thinking:                  thinking,
+				supportedInputModalities:  inputModalities,
+				supportedOutputModalities: outputModalities,
+				providers:                 appendUniqueHomeProvider(nil, provider),
+				nativeCapabilityRoutes:    []registry.NativeCapabilityRoute{route},
+				routes:                    []homeModelRoute{modelRoute},
 			})
 		}
 	}
 
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
-	if len(out) == 0 {
+	// An empty catalog is valid when the client's access scopes have no routes.
+	// Non-empty sections with no usable model IDs still indicate malformed data.
+	if len(out) == 0 && hasModelRecords {
 		return nil, fmt.Errorf("home models payload contains no models")
 	}
 	return out, nil
+}
+
+func homeModelNativeCapabilities(model map[string]any) *registry.NativeCapabilities {
+	raw, ok := model["native_capabilities"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	capabilities := &registry.NativeCapabilities{}
+	if webSearch, okWebSearch := raw["web_search"].(bool); okWebSearch {
+		capabilities.WebSearch = &webSearch
+	}
+	if toolSearch, okToolSearch := raw["tool_search"].(bool); okToolSearch {
+		capabilities.ToolSearch = &toolSearch
+	}
+	return capabilities
+}
+
+func appendUniqueHomeProvider(providers []string, provider string) []string {
+	if provider == "" {
+		return providers
+	}
+	for _, existing := range providers {
+		if existing == provider {
+			return providers
+		}
+	}
+	return append(providers, provider)
+}
+
+func homeModelThinkingSupport(model map[string]any) (*registry.ThinkingSupport, bool) {
+	raw, exists := model["thinking"]
+	if !exists {
+		return nil, false
+	}
+	if raw == nil {
+		return nil, true
+	}
+	data, errMarshal := json.Marshal(raw)
+	if errMarshal != nil {
+		return nil, true
+	}
+	var thinking registry.ThinkingSupport
+	if errUnmarshal := json.Unmarshal(data, &thinking); errUnmarshal != nil {
+		return nil, true
+	}
+	return &thinking, true
+}
+
+func homeModelStringSlice(model map[string]any, keys ...string) ([]string, bool) {
+	for _, key := range keys {
+		raw, exists := model[key]
+		if !exists {
+			continue
+		}
+		if raw == nil {
+			continue
+		}
+		switch typed := raw.(type) {
+		case []string:
+			return append([]string(nil), typed...), true
+		case []any:
+			out := make([]string, 0, len(typed))
+			for _, item := range typed {
+				if s, ok := item.(string); ok {
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+			}
+			return out, true
+		}
+	}
+	return nil, false
 }
 
 func homeModelInt64Value(model map[string]any, keys ...string) int64 {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -19,6 +19,9 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 		return resp, handled, errPick
 	}
 	if !resp.Handled {
+		if excluded := normalizeExcludedCandidates(resp.ExcludeCandidates); len(excluded) > 0 {
+			return pluginapi.SchedulerPickResponse{ExcludeCandidates: excluded}, false, nil
+		}
 		return pluginapi.SchedulerPickResponse{}, false, nil
 	}
 
@@ -32,6 +35,61 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 
 func (h *Host) HasScheduler() bool {
 	return h.schedulerRecord() != nil
+}
+
+func (h *Host) SchedulerWantsAcrossPriorities() bool {
+	record := h.schedulerRecord()
+	if record == nil {
+		return false
+	}
+	return schedulerWantsAcrossPriorities(record.plugin.Capabilities)
+}
+
+// HasSchedulerContinuity reports whether the active scheduler plugin provides SchedulerContinuity.
+func (h *Host) HasSchedulerContinuity() bool {
+	return h.schedulerContinuityRecord() != nil
+}
+
+// EvaluateSchedulerContinuity invokes the active scheduler plugin's Continuity callback.
+func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	record := h.schedulerContinuityRecord()
+	if record == nil {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	return h.callSchedulerContinuity(ctx, *record, req)
+}
+
+func (h *Host) schedulerContinuityRecord() *capabilityRecord {
+	record := h.schedulerRecord()
+	if record == nil || record.plugin.Capabilities.SchedulerContinuity == nil {
+		return nil
+	}
+	return record
+}
+
+func (h *Host) callSchedulerContinuity(ctx context.Context, record capabilityRecord, req pluginapi.SchedulerContinuityRequest) (resp pluginapi.SchedulerContinuityResponse, handled bool, err error) {
+	continuity := record.plugin.Capabilities.SchedulerContinuity
+	if h == nil || continuity == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "SchedulerContinuity.Continuity", recovered)
+			resp = pluginapi.SchedulerContinuityResponse{}
+			handled = false
+			err = nil
+		}
+	}()
+
+	req.Plugin = record.meta
+	resp, errEval := continuity.Continuity(ctx, req)
+	if errEval != nil {
+		log.WithField("plugin_id", record.id).WithError(errEval).Warn("pluginhost: scheduler continuity evaluation failed")
+		return pluginapi.SchedulerContinuityResponse{}, true, errEval
+	}
+	resp.Decision = pluginapi.SchedulerContinuityDecision(strings.ToLower(strings.TrimSpace(string(resp.Decision))))
+	resp.Reason = strings.TrimSpace(resp.Reason)
+	return resp, true, nil
 }
 
 func (h *Host) schedulerRecord() *capabilityRecord {
@@ -74,6 +132,20 @@ func (h *Host) callScheduler(ctx context.Context, record capabilityRecord, req p
 func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, string) {
 	resp.AuthID = strings.TrimSpace(resp.AuthID)
 	resp.DelegateBuiltin = strings.TrimSpace(resp.DelegateBuiltin)
+	resp.RejectCode = strings.TrimSpace(resp.RejectCode)
+	resp.RejectReason = strings.TrimSpace(resp.RejectReason)
+	resp.ExcludeCandidates = normalizeExcludedCandidates(resp.ExcludeCandidates)
+
+	if resp.Reject {
+		if resp.RejectCode == "" {
+			resp.RejectCode = "auth_unavailable"
+		}
+		if resp.RejectReason == "" {
+			resp.RejectReason = "scheduler rejected candidate selection"
+		}
+		resp.ExcludeCandidates = nil
+		return resp, true, ""
+	}
 
 	hasAuthID := resp.AuthID != ""
 	hasDelegate := resp.DelegateBuiltin != ""
@@ -84,12 +156,36 @@ func normalizeSchedulerResponse(resp pluginapi.SchedulerPickResponse, req plugin
 		if !schedulerCandidateExists(req.Candidates, resp.AuthID) {
 			return pluginapi.SchedulerPickResponse{}, false, "unknown auth id"
 		}
+		resp.ExcludeCandidates = nil
 		return resp, true, ""
 	}
 	if !validSchedulerBuiltin(resp.DelegateBuiltin) {
 		return pluginapi.SchedulerPickResponse{}, false, "unknown delegate"
 	}
 	return resp, true, ""
+}
+
+func normalizeExcludedCandidates(candidates []string) []string {
+	if len(candidates) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		trimmed := strings.TrimSpace(candidate)
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func schedulerCandidateExists(candidates []pluginapi.SchedulerAuthCandidate, authID string) bool {

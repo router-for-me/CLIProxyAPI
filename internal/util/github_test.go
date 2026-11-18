@@ -1,6 +1,9 @@
 package util
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestResolveGitHubToken(t *testing.T) {
 	tests := []struct {
@@ -49,8 +52,19 @@ func TestResolveGitHubToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GITHUB_TOKEN", tt.githubToken)
-			t.Setenv("github_token", tt.lowerToken)
+			if runtime.GOOS == "windows" && tt.name == "GITHUB_TOKEN has highest priority" {
+				t.Skip("environment variables are case-insensitive on Windows")
+			}
+			if tt.githubToken != "" {
+				t.Setenv("GITHUB_TOKEN", tt.githubToken)
+			}
+			if tt.lowerToken != "" {
+				t.Setenv("github_token", tt.lowerToken)
+			}
+			if tt.githubToken == "" && tt.lowerToken == "" {
+				t.Setenv("GITHUB_TOKEN", "")
+				t.Setenv("github_token", "")
+			}
 			t.Setenv("GITSTORE_GIT_TOKEN", tt.gitStoreToken)
 			t.Setenv("GITSTORE_GIT_URL", tt.gitStoreURL)
 

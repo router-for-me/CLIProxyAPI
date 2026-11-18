@@ -1,50 +1,85 @@
 package responses
 
 import (
+	"context"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/ojson"
+	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+)
+
+const (
+	defaultClaudeResponsesMaxTokens = 32000
+	defaultFableResponsesMaxTokens  = 64000
 )
 
 // ConvertOpenAIResponsesRequestToClaude transforms an OpenAI Responses API request
 // into a Claude Messages API request using only gjson/sjson for JSON handling.
 // It supports:
 //   - instructions, input[].role==system and input[].role==developer -> separate
-//     top-level system blocks, in source order
+//     top-level system blocks, in source order; text-only system and developer
+//     items after the first conversation item stay in place as role=system
+//     turns unless WithTopLevelSystemItems pins the top-level path
 //   - input[].type==message with input_text/output_text -> user/assistant messages
 //   - function_call/custom_tool_call -> assistant tool_use
 //   - function_call_output/custom_tool_call_output -> user tool_result
 //   - top-level tools and input[].additional_tools -> Claude tools[].input_schema
 //   - max_output_tokens -> max_tokens
 //   - stream passthrough via parameter
-func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
-	return convertOpenAIResponsesRequestToClaude(modelName, inputRawJSON, stream, false)
+func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIResponsesRequestToClaude(context.Background(), modelName, inputRawJSON, stream, false, ClientToolSearchEnabled())
+
 }
 
 // ConvertOpenAIResponsesRequestToClaudeWithCompat preserves reasoning items
 // whose encrypted content is empty for configured compatibility endpoints.
-func ConvertOpenAIResponsesRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
-	return convertOpenAIResponsesRequestToClaude(modelName, inputRawJSON, stream, true)
+func ConvertOpenAIResponsesRequestToClaudeWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIResponsesRequestToClaude(context.Background(), modelName, inputRawJSON, stream, true, ClientToolSearchEnabled())
 }
 
-func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks bool) []byte {
-	rawJSON := inputRawJSON
+// ConvertOpenAIResponsesRequestEnvelopeToClaude translates with the
+// upstream.claude.tool-search value pinned in ctx, if any.
+func ConvertOpenAIResponsesRequestEnvelopeToClaude(ctx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+	req.Body, req.Err = convertOpenAIResponsesRequestToClaude(ctx, req.Model, req.Body, req.Stream, false, ClientToolSearchEnabledFor(ctx))
+	return req
+}
+
+// ConvertOpenAIResponsesRequestToClaudeWithCompatContext is
+// ConvertOpenAIResponsesRequestToClaudeWithCompat with the
+// upstream.claude.tool-search value pinned in ctx, if any.
+func ConvertOpenAIResponsesRequestToClaudeWithCompatContext(ctx context.Context, modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIResponsesRequestToClaude(ctx, modelName, inputRawJSON, stream, true, ClientToolSearchEnabledFor(ctx))
+}
+
+// toolSearch carries upstream.claude.tool-search for the whole translation so
+// a config reload cannot mix the two behaviors within one request.
+func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string, inputRawJSON []byte, stream, preserveEmptyThinkingBlocks, toolSearch bool) ([]byte, error) {
+	rawJSON := normalizeCodexAgentMessages(inputRawJSON)
+	var drops common.UserTurnDrops
+	var toolOutputErr error
 
 	userID := common.DeriveClaudeUserID(rawJSON)
 
 	// Base Claude message payload
-	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
-	out, _ = sjson.SetBytes(out, "metadata.user_id", userID)
+	outDoc := ojson.NewDoc([]byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`))
+	_ = outDoc.Set("metadata.user_id", userID)
+	_ = outDoc.Set("max_tokens", defaultClaudeResponsesMaxTokensForModel(modelName))
 
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 
 	// Convert OpenAI Responses reasoning.effort to Claude thinking config.
 	if v := root.Get("reasoning.effort"); v.Exists() {
@@ -60,20 +95,22 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 			if supportsAdaptive {
 				switch effort {
 				case "none":
-					out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
-					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
-					out, _ = sjson.DeleteBytes(out, "output_config.effort")
+					_ = outDoc.Set("thinking.type", "disabled")
+					_ = outDoc.Delete("thinking.budget_tokens")
+					_ = outDoc.Delete("output_config.effort")
 				case "auto":
-					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
-					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
-					out, _ = sjson.DeleteBytes(out, "output_config.effort")
+					_ = outDoc.Set("thinking.type", "adaptive")
+					_ = outDoc.Delete("thinking.budget_tokens")
+					_ = outDoc.Delete("output_config.effort")
 				default:
-					if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
-						effort = mapped
+					if !thinking.HasLevel(mi.Thinking.Levels, effort) {
+						if mapped, ok := thinking.MapToClaudeEffort(effort, supportsMax); ok {
+							effort = mapped
+						}
 					}
-					out, _ = sjson.SetBytes(out, "thinking.type", "adaptive")
-					out, _ = sjson.DeleteBytes(out, "thinking.budget_tokens")
-					out, _ = sjson.SetBytes(out, "output_config.effort", effort)
+					_ = outDoc.Set("thinking.type", "adaptive")
+					_ = outDoc.Delete("thinking.budget_tokens")
+					_ = outDoc.Set("output_config.effort", effort)
 				}
 			} else {
 				// Legacy/manual thinking (budget_tokens).
@@ -81,13 +118,13 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if ok {
 					switch budget {
 					case 0:
-						out, _ = sjson.SetBytes(out, "thinking.type", "disabled")
+						_ = outDoc.Set("thinking.type", "disabled")
 					case -1:
-						out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
+						_ = outDoc.Set("thinking.type", "enabled")
 					default:
 						if budget > 0 {
-							out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
-							out, _ = sjson.SetBytes(out, "thinking.budget_tokens", budget)
+							_ = outDoc.Set("thinking.type", "enabled")
+							_ = outDoc.Set("thinking.budget_tokens", budget)
 						}
 					}
 				}
@@ -96,83 +133,107 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	}
 
 	// Model
-	out, _ = sjson.SetBytes(out, "model", modelName)
+	_ = outDoc.Set("model", modelName)
 
 	// Max tokens
-	if mot := root.Get("max_output_tokens"); mot.Exists() {
-		out, _ = sjson.SetBytes(out, "max_tokens", mot.Int())
+	if mot := root.Get("max_output_tokens"); mot.Exists() && mot.Type != ojson.Null {
+		val := mot.Int()
+		if info := registry.LookupModelInfo(modelName, "claude"); info != nil && info.MaxCompletionTokens > 0 && val > int64(info.MaxCompletionTokens) {
+			val = int64(info.MaxCompletionTokens)
+		}
+		_ = outDoc.Set("max_tokens", val)
 	}
 
 	// Stream
-	out, _ = sjson.SetBytes(out, "stream", stream)
+	_ = outDoc.Set("stream", stream)
 
 	// Service Tier -> Speed
-	if st := root.Get("service_tier"); st.Type == gjson.String && st.String() == "priority" {
-		out, _ = sjson.SetBytes(out, "speed", "fast")
+	if st := root.Get("service_tier"); st.Type == ojson.String && st.String() == "priority" {
+		_ = outDoc.Set("speed", "fast")
 	}
 
-	// System-level inputs become canonical top-level Claude system blocks in
-	// source order: instructions first, then every input item whose role is
-	// system or developer. Each source block stays a separate Claude block and
-	// keeps operator authority; the Claude executor decides the final placement
-	// (mid-conversation role=system messages, or system reminders on legacy
-	// models), so this layer must not merge, trim or downgrade them to user text.
+	// Instructions and leading system-level items become separate top-level
+	// Claude blocks in source order. Eligible later items keep their position in
+	// the conversation as role=system turns, because clients such as Codex append
+	// them on later turns and moving them ahead of the history would invalidate
+	// Claude's prompt-cache prefix. The executor pins every item to the top
+	// level before translation when model compatibility or wire policy requires
+	// it, and still owns the final placement of the leading blocks. Both paths
+	// keep source text, block boundaries and cache_control, and never downgrade
+	// system-level items to user text.
 	messageCapacity := root.Get("input.#").Int()
+	if messageCapacity == 0 && root.Get("input").Type == ojson.String {
+		messageCapacity = 1
+	}
 	messageBlocks := common.NewRawArrayItems(messageCapacity)
 	systemBlocks := make([][]byte, 0, 4)
-	appendSystemText := func(text string, cacheSource gjson.Result) {
-		if text == "" {
+	appendSystemText := func(text string) {
+		if strings.TrimSpace(text) == "" {
 			return
 		}
-		block := []byte(`{"type":"text","text":""}`)
-		block, _ = sjson.SetBytes(block, "text", text)
-		if cacheSource.Exists() {
-			block = common.AttachCacheControl(block, cacheSource)
-		}
-		systemBlocks = append(systemBlocks, block)
+		blockDoc := ojson.NewDoc([]byte(`{"type":"text","text":""}`))
+		_ = blockDoc.Set("text", text)
+		systemBlocks = append(systemBlocks, blockDoc.Bytes())
 	}
-	if instr := root.Get("instructions"); instr.Type == gjson.String {
-		appendSystemText(instr.String(), gjson.Result{})
+	if instr := root.Get("instructions"); instr.Type == ojson.String {
+		appendSystemText(instr.String())
 	}
+	type responsesSystemInputEntry struct {
+		blocks   [][]byte
+		eligible bool
+		emitted  bool
+	}
+	topLevelSystemItems := topLevelSystemItemsFor(ctx, modelName)
+	var systemInputEntries []responsesSystemInputEntry
+	systemInputEntryByIndex := map[int]int{}
 	if input := root.Get("input"); input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
+		conversationStarted := false
+		itemIndex := -1
+		input.ForEach(func(_, item ojson.Result) bool {
+			itemIndex++
 			if !isResponsesSystemLevelRole(item.Get("role").String()) {
+				conversationStarted = true
 				return true
 			}
-			startIdx := len(systemBlocks)
-			content := item.Get("content")
-			if content.Type == gjson.String {
-				appendSystemText(content.String(), gjson.Result{})
-			} else if content.IsArray() {
-				content.ForEach(func(_, part gjson.Result) bool {
-					switch part.Get("type").String() {
-					case "input_text", "output_text", "text":
-						appendSystemText(part.Get("text").String(), part)
-					default:
-						if block := responsesSystemUnsupportedBlock(part); len(block) > 0 {
-							systemBlocks = append(systemBlocks, block)
-						}
-					}
-					return true
-				})
-			}
-			// Item-level cache_control applies to the last block this item produced.
-			if item.Get("cache_control").Exists() && len(systemBlocks) > startIdx {
-				lastIdx := len(systemBlocks) - 1
-				if !gjson.GetBytes(systemBlocks[lastIdx], "cache_control").Exists() {
-					systemBlocks[lastIdx] = common.AttachCacheControl(systemBlocks[lastIdx], item)
-				}
-			}
+			blocks := responsesSystemItemToClaudeBlocks(item)
+			eligible := !topLevelSystemItems && conversationStarted && isResponsesMessageItem(item) && claudeBlocksAreAllText(blocks)
+			systemInputEntryByIndex[itemIndex] = len(systemInputEntries)
+			systemInputEntries = append(systemInputEntries, responsesSystemInputEntry{
+				blocks:   blocks,
+				eligible: eligible,
+			})
 			return true
 		})
 	}
+
+	names := buildClaudeToolNames(root, toolSearch)
+	winners := responsesToolWinners(root, toolSearch)
+	// Native tool search declares discovered tools as deferred and replays
+	// search results as tool_reference blocks, which keeps the cached prefix.
+	nativeToolSearch := responsesClientToolSearchWins(responsesToolDescriptors(root, toolSearch))
 
 	// input array processing
 	var pendingRole string
 	var pendingParts [][]byte
 	var pendingToolUseParts [][]byte
+	var turnHasEmptyWebSearchResult bool
+	// Anthropic accepts a role=system turn only after a user message and before
+	// an assistant message or the end of messages. Mid-session system items are
+	// therefore queued until a user message is emitted, which may be the user
+	// message still being accumulated or a later one, and placed right after it.
+	var pendingSystemEntryIndices []int
 	appendMessage := func(msg []byte) {
 		messageBlocks = append(messageBlocks, msg)
+		if len(pendingSystemEntryIndices) == 0 || ojson.GetBytesNoCopy(msg, "role").String() != "user" {
+			return
+		}
+		for _, entryIdx := range pendingSystemEntryIndices {
+			systemDoc := ojson.NewDoc([]byte(`{"role":"system","content":[]}`))
+			_ = systemDoc.SetRawBytes("content", common.JoinRawArray(systemInputEntries[entryIdx].blocks))
+			messageBlocks = append(messageBlocks, systemDoc.Bytes())
+			systemInputEntries[entryIdx].emitted = true
+		}
+		pendingSystemEntryIndices = nil
 	}
 	flushPendingMessage := func() {
 		if pendingRole == "" {
@@ -181,25 +242,35 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 		parts := pendingParts
 		if pendingRole == "assistant" && len(pendingToolUseParts) > 0 {
-			combined := make([][]byte, 0, len(pendingParts)+len(pendingToolUseParts))
+			combined := make([][]byte, 0, len(pendingParts)+len(pendingToolUseParts)+1)
 			combined = append(combined, pendingParts...)
+			if separator := claudeThinkingSeparatorForToolUse(pendingParts); separator != nil {
+				combined = append(combined, separator)
+			}
 			combined = append(combined, pendingToolUseParts...)
 			parts = combined
 		}
+		if pendingRole == "assistant" && (turnHasEmptyWebSearchResult || claudeBlocksHaveEmptyWebSearchResult(parts)) {
+			var droppedCitations int
+			parts, droppedCitations = stripClaudeWebSearchCitationsFromParts(parts)
+			if droppedCitations > 0 {
+				log.Debugf("responses->claude: dropped %d web_search_result_location citation(s) from assistant turn without search results", droppedCitations)
+			}
+		}
 		if len(parts) > 0 {
-			msg := []byte(`{"role":"","content":[]}`)
-			msg, _ = sjson.SetBytes(msg, "role", pendingRole)
+			msgDoc := ojson.NewDoc([]byte(`{"role":"","content":[]}`))
+			_ = msgDoc.Set("role", pendingRole)
 			if len(parts) == 1 {
-				part := gjson.ParseBytes(parts[0])
+				part := util.ParseGJSONBytesNoCopy(parts[0])
 				if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
-					msg, _ = sjson.SetBytes(msg, "content", part.Get("text").String())
+					_ = msgDoc.Set("content", part.Get("text").String())
 				} else {
-					msg, _ = sjson.SetRawBytes(msg, "content", common.JoinRawArray(parts))
+					_ = msgDoc.SetRawBytes("content", common.JoinRawArray(parts))
 				}
 			} else {
-				msg, _ = sjson.SetRawBytes(msg, "content", common.JoinRawArray(parts))
+				_ = msgDoc.SetRawBytes("content", common.JoinRawArray(parts))
 			}
-			appendMessage(msg)
+			appendMessage(msgDoc.Bytes())
 		}
 
 		pendingRole = ""
@@ -226,117 +297,151 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		pendingRole = "assistant"
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
+	appendReasoning := func(reasoningPart []byte) {
+		if len(reasoningPart) == 0 {
+			return
+		}
+		if pendingRole != "" && pendingRole != "assistant" {
+			flushPendingMessage()
+		}
+		pendingRole = "assistant"
 
-	lastToolResult := map[string]gjson.Result{}
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			switch item.Get("type").String() {
-			case "function_call_output", "custom_tool_call_output":
-				rawID := item.Get("call_id").String()
-				if rawID != "" {
-					lastToolResult[rawID] = item
-				}
+		// Client tool calls normally stay at the end of an assistant message, but
+		// a later reasoning item makes them a real separator between thinking blocks.
+		if len(pendingToolUseParts) > 0 {
+			pendingParts = append(pendingParts, pendingToolUseParts...)
+			pendingToolUseParts = nil
+		}
+
+		currentType := ojson.GetBytesNoCopy(reasoningPart, "type").String()
+		if currentType == "thinking" && len(pendingParts) > 0 {
+			lastIdx := len(pendingParts) - 1
+			if ojson.GetBytesNoCopy(pendingParts[lastIdx], "type").String() == "thinking" {
+				pendingParts[lastIdx] = reasoningPart
+				return
 			}
-			return true
-		})
+		}
+		pendingParts = append(pendingParts, reasoningPart)
+	}
+
+	var inputItems []ojson.Result
+	if input := root.Get("input"); input.Exists() {
+		if input.IsArray() {
+			inputItems = common.NormalizeResponsesToolCallOutputs(input.Array())
+		} else if input.Type == ojson.String && strings.TrimSpace(input.String()) != "" {
+			contentPart := []byte(`{"type":"text","text":""}`)
+			contentPart, _ = ojson.SetBytes(contentPart, "text", input.String())
+			appendParts("user", contentPart)
+		}
+	}
+
+	lastToolResult := map[string]ojson.Result{}
+	for _, item := range inputItems {
+		switch item.Get("type").String() {
+		case "function_call_output", "custom_tool_call_output":
+			rawID := common.ExtractResponsesCallID(item)
+			if rawID != "" {
+				lastToolResult[rawID] = item
+			}
+		}
 	}
 	emittedToolResults := map[string]struct{}{}
+	emittedRawToolUses := map[string]struct{}{}
+	unmappedItemTypes := map[string]int{}
+	webSearchHistory := scanResponsesWebSearchHistory(inputItems)
 
-	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			// System-level items already became top-level system blocks.
-			if isResponsesSystemLevelRole(item.Get("role").String()) {
-				return true
+	for itemIndex, item := range inputItems {
+		// System-level items are top-level blocks unless queued as in-place turns.
+		if isResponsesSystemLevelRole(item.Get("role").String()) {
+			if entryIdx, ok := systemInputEntryByIndex[itemIndex]; ok && systemInputEntries[entryIdx].eligible {
+				pendingSystemEntryIndices = append(pendingSystemEntryIndices, entryIdx)
 			}
-			typ := item.Get("type").String()
-			if typ == "" && item.Get("role").String() != "" {
-				typ = "message"
+			continue
+		}
+		typ := item.Get("type").String()
+		if typ == "" && item.Get("role").String() != "" {
+			typ = "message"
+		}
+		switch typ {
+		case "message":
+			// Determine role and construct Claude-compatible content parts.
+			var role string
+			var partsJSON [][]byte
+			var droppedPartType string
+			attachCacheControlToPrecedingPart := func(src ojson.Result) {
+				if !src.Get("cache_control").Exists() || len(partsJSON) == 0 {
+					return
+				}
+				prevIdx := len(partsJSON) - 1
+				if !ojson.GetBytesNoCopy(partsJSON[prevIdx], "cache_control").Exists() {
+					partsJSON[prevIdx] = common.AttachCacheControl(partsJSON[prevIdx], src)
+				}
 			}
-			switch typ {
-			case "message":
-				// Determine role and construct Claude-compatible content parts.
-				var role string
-				var partsJSON [][]byte
-				if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
-					parts.ForEach(func(_, part gjson.Result) bool {
-						ptype := part.Get("type").String()
-						switch ptype {
-						case "input_text", "output_text":
-							if t := part.Get("text"); t.Exists() {
-								txt := t.String()
+			if parts := item.Get("content"); parts.Exists() && parts.IsArray() {
+				parts.ForEach(func(_, part ojson.Result) bool {
+					ptype := part.Get("type").String()
+					switch ptype {
+					case "input_text", "output_text":
+						if t := part.Get("text"); t.Exists() {
+							txt := t.String()
+							if strings.TrimSpace(txt) != "" {
 								contentPart := []byte(`{"type":"text","text":""}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "text", txt)
+								contentPart, _ = ojson.SetBytes(contentPart, "text", txt)
 								contentPart = attachClaudeCitations(contentPart, part.Get("annotations"))
 								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, contentPart)
-							}
-							if ptype == "input_text" {
-								role = "user"
 							} else {
-								role = "assistant"
+								attachCacheControlToPrecedingPart(part)
 							}
-						case "refusal":
-							// Claude has no refusal block; the text keeps the turn intact.
-							if t := part.Get("refusal"); t.Exists() && t.String() != "" {
+						}
+						if ptype == "input_text" {
+							role = "user"
+						} else {
+							role = "assistant"
+						}
+					case "refusal":
+						// Claude has no refusal block; the text keeps the turn intact.
+						if t := part.Get("refusal"); t.Exists() {
+							txt := t.String()
+							if strings.TrimSpace(txt) != "" {
 								contentPart := []byte(`{"type":"text","text":""}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
+								contentPart, _ = ojson.SetBytes(contentPart, "text", txt)
 								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, contentPart)
+							} else {
+								attachCacheControlToPrecedingPart(part)
 							}
-							role = "assistant"
-						case "input_image":
-							url := part.Get("image_url").String()
-							if url == "" {
-								url = part.Get("url").String()
-							}
-							if url != "" {
-								var contentPart []byte
-								if strings.HasPrefix(url, "data:") {
-									trimmed := strings.TrimPrefix(url, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									mediaType := "application/octet-stream"
-									data := ""
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mediaType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									}
-									if data != "" {
-										contentPart = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-										contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-										contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-									}
-								} else {
-									contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
-									contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
-								}
-								if len(contentPart) > 0 {
-									contentPart = common.AttachCacheControl(contentPart, part)
-									partsJSON = append(partsJSON, contentPart)
-									if role == "" {
-										role = "user"
-									}
-								}
-							}
-						case "input_file":
-							fileData := part.Get("file_data").String()
-							if fileData != "" {
+						}
+						role = "assistant"
+					case "input_image":
+						url := part.Get("image_url").String()
+						if url == "" {
+							url = part.Get("url").String()
+						}
+						if url != "" {
+							var contentPart []byte
+							if strings.HasPrefix(url, "data:") {
+								trimmed := strings.TrimPrefix(url, "data:")
+								mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 								mediaType := "application/octet-stream"
-								data := fileData
-								if strings.HasPrefix(fileData, "data:") {
-									trimmed := strings.TrimPrefix(fileData, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mediaType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
+								data := ""
+								if len(mediaAndData) == 2 {
+									if mediaAndData[0] != "" {
+										mediaType = mediaAndData[0]
 									}
+									data = mediaAndData[1]
 								}
-								contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-								contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
+								if data != "" {
+									cpDoc := ojson.NewDoc([]byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`))
+									_ = cpDoc.Set("source.media_type", mediaType)
+									_ = cpDoc.Set("source.data", data)
+									contentPart = cpDoc.Bytes()
+								}
+							} else {
+								contentPart = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+								contentPart, _ = ojson.SetBytes(contentPart, "source.url", url)
+							}
+							if len(contentPart) > 0 {
 								contentPart = common.AttachCacheControl(contentPart, part)
 								partsJSON = append(partsJSON, contentPart)
 								if role == "" {
@@ -344,120 +449,252 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 								}
 							}
 						}
-						return true
-					})
-				} else if parts.Type == gjson.String && parts.String() != "" {
-					contentPart := []byte(`{"type":"text","text":""}`)
-					contentPart, _ = sjson.SetBytes(contentPart, "text", parts.String())
-					partsJSON = append(partsJSON, contentPart)
-				}
-
-				// Fallback to given role if content types not decisive
-				if role == "" {
-					r := item.Get("role").String()
-					switch r {
-					case "user", "assistant":
-						role = r
-					default:
-						role = "user"
-					}
-				}
-
-				if len(partsJSON) > 0 {
-					lastIdx := len(partsJSON) - 1
-					if !gjson.GetBytes(partsJSON[lastIdx], "cache_control").Exists() {
-						partsJSON[lastIdx] = common.AttachCacheControl(partsJSON[lastIdx], item)
-					}
-					appendParts(role, partsJSON...)
-				}
-
-			case "web_search_call":
-				// Rebuild the Claude server-side search pair so the replayed turn
-				// still shows the search and its hits.
-				if blocks := convertResponsesWebSearchCallToClaudeBlocks(item); len(blocks) > 0 {
-					appendParts("assistant", blocks...)
-				}
-
-			case "reasoning":
-				if thinkingPart := convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks); len(thinkingPart) > 0 {
-					appendParts("assistant", thinkingPart)
-				}
-
-			case "function_call", "custom_tool_call":
-				// Map to assistant tool_use. Freeform custom input is wrapped in an
-				// object because Claude tool_use input must be a JSON object.
-				callID := item.Get("call_id").String()
-				if callID == "" {
-					callID = common.GenerateClaudeToolCallID()
-				}
-				callID = util.SanitizeClaudeToolID(callID)
-				name := item.Get("name").String()
-				if namespaceName := strings.TrimSpace(item.Get("namespace").String()); namespaceName != "" {
-					// Rebuild the qualified name emitted by the previous Responses turn.
-					name = qualifyResponsesNamespaceToolName(namespaceName, name)
-				}
-				isCustomToolCall := typ == "custom_tool_call"
-
-				toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-				toolUse, _ = sjson.SetBytes(toolUse, "id", callID)
-				toolUse, _ = sjson.SetBytes(toolUse, "name", name)
-				if isCustomToolCall {
-					toolUse, _ = sjson.SetBytes(toolUse, "input.input", item.Get("input").String())
-				} else {
-					argsStr := item.Get("arguments").String()
-					if argsStr != "" && gjson.Valid(argsStr) {
-						argsJSON := gjson.Parse(argsStr)
-						if argsJSON.IsObject() {
-							toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(argsJSON.Raw))
+					case "input_file":
+						if contentPart, ok := convertResponsesInputFileToClaude(part); ok {
+							contentPart = common.AttachCacheControl(contentPart, part)
+							partsJSON = append(partsJSON, contentPart)
+							if role == "" {
+								role = "user"
+							}
+						} else if droppedPartType == "" {
+							droppedPartType = ptype
+						}
+					case "input_audio":
+						// Claude has no audio block, so the part cannot be sent.
+						if droppedPartType == "" {
+							droppedPartType = ptype
 						}
 					}
-				}
+					return true
+				})
+			} else if parts.Type == ojson.String && strings.TrimSpace(parts.String()) != "" {
+				contentPart := []byte(`{"type":"text","text":""}`)
+				contentPart, _ = ojson.SetBytes(contentPart, "text", parts.String())
+				partsJSON = append(partsJSON, contentPart)
+			}
 
-				appendToolUse(toolUse)
-
-			case "function_call_output", "custom_tool_call_output":
-				// Map to user tool_result
-				rawID := item.Get("call_id").String()
-				callID := util.SanitizeClaudeToolID(rawID)
-				if rawID != "" {
-					if _, exists := emittedToolResults[rawID]; exists {
-						return true
-					}
-					emittedToolResults[rawID] = struct{}{}
-				}
-				output := item.Get("output")
-				if rawID != "" {
-					if lastItem, exists := lastToolResult[rawID]; exists {
-						output = lastItem.Get("output")
-					}
-				}
-				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
-				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
-				toolResult = applyResponsesToolResultContent(toolResult, output)
-
-				appendParts("user", toolResult)
-
-			default:
-				// Reachability guard: Claude only ever receives the item types this
-				// switch handles. A new one means the client gained a capability
-				// whose Claude counterpart still has to be decided, so make the gap
-				// visible instead of dropping the turn content in silence.
-				if typ := item.Get("type").String(); typ != "" {
-					log.Debugf("responses->claude: unmapped input item type %q", typ)
+			// Fallback to given role if content types not decisive
+			if role == "" {
+				r := item.Get("role").String()
+				switch r {
+				case "user", "assistant":
+					role = r
+				default:
+					role = "user"
 				}
 			}
-			return true
-		})
+
+			if role == "user" {
+				if droppedPartType != "" {
+					drops.Drop(droppedPartType)
+				}
+				drops.EndTurn(len(partsJSON))
+			}
+
+			if len(partsJSON) > 0 {
+				lastIdx := len(partsJSON) - 1
+				if !ojson.GetBytesNoCopy(partsJSON[lastIdx], "cache_control").Exists() {
+					partsJSON[lastIdx] = common.AttachCacheControl(partsJSON[lastIdx], item)
+				}
+				appendParts(role, partsJSON...)
+				if role == "user" {
+					turnHasEmptyWebSearchResult = false
+				}
+			}
+
+		case "web_search_call":
+			// Rebuild the Claude server-side search pair so the replayed turn
+			// still shows the search and its hits.
+			if blocks := webSearchHistory.claudeBlocksWithContext(ctx, itemIndex, item); len(blocks) > 0 {
+				if claudeBlocksHaveEmptyWebSearchResult(blocks) {
+					turnHasEmptyWebSearchResult = true
+				}
+				appendParts("assistant", blocks...)
+			}
+
+		case "reasoning":
+			appendReasoning(convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks))
+
+		case "function_call", "custom_tool_call":
+			// Map to assistant tool_use. Freeform custom input is wrapped in an
+			// object because Claude tool_use input must be a JSON object.
+			rawCallID := common.ExtractResponsesCallID(item)
+			callID := rawCallID
+			if callID == "" {
+				callID = common.GenerateClaudeToolCallID()
+			}
+			callID = util.SanitizeClaudeToolID(callID)
+			if rawCallID != "" {
+				emittedRawToolUses[rawCallID] = struct{}{}
+			}
+			name := item.Get("name").String()
+			if namespaceName := strings.TrimSpace(item.Get("namespace").String()); namespaceName != "" {
+				// Rebuild the qualified name emitted by the previous Responses turn.
+				name = qualifyResponsesNamespaceToolName(namespaceName, name)
+			}
+			isCustomToolCall := typ == "custom_tool_call"
+
+			toolUseDoc := ojson.NewDoc([]byte(`{"type":"tool_use","id":"","name":"","input":{}}`))
+			_ = toolUseDoc.Set("id", callID)
+			_ = toolUseDoc.Set("name", names.claudeName(name))
+			if isCustomToolCall {
+				_ = toolUseDoc.Set("input.input", item.Get("input").String())
+			} else {
+				argsStr := item.Get("arguments").String()
+				if argsStr != "" && ojson.Valid(argsStr) {
+					argsJSON := ojson.Parse(argsStr)
+					if argsJSON.IsObject() {
+						_ = toolUseDoc.SetRaw("input", argsJSON.Raw)
+					}
+				}
+			}
+
+			appendToolUse(toolUseDoc.Bytes())
+
+		case "function_call_output", "custom_tool_call_output":
+			// Map to user tool_result
+			rawID := common.ExtractResponsesCallID(item)
+			if rawID != "" {
+				if _, exists := emittedToolResults[rawID]; exists {
+					continue
+				}
+				emittedToolResults[rawID] = struct{}{}
+			}
+			outputItem := item
+			if rawID != "" {
+				if lastItem, exists := lastToolResult[rawID]; exists {
+					outputItem = lastItem
+				}
+			}
+			output := outputItem.Get("output")
+			// Standalone outputs (no call_id, or one that never paired with a
+			// function_call in this input, e.g. the create_thread delegation seed)
+			// have no tool_use to attach to. Claude rejects orphan tool_result
+			// blocks, so surface them as plain user text instead. Pairing is
+			// decided on the raw id so two distinct ids that sanitize to the
+			// same Claude id are not mistaken for the same call.
+			if _, paired := emittedRawToolUses[rawID]; rawID == "" || !paired {
+				standaloneParts, errStandalone := convertResponsesStandaloneToolOutputToClaudeText(output)
+				if errStandalone != nil && toolOutputErr == nil {
+					toolOutputErr = errStandalone
+				}
+				appendParts("user", standaloneParts...)
+				turnHasEmptyWebSearchResult = false
+				continue
+			}
+			callID := util.SanitizeClaudeToolID(rawID)
+			toolResultDoc := ojson.NewDoc([]byte(`{"type":"tool_result","tool_use_id":"","content":""}`))
+			_ = toolResultDoc.Set("tool_use_id", callID)
+			// Responses reports an unfinished tool output as status
+			// "incomplete"; Claude's only in-band equivalent is is_error
+			// on tool_result, so carry the signal over instead of dropping it.
+			if strings.EqualFold(strings.TrimSpace(outputItem.Get("status").String()), "incomplete") {
+				_ = toolResultDoc.Set("is_error", true)
+			}
+			if errToolResult := applyResponsesToolResultContentDoc(toolResultDoc, output); errToolResult != nil && toolOutputErr == nil {
+				toolOutputErr = errToolResult
+			}
+
+			appendParts("user", toolResultDoc.Bytes())
+
+		case "tool_search_call":
+			if !toolSearch {
+				unmappedItemTypes[typ]++
+				continue
+			}
+			toolUse, rawCallID := convertResponsesToolSearchCallToClaude(item, names.claudeName(responsesToolSearchType))
+			if toolUse == nil {
+				unmappedItemTypes[typ]++
+				continue
+			}
+			emittedRawToolUses[rawCallID] = struct{}{}
+			appendToolUse(toolUse)
+
+		case "tool_search_output":
+			if !toolSearch {
+				unmappedItemTypes[typ]++
+				continue
+			}
+			rawID := strings.TrimSpace(item.Get("call_id").String())
+			if rawID != "" {
+				if _, exists := emittedToolResults[rawID]; exists {
+					continue
+				}
+				emittedToolResults[rawID] = struct{}{}
+			}
+			if _, paired := emittedRawToolUses[rawID]; rawID == "" || !paired {
+				text := []byte(`{"type":"text","text":""}`)
+				text, _ = ojson.SetBytes(text, "text", responsesToolSearchOutputText(item, names))
+				appendParts("user", text)
+				turnHasEmptyWebSearchResult = false
+				continue
+			}
+			toolResultDoc := ojson.NewDoc([]byte(`{"type":"tool_result","tool_use_id":"","content":""}`))
+			_ = toolResultDoc.Set("tool_use_id", util.SanitizeClaudeToolID(rawID))
+			_ = toolResultDoc.SetRawBytes("content", responsesToolSearchOutputContent(item, names, winners, nativeToolSearch))
+			appendParts("user", toolResultDoc.Bytes())
+
+		default:
+			// Reachability guard: Claude only ever receives the item types this
+			// switch handles. A new one means the client gained a capability
+			// whose Claude counterpart still has to be decided, so make the gap
+			// visible instead of dropping the turn content in silence.
+			if typ := item.Get("type").String(); typ != "" && typ != "additional_tools" {
+				// additional_tools is consumed later when building tools[], so it
+				// is not dropped turn content and must not warn.
+				unmappedItemTypes[typ]++
+			}
+		}
 	}
 	flushPendingMessage()
-	// Preserve a minimal conversational turn for system-only inputs so downstream
-	// validation still sees a Claude-shaped request.
-	if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
+	// Every system-level input item that was not emitted as an in-place turn
+	// (leading items, ineligible items, and queued items with no following user
+	// message) becomes a top-level system block in its original source order.
+	for _, entry := range systemInputEntries {
+		if !entry.emitted {
+			systemBlocks = append(systemBlocks, entry.blocks...)
+		}
+	}
+	pendingSystemEntryIndices = nil
+	// The structured-output instruction stays the last system block.
+	formatResult := root.Get("text.format")
+	if !formatResult.Exists() {
+		formatResult = root.Get("response_format")
+	}
+	formatInstruction := common.BuildClaudeStructuredOutputInstruction(formatResult)
+	if schema, ok := common.ClaudeOutputFormatSchema(modelName, formatResult); ok {
+		_ = outDoc.Set("output_config.format.type", "json_schema")
+		_ = outDoc.SetRaw("output_config.format.schema", schema.Raw)
+		formatInstruction = common.BuildClaudeOutputFormatDescription(formatResult)
+	}
+	if formatInstruction != "" {
+		appendSystemText(formatInstruction)
+	}
+	if len(unmappedItemTypes) > 0 {
+		log.Warnf("responses->claude: dropped input items of unmapped types %v (model=%s)", unmappedItemTypes, modelName)
+	}
+	hadMessages := len(messageBlocks) > 0
+	if !preserveEmptyThinkingBlocks {
+		messageBlocks = stripTrailingClaudeThinkingBlocks(messageBlocks)
+	}
+	// Answer dangling tool_use blocks before the prefill check below so an
+	// interrupted turn ends with a synthesized user tool_result instead of a
+	// rejected assistant prefill on models that disallow it.
+	messageBlocks = repairClaudeToolPairing(messageBlocks)
+	if !preserveEmptyThinkingBlocks {
+		messageBlocks = dropUnsupportedClaudeAssistantPrefill(modelName, messageBlocks)
+	}
+	if problems := claudeMessageInvariantProblems(messageBlocks); len(problems) > 0 {
+		log.Warnf("responses->claude: message invariants violated after repair (model=%s): %s", modelName, strings.Join(problems, "; "))
+	}
+	// Preserve a minimal conversational turn for system-only inputs or when messages became empty
+	// so downstream validation still sees a Claude-shaped request.
+	if len(messageBlocks) == 0 && (len(systemBlocks) > 0 || hadMessages) {
 		messageBlocks = append(messageBlocks, []byte(`{"role":"user","content":[{"type":"text","text":""}]}`))
 	}
-	out = common.SetRawArrayItems(out, "messages", messageBlocks)
+	common.SetRawArrayItemsDoc(outDoc, "messages", messageBlocks)
 	if len(systemBlocks) > 0 {
-		out, _ = sjson.SetRawBytes(out, "system", common.JoinRawArray(systemBlocks))
+		_ = outDoc.SetRawBytes("system", common.JoinRawArray(systemBlocks))
 	}
 
 	includedToolNames := map[string]struct{}{}
@@ -467,44 +704,73 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 	// one winner for each final name, while keeping the original order for the
 	// tools that survive conversion.
 	var toolItems [][]byte
-	winners := responsesToolWinners(root)
-	for _, descriptor := range responsesToolDescriptors(root) {
+	// The deferred anchor goes between declared and discovered tools, so each
+	// discovery only appends to tools[].
+	anchorIndex := -1
+	for _, descriptor := range responsesToolDescriptors(root, toolSearch) {
 		winner, ok := winners[descriptor.name]
 		if !ok || winner.order != descriptor.order {
 			continue
 		}
-		tJSON, ok := convertResponsesToolDescriptorToClaude(descriptor)
+		claudeName := names.claudeName(descriptor.name)
+		tJSON, ok := convertResponsesToolDescriptorToClaude(descriptor, claudeName)
 		if !ok {
 			continue
 		}
-		toolName := gjson.GetBytes(tJSON, "name").String()
+		if nativeToolSearch && descriptor.sourcePriority == responsesDiscoveredToolPriority {
+			if anchorIndex < 0 {
+				anchorIndex = len(toolItems)
+			}
+			// Anthropic rejects cache_control on deferred tools.
+			tDoc := ojson.NewDoc(tJSON)
+			_ = tDoc.Delete("cache_control")
+			_ = tDoc.Set("defer_loading", true)
+			tJSON = tDoc.Bytes()
+		}
+		toolName := ojson.GetBytesNoCopy(tJSON, "name").String()
 		if toolName != "" {
+			includedToolNames[descriptor.name] = struct{}{}
 			includedToolNames[toolName] = struct{}{}
 		}
 		toolItems = append(toolItems, tJSON)
 	}
-	toolNameMap = responsesToolNameMap(root, includedToolNames)
+	if nativeToolSearch {
+		if anchorIndex < 0 {
+			anchorIndex = len(toolItems)
+		}
+		if anchor, ok := responsesDeferredAnchorTool(toolItems); ok {
+			toolItems = append(toolItems[:anchorIndex], append([][]byte{anchor}, toolItems[anchorIndex:]...)...)
+		}
+	}
+	toolNameMap = responsesToolNameMap(root, includedToolNames, toolSearch)
 	if len(toolItems) > 0 {
-		out, _ = sjson.SetRawBytes(out, "tools", common.JoinRawArray(toolItems))
+		_ = outDoc.SetRawBytes("tools", common.JoinRawArray(toolItems))
 	}
 
 	// Map tool_choice similar to Chat Completions translator (optional in docs, safe to handle)
+	toolChoiceNone := false
+	forcedToolFilteredOut := false
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
 		switch toolChoice.Type {
-		case gjson.String:
+		case ojson.String:
 			switch toolChoice.String() {
 			case "auto":
-				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+				_ = outDoc.SetRaw("tool_choice", `{"type":"auto"}`)
 			case "none":
 				// Leave unset; implies no tools
+				toolChoiceNone = true
 			case "required":
 				if len(includedToolNames) > 0 {
-					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+					_ = outDoc.SetRaw("tool_choice", `{"type":"any"}`)
+				} else {
+					forcedToolFilteredOut = true
 				}
 			}
-		case gjson.JSON:
-			choiceType := toolChoice.Get("type").String()
-			if choiceType == "function" || choiceType == "custom" {
+		case ojson.JSON:
+			choiceType := strings.TrimSpace(toolChoice.Get("type").String())
+			if choiceType == "none" {
+				toolChoiceNone = true
+			} else if choiceType == "function" || choiceType == "custom" {
 				fn := toolChoice.Get("function.name").String()
 				if fn == "" {
 					fn = toolChoice.Get("custom.name").String()
@@ -527,8 +793,14 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				if _, ok := includedToolNames[fn]; ok {
 					toolChoiceJSON := []byte(`{"name":"","type":"tool"}`)
-					toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", fn)
-					out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+					toolChoiceJSON, _ = ojson.SetBytes(toolChoiceJSON, "name", names.claudeName(fn))
+					_ = outDoc.SetRawBytes("tool_choice", toolChoiceJSON)
+				} else {
+					forcedToolFilteredOut = true
+				}
+			} else if choiceType != "" && choiceType != "auto" {
+				if _, ok := includedToolNames[choiceType]; !ok {
+					forcedToolFilteredOut = true
 				}
 			}
 		default:
@@ -536,7 +808,43 @@ func convertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		}
 	}
 
-	return out
+	// parallel_tool_calls=false maps to Anthropic's disable_parallel_tool_use,
+	// mirroring the Chat Completions translator. It is not added when the
+	// effective choice is none, when no tool survived conversion, or when a
+	// forced tool was filtered out (no tool_choice was produced for it).
+	if parallelToolCalls := root.Get("parallel_tool_calls"); parallelToolCalls.Type == ojson.False && !toolChoiceNone && !forcedToolFilteredOut && len(toolItems) > 0 {
+		if choice := outDoc.Get("tool_choice"); choice.Exists() {
+			if choice.Get("type").String() != "none" {
+				_ = outDoc.Set("tool_choice.disable_parallel_tool_use", true)
+			}
+		} else {
+			_ = outDoc.SetRaw("tool_choice", `{"type":"auto","disable_parallel_tool_use":true}`)
+		}
+	}
+
+	if errDrops := drops.Err(); errDrops != nil {
+		return thinking.ApplyTranslatedSummaryToClaude(outDoc.Bytes(), rawJSON, "openai-response", modelName), errDrops
+	}
+	return thinking.ApplyTranslatedSummaryToClaude(outDoc.Bytes(), rawJSON, "openai-response", modelName), toolOutputErr
+}
+
+func defaultClaudeResponsesMaxTokensForModel(modelName string) int {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	maxTokens := defaultClaudeResponsesMaxTokens
+	if strings.Contains(normalized, "fable") {
+		maxTokens = defaultFableResponsesMaxTokens
+	}
+	info := registry.LookupModelInfo(modelName, "claude")
+	if info == nil || info.MaxCompletionTokens <= 0 {
+		return maxTokens
+	}
+	// Fable keeps its conservative omitted-field ceiling. Every other registered
+	// model uses its output limit, including when that limit is above the
+	// historical 32000 default.
+	if strings.Contains(normalized, "fable") && info.MaxCompletionTokens >= maxTokens {
+		return maxTokens
+	}
+	return info.MaxCompletionTokens
 }
 
 // isResponsesSystemLevelRole reports whether an input item carries system-level
@@ -551,6 +859,258 @@ func isResponsesSystemLevelRole(role string) bool {
 	}
 }
 
+type topLevelSystemItemsContextKey struct{}
+
+// WithTopLevelSystemItems pins, for one request, whether every system-level
+// input item becomes a top-level system block. The executor sets it before
+// translation for upstreams where an in-place role=system turn cannot be used:
+// models that reject the turn, strict cloaking (which drops every caller system
+// instruction) and requests whose mid-conversation system turns are rebuilt
+// into the system field.
+func WithTopLevelSystemItems(ctx context.Context, topLevel bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, topLevelSystemItemsContextKey{}, topLevel)
+}
+
+// topLevelSystemItemsFor returns the value pinned in ctx or, when ctx carries
+// none, whether modelName rejects mid-conversation role=system turns.
+func topLevelSystemItemsFor(ctx context.Context, modelName string) bool {
+	if ctx != nil {
+		if topLevel, ok := ctx.Value(topLevelSystemItemsContextKey{}).(bool); ok {
+			return topLevel
+		}
+	}
+	return util.IsClaudeLegacySystemReminderModel(modelName)
+}
+
+// responsesSystemItemToClaudeBlocks converts one system-level input item into
+// Claude system blocks: one text block per non-blank text part, a blank part's
+// cache_control moved to the preceding block, the item's cache_control on its
+// last block, and a typed marker for each unsupported part so the executor can
+// report it instead of dropping it.
+func responsesSystemItemToClaudeBlocks(item ojson.Result) [][]byte {
+	var blockDocs []*ojson.Doc
+	attachCacheControlToLast := func(source ojson.Result) {
+		if !source.Get("cache_control").Exists() || len(blockDocs) == 0 {
+			return
+		}
+		lastDoc := blockDocs[len(blockDocs)-1]
+		if !lastDoc.Get("cache_control").Exists() {
+			attachClaudeCacheControlDoc(lastDoc, source)
+		}
+	}
+	appendText := func(text string, cacheSource ojson.Result) {
+		if strings.TrimSpace(text) == "" {
+			attachCacheControlToLast(cacheSource)
+			return
+		}
+		blockDoc := ojson.NewDoc([]byte(`{"type":"text","text":""}`))
+		_ = blockDoc.Set("text", text)
+		if cacheSource.Exists() {
+			attachClaudeCacheControlDoc(blockDoc, cacheSource)
+		}
+		blockDocs = append(blockDocs, blockDoc)
+	}
+	content := item.Get("content")
+	if content.Type == ojson.String {
+		appendText(content.String(), ojson.Result{})
+	} else if content.IsArray() {
+		content.ForEach(func(_, part ojson.Result) bool {
+			switch part.Get("type").String() {
+			case "input_text", "output_text", "text":
+				appendText(part.Get("text").String(), part)
+			default:
+				if blockDoc := responsesSystemUnsupportedBlockDoc(part); blockDoc != nil {
+					blockDocs = append(blockDocs, blockDoc)
+				}
+			}
+			return true
+		})
+	}
+	attachCacheControlToLast(item)
+	if len(blockDocs) == 0 {
+		return nil
+	}
+	blocks := make([][]byte, len(blockDocs))
+	for i, blockDoc := range blockDocs {
+		blocks[i] = blockDoc.Bytes()
+	}
+	return blocks
+}
+
+func attachClaudeCacheControlDoc(doc *ojson.Doc, src ojson.Result) {
+	if doc == nil {
+		return
+	}
+	cc := src.Get("cache_control")
+	if !cc.Exists() || cc.Type == ojson.Null || !cc.IsObject() {
+		return
+	}
+	typ := cc.Get("type")
+	if typ.Type != ojson.String || typ.String() != "ephemeral" {
+		return
+	}
+	switch doc.Get("type").String() {
+	case "thinking", "redacted_thinking":
+		return
+	case "text":
+		if strings.TrimSpace(doc.Get("text").String()) == "" {
+			return
+		}
+	}
+	_ = doc.SetRaw("cache_control", cc.Raw)
+}
+
+// isResponsesMessageItem reports whether an input item is a message, which is
+// the only item shape that can become a role=system turn.
+func isResponsesMessageItem(item ojson.Result) bool {
+	typ := item.Get("type").String()
+	return typ == "" || typ == "message"
+}
+
+// claudeBlocksAreAllText reports whether blocks is non-empty and holds only
+// text blocks, the content a role=system turn can carry besides tool changes.
+func claudeBlocksAreAllText(blocks [][]byte) bool {
+	if len(blocks) == 0 {
+		return false
+	}
+	for _, block := range blocks {
+		if ojson.GetBytesNoCopy(block, "type").String() != "text" {
+			return false
+		}
+	}
+	return true
+}
+
+// dropUnsupportedClaudeAssistantPrefill removes a trailing assistant message for
+// Claude model families that reject assistant message prefill (e.g., Fable,
+// Opus 5, Sonnet 4.6, Haiku 5.5), except when the message ends on a server-tool
+// block (server_tool_use or web_search_tool_result) from a pause_turn response
+// that the continuation must send back.
+func dropUnsupportedClaudeAssistantPrefill(modelName string, messages [][]byte) [][]byte {
+	if !claudeModelRejectsAssistantPrefill(modelName) || len(messages) == 0 {
+		return messages
+	}
+	last := util.ParseGJSONBytesNoCopy(messages[len(messages)-1])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	if claudeAssistantMessageEndsWithPausedServerTool(last) {
+		return messages
+	}
+	return messages[:len(messages)-1]
+}
+
+func claudeAssistantMessageEndsWithPausedServerTool(message ojson.Result) bool {
+	content := message.Get("content")
+	if !content.IsArray() {
+		return false
+	}
+	parts := content.Array()
+	if len(parts) == 0 {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(parts[len(parts)-1].Get("type").String())) {
+	case "server_tool_use", "web_search_tool_result":
+		return true
+	default:
+		return false
+	}
+}
+
+// stripTrailingClaudeThinkingBlocks removes trailing thinking and
+// redacted_thinking blocks from the final assistant message. Anthropic rejects
+// requests whose final assistant content block is thinking. If no content
+// blocks remain after stripping, the assistant message itself is dropped.
+func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
+	if len(messages) == 0 {
+		return messages
+	}
+	lastIdx := len(messages) - 1
+	last := util.ParseGJSONBytesNoCopy(messages[lastIdx])
+	if !strings.EqualFold(strings.TrimSpace(last.Get("role").String()), "assistant") {
+		return messages
+	}
+	content := last.Get("content")
+	if !content.IsArray() {
+		return messages
+	}
+	parts := content.Array()
+	end := len(parts)
+	for end > 0 {
+		partType := strings.TrimSpace(parts[end-1].Get("type").String())
+		if partType == "thinking" || partType == "redacted_thinking" {
+			end--
+		} else {
+			break
+		}
+	}
+	if end == len(parts) {
+		return messages
+	}
+	if end == 0 {
+		return messages[:lastIdx]
+	}
+	remainingParts := make([][]byte, end)
+	for i := 0; i < end; i++ {
+		remainingParts[i] = []byte(parts[i].Raw)
+	}
+	var updatedMsg []byte
+	if end == 1 {
+		part := parts[0]
+		if part.Get("type").String() == "text" && !part.Get("cache_control").Exists() && !part.Get("citations").Exists() {
+			updatedMsg, _ = ojson.SetBytes(messages[lastIdx], "content", part.Get("text").String())
+		} else {
+			updatedMsg, _ = ojson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+		}
+	} else {
+		updatedMsg, _ = ojson.SetRawBytes(messages[lastIdx], "content", common.JoinRawArray(remainingParts))
+	}
+	messages[lastIdx] = updatedMsg
+	return messages
+}
+
+// claudeModelRejectsAssistantPrefill reports whether a Claude model family
+// disallows trailing assistant prefill in its conversation history.
+func claudeModelRejectsAssistantPrefill(modelName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(modelName))
+	// Provider namespaces are not part of the model family.
+	if index := strings.LastIndexByte(normalized, '/'); index >= 0 {
+		normalized = normalized[index+1:]
+	}
+	normalized = strings.TrimPrefix(normalized, "claude-")
+	tokens := strings.Split(strings.ReplaceAll(normalized, ".", "-"), "-")
+	if tokens[0] == "fable" {
+		return true
+	}
+	if len(tokens) < 2 || (tokens[0] != "opus" && tokens[0] != "sonnet" && tokens[0] != "haiku") {
+		return false
+	}
+	parseVersion := func(token string) int {
+		// Eight-digit snapshot dates must never be treated as versions.
+		if token == "" || len(token) >= 8 {
+			return -1
+		}
+		for _, digit := range token {
+			if digit < '0' || digit > '9' {
+				return -1
+			}
+		}
+		version, errAtoi := strconv.Atoi(token)
+		if errAtoi != nil {
+			return -1
+		}
+		return version
+	}
+	major := parseVersion(tokens[1])
+	if major >= 5 {
+		return true
+	}
+	return tokens[0] == "sonnet" && major == 4 && len(tokens) > 2 && parseVersion(tokens[2]) >= 6
+}
+
 // responsesSystemUnsupportedBlock represents a system-level content part that
 // Claude cannot carry. Anthropic accepts text only in the top-level system field
 // ("system.<i>.type: Input should be 'text'") and text, tool_addition and
@@ -560,14 +1120,14 @@ func isResponsesSystemLevelRole(role string) bool {
 // rejected request, and the marker lets the Claude executor fail the request with
 // the offending type named. The original payload is not copied because the
 // request can never succeed.
-func responsesSystemUnsupportedBlock(part gjson.Result) []byte {
+func responsesSystemUnsupportedBlockDoc(part ojson.Result) *ojson.Doc {
 	partType := strings.TrimSpace(part.Get("type").String())
 	if partType == "" {
 		return nil
 	}
-	block := []byte(`{"type":""}`)
-	block, _ = sjson.SetBytes(block, "type", partType)
-	return block
+	blockDoc := ojson.NewDoc([]byte(`{"type":""}`))
+	_ = blockDoc.Set("type", partType)
+	return blockDoc
 }
 
 // convertResponsesReasoningToClaudeThinking rebuilds one Claude thinking block
@@ -579,7 +1139,7 @@ func responsesSystemUnsupportedBlock(part gjson.Result) []byte {
 // signature for upstreams that use a provider-specific signature format.
 // Anthropic does not verify the text against the signature, which is what makes
 // the summarized text safe to restore alongside it.
-func convertResponsesReasoningToClaudeThinking(item gjson.Result, preserveEmptyThinkingBlocks ...bool) []byte {
+func convertResponsesReasoningToClaudeThinking(item ojson.Result, preserveEmptyThinkingBlocks ...bool) []byte {
 	encrypted := item.Get("encrypted_content").String()
 	preserveEmpty := len(preserveEmptyThinkingBlocks) > 0 && preserveEmptyThinkingBlocks[0]
 	if data, isRedacted := responsesRedactedThinkingData(encrypted); isRedacted {
@@ -587,7 +1147,7 @@ func convertResponsesReasoningToClaudeThinking(item gjson.Result, preserveEmptyT
 			return nil
 		}
 		redactedPart := []byte(`{"type":"redacted_thinking","data":""}`)
-		redactedPart, _ = sjson.SetBytes(redactedPart, "data", data)
+		redactedPart, _ = ojson.SetBytes(redactedPart, "data", data)
 		return redactedPart
 	}
 
@@ -600,10 +1160,10 @@ func convertResponsesReasoningToClaudeThinking(item gjson.Result, preserveEmptyT
 	}
 
 	thinkingText := responsesReasoningText(item)
-	thinkingPart := []byte(`{"type":"thinking","thinking":"","signature":""}`)
-	thinkingPart, _ = sjson.SetBytes(thinkingPart, "thinking", thinkingText)
-	thinkingPart, _ = sjson.SetBytes(thinkingPart, "signature", signature)
-	return thinkingPart
+	thinkingPartDoc := ojson.NewDoc([]byte(`{"type":"thinking","thinking":"","signature":""}`))
+	_ = thinkingPartDoc.Set("thinking", thinkingText)
+	_ = thinkingPartDoc.Set("signature", signature)
+	return thinkingPartDoc.Bytes()
 }
 
 // responsesRedactedThinkingData reports whether encrypted_content carries an
@@ -622,22 +1182,22 @@ func responsesRedactedThinkingData(encryptedContent string) (string, bool) {
 // item back through whichever array their SDK models, so both are read. content[]
 // is only consulted when summary[] carried nothing, otherwise a client that
 // mirrors the text into both arrays would replay it twice.
-func responsesReasoningText(item gjson.Result) string {
+func responsesReasoningText(item ojson.Result) string {
 	if text := responsesReasoningPartsText(item.Get("summary")); text != "" {
 		return text
 	}
 	return responsesReasoningPartsText(item.Get("content"))
 }
 
-func responsesReasoningPartsText(parts gjson.Result) string {
+func responsesReasoningPartsText(parts ojson.Result) string {
 	if !parts.Exists() || !parts.IsArray() {
 		return ""
 	}
 	var builder strings.Builder
-	parts.ForEach(func(_, part gjson.Result) bool {
+	parts.ForEach(func(_, part ojson.Result) bool {
 		if text := part.Get("text"); text.Exists() {
 			builder.WriteString(text.String())
-		} else if part.Type == gjson.String {
+		} else if part.Type == ojson.String {
 			builder.WriteString(part.String())
 		}
 		return true
@@ -645,50 +1205,441 @@ func responsesReasoningPartsText(parts gjson.Result) string {
 	return builder.String()
 }
 
-func applyResponsesToolResultContent(toolResult []byte, output gjson.Result) []byte {
-	if output.Exists() && output.IsArray() {
+// claudeThinkingSeparatorForToolUse returns the most recent thinking block when
+// the buffered assistant content ends with a server tool result, so the
+// tool-use run that follows keeps a thinking block of its own. Upstreams that
+// enforce Anthropic's thinking replay rules reject a tool_use glued directly
+// onto a web_search_tool_result, while native Claude output always carries a
+// fresh thinking block before the continued segment.
+func claudeThinkingSeparatorForToolUse(parts [][]byte) []byte {
+	if len(parts) == 0 {
+		return nil
+	}
+	if ojson.GetBytesNoCopy(parts[len(parts)-1], "type").String() != "web_search_tool_result" {
+		return nil
+	}
+	for index := len(parts) - 1; index >= 0; index-- {
+		if ojson.GetBytesNoCopy(parts[index], "type").String() == "thinking" {
+			return parts[index]
+		}
+	}
+	return nil
+}
+
+func isResponsesStructuredToolOutputPart(part ojson.Result) bool {
+	if !part.IsObject() {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(part.Get("type").String())) {
+	case "input_text", "output_text", "input_image", "input_file", "file", "input_audio", "audio", "input_video", "video":
+		return true
+	case "text":
+		return part.Get("text").Type == ojson.String
+	default:
+		return false
+	}
+}
+
+func unsupportedResponsesToolPartType(part ojson.Result) string {
+	ptype := strings.TrimSpace(part.Get("type").String())
+	switch strings.ToLower(ptype) {
+	case "input_file", "file", "input_audio", "audio", "input_video", "video", "input_image":
+		return ptype
+	default:
+		return ""
+	}
+}
+
+func responsesToolOutputItems(output ojson.Result) ([]ojson.Result, bool) {
+	if !output.Exists() {
+		return nil, false
+	}
+	if output.IsArray() {
+		return output.Array(), true
+	}
+	if isResponsesStructuredToolOutputPart(output) {
+		return []ojson.Result{output}, true
+	}
+	return nil, false
+}
+
+func applyResponsesToolResultContentDoc(toolResultDoc *ojson.Doc, output ojson.Result) error {
+	if items, ok := responsesToolOutputItems(output); ok {
 		var partsJSON [][]byte
 		hasImage := false
 		hasFile := false
-		output.ForEach(func(_, part gjson.Result) bool {
-			if partJSON := convertResponsesContentPartToClaude(part); len(partJSON) > 0 {
-				partsJSON = append(partsJSON, partJSON)
-				partType := gjson.ParseBytes(partJSON).Get("type").String()
-				if partType == "image" {
-					hasImage = true
+		droppedEmptyPart := false
+		var unsupportedType string
+		for _, part := range items {
+			partJSON := convertResponsesContentPartToClaude(part)
+			if len(partJSON) == 0 {
+				if unsupportedType == "" {
+					unsupportedType = unsupportedResponsesToolPartType(part)
 				}
-				if partType == "document" {
-					hasFile = true
-				}
+				continue
 			}
-			return true
-		})
+			if !contentPartHasVisibleContent(partJSON) {
+				droppedEmptyPart = true
+				continue
+			}
+			partsJSON = append(partsJSON, partJSON)
+			partType := util.ParseGJSONBytesNoCopy(partJSON).Get("type").String()
+			if partType == "image" {
+				hasImage = true
+			}
+			if partType == "document" {
+				hasFile = true
+			}
+		}
+		if unsupportedType != "" {
+			return &common.UnsupportedPartError{Type: unsupportedType}
+		}
 		if len(partsJSON) == 0 {
-			toolResult, _ = sjson.SetBytes(toolResult, "content", output.Raw)
-			return toolResult
+			if droppedEmptyPart {
+				_ = toolResultDoc.Set("content", "")
+				return nil
+			}
+			if output.IsArray() {
+				_ = toolResultDoc.Set("content", output.Raw)
+			} else {
+				_ = toolResultDoc.Set("content", output.String())
+			}
+			return nil
 		}
 		if len(partsJSON) == 1 && !hasImage && !hasFile {
-			textPart := gjson.ParseBytes(partsJSON[0])
+			textPart := util.ParseGJSONBytesNoCopy(partsJSON[0])
 			if textPart.Get("type").String() == "text" {
-				toolResult, _ = sjson.SetBytes(toolResult, "content", textPart.Get("text").String())
-				return toolResult
+				_ = toolResultDoc.Set("content", textPart.Get("text").String())
+				return nil
 			}
 		}
-		toolResult, _ = sjson.DeleteBytes(toolResult, "content")
-		toolResult, _ = sjson.SetRawBytes(toolResult, "content", common.JoinRawArray(partsJSON))
-		return toolResult
+		_ = toolResultDoc.SetRawBytes("content", common.JoinRawArray(partsJSON))
+		return nil
 	}
-	toolResult, _ = sjson.SetBytes(toolResult, "content", output.String())
-	return toolResult
+	_ = toolResultDoc.Set("content", output.String())
+	return nil
 }
 
-func convertResponsesContentPartToClaude(part gjson.Result) []byte {
+// claudeMessageInvariantProblems reports shapes Anthropic rejects. It only
+// describes; repairClaudeToolPairing already fixes the cases it knows about,
+// so anything reported here is a new history shape worth investigating from
+// the proxy log instead of from an upstream 400.
+func claudeMessageInvariantProblems(messages [][]byte) []string {
+	var problems []string
+	if len(messages) > 0 && ojson.GetBytesNoCopy(messages[0], "role").String() != "user" {
+		problems = append(problems, "first message is not user")
+	}
+	for i, msg := range messages {
+		role := ojson.GetBytesNoCopy(msg, "role").String()
+		content := ojson.GetBytesNoCopy(msg, "content")
+		switch role {
+		case "assistant":
+			var toolUseIDs []string
+			content.ForEach(func(_, block ojson.Result) bool {
+				if block.Get("type").String() == "tool_use" {
+					toolUseIDs = append(toolUseIDs, block.Get("id").String())
+				}
+				return true
+			})
+			if len(toolUseIDs) == 0 {
+				continue
+			}
+			if i+1 >= len(messages) || ojson.GetBytesNoCopy(messages[i+1], "role").String() != "user" {
+				problems = append(problems, "messages["+strconv.Itoa(i)+"] tool_use has no following user message")
+				continue
+			}
+			next := ojson.GetBytesNoCopy(messages[i+1], "content")
+			answered := map[string]struct{}{}
+			next.ForEach(func(_, block ojson.Result) bool {
+				if block.Get("type").String() == "tool_result" {
+					answered[block.Get("tool_use_id").String()] = struct{}{}
+				}
+				return true
+			})
+			for _, id := range toolUseIDs {
+				if _, ok := answered[id]; !ok {
+					problems = append(problems, "messages["+strconv.Itoa(i)+"] tool_use "+id+" has no tool_result in messages["+strconv.Itoa(i+1)+"]")
+				}
+			}
+		case "user":
+			var previous ojson.Result
+			if i > 0 {
+				previous = ojson.GetBytesNoCopy(messages[i-1], "content")
+			}
+			toolUses := map[string]struct{}{}
+			previous.ForEach(func(_, block ojson.Result) bool {
+				if block.Get("type").String() == "tool_use" {
+					toolUses[block.Get("id").String()] = struct{}{}
+				}
+				return true
+			})
+			leading := true
+			content.ForEach(func(_, block ojson.Result) bool {
+				if block.Get("type").String() == "tool_result" {
+					if !leading {
+						problems = append(problems, "messages["+strconv.Itoa(i)+"] tool_result after non-tool_result block")
+					}
+					if _, ok := toolUses[block.Get("tool_use_id").String()]; !ok {
+						problems = append(problems, "messages["+strconv.Itoa(i)+"] tool_result "+block.Get("tool_use_id").String()+" has no tool_use in the previous message")
+					}
+				} else {
+					leading = false
+				}
+				return true
+			})
+		}
+	}
+	return problems
+}
+
+// repairClaudeToolPairing enforces the Anthropic invariant that every
+// assistant tool_use is answered by a tool_result at the start of the very
+// next user message, and that every tool_result references a tool_use in the
+// immediately preceding assistant message. Histories break it in practice
+// when a session dies while a tool runs (tool_use with no output), when
+// standalone context is injected ahead of a real tool output (text before
+// tool_result), or when a delayed output lands after an intervening
+// assistant message. Missing results are synthesized as errors and orphan
+// results fold into plain text so the model can carry on.
+func repairClaudeToolPairing(messages [][]byte) [][]byte {
+	if len(messages) == 0 {
+		return messages
+	}
+	prevToolUseIDs := map[string]struct{}{}
+	out := make([][]byte, 0, len(messages)+1)
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+		role := ojson.GetBytesNoCopy(msg, "role").String()
+		content := ojson.GetBytesNoCopy(msg, "content")
+
+		if role == "user" {
+			// Fold tool_result blocks that do not answer a tool_use in the
+			// immediately preceding assistant message into plain text, and move
+			// the real ones ahead of any other content.
+			rebuilt, changed := normalizeClaudeToolResultMessage(msg, prevToolUseIDs)
+			if changed {
+				msg = rebuilt
+				content = ojson.GetBytesNoCopy(msg, "content")
+				if i < len(messages) {
+					messages[i] = msg
+				}
+			}
+		}
+
+		out = append(out, msg)
+
+		prevToolUseIDs = map[string]struct{}{}
+		if role == "assistant" {
+			var toolUseIDs []string
+			content.ForEach(func(_, block ojson.Result) bool {
+				if block.Get("type").String() == "tool_use" {
+					if id := block.Get("id").String(); id != "" {
+						toolUseIDs = append(toolUseIDs, id)
+						prevToolUseIDs[id] = struct{}{}
+					}
+				}
+				return true
+			})
+			if len(toolUseIDs) == 0 {
+				continue
+			}
+
+			hasNextUser := i+1 < len(messages) && ojson.GetBytesNoCopy(messages[i+1], "role").String() == "user"
+			answered := map[string]struct{}{}
+			if hasNextUser {
+				ojson.GetBytesNoCopy(messages[i+1], "content").ForEach(func(_, block ojson.Result) bool {
+					if block.Get("type").String() == "tool_result" {
+						answered[block.Get("tool_use_id").String()] = struct{}{}
+					}
+					return true
+				})
+			}
+
+			var synthesized [][]byte
+			for _, id := range toolUseIDs {
+				if _, ok := answered[id]; ok {
+					continue
+				}
+				part := []byte(`{"type":"tool_result","tool_use_id":"","is_error":true,"content":"Tool call was interrupted before any output was recorded."}`)
+				part, _ = ojson.SetBytes(part, "tool_use_id", id)
+				synthesized = append(synthesized, part)
+			}
+			if len(synthesized) == 0 {
+				continue
+			}
+
+			if hasNextUser {
+				// Prepend the missing results so tool_result blocks still lead
+				// the existing user message.
+				next := messages[i+1]
+				nextContent := ojson.GetBytesNoCopy(next, "content")
+				parts := synthesized
+				if nextContent.IsArray() {
+					nextContent.ForEach(func(_, block ojson.Result) bool {
+						parts = append(parts, []byte(block.Raw))
+						return true
+					})
+				} else if nextContent.Type == ojson.String {
+					textPart := []byte(`{"type":"text","text":""}`)
+					textPart, _ = ojson.SetBytes(textPart, "text", nextContent.String())
+					parts = append(parts, textPart)
+				}
+				userMsg := []byte(`{"role":"user","content":[]}`)
+				userMsg, _ = ojson.SetRawBytes(userMsg, "content", common.JoinRawArray(parts))
+				messages[i+1] = userMsg
+			} else {
+				userMsg := []byte(`{"role":"user","content":[]}`)
+				userMsg, _ = ojson.SetRawBytes(userMsg, "content", common.JoinRawArray(synthesized))
+				out = append(out, userMsg)
+			}
+		}
+	}
+	return out
+}
+
+// normalizeClaudeToolResultMessage rebuilds a user message so tool_result
+// blocks lead the content and any tool_result that does not answer a tool_use
+// in the immediately preceding assistant message folds into plain text.
+// answeredIDs lists the ids allowed to stay tool_result blocks.
+func normalizeClaudeToolResultMessage(msg []byte, answeredIDs map[string]struct{}) ([]byte, bool) {
+	content := ojson.GetBytesNoCopy(msg, "content")
+	if !content.IsArray() {
+		return msg, false
+	}
+	var resultParts, otherParts [][]byte
+	seenOther := false
+	changed := false
+	content.ForEach(func(_, block ojson.Result) bool {
+		raw := []byte(block.Raw)
+		if block.Get("type").String() == "tool_result" {
+			if _, ok := answeredIDs[block.Get("tool_use_id").String()]; !ok {
+				changed = true
+				seenOther = true
+				if textParts := toolResultTextParts(block); len(textParts) > 0 {
+					otherParts = append(otherParts, textParts...)
+				} else {
+					// An empty orphan result folds to nothing, so keep an
+					// explicit marker instead of producing an empty user
+					// message that Anthropic also rejects.
+					otherParts = append(otherParts, []byte(`{"type":"text","text":"Tool result was empty."}`))
+				}
+				return true
+			}
+			resultParts = append(resultParts, raw)
+			if seenOther {
+				changed = true
+			}
+			return true
+		}
+		seenOther = true
+		otherParts = append(otherParts, raw)
+		return true
+	})
+	if !changed {
+		return msg, false
+	}
+	parts := make([][]byte, 0, len(resultParts)+len(otherParts))
+	parts = append(parts, resultParts...)
+	parts = append(parts, otherParts...)
+	userMsg := []byte(`{"role":"user","content":[]}`)
+	userMsg, _ = ojson.SetRawBytes(userMsg, "content", common.JoinRawArray(parts))
+	return userMsg, true
+}
+
+// toolResultTextParts folds an orphan tool_result block into plain text parts
+// so it can ride along as ordinary user content. Empty text parts are
+// filtered out; when nothing visible remains it returns nil so the caller
+// can substitute a marker instead of emitting empty text blocks that
+// Anthropic rejects.
+func toolResultTextParts(block ojson.Result) [][]byte {
+	content := block.Get("content")
+	if content.IsArray() {
+		var parts [][]byte
+		content.ForEach(func(_, part ojson.Result) bool {
+			raw := []byte(part.Raw)
+			if part.Get("type").String() == "" {
+				raw, _ = ojson.SetBytes(raw, "type", "text")
+			}
+			if !contentPartHasVisibleContent(raw) {
+				return true
+			}
+			parts = append(parts, raw)
+			return true
+		})
+		if len(parts) > 0 {
+			return parts
+		}
+		return nil
+	}
+	text := content.String()
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	part := []byte(`{"type":"text","text":""}`)
+	part, _ = ojson.SetBytes(part, "text", text)
+	return [][]byte{part}
+}
+
+// convertResponsesStandaloneToolOutputToClaudeText renders a tool output that
+// has no matching tool_use as ordinary user content blocks.
+func convertResponsesStandaloneToolOutputToClaudeText(output ojson.Result) ([][]byte, error) {
+	if items, ok := responsesToolOutputItems(output); ok {
+		var partsJSON [][]byte
+		var unsupportedType string
+		for _, part := range items {
+			partJSON := convertResponsesContentPartToClaude(part)
+			if len(partJSON) == 0 {
+				if unsupportedType == "" {
+					unsupportedType = unsupportedResponsesToolPartType(part)
+				}
+				continue
+			}
+			// Drop empty text parts so a mixed array never emits blocks
+			// Anthropic rejects; images and documents always count.
+			if !contentPartHasVisibleContent(partJSON) {
+				continue
+			}
+			partsJSON = append(partsJSON, partJSON)
+		}
+		if unsupportedType != "" {
+			return nil, &common.UnsupportedPartError{Type: unsupportedType}
+		}
+		if len(partsJSON) > 0 {
+			return partsJSON, nil
+		}
+	}
+	text := output.String()
+	if output.IsArray() || isResponsesStructuredToolOutputPart(output) || strings.TrimSpace(text) == "" {
+		// An empty standalone output still needs a block so the user message
+		// it joins never degenerates to an empty content array. The IsArray
+		// guard keeps the raw array dump from leaking in as literal text when
+		// every converted part was empty.
+		return [][]byte{[]byte(`{"type":"text","text":"Tool result was empty."}`)}, nil
+	}
+	contentPart := []byte(`{"type":"text","text":""}`)
+	contentPart, _ = ojson.SetBytes(contentPart, "text", text)
+	return [][]byte{contentPart}, nil
+}
+
+// contentPartHasVisibleContent reports whether a converted Claude content
+// block carries user-visible payload (non-empty text, image, or document).
+func contentPartHasVisibleContent(part []byte) bool {
+	switch ojson.GetBytesNoCopy(part, "type").String() {
+	case "text":
+		return strings.TrimSpace(ojson.GetBytesNoCopy(part, "text").String()) != ""
+	default:
+		// Non-text blocks (image, document, ...) always carry content.
+		return true
+	}
+}
+
+func convertResponsesContentPartToClaude(part ojson.Result) []byte {
 	ptype := part.Get("type").String()
 	switch ptype {
-	case "input_text", "output_text":
+	case "input_text", "output_text", "text":
 		if t := part.Get("text"); t.Exists() {
 			contentPart := []byte(`{"type":"text","text":""}`)
-			contentPart, _ = sjson.SetBytes(contentPart, "text", t.String())
+			contentPart, _ = ojson.SetBytes(contentPart, "text", t.String())
 			return contentPart
 		}
 	case "input_image":
@@ -713,47 +1664,155 @@ func convertResponsesContentPartToClaude(part gjson.Result) []byte {
 			if data == "" {
 				return nil
 			}
-			contentPart := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-			contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-			contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-			return contentPart
+			cpDoc := ojson.NewDoc([]byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`))
+			_ = cpDoc.Set("source.media_type", mediaType)
+			_ = cpDoc.Set("source.data", data)
+			return cpDoc.Bytes()
 		}
 		contentPart := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
-		contentPart, _ = sjson.SetBytes(contentPart, "source.url", url)
+		contentPart, _ = ojson.SetBytes(contentPart, "source.url", url)
 		return contentPart
-	case "input_file":
-		fileData := part.Get("file_data").String()
-		if fileData == "" {
-			return nil
+	case "input_file", "file":
+		if contentPart, ok := convertResponsesInputFileToClaude(part); ok {
+			return contentPart
 		}
-		mediaType := "application/octet-stream"
-		data := fileData
-		if strings.HasPrefix(fileData, "data:") {
-			trimmed := strings.TrimPrefix(fileData, "data:")
-			mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-			if len(mediaAndData) == 2 {
-				if mediaAndData[0] != "" {
-					mediaType = mediaAndData[0]
-				}
-				data = mediaAndData[1]
-			}
-		}
-		contentPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
-		contentPart, _ = sjson.SetBytes(contentPart, "source.media_type", mediaType)
-		contentPart, _ = sjson.SetBytes(contentPart, "source.data", data)
-		return contentPart
+		return nil
 	}
 	return nil
 }
 
-func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) bool {
-	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
+func isGenericClaudeInputFileMIME(mimeType string) bool {
+	m := strings.ToLower(strings.TrimSpace(mimeType))
+	return m == "" || m == "application/octet-stream" || m == "binary/octet-stream"
 }
 
-func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor) ([]byte, bool) {
-	overrideName := ""
-	if !descriptor.direct {
+func isSupportedClaudeDocumentMIME(mimeType string) bool {
+	m := strings.ToLower(strings.TrimSpace(mimeType))
+	if isGenericClaudeInputFileMIME(m) {
+		return false
+	}
+	return m == "application/pdf" || m == "text/plain"
+}
+
+func resolveClaudeInputFileFallbackMIME(part ojson.Result, filename string) string {
+	for _, candidate := range []string{
+		part.Get("mime_type").String(),
+		part.Get("file.mime_type").String(),
+		part.Get("format").String(),
+		part.Get("file.format").String(),
+	} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || isGenericClaudeInputFileMIME(candidate) {
+			continue
+		}
+		if strings.Contains(candidate, "/") {
+			return candidate
+		}
+		if mapped := misc.MimeTypes[strings.ToLower(strings.TrimPrefix(candidate, "."))]; mapped != "" && !isGenericClaudeInputFileMIME(mapped) {
+			return mapped
+		}
+	}
+	if filename != "" {
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+		if mapped := misc.MimeTypes[ext]; mapped != "" && !isGenericClaudeInputFileMIME(mapped) {
+			return mapped
+		}
+	}
+	return ""
+}
+
+func convertResponsesInputFileToClaude(part ojson.Result) ([]byte, bool) {
+	filename := strings.TrimSpace(part.Get("filename").String())
+	if filename == "" {
+		filename = strings.TrimSpace(part.Get("file.filename").String())
+	}
+	fileData := strings.TrimSpace(part.Get("file_data").String())
+	if fileData == "" {
+		fileData = strings.TrimSpace(part.Get("file.file_data").String())
+	}
+	fileURL := strings.TrimSpace(part.Get("file_url").String())
+	if fileURL == "" {
+		fileURL = strings.TrimSpace(part.Get("file.file_url").String())
+	}
+	if fileData == "" && len(fileURL) >= 5 && strings.EqualFold(fileURL[:5], "data:") {
+		fileData = fileURL
+		fileURL = ""
+	}
+
+	fallbackMIME := resolveClaudeInputFileFallbackMIME(part, filename)
+	if fileData != "" {
+		var mediaType, data string
+		if len(fileData) >= 5 && strings.EqualFold(fileData[:5], "data:") {
+			metadata, payload, found := strings.Cut(fileData[5:], ",")
+			payload = strings.TrimSpace(payload)
+			if !found || payload == "" {
+				return nil, false
+			}
+			fields := strings.Split(metadata, ";")
+			isBase64 := false
+			for _, field := range fields[1:] {
+				if strings.EqualFold(strings.TrimSpace(field), "base64") {
+					isBase64 = true
+					break
+				}
+			}
+			if !isBase64 {
+				return nil, false
+			}
+			mediaType = strings.TrimSpace(fields[0])
+			data = payload
+		} else {
+			var ok bool
+			mediaType, data, ok = common.NormalizeOpenAIFileData(filename, fallbackMIME, fileData)
+			if !ok {
+				data = fileData
+				mediaType = fallbackMIME
+			}
+		}
+		if isGenericClaudeInputFileMIME(mediaType) {
+			if fallbackMIME != "" {
+				mediaType = fallbackMIME
+			} else if strings.HasPrefix(data, "JVBERi0") {
+				mediaType = "application/pdf"
+			}
+		}
+		if !isSupportedClaudeDocumentMIME(mediaType) || data == "" {
+			return nil, false
+		}
+		normalizedMIME := strings.ToLower(strings.TrimSpace(mediaType))
+		if normalizedMIME == "text/plain" {
+			decoded, errDecode := base64.StdEncoding.DecodeString(data)
+			if errDecode != nil {
+				decoded, errDecode = base64.RawStdEncoding.DecodeString(data)
+			}
+			if errDecode != nil || len(decoded) == 0 || !utf8.Valid(decoded) {
+				return nil, false
+			}
+			cpDoc := ojson.NewDoc([]byte(`{"type":"document","source":{"type":"text","media_type":"text/plain","data":""}}`))
+			_ = cpDoc.Set("source.data", string(decoded))
+			return cpDoc.Bytes(), true
+		}
+		cpDoc := ojson.NewDoc([]byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`))
+		_ = cpDoc.Set("source.media_type", normalizedMIME)
+		_ = cpDoc.Set("source.data", data)
+		return cpDoc.Bytes(), true
+	}
+
+	if common.IsHTTPURL(fileURL) {
+		cpDoc := ojson.NewDoc([]byte(`{"type":"document","source":{"type":"url","url":""}}`))
+		_ = cpDoc.Set("source.url", fileURL)
+		return cpDoc.Bytes(), true
+	}
+	return nil, false
+}
+
+func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor, claudeName string) ([]byte, bool) {
+	overrideName := claudeName
+	if overrideName == "" && !descriptor.direct {
 		overrideName = descriptor.name
+	}
+	if descriptor.clientSearch {
+		return convertResponsesToolSearchToolToClaude(descriptor.tool, claudeName)
 	}
 	switch descriptor.toolType {
 	case "function":
@@ -773,14 +1832,18 @@ func convertResponsesToolDescriptorToClaude(descriptor responsesToolDescriptor) 
 	}
 }
 
+// responsesDiscoveredToolPriority ranks tools loaded by a tool_search_output
+// after every declared tool, so they append to tools[] in discovery order.
+const responsesDiscoveredToolPriority = 2
+
 type responsesToolSource struct {
-	tools    gjson.Result
-	priority int // Top-level tools use 0; all additional_tools sources use 1.
+	tools    ojson.Result
+	priority int // Top-level tools use 0, additional_tools 1, tool_search_output results 2.
 }
 
-func responsesToolSources(root gjson.Result) []responsesToolSource {
+func responsesToolSources(root ojson.Result, toolSearch bool) []responsesToolSource {
 	var sources []responsesToolSource
-	appendSource := func(tools gjson.Result, priority int) {
+	appendSource := func(tools ojson.Result, priority int) {
 		if tools.Exists() && tools.IsArray() {
 			sources = append(sources, responsesToolSource{tools: tools, priority: priority})
 		}
@@ -788,12 +1851,20 @@ func responsesToolSources(root gjson.Result) []responsesToolSource {
 
 	appendSource(root.Get("tools"), 0)
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
+		input.ForEach(func(_, item ojson.Result) bool {
 			if item.Get("type").String() == "additional_tools" {
 				appendSource(item.Get("tools"), 1)
 			}
 			return true
 		})
+		if toolSearch {
+			input.ForEach(func(_, item ojson.Result) bool {
+				if item.Get("type").String() == "tool_search_output" {
+					appendSource(item.Get("tools"), responsesDiscoveredToolPriority)
+				}
+				return true
+			})
+		}
 	}
 	return sources
 }
@@ -803,15 +1874,51 @@ type responsesToolDescriptor struct {
 	childName      string
 	namespace      string
 	toolType       string
-	tool           gjson.Result
+	tool           ojson.Result
 	sourcePriority int
 	direct         bool
 	order          int
+	// clientSearch marks the Codex client tool_search declaration, which only
+	// exists while upstream.claude.tool-search is on.
+	clientSearch bool
 }
 
-func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
+func responsesToolDescriptors(root ojson.Result, toolSearch bool) []responsesToolDescriptor {
 	var descriptors []responsesToolDescriptor
-	appendDescriptor := func(tool gjson.Result, name, childName, namespaceName, toolType string, sourcePriority int, direct bool) {
+	for _, source := range responsesToolSources(root, toolSearch) {
+		descriptors = appendResponsesToolDescriptors(descriptors, source.tools, source.priority, toolSearch)
+	}
+	if !responsesClientToolSearchWins(descriptors) {
+		return descriptors
+	}
+	// With client tool search, declared defer_loading tools stay hidden until
+	// a tool_search_output in history loads them.
+	kept := descriptors[:0]
+	for _, descriptor := range descriptors {
+		if descriptor.sourcePriority != responsesDiscoveredToolPriority && descriptor.tool.Get("defer_loading").Bool() {
+			continue
+		}
+		descriptor.order = len(kept)
+		kept = append(kept, descriptor)
+	}
+	return kept
+}
+
+// responsesClientToolSearchWins reports whether the client tool_search
+// declaration owns the tool_search name. A same-named function that wins
+// instead leaves no search tool, so deferred tools must stay declared.
+func responsesClientToolSearchWins(descriptors []responsesToolDescriptor) bool {
+	var winner *responsesToolDescriptor
+	for i := range descriptors {
+		if descriptors[i].name == responsesToolSearchType && (winner == nil || responsesToolDescriptorPrecedes(descriptors[i], *winner)) {
+			winner = &descriptors[i]
+		}
+	}
+	return winner != nil && winner.clientSearch
+}
+
+func appendResponsesToolDescriptors(descriptors []responsesToolDescriptor, tools ojson.Result, sourcePriority int, toolSearch bool) []responsesToolDescriptor {
+	appendDescriptor := func(tool ojson.Result, name, childName, namespaceName, toolType string, direct bool) {
 		if name == "" {
 			return
 		}
@@ -826,13 +1933,13 @@ func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
 			order:          len(descriptors),
 		})
 	}
-	appendNamespaceChildren := func(namespaceTool gjson.Result, sourcePriority int) {
+	appendNamespaceChildren := func(namespaceTool ojson.Result) {
 		namespaceName := strings.TrimSpace(namespaceTool.Get("name").String())
 		children := namespaceTool.Get("tools")
 		if !children.Exists() || !children.IsArray() {
 			return
 		}
-		children.ForEach(func(_, child gjson.Result) bool {
+		children.ForEach(func(_, child ojson.Result) bool {
 			childName := responsesToolName(child)
 			if childName == "" {
 				return true
@@ -840,45 +1947,52 @@ func responsesToolDescriptors(root gjson.Result) []responsesToolDescriptor {
 			qualifiedName := qualifyResponsesNamespaceToolName(namespaceName, childName)
 			switch strings.TrimSpace(child.Get("type").String()) {
 			case "", "function":
-				appendDescriptor(child, qualifiedName, childName, namespaceName, "function", sourcePriority, false)
+				appendDescriptor(child, qualifiedName, childName, namespaceName, "function", false)
 			case "custom":
-				if !isOpenAIResponsesApplyPatchCustomTool("custom", child) {
-					appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", sourcePriority, false)
-				}
+				appendDescriptor(child, qualifiedName, childName, namespaceName, "custom", false)
 			}
 			return true
 		})
 	}
-	for _, source := range responsesToolSources(root) {
-		source.tools.ForEach(func(_, tool gjson.Result) bool {
-			toolType := strings.TrimSpace(tool.Get("type").String())
-			switch toolType {
-			case "", "function":
-				appendDescriptor(tool, responsesToolName(tool), "", "", "function", source.priority, true)
-			case "custom":
-				if !isOpenAIResponsesApplyPatchCustomTool("custom", tool) {
-					appendDescriptor(tool, responsesToolName(tool), "", "", "custom", source.priority, true)
-				}
-			case "namespace":
-				appendNamespaceChildren(tool, source.priority)
-			case "web_search":
-				if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() && !externalWebAccess.Bool() {
-					return true
-				}
-				name := strings.TrimSpace(tool.Get("name").String())
-				if name == "" {
-					name = "web_search"
-				}
-				appendDescriptor(tool, name, "", "", "web_search", source.priority, true)
-			default:
-				if isUnsupportedOpenAIBuiltinToolType(toolType) {
-					return true
-				}
-				appendDescriptor(tool, strings.TrimSpace(tool.Get("name").String()), "", "", toolType, source.priority, true)
+	tools.ForEach(func(_, tool ojson.Result) bool {
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		switch toolType {
+		case "", "function":
+			appendDescriptor(tool, responsesToolName(tool), "", "", "function", true)
+		case "custom":
+			appendDescriptor(tool, responsesToolName(tool), "", "", "custom", true)
+		case "namespace":
+			appendNamespaceChildren(tool)
+		case responsesToolSearchType:
+			if !toolSearch {
+				// Without tool search support a declaration is a generic tool,
+				// as it was before tool_search was translated.
+				appendDescriptor(tool, strings.TrimSpace(tool.Get("name").String()), "", "", toolType, true)
+				return true
 			}
-			return true
-		})
-	}
+			// Hosted search cannot run on Claude, and the raw declaration must
+			// never reach Claude, so only client search is kept.
+			if isResponsesClientToolSearch(tool) {
+				appendDescriptor(tool, responsesToolSearchType, "", "", responsesToolSearchType, true)
+				descriptors[len(descriptors)-1].clientSearch = true
+			}
+		case "web_search":
+			if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() && !externalWebAccess.Bool() {
+				return true
+			}
+			name := strings.TrimSpace(tool.Get("name").String())
+			if name == "" {
+				name = "web_search"
+			}
+			appendDescriptor(tool, name, "", "", "web_search", true)
+		default:
+			if isUnsupportedOpenAIBuiltinToolType(toolType) {
+				return true
+			}
+			appendDescriptor(tool, strings.TrimSpace(tool.Get("name").String()), "", "", toolType, true)
+		}
+		return true
+	})
 	return descriptors
 }
 
@@ -894,9 +2008,9 @@ func responsesToolDescriptorPrecedes(left, right responsesToolDescriptor) bool {
 	return left.order < right.order
 }
 
-func responsesToolWinners(root gjson.Result) map[string]responsesToolDescriptor {
+func responsesToolWinners(root ojson.Result, toolSearch bool) map[string]responsesToolDescriptor {
 	winners := map[string]responsesToolDescriptor{}
-	for _, descriptor := range responsesToolDescriptors(root) {
+	for _, descriptor := range responsesToolDescriptors(root, toolSearch) {
 		current, exists := winners[descriptor.name]
 		if !exists || responsesToolDescriptorPrecedes(descriptor, current) {
 			winners[descriptor.name] = descriptor
@@ -905,10 +2019,10 @@ func responsesToolWinners(root gjson.Result) map[string]responsesToolDescriptor 
 	return winners
 }
 
-func responsesToolNameMap(root gjson.Result, acceptedToolNames map[string]struct{}) map[string]string {
+func responsesToolNameMap(root ojson.Result, acceptedToolNames map[string]struct{}, toolSearch bool) map[string]string {
 	toolNameMap := map[string]string{}
-	descriptors := responsesToolDescriptors(root)
-	winners := responsesToolWinners(root)
+	descriptors := responsesToolDescriptors(root, toolSearch)
+	winners := responsesToolWinners(root, toolSearch)
 
 	// Direct tool names are canonical aliases and must win over namespace
 	// child aliases, regardless of declaration order.
@@ -943,66 +2057,141 @@ func responsesToolNameMap(root gjson.Result, acceptedToolNames map[string]struct
 
 func responsesCustomToolNames(requestRawJSON []byte) map[string]struct{} {
 	names := make(map[string]struct{})
-	root := gjson.ParseBytes(requestRawJSON)
-	for name, descriptor := range responsesToolWinners(root) {
+	root := util.ParseGJSONBytesNoCopy(requestRawJSON)
+	toolSearch := ClientToolSearchEnabled()
+	winners := responsesToolWinners(root, toolSearch)
+	toolNames := buildClaudeToolNamesWithWinners(root, winners, toolSearch)
+	for name, descriptor := range winners {
 		if descriptor.toolType == "custom" {
 			names[name] = struct{}{}
+			if cName := toolNames.claudeName(name); cName != "" {
+				names[cName] = struct{}{}
+			}
 		}
 	}
 	return names
 }
 
 func unwrapCustomToolInput(arguments string) string {
-	if v := gjson.Get(arguments, "input"); v.Exists() {
-		if v.Type == gjson.String {
+	trimmed := strings.TrimSpace(arguments)
+	if v := ojson.Get(trimmed, "input"); v.Exists() {
+		if v.Type == ojson.String {
 			return v.String()
 		}
 		return v.Raw
 	}
+	idx := strings.Index(trimmed, `"input"`)
+	if idx >= 0 {
+		rest := strings.TrimSpace(trimmed[idx+7:])
+		if strings.HasPrefix(rest, ":") {
+			rest = strings.TrimSpace(rest[1:])
+			if strings.HasPrefix(rest, `"`) {
+				content := rest[1:]
+				var unescaped strings.Builder
+				inEscape := false
+				for i := 0; i < len(content); i++ {
+					c := content[i]
+					if inEscape {
+						switch c {
+						case '"', '\\', '/':
+							unescaped.WriteByte(c)
+						case 'b':
+							unescaped.WriteByte('\b')
+						case 'f':
+							unescaped.WriteByte('\f')
+						case 'n':
+							unescaped.WriteByte('\n')
+						case 'r':
+							unescaped.WriteByte('\r')
+						case 't':
+							unescaped.WriteByte('\t')
+						case 'u':
+							if i+4 < len(content) {
+								if r, err := strconv.ParseUint(content[i+1:i+5], 16, 16); err == nil {
+									if utf16.IsSurrogate(rune(r)) && i+10 < len(content) && content[i+5:i+7] == `\u` {
+										if r2, err2 := strconv.ParseUint(content[i+7:i+11], 16, 16); err2 == nil {
+											unescaped.WriteRune(utf16.DecodeRune(rune(r), rune(r2)))
+											i += 10
+											inEscape = false
+											continue
+										}
+									}
+									unescaped.WriteRune(rune(r))
+									i += 4
+									inEscape = false
+									continue
+								}
+							}
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte('u')
+						default:
+							unescaped.WriteByte('\\')
+							unescaped.WriteByte(c)
+						}
+						inEscape = false
+					} else if c == '\\' {
+						inEscape = true
+					} else if c == '"' {
+						break
+					} else {
+						unescaped.WriteByte(c)
+					}
+				}
+				if inEscape {
+					unescaped.WriteByte('\\')
+				}
+				return unescaped.String()
+			}
+		}
+	}
 	return arguments
 }
 
-func convertResponsesFunctionToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
+func convertResponsesFunctionToolToClaude(tool ojson.Result, overrideName string) ([]byte, bool) {
 	name := strings.TrimSpace(overrideName)
 	if name == "" {
-		name = responsesToolName(tool)
+		name = util.SanitizeClaudeFunctionName(responsesToolName(tool))
 	}
 	if name == "" {
 		return nil, false
 	}
 
-	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tDoc := ojson.NewDoc([]byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`))
+	_ = tDoc.Set("name", name)
 	if d := responsesToolDescription(tool); d != "" {
-		tJSON, _ = sjson.SetBytes(tJSON, "description", d)
+		_ = tDoc.Set("description", d)
 	}
-	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", util.NormalizeClaudeToolInputSchema([]byte(responsesToolParameters(tool).Raw)))
-	tJSON = common.AttachCacheControl(tJSON, tool)
-	if !gjson.GetBytes(tJSON, "cache_control").Exists() {
+	_ = tDoc.SetRawBytes("input_schema", util.NormalizeClaudeToolInputSchema([]byte(responsesToolParameters(tool).Raw)))
+	tJSON := common.AttachCacheControl(tDoc.Bytes(), tool)
+	if !ojson.GetBytesNoCopy(tJSON, "cache_control").Exists() {
 		tJSON = common.AttachCacheControl(tJSON, tool.Get("function"))
 	}
 	return tJSON, true
 }
 
-func convertResponsesCustomToolToClaude(tool gjson.Result, overrideName string) ([]byte, bool) {
+func convertResponsesCustomToolToClaude(tool ojson.Result, overrideName string) ([]byte, bool) {
 	name := strings.TrimSpace(overrideName)
 	if name == "" {
-		name = responsesToolName(tool)
+		name = util.SanitizeClaudeFunctionName(responsesToolName(tool))
 	}
 	if name == "" {
 		return nil, false
 	}
 
-	tJSON := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tDoc := ojson.NewDoc([]byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}}`))
+	_ = tDoc.Set("name", name)
 	if description := responsesToolDescription(tool); description != "" {
-		tJSON, _ = sjson.SetBytes(tJSON, "description", description)
+		_ = tDoc.Set("description", description)
 	}
-	tJSON = common.AttachCacheControl(tJSON, tool)
+	if applypatch.IsCustomTool(tool) {
+		_ = tDoc.Set("description", applypatch.Description(tool))
+		_ = tDoc.SetRawBytes("input_schema", applypatch.Parameters())
+	}
+	tJSON := common.AttachCacheControl(tDoc.Bytes(), tool)
 	return tJSON, true
 }
 
-func convertResponsesWebSearchToolToClaude(tool gjson.Result) ([]byte, bool) {
+func convertResponsesWebSearchToolToClaude(tool ojson.Result) ([]byte, bool) {
 	if externalWebAccess := tool.Get("external_web_access"); externalWebAccess.Exists() && !externalWebAccess.Bool() {
 		return nil, false
 	}
@@ -1011,35 +2200,35 @@ func convertResponsesWebSearchToolToClaude(tool gjson.Result) ([]byte, bool) {
 	if name == "" {
 		name = "web_search"
 	}
-	tJSON := []byte(`{"type":"web_search_20250305","name":""}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", name)
+	tDoc := ojson.NewDoc([]byte(`{"type":"web_search_20250305","name":""}`))
+	_ = tDoc.Set("name", name)
 	if maxUses := tool.Get("max_uses"); maxUses.Exists() {
-		tJSON, _ = sjson.SetBytes(tJSON, "max_uses", maxUses.Int())
+		_ = tDoc.Set("max_uses", maxUses.Int())
 	}
 	if allowedDomains := tool.Get("filters.allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() {
-		tJSON, _ = sjson.SetRawBytes(tJSON, "allowed_domains", []byte(allowedDomains.Raw))
+		_ = tDoc.SetRaw("allowed_domains", allowedDomains.Raw)
 	}
 	if userLocation := tool.Get("user_location"); userLocation.Exists() && userLocation.IsObject() {
-		tJSON, _ = sjson.SetRawBytes(tJSON, "user_location", []byte(userLocation.Raw))
+		_ = tDoc.SetRaw("user_location", userLocation.Raw)
 	}
-	return tJSON, true
+	return tDoc.Bytes(), true
 }
 
-func responsesToolName(tool gjson.Result) string {
+func responsesToolName(tool ojson.Result) string {
 	if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
 		return name
 	}
 	return strings.TrimSpace(tool.Get("function.name").String())
 }
 
-func responsesToolDescription(tool gjson.Result) string {
+func responsesToolDescription(tool ojson.Result) string {
 	if description := tool.Get("description").String(); description != "" {
 		return description
 	}
 	return tool.Get("function.description").String()
 }
 
-func responsesToolParameters(tool gjson.Result) gjson.Result {
+func responsesToolParameters(tool ojson.Result) ojson.Result {
 	for _, path := range []string{
 		"parameters",
 		"parametersJsonSchema",
@@ -1051,7 +2240,7 @@ func responsesToolParameters(tool gjson.Result) gjson.Result {
 			return parameters
 		}
 	}
-	return gjson.Result{}
+	return ojson.Result{}
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
@@ -1068,21 +2257,25 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 	return namespaceName + "__" + childName
 }
 
-func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
+func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string, toolSearch bool) (name, namespace string) {
 	qualifiedName = strings.TrimSpace(qualifiedName)
 	if qualifiedName == "" {
 		return "", ""
 	}
 
-	root := gjson.ParseBytes(requestRawJSON)
-	descriptor, ok := responsesToolWinners(root)[qualifiedName]
+	root := util.ParseGJSONBytesNoCopy(requestRawJSON)
+	winners := responsesToolWinners(root, toolSearch)
+	toolNames := buildClaudeToolNamesWithWinners(root, winners, toolSearch)
+	identity := toolNames.identity(qualifiedName)
+
+	descriptor, ok := winners[identity]
 	if !ok {
-		return qualifiedName, ""
+		return identity, ""
 	}
 	if !descriptor.direct {
 		return descriptor.childName, descriptor.namespace
 	}
-	return qualifiedName, ""
+	return identity, ""
 }
 
 func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
@@ -1092,4 +2285,56 @@ func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {
 	default:
 		return false
 	}
+}
+
+// normalizeCodexAgentMessages rewrites Codex multi-agent v2 "agent_message"
+// input items into plain user "message" items so the Claude translator does
+// not drop the delegated task text. Encrypted content parts are surfaced as
+// input_text, mirroring the multi-agent v2 optimizer used for other upstreams.
+func normalizeCodexAgentMessages(payload []byte) []byte {
+	input := ojson.GetBytesNoCopy(payload, "input")
+	if !input.IsArray() {
+		return payload
+	}
+	var updatedDoc *ojson.Doc
+	for itemIndex, item := range input.Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
+			continue
+		}
+		if updatedDoc == nil {
+			updatedDoc = ojson.NewDoc(payload)
+		}
+		itemPath := "input." + strconv.Itoa(itemIndex)
+		if content := item.Get("content"); content.IsArray() {
+			for partIndex, part := range content.Array() {
+				if strings.TrimSpace(part.Get("type").String()) != "encrypted_content" {
+					continue
+				}
+				enc := part.Get("encrypted_content")
+				if enc.Type != ojson.String {
+					continue
+				}
+				partPath := itemPath + ".content." + strconv.Itoa(partIndex)
+				if errSet := updatedDoc.Set(partPath+".type", "input_text"); errSet != nil {
+					return payload
+				}
+				if errSet := updatedDoc.Set(partPath+".text", enc.String()); errSet != nil {
+					return payload
+				}
+				if errDelete := updatedDoc.Delete(partPath + ".encrypted_content"); errDelete != nil {
+					return payload
+				}
+			}
+		}
+		if errSet := updatedDoc.Set(itemPath+".role", "user"); errSet != nil {
+			return payload
+		}
+		if errSet := updatedDoc.Set(itemPath+".type", "message"); errSet != nil {
+			return payload
+		}
+	}
+	if updatedDoc == nil {
+		return payload
+	}
+	return updatedDoc.Bytes()
 }

@@ -4,11 +4,11 @@ import (
 	"net/http"
 	"testing"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 func TestErrorLegacyUnkeyedLiteralCompatibility(t *testing.T) {
-	err := cliproxyauth.Error{"code", "message", false, http.StatusRequestTimeout}
+	err := cliproxyauth.Error{"code", "message", false, http.StatusRequestTimeout, nil}
 
 	if err.Code != "code" || err.Message != "message" || err.Retryable || err.HTTPStatus != http.StatusRequestTimeout {
 		t.Fatalf("unexpected error fields: %#v", err)

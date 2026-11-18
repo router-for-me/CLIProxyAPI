@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // PluginAuthParser parses auth JSON owned by plugin providers.
@@ -32,4 +32,22 @@ type SynthesisContext struct {
 	IDGenerator *StableIDGenerator
 	// PluginAuthParser parses plugin-owned auth files
 	PluginAuthParser PluginAuthParser
+	// StrictFileParsing surfaces parse errors instead of silently skipping or falling back.
+	StrictFileParsing bool
+	// IncompleteFiles records existing auth JSON file paths whose contents were
+	// empty or not valid JSON during a non-strict directory scan, or file/directory
+	// paths whose os.ReadFile or os.ReadDir failed with an error other than fs.ErrNotExist.
+	IncompleteFiles map[string]struct{}
+}
+
+// RecordIncompleteFile records an existing auth JSON file whose content is not yet complete JSON
+// or a file/directory path whose os.ReadFile or os.ReadDir failed with an error other than fs.ErrNotExist.
+func (c *SynthesisContext) RecordIncompleteFile(path string) {
+	if c == nil || path == "" {
+		return
+	}
+	if c.IncompleteFiles == nil {
+		c.IncompleteFiles = make(map[string]struct{})
+	}
+	c.IncompleteFiles[path] = struct{}{}
 }

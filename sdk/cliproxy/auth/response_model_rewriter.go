@@ -3,9 +3,8 @@ package auth
 import (
 	"bytes"
 
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 var modelFieldPaths = []string{"model", "modelVersion", "response.model", "response.modelVersion", "message.model"}
@@ -20,7 +19,7 @@ func rewriteSSEPayloadLines(payload []byte, targetModel string) []byte {
 	out := make([][]byte, 0, len(lines))
 	for _, line := range lines {
 		prefix, jsonData, ok := extractSSEDataLine(line)
-		if ok && len(jsonData) > 0 && jsonData[0] == '{' && gjson.ValidBytes(jsonData) {
+		if ok && len(jsonData) > 0 && jsonData[0] == '{' && ojson.ValidBytes(jsonData) {
 			rewritten := rewriteModelInResponse(jsonData, targetModel)
 			line = append(append([]byte{}, prefix...), rewritten...)
 		}
@@ -37,13 +36,21 @@ func rewriteModelInResponse(data []byte, targetModel string) []byte {
 	if targetModel == "" || len(data) == 0 {
 		return data
 	}
-	for _, path := range modelFieldPaths {
-		if gjson.GetBytes(data, path).Exists() {
-			data, _ = sjson.SetBytes(data, path, targetModel)
-			log.Debugf("response rewriter: rewrote model at path %s to %s", path, targetModel)
+	var resultsBuf [5]ojson.Result
+	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths...)
+	var doc *ojson.Doc
+	for i, path := range modelFieldPaths {
+		if i < len(results) && results[i].Exists() {
+			if doc == nil {
+				doc = ojson.NewDoc(data)
+			}
+			_ = doc.Set(path, targetModel)
 		}
 	}
-	return data
+	if doc == nil {
+		return data
+	}
+	return doc.Bytes()
 }
 
 // StreamRewriteOptions configures the stream rewriter.
@@ -53,16 +60,79 @@ type StreamRewriteOptions struct {
 
 // StreamRewriter rewrites model names in streaming SSE responses.
 type StreamRewriter struct {
-	options    StreamRewriteOptions
-	pendingBuf []byte
+	options         StreamRewriteOptions
+	pendingBuf      []byte
+	loggedPaths     map[string]bool
+	rewrittenChunks int
+	loggedFinished  bool
 }
 
 // NewStreamRewriter creates a new stream rewriter.
 func NewStreamRewriter(options StreamRewriteOptions) *StreamRewriter {
 	return &StreamRewriter{
-		options:    options,
-		pendingBuf: nil,
+		options:     options,
+		pendingBuf:  nil,
+		loggedPaths: make(map[string]bool),
 	}
+}
+
+func (r *StreamRewriter) rewriteModel(data []byte) []byte {
+	if r == nil || r.options.RewriteModel == "" || len(data) == 0 {
+		return data
+	}
+	targetModel := r.options.RewriteModel
+	var resultsBuf [5]ojson.Result
+	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths...)
+	var doc *ojson.Doc
+	for i, path := range modelFieldPaths {
+		if i < len(results) && results[i].Exists() {
+			if doc == nil {
+				doc = ojson.NewDoc(data)
+			}
+			_ = doc.Set(path, targetModel)
+			if r.loggedPaths == nil {
+				r.loggedPaths = make(map[string]bool)
+			}
+			if !r.loggedPaths[path] {
+				r.loggedPaths[path] = true
+				log.Debugf("response rewriter: stream started, rewrote model at path %s to %s", path, targetModel)
+			}
+		}
+	}
+	if doc == nil {
+		return data
+	}
+	r.rewrittenChunks++
+	return doc.Bytes()
+}
+
+func (r *StreamRewriter) rewriteSSELines(payload []byte) []byte {
+	if r == nil || r.options.RewriteModel == "" || len(payload) == 0 {
+		return payload
+	}
+	lines := bytes.Split(payload, []byte("\n"))
+	out := make([][]byte, 0, len(lines))
+	for _, line := range lines {
+		prefix, jsonData, ok := extractSSEDataLine(line)
+		if ok && len(jsonData) > 0 && jsonData[0] == '{' && ojson.ValidBytes(jsonData) {
+			rewritten := r.rewriteModel(jsonData)
+			line = append(append([]byte{}, prefix...), rewritten...)
+		}
+		out = append(out, line)
+	}
+	joined := bytes.Join(out, []byte("\n"))
+	if len(payload) > 0 && payload[len(payload)-1] == '\n' && (len(joined) == 0 || joined[len(joined)-1] != '\n') {
+		joined = append(joined, '\n')
+	}
+	return joined
+}
+
+func (r *StreamRewriter) logStreamFinishedOnce() {
+	if r == nil || r.loggedFinished || r.rewrittenChunks == 0 {
+		return
+	}
+	r.loggedFinished = true
+	log.Debugf("response rewriter: stream finished, successfully rewrote %d chunks to %s", r.rewrittenChunks, r.options.RewriteModel)
 }
 
 // RewriteChunk rewrites model names in a single SSE chunk.
@@ -89,10 +159,10 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 	// Handle raw JSON chunks (Gemini/OpenAI format without SSE "data:" prefix)
 	trimmed := bytes.TrimSpace(chunk)
-	if len(trimmed) > 0 && trimmed[0] == '{' && gjson.ValidBytes(trimmed) {
+	if len(trimmed) > 0 && trimmed[0] == '{' && ojson.ValidBytes(trimmed) {
 		rewritten := trimmed
 		if r.options.RewriteModel != "" {
-			rewritten = rewriteModelInResponse(rewritten, r.options.RewriteModel)
+			rewritten = r.rewriteModel(rewritten)
 		}
 		return rewritten
 	}
@@ -109,7 +179,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 		} else {
 			processChunk = chunk
 		}
-	} else if gjson.ValidBytes(extractLastDataPayload(chunk)) {
+	} else if ojson.ValidBytes(extractLastDataPayload(chunk)) {
 		processChunk = chunk
 	} else if len(bytes.TrimSpace(chunk)) == 0 {
 		return chunk
@@ -141,7 +211,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 		dataPrefix, jsonData, found := extractSSEDataLine(line)
 		if found && len(jsonData) > 0 && jsonData[0] == '{' {
-			if !gjson.ValidBytes(jsonData) {
+			if !ojson.ValidBytes(jsonData) {
 				if pendingEvent != nil {
 					r.pendingBuf = append(pendingEvent, '\n')
 					r.pendingBuf = append(r.pendingBuf, line...)
@@ -159,7 +229,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 			rewritten := jsonData
 			if r.options.RewriteModel != "" {
-				rewritten = rewriteModelInResponse(jsonData, r.options.RewriteModel)
+				rewritten = r.rewriteModel(jsonData)
 			}
 			result = append(result, append(dataPrefix, rewritten...))
 			continue
@@ -178,7 +248,10 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 	joined := bytes.Join(result, []byte("\n"))
 	if len(joined) == 0 && len(chunk) > 0 {
-		return rewriteSSEPayloadLines(chunk, r.options.RewriteModel)
+		return r.rewriteSSELines(chunk)
+	}
+	if bytes.Contains(chunk, []byte("[DONE]")) {
+		r.logStreamFinishedOnce()
 	}
 	return joined
 }
@@ -242,7 +315,7 @@ func safeReplaceGlued(chunk []byte, old, new []byte) []byte {
 			part = remaining[lineStart+1 : idx+1]
 		}
 		_, jsonData, ok := extractSSEDataLine(part)
-		if ok && len(jsonData) > 0 && gjson.ValidBytes(jsonData) {
+		if ok && len(jsonData) > 0 && ojson.ValidBytes(jsonData) {
 			result = append(result, remaining[:idx]...)
 			result = append(result, new...)
 			remaining = remaining[idx+len(old):]
@@ -267,7 +340,7 @@ func (r *StreamRewriter) Finish() []byte {
 	r.pendingBuf = nil
 	out := r.RewriteChunk(buf)
 	if len(r.pendingBuf) > 0 {
-		tail := rewriteSSEPayloadLines(r.pendingBuf, r.options.RewriteModel)
+		tail := r.rewriteSSELines(r.pendingBuf)
 		r.pendingBuf = nil
 		if len(tail) > 0 {
 			if len(out) > 0 {
@@ -277,5 +350,6 @@ func (r *StreamRewriter) Finish() []byte {
 			}
 		}
 	}
+	r.logStreamFinishedOnce()
 	return out
 }

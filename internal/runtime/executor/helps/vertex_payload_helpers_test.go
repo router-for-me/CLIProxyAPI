@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestStripVertexToolCallIDsReusesPayloadWithoutIDs(t *testing.T) {
@@ -18,16 +18,16 @@ func TestStripVertexToolCallIDsReusesPayloadWithoutIDs(t *testing.T) {
 func TestStripVertexToolCallIDsRebuildsContentsOnce(t *testing.T) {
 	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{"id":9007199254740993}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"lookup","response":{"id":"keep"}}}]}]}`)
 	output := StripVertexOpenAIResponsesToolCallIDs(input, "openai-response")
-	if gjson.GetBytes(output, "contents.0.parts.0.functionCall.id").Exists() {
+	if ojson.GetBytes(output, "contents.0.parts.0.functionCall.id").Exists() {
 		t.Fatal("functionCall.id was not removed")
 	}
-	if gjson.GetBytes(output, "contents.1.parts.0.functionResponse.id").Exists() {
+	if ojson.GetBytes(output, "contents.1.parts.0.functionResponse.id").Exists() {
 		t.Fatal("functionResponse.id was not removed")
 	}
-	if got := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.response.id").String(); got != "keep" {
+	if got := ojson.GetBytes(output, "contents.1.parts.0.functionResponse.response.id").String(); got != "keep" {
 		t.Fatalf("nested response id = %q, want keep", got)
 	}
-	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.args.id").Raw; got != "9007199254740993" {
+	if got := ojson.GetBytes(output, "contents.0.parts.0.functionCall.args.id").Raw; got != "9007199254740993" {
 		t.Fatalf("large integer = %s, want exact original value", got)
 	}
 }

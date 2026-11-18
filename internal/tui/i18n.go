@@ -135,13 +135,15 @@ var zhStrings = map[string]string{
 
 	// ── Auth Files ──
 	"auth_title":      "🔑 认证文件",
-	"auth_help1":      " [↑↓/jk] 导航 • [Enter] 展开 • [e] 启用/停用 • [d] 删除 • [r] 刷新",
+	"auth_help1":      " [↑↓/jk] 导航 • [Enter] 展开 • [e] 启用/停用 • [d] 删除 • [r] 刷新 • [R] 刷新凭证",
 	"auth_help2":      " [1] 编辑 prefix • [2] 编辑 proxy_url • [3] 编辑 priority",
 	"no_auth_files":   "  无认证文件",
 	"confirm_delete":  "⚠ 删除 %s? [y/n]",
 	"deleted":         "已删除 %s",
 	"enabled":         "已启用",
 	"disabled":        "已停用",
+	"refreshed_auth":  "已刷新凭证 %s",
+	"refreshed_all":   "已刷新所有凭证",
 	"updated_field":   "已更新 %s 的 %s",
 	"status_active":   "活跃",
 	"status_disabled": "已停用",
@@ -290,13 +292,15 @@ var enStrings = map[string]string{
 
 	// ── Auth Files ──
 	"auth_title":      "🔑 Auth Files",
-	"auth_help1":      " [↑↓/jk] Navigate • [Enter] Expand • [e] Enable/Disable • [d] Delete • [r] Refresh",
+	"auth_help1":      " [↑↓/jk] Navigate • [Enter] Expand • [e] Enable/Disable • [d] Delete • [r] Refresh • [R] Refresh Token",
 	"auth_help2":      " [1] Edit prefix • [2] Edit proxy_url • [3] Edit priority",
 	"no_auth_files":   "  No auth files found",
 	"confirm_delete":  "⚠ Delete %s? [y/n]",
 	"deleted":         "Deleted %s",
 	"enabled":         "Enabled",
 	"disabled":        "Disabled",
+	"refreshed_auth":  "Refreshed credential %s",
+	"refreshed_all":   "Refreshed all credentials",
 	"updated_field":   "Updated %s on %s",
 	"status_active":   "active",
 	"status_disabled": "disabled",

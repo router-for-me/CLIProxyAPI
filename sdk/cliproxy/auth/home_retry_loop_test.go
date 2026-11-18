@@ -2,15 +2,15 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/MoeForge/moego/json"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type repeatedHomeAuthDispatcher struct {
@@ -96,5 +96,41 @@ func TestManagerExecuteHomeStopsWhenDispatchRepeatsTriedAuth(t *testing.T) {
 	}
 	if got := dispatcher.calls.Load(); got != 2 {
 		t.Fatalf("home dispatch calls = %d, want 2", got)
+	}
+}
+
+func TestManagerExecuteStreamHomeRejectsMetadataExcludedAuthWhenRepeated(t *testing.T) {
+	dispatcher := &repeatedHomeAuthDispatcher{}
+	oldCurrentHomeDispatcher := currentHomeDispatcher
+	currentHomeDispatcher = func() homeAuthDispatcher {
+		return dispatcher
+	}
+	t.Cleanup(func() {
+		currentHomeDispatcher = oldCurrentHomeDispatcher
+	})
+
+	executor := &unauthorizedHomeExecutor{}
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
+	manager.SetHomeExecutionRegistry(executionregistry.New())
+	manager.RegisterExecutor(executor)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			ExcludedAuthIDsMetadataKey: []string{"home-auth-1"},
+		},
+	}
+	_, err := manager.ExecuteStream(ctx, []string{"home-loop-test"}, cliproxyexecutor.Request{Model: "gemini-3.5-flash-low"}, opts)
+	if err == nil {
+		t.Fatal("ExecuteStream error = nil, want repeated auth rejection")
+	}
+	if got := executor.calls.Load(); got != 0 {
+		t.Fatalf("executor calls = %d, want 0 when dispatch returns metadata-excluded auth", got)
+	}
+	if got := dispatcher.calls.Load(); got != 1 {
+		t.Fatalf("home dispatch calls = %d, want 1", got)
 	}
 }

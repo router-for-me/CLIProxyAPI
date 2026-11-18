@@ -5,17 +5,17 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecutor.Request, rawJSON []byte) ([]byte, http.Header) {
@@ -28,6 +28,19 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	if len(rawJSON) == 0 {
 		return rawJSON, headers, nil
 	}
+	doc := ojson.NewDoc(rawJSON)
+	headers, changed, err := applyCodexPromptCacheHeadersWithContextDoc(ctx, from, req, doc, headerSets...)
+	if err != nil || !changed {
+		return rawJSON, headers, err
+	}
+	return doc.Bytes(), headers, nil
+}
+
+func applyCodexPromptCacheHeadersWithContextDoc(ctx context.Context, from sdktranslator.Format, req cliproxyexecutor.Request, doc *ojson.Doc, headerSets ...http.Header) (http.Header, bool, error) {
+	headers := http.Header{}
+	if doc == nil || doc.Len() == 0 {
+		return headers, false, nil
+	}
 
 	var requestHeaders http.Header
 	if len(headerSets) > 0 {
@@ -35,36 +48,37 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	}
 	var cache helps.CodexCache
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
-		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+		modelName := strings.TrimSpace(doc.Get("model").String())
 		if modelName == "" {
 			modelName = thinking.ParseSuffix(req.Model).ModelName
 		}
 		cached, ok, errCache := helps.ClaudeCodePromptCache(ctx, modelName, req.Payload, requestHeaders)
 		if errCache != nil {
-			return nil, nil, errCache
+			return nil, false, errCache
 		}
 		if ok {
 			cache = cached
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
-		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
-			cache.ID = promptCacheKey.String()
+		if promptCacheKey := ojson.GetBytesNoCopy(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
+			cache.ID = strings.Clone(promptCacheKey.String())
 		}
 	}
 	if cache.ID == "" {
 		cache.ID = helps.ProviderSessionUUID("codex", req.Metadata)
 	}
 
+	changed := false
 	if cache.ID != "" {
-		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
+		changed = helps.SetStringIfDifferentDoc(doc, "prompt_cache_key", cache.ID)
 		setHeaderCasePreserved(headers, "session_id", cache.ID)
 		headers.Set("Conversation_id", cache.ID)
 	}
 
-	return rawJSON, headers, nil
+	return headers, changed, nil
 }
 
-func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config, clientHeaders ...http.Header) http.Header {
+func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config, nativeRequest bool, clientHeaders ...http.Header) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -81,6 +95,32 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
+	if codexUseSIWCForRequest(ctx, auth, clientHeaders...) {
+		deleteHeaderCaseInsensitive(headers, "conversation_id")
+		ensureCodexWebsocketSessionHeader(headers, ginHeaders, "")
+		if sessionID := codexSessionHeaderValue(headers); sessionID != "" {
+			headers.Set("X-Client-Request-Id", sessionID)
+		} else {
+			misc.EnsureHeader(headers, ginHeaders, "X-Client-Request-Id", "")
+		}
+		headers.Set("User-Agent", codexSIWCUserAgent(cfg))
+		betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
+		if betaHeader == "" && ginHeaders != nil {
+			betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
+		}
+		if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
+			betaHeader = codexResponsesWebsocketBetaHeaderValue
+		}
+		headers.Set("OpenAI-Beta", betaHeader)
+		var attrs map[string]string
+		if auth != nil {
+			attrs = auth.Attributes
+		}
+		req := (&http.Request{Header: headers}).WithContext(ctx)
+		util.ApplyCustomHeadersFromAttrs(req, attrs, ginHeaders)
+		return headers
+	}
+
 	isAPIKey := codexAuthUsesAPIKey(auth)
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
@@ -89,6 +129,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
 	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	if nativeRequest {
+		misc.EnsureHeader(headers, ginHeaders, codexResponsesLiteHeader, "")
+	}
 	if isAPIKey {
 		ensureHeaderWithPriority(headers, ginHeaders, "User-Agent", "", "")
 	} else {
@@ -108,6 +151,17 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		sessionFallback = uuid.NewString()
 	}
 	ensureCodexWebsocketSessionHeader(headers, ginHeaders, sessionFallback)
+	if nativeRequest && isCodexCloakingDisabled(cfg, auth) {
+		deleteHeaderCaseInsensitive(headers, "session_id")
+		deleteHeaderCaseInsensitive(headers, "conversation_id")
+		for key, values := range ginHeaders {
+			switch strings.ToLower(key) {
+			case "session-id", "session_id", "conversation_id", "thread-id", "x-codex-routing-hint", "x-codex-window-id":
+				deleteHeaderCaseInsensitive(headers, key)
+				headers[key] = append([]string(nil), values...)
+			}
+		}
+	}
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
 		headers.Set("Originator", originator)
 	} else if !isAPIKey {
@@ -127,8 +181,9 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs, ginHeaders)
-	applyCodexCloakingHeaders(headers, cfg)
+	req := (&http.Request{Header: headers}).WithContext(ctx)
+	util.ApplyCustomHeadersFromAttrs(req, attrs, ginHeaders)
+	applyCodexCloakingHeaders(headers, cfg, auth)
 
 	return headers
 }

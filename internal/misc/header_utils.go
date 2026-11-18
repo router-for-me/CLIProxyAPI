@@ -74,6 +74,14 @@ func EnsureHeader(target http.Header, source http.Header, key, defaultValue stri
 			target.Set(key, val)
 			return
 		}
+		for k, v := range source {
+			if strings.EqualFold(k, key) && len(v) > 0 {
+				if val := strings.TrimSpace(v[0]); val != "" {
+					target.Set(key, val)
+					return
+				}
+			}
+		}
 	}
 	if strings.TrimSpace(target.Get(key)) != "" {
 		return

@@ -5,11 +5,12 @@ package cliproxy
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 // TokenClientProvider loads clients backed by stored authentication tokens.
@@ -68,6 +69,9 @@ type APIKeyClientResult struct {
 	// XAIKeyCount is the number of xAI API keys loaded
 	XAIKeyCount int
 
+	// MetaKeyCount is the number of Meta API keys loaded
+	MetaKeyCount int
+
 	// OpenAICompatCount is the number of OpenAI compatibility API keys loaded
 	OpenAICompatCount int
 }
@@ -101,13 +105,16 @@ type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
 
-	setConfig             func(cfg *config.Config)
-	snapshotAuths         func() []*coreauth.Auth
-	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
-	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
-	dispatchPersistedAuth func(update watcher.AuthUpdate) bool
-	setPluginAuthParser   func(parser PluginAuthParser)
-	reloadConfigIfChanged func()
+	setConfig                    func(cfg *config.Config)
+	snapshotAuths                func() []*coreauth.Auth
+	snapshotAuthFile             func(path string) ([]*coreauth.Auth, error)
+	setUpdateQueue               func(queue chan<- watcher.AuthUpdate)
+	dispatchRuntimeUpdate        func(update watcher.AuthUpdate) bool
+	dispatchPersistedAuth        func(update watcher.AuthUpdate) bool
+	dispatchPersistedAuthWithRev func(update *watcher.AuthUpdate) (bool, uint64)
+	rereadDiscardedFileSnapshot  func(auth *coreauth.Auth)
+	setPluginAuthParser          func(parser PluginAuthParser)
+	reloadConfigIfChanged        func()
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -163,10 +170,33 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 
 // DispatchPersistedAuthUpdate forwards already-persisted file auth updates.
 func (w *WatcherWrapper) DispatchPersistedAuthUpdate(update watcher.AuthUpdate) bool {
-	if w == nil || w.dispatchPersistedAuth == nil {
+	if w == nil {
 		return false
 	}
-	return w.dispatchPersistedAuth(update)
+	if w.dispatchPersistedAuthWithRev != nil {
+		ok, _ := w.dispatchPersistedAuthWithRev(&update)
+		return ok
+	}
+	if w.dispatchPersistedAuth != nil {
+		return w.dispatchPersistedAuth(update)
+	}
+	return false
+}
+
+// DispatchPersistedAuthUpdateWithRevision forwards already-persisted file auth updates
+// and returns whether it was enqueued along with its assigned watcher revision.
+func (w *WatcherWrapper) DispatchPersistedAuthUpdateWithRevision(update *watcher.AuthUpdate) (bool, uint64) {
+	if w == nil {
+		return false, 0
+	}
+	if w.dispatchPersistedAuthWithRev != nil {
+		return w.dispatchPersistedAuthWithRev(update)
+	}
+	if w.dispatchPersistedAuth != nil && update != nil {
+		ok := w.dispatchPersistedAuth(*update)
+		return ok, update.Revision()
+	}
+	return false, 0
 }
 
 // SetClients updates the watcher file-backed clients registry.
@@ -181,6 +211,23 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 		return nil
 	}
 	return w.snapshotAuths()
+}
+
+// SnapshotAuthFile re-synthesizes a single file and preserves parsing errors.
+func (w *WatcherWrapper) SnapshotAuthFile(path string) ([]*coreauth.Auth, error) {
+	if w == nil || w.snapshotAuthFile == nil {
+		return nil, fmt.Errorf("file auth snapshot is unavailable")
+	}
+	return w.snapshotAuthFile(path)
+}
+
+// RereadDiscardedFileSnapshot asks the underlying watcher to invalidate and
+// re-read a file snapshot discarded by the manager's digest fence.
+func (w *WatcherWrapper) RereadDiscardedFileSnapshot(auth *coreauth.Auth) {
+	if w == nil || w.rereadDiscardedFileSnapshot == nil {
+		return
+	}
+	w.rereadDiscardedFileSnapshot(auth)
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.
