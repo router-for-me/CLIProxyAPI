@@ -27,7 +27,7 @@ const (
 
 // SanitizeCodexInputItemIDs normalizes supported input item IDs for Codex, removes encrypted
 // reasoning items whose IDs exceed the Codex limit, and deterministically shortens
-// other overlong input item IDs.
+// other overlong input item IDs and tool call IDs.
 func SanitizeCodexInputItemIDs(body []byte) []byte {
 	if len(body) == 0 {
 		return body
@@ -41,7 +41,7 @@ func SanitizeCodexInputItemIDs(body []byte) []byte {
 
 // SanitizeCodexInputItemIDsDoc normalizes supported input item IDs for Codex in place on doc,
 // removes encrypted reasoning items whose IDs exceed the Codex limit, and deterministically
-// shortens other overlong input item IDs.
+// shortens other overlong input item IDs and tool call IDs.
 func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
 	if doc == nil || doc.Len() == 0 {
 		return false
@@ -85,7 +85,7 @@ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
 	if hasDropped {
 		dropped = make(map[int]bool)
 	}
-	changed := false
+	changed := shortenCodexCallIDsDoc(doc, items)
 	for idx, item := range items {
 		if shouldDropCodexEncryptedReasoningItem(item) {
 			dropped[idx] = true
@@ -165,6 +165,49 @@ func SanitizeCodexInputItemIDsDoc(doc *ojson.Doc) bool {
 		return doc.SetRawBytes("input", JoinRawJSONArray(rebuilt)) == nil
 	}
 	return true
+}
+
+func shortenCodexCallIDsDoc(doc *ojson.Doc, items []ojson.Result) bool {
+	// Reserve valid IDs before assigning aliases shared by calls and their outputs.
+	aliases := make(map[string]string)
+	hasLongID := false
+	for _, item := range items {
+		callID := item.Get("call_id")
+		if callID.Type != ojson.String {
+			continue
+		}
+		id := callID.String()
+		if len([]rune(id)) > codexInputItemIDLimit {
+			hasLongID = true
+		} else {
+			aliases[id] = id
+		}
+	}
+	if !hasLongID {
+		return false
+	}
+
+	changed := false
+	for idx, item := range items {
+		callID := item.Get("call_id")
+		if callID.Type != ojson.String {
+			continue
+		}
+		id := callID.String()
+		shortened, ok := aliases[id]
+		if !ok {
+			shortened = shortenCodexInputItemID(id)
+			for attempt := 1; aliases[shortened] != ""; attempt++ {
+				shortened = shortenCodexInputItemIDWithAttempt(id, attempt)
+			}
+			aliases[id] = shortened
+			aliases[shortened] = shortened
+		}
+		if shortened != id && doc.Set(fmt.Sprintf("input.%d.call_id", idx), shortened) == nil {
+			changed = true
+		}
+	}
+	return changed
 }
 
 func normalizeCodexInputItemID(item ojson.Result, id string) string {
