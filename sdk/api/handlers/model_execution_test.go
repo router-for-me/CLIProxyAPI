@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1353,5 +1354,346 @@ func TestExecuteModelReplaysInterceptedCallerScopeWithoutGinContext(t *testing.T
 	}
 	if got := replayExecOpts.Metadata[coreexecutor.DerivedSessionIDMetadataKey]; got != originalDerivedSession {
 		t.Fatalf("replay execute DerivedSessionIDMetadataKey = %v, want %q", got, originalDerivedSession)
+	}
+}
+
+type nestedContinuityTestScheduler struct {
+	mu           sync.Mutex
+	requestIDs   []string
+	continuityFn func(context.Context, pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error)
+}
+
+func (s *nestedContinuityTestScheduler) PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error) {
+	return pluginapi.SchedulerPickResponse{}, false, nil
+}
+
+func (s *nestedContinuityTestScheduler) HasSchedulerContinuity() bool { return true }
+
+func (s *nestedContinuityTestScheduler) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	s.mu.Lock()
+	s.requestIDs = append(s.requestIDs, req.RequestID)
+	s.mu.Unlock()
+	if s.continuityFn != nil {
+		return s.continuityFn(ctx, req)
+	}
+	return pluginapi.SchedulerContinuityResponse{Decision: pluginapi.SchedulerContinuityDisabled}, true, nil
+}
+
+func TestExecuteModelIsolatesContinuitySessionAcrossSequentialAndConcurrentCalls(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&modelExecutionCaptureExecutor{
+		provider: "codex",
+		execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{Payload: []byte(`{"ok":"codex"}`)}, nil
+		},
+	})
+	manager.RegisterExecutor(&modelExecutionCaptureExecutor{
+		provider: "gemini",
+		execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+			return coreexecutor.Response{Payload: []byte(`{"ok":"gemini"}`)}, nil
+		},
+		stream: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			ch := make(chan coreexecutor.StreamChunk, 1)
+			ch <- coreexecutor.StreamChunk{Payload: []byte(`data: {"ok":"gemini-stream"}` + "\n\n")}
+			close(ch)
+			return &coreexecutor.StreamResult{Chunks: ch}, nil
+		},
+	})
+
+	recoverAt := time.Now().Add(time.Minute)
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:             "codex-nested-cool",
+		Provider:       "codex",
+		Status:         coreauth.StatusActive,
+		Quota:          coreauth.QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: recoverAt},
+		NextRetryAfter: recoverAt,
+	}); errRegister != nil {
+		t.Fatalf("register codex: %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "gemini-nested-ok",
+		Provider: "gemini",
+		Status:   coreauth.StatusActive,
+	}); errRegister != nil {
+		t.Fatalf("register gemini: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient("codex-nested-cool", "codex", []*registry.ModelInfo{{ID: "gpt-5-codex"}})
+	registry.GetGlobalRegistry().RegisterClient("gemini-nested-ok", "gemini", []*registry.ModelInfo{{ID: "gemini-2.5-pro"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient("codex-nested-cool")
+		registry.GetGlobalRegistry().UnregisterClient("gemini-nested-ok")
+	})
+
+	scheduler := &nestedContinuityTestScheduler{}
+	manager.SetPluginScheduler(scheduler)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+
+	// Shared parent context simulating a parent request lifecycle that already bound a continuity session.
+	parentCtx := coreauth.WithRequestContinuitySession(context.Background())
+
+	// 1. Sequential: first Codex nested call terminates its continuity session;
+	// subsequent Gemini and Codex nested calls on the same parentCtx must remain isolated.
+	_, errCodex := handler.ExecuteModel(parentCtx, ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         "gpt-5-codex",
+		Body:          []byte(`{"model":"gpt-5-codex","messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if errCodex == nil {
+		t.Fatal("expected first nested Codex ExecuteModel to fail with cooldown when continuity disabled")
+	}
+
+	geminiResp, errGemini := handler.ExecuteModel(parentCtx, ModelExecutionRequest{
+		EntryProtocol: "gemini",
+		ExitProtocol:  "gemini",
+		Model:         "gemini-2.5-pro",
+		Body:          []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+	})
+	if errGemini != nil {
+		t.Fatalf("subsequent nested Gemini ExecuteModel() error = %+v, want nil (must not inherit Codex continuity termination)", errGemini)
+	}
+	if !strings.Contains(string(geminiResp.Body), "gemini") {
+		t.Fatalf("geminiResp.Body = %s, want gemini payload", geminiResp.Body)
+	}
+
+	_, errCodexStream := handler.ExecuteModelStream(parentCtx, ModelExecutionRequest{
+		EntryProtocol: "openai-response",
+		ExitProtocol:  "openai-response",
+		Model:         "gpt-5-codex",
+		Stream:        true,
+		Body:          []byte(`{"model":"gpt-5-codex","stream":true,"input":"hi"}`),
+	})
+	if errCodexStream == nil {
+		t.Fatal("expected second nested Codex ExecuteModelStream to fail with cooldown when continuity disabled")
+	}
+
+	scheduler.mu.Lock()
+	seqIDs := append([]string(nil), scheduler.requestIDs...)
+	scheduler.mu.Unlock()
+	if len(seqIDs) != 2 || seqIDs[0] == "" || seqIDs[1] == "" || seqIDs[0] == seqIDs[1] {
+		t.Fatalf("sequential continuity requestIDs = %v, want 2 distinct non-empty IDs", seqIDs)
+	}
+
+	// 2. Concurrent nested ExecuteModel and ExecuteModelStream calls sharing parentCtx under -race.
+	const workers = 6
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers*2)
+	for i := 0; i < workers; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, errExec := handler.ExecuteModel(parentCtx, ModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "gpt-5-codex",
+				Body:          []byte(`{"model":"gpt-5-codex","messages":[{"role":"user","content":"hi"}]}`),
+			}); errExec == nil {
+				errCh <- fmt.Errorf("concurrent nested Codex ExecuteModel succeeded unexpectedly")
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			stream, errExec := handler.ExecuteModelStream(parentCtx, ModelExecutionRequest{
+				EntryProtocol: "gemini",
+				ExitProtocol:  "gemini",
+				Model:         "gemini-2.5-pro",
+				Stream:        true,
+				Body:          []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+			})
+			if errExec != nil {
+				errCh <- fmt.Errorf("concurrent nested Gemini ExecuteModelStream error = %v", errExec.Error)
+				return
+			}
+			for range stream.Chunks {
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for errWorker := range errCh {
+		t.Fatal(errWorker)
+	}
+
+	scheduler.mu.Lock()
+	totalIDs := len(scheduler.requestIDs)
+	uniqueIDs := make(map[string]struct{}, totalIDs)
+	for _, id := range scheduler.requestIDs {
+		uniqueIDs[id] = struct{}{}
+	}
+	scheduler.mu.Unlock()
+	if totalIDs != 2+workers || len(uniqueIDs) != 2+workers {
+		t.Fatalf("totalIDs=%d uniqueIDs=%d, want %d distinct continuity RequestIDs", totalIDs, len(uniqueIDs), 2+workers)
+	}
+}
+
+func TestStreamBootstrapRetriesWithoutContinuityDoNotShareAttemptCount(t *testing.T) {
+	model := "bootstrap-compat-model"
+	var calls atomic.Int32
+	executor := &modelExecutionCaptureExecutor{
+		provider: "codex",
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			switch calls.Add(1) {
+			case 1:
+				// First ExecuteStream call, attempt 0: transient 503 triggers internal retry.
+				return nil, &coreauth.Error{Code: "upstream_503", Message: "busy", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+			case 2:
+				// First ExecuteStream call, attempt 1: returns pre-output 503 stream chunk -> triggers outer bootstrap retry.
+				ch := make(chan coreexecutor.StreamChunk, 1)
+				ch <- coreexecutor.StreamChunk{Err: &coreauth.Error{Code: "stream_503", Message: "pre-output busy", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}}
+				close(ch)
+				return &coreexecutor.StreamResult{Chunks: ch}, nil
+			case 3:
+				// Second ExecuteStream call (bootstrap retry 1) MUST reset attempt back to 0 so RequestRetry=1 applies again.
+				return nil, &coreauth.Error{Code: "upstream_503", Message: "busy again", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+			default:
+				ch := make(chan coreexecutor.StreamChunk, 1)
+				ch <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed"}`)}
+				close(ch)
+				return &coreexecutor.StreamResult{Chunks: ch}, nil
+			}
+		},
+	}
+
+	disableCooling := true
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	manager.SetRetryConfig(1, 0, 0)
+	manager.SetConfigSnapshot(&sdkconfig.Config{
+		DisableCooling: disableCooling,
+		RequestRetry:   1,
+	})
+	auth := &coreauth.Auth{
+		ID:       "codex-bootstrap-compat",
+		Provider: "codex",
+		Status:   coreauth.StatusActive,
+	}
+	if _, errReg := manager.Register(context.Background(), auth); errReg != nil {
+		t.Fatalf("Register: %v", errReg)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	cfg := &sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	}
+	handler := NewBaseAPIHandlers(cfg, manager)
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Stream:        true,
+		Body:          []byte(`{"model":"bootstrap-compat-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream error = %+v", errMsg)
+	}
+	var got []string
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk.Err = %+v", chunk.Err)
+		}
+		got = append(got, string(chunk.Payload))
+	}
+	if calls.Load() != 4 {
+		t.Fatalf("executor calls = %d, want 4 (2 internal attempts per ExecuteStream call)", calls.Load())
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "response.completed") {
+		t.Fatalf("chunks = %v, want response.completed", got)
+	}
+}
+
+func TestMixedProviderStreamBootstrapRetriesDoNotShareNonCodexAttemptCount(t *testing.T) {
+	model := "mixed-bootstrap-compat-model"
+	var claudeCalls atomic.Int32
+	claudeExec := &modelExecutionCaptureExecutor{
+		provider: "claude",
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			switch claudeCalls.Add(1) {
+			case 1:
+				return nil, &coreauth.Error{Code: "upstream_503", Message: "busy", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+			case 2:
+				ch := make(chan coreexecutor.StreamChunk, 1)
+				ch <- coreexecutor.StreamChunk{Err: &coreauth.Error{Code: "stream_503", Message: "pre-output busy", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}}
+				close(ch)
+				return &coreexecutor.StreamResult{Chunks: ch}, nil
+			case 3:
+				return nil, &coreauth.Error{Code: "upstream_503", Message: "busy again", Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+			default:
+				ch := make(chan coreexecutor.StreamChunk, 1)
+				ch <- coreexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.completed"}`)}
+				close(ch)
+				return &coreexecutor.StreamResult{Chunks: ch}, nil
+			}
+		},
+	}
+	var codexCalls atomic.Int32
+	codexExec := &modelExecutionCaptureExecutor{
+		provider: "codex",
+		stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			codexCalls.Add(1)
+			return nil, &coreauth.Error{Code: "unexpected_codex", Message: "unexpected codex execution", HTTPStatus: http.StatusInternalServerError}
+		},
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(claudeExec)
+	manager.RegisterExecutor(codexExec)
+	manager.SetRetryConfig(1, 0, 0)
+	manager.SetConfigSnapshot(&sdkconfig.Config{
+		DisableCooling: true,
+		RequestRetry:   1,
+	})
+	manager.SetPluginScheduler(&nestedContinuityTestScheduler{})
+
+	claudeAuth := &coreauth.Auth{
+		ID:       "claude-mixed-compat",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+	}
+	codexAuth := &coreauth.Auth{
+		ID:       "codex-mixed-compat",
+		Provider: "codex",
+		Status:   coreauth.StatusDisabled,
+		Disabled: true,
+	}
+	for _, a := range []*coreauth.Auth{claudeAuth, codexAuth} {
+		if _, errReg := manager.Register(context.Background(), a); errReg != nil {
+			t.Fatalf("Register %s: %v", a.ID, errReg)
+		}
+		registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: model}})
+		id := a.ID
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(id)
+		})
+	}
+
+	cfg := &sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{BootstrapRetries: 1},
+	}
+	handler := NewBaseAPIHandlers(cfg, manager)
+	stream, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+		EntryProtocol: "openai",
+		ExitProtocol:  "openai",
+		Model:         model,
+		Stream:        true,
+		Body:          []byte(`{"model":"mixed-bootstrap-compat-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+	})
+	if errMsg != nil {
+		t.Fatalf("ExecuteModelStream error = %+v", errMsg)
+	}
+	var got []string
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk.Err = %+v", chunk.Err)
+		}
+		got = append(got, string(chunk.Payload))
+	}
+	if claudeCalls.Load() != 4 || codexCalls.Load() != 0 {
+		t.Fatalf("claudeCalls=%d codexCalls=%d, want 4 and 0", claudeCalls.Load(), codexCalls.Load())
+	}
+	if len(got) != 1 || !strings.Contains(got[0], "response.completed") {
+		t.Fatalf("chunks = %v, want response.completed", got)
 	}
 }

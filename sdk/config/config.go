@@ -27,6 +27,9 @@ type OAuthModelSetting = internalconfig.OAuthModelSetting
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
+type PayloadReplaceRule = internalconfig.PayloadReplaceRule
+type PayloadReplaceTarget = internalconfig.PayloadReplaceTarget
+type PayloadReplacement = internalconfig.PayloadReplacement
 type PayloadModelRule = internalconfig.PayloadModelRule
 
 type ProxyConnectionPoolConfig = internalconfig.ProxyConnectionPoolConfig

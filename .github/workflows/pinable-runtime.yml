@@ -3,44 +3,18 @@ name: Pinable desktop runtime
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-    paths:
-      - 'cmd/server/**'
-      - 'internal/**'
-      - 'sdk/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/pinable-runtime.yml'
-      - 'scripts/pinable/runtime.py'
-      - 'scripts/pinable/test_runtime.py'
-      - 'scripts/pinable/test_publish_runtime.py'
-      - 'scripts/pinable/test_smoke_runtime.py'
-      - 'scripts/pinable/smoke_runtime.py'
-      - 'scripts/pinable/publish_runtime.py'
-      - 'docs/pinable/desktop-runtime.md'
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Optional version label; default is source timestamp + SHA'
-        type: string
-        required: false
-      publish_release:
-        description: 'Publish this manual main build; main pushes already publish automatically'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: pinable-runtime-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: pinable-runtime-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   PYTHONDONTWRITEBYTECODE: '1'
-  SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  RUNTIME_VERSION: ${{ inputs.version || '' }}
+  SOURCE_SHA: ${{ github.sha }}
+  RUNTIME_VERSION: ''
 
 jobs:
   quality:
@@ -207,7 +181,7 @@ jobs:
     name: Publish verified stable runtime
     if: >-
       github.repository == 'PinableAgents/CLIProxyAPI' && github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+      github.event_name == 'push'
     needs: [assemble]
     runs-on: ubuntu-22.04
     timeout-minutes: 15

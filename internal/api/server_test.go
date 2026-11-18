@@ -3,7 +3,6 @@ package api
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	gin "github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -536,8 +536,8 @@ func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *tes
 	}
 	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
 	apiResponse, _ := rawAPIResponse.([]byte)
-	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
-		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
 	}
 }
 
@@ -2144,6 +2144,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 			MaxCompletionTokens: 64000,
 			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
+		{ID: "gpt-6.2-sol", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{
 			ID:            "custom-codex-model-test",
 			Object:        "model",
@@ -2204,11 +2205,14 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	}
 
 	var gpt55 map[string]any
+	var gpt62Sol map[string]any
 	var custom map[string]any
 	for _, model := range resp.Models {
 		switch slug, _ := model["slug"].(string); slug {
 		case "gpt-5.5":
 			gpt55 = model
+		case "gpt-6.2-sol":
+			gpt62Sol = model
 		case "custom-codex-model-test":
 			custom = model
 		}
@@ -2225,9 +2229,31 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
 		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
+	// The upstream 0.169.0 catalog removed GPT-5.5 speed tiers and added
+	// priority/ultrafast tiers to GPT-6.2-Sol. Verify both endpoint contracts.
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
-	if !ok || len(serviceTiers) != 1 {
-		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	if !ok || len(serviceTiers) != 0 {
+		t.Fatalf("expected gpt-5.5 service_tiers = [], got %#v", gpt55["service_tiers"])
+	}
+	if gpt62Sol == nil {
+		t.Fatal("expected gpt-6.2-sol codex catalog entry")
+	}
+	if got := gpt62Sol["apply_patch_tool_type"]; got != "freeform" {
+		t.Fatalf("gpt-6.2-sol apply_patch_tool_type = %#v, want freeform", got)
+	}
+	if got := gpt62Sol["minimal_client_version"]; got != "0.166.0" {
+		t.Fatalf("gpt-6.2-sol minimal_client_version = %#v, want 0.166.0", got)
+	}
+	solTiers, ok := gpt62Sol["service_tiers"].([]any)
+	if !ok || len(solTiers) != 2 {
+		t.Fatalf("expected gpt-6.2-sol priority and ultrafast tiers, got %#v", gpt62Sol["service_tiers"])
+	}
+	for i, wantID := range []string{"priority", "ultrafast"} {
+		tier, okTier := solTiers[i].(map[string]any)
+		name, _ := tier["name"].(string)
+		if !okTier || tier["id"] != wantID || name == "" {
+			t.Fatalf("gpt-6.2-sol service_tiers[%d] = %#v, want named %s tier", i, solTiers[i], wantID)
+		}
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")

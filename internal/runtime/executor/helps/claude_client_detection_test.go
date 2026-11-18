@@ -1,11 +1,11 @@
 package helps
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 

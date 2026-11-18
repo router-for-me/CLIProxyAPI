@@ -66,6 +66,16 @@ type Service struct {
 	// hooks provides lifecycle callbacks.
 	hooks Hooks
 
+	// executorWrapper optionally wraps every built-in executor before registration.
+	executorWrapper ExecutorWrapper
+
+	// ownedExecutors tracks the service-owned underlying executor per provider
+	// so reuse and rebinding decisions survive embedder wrapping.
+	// ownedRevisions tracks the manager revision at registration time so
+	// external overwrites and removals invalidate the cache.
+	ownedExecutors map[string]coreauth.ProviderExecutor
+	ownedRevisions map[string]uint64
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 
