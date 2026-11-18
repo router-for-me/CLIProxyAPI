@@ -53,7 +53,7 @@ func QuotaRecoveryCandidate(auth *Auth) bool {
 		message, lastError := state.StatusMessage, state.LastError
 		// A propagated-only layer owns the current quota restriction. Its retained
 		// sibling diagnostic describes an expired failure, not this active layer.
-		if state.credentialQuotaPropagated && state.credentialQuotaShadow == nil && state.Quota.Exceeded && state.Quota.Reason == "credential_quota" {
+		if state.credentialQuotaPropagated && !isModelStateActiveCooldown(state.credentialQuotaShadow, now) && state.Quota.Exceeded && state.Quota.Reason == "credential_quota" {
 			message, lastError = "credential_quota", nil
 		}
 		modelKnown, modelSafe := quotaRecoveryState(auth.Provider, state.Status, message, state.Unavailable, state.NextRetryAfter, state.Quota, lastError)

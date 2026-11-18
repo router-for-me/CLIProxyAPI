@@ -22,7 +22,7 @@ import (
 
 func TestManagementV8ExpiredSiblingDiagnostic(t *testing.T) {
 	for _, provider := range []string{"claude", "codex"} {
-		for _, mode := range []string{"expired", "live", "unpropagated", "reason_only", "private_rate", "force"} {
+		for _, mode := range []string{"expired", "expired_shadow", "live", "unpropagated", "reason_only", "private_rate", "force"} {
 			for _, restored := range []bool{false, true} {
 				if mode == "reason_only" && restored {
 					continue
@@ -77,12 +77,15 @@ func TestManagementV8ExpiredSiblingDiagnostic(t *testing.T) {
 					}
 					diagnostic := &coreauth.Error{HTTPStatus: 404, Message: `{"error":{"message":"sibling route not found"}}`}
 					short := 45 * time.Second
+					if mode == "expired_shadow" {
+						short = 2 * time.Second
+					}
 					manager.MarkResult(ctx, coreauth.Result{AuthID: auth.ID, Provider: provider, Model: sibling, Error: diagnostic, RetryAfter: &short})
 					records, err := store.Load(ctx)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if mode != "live" && mode != "unpropagated" {
+					if mode != "live" && mode != "unpropagated" && mode != "expired_shadow" {
 						current, _ := manager.GetByID(auth.ID)
 						raw, err := json.Marshal(current)
 						if err != nil {
@@ -151,6 +154,45 @@ func TestManagementV8ExpiredSiblingDiagnostic(t *testing.T) {
 					}
 					hour := time.Hour
 					manager.MarkResult(ctx, coreauth.Result{AuthID: auth.ID, Provider: provider, Model: model, Error: plan, RetryAfter: &hour, CredentialScope: wide})
+					if mode == "expired_shadow" {
+						wrapped, err := store.Load(ctx)
+						if err != nil {
+							t.Fatal(err)
+						}
+						var deadline time.Time
+						for _, record := range wrapped {
+							if record.Model == sibling && record.CredentialQuotaPropagated && record.IndependentState != nil && record.IndependentState.LastError != nil && record.IndependentState.LastError.HTTPStatus == 404 {
+								deadline = record.IndependentState.NextRetryAfter
+								if !record.IndependentNonQuotaCooldownUntil.Equal(deadline) || !record.NonQuotaCooldownUntil.Equal(deadline) {
+									t.Fatal("native404 private deadlines did not match its own public expiry")
+								}
+							}
+						}
+						if !deadline.After(time.Now()) {
+							t.Fatal("propagation did not persist a live independent sibling shadow")
+						}
+						wrappedAuth, _ := manager.GetByID(auth.ID)
+						if coreauth.QuotaRecoveryCandidate(wrappedAuth) {
+							t.Fatal("live independent sibling shadow allowed subscription recovery")
+						}
+						<-time.After(time.Until(deadline) + time.Millisecond)
+						expired, err := store.Load(ctx)
+						if err != nil {
+							t.Fatal(err)
+						}
+						foundExpired := false
+						for _, record := range expired {
+							if record.Model == sibling && record.CredentialQuotaPropagated && record.IndependentState != nil && record.IndependentState.NextRetryAfter.Equal(deadline) {
+								if record.IndependentNonQuotaCooldownUntil.After(time.Now()) || record.NonQuotaCooldownUntil.After(time.Now()) {
+									t.Fatal("native404 private deadline remains active after public expiry")
+								}
+								foundExpired = true
+							}
+						}
+						if !foundExpired {
+							t.Fatal("expired independent shadow disappeared before recovery")
+						}
+					}
 					if mode == "reason_only" {
 						current, _ := manager.GetByID(auth.ID)
 						state := current.ModelStates[sibling]
@@ -176,7 +218,7 @@ func TestManagementV8ExpiredSiblingDiagnostic(t *testing.T) {
 					if state == nil || state.LastError == nil || state.LastError.HTTPStatus != 404 || state.LastError.Message != diagnostic.Message {
 						t.Fatal("propagation or restore erased owned sibling diagnostic")
 					}
-					wantRecovery := mode == "expired"
+					wantRecovery := mode == "expired" || mode == "expired_shadow"
 					if got := coreauth.QuotaRecoveryCandidate(before); got != wantRecovery {
 						t.Errorf("candidate confused retained diagnostic with active propagated layer: got=%t want=%t", got, wantRecovery)
 					}
