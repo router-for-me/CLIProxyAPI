@@ -1021,6 +1021,12 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		auth.claudeFablePoolCooldownUntil = time.Time{}
 	}
 
+	if !keepAuthLevelForce && !keepCredQuotaForce && (!auth.claudeOverageCooldownUntil.IsZero() || !auth.claudeFablePoolCooldownUntil.IsZero()) {
+		auth.claudeOverageCooldownUntil = time.Time{}
+		auth.claudeFablePoolCooldownUntil = time.Time{}
+		changed = true
+	}
+
 	prevUnavailable := auth.Unavailable
 	prevNextRetry := auth.NextRetryAfter
 	prevQuota := cooldownFieldsOf(auth.Quota)
