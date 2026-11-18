@@ -99,6 +99,8 @@ func TestCodexCommentaryMirrorAppearsOnceInCrossProviderReplay(t *testing.T) {
 	}{
 		{"same message", `[{"role":"assistant","content":[` + marker + "," + mirror + "," + final + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + `]}]`},
 		{"split assistant message", `[{"role":"assistant","content":[` + marker + `]},{"role":"assistant","content":[` + mirror + "," + final + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + `]}]`},
+		{"split string mirror", `[{"role":"assistant","content":[` + marker + `]},{"role":"assistant","content":"progress"}]`, `[{"role":"assistant","content":"progress"}]`},
+		{"different adjacent string", `[{"role":"assistant","content":[` + marker + `]},{"role":"assistant","content":"final"}]`, `[{"role":"assistant","content":[` + mirror + `]},{"role":"assistant","content":"final"}]`},
 		{"different adjacent text", `[{"role":"assistant","content":[` + marker + "," + final + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + `]}]`},
 		{"nonadjacent repeated text", `[{"role":"assistant","content":[` + marker + "," + final + "," + mirror + `]}]`, `[{"role":"assistant","content":[` + mirror + "," + final + "," + mirror + `]}]`},
 		{"user text is preserved", `[{"role":"assistant","content":[` + marker + `]},{"role":"user","content":[` + mirror + `]}]`, `[{"role":"assistant","content":[` + mirror + `]},{"role":"user","content":[` + mirror + `]}]`},

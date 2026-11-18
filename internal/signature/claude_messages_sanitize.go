@@ -119,7 +119,11 @@ func hasAdjacentCommentaryMirror(messages, content []ojson.Result, messageIndex,
 	} else if messageIndex+1 < len(messages) {
 		message := messages[messageIndex+1]
 		if message.Get("role").String() == "assistant" {
-			next = message.Get("content.0")
+			nextContent := message.Get("content")
+			if nextContent.Type == ojson.String {
+				return nextContent.String() == text
+			}
+			next = nextContent.Get("0")
 		}
 	}
 	return next.Get("type").String() == "text" && next.Get("text").String() == text
