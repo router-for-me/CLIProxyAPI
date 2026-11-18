@@ -1707,6 +1707,48 @@ func TestMarshalCompactJSONIsSingleLine(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsResponse_NonTemplateAPIVisibility(t *testing.T) {
+	resetTemplateCache := func() {
+		codexClientModelTemplatesMu.Lock()
+		codexClientModelTemplatesLoaded = false
+		codexClientModelTemplatesMu.Unlock()
+	}
+	resetTemplateCache()
+	t.Cleanup(resetTemplateCache)
+
+	snapshot := []byte(`{"models":[{"slug":"gpt-5.5","visibility":"list","supported_in_api":false}]}`)
+	if _, _, errLoad := loadCodexClientModelTemplatesSnapshot(snapshot, registry.GetCodexClientModelsRevision()); errLoad != nil {
+		t.Fatalf("load test catalog: %v", errLoad)
+	}
+
+	available := []map[string]any{
+		{"id": "gpt-5.5"},
+		{"id": "deepseek-flash"},
+		{"id": "deepseek-v4-pro"},
+		{"id": "gpt-image-2"},
+	}
+	entries := buildCodexClientModels(available, nil, nil, false, "0.169.0")
+	bySlug := make(map[string]map[string]any, len(entries))
+	for _, entry := range entries {
+		bySlug[stringModelValue(entry, "slug")] = entry
+	}
+
+	for _, tt := range []struct {
+		slug, visibility string
+		supported        bool
+	}{
+		{"gpt-5.5", "list", false},
+		{"deepseek-flash", "list", true},
+		{"deepseek-v4-pro", "list", true},
+		{"gpt-image-2", "hide", false},
+	} {
+		entry := bySlug[tt.slug]
+		if entry["visibility"] != tt.visibility || entry["supported_in_api"] != tt.supported {
+			t.Errorf("%s visibility/API support = %v/%v, want %s/%t", tt.slug, entry["visibility"], entry["supported_in_api"], tt.visibility, tt.supported)
+		}
+	}
+}
+
 func TestCodexClientModelsResponse_NonTemplateCatalogStaysWithinOneMiB(t *testing.T) {
 	ids := []string{
 		"gpt-6-astra",

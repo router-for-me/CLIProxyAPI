@@ -157,6 +157,10 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
+		if entry["visibility"] == "list" {
+			// A synthesized picker entry represents a model already exposed by the API.
+			entry["supported_in_api"] = true
+		}
 		applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
 		applyCodexClientApplyPatchCapability(entry, id, applyPatchCapabilityForModel)
 		result = append(result, entry)
