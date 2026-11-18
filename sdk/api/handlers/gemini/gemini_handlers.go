@@ -93,36 +93,8 @@ func (h *GeminiAPIHandler) GeminiGetHandler(c *gin.Context) {
 		})
 		return
 	}
-	action := strings.TrimPrefix(request.Action, "/")
-
-	// Get dynamic models from the global registry and find the matching one
-	availableModels := h.Models()
-	var targetModel map[string]any
-
-	for _, model := range availableModels {
-		name, _ := model["name"].(string)
-		// Match name with or without 'models/' prefix
-		if name == action || name == "models/"+action {
-			targetModel = model
-			break
-		}
-	}
-
-	if targetModel != nil {
-		// Ensure the name has 'models/' prefix in the output if it's a Gemini model
-		if name, ok := targetModel["name"].(string); ok && name != "" && !strings.HasPrefix(name, "models/") {
-			targetModel["name"] = "models/" + name
-		}
-		c.JSON(http.StatusOK, targetModel)
-		return
-	}
-
-	c.JSON(http.StatusNotFound, handlers.ErrorResponse{
-		Error: handlers.ErrorDetail{
-			Message: "Not Found",
-			Type:    "not_found",
-		},
-	})
+	c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(request.Action, "/"))
+	h.GeminiModels(c)
 }
 
 // GeminiHandler handles POST requests for Gemini API operations.
