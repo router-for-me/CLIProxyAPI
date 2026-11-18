@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -379,18 +380,11 @@ func appendPath(path []string, key string) []string {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 //
-// Credential connection-pool blocks (enabled, idle-conn-timeout,
-// max-idle-conns-per-host) are deliberately absent from the pointer-backed
-// zero-value whitelist below. The pruning here only applies to keys that are new
-// to the destination document: a block already present on disk is merged into its
-// existing node and survives. So an empty block (connection-pool: {} is the opt-in
-// for the default pool), an explicit enabled: false, and an explicit
-// max-idle-conns-per-host: 0 all persist when the operator wrote them by hand or
-// through the v8 management API, which writes the YAML tree directly. The
-// remaining gap is a block that only exists in an in-memory Config, for example one
-// an SDK embedder adds through sdk/config.SaveConfigPreserveComments to a file that
-// never carried it: pruning drops those zero-valued sub-keys. No management
-// endpoint mutates ProxyConnectionPool, so that path is reachable only from code.
+// Connection-pool blocks are pointer-backed: a block is marshalled only when it
+// was set, so every value inside it is explicit. An empty block (connection-pool: {})
+// is the opt-in for the default pool, and enabled: false or max-idle-conns-per-host: 0
+// change pooling, so the block and its sub-keys are never pruned as defaults, even
+// when an SDK embedder saves a block the destination file never carried.
 func isSensitiveWordsReplaceEntryPath(path []string) bool {
 	for i, part := range path {
 		if part == "sensitive-words-replace" && i < len(path)-1 {
@@ -444,7 +438,29 @@ func isPayloadReplacementsPath(path []string) bool {
 	return len(path) >= 3 && path[0] == "payload" && path[1] == "replace" && path[2] == "replacements"
 }
 
+// isConnectionPoolPath reports whether path is a connection-pool block or lies inside one.
+func isConnectionPoolPath(path []string) bool {
+	return slices.Contains(path, "connection-pool")
+}
+
+// containsConnectionPoolNode reports whether a mapping carries a connection-pool block
+// at any depth, so its ancestors survive the zero-value check.
+func containsConnectionPoolNode(node *yaml.Node) bool {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == "connection-pool" || containsConnectionPoolNode(node.Content[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	if isConnectionPoolPath(path) || containsConnectionPoolNode(node) {
+		return false
+	}
 	if isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) || isPayloadReplacementsPath(path) {
 		return false
 	}
@@ -537,7 +553,7 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 // pruneKnownDefaultsInNewNode removes default-valued descendants from a new node
 // before it is appended into the destination YAML tree.
 func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
-	if node == nil || isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) || isPayloadReplacementsPath(path) {
+	if node == nil || isConnectionPoolPath(path) || isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) || isPayloadReplacementsPath(path) {
 		return
 	}
 	if len(path) > 0 && (path[len(path)-1] == "sensitive-words-replace" || path[len(path)-1] == "sensitive-patterns-replace") {
@@ -560,7 +576,8 @@ func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
 			}
 
 			pruneKnownDefaultsInNewNode(childPath, valueNode)
-			if (valueNode.Kind == yaml.MappingNode || valueNode.Kind == yaml.SequenceNode) &&
+			if !isConnectionPoolPath(childPath) &&
+				(valueNode.Kind == yaml.MappingNode || valueNode.Kind == yaml.SequenceNode) &&
 				len(valueNode.Content) == 0 {
 				continue
 			}

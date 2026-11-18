@@ -245,6 +245,50 @@ func TestParseConfigBytesClaudeConnectionPool(t *testing.T) {
 	}
 }
 
+// An SDK embedder opts in with an empty block. Saving it into a file that never
+// carried the block must keep it, or the reloaded config silently drops pooling.
+func TestSaveConfigPreserveComments_ClaudeEmptyConnectionPoolSurvives(t *testing.T) {
+	tests := []struct {
+		name        string
+		initial     string
+		migrateV8   bool
+		pool        ProxyConnectionPoolConfig
+		wantEnabled bool
+	}{
+		{name: "legacy layout", initial: "port: 8317\n", wantEnabled: true},
+		{name: "v8 layout", initial: "config-version: 8\nserver:\n  port: 8317\n", migrateV8: true, wantEnabled: true},
+		{name: "v8 explicit opt-out", initial: "config-version: 8\nserver:\n  port: 8317\n", migrateV8: true, pool: ProxyConnectionPoolConfig{Enabled: new(false)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if errWrite := os.WriteFile(configPath, []byte(tt.initial), 0o600); errWrite != nil {
+				t.Fatalf("os.WriteFile() error = %v", errWrite)
+			}
+			pool := tt.pool
+			cfg := &Config{Port: 8317, Claude: ClaudeConfig{ConnectionPool: &pool}}
+			if errSave := SaveConfigPreserveComments(configPath, cfg, tt.migrateV8); errSave != nil {
+				t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+			}
+			savedBytes, errRead := os.ReadFile(configPath)
+			if errRead != nil {
+				t.Fatalf("os.ReadFile() error = %v", errRead)
+			}
+			reloaded, errLoad := LoadConfig(configPath)
+			if errLoad != nil {
+				t.Fatalf("LoadConfig() error = %v", errLoad)
+			}
+			if reloaded.Claude.ConnectionPool == nil {
+				t.Fatalf("reloaded cfg.Claude.ConnectionPool = nil, want the saved block; saved:\n%s", savedBytes)
+			}
+			if got := reloaded.Claude.ConnectionPool.Enabled == nil || *reloaded.Claude.ConnectionPool.Enabled; got != tt.wantEnabled {
+				t.Fatalf("reloaded pool enabled = %t, want %t; saved:\n%s", got, tt.wantEnabled, savedBytes)
+			}
+		})
+	}
+}
+
 func TestParseAndSaveClaudeOAuthIncludeCreateAPIKey(t *testing.T) {
 	tests := []struct {
 		name        string
