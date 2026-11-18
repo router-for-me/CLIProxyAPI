@@ -1,8 +1,9 @@
 package registry
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func testNativeCapabilities(value *bool) *NativeCapabilities {

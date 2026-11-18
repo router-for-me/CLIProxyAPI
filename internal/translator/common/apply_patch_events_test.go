@@ -1,12 +1,12 @@
 package common
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	applypatch "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/apply-patch"
 
 	"github.com/MoeForge/moego/ojson"

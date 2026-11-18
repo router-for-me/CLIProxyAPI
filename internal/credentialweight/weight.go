@@ -2,11 +2,12 @@
 package credentialweight
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (

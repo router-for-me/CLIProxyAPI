@@ -100,3 +100,24 @@ oauth-request-scoped-errors:
 		t.Fatalf("unexpected meta request-scoped error rule: %+v", rules[0])
 	}
 }
+
+func TestSanitizeOAuthModelAlias_PreservesCaseOnlyAlias(t *testing.T) {
+	cfg := &Config{
+		OAuthModelAlias: map[string][]OAuthModelAlias{
+			"opencode-go": {
+				{Name: "minimax-m3.1-flash", Alias: "MiniMax-M3.1-Flash"},
+				{Name: "same-exact", Alias: "same-exact"},
+			},
+		},
+	}
+
+	cfg.SanitizeOAuthModelAlias()
+
+	aliases := cfg.OAuthModelAlias["opencode-go"]
+	if len(aliases) != 1 {
+		t.Fatalf("expected 1 case-only alias, got %d (%#v)", len(aliases), aliases)
+	}
+	if aliases[0].Name != "minimax-m3.1-flash" || aliases[0].Alias != "MiniMax-M3.1-Flash" {
+		t.Fatalf("unexpected sanitized alias: %+v", aliases[0])
+	}
+}

@@ -2,7 +2,6 @@ package synthesizer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	kimiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -65,7 +65,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			ctx.RecordIncompleteFile(full)
 			continue
 		}
-		auths, errSynthesize := synthesizeFileAuths(ctx, full, data)
+		auths, _, errSynthesize := synthesizeFileAuths(ctx, full, data)
 		if errSynthesize != nil {
 			log.WithError(errSynthesize).Warnf("skipping auth file %s", name)
 			continue
@@ -81,24 +81,31 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 // SynthesizeAuthFile generates Auth entries for one auth JSON file payload.
 // It shares exactly the same mapping behavior as FileSynthesizer.Synthesize.
 func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
+	auths, _, errSynthesize := synthesizeFileAuths(ctx, fullPath, data)
+	return auths, errSynthesize
+}
+
+// SynthesizeAuthFileDetailed generates Auth entries for one auth JSON file payload
+// and reports whether a plugin auth parser claimed the file.
+func SynthesizeAuthFileDetailed(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, bool, error) {
 	return synthesizeFileAuths(ctx, fullPath, data)
 }
 
-func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
+func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, bool, error) {
 	if ctx == nil || len(data) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	now := ctx.Now
 	var metadata map[string]any
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		if ctx.StrictFileParsing {
-			return nil, fmt.Errorf("parse auth file: %w", errUnmarshal)
+			return nil, false, fmt.Errorf("parse auth file: %w", errUnmarshal)
 		}
-		return nil, nil
+		return nil, false, nil
 	}
 	coreauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
-		return nil, fmt.Errorf("invalid weight in %s: %w", filepath.Base(fullPath), errWeight)
+		return nil, false, fmt.Errorf("invalid weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
 	// Invalid per-account rules must not drop an existing credential: keep the valid
 	// entries and warn. Write entry points (upload and PATCH) reject them before persisting.
@@ -111,20 +118,32 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if provider == "gemini" {
 		provider = "gemini-cli"
 	}
+	defaultID := fileRelativeAuthID(ctx.AuthDir, fullPath)
+	defaultFileName := filepath.Base(fullPath)
 	if ctx.PluginAuthParser != nil {
 		auths, handled, errParse := parsePluginFileAuths(ctx.PluginAuthParser, pluginapi.AuthParseRequest{
 			Provider: provider,
 			Path:     fullPath,
-			FileName: filepath.Base(fullPath),
+			FileName: defaultFileName,
 			RawJSON:  data,
-		})
+		}, ctx.AuthDir)
 		if errParse != nil && ctx.StrictFileParsing {
-			return nil, fmt.Errorf("parse plugin auth file: %w", errParse)
+			return nil, false, fmt.Errorf("parse plugin auth file: %w", errParse)
 		}
 		if errParse == nil && handled {
+			if ctx.StrictFileParsing {
+				for _, auth := range auths {
+					if auth == nil {
+						continue
+					}
+					if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
+						return nil, true, fmt.Errorf("invalid plugin auth weight in %s: %w", defaultFileName, errWeight)
+					}
+				}
+			}
 			auths = compactPluginAuths(auths)
 			if len(auths) == 0 {
-				return nil, nil
+				return nil, true, nil
 			}
 			filePortalHint := ""
 			for _, key := range []string{"oauth_provider", "portal"} {
@@ -140,6 +159,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			for index, auth := range auths {
 				if auth == nil {
 					continue
+				}
+				auth.FileName = strings.TrimSpace(auth.FileName)
+				if auth.FileName == "" {
+					auth.FileName = defaultFileName
+				}
+				auth.ID = strings.TrimSpace(auth.ID)
+				if auth.ID == "" {
+					auth.ID = defaultID
 				}
 				coreauth.NormalizeCredentialMetadata(auth.Metadata)
 				if filePortalHint != "" {
@@ -191,7 +218,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 					auth.Prefix = strings.Trim(strings.TrimSpace(pref), "/")
 				}
 				if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
-					return nil, fmt.Errorf("invalid plugin auth weight in %s: %w", filepath.Base(fullPath), errWeight)
+					return nil, true, fmt.Errorf("invalid plugin auth weight in %s: %w", defaultFileName, errWeight)
 				}
 				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
 				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
@@ -206,26 +233,18 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				applyFingerprintProfileAttribute(auth, metadata)
 				auth.BindFileSnapshot(fullPath, data)
 			}
-			return auths, nil
+			return auths, true, nil
 		}
 	}
 	if provider == "" || provider == "gemini-cli" {
-		return nil, nil
+		return nil, false, nil
 	}
 	label := provider
 	if email, _ := metadata["email"].(string); email != "" {
 		label = email
 	}
 	// Use relative path under authDir as ID to stay consistent with the file-based token store.
-	id := fullPath
-	if strings.TrimSpace(ctx.AuthDir) != "" {
-		if rel, errRel := filepath.Rel(ctx.AuthDir, fullPath); errRel == nil && rel != "" {
-			id = rel
-		}
-	}
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
+	id := defaultID
 
 	proxyURL := ""
 	if p, ok := metadata["proxy_url"].(string); ok {
@@ -270,7 +289,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	// Read priority from auth file.
 	coreauth.ApplyAuthPriorityMetadata(a, metadata)
 	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
-		return nil, fmt.Errorf("invalid auth weight in %s: %w", filepath.Base(fullPath), errWeight)
+		return nil, false, fmt.Errorf("invalid auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 	}
 	// Read note from auth file.
 	if rawNote, ok := metadata["note"]; ok {
@@ -317,12 +336,66 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 		}
 	}
 	a.BindFileSnapshot(fullPath, data)
-	return []*coreauth.Auth{a}, nil
+	return []*coreauth.Auth{a}, false, nil
 }
 
-func parsePluginFileAuths(parser PluginAuthParser, req pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error) {
+func fileRelativeAuthID(authDir, fullPath string) string {
+	id := fullPath
+	if trimmedDir := strings.TrimSpace(authDir); trimmedDir != "" {
+		if rel, errRel := filepath.Rel(trimmedDir, fullPath); errRel == nil && rel != "" && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			id = rel
+		} else {
+			cleanDir := filepath.Clean(trimmedDir)
+			cleanPath := filepath.Clean(fullPath)
+			if !filepath.IsAbs(cleanDir) {
+				if absDir, errAbs := filepath.Abs(cleanDir); errAbs == nil {
+					cleanDir = absDir
+				}
+			}
+			if !filepath.IsAbs(cleanPath) {
+				if absPath, errAbs := filepath.Abs(cleanPath); errAbs == nil {
+					cleanPath = absPath
+				}
+			}
+			if relAbs, errRelAbs := filepath.Rel(cleanDir, cleanPath); errRelAbs == nil && relAbs != "" && relAbs != "." && relAbs != ".." && !strings.HasPrefix(relAbs, ".."+string(filepath.Separator)) {
+				id = relAbs
+			} else if evalDir, evalPath := evalSynthesizerPathSymlinks(cleanDir), evalSynthesizerPathSymlinks(cleanPath); evalDir != "" && evalPath != "" {
+				if relEval, errRelEval := filepath.Rel(evalDir, evalPath); errRelEval == nil && relEval != "" && relEval != "." && relEval != ".." && !strings.HasPrefix(relEval, ".."+string(filepath.Separator)) {
+					id = relEval
+				}
+			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		id = strings.ToLower(id)
+	}
+	return id
+}
+
+func evalSynthesizerPathSymlinks(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if real, errEval := filepath.EvalSymlinks(path); errEval == nil && strings.TrimSpace(real) != "" {
+		return filepath.Clean(real)
+	}
+	if parent, errParent := filepath.EvalSymlinks(filepath.Dir(path)); errParent == nil && strings.TrimSpace(parent) != "" {
+		return filepath.Clean(filepath.Join(parent, filepath.Base(path)))
+	}
+	return filepath.Clean(path)
+}
+
+type defaultAuthDirMultiParser interface {
+	ParseAuthsWithDefaultAuthDir(context.Context, pluginapi.AuthParseRequest, string) ([]*coreauth.Auth, bool, error)
+}
+
+func parsePluginFileAuths(parser PluginAuthParser, req pluginapi.AuthParseRequest, defaultAuthDir string) ([]*coreauth.Auth, bool, error) {
 	if parser == nil {
 		return nil, false, nil
+	}
+	if dirParser, ok := parser.(defaultAuthDirMultiParser); ok {
+		return dirParser.ParseAuthsWithDefaultAuthDir(context.Background(), req, defaultAuthDir)
 	}
 	if multiParser, ok := parser.(PluginMultiAuthParser); ok {
 		return multiParser.ParseAuths(context.Background(), req)

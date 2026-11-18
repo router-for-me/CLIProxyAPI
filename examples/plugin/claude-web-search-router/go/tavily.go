@@ -3,12 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync/atomic"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const tavilySearchURL = "https://api.tavily.com/search"

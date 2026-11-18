@@ -168,11 +168,15 @@ func TestClaudeExecutor_Issue7000OpenAITranslation(t *testing.T) {
 					if ojson.GetBytes(body, "tool_choice.name").Exists() {
 						t.Errorf("forced tool name survived: %s", body)
 					}
-					if withSchema && (!strings.Contains(ojson.GetBytes(body, "system").Raw, "issue7000_title") || !strings.Contains(ojson.GetBytes(body, "system").Raw, "JSON")) {
-						t.Errorf("existing schema prompt fallback missing: %s", body)
-					}
-					if ojson.GetBytes(body, "output_config.format").Exists() {
-						t.Errorf("translated schema should retain prompt fallback, not native output format: %s", body)
+					if withSchema {
+						if got := ojson.GetBytes(body, "output_config.format").Value(); !reflect.DeepEqual(got, ojson.Parse(`{"type":"json_schema","schema":`+schema+`}`).Value()) {
+							t.Errorf("translated schema should reach output_config.format unchanged: %s", body)
+						}
+						if strings.Contains(ojson.GetBytes(body, "system").Raw, "conforms strictly") {
+							t.Errorf("schema instruction must not be sent beside output_config.format: %s", body)
+						}
+					} else if ojson.GetBytes(body, "output_config.format").Exists() {
+						t.Errorf("output_config.format without a schema: %s", body)
 					}
 				})
 			}
