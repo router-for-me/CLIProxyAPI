@@ -12,6 +12,8 @@ What the fork adds:
 
 Request fields, limits, and OpenWhispr setup are in [docs/audio-transcription.md](docs/audio-transcription.md).
 
+The Claude model list also includes `claude-mythos-5-2` and `claude-mythos-5-1`, which upstream leaves out because few accounts have Mythos access. They are defined in [internal/registry/models/fork_models.json](internal/registry/models/fork_models.json) and added to whichever model catalog loads, including the upstream catalog refreshed every 3 hours. A model upstream already lists keeps upstream's entry. Requests for these models only succeed on Claude accounts with Mythos access.
+
 ---
 
 # CLI Proxy API

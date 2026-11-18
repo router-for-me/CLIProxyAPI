@@ -328,6 +328,7 @@ func publishCatalogBytes(data []byte) ([]string, error) {
 	if errValidate := validateModelsCatalog(&parsed); errValidate != nil {
 		return nil, errValidate
 	}
+	addForkModels(&parsed)
 	old := getModels()
 	if len(parsed.Meta) == 0 && old != nil {
 		parsed.Meta = old.Meta
