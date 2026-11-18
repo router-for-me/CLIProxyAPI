@@ -27,7 +27,6 @@ import { useAuthStore, useQuotaStore, useThemeStore } from '@/stores';
 import type { AuthFileItem, ResolvedTheme } from '@/types';
 import { getQuotaCacheKey } from '@/utils/quota/identity';
 import { ProviderTabs } from '@/features/authFiles/components/ProviderTabs';
-import { maskedLabel } from '@/features/quota/maskedLabel';
 import { PoolCard } from '@/features/quota/components/PoolCard';
 import { PoolControls } from '@/features/quota/components/PoolControls';
 import { PoolHistoryNotice } from '@/features/quota/components/PoolHistoryNotice';
@@ -40,7 +39,6 @@ import {
   type PoolMetric,
   type PoolProvider,
 } from '@/features/quota/pool/constants';
-import { accountOrdinals } from '@/features/quota/pool/members';
 import { buildPoolCardModel, worstHistoryStatus } from '@/features/quota/pool/model';
 import type { PoolCardModel } from '@/features/quota/pool/types';
 import { QuotaHeader } from './components/QuotaHeader';
@@ -82,7 +80,6 @@ interface PoolPreferences {
   burnWindow: BurnWindowHours;
   futureUsage: FutureUsage;
   metric: PoolMetric;
-  showEmails: boolean;
 }
 
 /** A pool view preference that survives reloads within the browser session. */
@@ -129,7 +126,6 @@ export function QuotaPage() {
   const [burnWindow, setBurnWindow] = usePoolPreference('burnWindow', 3);
   const [futureUsage, setFutureUsage] = usePoolPreference('futureUsage', 'same');
   const [accounts, setAccounts] = usePoolPreference('accounts', false);
-  const [showEmails, setShowEmails] = usePoolPreference('showEmails', false);
   const [rangeOffset, setRangeOffset] = useState(0);
   const [historyToken, setHistoryToken] = useState(0);
   const [page, setPage] = useState(1);
@@ -304,34 +300,6 @@ export function QuotaPage() {
     });
   }, [entries, error, filesGeneration, loading, sessionGeneration]);
 
-  /* ---------- Account labels ----------
-   * Ordinals are per provider over every classified credential, so "Account N" stays the same
-   * across tabs, search and pages. */
-
-  const ordinalsByType = useMemo(
-    () =>
-      new Map(
-        QUOTA_TAB_ORDER.map((type) => [
-          type,
-          accountOrdinals(
-            entries.filter((entry) => entry.type === type).map((entry) => entry.file)
-          ),
-        ])
-      ),
-    [entries]
-  );
-
-  const getOrdinal = useCallback(
-    (entry: QuotaFileEntry) =>
-      ordinalsByType.get(entry.type)?.get(getQuotaCacheKey(entry.file)) ?? 1,
-    [ordinalsByType]
-  );
-
-  const getActionLabel = useCallback(
-    (entry: QuotaFileEntry) => (showEmails ? undefined : maskedLabel(t, getOrdinal(entry))),
-    [getOrdinal, showEmails, t]
-  );
-
   /* ---------- Loading and actions ---------- */
 
   const { batchLoading, loadQuota } = useQuotaBatchLoader();
@@ -383,9 +351,9 @@ export function QuotaPage() {
         handleRefreshAll();
         return;
       }
-      void refreshQuota(entry.file, QUOTA_ADAPTERS[entry.type], getActionLabel(entry));
+      void refreshQuota(entry.file, QUOTA_ADAPTERS[entry.type]);
     },
-    [getActionLabel, handleRefreshAll, refreshQuota]
+    [handleRefreshAll, refreshQuota]
   );
 
   useQuotaAutoLoad(
@@ -454,7 +422,6 @@ export function QuotaPage() {
             history: history.result,
             metric,
             now,
-            ordinals: ordinalsByType.get(provider) ?? new Map<string, number>(),
             provider,
             rangeOffset,
             timeZone: TIME_ZONE,
@@ -469,7 +436,6 @@ export function QuotaPage() {
       history.result,
       metric,
       now,
-      ordinalsByType,
       poolProviders,
       rangeOffset,
     ]
@@ -487,8 +453,6 @@ export function QuotaPage() {
   const handlePrevRange = () => setRangeOffset(range.offset - 1);
   const handleNextRange = () => setRangeOffset(range.offset + 1);
   const handleTodayRange = () => setRangeOffset(0);
-  const handleToggleEmails = () => setShowEmails(!showEmails);
-
   /* ---------- Render ---------- */
 
   const isEmpty = !loading && filteredEntries.length === 0;
@@ -501,9 +465,7 @@ export function QuotaPage() {
         attentionCount={attentionCount}
         refreshing={loading || batchLoading}
         disableControls={disableControls}
-        showEmails={showEmails}
         onRefreshAll={handleRefreshAll}
-        onToggleEmails={handleToggleEmails}
       />
 
       <section className={styles.workbench}>
@@ -570,7 +532,6 @@ export function QuotaPage() {
                     metric={metric}
                     model={model}
                     resolvedTheme={resolvedTheme}
-                    showEmails={showEmails}
                     timeZone={TIME_ZONE}
                   />
                 ))}
@@ -662,12 +623,8 @@ export function QuotaPage() {
                     canRefresh={canUseActions && !entry.file.disabled}
                     resetting={resettingQuotaName === getQuotaCacheKey(entry.file)}
                     entranceDelayMs={cardEntranceDelay(index)}
-                    maskName={!showEmails}
-                    ordinal={getOrdinal(entry)}
                     onRefresh={() => refreshEntry(entry)}
-                    onReset={() =>
-                      resetQuota(entry.file, QUOTA_ADAPTERS[entry.type], getActionLabel(entry))
-                    }
+                    onReset={() => resetQuota(entry.file, QUOTA_ADAPTERS[entry.type])}
                   />
                 ))}
               </div>

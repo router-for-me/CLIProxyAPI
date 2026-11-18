@@ -1559,9 +1559,7 @@
     "meta_attention": "{{count}}개 주의 필요",
     "empty_title": "할당량 확인 가능한 자격 증명 없음",
     "empty_desc": "여기에서 할당량을 추적하려면 Antigravity, Claude, Codex, xAI 또는 Kimi 자격 증명을 연결하세요.",
-    "soonest_row_hint": "이 자격 증명에서 가장 먼저 복구됨",
-    "show_emails": "이메일 표시",
-    "hide_emails": "이메일 숨기기"
+    "soonest_row_hint": "이 자격 증명에서 가장 먼저 복구됨"
   },
   "quota_pool": {
     "metric_label": "차트 지표",
@@ -1621,8 +1619,7 @@
     "history_retry": "다시 시도",
     "chart_label": "{{provider}} 통합 할당량 차트",
     "chart_summary": "{{provider}}: {{capacity}}% 중 {{remaining}}% 남음. 소모율 {{burn}}. 풀 소진: {{poolEmpty}}. 다음 초기화: {{nextReset}}.",
-    "chart_hint": "방향키로 시간을 이동합니다. Shift를 누르면 하루씩 이동합니다.",
-    "account_n": "계정 {{n}}"
+    "chart_hint": "방향키로 시간을 이동합니다. Shift를 누르면 하루씩 이동합니다."
   },
   "plugin_management": {
     "title": "플러그인 관리",

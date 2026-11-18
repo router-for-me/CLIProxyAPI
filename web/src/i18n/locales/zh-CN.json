@@ -1558,9 +1558,7 @@
     "meta_attention": "{{count}} 个需关注",
     "empty_title": "暂无可查额度的凭证",
     "empty_desc": "接入 Antigravity、Claude、Codex、xAI 或 Kimi 凭证后即可在此查看额度。",
-    "soonest_row_hint": "该凭证中最先恢复",
-    "show_emails": "显示邮箱",
-    "hide_emails": "隐藏邮箱"
+    "soonest_row_hint": "该凭证中最先恢复"
   },
   "quota_pool": {
     "metric_label": "图表指标",
@@ -1620,8 +1618,7 @@
     "history_retry": "重试",
     "chart_label": "{{provider}} 汇总配额图表",
     "chart_summary": "{{provider}}：剩余 {{remaining}}%，总量 {{capacity}}%。消耗速度 {{burn}}。额度池耗尽：{{poolEmpty}}。下次重置：{{nextReset}}。",
-    "chart_hint": "使用方向键在时间轴上移动。按住 Shift 可按天移动。",
-    "account_n": "账号 {{n}}"
+    "chart_hint": "使用方向键在时间轴上移动。按住 Shift 可按天移动。"
   },
   "plugin_management": {
     "title": "插件管理",

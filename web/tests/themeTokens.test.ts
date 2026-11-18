@@ -110,9 +110,7 @@ describe('hard-coded colors', () => {
     const directory = 'src/features/quota/components';
     const directoryUrl = new URL(`../${directory}`, import.meta.url);
     const modules = existsSync(directoryUrl)
-      ? readdirSync(directoryUrl).filter(
-          (file) => /^Pool\w*\.module\.scss$/.test(file) || file === 'MaskedName.module.scss'
-        )
+      ? readdirSync(directoryUrl).filter((file) => /^Pool\w*\.module\.scss$/.test(file))
       : [];
 
     for (const file of modules) {

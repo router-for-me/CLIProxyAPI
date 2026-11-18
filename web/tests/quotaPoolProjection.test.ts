@@ -28,7 +28,6 @@ const member = (key: string, used: number, resetAt: number | null): PoolMember =
   return {
     file: { name: key },
     key,
-    ordinal: 1,
     periodMs: 168 * HOUR_MS,
     readings,
   };

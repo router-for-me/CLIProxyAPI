@@ -1584,9 +1584,7 @@
     "meta_attention": "{{count}} 個需關注",
     "empty_title": "暫無可查配額的憑證",
     "empty_desc": "接入 Antigravity、Claude、Codex、xAI 或 Kimi 憑證後即可在此查看配額。",
-    "soonest_row_hint": "該憑證中最先恢復",
-    "show_emails": "顯示電子郵件",
-    "hide_emails": "隱藏電子郵件"
+    "soonest_row_hint": "該憑證中最先恢復"
   },
   "quota_pool": {
     "metric_label": "圖表指標",
@@ -1646,8 +1644,7 @@
     "history_retry": "重試",
     "chart_label": "{{provider}} 彙總配額圖表",
     "chart_summary": "{{provider}}：剩餘 {{remaining}}%，總量 {{capacity}}%。消耗速度 {{burn}}。額度池耗盡：{{poolEmpty}}。下次重置：{{nextReset}}。",
-    "chart_hint": "使用方向鍵在時間軸上移動。按住 Shift 可依天移動。",
-    "account_n": "帳號 {{n}}"
+    "chart_hint": "使用方向鍵在時間軸上移動。按住 Shift 可依天移動。"
   },
   "plugin_management": {
     "title": "插件管理",

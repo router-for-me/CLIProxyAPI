@@ -1,5 +1,4 @@
 import type { PoolProvider } from '@/features/quota/pool/constants';
-import { accountOrdinals } from '@/features/quota/pool/members';
 import type { PoolModelInput } from '@/features/quota/pool/types';
 import type {
   QuotaHistoryCredential,
@@ -165,7 +164,6 @@ export const poolModelInput = (
     history: historyOk(),
     metric: 'remaining',
     now: NOW,
-    ordinals: accountOrdinals(files),
     provider,
     rangeOffset: 0,
     timeZone: TZ,

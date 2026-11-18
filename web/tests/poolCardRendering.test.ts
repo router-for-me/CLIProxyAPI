@@ -17,7 +17,7 @@ const buildModel = (provider: PoolProvider, overrides: Partial<PoolModelInput> =
   return model;
 };
 
-const renderCard = (model: PoolCardModel, showEmails = false) =>
+const renderCard = (model: PoolCardModel) =>
   renderToStaticMarkup(
     createElement(PoolCard, {
       chartWidth: 1100,
@@ -25,7 +25,6 @@ const renderCard = (model: PoolCardModel, showEmails = false) =>
       metric: 'remaining',
       model,
       resolvedTheme: 'dark',
-      showEmails,
       timeZone: TZ,
     })
   );
@@ -56,16 +55,10 @@ describe('PoolCard', () => {
     }
   });
 
-  test('masks the first-empty account unless emails are shown', () => {
-    const masked = renderCard(buildModel('claude'));
-    const shown = renderCard(buildModel('claude'), true);
+  test('names the first-empty account', () => {
+    const markup = renderCard(buildModel('claude'));
 
-    expect(masked).not.toContain('user-a@example.com');
-    expect(masked).not.toContain('claude-a@example.com');
-    expect(masked).not.toContain('@example.com');
-    expect(masked).toContain('Account 1');
-    expect(shown).toContain('user-a@example.com');
-    expect(shown).not.toContain('Account 1');
+    expect(markup).toContain('user-a@example.com in 15h 49m');
   });
 
   test('renders the Codex headline with every account at 100%', () => {

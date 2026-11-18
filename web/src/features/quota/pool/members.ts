@@ -8,13 +8,6 @@ import { getQuotaCacheKey } from '@/utils/quota/identity';
 const isUnscopedWeekly = (window: { kind: string; scope?: string }): boolean =>
   window.kind === 'weekly' && !window.scope;
 
-/** 1-based position of each file's cache key in ascending key order. */
-export const accountOrdinals = (files: AuthFileItem[]): Map<string, number> => {
-  const keys = files.map(getQuotaCacheKey).sort();
-
-  return new Map(keys.map((key, index) => [key, index + 1]));
-};
-
 const findHistoryWindow = (
   history: QuotaHistoryResult | null,
   file: AuthFileItem
@@ -55,7 +48,7 @@ const getReadings = (
 export const buildPoolMembers = (
   input: PoolModelInput
 ): { members: PoolMember[]; noDataCount: number } => {
-  const { dataAt, files, history, ordinals } = input;
+  const { dataAt, files, history } = input;
   const members: PoolMember[] = [];
 
   for (const file of files) {
@@ -68,7 +61,6 @@ export const buildPoolMembers = (
       members.push({
         file,
         key,
-        ordinal: ordinals.get(key) ?? 1,
         periodMs: historyWindow?.periodMs ?? DEFAULT_PERIOD_MS,
         readings,
       });

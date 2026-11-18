@@ -18,7 +18,6 @@ export interface PoolMember {
   file: AuthFileItem;
   /** getQuotaCacheKey(file). */
   key: string;
-  ordinal: number;
   periodMs: number;
   /** Ascending, distinct t: history (live=false, t < dataAt), then the live reading at dataAt. */
   readings: Reading[];
@@ -133,8 +132,6 @@ export interface PoolModelInput {
   metric: PoolMetric;
   /** Wall clock: Now marker, range, horizon, countdowns. */
   now: number;
-  /** accountOrdinals() over the same provider's files. */
-  ordinals: Map<string, number>;
   provider: PoolProvider;
   rangeOffset: number;
   timeZone: string;

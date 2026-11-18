@@ -16,7 +16,6 @@ const EMPTY_STATE = {
   burnWindow: undefined,
   futureUsage: undefined,
   metric: undefined,
-  showEmails: undefined,
   sortMode: undefined,
   tab: undefined,
 };
@@ -64,7 +63,6 @@ describe('quota ui state', () => {
       burnWindow: 6,
       futureUsage: 'half',
       metric: 'drain',
-      showEmails: true,
       sortMode: 'soonest',
       tab: 'codex',
     } as const;
@@ -75,9 +73,9 @@ describe('quota ui state', () => {
   });
 
   test('round-trips false booleans', () => {
-    writeQuotaUiState({ accounts: false, showEmails: false });
+    writeQuotaUiState({ accounts: false });
 
-    expect(readQuotaUiState()).toEqual({ ...EMPTY_STATE, accounts: false, showEmails: false });
+    expect(readQuotaUiState()).toEqual({ ...EMPTY_STATE, accounts: false });
   });
 
   test('retains the Devin tab across visits', () => {
@@ -89,13 +87,11 @@ describe('quota ui state', () => {
   test('writing one preference preserves the others', () => {
     writeQuotaUiState({ sortMode: 'soonest' });
     writeQuotaUiState({ burnWindow: 1 });
-    writeQuotaUiState({ showEmails: true });
     writeQuotaUiState({ tab: 'kimi' });
 
     expect(readQuotaUiState()).toEqual({
       ...EMPTY_STATE,
       burnWindow: 1,
-      showEmails: true,
       sortMode: 'soonest',
       tab: 'kimi',
     });
@@ -108,7 +104,6 @@ describe('quota ui state', () => {
         accounts: 'yes',
         futureUsage: 'triple',
         metric: 'grid',
-        showEmails: 1,
         sortMode: 'by-vibes',
         tab: 'not-a-tab',
       })

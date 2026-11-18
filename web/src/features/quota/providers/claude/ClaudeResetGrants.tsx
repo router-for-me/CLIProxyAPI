@@ -19,8 +19,7 @@ export function useClaudeResetGrants(
   enabled: boolean,
   disabled: boolean,
   refreshToken: unknown,
-  onRefresh: () => void,
-  label?: string
+  onRefresh: () => void
 ) {
   const { t } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
@@ -75,7 +74,7 @@ export function useClaudeResetGrants(
     showConfirmation({
       title: t('claude_reset.title'),
       message: t(pending ? 'claude_reset.retry_confirm' : 'claude_reset.confirm_text', {
-        name: label ?? file.name,
+        name: file.name,
       }),
       confirmText: t(pending ? 'claude_reset.retry' : 'claude_reset.confirm'),
       variant: 'primary',

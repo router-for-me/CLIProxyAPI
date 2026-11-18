@@ -6,9 +6,6 @@
  * - loading: a two-row ghost skeleton (aria-busy, with a visually hidden text equivalent);
  * - error: a failure strip; the footer refresh retries;
  * - success: the provider Body (styled by QuotaBody.module.scss).
- *
- * With `maskName` the account name is replaced by a blurred placeholder and never reaches the
- * DOM, including the file-name tooltip and the Claude reset confirmation.
  */
 
 import { useState, type CSSProperties } from 'react';
@@ -23,8 +20,6 @@ import {
   getTypeLabel,
   isThemeSurfaceIconProvider,
 } from '@/features/authFiles/constants';
-import { MaskedName } from '@/features/quota/components/MaskedName';
-import { maskedLabel } from '@/features/quota/maskedLabel';
 import { bindQuotaClasses } from '../types';
 import { QUOTA_ADAPTERS, type QuotaCardState } from '../providers';
 import { isQuotaRefreshDisabled, type QuotaFileEntry } from '../logic';
@@ -44,8 +39,6 @@ export type QuotaCardProps = {
   resetting: boolean;
   /** First-render cascade delay; null = no entrance (cards mounted by a tab switch, page or refresh). */
   entranceDelayMs?: number | null;
-  maskName?: boolean;
-  ordinal?: number;
   onRefresh: () => void;
   onReset: () => void;
 };
@@ -58,8 +51,6 @@ export function QuotaCard(props: QuotaCardProps) {
     canRefresh,
     resetting,
     entranceDelayMs,
-    maskName = false,
-    ordinal = 1,
     onRefresh,
     onReset,
   } = props;
@@ -83,8 +74,7 @@ export function QuotaCard(props: QuotaCardProps) {
     entry.type === 'claude' && status !== 'idle',
     !canRefresh || loading || resetting,
     quota,
-    onRefresh,
-    maskName ? maskedLabel(t, ordinal) : undefined
+    onRefresh
   );
   const iconSrc = getAuthFileIcon(entry.type, resolvedTheme);
   const typeLabel = getTypeLabel(t, entry.type);
@@ -120,13 +110,9 @@ export function QuotaCard(props: QuotaCardProps) {
             <span className={styles.iconFallback}>{typeLabel.slice(0, 1).toUpperCase()}</span>
           )}
         </span>
-        {maskName ? (
-          <MaskedName label={displayName} masked ordinal={ordinal} />
-        ) : (
-          <span className={styles.fileName} title={file.name}>
-            {displayName}
-          </span>
-        )}
+        <span className={styles.fileName} title={file.name}>
+          {displayName}
+        </span>
       </header>
 
       <div className={styles.body}>

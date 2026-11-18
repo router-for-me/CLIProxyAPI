@@ -1562,9 +1562,7 @@
     "meta_attention": "{{count}} требуют внимания",
     "empty_title": "Нет учётных данных с квотами",
     "empty_desc": "Подключите учётные данные Antigravity, Claude, Codex, xAI или Kimi, чтобы отслеживать квоту здесь.",
-    "soonest_row_hint": "Восстановится первым у этих учётных данных",
-    "show_emails": "Показать почту",
-    "hide_emails": "Скрыть почту"
+    "soonest_row_hint": "Восстановится первым у этих учётных данных"
   },
   "quota_pool": {
     "metric_label": "Показатель графика",
@@ -1626,8 +1624,7 @@
     "history_retry": "Повторить",
     "chart_label": "Сводный график квот {{provider}}",
     "chart_summary": "{{provider}}: осталось {{remaining}}% из {{capacity}}%. Расход {{burn}}. Пул исчерпан: {{poolEmpty}}. Следующий сброс: {{nextReset}}.",
-    "chart_hint": "Стрелки перемещают по времени. Shift перемещает на день.",
-    "account_n": "Аккаунт {{n}}"
+    "chart_hint": "Стрелки перемещают по времени. Shift перемещает на день."
   },
   "plugin_management": {
     "title": "Управление плагинами",

@@ -6,7 +6,6 @@ import {
   splitDuration,
 } from '@/features/quota/pool/format';
 import { buildPoolCardModel, worstHistoryStatus } from '@/features/quota/pool/model';
-import { accountOrdinals } from '@/features/quota/pool/members';
 import type { HistoryStatus, PoolCardModel } from '@/features/quota/pool/types';
 import type { QuotaHistoryPoint } from '@/services/api/quotaHistory';
 import { DAY_MS, HOUR_MS } from '@/utils/time/durations';
@@ -226,7 +225,6 @@ describe('performance', () => {
     return poolModelInput('claude', {
       files,
       history: okHistory(credentials),
-      ordinals: accountOrdinals(files),
     });
   };
 

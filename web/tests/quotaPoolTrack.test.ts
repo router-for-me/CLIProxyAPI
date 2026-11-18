@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { accountOrdinals, buildPoolMembers } from '@/features/quota/pool/members';
+import { buildPoolMembers } from '@/features/quota/pool/members';
 import { segmentValueAt } from '@/features/quota/pool/geometry';
 import { recordedPool } from '@/features/quota/pool/recorded';
 import {
@@ -14,8 +14,6 @@ import { HOUR_MS } from '@/utils/time/durations';
 import {
   CLAUDE_RESETS,
   NOW,
-  claudeFiles,
-  claudeName,
   claudeOutageFiles,
   historyCredential,
   historyWithOutage,
@@ -36,7 +34,6 @@ const reading = (t: number, used: number, resetAt: number | null = null): Readin
 const member = (key: string, readings: Reading[]): PoolMember => ({
   file: { name: key },
   key,
-  ordinal: 1,
   periodMs: 168 * HOUR_MS,
   readings,
 });
@@ -68,9 +65,7 @@ describe('buildPoolMembers', () => {
       },
       { ...historyCredential('by-name.json', 'claude', [point(NOW - HOUR_MS, 0.2)]), id: 'x' },
     ]);
-    const { members, noDataCount } = buildPoolMembers(
-      poolModelInput('claude', { files, history, ordinals: accountOrdinals(files) })
-    );
+    const { members, noDataCount } = buildPoolMembers(poolModelInput('claude', { files, history }));
 
     expect(members.map((entry) => entry.key)).toEqual(['by-id.json', 'by-name.json']);
     expect(members[0].readings).toEqual([
@@ -80,7 +75,6 @@ describe('buildPoolMembers', () => {
     expect(members[1].readings).toEqual([
       { live: false, resetAt: null, t: NOW - HOUR_MS, used: 0.2 },
     ]);
-    expect(members.map((entry) => entry.ordinal)).toEqual([1, 2]);
     expect(noDataCount).toBe(1);
   });
 
@@ -91,13 +85,6 @@ describe('buildPoolMembers', () => {
 
     expect(readings.slice(0, -1).every((entry) => !entry.live && entry.t < dataAt)).toBe(true);
     expect(readings[readings.length - 1]).toMatchObject({ live: true, t: dataAt });
-  });
-
-  test('numbers accounts by sorted cache key', () => {
-    const ordinals = accountOrdinals([...claudeFiles()].reverse());
-
-    expect(ordinals.get(claudeName('a'))).toBe(1);
-    expect(ordinals.get(claudeName('f'))).toBe(6);
   });
 });
 

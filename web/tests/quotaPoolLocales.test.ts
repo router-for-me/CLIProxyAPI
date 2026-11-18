@@ -67,7 +67,6 @@ const poolKeys = [
   'chart_label',
   'chart_summary',
   'chart_hint',
-  'account_n',
 ] as const;
 
 const removedQuotaKeyPatterns = [
@@ -90,11 +89,6 @@ describe('quota pool locales', () => {
           expect(typeof value).toBe('string');
           expect(tokens(value)).toEqual(tokens(en.quota_pool[key]));
         }
-      });
-
-      test('has the email visibility labels', () => {
-        expect(locale.quota_management.show_emails).toBeTruthy();
-        expect(locale.quota_management.hide_emails).toBeTruthy();
       });
 
       test('uses the prox brand and no sidebar subtitle', () => {

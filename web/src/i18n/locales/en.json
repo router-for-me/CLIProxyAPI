@@ -1559,9 +1559,7 @@
     "meta_attention": "{{count}} need attention",
     "empty_title": "No quota-capable credentials",
     "empty_desc": "Connect an Antigravity, Claude, Codex, xAI, or Kimi credential to track its quota here.",
-    "soonest_row_hint": "Recovers first on this credential",
-    "show_emails": "Show emails",
-    "hide_emails": "Hide emails"
+    "soonest_row_hint": "Recovers first on this credential"
   },
   "quota_pool": {
     "metric_label": "Chart metric",
@@ -1621,8 +1619,7 @@
     "history_retry": "Retry",
     "chart_label": "{{provider}} pooled quota chart",
     "chart_summary": "{{provider}}: {{remaining}}% of {{capacity}}% left. Burn {{burn}}. Pool empty: {{poolEmpty}}. Next reset: {{nextReset}}.",
-    "chart_hint": "Use the arrow keys to move through time. Shift moves a day.",
-    "account_n": "Account {{n}}"
+    "chart_hint": "Use the arrow keys to move through time. Shift moves a day."
   },
   "plugin_management": {
     "title": "Plugin Management",

@@ -21,7 +21,6 @@ export type QuotaUiState = {
   burnWindow?: BurnWindowHours;
   futureUsage?: FutureUsage;
   accounts?: boolean;
-  showEmails?: boolean;
 };
 
 const QUOTA_UI_STATE_KEY = 'quotaPage.uiState';
@@ -65,7 +64,6 @@ export const readQuotaUiState = (): QuotaUiState | null => {
       burnWindow: isBurnWindow(parsed.burnWindow) ? parsed.burnWindow : undefined,
       futureUsage: isFutureUsage(parsed.futureUsage) ? parsed.futureUsage : undefined,
       accounts: booleanOrUndefined(parsed.accounts),
-      showEmails: booleanOrUndefined(parsed.showEmails),
     };
   } catch {
     return null;

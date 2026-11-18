@@ -2,7 +2,6 @@ import type { TFunction } from 'i18next';
 import { useId, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getAuthFileIcon, getTypeLabel } from '@/features/authFiles/constants';
-import { MaskedName } from '@/features/quota/components/MaskedName';
 import styles from '@/features/quota/components/PoolCard.module.scss';
 import { PoolChart } from '@/features/quota/components/PoolChart';
 import type { PoolMetric, PoolProvider } from '@/features/quota/pool/constants';
@@ -25,14 +24,12 @@ export interface PoolCardProps {
   metric: PoolMetric;
   model: PoolCardModel;
   resolvedTheme: ResolvedTheme;
-  showEmails: boolean;
   timeZone: string;
 }
 
 interface StatsProps {
   locale: string;
   model: PoolCardModel;
-  showEmails: boolean;
   timeZone: string;
 }
 
@@ -65,7 +62,7 @@ const Unknown = (): ReactElement => {
   return <span title={t('quota_pool.needs_history')}>{t('quota_pool.unknown')}</span>;
 };
 
-const PoolStats = ({ locale, model, showEmails, timeZone }: StatsProps): ReactElement => {
+const PoolStats = ({ locale, model, timeZone }: StatsProps): ReactElement => {
   const { t } = useTranslation();
   const { burn, now, stats } = model;
   const notBy = (horizonEnd: number) => (
@@ -102,13 +99,7 @@ const PoolStats = ({ locale, model, showEmails, timeZone }: StatsProps): ReactEl
 
     return (
       <>
-        {member && (
-          <MaskedName
-            label={getQuotaDisplayName(member.file)}
-            masked={!showEmails}
-            ordinal={member.ordinal}
-          />
-        )}{' '}
+        {member && getQuotaDisplayName(member.file)}{' '}
         {duration ? t('quota_pool.in_duration', { duration }) : t('quota_pool.now_short')}
       </>
     );
@@ -162,7 +153,6 @@ export const PoolCard = ({
   metric,
   model,
   resolvedTheme,
-  showEmails,
   timeZone,
 }: PoolCardProps): ReactElement => {
   const { t } = useTranslation();
@@ -191,7 +181,7 @@ export const PoolCard = ({
             {t('quota_pool.of_capacity', { capacity: formatPoolPercent(model.capacity) })}
           </span>
         </p>
-        <PoolStats locale={locale} model={model} showEmails={showEmails} timeZone={timeZone} />
+        <PoolStats locale={locale} model={model} timeZone={timeZone} />
       </div>
       <PoolChart
         locale={locale}
