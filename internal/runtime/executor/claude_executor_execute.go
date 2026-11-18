@@ -192,7 +192,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	subagent1h := isSubagent && claudeSubagentRequests1hDoc(incomingHeaders, doc)
 	if cpaOwnsCacheControl && fp.ProfileClaudeCodeCLI && (!isSubagent || subagent1h) && !isProbeOrHelper {
 		upgradeClaudeCacheControlTTLDoc(doc, claudeCacheControlTTL1h)
-	} else if !explicitCacheMode && claudeNativeMainCacheTTL1h(e.cfg, fp, confirmedClaudeCode, isSubagent, isProbeOrHelper, claudeCodeDetection.HelperProfile) {
+	} else if !explicitCacheMode && claudeNativeMainCacheTTL1h(e.cfg, fp, claudeCodeDetection, isSubagent, isProbeOrHelper) {
 		upgradeClaudeCacheControlTTLDoc(doc, claudeCacheControlTTL1h)
 	} else if (isProbeOrHelper || (isSubagent && !subagent1h)) && !explicitCacheMode {
 		stripClaudeCacheControlTTLDoc(doc)
