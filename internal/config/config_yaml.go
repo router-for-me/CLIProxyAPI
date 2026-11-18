@@ -108,8 +108,9 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	}
 	data = NormalizeCommentIndentation(buf.Bytes())
 	var migrated *Config
+	var commented []ArchivedV8Section
 	if migrating {
-		data, _, err = NormalizeConfigLayout(data, true)
+		data, _, commented, err = NormalizeConfigLayoutSilent(data, true)
 		if err != nil {
 			return err
 		}
@@ -121,6 +122,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	if err = os.WriteFile(configFile, data, 0600); err != nil {
 		return err
 	}
+	WarnUnrecognizedV8Sections(commented)
 	if migrated != nil {
 		// Keep runtime-only values intact and publish scope only after the write succeeds.
 		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
