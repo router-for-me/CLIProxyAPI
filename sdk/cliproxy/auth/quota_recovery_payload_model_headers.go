@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 )
@@ -19,6 +20,49 @@ func quotaRecoveryPayloadModels(cfg *internalconfig.Config, model string, reques
 	names := []string{model}
 	for _, name := range requested {
 		names = append(names, name, thinking.ParseSuffix(name).ModelName)
+	}
+	// Path replacements can now edit the finalized model. Without the original
+	// body, computed selectors and model paths cannot establish its identity.
+	for _, rule := range cfg.Payload.Replace {
+		if rule.Validate() != nil || len(rule.Target.Paths) == 0 {
+			continue
+		}
+		possible := false
+		for _, match := range rule.Models {
+			if p := strings.TrimSpace(match.Protocol); p != "" && !strings.EqualFold(p, "codex") {
+				continue
+			}
+			for _, name := range names {
+				if quotaRecoveryPayloadPatternMatches(match.Name, name) {
+					possible = true
+					break
+				}
+			}
+		}
+		if !possible {
+			continue
+		}
+		canReplace := false
+		for _, replacement := range rule.Replacements {
+			source, _, isRegex, err := replacement.Resolve()
+			if err != nil {
+				continue
+			}
+			if isRegex {
+				if _, err = regexp.Compile(source); source == "" || err != nil {
+					continue // The shared finalizer skips invalid regex entries.
+				}
+			}
+			canReplace = true
+			break
+		}
+		if canReplace {
+			for _, path := range rule.Target.Paths {
+				if !quotaRecoveryLiteralNonModelPath(path) {
+					return nil, false
+				}
+			}
+		}
 	}
 	for _, group := range []struct {
 		rules []internalconfig.PayloadRule
@@ -110,4 +154,25 @@ func quotaRecoveryPayloadPatternMatches(pattern, name string) bool {
 		name = name[index+len(part):]
 	}
 	return strings.HasSuffix(name, parts[len(parts)-1])
+}
+
+// Recognize only plain non-model member/index paths. This is a safe subset,
+// not a second evaluator for the finalizer's computed or wildcard selectors.
+func quotaRecoveryLiteralNonModelPath(path string) bool {
+	parts := strings.Split(path, ".")
+	if parts[0] == "model" {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
