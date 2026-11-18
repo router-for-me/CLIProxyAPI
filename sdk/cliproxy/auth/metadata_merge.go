@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"maps"
 	"reflect"
 	"strings"
 	"time"
@@ -14,7 +15,19 @@ func MergePluginRefreshMetadata(inherited, stored, explicit map[string]any) map[
 	if merged == nil {
 		merged = make(map[string]any)
 	}
-	for _, incoming := range []map[string]any{stored, explicit} {
+	previous, _ := pluginRefreshAccessToken(inherited)
+	storedToken, hasStoredToken := pluginRefreshAccessToken(stored)
+	explicitToken, hasExplicitToken := pluginRefreshAccessToken(explicit)
+	if hasExplicitToken && hasStoredToken && explicitToken != storedToken {
+		stored = cloneMetadataMap(stored)
+		clearPluginRefreshExpiry(stored)
+	}
+	if (hasExplicitToken && explicitToken != previous) || (!hasExplicitToken && hasStoredToken && storedToken != previous) {
+		clearPluginRefreshExpiry(merged)
+	}
+	storedSIWC, _ := stored["siwc"].(map[string]any)
+	explicitSIWC, _ := explicit["siwc"].(map[string]any)
+	for i, incoming := range []map[string]any{stored, explicit} {
 		for _, aliases := range [][]string{{"access_token", "accessToken"}, {"refresh_token", "refreshToken"}, {"id_token", "idToken"}} {
 			for _, key := range aliases {
 				if _, present := incoming[key]; present {
@@ -37,13 +50,49 @@ func MergePluginRefreshMetadata(inherited, stored, explicit map[string]any) map[
 			if key == "siwc" {
 				if nested, ok := value.(map[string]any); ok {
 					current, _ := merged[key].(map[string]any)
-					value = MergePluginRefreshMetadata(current, nil, nested)
+					if storedSIWC != nil && explicitSIWC != nil {
+						if i == 0 {
+							continue
+						}
+						value = MergePluginRefreshMetadata(current, storedSIWC, explicitSIWC)
+					} else {
+						value = MergePluginRefreshMetadata(current, nil, nested)
+					}
 				}
 			}
 			merged[key] = value
 		}
 	}
 	return merged
+}
+
+func pluginRefreshAccessToken(metadata map[string]any) (string, bool) {
+	_, snakeCase := metadata["access_token"]
+	_, camelCase := metadata["accessToken"]
+	return authOuterAccessToken(&Auth{Metadata: metadata}), snakeCase || camelCase
+}
+
+func clearPluginRefreshExpiry(metadata map[string]any) {
+	clearPluginRefreshTiming(metadata)
+	for _, key := range []string{"token", "Token"} {
+		switch nested := metadata[key].(type) {
+		case map[string]any:
+			clearPluginRefreshExpiry(nested)
+		case map[string]string:
+			nested = maps.Clone(nested)
+			clearPluginRefreshTiming(nested)
+			metadata[key] = nested
+		}
+	}
+}
+
+func clearPluginRefreshTiming[T any](metadata map[string]T) {
+	for _, key := range expireKeys {
+		delete(metadata, key)
+	}
+	for _, key := range []string{"expires_in", "expiresIn", "timestamp", "issued_at", "issuedAt", "last_refresh", "lastRefresh"} {
+		delete(metadata, key)
+	}
 }
 
 // IsAuthTokenPayloadKey returns true if key is a credential or token lifecycle field
