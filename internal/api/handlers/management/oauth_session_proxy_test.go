@@ -141,7 +141,10 @@ func startForwardHTTPProxy(t *testing.T, hits *atomic.Int32, expectedProxyAuth s
 
 func waitForOAuthStatus(t *testing.T, router http.Handler, state string) oauthStatusResponse {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// The poll returns as soon as the session settles. The deadline only bounds
+	// a hung session, and a loaded Windows run can take over 6s to report a
+	// failed proxy dial, so it must not double as a latency budget.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		resp := performOAuthStatusRequest(t, router, state)
 		if resp.Status != "wait" {
