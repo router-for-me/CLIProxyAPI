@@ -3034,9 +3034,11 @@ func lastCacheableClaudeSystemIndex(system ojson.Result) int {
 // main-conversation request should be upgraded to the 1h cache. Claude Code picks
 // 1h itself only when logged in with a subscription; through the proxy it sees an
 // API key and picks 5m, although the upstream credential is a subscription. The
-// extended-cache-ttl beta is already sent for these requests.
-func claudeNativeMainCacheTTL1h(cfg *config.Config, fp claudeFingerprintPolicy, confirmedClaudeCode, isSubagent, isProbeOrHelper bool) bool {
-	return cfg != nil && cfg.ClaudeCode.MainCacheTTL1h && confirmedClaudeCode && fp.AuthIsOAuthToken && !isSubagent && !isProbeOrHelper
+// extended-cache-ttl beta is already sent for these requests. Helper profiles
+// (such as Haiku 5.5 Agent SDK helpers) are not main conversations and may
+// lack that beta, so they are excluded too.
+func claudeNativeMainCacheTTL1h(cfg *config.Config, fp claudeFingerprintPolicy, confirmedClaudeCode, isSubagent, isProbeOrHelper, helperProfile bool) bool {
+	return cfg != nil && cfg.ClaudeCode.MainCacheTTL1h && confirmedClaudeCode && fp.AuthIsOAuthToken && !isSubagent && !isProbeOrHelper && !helperProfile
 }
 
 // upgradeClaudeCacheControlTTL mirrors the native ttl upgrade helper, which only
