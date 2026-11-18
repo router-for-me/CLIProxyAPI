@@ -308,6 +308,64 @@
       ]
     },
     {
+      "id": "claude-mythos-5-1",
+      "object": "model",
+      "created": 1788220800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Mythos 5.1",
+      "description": "Claude Fable 5.1 capabilities for organizations verified through Anthropic's Cyber Verification Program.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "claude-mythos-5-2",
+      "object": "model",
+      "created": 1794250800,
+      "owned_by": "anthropic",
+      "type": "claude",
+      "display_name": "Claude Mythos 5.2",
+      "description": "Claude Fable 5.2 capabilities for organizations verified through Anthropic's Cyber Verification Program.",
+      "context_length": 1000000,
+      "max_completion_tokens": 128000,
+      "thinking": {
+        "zero_allowed": false,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ]
+    },
+    {
       "id": "claude-opus-5-5",
       "native_capabilities": {
         "web_search": true

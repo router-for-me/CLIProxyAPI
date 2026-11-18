@@ -37,3 +37,27 @@ func TestLookupStaticModelInfoClaudeVariantsUseCatalogEntry(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeCatalogIncludesMythosModels(t *testing.T) {
+	want := map[string]bool{"claude-mythos-5-1": false, "claude-mythos-5-2": false}
+	for _, m := range GetClaudeModels() {
+		if _, ok := want[m.ID]; !ok {
+			continue
+		}
+		want[m.ID] = true
+		if m.ContextLength != 1000000 || m.MaxCompletionTokens != 128000 {
+			t.Errorf("%s: context=%d max_completion=%d", m.ID, m.ContextLength, m.MaxCompletionTokens)
+		}
+		if m.Thinking == nil || m.Thinking.ZeroAllowed || len(m.Thinking.Levels) != 5 {
+			t.Errorf("%s: unexpected thinking support %+v", m.ID, m.Thinking)
+		}
+	}
+	for id, found := range want {
+		if !found {
+			t.Errorf("expected %s in the Claude catalog", id)
+		}
+	}
+	if LookupStaticModelInfo("claude-mythos-5-2[1m]") == nil {
+		t.Error("expected claude-mythos-5-2[1m] to resolve to its catalog entry")
+	}
+}
