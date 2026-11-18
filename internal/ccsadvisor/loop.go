@@ -28,15 +28,9 @@ func Run(ctx context.Context, req Message, advisorModel string, call Call) (Mess
 		exec["messages"] = history
 	}
 	tools := slices.Clone(list(req["tools"]))
-	idx := -1
-	for i, v := range tools {
-		d := obj(v)
-		if d["type"] == "advisor_20260301" && d["name"] == "advisor" {
-			if idx >= 0 {
-				return nil, errors.New("duplicate advisor declaration")
-			}
-			idx = i
-		}
+	idx, limit, err := declaration(tools)
+	if err != nil {
+		return nil, err
 	}
 	if idx < 0 {
 		return call(ctx, exec)
@@ -45,16 +39,6 @@ func Run(ctx context.Context, req Message, advisorModel string, call Call) (Mess
 		return nil, errors.New("advisor requires a model and a non-streaming request")
 	}
 	decl := obj(tools[idx])
-	limit := 2
-	if value := decl["max_uses"]; value != nil {
-		n, ok := counter(value)
-		if !ok || n <= 0 {
-			return nil, errors.New("invalid advisor max_uses")
-		}
-		if n == 1 {
-			limit = 1
-		}
-	}
 	tools[idx] = Message{"name": "advisor", "description": "Consult a specialist for concise advice on a specific question.", "input_schema": Message{"type": "object", "properties": Message{"question": Message{"type": "string"}}, "required": []string{"question"}}}
 	exec["tools"] = tools
 	var public, iterations []any

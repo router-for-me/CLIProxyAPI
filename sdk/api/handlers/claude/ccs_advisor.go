@@ -64,6 +64,10 @@ func (h *ClaudeCodeAPIHandler) tryCCSAdvisor(c *gin.Context, body []byte) ([]byt
 		defs, _ := req["tools"].([]any)
 		req["tools"] = append(defs, ccsadvisor.Message{"name": "advisor", "type": advisorToolType, "model": advisor})
 	}
+	if err := ccsadvisor.ValidateDeclaration(req); err != nil {
+		h.WriteErrorResponse(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: err})
+		return nil, true
+	}
 	h.runCCSAdvisor(c, req, worker, advisor)
 	return nil, true
 }
