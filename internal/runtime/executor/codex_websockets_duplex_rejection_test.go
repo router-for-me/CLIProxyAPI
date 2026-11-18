@@ -141,7 +141,7 @@ func TestCodexDuplexRejectedCreateMetadata(t *testing.T) {
 }
 
 func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
-	for _, kind := range []string{"response.failed", "error", "error_without_status"} {
+	for _, kind := range []string{"response.failed", "error", "error_without_status", "typeless_error", "typeless_body", "string_error", "wrapped_string_error"} {
 		for _, started := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/started=%t", kind, started), func(t *testing.T) {
 				internalcache.ClearCodexReasoningReplayCache()
@@ -179,6 +179,14 @@ func TestCodexDuplexLaterInvalidSignatureClearsReplay(t *testing.T) {
 						write(`{"type":"response.failed","response":{"id":"rejected","error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}}`)
 					case "error":
 						write(`{"type":"error","status":400,"body":{"error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}}`)
+					case "typeless_error":
+						write(`{"status":400,"error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}`)
+					case "typeless_body":
+						write(`{"body":{"error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}}`)
+					case "string_error":
+						write(`{"type":"error","status":400,"error":"Invalid signature in thinking block"}`)
+					case "wrapped_string_error":
+						write(`{"type":"error","status":400,"body":{"error":"Invalid signature in thinking block"}}`)
 					default:
 						write(`{"type":"error","error":{"type":"invalid_request_error","message":"Invalid signature in thinking block"}}`)
 					}

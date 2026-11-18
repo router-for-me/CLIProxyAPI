@@ -1862,7 +1862,8 @@ func collectImagesFromResponsesStream(ctx context.Context, data <-chan []byte, e
 			return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
 		}
 		payloadType := ojson.GetBytesNoCopy(payload, "type").String()
-		if responsesSSEErrorEvent(payloadType) || responsesSSEErrorEvent(responsesSSEEventName(frame)) || responsesSSEPayloadHasError(payload) {
+		streamEvent := responsesSSEEventName(frame)
+		if responsesSSEErrorEvent(payloadType) || responsesSSEErrorEvent(streamEvent) || responsesSSEPayloadHasErrorForEvent(streamEvent, payload) {
 			return nil, false, responsesSSEPayloadErrorMessage(payload)
 		}
 		if payloadType != "response.completed" {
@@ -2136,7 +2137,8 @@ func (h *OpenAIAPIHandler) forwardImagesStream(ctx context.Context, c *gin.Conte
 			return true, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("invalid SSE data JSON")}
 		}
 		payloadType := ojson.GetBytesNoCopy(payload, "type").String()
-		if responsesSSEErrorEvent(payloadType) || responsesSSEErrorEvent(responsesSSEEventName(frame)) || responsesSSEPayloadHasError(payload) {
+		streamEvent := responsesSSEEventName(frame)
+		if responsesSSEErrorEvent(payloadType) || responsesSSEErrorEvent(streamEvent) || responsesSSEPayloadHasErrorForEvent(streamEvent, payload) {
 			return true, responsesSSEPayloadErrorMessage(payload)
 		}
 

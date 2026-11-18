@@ -45,6 +45,53 @@ func (h *Host) SchedulerWantsAcrossPriorities() bool {
 	return schedulerWantsAcrossPriorities(record.plugin.Capabilities)
 }
 
+// HasSchedulerContinuity reports whether the active scheduler plugin provides SchedulerContinuity.
+func (h *Host) HasSchedulerContinuity() bool {
+	return h.schedulerContinuityRecord() != nil
+}
+
+// EvaluateSchedulerContinuity invokes the active scheduler plugin's Continuity callback.
+func (h *Host) EvaluateSchedulerContinuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error) {
+	record := h.schedulerContinuityRecord()
+	if record == nil {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	return h.callSchedulerContinuity(ctx, *record, req)
+}
+
+func (h *Host) schedulerContinuityRecord() *capabilityRecord {
+	record := h.schedulerRecord()
+	if record == nil || record.plugin.Capabilities.SchedulerContinuity == nil {
+		return nil
+	}
+	return record
+}
+
+func (h *Host) callSchedulerContinuity(ctx context.Context, record capabilityRecord, req pluginapi.SchedulerContinuityRequest) (resp pluginapi.SchedulerContinuityResponse, handled bool, err error) {
+	continuity := record.plugin.Capabilities.SchedulerContinuity
+	if h == nil || continuity == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
+		return pluginapi.SchedulerContinuityResponse{}, false, nil
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "SchedulerContinuity.Continuity", recovered)
+			resp = pluginapi.SchedulerContinuityResponse{}
+			handled = false
+			err = nil
+		}
+	}()
+
+	req.Plugin = record.meta
+	resp, errEval := continuity.Continuity(ctx, req)
+	if errEval != nil {
+		log.WithField("plugin_id", record.id).WithError(errEval).Warn("pluginhost: scheduler continuity evaluation failed")
+		return pluginapi.SchedulerContinuityResponse{}, true, errEval
+	}
+	resp.Decision = pluginapi.SchedulerContinuityDecision(strings.ToLower(strings.TrimSpace(string(resp.Decision))))
+	resp.Reason = strings.TrimSpace(resp.Reason)
+	return resp, true, nil
+}
+
 func (h *Host) schedulerRecord() *capabilityRecord {
 	if h == nil {
 		return nil

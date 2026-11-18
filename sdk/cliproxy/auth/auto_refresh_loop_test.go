@@ -589,3 +589,48 @@ func TestNextRefreshCheckAtIncludesSIWCWhenClassifiedAsAPIKey(t *testing.T) {
 		t.Fatalf("nextRefreshCheckAt = (%v, %v), want (%v, true)", due, ok, wantDue)
 	}
 }
+
+func TestAuthAutoRefreshLoop_HandleDueAuth_NonRefreshingPastNextBacksOff(t *testing.T) {
+	now := time.Date(2026, 11, 15, 13, 45, 0, 0, time.UTC)
+	// nextRefreshCheckAt evaluates CodexSIWCNeedsRefresh before RefreshEvaluator and returns now,
+	// whereas shouldRefresh evaluates RefreshEvaluator first and returns false.
+	mgr := NewManager(nil, nil, nil)
+	a := &Auth{
+		ID:       "non-refreshing-due-auth",
+		Provider: "codex",
+		Runtime:  testRefreshEvaluator{},
+		Metadata: map[string]any{
+			"type":          "codex",
+			"refresh_token": "outer-refresh",
+			"use_siwc":      true,
+			"siwc": map[string]any{
+				"access_token":  "siwc-access",
+				"refresh_token": "siwc-refresh",
+				"client_id":     "oaiapp_123",
+				"expired":       now.Add(-time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	mgr.mu.Lock()
+	mgr.auths[a.ID] = a
+	mgr.mu.Unlock()
+
+	interval := 5 * time.Second
+	loop := newAuthAutoRefreshLoop(mgr, interval, 1)
+	loop.upsert(a.ID, now)
+
+	due := loop.popDue(now)
+	if len(due) != 1 || due[0] != a.ID {
+		t.Fatalf("popDue() = %v, want [%s]", due, a.ID)
+	}
+
+	loop.handleDueAuth(context.Background(), now, a.ID)
+
+	wait, ok := loop.nextWait(now)
+	if !ok {
+		t.Fatal("nextWait() ok = false, want true")
+	}
+	if wait != interval {
+		t.Fatalf("nextWait() = %v, want %v (must not spin with 0s wait when shouldRefresh is false)", wait, interval)
+	}
+}

@@ -29,6 +29,7 @@ type rpcCapabilities struct {
 	FrontendAuthOmitBody              bool                         `json:"frontend_auth_omit_body,omitempty"`
 	Scheduler                         bool                         `json:"scheduler"`
 	SchedulerAcrossPriorities         bool                         `json:"scheduler_across_priorities,omitempty"`
+	SchedulerContinuity               bool                         `json:"scheduler_continuity,omitempty"`
 	ModelRouter                       bool                         `json:"model_router"`
 	Executor                          bool                         `json:"executor"`
 	ExecutorModelScope                pluginapi.ExecutorModelScope `json:"executor_model_scope"`
@@ -71,8 +72,9 @@ type rpcIdentifierResponse struct {
 }
 
 type rpcExecutorStreamResponse struct {
-	Headers http.Header                     `json:"headers,omitempty"`
-	Chunks  []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
+	Headers     http.Header                     `json:"headers,omitempty"`
+	Chunks      []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
+	Attribution *pluginapi.UsageAttribution     `json:"attribution,omitempty"`
 }
 
 type rpcAuthLoginStartRequest struct {
@@ -236,6 +238,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthOmitBody:              frontendAuthProviderWantsOmitBody(caps),
 		Scheduler:                         caps.Scheduler != nil,
 		SchedulerAcrossPriorities:         schedulerWantsAcrossPriorities(caps),
+		SchedulerContinuity:               caps.SchedulerContinuity != nil,
 		ModelRouter:                       caps.ModelRouter != nil,
 		Executor:                          caps.Executor != nil,
 		ExecutorModelScope:                normalizedExecutorModelScope(caps),

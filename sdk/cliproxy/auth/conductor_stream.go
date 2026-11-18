@@ -38,13 +38,14 @@ func newStreamBootstrapError(err error, headers http.Header) error {
 		return nil
 	}
 	upstreamAttempt := hasUpstreamExecutionAttempt(err)
+	provider := upstreamAttemptProviderFromError(err)
 	err = unwrapUpstreamExecutionAttempt(err)
 	bootstrapErr := &streamBootstrapError{
 		cause:   err,
 		headers: cloneHTTPHeader(headers),
 	}
 	if upstreamAttempt {
-		return markUpstreamExecutionAttempt(bootstrapErr)
+		return markUpstreamExecutionAttemptWithProvider(bootstrapErr, provider)
 	}
 	return bootstrapErr
 }
@@ -176,6 +177,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return false
 			}
 			if chunk.Err != nil {
+				if session := continuitySessionFromContext(ctx); session != nil {
+					session.setLastStreamProvider(provider)
+				}
 				if ctx == nil {
 					out <- chunk
 					return true
@@ -412,7 +416,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var upstreamErr error
 	didRefreshOnUnauthorized := false
 	for idx, execModel := range execModels {
-		ctx = m.newUpstreamAttemptContext(ctx)
+		ctx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(ctx), provider)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel

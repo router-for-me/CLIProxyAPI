@@ -74,8 +74,8 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 	seen := make(map[string]struct{}, len(list))
 	normalized := make([]string, 0, len(list))
 	for _, alias := range list {
-		name := strings.ToLower(strings.TrimSpace(alias.Name))
-		aliasVal := strings.ToLower(strings.TrimSpace(alias.Alias))
+		name := strings.TrimSpace(alias.Name)
+		aliasVal := strings.TrimSpace(alias.Alias)
 		if name == "" || aliasVal == "" {
 			continue
 		}

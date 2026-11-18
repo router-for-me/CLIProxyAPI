@@ -190,43 +190,79 @@ func (w *responsesWebsocketWriter) writePing() error {
 }
 
 func (w *responsesWebsocketWriter) keepAlive(ctx context.Context, cancel context.CancelCauseFunc, intervals <-chan time.Duration) {
-	if errPing := runResponsesWebsocketKeepAlive(ctx, intervals, w.writePing); errPing != nil {
+	w.keepAliveWithPredicate(ctx, cancel, intervals, nil)
+}
+
+func (w *responsesWebsocketWriter) keepAliveWithPredicate(ctx context.Context, cancel context.CancelCauseFunc, intervals <-chan time.Duration, shouldPing func() bool) {
+	if errPing := runResponsesWebsocketKeepAliveWithTicker(ctx, intervals, shouldPing, w.writePing, nil); errPing != nil {
 		cancel(errPing)
 		_, _ = w.closeWithoutError()
 	}
 }
 
 func runResponsesWebsocketKeepAlive(ctx context.Context, intervals <-chan time.Duration, ping func() error) error {
-	var ticker *time.Ticker
+	return runResponsesWebsocketKeepAliveWithTicker(ctx, intervals, nil, ping, nil)
+}
+
+func runResponsesWebsocketKeepAliveWithTicker(
+	ctx context.Context,
+	intervals <-chan time.Duration,
+	shouldPing func() bool,
+	ping func() error,
+	newTicker func(time.Duration) (<-chan time.Time, func()),
+) error {
+	var stopTicker func()
 	var ticks <-chan time.Time
-	defer func() {
-		if ticker != nil {
-			ticker.Stop()
+	stopCurrent := func() {
+		if stopTicker != nil {
+			stopTicker()
+			stopTicker = nil
 		}
-	}()
+		ticks = nil
+	}
+	defer stopCurrent()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case interval := <-intervals:
 			if interval <= 0 {
-				if ticker != nil {
-					ticker.Stop()
-				}
-				ticks = nil
+				stopCurrent()
 				continue
 			}
-			if ticker == nil {
-				ticker = time.NewTicker(interval)
+			stopCurrent()
+			if newTicker != nil {
+				ticks, stopTicker = newTicker(interval)
 			} else {
-				ticker.Reset(interval)
+				ticker := time.NewTicker(interval)
+				ticks = ticker.C
+				stopTicker = ticker.Stop
 			}
-			ticks = ticker.C
 		case <-ticks:
+			if shouldPing != nil && !shouldPing() {
+				stopCurrent()
+				continue
+			}
 			if errPing := ping(); errPing != nil {
 				return errPing
 			}
 		}
+	}
+}
+
+type responsesWebsocketContinuityObserver struct {
+	setActive func(bool)
+}
+
+func (o responsesWebsocketContinuityObserver) OnContinuityWaitStart() {
+	if o.setActive != nil {
+		o.setActive(true)
+	}
+}
+
+func (o responsesWebsocketContinuityObserver) OnContinuityWaitEnd() {
+	if o.setActive != nil {
+		o.setActive(false)
 	}
 }
 
@@ -433,22 +469,49 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	c.Request = c.Request.WithContext(socketCtx)
 	upgradeRequest := c.Request.Clone(socketCtx)
 	// Start Ping at upgrade, before opening an upstream stream can block.
+	var keepAliveMu sync.Mutex
 	var keepAliveIntervals chan time.Duration
 	var keepAliveInterval time.Duration
-	updateKeepAlive := func() {
+	var keepAliveActive atomic.Bool
+	var continuityWaitCount int
+	updateKeepAliveLocked := func() {
 		if h == nil {
 			return
 		}
 		interval := handlers.StreamingKeepAliveInterval(h.CurrentConfig())
+		if interval <= 0 && continuityWaitCount > 0 {
+			interval = handlers.ContinuityKeepAliveInterval(h.CurrentConfig())
+		}
+		keepAliveActive.Store(interval > 0)
 		if interval == keepAliveInterval {
 			return
 		}
 		keepAliveInterval = interval
 		if keepAliveIntervals == nil {
 			keepAliveIntervals = make(chan time.Duration, 1)
-			go writer.keepAlive(socketCtx, cancelSocket, keepAliveIntervals)
+			go writer.keepAliveWithPredicate(socketCtx, cancelSocket, keepAliveIntervals, keepAliveActive.Load)
 		}
 		queueResponsesWebsocketKeepAliveInterval(keepAliveIntervals, interval)
+	}
+	updateKeepAlive := func() {
+		keepAliveMu.Lock()
+		defer keepAliveMu.Unlock()
+		updateKeepAliveLocked()
+	}
+	setContinuityWaitActive := func(active bool) {
+		keepAliveMu.Lock()
+		defer keepAliveMu.Unlock()
+		wasActive := continuityWaitCount > 0
+		if active {
+			continuityWaitCount++
+		} else if continuityWaitCount > 0 {
+			continuityWaitCount--
+		}
+		nowActive := continuityWaitCount > 0
+		if wasActive == nowActive {
+			return
+		}
+		updateKeepAliveLocked()
 	}
 	updateKeepAlive()
 	// The reader owns the client socket so an in-flight interrupt is not stuck
@@ -953,6 +1016,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var completedPendingToolCallIDs []string
 		var forwardErrMsg *interfaces.ErrorMessage
 
+		turnExecutionParent := coreauth.WithFreshRequestContinuitySession(executionParent)
 		for {
 			lastAttemptedAuthID = pinnedAuthID
 			attemptedUpstreamMode = responsesWebsocketUpstreamModeUnknown
@@ -963,7 +1027,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			pinnedAuthAttempted = false
 			turnStartEpoch := inputEpoch.Load()
 			var cliCancel handlers.APIHandlerCancelFunc
-			cliCtx, cliCancel = h.GetContextWithCancel(h, c, executionParent)
+			cliCtx, cliCancel = h.GetContextWithCancel(h, c, turnExecutionParent)
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
 			cliCtx = cliproxyexecutor.WithLocalWebsocketTurnTracker(cliCtx)
 			cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
@@ -1017,7 +1081,14 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			if len(excludedAuthIDs) > 0 {
 				cliCtx = handlers.WithExcludedAuthIDs(cliCtx, excludedAuthIDs)
 			}
-			dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+			var dataChan <-chan []byte
+			var errChan <-chan *interfaces.ErrorMessage
+			if h != nil && h.HasSchedulerContinuity() {
+				cliCtx = cliproxyexecutor.WithContinuityWaitObserver(cliCtx, responsesWebsocketContinuityObserver{setActive: setContinuityWaitActive})
+				dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+			} else {
+				dataChan, _, errChan = h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
+			}
 			if !selectedAuthObserved {
 				// Plugin/alternate routes bypass auth selection. Keep canonical HTTP-mode
 				// state instead of inheriting the previous pinned websocket mode.
@@ -1049,6 +1120,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					lossWriteErr = writeResponsesWebsocketUpstreamLoss(writer, wsTimelineLog, errMsg)
 					return true
 				}
+				if coreauth.IsContinuityTerminatedError(errMsg.Error) {
+					return false
+				}
 				if !nativeWebsocketPassthrough || !pinnedAuthAttempted {
 					return false
 				}
@@ -1059,6 +1133,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if !requestRequiresCurrentUpstreamWebsocket {
 					if retriedPinnedFailover || downstreamCommitted.Load() {
 						return false
+					}
+					if h != nil && h.AuthManager != nil && errMsg != nil && errMsg.Error != nil {
+						proceed, gateErr := h.AuthManager.EvaluatePreOutputStreamFailoverQuotaGate(cliCtx, modelName, lastAttemptedAuthID, errMsg.Error)
+						if !proceed {
+							if gateErr != nil {
+								errMsg.Error = gateErr
+							}
+							return false
+						}
 					}
 					if !h.responsesWebsocketHasAlternativeReplayTarget(cliCtx, modelName, requestJSON, lastAttemptedAuthID) {
 						return false
