@@ -2,13 +2,14 @@ package home
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestCredentialInFlightWireContractFixture(t *testing.T) {

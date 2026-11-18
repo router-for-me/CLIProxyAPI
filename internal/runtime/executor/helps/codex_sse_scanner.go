@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	log "github.com/sirupsen/logrus"
 )
 

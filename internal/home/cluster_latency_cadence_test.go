@@ -2,11 +2,12 @@ package home
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestClusterLatencyProbeCadenceKeepsEvidenceFresh(t *testing.T) {
