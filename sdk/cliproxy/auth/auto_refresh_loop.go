@@ -100,10 +100,16 @@ func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 			if job == nil {
 				continue
 			}
+			var retryAt time.Time
 			if l.manager.beginRefreshJob(ctx, job) {
-				_, _ = l.manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch)
+				_, errRefresh := l.manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch)
+				if isAuthExecutionRefusal(errRefresh) {
+					// A policy refusal leaves credentials due without an upstream failure.
+					// Keep the existing job deadline path from immediately requeuing it.
+					retryAt = time.Now().Add(refreshCheckInterval)
+				}
 			}
-			l.manager.finishRefreshJob(job, time.Time{}, false)
+			l.manager.finishRefreshJob(job, retryAt, false)
 		}
 	}
 }
