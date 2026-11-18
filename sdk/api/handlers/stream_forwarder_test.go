@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,5 +217,103 @@ func TestForwardStreamResetsKeepAliveOnEachChunk(t *testing.T) {
 	}
 	if got := recorder.Body.String(); got != "data: {\"part\":1}\n\ndata: {\"part\":2}\n\n" {
 		t.Fatalf("body = %q, want two data chunks", got)
+	}
+}
+
+func TestContinuityWaitSignalPreservesActiveStateAcrossInterleavedWaits(t *testing.T) {
+	sig := newContinuityWaitSignal()
+	if sig.isActive() {
+		t.Fatal("expected initial signal inactive")
+	}
+
+	// Wait A starts -> inactive to active notification.
+	sig.OnContinuityWaitStart()
+	if !sig.isActive() {
+		t.Fatal("expected signal active after first start")
+	}
+	select {
+	case <-sig.notify:
+	default:
+		t.Fatal("expected notify on 0->1 transition")
+	}
+
+	// Wait B starts concurrently -> stays active, no spurious transition notify.
+	sig.OnContinuityWaitStart()
+	if !sig.isActive() {
+		t.Fatal("expected signal active after second start")
+	}
+	select {
+	case <-sig.notify:
+		t.Fatal("unexpected notify on 1->2 transition")
+	default:
+	}
+
+	// Wait A ends while Wait B is still active -> MUST remain active and NOT emit stop notify.
+	sig.OnContinuityWaitEnd()
+	if !sig.isActive() {
+		t.Fatal("expected signal to remain active while Wait B is still waiting")
+	}
+	select {
+	case <-sig.notify:
+		t.Fatal("unexpected notify on 2->1 transition while Wait B is still active")
+	default:
+	}
+
+	// Wait B ends -> active to inactive notification.
+	sig.OnContinuityWaitEnd()
+	if sig.isActive() {
+		t.Fatal("expected signal inactive after final wait ends")
+	}
+	select {
+	case <-sig.notify:
+	default:
+		t.Fatal("expected notify on 1->0 transition")
+	}
+}
+
+func TestStartContinuityWaitKeepAliveForPeekSuppressesQueuedTickAfterWaitEnds(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tickIn := make(chan time.Time)
+	tickerCreated := make(chan struct{})
+	var tickerOnce sync.Once
+	restoreFactory := SetContinuityKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		tickerOnce.Do(func() { close(tickerCreated) })
+		return tickIn, func() {}
+	})
+	defer restoreFactory()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	sig := newContinuityWaitSignal()
+	c.Set(continuityWaitSignalContextKey, sig)
+	sig.OnContinuityWaitStart()
+
+	h := &BaseAPIHandler{}
+	waitKeepAliveC, canWriteWaitKeepAlive, stopWaitKeepAlive := h.StartContinuityWaitKeepAliveForPeek(c, nil)
+	defer stopWaitKeepAlive()
+
+	// Unbuffered send guarantees the helper goroutine has received the tick;
+	// yield until it has pushed into the buffered waitKeepAliveC channel.
+	<-tickerCreated
+	tickIn <- time.Now()
+	for len(waitKeepAliveC) == 0 {
+		runtime.Gosched()
+	}
+
+	// End wait while a tick is queued in waitKeepAliveC.
+	sig.OnContinuityWaitEnd()
+
+	wroteStale := false
+	select {
+	case <-waitKeepAliveC:
+		if canWriteWaitKeepAlive() {
+			wroteStale = true
+		}
+	default:
+		// Also acceptable if syncTicker already drained tickOut before consumer read.
+	}
+	if wroteStale {
+		t.Fatal("expected queued peek keepalive tick to be suppressed after continuity wait ended")
 	}
 }

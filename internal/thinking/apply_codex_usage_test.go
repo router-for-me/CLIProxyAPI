@@ -151,7 +151,7 @@ func TestExtractCodexReasoningEffortWithConfigurationUpdateTargetRouting(t *test
 			name = "supported"
 		}
 		t.Run(name, func(t *testing.T) {
-			info := &registry.ModelInfo{ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: supported, Thinking: &registry.ThinkingSupport{Levels: []string{"low", "high", "xhigh"}}}
+			info := &registry.ModelInfo{ID: "opaque-route", Type: "codex", SupportConfigurationUpdate: supported, Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}}}
 			body, err := thinking.ApplyThinkingWithModelInfoAndSummary([]byte(source), []byte(source), "opaque-route(high)", "openai-response", "codex", "codex", info, thinking.SummaryConfig{})
 			if err != nil {
 				t.Fatalf("ApplyThinkingWithModelInfoAndSummary() error = %v", err)
@@ -208,9 +208,9 @@ func TestApplyConfigurationUpdateRouting(t *testing.T) {
 			supported: true, wantEffort: "xhigh", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"low","summary":"detailed"},"tools":[]},{"role":"user","content":"first"},{"type":"configuration_update","reasoning":{"effort":"high"}},{"role":"assistant","content":"reply"},{"type":"configuration_update","reasoning":{"effort":"low"}},{"role":"user","content":"last"}]`,
 		},
 		{
-			name:      "supported native request clamps baseline without changing auto update",
+			name:      "supported native request normalizes baseline and auto update independently",
 			body:      `{"reasoning":{"effort":"none","summary":"auto"},"input":[{"type":"configuration_update","reasoning":{"effort":"auto"}},{"role":"user","content":"ok"}]}`,
-			supported: true, wantEffort: "low", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"auto"}},{"role":"user","content":"ok"}]`,
+			supported: true, wantEffort: "low", wantInput: `[{"type":"configuration_update","reasoning":{"effort":"medium"}},{"role":"user","content":"ok"}]`,
 		},
 		{
 			name:      "supported native suffix still clamps disabled updates",
@@ -395,8 +395,8 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		wantBody     string
 		body         string
+		wantBody     string
 		wantEffort   string
 		wantLevel    thinking.ThinkingLevel
 		wantMode     thinking.ThinkingMode
@@ -428,10 +428,10 @@ func TestApplyThinkingLogsNativeResponsesEffectiveEffort(t *testing.T) {
 			wantEffort: "xhigh", wantLevel: thinking.LevelXHigh, wantMode: thinking.ModeLevel,
 		},
 		{
-			name:       "unsupported disabled update is clamped",
+			name:       "unsupported none uses minimum effort",
 			body:       `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}}]}`,
-			wantEffort: "low", wantMode: thinking.ModeLevel, wantLevel: thinking.LevelLow, wantBaseline: thinking.LevelHigh,
-			wantBody: `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`,
+			wantBody:   `{"model":"gpt-6-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"low"}}]}`,
+			wantEffort: "low", wantLevel: thinking.LevelLow, wantMode: thinking.ModeLevel, wantBaseline: thinking.LevelHigh,
 		},
 	}
 	for _, tc := range tests {

@@ -316,10 +316,6 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
-	if !suffixResult.HasSuffix && len(sourceBody) > 0 && isResponsesFormat(fromFormat) && !docValid && hasThinkingConfig(extractConfigurationUpdateConfig(sourceBody)) {
-		// Do not rebuild a malformed target from a separate source update.
-		return modified, nil
-	}
 	var nativeOriginalConfig, nativeOriginalBaseline ThinkingConfig
 	if nativeResponses {
 		if log.IsLevelEnabled(log.DebugLevel) {
@@ -327,15 +323,19 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 			nativeOriginalBaseline = extractCodexConfigFromGetter(doc.Get)
 		}
 		if !isPluginApplier {
-			changed, err := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, fromFormat, providerFormat, applier, !suffixResult.HasSuffix)
-			modified = modified || changed
-			if err != nil {
-				return modified, err
+			normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
+			modified = modified || normalized
+			if errNormalize != nil {
+				return modified, errNormalize
 			}
 		}
 	}
+	if !suffixResult.HasSuffix && len(sourceBody) > 0 && isResponsesFormat(fromFormat) && !docValid && hasThinkingConfig(extractConfigurationUpdateConfig(sourceBody)) {
+		// Do not rebuild a malformed target from a separate source update.
+		return modified, nil
+	}
 	if nativeResponses && !suffixResult.HasSuffix {
-		// Keep the baseline and each in-turn update separate after validation.
+		// Native Responses preserves the baseline and update timeline after validation.
 		if log.IsLevelEnabled(log.DebugLevel) && (modelInfo.Thinking != nil || modelInfo.UserDefined) {
 			if config := extractCodexUsageConfigDoc(doc, docValid); hasThinkingConfig(config) {
 				fields := log.Fields{
@@ -669,7 +669,7 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	}
 
 	if !isPluginApplier {
-		config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+		config = normalizeUserDefinedConfig(config, modelInfo, fromFormat, toFormat)
 	}
 	log.WithFields(log.Fields{
 		"provider": toFormat,
@@ -691,7 +691,7 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	return modified, nil
 }
 
-func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat string) ThinkingConfig {
+func normalizeUserDefinedConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFormat, toFormat string) ThinkingConfig {
 	if config.Mode != ModeLevel {
 		return config
 	}
@@ -700,6 +700,11 @@ func normalizeUserDefinedConfig(config ThinkingConfig, fromFormat, toFormat stri
 	}
 	if !isBudgetCapableProvider(toFormat) {
 		return config
+	}
+	if !strings.EqualFold(string(config.Level), string(LevelNone)) && !strings.EqualFold(string(config.Level), string(LevelAuto)) {
+		if isGeminiFamily(fromFormat) || fromFormat == "interactions" || (modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0) {
+			return config
+		}
 	}
 	budget, ok := ConvertLevelToBudget(string(config.Level))
 	if !ok {

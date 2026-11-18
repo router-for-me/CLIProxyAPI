@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
@@ -21,16 +22,20 @@ const (
 	MaxDeferredAPIResponseBodyBytes = 64 << 10 // 64 KiB
 	// MaxDeferredAPIResponseHeaderBytes bounds cloned response headers per upstream attempt.
 	MaxDeferredAPIResponseHeaderBytes = 16 << 10 // 16 KiB
-	// MaxDeferredAPIResponseErrorBytes bounds each recorded upstream error string.
-	MaxDeferredAPIResponseErrorBytes = 16 << 10 // 16 KiB
 	// MaxTotalDeferredAPIResponseBodyBytes bounds total deferred upstream response payload
-	// (body chunks, headers, and error strings) across retries for a single HTTP request.
+	// (body chunks and headers) across retries for a single HTTP request.
 	MaxTotalDeferredAPIResponseBodyBytes = 512 << 10 // 512 KiB
 	// MaxDeferredAPIResponseAttempts bounds the number of upstream response attempt slots retained per HTTP request.
 	MaxDeferredAPIResponseAttempts = 16
-	maxDeferredErrorsPerAttempt    = 8
 	maxDeferredHeaderEntries       = 64
+	maxResponseDiagnostics         = 32
 )
+
+// responseDiagnostic carries log-only details through the existing logger error channel.
+// It must not affect HTTP status selection or be rendered as an upstream error response.
+type responseDiagnostic string
+
+func (e responseDiagnostic) Error() string { return string(e) }
 
 type deferredAPIRequestCaptureDisabledKey struct{}
 type deferredAPICaptureKey struct{}
@@ -63,8 +68,8 @@ func DeferredAPIRequestCaptureDisabled(ctx context.Context) bool {
 type DeferredAPIResponse interface {
 	// HasPayload reports whether any upstream response metadata, body, or error was captured.
 	HasPayload() bool
-	// RenderAPIResponse returns the formatted "=== API RESPONSE n ===" attempt
-	// sections, or nil when no upstream response details were captured.
+	// RenderAPIResponse returns upstream attempt sections only, or nil when no
+	// upstream response details were captured. Local errors are reported elsewhere.
 	RenderAPIResponse() []byte
 }
 
@@ -126,8 +131,7 @@ type deferredResponseAttempt struct {
 	bodyHasContent   bool
 	prevWasSSEEvent  bool
 	bodyTruncated    bool
-	errors           []string
-	errorsTruncated  bool
+	hasError         bool
 	requestBodyBytes int
 }
 
@@ -138,21 +142,24 @@ func (a *deferredResponseAttempt) markCapturedAt() {
 }
 
 func (a *deferredResponseAttempt) hasContent() bool {
-	return a.status > 0 || a.headersRecorded || a.headersTruncated || a.bodyHasContent || a.bodyTruncated || len(a.errors) > 0 || a.errorsTruncated
+	return a.status > 0 || a.headersRecorded || a.headersTruncated || a.bodyHasContent || a.bodyTruncated || a.hasError
 }
 
 // DeferredAPICapture retains bounded upstream request and response details for
-// a single HTTP request while full request logging is disabled. All operations
-// are synchronized and become no-ops after Close so asynchronous stream workers
+// a single HTTP request while full request logging is disabled. Full logging also
+// uses this holder for bounded local diagnostics. All operations are synchronized
+// and become no-ops after Close so asynchronous stream workers
 // cannot race with Finalize or leak into a reused Gin context.
 type DeferredAPICapture struct {
-	mu              sync.Mutex
-	requests        []DeferredAPIRequest
-	requestBytes    int
-	attempts        []*deferredResponseAttempt
-	omittedAttempts int
-	responseBytes   int
-	closed          bool
+	mu                   sync.Mutex
+	requests             []DeferredAPIRequest
+	requestBytes         int
+	attempts             []*deferredResponseAttempt
+	omittedAttempts      int
+	responseBytes        int
+	diagnostics          []string
+	diagnosticsTruncated bool
+	closed               bool
 }
 
 // NewDeferredAPICapture constructs a fresh request-scoped DeferredAPICapture.
@@ -173,6 +180,8 @@ func (c *DeferredAPICapture) Close() {
 	c.attempts = nil
 	c.omittedAttempts = 0
 	c.responseBytes = 0
+	c.diagnostics = nil
+	c.diagnosticsTruncated = false
 }
 
 // IsClosed reports whether Close has been called.
@@ -357,13 +366,10 @@ func (c *DeferredAPICapture) RecordResponseMetadata(status int, headers http.Hea
 	}
 }
 
-// RecordResponseError appends a bounded transport or stream error to the latest attempt.
+// RecordResponseError marks the latest attempt as failed and retains bounded local
+// diagnostics separately from upstream response data.
 func (c *DeferredAPICapture) RecordResponseError(err error) {
 	if c == nil || err == nil {
-		return
-	}
-	raw := strings.TrimSpace(err.Error())
-	if raw == "" {
 		return
 	}
 	c.mu.Lock()
@@ -371,30 +377,38 @@ func (c *DeferredAPICapture) RecordResponseError(err error) {
 	if c.closed {
 		return
 	}
-	attempt := c.latestAttemptLocked()
-	if attempt == nil {
+	if attempt := c.latestAttemptLocked(); attempt != nil {
+		attempt.markCapturedAt()
+		attempt.hasError = true
+	}
+	if len(c.diagnostics) >= maxResponseDiagnostics {
+		c.diagnosticsTruncated = true
 		return
 	}
-	attempt.markCapturedAt()
-	if len(attempt.errors) >= maxDeferredErrorsPerAttempt {
-		attempt.errorsTruncated = true
-		return
+	if diagnostic := SafeDiagnosticForLog(err.Error()); diagnostic != "" {
+		c.diagnostics = append(c.diagnostics, strings.Clone(diagnostic))
 	}
-	budget := min(MaxDeferredAPIResponseErrorBytes, MaxTotalDeferredAPIResponseBodyBytes-c.responseBytes)
-	if budget <= 0 {
-		attempt.errorsTruncated = true
-		return
+}
+
+// ResponseDiagnostics snapshots local errors for the downstream RESPONSE log section.
+// Callers must add these only after deciding the response status and logging policy.
+func (c *DeferredAPICapture) ResponseDiagnostics() []*interfaces.ErrorMessage {
+	if c == nil {
+		return nil
 	}
-	if len(raw) > budget {
-		cut := truncateUTF8Boundary(raw, budget)
-		cloned := strings.Clone(raw[:cut])
-		c.responseBytes += cut
-		attempt.errors = append(attempt.errors, fmt.Sprintf("%s [API RESPONSE ERROR TRUNCATED: captured first %d bytes]", cloned, cut))
-		return
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
 	}
-	cloned := strings.Clone(raw)
-	c.responseBytes += len(cloned)
-	attempt.errors = append(attempt.errors, cloned)
+	var diagnostics []*interfaces.ErrorMessage
+	for _, message := range c.diagnostics {
+		diagnostics = append(diagnostics, &interfaces.ErrorMessage{Error: responseDiagnostic(message)})
+	}
+	if c.diagnosticsTruncated {
+		diagnostics = append(diagnostics, &interfaces.ErrorMessage{Error: responseDiagnostic("[LOCAL ERRORS TRUNCATED]")})
+	}
+	return diagnostics
 }
 
 // AppendResponseChunk appends a bounded response chunk to the latest attempt.
@@ -491,7 +505,7 @@ func (c *DeferredAPICapture) RenderAPIResponse() []byte {
 	}
 	var builder strings.Builder
 	for _, attempt := range c.attempts {
-		if attempt == nil || !attempt.hasContent() {
+		if attempt == nil || !(attempt.status > 0 || attempt.headersRecorded || attempt.headersTruncated || attempt.bodyHasContent || attempt.bodyTruncated) {
 			continue
 		}
 		if builder.Len() > 0 {
@@ -523,21 +537,6 @@ func (c *DeferredAPICapture) RenderAPIResponse() []byte {
 			if len(attempt.body) == 0 || attempt.body[len(attempt.body)-1] != '\n' || attempt.bodyTruncated {
 				builder.WriteByte('\n')
 			}
-			if len(attempt.errors) > 0 || attempt.errorsTruncated {
-				builder.WriteByte('\n')
-			}
-		}
-		for i, errText := range attempt.errors {
-			if i > 0 {
-				builder.WriteByte('\n')
-			}
-			builder.WriteString(fmt.Sprintf("Error: %s\n", errText))
-		}
-		if attempt.errorsTruncated {
-			if len(attempt.errors) > 0 {
-				builder.WriteByte('\n')
-			}
-			builder.WriteString("[API RESPONSE ERRORS TRUNCATED]\n")
 		}
 	}
 	if c.omittedAttempts > 0 && builder.Len() > 0 {

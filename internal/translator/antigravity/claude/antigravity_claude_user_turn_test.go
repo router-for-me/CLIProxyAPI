@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -181,5 +182,52 @@ func TestClaudeToAntigravityRealTextBesideWhitespaceAndAnImageStillSucceeds(t *t
 	}
 	if !found {
 		t.Fatalf("text was lost: %s", envelope.Body)
+	}
+}
+
+func TestClaudeToAntigravityDocumentTextAndContentSources(t *testing.T) {
+	envelope := claudeImageTurnToAntigravity(`{"type":"document","title":"note.txt","context":"secret note","source":{"type":"text","media_type":"text/plain","data":"Secret codeword: ORANGE-42"}},{"type":"text","text":"What is the secret codeword?"}`)
+	if envelope.Err != nil {
+		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
+	}
+	parts := ojson.GetBytesNoCopy(envelope.Body, "request.contents.2.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("got %d parts, want 2: %s", len(parts), envelope.Body)
+	}
+	docText := parts[0].Get("text").String()
+	if !strings.Contains(docText, "note.txt") || !strings.Contains(docText, "secret note") || !strings.Contains(docText, "ORANGE-42") {
+		t.Fatalf("document text was dropped or missing metadata: %q", docText)
+	}
+
+	contentEnv := claudeImageTurnToAntigravity(`{"type":"document","title":"bundle","context":"mixed","source":{"type":"content","content":[{"type":"text","text":"inside doc"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}}`)
+	if contentEnv.Err != nil {
+		t.Fatalf("content document err = %v, body = %s", contentEnv.Err, contentEnv.Body)
+	}
+	cParts := ojson.GetBytesNoCopy(contentEnv.Body, "request.contents.2.parts").Array()
+	if len(cParts) < 2 {
+		t.Fatalf("expected header/text and image parts, got %d: %s", len(cParts), contentEnv.Body)
+	}
+	var sawText, sawImage bool
+	for _, p := range cParts {
+		if strings.Contains(p.Get("text").String(), "inside doc") {
+			sawText = true
+		}
+		if p.Get("inlineData.mimeType").String() == "image/png" && p.Get("inlineData.data").String() == "aGVsbG8=" {
+			sawImage = true
+		}
+	}
+	if !sawText || !sawImage {
+		t.Fatalf("content document lost parts (sawText=%v, sawImage=%v): %s", sawText, sawImage, contentEnv.Body)
+	}
+
+	emptyTextEnv := claudeImageTurnToAntigravity(`{"type":"document","title":"empty.txt","source":{"type":"text","media_type":"text/plain","data":"  "}}`)
+	var unsupported *translatorcommon.UnsupportedPartError
+	if !errors.As(emptyTextEnv.Err, &unsupported) || unsupported.Type != "document" || unsupported.StatusCode() != 400 {
+		t.Fatalf("empty text document err = %v, want unsupported document; body = %s", emptyTextEnv.Err, emptyTextEnv.Body)
+	}
+
+	badContentEnv := claudeImageTurnToAntigravity(`{"type":"document","title":"bad","source":{"type":"content","content":[{"type":"image","source":{"type":"file","file_id":"f1"}}]}}`)
+	if !errors.As(badContentEnv.Err, &unsupported) || unsupported.Type != "image" || unsupported.StatusCode() != 400 {
+		t.Fatalf("unrepresentable content image err = %v, want unsupported image; body = %s", badContentEnv.Err, badContentEnv.Body)
 	}
 }

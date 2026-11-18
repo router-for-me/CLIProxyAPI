@@ -57,6 +57,14 @@ server:
   #   - 127.0.0.1
   #   - 192.0.2.0/24
 
+  # Graceful shutdown drain budget, in seconds. When the process receives SIGINT/SIGTERM,
+  # in-flight HTTP requests are allowed to finish for up to this many seconds before
+  # remaining connections are forcibly closed. Shutdown never hangs longer than this budget.
+  # Default 0 keeps the legacy behavior: close immediately without draining.
+  # Note: hijacked connections (WebSocket sessions) are not drained; they are
+  # released by their own connection managers after the drain window.
+  shutdown-timeout: 0
+
   # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
   tls:
     enable: false
@@ -348,6 +356,45 @@ requests:
   #           protocol: "codex" # restricts the rule to a specific protocol, options: openai, gemini, claude, codex, antigravity, meta
   #       params: # JSON path (gjson/sjson syntax) -> raw JSON value (strings are used as-is, must be valid JSON)
   #         "response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}"
+  #   replace: # Ordered literal and Go RE2 regex replacements in existing strings; runs after overrides, before filter.
+  #     - models:
+  #         - name: "*"
+  #           protocol: "claude"
+  #           from-protocol: "openai"
+  #       target:
+  #         role: user # system, developer, or user
+  #         positions: [1, 2] # One-based positions of the selected role in the final upstream body; missing positions are skipped.
+  #         # all: true      # Select all messages of this role instead of positions (mutually exclusive).
+  #       replacements: # Each entry is either {"source": "destination"} (literal) or {pattern, replacement} (Go RE2 regex; $1/${1} expand captures).
+  #         - "you are hero": "you are fool"
+  #         - "remove this phrase": ""
+  #         - pattern: '(?i)\bhero\b'
+  #           replacement: "friend"
+  #         - pattern: '(?s)<debug>.*?</debug>'
+  #           replacement: ""
+  #       # Invalid regex entries are skipped with an index-only warning; other replacements still run.
+  #       # Role targets process text blocks separately; assistant replies, images, tools, and thinking are not modified.
+  #       # Supported layouts: OpenAI Chat, Claude, Responses/Codex, Gemini, and Antigravity.
+  #       # system includes Claude system, Gemini systemInstruction, and Responses instructions (each counts as one message, before any system messages).
+  #       # developer merged into system during translation must be selected as system.
+  #       # Matching uses final upstream roles, not the original client roles.
+  #     - models:
+  #         - name: "*"
+  #           protocol: "codex"
+  #       target:
+  #         paths: # Alternative to role/positions/all (mutually exclusive); paths are relative to the provider payload root.
+  #           - 'tools.#(type=="function")#.description'
+  #           - "metadata.description"
+  #       replacements: # Same ordered literal and Go RE2 regex rules as role targets; $1/${1} expand captures.
+  #         - "old name": "new name"
+  #         - "remove this phrase": ""
+  #         - pattern: '(?i)user-(\d+)'
+  #           replacement: 'account-${1}'
+  #         - pattern: '(?s)<debug>.*?</debug>'
+  #           replacement: ""
+  #       # Invalid regex entries are skipped with an index-only warning; other replacements still run.
+  #       # Path targets edit only existing string nodes, regardless of role or field; missing/non-string nodes are skipped.
+  #       # Objects/arrays are not traversed recursively; duplicate resolved paths are replaced once per rule.
   #   filter: # Filter rules remove specified parameters from the payload.
   #     - models:
   #         - name: "gemini-2.5-pro" # Supports wildcards (e.g., "gemini-*")
@@ -842,6 +889,9 @@ upstream:
 #               - "proxy"
 #             sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement")
 #               "Claude Code": "Claude"
+#             sensitive-patterns-replace:  # optional: ordered Go RE2 regex replacements ("replacement": "" deletes matches)
+#               - pattern: '(?m)^You are omp[^\n]*\n?'
+#                 replacement: ""
 #             cache-user-id: true          # optional: default is false; set true to reuse cached user_id per API key instead of generating a random one each request
 #             # Every custom tool on a cloaked OAuth request automatically uses a caller-stable opaque mcp__<server>__<tool> alias.
 #
@@ -1219,10 +1269,17 @@ oauth:
       #   - "proxy"
       # sensitive-words-replace:      # optional: literal sensitive-word replacements ("target": "replacement") in system instructions
       #   "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+      # sensitive-patterns-replace:   # optional: ordered Go RE2 regex replacements in system instructions (deleting flagged text with "" is recommended over obfuscation for Antigravity)
+      #   - pattern: '(?m)^RFC 2119[^\n]*\n?'
+      #     replacement: ""
+      #   - pattern: '(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?'
+      #     replacement: ""
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
       #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2)
+      # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
+                                    # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
       # Use credits as a last resort after free-tier Claude quota is exhausted.
       antigravity-credits: true
 
@@ -1243,6 +1300,9 @@ oauth:
     #     - "proxy"
     #   sensitive-words-replace:     # optional: literal sensitive-word replacements ("target": "replacement") in system prompts
     #     "Claude Code": "Claude"
+    #   sensitive-patterns-replace:  # optional: ordered Go RE2 regex replacements in system prompts ("replacement": "" deletes matches)
+    #     - pattern: '(?m)^You are omp[^\n]*\n?'
+    #       replacement: ""
 
 # Image and video behavior.
 multimedia:

@@ -2,12 +2,12 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"

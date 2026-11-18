@@ -24,3 +24,22 @@ func TestDiffOAuthModelAliasChanges_IncludesDisplayName(t *testing.T) {
 		t.Fatalf("expected antigravity to be affected, got %#v", affected)
 	}
 }
+
+func TestDiffOAuthModelAliasChanges_DetectsCaseOnlyChange(t *testing.T) {
+	oldMap := map[string][]config.OAuthModelAlias{
+		"opencode-go": {
+			{Name: "minimax-m3.1-flash", Alias: "minimax-m3.1-flash"},
+		},
+	}
+	newMap := map[string][]config.OAuthModelAlias{
+		"opencode-go": {
+			{Name: "minimax-m3.1-flash", Alias: "MiniMax-M3.1-Flash"},
+		},
+	}
+
+	changes, affected := DiffOAuthModelAliasChanges(oldMap, newMap)
+	expectContains(t, changes, "oauth-model-alias[opencode-go]: updated (1 -> 1 entries)")
+	if len(affected) != 1 || affected[0] != "opencode-go" {
+		t.Fatalf("expected opencode-go to be affected, got %#v", affected)
+	}
+}
