@@ -97,6 +97,10 @@ func (s *Service) Run(ctx context.Context) error {
 				log.Warnf("failed to restore cooldown state: %v", errRestoreCooldown)
 			}
 		}
+		// Register the models of stored credentials before the server listens. The
+		// watcher's first scan registers them too, but only after the port is open,
+		// and a request in between gets "unknown provider for model".
+		s.registerModelsForAuthBatch(ctx, storedCredentials(s.coreManager.List()))
 		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
@@ -403,6 +407,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+// storedCredentials drops config API-key auths, whose models
+// registerConfigAPIKeyAuths has already registered.
+func storedCredentials(auths []*coreauth.Auth) []*coreauth.Auth {
+	stored := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth != nil && !coreauth.IsConfigAPIKeyAuth(auth) {
+			stored = append(stored, auth)
+		}
+	}
+	return stored
 }
 
 func (s *Service) ensureAuthDir() error {
