@@ -5,7 +5,6 @@ package handlers
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -56,8 +56,9 @@ type ErrorDetail struct {
 const idempotencyKeyMetadataKey = "idempotency_key"
 
 const (
-	defaultStreamingKeepAliveSeconds = 0
-	defaultStreamingBootstrapRetries = 0
+	defaultStreamingKeepAliveSeconds   = 0
+	defaultStreamingBootstrapRetries   = 0
+	defaultContinuityKeepAliveInterval = 10 * time.Second
 	// Stream interceptor history is intentionally bounded and not configurable in the first SDK surface.
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -160,6 +161,8 @@ func BuildErrorResponseBodyWithError(status int, errText string, err error) []by
 
 var streamingKeepAliveTickerFactory func(interval time.Duration) (<-chan time.Time, func())
 var streamingKeepAliveTickerWithResetFactory func(interval time.Duration) (<-chan time.Time, func(), func())
+var continuityKeepAliveTickerFactory func(interval time.Duration) (<-chan time.Time, func())
+var continuityKeepAliveIntervalOverride time.Duration
 
 func defaultStreamingKeepAliveTickerWithReset(interval time.Duration) (<-chan time.Time, func(), func()) {
 	ticker := time.NewTicker(interval)
@@ -222,6 +225,48 @@ func NewPreFirstTokenKeepAliveTicker(cfg *config.SDKConfig) (<-chan time.Time, f
 		return nil, func() {}
 	}
 	return NewStreamingKeepAliveTicker(StreamingKeepAliveInterval(cfg))
+}
+
+// ContinuityKeepAliveInterval returns the keep-alive interval used only while a
+// bounded scheduler continuity wait is active.
+func ContinuityKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
+	if continuityKeepAliveIntervalOverride > 0 {
+		return continuityKeepAliveIntervalOverride
+	}
+	if interval := StreamingKeepAliveInterval(cfg); interval > 0 {
+		return interval
+	}
+	return defaultContinuityKeepAliveInterval
+}
+
+// NewContinuityKeepAliveTicker returns a ticker channel and stop function for wait-only continuity keep-alives.
+func NewContinuityKeepAliveTicker(cfg *config.SDKConfig) (<-chan time.Time, func()) {
+	interval := ContinuityKeepAliveInterval(cfg)
+	if interval <= 0 {
+		return nil, func() {}
+	}
+	if continuityKeepAliveTickerFactory != nil {
+		return continuityKeepAliveTickerFactory(interval)
+	}
+	return NewStreamingKeepAliveTicker(interval)
+}
+
+// SetContinuityKeepAliveTickerFactoryForTest overrides the wait-only continuity ticker factory for tests.
+func SetContinuityKeepAliveTickerFactoryForTest(factory func(interval time.Duration) (<-chan time.Time, func())) func() {
+	prev := continuityKeepAliveTickerFactory
+	continuityKeepAliveTickerFactory = factory
+	return func() {
+		continuityKeepAliveTickerFactory = prev
+	}
+}
+
+// SetContinuityKeepAliveIntervalForTest overrides the continuity wait keep-alive interval for tests.
+func SetContinuityKeepAliveIntervalForTest(interval time.Duration) func() {
+	prev := continuityKeepAliveIntervalOverride
+	continuityKeepAliveIntervalOverride = interval
+	return func() {
+		continuityKeepAliveIntervalOverride = prev
+	}
 }
 
 // SetStreamingKeepAliveTickerFactoryForTest overrides the keep-alive ticker factory for deterministic tests
@@ -311,6 +356,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+	}
+	if excludedAuthIDs := excludedAuthIDsFromContext(ctx); len(excludedAuthIDs) > 0 {
+		meta[coreexecutor.ExcludedAuthIDsMetadataKey] = excludedAuthIDs
 	}
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
@@ -514,6 +562,15 @@ func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
 	h.runtimeMu.Lock()
 	h.Cfg = cfg
 	h.runtimeMu.Unlock()
+}
+
+// HasSchedulerContinuity reports whether the configured auth manager has an active
+// plugin scheduler supporting bounded Codex continuity.
+func (h *BaseAPIHandler) HasSchedulerContinuity() bool {
+	if h == nil || h.AuthManager == nil {
+		return false
+	}
+	return h.AuthManager.HasSchedulerContinuity()
 }
 
 // CurrentConfig returns the current application configuration snapshot.
@@ -796,9 +853,13 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	}
 }
 
-// appendAPIResponse preserves any previously captured API response and appends new data.
+// appendAPIResponse records handler fallback data only when executor capture is unavailable.
 func appendAPIResponse(c *gin.Context, data []byte) {
 	if c == nil || len(data) == 0 {
+		return
+	}
+	// Handler payloads are translated or synthesized; never append them to executor capture.
+	if captured, _ := c.Get(logging.APIResponseCapturedContextKey); captured == true {
 		return
 	}
 

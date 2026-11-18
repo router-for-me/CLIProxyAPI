@@ -2,11 +2,11 @@ package chat_completions
 
 import (
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 )
 
 func TestConvertOpenAIRequestToCodex_MaxOutputTokens(t *testing.T) {
@@ -536,11 +536,11 @@ func TestConvertOpenAIRequestToCodexPreservesInputAudio(t *testing.T) {
 	if parts[1].Get("type").String() != "input_audio" {
 		t.Fatalf("part 1: expected input_audio, got %s", parts[1].Raw)
 	}
-	if parts[1].Get("data").String() != "SUQzBA==" {
-		t.Fatalf("part 1: expected audio data to be preserved, got %s", parts[1].Get("data").String())
+	if parts[1].Get("input_audio.data").String() != "SUQzBA==" {
+		t.Fatalf("part 1: expected nested audio data to be preserved, got %s", parts[1].Raw)
 	}
-	if parts[1].Get("format").String() != "mp3" {
-		t.Fatalf("part 1: expected audio format mp3, got %s", parts[1].Get("format").String())
+	if parts[1].Get("input_audio.format").String() != "mp3" {
+		t.Fatalf("part 1: expected nested audio format mp3, got %s", parts[1].Raw)
 	}
 }
 

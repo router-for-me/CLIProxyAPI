@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/antigravity"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
@@ -106,10 +105,8 @@ func TestInvalidInteractionsSummaryDoesNotWriteTargetControl(t *testing.T) {
 }
 
 func TestSummaryIntentFinalPipeline(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("summary-final-pipeline-%d", time.Now().UnixNano())
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	tests := []struct {
 		name       string
@@ -180,10 +177,8 @@ func TestSummaryIntentFinalPipeline(t *testing.T) {
 }
 
 func TestGeminiSummaryOnlyProducesValidClaudeThinking(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("gemini-summary-only-claude-%d", time.Now().UnixNano())
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	tests := []struct {
 		name       string
@@ -231,10 +226,8 @@ func TestNativeClaudeMissingDisplayPreservesSignatureOnlyHistory(t *testing.T) {
 // independent opt-in. Thinking level/budget changes must preserve explicit
 // booleans and leave an omitted visibility control omitted.
 func TestAntigravityIncludeThoughtsPreservesExplicitness(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("antigravity-summary-default-%d", time.Now().UnixNano())
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	const contents = `"contents":[{"role":"user","parts":[{"text":"hi"}]}]`
 	tests := []struct {

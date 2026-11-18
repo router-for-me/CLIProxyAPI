@@ -140,9 +140,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		}
 		if content.IsArray() {
 			content.ForEach(func(_, item ojson.Result) bool {
-				if contentItem, ok := convertClaudeContentPart(item); ok {
-					systemContentItems = append(systemContentItems, []byte(contentItem))
-				}
+				systemContentItems = append(systemContentItems, convertClaudeContentParts(item, nil)...)
 				return true
 			})
 		}
@@ -231,11 +229,11 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
 
 					case "text", "image", "document", "container_upload":
-						if contentItem, ok := convertClaudeContentPart(part); ok {
-							contentItems = append(contentItems, []byte(contentItem))
-						} else if role == "user" && partType != "text" {
-							drops.Drop(partType)
+						var onDrop func(string)
+						if role == "user" && partType != "text" {
+							onDrop = drops.Drop
 						}
+						contentItems = append(contentItems, convertClaudeContentParts(part, onDrop)...)
 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
@@ -303,13 +301,13 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				// then emit any queued system reminders, then emit the current message's content.
 				messageItems = append(messageItems, toolResults...)
 
-				// OpenAI tool messages cannot carry image parts, so images returned by a tool are
+				// OpenAI tool messages cannot carry image/file parts, so media returned by a tool are
 				// replayed as a user message directly after the tool results.
 				if len(relayedToolImages) > 0 {
 					relayItems := make([][]byte, 0, len(relayedToolImages)+1)
-					noticeJSON := []byte(`{"type":"text","text":""}`)
-					noticeJSON, _ = ojson.SetBytes(noticeJSON, "text", toolResultImageRelayNotice)
-					relayItems = append(relayItems, noticeJSON)
+					noticeDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+					_ = noticeDoc.Set("text", toolResultRelayNoticeText(relayedToolImages))
+					relayItems = append(relayItems, noticeDoc.Bytes())
 					relayItems = append(relayItems, relayedToolImages...)
 
 					if role == "user" && hasContent {
@@ -651,6 +649,47 @@ func convertClaudeContentPart(part ojson.Result) (string, bool) {
 	}
 }
 
+func convertClaudeContentParts(part ojson.Result, onDrop func(string)) [][]byte {
+	partType := part.Get("type").String()
+	if partType == "document" {
+		buildTextPart := func(text string) []byte {
+			partDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+			_ = partDoc.Set("text", text)
+			return partDoc.Bytes()
+		}
+		if docText, ok := translatorcommon.ClaudeDocumentTextBlock(part); ok {
+			return [][]byte{buildTextPart(docText)}
+		}
+		var items [][]byte
+		var onImageDrop func()
+		if onDrop != nil {
+			onImageDrop = func() { onDrop("image") }
+		}
+		if translatorcommon.ExpandClaudeContentDocument(
+			part,
+			func(text string) { items = append(items, buildTextPart(text)) },
+			func(img ojson.Result) ([]byte, bool) {
+				s, ok := convertClaudeContentPart(img)
+				if !ok {
+					return nil, false
+				}
+				return []byte(s), true
+			},
+			func(img []byte) { items = append(items, img) },
+			onImageDrop,
+		) {
+			return items
+		}
+	}
+	if contentItem, ok := convertClaudeContentPart(part); ok {
+		return [][]byte{[]byte(contentItem)}
+	}
+	if onDrop != nil && partType != "text" {
+		onDrop(partType)
+	}
+	return nil
+}
+
 // convertClaudeFilePartToOpenAI emits an OpenAI file part for inline base64 bytes.
 // A file id carries none, so it stays unconverted and the caller reports it.
 func convertClaudeFilePartToOpenAI(part ojson.Result) (string, bool) {
@@ -673,8 +712,12 @@ func convertClaudeFilePartToOpenAI(part ojson.Result) (string, bool) {
 		mimeType = "application/octet-stream"
 	}
 
+	filename := part.Get("filename").String()
+	if filename == "" {
+		filename = part.Get("title").String()
+	}
 	fileContentDoc := ojson.NewDocString(`{"type":"file","file":{"filename":"","file_data":""}}`)
-	_ = fileContentDoc.Set("file.filename", part.Get("filename").String())
+	_ = fileContentDoc.Set("file.filename", filename)
 	_ = fileContentDoc.Set("file.file_data", base64.EncodeDataURL(mimeType, data))
 	return fileContentDoc.String(), true
 }
@@ -685,6 +728,87 @@ const toolResultImagePlaceholder = "[Tool returned image content; the images fol
 
 // toolResultImageRelayNotice labels the user message that carries relayed tool images.
 const toolResultImageRelayNotice = "Images returned by the preceding tool call(s):"
+
+// toolResultDocumentPlaceholder keeps the OpenAI tool message non-empty when a Claude
+// tool_result carried nothing but documents.
+const toolResultDocumentPlaceholder = "[Tool returned document content; the documents follow in the next user message.]"
+
+// toolResultDocumentRelayNotice labels the user message that carries relayed tool documents.
+const toolResultDocumentRelayNotice = "Documents returned by the preceding tool call(s):"
+
+// toolResultMediaPlaceholder keeps the OpenAI tool message non-empty when a Claude
+// tool_result carried mixed image and document media.
+const toolResultMediaPlaceholder = "[Tool returned media content; the attachments follow in the next user message.]"
+
+// toolResultMediaRelayNotice labels the user message that carries mixed relayed tool media.
+const toolResultMediaRelayNotice = "Media returned by the preceding tool call(s):"
+
+// toolResultUnsupportedDocumentPlaceholder avoids dumping raw base64 JSON into tool text
+// when a document block cannot be converted into an OpenAI file part.
+const toolResultUnsupportedDocumentPlaceholder = "[Unsupported document content]"
+
+func classifyRelayedToolMedia(items [][]byte) (hasImage, hasFile bool) {
+	for _, item := range items {
+		switch ojson.GetBytesNoCopy(item, "type").String() {
+		case "file":
+			hasFile = true
+		case "image_url":
+			hasImage = true
+		}
+	}
+	return hasImage, hasFile
+}
+
+func toolResultRelayPlaceholder(items [][]byte) string {
+	hasImage, hasFile := classifyRelayedToolMedia(items)
+	switch {
+	case hasFile && !hasImage:
+		return toolResultDocumentPlaceholder
+	case hasFile && hasImage:
+		return toolResultMediaPlaceholder
+	default:
+		return toolResultImagePlaceholder
+	}
+}
+
+func toolResultRelayNoticeText(items [][]byte) string {
+	hasImage, hasFile := classifyRelayedToolMedia(items)
+	switch {
+	case hasFile && !hasImage:
+		return toolResultDocumentRelayNotice
+	case hasFile && hasImage:
+		return toolResultMediaRelayNotice
+	default:
+		return toolResultImageRelayNotice
+	}
+}
+
+func appendOpenAIToolResultDocument(item ojson.Result, parts *[]string, relayedMedia *[][]byte) {
+	if docText, ok := translatorcommon.ClaudeDocumentTextBlock(item); ok {
+		*parts = append(*parts, docText)
+		return
+	}
+	if translatorcommon.ExpandClaudeContentDocument(
+		item,
+		func(text string) { *parts = append(*parts, text) },
+		func(img ojson.Result) ([]byte, bool) {
+			s, ok := convertClaudeContentPart(img)
+			if !ok {
+				return nil, false
+			}
+			return []byte(s), true
+		},
+		func(img []byte) { *relayedMedia = append(*relayedMedia, img) },
+		nil,
+	) {
+		return
+	}
+	if contentItem, ok := convertClaudeContentPart(item); ok {
+		*relayedMedia = append(*relayedMedia, []byte(contentItem))
+		return
+	}
+	*parts = append(*parts, toolResultUnsupportedDocumentPlaceholder)
+}
 
 func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
 	if !content.Exists() {
@@ -697,16 +821,18 @@ func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
 
 	if content.IsArray() {
 		var parts []string
-		var images [][]byte
+		var relayedMedia [][]byte
 		content.ForEach(func(_, item ojson.Result) bool {
 			switch {
 			case item.Type == ojson.String:
 				parts = append(parts, item.String())
 			case item.IsObject() && item.Get("type").String() == "text":
 				parts = append(parts, item.Get("text").String())
+			case item.IsObject() && item.Get("type").String() == "document":
+				appendOpenAIToolResultDocument(item, &parts, &relayedMedia)
 			case item.IsObject() && item.Get("type").String() == "image":
 				if contentItem, ok := convertClaudeContentPart(item); ok {
-					images = append(images, []byte(contentItem))
+					relayedMedia = append(relayedMedia, []byte(contentItem))
 				} else {
 					parts = append(parts, item.Raw)
 				}
@@ -720,18 +846,30 @@ func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
 
 		joined := strings.Join(parts, "\n\n")
 		if strings.TrimSpace(joined) == "" {
-			if len(images) > 0 {
-				return toolResultImagePlaceholder, images
+			if len(relayedMedia) > 0 {
+				return toolResultRelayPlaceholder(relayedMedia), relayedMedia
 			}
 			return content.Raw, nil
 		}
-		return joined, images
+		return joined, relayedMedia
 	}
 
 	if content.IsObject() {
-		if content.Get("type").String() == "image" {
+		blockType := content.Get("type").String()
+		if blockType == "document" {
+			var parts []string
+			var relayedMedia [][]byte
+			appendOpenAIToolResultDocument(content, &parts, &relayedMedia)
+			joined := strings.Join(parts, "\n\n")
+			if strings.TrimSpace(joined) == "" && len(relayedMedia) > 0 {
+				return toolResultRelayPlaceholder(relayedMedia), relayedMedia
+			}
+			return joined, relayedMedia
+		}
+		if blockType == "image" {
 			if contentItem, ok := convertClaudeContentPart(content); ok {
-				return toolResultImagePlaceholder, [][]byte{[]byte(contentItem)}
+				relayed := [][]byte{[]byte(contentItem)}
+				return toolResultRelayPlaceholder(relayed), relayed
 			}
 		}
 		if text := content.Get("text"); text.Exists() && text.Type == ojson.String {

@@ -328,10 +328,17 @@ func convertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream,
 		messageBlocks = messageAccumulator.Messages()
 	}
 
-	if formatInstruction := common.BuildClaudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
-		systemBlock := []byte(`{"type":"text","text":""}`)
-		systemBlock, _ = ojson.SetBytes(systemBlock, "text", formatInstruction)
-		systemBlocks = append(systemBlocks, systemBlock)
+	responseFormat := root.Get("response_format")
+	formatInstruction := common.BuildClaudeStructuredOutputInstruction(responseFormat)
+	if schema, ok := common.ClaudeOutputFormatSchema(modelName, responseFormat); ok {
+		_ = outDoc.Set("output_config.format.type", "json_schema")
+		_ = outDoc.SetRaw("output_config.format.schema", schema.Raw)
+		formatInstruction = common.BuildClaudeOutputFormatDescription(responseFormat)
+	}
+	if formatInstruction != "" {
+		systemDoc := ojson.NewDoc([]byte(`{"type":"text","text":""}`))
+		_ = systemDoc.Set("text", formatInstruction)
+		systemBlocks = append(systemBlocks, systemDoc.Bytes())
 	}
 
 	// Decided per user turn, so neither a system prompt nor the blank turn added below hides an emptied turn.

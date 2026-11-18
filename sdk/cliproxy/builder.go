@@ -67,9 +67,19 @@ type Builder struct {
 	// resultPolicy intercepts execution results before quota mutation and persistence.
 	resultPolicy coreauth.ResultPolicy
 
+	// executorWrapper optionally wraps every built-in executor before registration.
+	executorWrapper ExecutorWrapper
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 }
+
+// ExecutorWrapper rewrites a built-in executor before it is registered with
+// the core manager. The service applies it to every executor it registers,
+// so embedders can wrap built-in executors (for example the Claude executor)
+// once instead of reinstalling the wrapper after each re-registration.
+// A nil result keeps the unwrapped executor.
+type ExecutorWrapper func(provider string, exec coreauth.ProviderExecutor) coreauth.ProviderExecutor
 
 // Hooks allows callers to plug into service lifecycle stages.
 // These callbacks provide opportunities to perform custom initialization
@@ -219,6 +229,18 @@ func (b *Builder) WithResultPolicy(policy coreauth.ResultPolicy) *Builder {
 	return b
 }
 
+// WithExecutorWrapper registers a wrapper applied to every built-in executor
+// the service registers, on every registration path (startup sync, auth and
+// model refresh, and config apply). Embedders can install a single wrapper
+// instead of reinstalling after each re-registration. A nil wrapper disables
+// the hook; returning nil from the wrapper keeps the unwrapped executor.
+// The wrapper runs under the executor registration mutex and must not
+// re-enter executor registration; it must not block.
+func (b *Builder) WithExecutorWrapper(wrapper ExecutorWrapper) *Builder {
+	b.executorWrapper = wrapper
+	return b
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
 	if b.cfg == nil {
@@ -308,6 +330,7 @@ func (b *Builder) Build() (*Service, error) {
 		apiKeyProvider:        apiKeyProvider,
 		watcherFactory:        watcherFactory,
 		hooks:                 b.hooks,
+		executorWrapper:       b.executorWrapper,
 		authManager:           authManager,
 		accessManager:         accessManager,
 		coreManager:           coreManager,

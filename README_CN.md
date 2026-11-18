@@ -167,7 +167,7 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
-基于 Ant Design 的现代 CLIProxyAPI v8+ 管理面板，将 CPAMC 核心管理能力与 SQLite 持久化请求记录、用量分析整合在一起。覆盖 OAuth 账号、API 提供商、客户端密钥、配额、定价与 CPA 运维；逐请求追踪延迟、首 Token 延迟（TTFT）、Token 用量和成本，支持多维筛选、实时仪表盘与 Token 热力图。支持 OpenRouter 价格同步、自定义定价和逐请求价格快照，保持历史成本稳定；内置 Agent 与 MCP 工具，辅助用量分析和日常管理。
+面向 CLIProxyAPI v8+ 的 Web 控制台，基于 `shadcn/ui` 构建，拥有现代化的 UI/UX、细腻的动效以及桌面与移动端适配。集中管理提供商、OAuth、路由与内置插件，提供完善的请求记录（延迟、TTFT、Token、故障诊断与模型替换）、实时路由、多维度的定价统计、额度窗口预热与预测及 Agent/MCP 工具。采用 AES-GCM 加密与配置自动备份，支持直接二进制运行、Docker 部署及一键更新 OMC/CPA。
 
 ## SDK 文档
 
@@ -318,6 +318,10 @@ Claude Code 状态栏，按当前 CPA 实例展示 Codex / Grok / Antigravity / 
 ### [Nia Live Demo](https://github.com/nia-teams/nia-live-demo)
 
 全双工实时语音伙伴，带一块边聊边画、可点击交互的 SVG/HTML 画布。同时依赖 CLIProxyAPI 的两项能力：Codex GPT-Live 1.1 媒体中继（`gpt-live-1-codex`，WebRTC + Sideband）负责语音和随时打断；`ultrafast` 档 Responses（`gpt-6.1-sol` / `gpt-6-astra`）负责在对话过程中实时生成和修改画布。
+
+### [Hyphantria](https://hyphantria.com)
+
+原生 macOS 原理图与 PCB 设计应用，具备 AI 辅助元器件创建、参考设计复用以及联合布局布线优化功能。原生支持 CLIProxyAPI，可将其 AI 辅助功能连接到您的 AI 提供商。
 
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。

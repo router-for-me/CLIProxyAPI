@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -161,5 +162,41 @@ func TestClaudeToGeminiRealTextBesideWhitespaceAndAnImageStillSucceeds(t *testin
 	}
 	if !found {
 		t.Fatalf("text was lost: %s", envelope.Body)
+	}
+}
+
+func TestClaudeToGeminiDocumentTextAndContentSources(t *testing.T) {
+	envelope := claudeImageTurnToGemini(`{"type":"document","title":"note.txt","context":"secret note","source":{"type":"text","media_type":"text/plain","data":"Secret codeword: ORANGE-42"}},{"type":"text","text":"What is the secret codeword?"}`)
+	if envelope.Err != nil {
+		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
+	}
+	parts := ojson.GetBytesNoCopy(envelope.Body, "contents.2.parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("got %d parts, want 2: %s", len(parts), envelope.Body)
+	}
+	docText := parts[0].Get("text").String()
+	if !strings.Contains(docText, "note.txt") || !strings.Contains(docText, "secret note") || !strings.Contains(docText, "ORANGE-42") {
+		t.Fatalf("document text was dropped or missing metadata: %q", docText)
+	}
+
+	contentEnv := claudeImageTurnToGemini(`{"type":"document","title":"bundle","context":"mixed","source":{"type":"content","content":[{"type":"text","text":"inside doc"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}}`)
+	if contentEnv.Err != nil {
+		t.Fatalf("content document err = %v, body = %s", contentEnv.Err, contentEnv.Body)
+	}
+	cParts := ojson.GetBytesNoCopy(contentEnv.Body, "contents.2.parts").Array()
+	if len(cParts) < 2 {
+		t.Fatalf("expected header/text and image parts, got %d: %s", len(cParts), contentEnv.Body)
+	}
+	var sawText, sawImage bool
+	for _, p := range cParts {
+		if strings.Contains(p.Get("text").String(), "inside doc") {
+			sawText = true
+		}
+		if p.Get("inline_data.mime_type").String() == "image/png" && p.Get("inline_data.data").String() == "aGVsbG8=" {
+			sawImage = true
+		}
+	}
+	if !sawText || !sawImage {
+		t.Fatalf("content document lost parts (sawText=%v, sawImage=%v): %s", sawText, sawImage, contentEnv.Body)
 	}
 }

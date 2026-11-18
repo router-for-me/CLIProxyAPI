@@ -1269,13 +1269,15 @@ func TestRequestLoggingMiddlewareErrorLogKeepsUpstreamResponseWhenRequestLogDisa
 
 		apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
 		downstreamSection := logText[downstreamResponseIdx:]
+		if strings.Contains(apiResponseSection, "Error: unexpected EOF") {
+			t.Fatalf("local read error polluted upstream response:\n%s", apiResponseSection)
+		}
 		for _, want := range []string{
 			"=== API RESPONSE 1 ===",
 			"Status: 502",
 			"Authorization: Bearer supe...oken",
 			"X-Request-Id: xai-req-1",
 			"event: response.created\ndata: {\"type\":\"response.created\",\"id\":\"resp_1\"}",
-			"Error: unexpected EOF",
 			"=== API RESPONSE 2 ===",
 			"Status: 200",
 			"data: {\"type\":\"response.created\",\"id\":\"resp_2\"}",
@@ -1342,7 +1344,6 @@ func TestRequestLoggingMiddlewareErrorLogKeepsUpstreamResponseWhenRequestLogDisa
 			"Status: 200",
 			"X-Request-Id: xai-stream-1",
 			`data: {"type":"response.failed","response":{"error":{"message":"upstream quota exceeded"}}}`,
-			"Error: upstream quota exceeded",
 		} {
 			if !strings.Contains(logText, want) {
 				t.Fatalf("mid-stream error log missing %q:\n%s", want, logText)
