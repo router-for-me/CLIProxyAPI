@@ -3,7 +3,6 @@ package helps
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 )
@@ -49,7 +49,11 @@ func GeminiAppPrompt(body []byte) (string, error) {
 		}
 		return nil
 	}
-	if err := appendParts("System", root.Get("systemInstruction.parts")); err != nil {
+	systemParts := root.Get("systemInstruction.parts")
+	if !systemParts.Exists() {
+		systemParts = root.Get("system_instruction.parts")
+	}
+	if err := appendParts("System", systemParts); err != nil {
 		return "", err
 	}
 	for _, content := range root.Get("contents").Array() {
@@ -75,6 +79,9 @@ func GeminiAppPrompt(body []byte) (string, error) {
 // fields that translation may discard rather than preserve in generationConfig.
 func ValidateGeminiAppRequest(body []byte) error {
 	root := ojson.ParseBytes(body)
+	if root.Get("cachedContent").String() != "" || root.Get("cached_content").String() != "" {
+		return fmt.Errorf("gemini-app: cached content is not supported")
+	}
 	if len(root.Get("tools").Array()) > 0 || len(root.Get("functions").Array()) > 0 {
 		return fmt.Errorf("gemini-app: tool calling is not supported")
 	}
@@ -100,20 +107,26 @@ func ValidateGeminiAppRequest(body []byte) error {
 }
 
 // GeminiAppPayload builds the business payload before the user's final payload rules.
-func GeminiAppPayload(prompt string) []byte {
-	request := make([]any, 81)
-	request[0] = []any{prompt, 0, nil, nil, nil, nil, 0}
-	request[1] = []any{"en"}
-	request[2] = []any{"", "", "", nil, nil, nil, nil, nil, nil, ""}
-	request[6], request[7] = []any{1}, 1
-	request[10], request[11] = 1, 0
-	request[17], request[18] = []any{[]any{0}}, 0
-	request[27], request[30] = 1, []any{4}
-	request[41], request[45], request[53] = []any{1}, 1, 0
-	request[59], request[61] = strings.ToUpper(uuid.NewString()), []any{}
-	request[68], request[79], request[80] = 1, 1, 1
-	body, _ := json.Marshal(request)
-	return body
+func GeminiAppPayload(prompt string) *ojson.Doc {
+	doc := ojson.NewDocString(`[["",0,null,null,null,null,0],["en"],["","","",null,null,null,null,null,null,""]]`)
+	_ = doc.Set("0.0", prompt)
+	_ = doc.SetRaw("6", `[1]`)
+	_ = doc.Set("7", 1)
+	_ = doc.Set("10", 1)
+	_ = doc.Set("11", 0)
+	_ = doc.SetRaw("17", `[[0]]`)
+	_ = doc.Set("18", 0)
+	_ = doc.Set("27", 1)
+	_ = doc.SetRaw("30", `[4]`)
+	_ = doc.SetRaw("41", `[1]`)
+	_ = doc.Set("45", 1)
+	_ = doc.Set("53", 0)
+	_ = doc.Set("59", strings.ToUpper(uuid.NewString()))
+	_ = doc.SetRaw("61", `[]`)
+	_ = doc.Set("68", 1)
+	_ = doc.Set("79", 1)
+	_ = doc.Set("80", 1)
+	return doc
 }
 
 // GeminiAppWirePayload wraps an already finalized business payload without rewriting it.
@@ -121,7 +134,11 @@ func GeminiAppWirePayload(body []byte) ([]byte, error) {
 	if !ojson.ValidBytes(body) || !ojson.ParseBytes(body).IsArray() {
 		return nil, fmt.Errorf("gemini-app: payload rules must preserve the request array")
 	}
-	return json.Marshal([]any{nil, string(body)})
+	wire := ojson.NewDocString(`[null,null]`)
+	if err := wire.Set("1", string(body)); err != nil {
+		return nil, err
+	}
+	return wire.Bytes(), nil
 }
 
 type geminiAppError struct {
@@ -217,11 +234,14 @@ func ReadGeminiAppStream(reader io.Reader, emit func(string) error) (string, err
 func NewGeminiAppResponse(model string) func(string, bool) []byte {
 	id, created := "gemini-app-"+uuid.NewString(), time.Now().UTC().Format(time.RFC3339Nano)
 	return func(text string, final bool) []byte {
-		candidate := map[string]any{"index": 0, "content": map[string]any{"role": "model", "parts": []any{map[string]any{"text": text}}}}
+		doc := ojson.NewDocString(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":""}]}}]}`)
+		_ = doc.Set("candidates.0.content.parts.0.text", text)
 		if final {
-			candidate["finishReason"] = "STOP"
+			_ = doc.Set("candidates.0.finishReason", "STOP")
 		}
-		body, _ := json.Marshal(map[string]any{"candidates": []any{candidate}, "responseId": id, "modelVersion": model, "createTime": created})
-		return body
+		_ = doc.Set("responseId", id)
+		_ = doc.Set("modelVersion", model)
+		_ = doc.Set("createTime", created)
+		return doc.Bytes()
 	}
 }

@@ -163,6 +163,11 @@ func (e statusAndUnwrapError) Unwrap() error { return e.cause }
 func TestIsRequestFaultStructuredIdentifiers(t *testing.T) {
 	for _, code := range []string{
 		"cyber_policy",
+		"cyber_policy_violation",
+		"bio_policy",
+		"misalignment_policy_violation",
+		"content_policy_violation",
+		"image_content_policy_violation",
 		"context_length_exceeded",
 		"message_too_big",
 		"string_above_max_length",
@@ -211,6 +216,54 @@ func TestIsRequestFault(t *testing.T) {
 			status: http.StatusBadGateway,
 			err:    errors.New(`{"error":{"type":"invalid_request","code":"cyber_policy","message":"blocked"}}`),
 			want:   true,
+		},
+		{
+			name:   "bio policy behind bad gateway",
+			status: http.StatusBadGateway,
+			err:    errors.New(`{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk. If this seems wrong, try rephrasing your request. We are continuously refining our work in detecting biological risk, and you can read more about our approach in our blog post: https://openai.com/index/preparing-for-future-ai-capabilities-in-biology","param":null,"type":"invalid_request_error"},"sequence_number":7}`),
+			want:   true,
+		},
+		{
+			name:   "bio policy response.failed without type",
+			status: http.StatusBadGateway,
+			err:    errors.New(`{"type":"response.failed","sequence_number":3,"response":{"id":"resp_content_policy_no_type","object":"response","created_at":1759771628,"status":"failed","error":{"code":"bio_policy","message":"This content was flagged for possible biological risk."}}}`),
+			want:   true,
+		},
+		{
+			name:   "bio policy prefixed stream termination log error",
+			status: http.StatusBadGateway,
+			err:    errors.New(`responses stream terminated after response.metadata: {"error":{"code":"bio_policy"},"sequence_number":7}`),
+			want:   true,
+		},
+		{
+			name:   "bio policy plain text fallback message",
+			status: http.StatusBadGateway,
+			err:    errors.New("This content was flagged for possible biological risk."),
+			want:   true,
+		},
+		{
+			name:   "server error echoing bio policy text is not a request fault",
+			status: http.StatusInternalServerError,
+			err:    errors.New(`{"error":{"type":"server_error","message":"Backend crashed while handling prompt: This content was flagged for possible biological risk."}}`),
+			want:   false,
+		},
+		{
+			name:   "arbitrary prefix echoing json user input is not a request fault",
+			status: http.StatusInternalServerError,
+			err:    errors.New(`Backend failed; original user input: {"error":{"code":"bio_policy"}}`),
+			want:   false,
+		},
+		{
+			name:   "prefixed 401 authentication_error with generic invalid_request_error code stays credential fault",
+			status: http.StatusUnauthorized,
+			err:    errors.New(`responses stream terminated after response.metadata: {"error":{"type":"authentication_error","code":"invalid_request_error"}}`),
+			want:   false,
+		},
+		{
+			name:   "prefixed 404 model_not_found with invalid_request_error type stays capability fault",
+			status: http.StatusNotFound,
+			err:    errors.New(`responses stream terminated after response.metadata: {"error":{"type":"invalid_request_error","code":"model_not_found"}}`),
+			want:   false,
 		},
 		{
 			name:   "gemini filter block frame message",

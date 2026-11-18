@@ -1,9 +1,10 @@
 package codex
 
 import (
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 )
 
 func makeTestJWT(payload map[string]any) string {

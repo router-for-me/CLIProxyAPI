@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"maps"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/geminiapp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -204,11 +204,11 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, err.Error())
 	}
-	body := helps.GeminiAppPayload(prompt)
+	doc := helps.GeminiAppPayload(prompt)
 	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), req.Model, e.Identifier(), "", translatedOriginal, req, opts)
-	body = finalize(body)
+	finalize.FinalizeDoc(doc)
 	// Only transport framing follows the final payload barrier.
-	wire, err := helps.GeminiAppWirePayload(body)
+	wire, err := helps.GeminiAppWirePayload(doc.Bytes())
 	if err != nil {
 		return nil, nil, helps.NewGeminiAppRequestError(http.StatusBadRequest, err.Error())
 	}
@@ -251,7 +251,7 @@ func (e *GeminiAppExecutor) open(ctx context.Context, auth *cliproxyauth.Auth, r
 	httpReq.Header.Set("Referer", geminiapp.BaseURL+"/app")
 	httpReq.Header.Set("User-Agent", "Mozilla/5.0")
 	httpReq.Header.Set("X-Same-Domain", "1")
-	if id := ojson.GetBytes(body, "59").String(); id != "" {
+	if id := doc.Get("59").String(); id != "" {
 		httpReq.Header.Set("x-goog-ext-525005358-jspb", fmt.Sprintf("[%q,1]", id))
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes)

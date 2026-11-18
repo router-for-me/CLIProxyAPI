@@ -1,12 +1,12 @@
 package helps
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -29,6 +29,10 @@ func TestGeminiAppPrompt(t *testing.T) {
 	}
 	if prompt != "System:\nBe brief\n\nUser:\nOne two\n\nAssistant:\nThree\n\nUser:\nFour" {
 		t.Fatalf("unexpected history: %q", prompt)
+	}
+	snakeInput := strings.Replace(string(input), "systemInstruction", "system_instruction", 1)
+	if got, err := GeminiAppPrompt([]byte(snakeInput)); err != nil || got != prompt {
+		t.Fatalf("snake_case system instruction: got %q, %v; want %q", got, err, prompt)
 	}
 	for _, input := range []string{
 		`{}`, `bad json`, `{"tools":[{"functionDeclarations":[]}]}`,

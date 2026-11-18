@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
@@ -315,6 +315,8 @@ func TestGeminiAppRejectsStructuredOutputBeforeUpstream(t *testing.T) {
 		{"Gemini image", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseModalities":["IMAGE"]}}`},
 		{"Gemini mixed modalities", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"responseModalities":["TEXT","AUDIO"]}}`},
 		{"Gemini candidates", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"generationConfig":{"candidateCount":2}}`},
+		{"Gemini cached content", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"cachedContent":"cachedContents/example"}`},
+		{"Gemini snake_case cached content", sdktranslator.FormatGemini, `{"contents":[{"parts":[{"text":"Hello"}]}],"cached_content":"cachedContents/example"}`},
 		{"OpenAI image", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["image"]}`},
 		{"OpenAI audio", sdktranslator.FormatOpenAI, `{"messages":[{"role":"user","content":"Hello"}],"modalities":["text","audio"]}`},
 		{"Responses required search", sdktranslator.FormatOpenAIResponse, `{"input":"Hello","tools":[{"type":"web_search"}],"tool_choice":"required"}`},

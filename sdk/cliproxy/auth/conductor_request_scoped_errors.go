@@ -2,12 +2,12 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/regexp"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -384,6 +384,18 @@ func applyRequestScopedActionToResult(action string, okAction bool, result *Resu
 	} else if action == RequestScopedActionStopAndCooldown || action == RequestScopedActionContinueAndCooldown {
 		result.Error.Code = ErrorCodeForceCooldown
 	}
+}
+
+// ApplyRequestScopedErrorResult evaluates request-scoped error rules for auth
+// and applies any matched action code onto result before MarkResult.
+func (m *Manager) ApplyRequestScopedErrorResult(ctx context.Context, auth *Auth, err error, result *Result) (string, bool) {
+	var cfg *internalconfig.Config
+	if m != nil {
+		cfg = m.requestScopedErrorConfig(ctx)
+	}
+	action, okAction := matchRequestScopedErrorAction(auth, err, cfg)
+	applyRequestScopedActionToResult(action, okAction, result)
+	return action, okAction
 }
 
 func isRequestScopedStop(action string, okAction bool) bool {

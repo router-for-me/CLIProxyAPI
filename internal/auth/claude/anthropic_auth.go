@@ -5,7 +5,6 @@ package claude
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -509,6 +509,9 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	result, err, _ := claudeRefreshGroup.Do(refreshToken, func() (interface{}, error) {
 		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), claudeRefreshTimeout)
 		defer cancelRefresh()
+		if errReadiness := claudeRefreshReadiness(refreshCtx); errReadiness != nil {
+			return nil, errReadiness
+		}
 		refreshCtx = context.WithValue(refreshCtx, claudeRefreshHandshakeTimeoutContextKey{}, claudeRefreshHandshakeTimeout)
 		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 	})
@@ -642,6 +645,9 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 //   - *ClaudeTokenData: The refreshed token data
 //   - error: An error if all retry attempts fail
 func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -657,6 +663,9 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 		tokenData, err := o.RefreshTokens(ctx, refreshToken)
 		if err == nil {
 			return tokenData, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, ErrClaudeRefreshDeferred) {
+			return nil, err
 		}
 
 		lastErr = err

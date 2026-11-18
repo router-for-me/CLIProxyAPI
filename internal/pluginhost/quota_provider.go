@@ -11,6 +11,11 @@ import (
 
 // RegisterPluginForTest registers a plugin directly on the host for testing.
 func (h *Host) RegisterPluginForTest(id string, plugin pluginapi.Plugin) {
+	h.RegisterPluginWithPriorityForTest(id, 1, plugin)
+}
+
+// RegisterPluginWithPriorityForTest registers a plugin with an explicit runtime priority on the host for testing.
+func (h *Host) RegisterPluginWithPriorityForTest(id string, priority int, plugin pluginapi.Plugin) {
 	if h == nil {
 		return
 	}
@@ -20,7 +25,7 @@ func (h *Host) RegisterPluginForTest(id string, plugin pluginapi.Plugin) {
 		version:  "1.0.0",
 		meta:     plugin.Metadata,
 		plugin:   plugin,
-		priority: 1,
+		priority: priority,
 	}
 	records := append(h.activeRecords(), record)
 	h.mu.Lock()

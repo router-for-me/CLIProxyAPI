@@ -360,3 +360,160 @@ func TestManagerKimiDomainIsolation(t *testing.T) {
 		t.Fatal("expected error picking kimi on ai-only manager, got nil")
 	}
 }
+
+// unwrapSharerExecutor models a service-owned executor whose sessions are
+// shared across instances (like the global Codex/XAI websocket stores).
+type unwrapSharerExecutor struct {
+	replaceAwareExecutor
+}
+
+func (e *unwrapSharerExecutor) SharesExecutionSessionsWith(other ProviderExecutor) bool {
+	owned := unwrapProviderExecutor(other)
+	_, ok := owned.(*unwrapSharerExecutor)
+	return ok && owned != nil
+}
+
+// wrapperExecutor models an embedder wrapper exposing its inner executor.
+type wrapperExecutor struct {
+	replaceAwareExecutor
+	inner ProviderExecutor
+}
+
+func (e *wrapperExecutor) Unwrap() ProviderExecutor { return e.inner }
+
+// TestManagerRegisterExecutorPreservesSharedSessionsThroughWrappers proves a
+// forced rebind of two wrappers around shared underlying executors does not
+// close sessions, while a rebind across different underlying executors does.
+func TestManagerRegisterExecutorPreservesSharedSessionsThroughWrappers(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	inner1 := &unwrapSharerExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}}
+	inner2 := &unwrapSharerExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}}
+	wrapper1 := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner1}
+	wrapper2 := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner2}
+
+	manager.RegisterExecutor(wrapper1)
+	manager.RegisterExecutor(wrapper2)
+
+	if closed := wrapper1.ClosedSessionIDs(); len(closed) != 0 {
+		t.Fatalf("expected wrapper sessions to stay open across shared rebind, got closes %v", closed)
+	}
+	if closed := inner1.ClosedSessionIDs(); len(closed) != 0 {
+		t.Fatalf("expected inner sessions to stay open across shared rebind, got closes %v", closed)
+	}
+}
+
+// TestManagerRegisterExecutorPreservesIdenticalOwnedSessions proves rewrapping
+// the identical underlying executor does not close its sessions.
+func TestManagerRegisterExecutorPreservesIdenticalOwnedSessions(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	inner := &unwrapSharerExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}}
+	wrapper1 := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner}
+	wrapper2 := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner}
+
+	manager.RegisterExecutor(wrapper1)
+	manager.RegisterExecutor(wrapper2)
+
+	if closed := wrapper1.ClosedSessionIDs(); len(closed) != 0 {
+		t.Fatalf("expected wrapper sessions to stay open across identical-owned rewrap, got closes %v", closed)
+	}
+	if closed := inner.ClosedSessionIDs(); len(closed) != 0 {
+		t.Fatalf("expected inner sessions to stay open across identical-owned rewrap, got closes %v", closed)
+	}
+}
+
+// cycleWrapper supports multi-node unwrap cycles.
+type cycleWrapper struct {
+	replaceAwareExecutor
+	next ProviderExecutor
+}
+
+func (e *cycleWrapper) Unwrap() ProviderExecutor { return e.next }
+
+// TestUnwrapProviderExecutorHandlesMultiNodeCycles proves traversal terminates
+// on A->B->A instead of looping.
+func TestUnwrapProviderExecutorHandlesMultiNodeCycles(t *testing.T) {
+	t.Parallel()
+
+	a := &cycleWrapper{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}}
+	b := &cycleWrapper{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}}
+	a.next = b
+	b.next = a
+
+	got := unwrapProviderExecutor(a)
+	if got == nil {
+		t.Fatal("expected non-nil result for cyclic unwrap")
+	}
+}
+
+// nonComparableExecutor holds a slice, making the value type non-comparable.
+type nonComparableExecutor struct {
+	id     string
+	fields []string
+}
+
+func (e nonComparableExecutor) Identifier() string { return e.id }
+
+func (e nonComparableExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e nonComparableExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	ch := make(chan cliproxyexecutor.StreamChunk)
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
+}
+
+func (e nonComparableExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e nonComparableExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (e nonComparableExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+// TestUnwrapHandlesNonComparableInner proves traversal does not panic when a
+// wrapper exposes a non-comparable inner executor.
+func TestUnwrapHandlesNonComparableInner(t *testing.T) {
+	t.Parallel()
+
+	inner := nonComparableExecutor{id: "codex", fields: []string{"a"}}
+	wrapper := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner}
+
+	got := unwrapProviderExecutor(wrapper)
+	if got == nil {
+		t.Fatal("expected non-nil unwrap result")
+	}
+	// The inner is non-comparable, so identity comparison is skipped; the
+	// result must be the inner value itself.
+	if _, ok := got.(nonComparableExecutor); !ok {
+		t.Fatalf("unwrap result = %T, want nonComparableExecutor", got)
+	}
+}
+
+// TestManagerRegisterExecutorHandlesNonComparableOwned proves replacing two
+// wrappers around non-comparable inner executors does not panic.
+func TestManagerRegisterExecutorHandlesNonComparableOwned(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	inner1 := nonComparableExecutor{id: "codex", fields: []string{"a"}}
+	inner2 := nonComparableExecutor{id: "codex", fields: []string{"b"}}
+	wrapper1 := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner1}
+	wrapper2 := &wrapperExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "codex"}, inner: inner2}
+
+	manager.RegisterExecutor(wrapper1)
+	manager.RegisterExecutor(wrapper2)
+
+	got, ok := manager.Executor("codex")
+	if !ok || got != wrapper2 {
+		t.Fatalf("executor = %#v, want latest wrapper %#v", got, wrapper2)
+	}
+}

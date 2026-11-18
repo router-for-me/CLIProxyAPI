@@ -302,8 +302,17 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 	if !after.forceCooldownUntil.Equal(before.forceCooldownUntil) && (!preserveConcurrent || target.forceCooldownUntil.Equal(before.forceCooldownUntil)) {
 		target.forceCooldownUntil = after.forceCooldownUntil
 	}
+	if !after.quotaForceCooldownUntil.Equal(before.quotaForceCooldownUntil) && (!preserveConcurrent || target.quotaForceCooldownUntil.Equal(before.quotaForceCooldownUntil)) {
+		target.quotaForceCooldownUntil = after.quotaForceCooldownUntil
+	}
 	if !after.credQuotaForceUntil.Equal(before.credQuotaForceUntil) && (!preserveConcurrent || target.credQuotaForceUntil.Equal(before.credQuotaForceUntil)) {
 		target.credQuotaForceUntil = after.credQuotaForceUntil
+	}
+	if !after.credentialRetryAfter.Equal(before.credentialRetryAfter) && (!preserveConcurrent || target.credentialRetryAfter.Equal(before.credentialRetryAfter)) {
+		target.credentialRetryAfter = after.credentialRetryAfter
+	}
+	if !after.nonQuotaCooldownUntil.Equal(before.nonQuotaCooldownUntil) && (!preserveConcurrent || target.nonQuotaCooldownUntil.Equal(before.nonQuotaCooldownUntil)) {
+		target.nonQuotaCooldownUntil = after.nonQuotaCooldownUntil
 	}
 	if after.forceCooldownSeeded != before.forceCooldownSeeded && (!preserveConcurrent || target.forceCooldownSeeded == before.forceCooldownSeeded) {
 		target.forceCooldownSeeded = after.forceCooldownSeeded
@@ -323,7 +332,10 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 		!target.Unavailable && target.NextRetryAfter.IsZero() &&
 		(!target.Quota.Exceeded || target.Quota.NextRecoverAt.IsZero()) {
 		target.forceCooldownUntil = time.Time{}
+		target.quotaForceCooldownUntil = time.Time{}
 		target.credQuotaForceUntil = time.Time{}
+		target.credentialRetryAfter = time.Time{}
+		target.nonQuotaCooldownUntil = time.Time{}
 	}
 }
 

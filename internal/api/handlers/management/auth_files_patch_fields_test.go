@@ -2,9 +2,7 @@ package management
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"testing/synctest"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
