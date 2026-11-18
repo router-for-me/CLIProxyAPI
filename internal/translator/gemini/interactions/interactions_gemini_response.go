@@ -14,12 +14,13 @@ import (
 )
 
 type interactionsToGeminiStreamState struct {
-	ID             string
-	Model          string
-	ServiceTier    string
-	StepNames      map[int]string
-	StepIDs        map[int]string
-	StepSignatures map[int]string
+	ID                   string
+	Model                string
+	ServiceTier          string
+	StepNames            map[int]string
+	StepIDs              map[int]string
+	StepSignatures       map[int]string
+	PendingFunctionSteps map[int]string
 }
 
 func ConvertGeminiResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
@@ -104,6 +105,13 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		if chunk := interactionsStepDeltaToGeminiChunk(modelName, root, st); len(chunk) > 0 {
 			return [][]byte{chunk}
 		}
+	case "step.stop":
+		index := int(root.Get("index").Int())
+		if step, ok := st.PendingFunctionSteps[index]; ok {
+			delete(st.PendingFunctionSteps, index)
+			part := interactionsFunctionCallStepToGeminiPart(ojson.Parse(step))
+			return [][]byte{buildInteractionsGeminiChunk(st, modelName, [][]byte{part}, "", ojson.Result{}, false)}
+		}
 	case "interaction.completed", "finish":
 		interaction := root.Get("interaction")
 		st.ID = strings.Clone(firstNonEmptyInteractionString(st.ID, interaction.Get("id").String()))
@@ -169,6 +177,15 @@ func rememberInteractionsGeminiStep(root ojson.Result, st *interactionsToGeminiS
 	st.StepNames[index] = strings.Clone(step.Get("name").String())
 	st.StepIDs[index] = strings.Clone(firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String()))
 	st.StepSignatures[index] = strings.Clone(firstNonEmptyInteractionString(step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String()))
+	// Even an empty arguments object may be complete, or it may precede a delta.
+	if step.Get("type").String() == "function_call" && firstExistingInteractionResult(step, "arguments", "args").IsObject() {
+		if st.PendingFunctionSteps == nil {
+			st.PendingFunctionSteps = make(map[int]string)
+		}
+		st.PendingFunctionSteps[index] = strings.Clone(step.Raw)
+	} else {
+		delete(st.PendingFunctionSteps, index)
+	}
 }
 
 func interactionsStepDeltaToGeminiChunk(modelName string, root ojson.Result, st *interactionsToGeminiStreamState) []byte {
@@ -176,6 +193,7 @@ func interactionsStepDeltaToGeminiChunk(modelName string, root ojson.Result, st 
 	delta := root.Get("delta")
 	switch delta.Get("type").String() {
 	case "arguments_delta":
+		delete(st.PendingFunctionSteps, index)
 		partDoc := ojson.NewDocString(`{"functionCall":{"name":"","args":{}}}`)
 		_ = partDoc.Set("functionCall.name", firstNonEmptyInteractionString(st.StepNames[index], root.Get("step.name").String()))
 		if id := st.StepIDs[index]; id != "" {
