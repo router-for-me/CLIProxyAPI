@@ -3101,6 +3101,15 @@ func upgradeClaudeCacheControlTTLDoc(doc *ojson.Doc, ttl string) bool {
 		if scope := cacheControl.Get("scope"); scope.Exists() {
 			upgraded += `,"scope":` + scope.Raw
 		}
+		// Keep any other caller fields, such as evict_on_complete, after them.
+		cacheControl.ForEach(func(key, value ojson.Result) bool {
+			switch key.String() {
+			case "type", "ttl", "scope":
+			default:
+				upgraded += `,` + marshalJSONStringWithoutHTMLEscape(key.String()) + `:` + value.Raw
+			}
+			return true
+		})
 		upgraded += "}"
 		if errSet := doc.SetRawBytes(claudeCacheControlPath(path), []byte(upgraded)); errSet == nil {
 			changed = true
