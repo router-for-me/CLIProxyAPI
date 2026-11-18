@@ -3,9 +3,10 @@ package interactions_test
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 func TestInteractionsTranslatorsDoNotImportGeminiTranslators(t *testing.T) {

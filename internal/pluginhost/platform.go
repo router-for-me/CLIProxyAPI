@@ -4,12 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/regexp"
 	log "github.com/sirupsen/logrus"
 )
 

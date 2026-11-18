@@ -9,13 +9,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -74,10 +74,11 @@ func (e *AntigravityExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatc
 	}
 	words := e.cfg.Antigravity.SensitiveWords
 	replacements := e.cfg.Antigravity.SensitiveWordsReplace
-	if len(words) == 0 && len(replacements) == 0 {
+	patterns := e.cfg.Antigravity.SensitivePatternsReplace
+	if len(words) == 0 && len(replacements) == 0 && len(patterns) == 0 {
 		return nil
 	}
-	key := helps.SensitiveWordConfigCacheKey(words, replacements)
+	key := helps.SensitiveWordConfigCacheKeyWithPatterns(words, replacements, patterns)
 	e.matcherMu.RLock()
 	if e.lastWordsKey == key {
 		m := e.cachedMatcher
@@ -92,7 +93,7 @@ func (e *AntigravityExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatc
 		return e.cachedMatcher
 	}
 	e.lastWordsKey = key
-	e.cachedMatcher = helps.BuildAntigravitySensitiveWordMatcher(words, replacements)
+	e.cachedMatcher = helps.BuildAntigravitySensitiveWordMatcherWithPatterns(words, replacements, patterns)
 	return e.cachedMatcher
 }
 

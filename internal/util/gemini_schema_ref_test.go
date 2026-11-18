@@ -1,9 +1,9 @@
 package util
 
 import (
-	"encoding/json"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 )
 

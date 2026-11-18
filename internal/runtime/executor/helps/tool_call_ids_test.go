@@ -2,11 +2,11 @@ package helps
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 )
 
 func legacyToolIDHistory(callCount int) []byte {

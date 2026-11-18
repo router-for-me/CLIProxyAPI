@@ -1,9 +1,10 @@
 package responses
 
 import (
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"strings"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
