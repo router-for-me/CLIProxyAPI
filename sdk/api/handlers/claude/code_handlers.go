@@ -553,13 +553,11 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
-}
-
-type claudeErrorDetails struct {
-	ErrorCode string `json:"error_code"`
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	// Details carries upstream error.details verbatim. Claude Code reads
+	// details.error_code (e.g. "thread_not_found") to decide how to recover.
+	Details json.RawMessage `json:"details,omitempty"`
 }
 
 type claudeErrorResponse struct {
@@ -607,10 +605,18 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 		Error: claudeErrorDetail{
 			Type:    errType,
 			Message: message,
+			Details: claudeErrorDetailsFromText(errText),
 		},
 	}
-	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
-		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
+	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) && !ojson.GetBytes(response.Error.Details, "error_code").Exists() {
+		details := []byte(response.Error.Details)
+		if len(details) == 0 {
+			details = []byte("{}")
+		}
+		doc := ojson.NewDoc(details)
+		if errSet := doc.Set("error_code", "thread_not_found"); errSet == nil {
+			response.Error.Details = doc.Bytes()
+		}
 	}
 	return response
 }
@@ -729,6 +735,15 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 	}
 
 	return errType, message
+}
+
+// claudeErrorDetailsFromText returns the upstream error.details object, if any.
+func claudeErrorDetailsFromText(errText string) json.RawMessage {
+	details := ojson.Get(strings.TrimSpace(errText), "error.details")
+	if !details.IsObject() {
+		return nil
+	}
+	return json.RawMessage(details.Raw)
 }
 
 func claudeErrorTypeFromStatus(status int) string {
