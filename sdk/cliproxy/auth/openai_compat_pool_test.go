@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -904,34 +905,36 @@ func TestManagerExecute_DisableCooling_AliasPoolHonoursMemberResets(t *testing.T
 // is left out of the retry rounds while another member is free: here up-b's short
 // reset reopens the pool, but up-a's 2h reset keeps it from being probed again.
 func TestManagerExecute_DisableCooling_AliasPoolSkipsMemberWithLiveReset(t *testing.T) {
-	prev := quotaCooldownDisabled.Load()
-	quotaCooldownDisabled.Store(true)
-	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+	synctest.Test(t, func(t *testing.T) {
+		prev := quotaCooldownDisabled.Load()
+		quotaCooldownDisabled.Store(true)
+		t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
 
-	alias := "pool-alias-live-member"
-	executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: map[string]error{
-		"up-a": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
-		"up-b": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 20 * time.Millisecond},
-	}}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "up-a", Alias: alias},
-		{Name: "up-b", Alias: alias},
-	}, executor)
-	m.SetRetryConfig(3, 10*time.Second, 0)
+		alias := "pool-alias-live-member"
+		executor := &openAICompatPoolExecutor{id: openAICompatPoolProviderKey, executeErrors: map[string]error{
+			"up-a": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "quota exhausted", retryAfter: 2 * time.Hour},
+			"up-b": &retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 20 * time.Millisecond},
+		}}
+		m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "up-a", Alias: alias},
+			{Name: "up-b", Alias: alias},
+		}, executor)
+		m.SetRetryConfig(3, 10*time.Second, 0)
 
-	if _, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err == nil {
-		t.Fatal("expected execute error")
-	}
-	got := executor.ExecuteModels()
-	sentToA := 0
-	for _, model := range got {
-		if model == "up-a" {
-			sentToA++
+		if _, err := m.Execute(context.Background(), []string{openAICompatPoolProviderKey}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{}); err == nil {
+			t.Fatal("expected execute error")
 		}
-	}
-	if sentToA != 1 || len(got) < 3 {
-		t.Fatalf("pool calls = %v, want up-a once (its 2h reset is live) and up-b retried", got)
-	}
+		got := executor.ExecuteModels()
+		sentToA := 0
+		for _, model := range got {
+			if model == "up-a" {
+				sentToA++
+			}
+		}
+		if sentToA != 1 || len(got) < 3 {
+			t.Fatalf("pool calls = %v, want up-a once (its 2h reset is live) and up-b retried", got)
+		}
+	})
 }
 
 // A pool member under an ordinary block is not used, so it must not count as

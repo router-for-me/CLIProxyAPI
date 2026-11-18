@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -2977,47 +2978,49 @@ func TestManager_MarkResult_DisableCooling_RetryResetSurvivesStaleResults(t *tes
 // did not attempt it: here B (request_retry 1) runs out, and the request must
 // wait for A's reset and retry A instead of ending with no credential left.
 func TestManager_Execute_DisableCooling_WaitsForResetFromEarlierRound(t *testing.T) {
-	prev := quotaCooldownDisabled.Load()
-	quotaCooldownDisabled.Store(false)
-	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+	synctest.Test(t, func(t *testing.T) {
+		prev := quotaCooldownDisabled.Load()
+		quotaCooldownDisabled.Store(false)
+		t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
 
-	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 10*time.Second, 0)
-	const authA, authB = "auth-earlier-reset-a", "auth-earlier-reset-b"
-	executor := &sequencedErrorExecutor{
-		authFallbackExecutor: authFallbackExecutor{id: "claude"},
-		queued: map[string][]error{
-			authA: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 200 * time.Millisecond}},
-			authB: {
-				&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
-				&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
-				&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+		m := NewManager(nil, nil, nil)
+		m.SetRetryConfig(3, 10*time.Second, 0)
+		const authA, authB = "auth-earlier-reset-a", "auth-earlier-reset-b"
+		executor := &sequencedErrorExecutor{
+			authFallbackExecutor: authFallbackExecutor{id: "claude"},
+			queued: map[string][]error{
+				authA: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 200 * time.Millisecond}},
+				authB: {
+					&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+					&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+					&retryAfterStatusError{status: http.StatusInternalServerError, message: "upstream hiccup"},
+				},
 			},
-		},
-	}
-	m.RegisterExecutor(executor)
-
-	model := "test-model-earlier-reset"
-	reg := registry.GetGlobalRegistry()
-	for _, auth := range []*Auth{
-		{ID: authA, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}},
-		{ID: authB, Provider: "claude", Metadata: map[string]any{"disable_cooling": true, "request_retry": 1}},
-	} {
-		if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
-			t.Fatalf("register %s: %v", auth.ID, errRegister)
 		}
-		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
-		id := auth.ID
-		t.Cleanup(func() { reg.UnregisterClient(id) })
-	}
+		m.RegisterExecutor(executor)
 
-	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errExecute != nil {
-		t.Fatalf("Execute error = %v (calls %v), want a wait for %s's reset and a retry of it", errExecute, executor.ExecuteCalls(), authA)
-	}
-	if string(resp.Payload) != authA {
-		t.Fatalf("response from %q, want %s", resp.Payload, authA)
-	}
+		model := "test-model-earlier-reset"
+		reg := registry.GetGlobalRegistry()
+		for _, auth := range []*Auth{
+			{ID: authA, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}},
+			{ID: authB, Provider: "claude", Metadata: map[string]any{"disable_cooling": true, "request_retry": 1}},
+		} {
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register %s: %v", auth.ID, errRegister)
+			}
+			reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+			id := auth.ID
+			t.Cleanup(func() { reg.UnregisterClient(id) })
+		}
+
+		resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("Execute error = %v (calls %v), want a wait for %s's reset and a retry of it", errExecute, executor.ExecuteCalls(), authA)
+		}
+		if string(resp.Payload) != authA {
+			t.Fatalf("response from %q, want %s", resp.Payload, authA)
+		}
+	})
 }
 
 // Registry reconciliation resets error states with no cooldown deadline; a live
@@ -3061,39 +3064,41 @@ func TestMergeModelStateKeepsLaterCoolingDisabledReset(t *testing.T) {
 // newer word: a fresh request whose 429 announces a short reset retries after
 // it, as on dev, instead of stopping on the stale 2h hint.
 func TestManager_Execute_DisableCooling_NewerShortResetReplacesStaleLongOne(t *testing.T) {
-	prev := quotaCooldownDisabled.Load()
-	quotaCooldownDisabled.Store(false)
-	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+	synctest.Test(t, func(t *testing.T) {
+		prev := quotaCooldownDisabled.Load()
+		quotaCooldownDisabled.Store(false)
+		t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
 
-	m := NewManager(nil, nil, nil)
-	m.SetRetryConfig(3, 10*time.Second, 0)
-	const id, model = "auth-newer-short-reset", "test-model-newer-short-reset"
-	executor := &sequencedErrorExecutor{
-		authFallbackExecutor: authFallbackExecutor{id: "claude"},
-		queued: map[string][]error{
-			id: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 5 * time.Millisecond}},
-		},
-	}
-	m.RegisterExecutor(executor)
-	if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
-		t.Fatalf("register: %v", errRegister)
-	}
-	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
-	t.Cleanup(func() { reg.UnregisterClient(id) })
+		m := NewManager(nil, nil, nil)
+		m.SetRetryConfig(3, 10*time.Second, 0)
+		const id, model = "auth-newer-short-reset", "test-model-newer-short-reset"
+		executor := &sequencedErrorExecutor{
+			authFallbackExecutor: authFallbackExecutor{id: "claude"},
+			queued: map[string][]error{
+				id: {&retryAfterStatusError{status: http.StatusTooManyRequests, message: "rate limited", retryAfter: 5 * time.Millisecond}},
+			},
+		}
+		m.RegisterExecutor(executor)
+		if _, errRegister := m.Register(context.Background(), &Auth{ID: id, Provider: "claude", Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+			t.Fatalf("register: %v", errRegister)
+		}
+		reg := registry.GetGlobalRegistry()
+		reg.RegisterClient(id, "claude", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { reg.UnregisterClient(id) })
 
-	// An earlier request left a 2h reset.
-	stale := 2 * time.Hour
-	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.currentExecutionSeq(),
-		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
+		// An earlier request left a 2h reset.
+		stale := 2 * time.Hour
+		m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: model, ExecutionSeq: m.currentExecutionSeq(),
+			Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted"}, RetryAfter: &stale})
 
-	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
-	if errExecute != nil {
-		t.Fatalf("Execute error = %v (calls %v), want a retry after the newer 5ms reset", errExecute, executor.ExecuteCalls())
-	}
-	if string(resp.Payload) != id || len(executor.ExecuteCalls()) != 2 {
-		t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
-	}
+		resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("Execute error = %v (calls %v), want a retry after the newer 5ms reset", errExecute, executor.ExecuteCalls())
+		}
+		if string(resp.Payload) != id || len(executor.ExecuteCalls()) != 2 {
+			t.Fatalf("response %q after calls %v, want %s on the second call", resp.Payload, executor.ExecuteCalls(), id)
+		}
+	})
 }
 
 // A cooling-disabled reset must not schedule a retry before an ordinary block
