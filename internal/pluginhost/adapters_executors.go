@@ -1255,6 +1255,9 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth
+	if errMerge := mergeLazyRefreshData(&data, auth); errMerge != nil {
+		return nil, errMerge
+	}
 	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)

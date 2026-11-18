@@ -288,6 +288,13 @@ func (m *Manager) UpdatePreparedAuth(ctx context.Context, base, updated *Auth) (
 // UpdateRefreshedAuth atomically merges refresh results into the latest runtime auth
 // under the manager lock, preserving concurrent modifications (proxy_url, notes, weights, etc.).
 func (m *Manager) UpdateRefreshedAuth(ctx context.Context, base, updated *Auth) (*Auth, error) {
+	if (base.UsesLazyRefresh() || updated.UsesLazyRefresh()) && base != nil && updated != nil && !refreshIdentityMatches(base, updated) {
+		return nil, fmt.Errorf("refresh result changed credential identity or provider")
+	}
+
+	if base.UsesLazyRefresh() || updated.UsesLazyRefresh() {
+		ctx = WithoutSkipPersist(ctx)
+	}
 	return m.updateInternal(ctx, base, updated, updateModeRefresh)
 }
 
@@ -428,6 +435,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if (mode == updateModeRefresh || mode == updateModePrepare) && base != nil && existing.RegistrationEpoch != base.RegistrationEpoch {
 		m.mu.Unlock()
 		return nil, false, false, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
+	}
+	if mode == updateModeRefresh && (base.UsesLazyRefresh() || auth.UsesLazyRefresh() || existing.UsesLazyRefresh()) && base != nil && !refreshIdentityMatches(base, existing) {
+		m.mu.Unlock()
+		return nil, false, false, fmt.Errorf("credential provider changed during refresh")
 	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
 	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
@@ -645,7 +656,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		}
 	} else {
-		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+		applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh && refreshRevalidatesUnchangedToken(base, auth))
 		applyPreservedRenewalState(existing, auth, mode, now)
 		// Refresh updates must retain their outcome rather than the pending job marker.
 		if mode != updateModeRefresh {
@@ -684,7 +695,18 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
+	if mode == updateModeRefresh && base.UsesLazyRefresh() && m.store != nil && lazyPersistenceUnsupported(auth) {
+		m.mu.Unlock()
+		return nil, false, false, &lazyPersistenceError{
+			auth: auth.Clone(),
+			err:  fmt.Errorf("lazy refresh requires a persistable physical credential"),
+		}
+	}
 	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
+		if mode == updateModeRefresh && (auth.UsesLazyRefresh() || base.UsesLazyRefresh()) {
+			m.mu.Unlock()
+			return nil, false, false, &lazyPersistenceError{auth: auth.Clone(), err: errPersist}
+		}
 		// A minted Meta key must reach the store before requests can use it.
 		if persistMetaMint {
 			m.mu.Unlock()
@@ -705,7 +727,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	if (auth.RejectedAccessToken == "" && existing.RejectedAccessToken != "") || (auth.RejectedSIWCAccessToken == "" && existing.RejectedSIWCAccessToken != "") {
 		probe := auth.Clone()
 		probe.CodexRefreshPatch = refreshPatchBeforeSave
-		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh)
+		applyPreservedRejectedTokens(existing, probe, mode == updateModeRefresh && refreshRevalidatesUnchangedToken(base, probe))
 		auth.RejectedAccessToken = probe.RejectedAccessToken
 		auth.RejectedSIWCAccessToken = probe.RejectedSIWCAccessToken
 	}
@@ -1002,6 +1024,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
+	}
+	if auth.UsesLazyRefresh() && lazyPersistenceUnsupported(auth) {
+		return fmt.Errorf("lazy refresh requires a persistable physical credential")
 	}
 	if IsConfigAPIKeyAuth(auth) {
 		return nil

@@ -8,6 +8,44 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
+// MergePluginRefreshMetadata applies storage and explicit metadata to inherited auth data.
+func MergePluginRefreshMetadata(inherited, stored, explicit map[string]any) map[string]any {
+	merged := cloneMetadataMap(inherited)
+	if merged == nil {
+		merged = make(map[string]any)
+	}
+	for _, incoming := range []map[string]any{stored, explicit} {
+		for _, aliases := range [][]string{{"access_token", "accessToken"}, {"refresh_token", "refreshToken"}, {"id_token", "idToken"}} {
+			for _, key := range aliases {
+				if _, present := incoming[key]; present {
+					for _, alias := range aliases {
+						delete(merged, alias)
+					}
+					break
+				}
+			}
+		}
+		if _, hasExpiry := expirationFromMap(incoming); hasExpiry {
+			for _, key := range expireKeys {
+				delete(merged, key)
+			}
+			for _, key := range []string{"expires_in", "expiresIn", "timestamp", "issued_at", "issuedAt", "token", "Token"} {
+				delete(merged, key)
+			}
+		}
+		for key, value := range incoming {
+			if key == "siwc" {
+				if nested, ok := value.(map[string]any); ok {
+					current, _ := merged[key].(map[string]any)
+					value = MergePluginRefreshMetadata(current, nil, nested)
+				}
+			}
+			merged[key] = value
+		}
+	}
+	return merged
+}
+
 // IsAuthTokenPayloadKey returns true if key is a credential or token lifecycle field
 // that should not overwrite newly acquired OAuth credentials during metadata merge.
 func IsAuthTokenPayloadKey(key string) bool {
@@ -227,6 +265,10 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 	}
 
 	merged := current.Clone()
+	if updated.RefreshPolicy != nil && (base == nil || reflect.DeepEqual(base.RefreshPolicy, current.RefreshPolicy)) {
+		policy := *updated.RefreshPolicy
+		merged.RefreshPolicy = &policy
+	}
 	if merged.Metadata == nil {
 		merged.Metadata = make(map[string]any)
 	}
@@ -263,8 +305,12 @@ func mergeAuthContent(base, current, updated *Auth) *Auth {
 							mergedSIWC[sk] = sv
 						}
 					}
-					for sk, sv := range siwcUpd {
-						mergedSIWC[sk] = sv
+					if base.UsesLazyRefresh() || updated.UsesLazyRefresh() {
+						mergedSIWC = MergePluginRefreshMetadata(mergedSIWC, nil, siwcUpd)
+					} else {
+						for sk, sv := range siwcUpd {
+							mergedSIWC[sk] = sv
+						}
 					}
 					merged.Metadata[k] = mergedSIWC
 				}

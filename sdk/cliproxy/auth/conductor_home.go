@@ -1499,7 +1499,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
-		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
+		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(creditsCtx, c.executor, c.auth, routeModel)
 		if errPrepare != nil {
 			continue
 		}
@@ -1568,7 +1568,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
 		creditsCtx = coreusage.WithSelectionID(creditsCtx, "")
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
-		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
+		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(creditsCtx, c.executor, c.auth, routeModel)
 		if errPrepare != nil {
 			continue
 		}
