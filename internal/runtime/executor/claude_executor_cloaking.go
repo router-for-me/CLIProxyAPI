@@ -945,7 +945,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
 	billingBlock := buildTextBlock(billingText, nil)
-	if !strictMode && helps.IsClaudeAutoModeClassifierSystem(system) {
+	if !strictMode && helps.IsClaudeAutoModeClassifierRequest(system, doc.Get("messages")) {
 		keepClaudeClassifierSystemPromptDoc(doc, system, billingBlock)
 		return true
 	}

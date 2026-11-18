@@ -15,6 +15,7 @@ import (
 	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const (
@@ -793,19 +794,36 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 // auto-mode permission classifier.
 const claudeAutoModeClassifierPrompt = "You are a security monitor for autonomous AI coding agents."
 
-// IsClaudeAutoModeClassifierSystem reports whether a request "system" field is
-// the one of Claude Code's auto-mode permission classifier. Claude Code sends
-// it with its own system prompt and no CLI identity block.
-func IsClaudeAutoModeClassifierSystem(system ojson.Result) bool {
+// IsClaudeAutoModeClassifierRequest reports whether a request has the shape of
+// Claude Code's auto-mode permission classifier: its system prompt opens with
+// the classifier sentence (after the billing header, with no CLI identity block
+// before it), and every message is a user turn. A prompt that only quotes the
+// sentence later, or a conversation with assistant turns, does not match.
+func IsClaudeAutoModeClassifierRequest(system, messages ojson.Result) bool {
+	if !messages.IsArray() || len(messages.Array()) == 0 {
+		return false
+	}
+	allUser := true
+	messages.ForEach(func(_, message ojson.Result) bool {
+		allUser = message.Get("role").String() == "user"
+		return allUser
+	})
+	if !allUser {
+		return false
+	}
 	if system.Type == ojson.String {
 		return strings.HasPrefix(system.String(), claudeAutoModeClassifierPrompt)
 	}
-	found := false
+	first := ""
 	system.ForEach(func(_, part ojson.Result) bool {
-		found = strings.HasPrefix(part.Get("text").String(), claudeAutoModeClassifierPrompt)
-		return !found
+		text := part.Get("text").String()
+		if part.Get("type").String() != "text" || util.IsClaudeCodeAttributionSystemText(text) {
+			return true
+		}
+		first = text
+		return false
 	})
-	return found
+	return strings.HasPrefix(first, claudeAutoModeClassifierPrompt)
 }
 
 // IsClaudeProbeOrHelperRequest reports whether the request is a minimal
