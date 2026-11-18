@@ -121,7 +121,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	merged.CodexRefreshPatch = updated.CodexRefreshPatch
 
 	// 1. Refresh Lifecycle Timestamps
-	applyPreservedRejectedTokens(current, merged, true)
+	applyPreservedRejectedTokens(current, merged, refreshRevalidatesUnchangedToken(base, merged))
 	if !updated.LastRefreshedAt.IsZero() {
 		merged.LastRefreshedAt = updated.LastRefreshedAt
 	}

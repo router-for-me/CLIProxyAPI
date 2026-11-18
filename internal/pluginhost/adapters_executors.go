@@ -1236,6 +1236,9 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			if auth.UsesLazyRefresh() {
+				recovered = "credential refresh callback panicked"
+			}
 			a.host.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
 			err = fmt.Errorf("plugin executor %s refresh panic: %v", a.Identifier(), recovered)
@@ -1252,6 +1255,9 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		HTTPClient:   a.host.newHTTPClient(auth),
 	})
 	if errRefresh != nil {
+		if auth.UsesLazyRefresh() {
+			errRefresh = coreauth.SanitizeLazyRefreshError(auth, errRefresh)
+		}
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth

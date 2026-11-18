@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -166,7 +165,11 @@ func (e *safeLazyError) SafeResponseHeaders() http.Header {
 	return safeRetryAfterHeader(*e.retryAfter)
 }
 
-func safeLazyRefreshError(auth *Auth, err error) error {
+// SanitizeLazyRefreshError retains typed failure information without exposing plugin diagnostics.
+func SanitizeLazyRefreshError(auth *Auth, err error) error {
+	if err == nil {
+		return nil
+	}
 	var persist *lazyPersistenceError
 	if errors.As(err, &persist) {
 		return &Error{Code: "refresh_persistence_failed", Message: "failed to persist refreshed credential", HTTPStatus: http.StatusServiceUnavailable}
@@ -177,28 +180,12 @@ func safeLazyRefreshError(auth *Auth, err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return context.DeadlineExceeded
 	}
-	safe := resultErrorFromError(err)
-	safe.Message = sanitizeRenewalMessage(redactLazyCredentialValues(auth, safe.Message))
-	safe.Code = sanitizeRenewalMessage(redactLazyCredentialValues(auth, safe.Code))
 	var retry *time.Duration
 	if hint := retryAfterFromError(err); hint != nil {
 		value := *hint
 		retry = &value
 	}
-	return &safeLazyError{public: safe, retryAfter: retry}
-}
-
-func redactLazyCredentialValues(auth *Auth, text string) string {
-	secrets := []string{authOuterAccessToken(auth), authRefreshToken(auth),
-		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
-		authMetadataString(auth, "id_token"), authMetadataString(auth, "idToken")}
-	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	for _, secret := range secrets {
-		if secret != "" {
-			text = strings.ReplaceAll(text, secret, "[redacted]")
-		}
-	}
-	return text
+	return &safeLazyError{public: renewalError(auth, err, true), retryAfter: retry}
 }
 
 type refreshTrigger struct {
@@ -216,7 +203,7 @@ func (l *authRefreshLock) clearLazyState() {
 }
 
 func (l *authRefreshLock) recordLazyFailure(auth *Auth, err error) {
-	l.failure = safeLazyRefreshError(auth, err)
+	l.failure = SanitizeLazyRefreshError(auth, err)
 	l.retryAt = time.Now().Add(refreshFailureBackoff)
 	l.failureEpoch = auth.RegistrationEpoch
 	l.failureVersion = auth.CredentialVersion

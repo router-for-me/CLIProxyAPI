@@ -538,7 +538,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 		}
 		if credChanged || mode == updateModeRefresh {
-			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
+			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh && refreshRevalidatesUnchangedToken(base, auth))
 			applyPreservedRenewalState(existing, auth, mode, now)
 			if auth.RejectedAccessToken == "" || authAccessToken(auth) != auth.RejectedAccessToken {
 				auth.RefreshFailures = 0

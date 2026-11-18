@@ -1190,12 +1190,13 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
 		return auth, false
 	}
-	if (auth.UsesLazyRefresh() || refreshed.UsesLazyRefresh()) &&
+	lazy := auth.UsesLazyRefresh() || refreshed.UsesLazyRefresh()
+	if lazy &&
 		(!refreshIdentityMatches(auth, refreshed) || refreshed.Disabled || refreshed.Status == StatusDisabled ||
 			hasUnauthorizedAuthFailure(refreshed) || refreshed.RequiresSignIn || !hasValidAccessTokenForRequest(ctx, refreshed, time.Now())) {
 		return auth, false
 	}
-	if failedToken != "" && authAccessTokenForRequest(ctx, refreshed, clientHeaders...) == failedToken && (refreshed.RejectedAccessToken == failedToken || refreshed.RejectedSIWCAccessToken == failedToken) {
+	if failedToken != "" && authAccessTokenForRequest(ctx, refreshed, clientHeaders...) == failedToken && (lazy || refreshed.RejectedAccessToken == failedToken || refreshed.RejectedSIWCAccessToken == failedToken) {
 		return auth, false
 	}
 	return refreshed, true
@@ -1325,10 +1326,11 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch || trigger.selected != nil && !refreshIdentityMatches(trigger.selected, auth) {
 		return nil, errors.New("credential changed before refresh")
 	}
-	if auth.UsesLazyRefresh() || trigger.selected != nil {
+	safeDiagnostics := auth.UsesLazyRefresh() || trigger.selected != nil
+	if safeDiagnostics {
 		defer func() {
 			if resultErr != nil {
-				resultErr = safeLazyRefreshError(auth, resultErr)
+				resultErr = SanitizeLazyRefreshError(auth, resultErr)
 			}
 		}()
 	}
@@ -1559,8 +1561,8 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		}
 	}
 	logErr := err
-	if err != nil && auth.UsesLazyRefresh() {
-		logErr = safeLazyRefreshError(auth, err)
+	if err != nil && safeDiagnostics {
+		logErr = SanitizeLazyRefreshError(auth, err)
 	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, logErr)
 	if err != nil {
@@ -1580,7 +1582,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 				return nil, err
 			}
 			terminalRefresh := isTerminalRefreshError(base, err) || base.UsesLazyRefresh() && isInvalidGrantError(err)
-			sanitizedRefreshErr := sanitizeRenewalError(base, err)
+			sanitizedRefreshErr := renewalError(base, err, safeDiagnostics || current.UsesLazyRefresh())
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
 			if wasTerminalUnauthorized {
 				current.Generation++
@@ -1609,9 +1611,10 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 			}
 			current.Generation++
 			current.UpdatedAt = now
-			current.LastError = refreshErrorFromError(err)
-			if base.UsesLazyRefresh() {
+			if safeDiagnostics || current.UsesLazyRefresh() {
 				current.LastError = cloneError(sanitizedRefreshErr)
+			} else {
+				current.LastError = refreshErrorFromError(err)
 			}
 			if terminalRefresh {
 				current.RefreshError = sanitizedRefreshErr

@@ -3528,6 +3528,10 @@ func terminalRefreshErrorCode(message string, statusCode int) string {
 }
 
 func sanitizeRenewalError(auth *Auth, err error) *Error {
+	return renewalError(auth, err, auth.UsesLazyRefresh())
+}
+
+func renewalError(auth *Auth, err error, safeOnly bool) *Error {
 	if err == nil {
 		return nil
 	}
@@ -3546,6 +3550,9 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 	}
 	raw := err.Error()
 	statusCode := statusCodeFromError(err)
+	if safeOnly && (statusCode < http.StatusBadRequest || statusCode > 599) {
+		statusCode = 0
+	}
 	if statusCode == 0 {
 		if isUnauthorizedError(err) {
 			statusCode = http.StatusUnauthorized
@@ -3555,22 +3562,32 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 	}
 	terminal := isTerminalRefreshError(auth, err)
 	code := terminalRefreshErrorCode(raw, statusCode)
-	if auth.UsesLazyRefresh() {
+	if safeOnly {
 		structuredCode := strings.ToLower(strings.TrimSpace(errorCodeFromError(err)))
-		if isKnownSafeOAuthErrorCode(structuredCode) {
-			code = structuredCode
+		message := "credential refresh failed"
+		switch structuredCode {
+		case "auth_unavailable":
+			code, message = structuredCode, "credential is unavailable"
+		case "invalid_refresh_identity":
+			code, message = structuredCode, "plugin refresh changed credential identity or provider"
+		case "lazy_refresh_not_persistable":
+			code, message = structuredCode, "lazy refresh requires a persistable physical credential"
+		case "refresh_not_fresh":
+			code, message = structuredCode, "plugin refresh did not return a fresh access token"
+		default:
+			if isKnownSafeOAuthErrorCode(structuredCode) {
+				code = structuredCode
+			}
 		}
 		if terminal && statusCode == 0 {
 			statusCode = http.StatusBadRequest
 		}
+		return &Error{Code: code, Message: message, HTTPStatus: statusCode, Retryable: !terminal}
 	}
 
 	var existingAuthErr *Error
 	if errors.As(err, &existingAuthErr) && existingAuthErr != nil && isKnownSafeOAuthErrorCode(existingAuthErr.Code) {
 		code = strings.ToLower(strings.TrimSpace(existingAuthErr.Code))
-	}
-	if auth.UsesLazyRefresh() {
-		raw = redactLazyCredentialValues(auth, raw)
 	}
 	return &Error{
 		Code:       code,
