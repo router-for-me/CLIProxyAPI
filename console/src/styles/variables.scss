@@ -1,0 +1,72 @@
+/**
+ * SCSS 变量定义
+ */
+
+// 颜色
+$primary-color: #8b8680;
+$success-color: #10b981;
+$warning-color: #c65746;
+$error-color: #c65746;
+
+// 灰阶
+$gray-400: #9ca3af;
+
+// 间距
+$spacing-xs: 4px;
+$spacing-sm: 8px;
+$spacing-md: 16px;
+$spacing-lg: 24px;
+$spacing-xl: 32px;
+$spacing-2xl: 48px;
+
+// 圆角
+$radius-sm: 4px;
+$radius-md: 8px;
+$radius-lg: 12px;
+$radius-full: 9999px;
+
+// 阴影
+$shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+$shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+$shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+
+// 过渡
+$transition-fast: 150ms ease;
+$transition-normal: 300ms ease;
+
+// 断点
+$breakpoint-mobile: 768px;
+$breakpoint-tablet: 1024px;
+
+// Z-index
+$z-dropdown: 1000;
+$z-modal: 2000;
+$z-notification: 3000;
+
+// 字体
+$font-family:
+  'Recursive Variable',
+  -apple-system,
+  BlinkMacSystemFont,
+  'Segoe UI',
+  'Roboto',
+  'Helvetica Neue',
+  sans-serif;
+
+$font-mono:
+  'Recursive Variable', ui-monospace, 'SF Mono', 'Cascadia Mono', 'JetBrains Mono', Menlo, Consolas,
+  monospace;
+
+// Recursive's monospace is an axis of the same family, so mono text needs both lines.
+@mixin font-mono {
+  font-family: $font-mono;
+  font-variation-settings: 'MONO' 1;
+}
+
+// Page titles: heavy and slightly casual, the console's one typographic flourish.
+@mixin font-display {
+  font-family: $font-family;
+  font-variation-settings: 'CASL' 0.6;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+}

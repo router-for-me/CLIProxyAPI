@@ -1,0 +1,37 @@
+// 时长与 useLoginTransitionStore 的 reveal 保持一致。
+@keyframes loginVeilOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.login-reveal-veil {
+  position: fixed;
+  inset: 0;
+  // 低于通知层，高于主界面全部浮层
+  z-index: $z-notification - 1;
+  // 幕布颜色 = 登录页底色（与 src/pages/login/_palette.scss 的 --login-bg 保持一致）：
+  // 登录页淡出到底色后无缝接管，再从同一底色中揭出主界面
+  background: #faf9f5;
+  pointer-events: none;
+  animation: loginVeilOut 600ms cubic-bezier(0.32, 0.72, 0, 1) 40ms both;
+}
+
+html[data-theme='white'] .login-reveal-veil {
+  background: #ffffff;
+}
+
+html[data-theme='dark'] .login-reveal-veil {
+  background: #000000;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-reveal-veil {
+    animation-duration: 200ms;
+    animation-delay: 0ms;
+    animation-timing-function: ease;
+  }
+}

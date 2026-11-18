@@ -1,0 +1,465 @@
+@use 'sass:list';
+@use 'sass:map';
+@use '../../../styles/mixins' as *;
+
+/* ============================================================
+ * APIKEY.FUN 双 11 活动卡。
+ *
+ * 视觉语汇沿用 OAuth 赞助商卡（features/oauth/components/SponsorCard）：
+ * 三团光池各自沿 Lissajous 轨迹漂移，同一组光池渲染两层 —— .field 是低透明光晕底，
+ * .rim 被遮罩成 1px 描边。区别只在色板：品牌蓝换成节日红 / 橙 / 金，
+ * 并用超大号「+11.11%」做唯一视觉焦点。
+ *
+ * 色彩分工：
+ * - $festive-*：光晕、描边、水印等不承载文字的面
+ * - $festive-cta / -end：承载白字的按钮底（#c2410c 5.2:1、#b91c1c 4.9:1，均过 AA）
+ * - festive-ink()：活动色文字，向正文色混合 —— 浅色变深、深色变亮，两边都可读
+ * ============================================================ */
+
+$festive-red: #ef4444;
+$festive-orange: #f97316;
+$festive-gold: #f5b301;
+$festive-cta: #c2410c;
+$festive-cta-end: #b91c1c;
+$festive-cta-hover: #a8380a;
+$festive-cta-hover-end: #9f1818;
+
+@function festive-ink() {
+  @return color-mix(in srgb, #{$festive-orange} 62%, var(--text-primary));
+}
+
+@function festive-tint($percent) {
+  @return color-mix(in srgb, #{$festive-orange} $percent, transparent);
+}
+
+$light-pools: (
+  a: (
+    color: $festive-red,
+    x: (
+      -100%,
+      62%,
+    ),
+    y: (
+      -46%,
+      34%,
+    ),
+    tx: 23s,
+    ty: 9.5s,
+    ts: 14s,
+    dx: -6s,
+    dy: -2s,
+  ),
+  b: (
+    color: $festive-gold,
+    x: (
+      98%,
+      -58%,
+    ),
+    y: (
+      40%,
+      -40%,
+    ),
+    tx: 29s,
+    ty: 12.5s,
+    ts: 17s,
+    dx: -19s,
+    dy: -8s,
+  ),
+  c: (
+    color: $festive-orange,
+    x: (
+      -30%,
+      104%,
+    ),
+    y: (
+      -38%,
+      46%,
+    ),
+    tx: 37s,
+    ty: 8s,
+    ts: 21s,
+    dx: -11s,
+    dy: -5s,
+  ),
+);
+
+$card-radius: 12px;
+
+.card {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px 28px;
+  padding: 20px 24px;
+  border-radius: $card-radius;
+  background: linear-gradient(
+    120deg,
+    color-mix(in srgb, #{$festive-orange} 9%, var(--bg-primary)),
+    var(--bg-primary) 68%
+  );
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, #{$festive-orange} 22%, var(--border-color)),
+    0 16px 36px -28px festive-tint(70%);
+  animation: campaign-card-in 0.45s var(--ease-out-strong, ease-out) backwards;
+}
+
+@keyframes campaign-card-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+}
+
+/* ---------- 光层 ---------- */
+
+.field,
+.rim {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.field {
+  opacity: 0.5;
+  $field-mask:
+    linear-gradient(rgb(0 0 0 / 0.3) 0 0),
+    linear-gradient(to right, #000, transparent 22px, transparent calc(100% - 22px), #000),
+    linear-gradient(to bottom, #000, transparent 22px, transparent calc(100% - 22px), #000);
+  -webkit-mask: $field-mask;
+  mask: $field-mask;
+}
+
+.rim {
+  padding: 1px;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+}
+
+.pool {
+  $size: max(48%, 240px);
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: $size;
+  aspect-ratio: 8 / 5;
+  margin: calc(#{$size} * -5 / 16) 0 0 calc(#{$size} / -2);
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    var(--pool-color) 0%,
+    color-mix(in srgb, var(--pool-color) 52%, transparent) 40%,
+    color-mix(in srgb, var(--pool-color) 16%, transparent) 72%,
+    transparent 100%
+  );
+}
+
+.rim .pool {
+  background: radial-gradient(
+    closest-side,
+    var(--pool-color) 0%,
+    color-mix(in srgb, var(--pool-color) 80%, transparent) 45%,
+    color-mix(in srgb, var(--pool-color) 28%, transparent) 78%,
+    transparent 100%
+  );
+}
+
+@each $name, $pool in $light-pools {
+  $x: map.get($pool, x);
+  $y: map.get($pool, y);
+
+  .pool[data-pool='#{$name}'] {
+    --pool-color: #{map.get($pool, color)};
+    translate: calc((#{list.nth($x, 1)} + #{list.nth($x, 2)}) / 2) 0;
+    animation:
+      campaign-pool-#{$name}-x map.get($pool, tx) ease-in-out map.get($pool, dx) infinite alternate,
+      campaign-pool-#{$name}-y map.get($pool, ty) ease-in-out map.get($pool, dy) infinite alternate,
+      campaign-pool-morph map.get($pool, ts) ease-in-out map.get($pool, dx) infinite alternate;
+  }
+
+  @keyframes campaign-pool-#{$name}-x {
+    from {
+      translate: list.nth($x, 1) 0;
+    }
+    to {
+      translate: list.nth($x, 2) 0;
+    }
+  }
+
+  @keyframes campaign-pool-#{$name}-y {
+    from {
+      transform: translateY(list.nth($y, 1));
+    }
+    to {
+      transform: translateY(list.nth($y, 2));
+    }
+  }
+}
+
+@keyframes campaign-pool-morph {
+  from {
+    scale: 1.2 0.86;
+  }
+  to {
+    scale: 0.86 1.16;
+  }
+}
+
+/* 「11.11」水印：锚定在优惠列左侧、沉到卡片底边被裁切，给卡片一个一眼可辨的节日记号；
+ * 以优惠列为参照定位，任何宽度 / 语言下都不会与主数字重叠 */
+.watermark {
+  position: absolute;
+  z-index: -1;
+  right: calc(100% + 20px);
+  bottom: -64px;
+  font-size: 120px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  color: festive-tint(9%);
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* ---------- 文案 ---------- */
+
+.body,
+.offer {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid festive-tint(36%);
+  background: color-mix(in srgb, var(--bg-secondary) 70%, transparent);
+  color: festive-ink();
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.title {
+  margin: 2px 0 0;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.caption {
+  margin: 0;
+  max-width: 56ch;
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+/* ---------- 优惠 + 行动 ---------- */
+
+.offer {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.figure {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  margin: 0;
+}
+
+.figureLabel {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.figureValue {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  color: festive-ink();
+
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    background: linear-gradient(100deg, #{$festive-cta-end}, #{$festive-cta} 55%, #d97706);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+.figureSign {
+  margin-right: 2px;
+  font-size: 0.62em;
+  font-weight: 750;
+}
+
+.figureUnit {
+  margin-left: 2px;
+  font-size: 0.5em;
+  font-weight: 750;
+}
+
+.cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 999px;
+  background: linear-gradient(100deg, #{$festive-cta}, #{$festive-cta-end});
+  color: #fff;
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  text-decoration: none;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.18),
+    0 10px 22px -12px color-mix(in srgb, #{$festive-cta-end} 85%, transparent);
+  transition:
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    filter var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+
+  &:active {
+    transform: scale(0.97);
+  }
+
+  &:focus-visible {
+    outline: 2px solid #{$festive-cta};
+    outline-offset: 3px;
+  }
+}
+
+.ctaIcon {
+  flex-shrink: 0;
+  transition: transform var(--dur-hover, 200ms) var(--ease-out-strong, ease-out);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cta:hover {
+    background: linear-gradient(100deg, #{$festive-cta-hover}, #{$festive-cta-hover-end});
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.18),
+      0 14px 28px -12px color-mix(in srgb, #{$festive-cta-end} 95%, transparent);
+  }
+
+  .cta:hover .ctaIcon {
+    transform: translate(1px, -1px);
+  }
+
+  .cta:active {
+    transform: scale(0.97);
+  }
+}
+
+/* ---------- 主题 ---------- */
+
+:global([data-theme='dark']) {
+  .card {
+    background: linear-gradient(
+      120deg,
+      color-mix(in srgb, #{$festive-orange} 13%, var(--bg-primary)),
+      var(--bg-primary) 68%
+    );
+  }
+
+  .field {
+    opacity: 0.6;
+  }
+
+  .watermark {
+    color: festive-tint(11%);
+  }
+
+  .figureValue {
+    @supports (background-clip: text) or (-webkit-background-clip: text) {
+      background: linear-gradient(100deg, #fb7185, #fb923c 55%, #fbbf24);
+      -webkit-background-clip: text;
+      background-clip: text;
+    }
+  }
+}
+
+/* ---------- 窄屏：上下堆叠，优惠数字与按钮同行 ---------- */
+
+@include mobile {
+  .card {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  .offer {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+  }
+
+  .figure {
+    align-items: flex-start;
+  }
+
+  .figureValue {
+    font-size: 38px;
+  }
+
+  /* 窄屏没有留白可放水印，直接隐藏，避免与主数字叠影 */
+  .watermark {
+    display: none;
+  }
+}
+
+/* 减弱动效：入场与光池漂移全部停下，光效停在静止构图 */
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .pool[data-pool] {
+    animation: none;
+  }
+
+  /* 保留颜色/投影反馈，去掉位移与缩放 */
+  .cta,
+  .cta:active,
+  .cta:hover .ctaIcon {
+    transform: none;
+  }
+}

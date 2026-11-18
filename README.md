@@ -1,3 +1,17 @@
+# Papa Proxy
+
+Papa Proxy is a fork of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) for people who route several Claude and Codex subscriptions through one always-on box. It adds:
+
+- **Reset-first routing** (`routing.strategy: reset-first`). Requests go to the account whose weekly quota resets soonest, so quota that is about to expire gets used before quota with days left. Reset times come from the rate-limit headers on every Claude and Codex response. An account that hasn't been seen yet is tried first, so it gets observed. Accounts in cooldown are skipped as usual.
+- **Codex over WebSockets by default** (`upstream.codex.oauth-websockets`, on unless set to false). ChatGPT-subscription credentials use the upstream WebSocket transport when the client connects over WebSocket. In Codex, also set `supports_websockets = true` on the proxy's provider entry.
+- **Session affinity in the template**. `config.example.yaml` turns on `routing.session-affinity`, so a thread stays on one account and keeps its prompt cache.
+- **Per-account cache counters** at `GET /v8/management/observability/cache`: prompt-cache reads and writes for the last hour and since start. A thread that keeps switching accounts shows up as lots of writes and few reads.
+- **A built-in console** at `/management.html`, embedded in the binary and never replaced by a download. Its quota page opens on a **Ledger** view. At the top is a reset runway: the next seven days, one lane per provider, with each account placed at its weekly reset and filled by how much it has left. Below it is one row per account, ordered the way reset-first spends them, with a "Next up" marker, a per-account cache line, masked emails behind a Show emails toggle, and Codex manual resets. The console uses its own slate and periwinkle theme and the Recursive typeface. The console source is in `console/`, vendored from [Cli-Proxy-API-Management-Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) at `e5eb4fe`. Rebuild the embedded copy with `scripts/build-console.sh`. To serve a different panel, point `MANAGEMENT_STATIC_PATH` at it and set `remote-management.disable-auto-update-panel: true`, or the upstream updater will replace it with the latest upstream panel.
+
+The rest of this README is upstream's.
+
+---
+
 # CLI Proxy API
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)

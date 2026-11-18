@@ -1,0 +1,29 @@
+/* Cards flow in one column until the container is measured, then each is positioned in its
+   column by StackedColumns (width and translate set inline). */
+.columns {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--stacked-gap, 16px);
+  min-width: 0;
+
+  &[data-positioned] {
+    display: block;
+  }
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+
+  > * {
+    flex: 1 1 auto;
+  }
+
+  .columns[data-positioned] > & {
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+}

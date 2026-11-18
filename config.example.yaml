@@ -175,7 +175,10 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "reset-first" # round-robin (default when unset), weighted-round-robin, fill-first, reset-first
+  # reset-first spends the credential whose weekly quota window resets soonest, so quota that is
+  # about to expire is used before quota that still has days left. Reset times come from the
+  # rate-limit headers on each Claude and Codex response; an account not yet observed is tried first.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # Sticky requests (including inherited and LCP bindings) also consume weighted credits
@@ -204,7 +207,9 @@ routing:
   # An established binding outranks credential priority: once a session is bound, that
   # credential is kept even if a higher-priority credential recovers. Credential priority
   # still decides cold bindings, requests without a session, and post-failover rebinding.
-  session-affinity: false # default: false
+  # Keep a thread on the account it started on: prompt caches belong to one account, so
+  # switching accounts mid-thread makes upstream rebuild the cache.
+  session-affinity: true # default when unset: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
@@ -451,6 +456,10 @@ upstream:
     upstream-request-compression: false
     # Request bodies smaller than this many bytes are sent uncompressed.
     upstream-request-compression-min-bytes: 1024
+    # Send Codex OAuth (ChatGPT subscription) traffic over the upstream WebSocket transport when
+    # the client connects over WebSocket. Auth files that set "websockets" keep their own value.
+    # Clients must opt in too: in Codex, set supports_websockets = true on the proxy provider.
+    oauth-websockets: true # default: true
     # Enable permessage-deflate compression on Codex WebSocket connections
     # (upstream and downstream) after negotiation. Default: true.
     websocket-compression: true

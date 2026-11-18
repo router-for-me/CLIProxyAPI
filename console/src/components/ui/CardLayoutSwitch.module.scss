@@ -1,0 +1,69 @@
+/* Same pill as the auth-files status filter (AuthFilesToolbar .segmented), icon-only. */
+.switch {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: $radius-full;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 28px;
+  border: 0;
+  border-radius: $radius-full;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    background-color var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    box-shadow var(--dur-hover, 200ms) var(--ease-out-strong, ease-out),
+    transform var(--dur-press, 160ms) var(--ease-out-strong, ease-out);
+
+  &:active {
+    transform: scale(0.96);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -1px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  svg {
+    display: block;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .option:hover:not(.optionActive):not(:disabled) {
+    color: var(--text-primary);
+  }
+}
+
+.optionActive {
+  color: var(--text-primary);
+  background: var(--floating-surface, var(--bg-primary));
+  box-shadow: var(--shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .option {
+    transition: none;
+
+    &:active {
+      transform: none;
+    }
+  }
+}

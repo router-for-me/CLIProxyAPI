@@ -1,0 +1,197 @@
+/**
+ * Theme tokens. Papa Proxy uses cool slate surfaces in both modes, one
+ * periwinkle signal colour reserved for "what the proxy does next" and for
+ * primary actions, and green / amber / red only for quota and traffic data.
+ */
+
+:root {
+  // Papa Proxy, light: cool fog greys, one periwinkle signal for "what happens next".
+  --bg-secondary: #f4f5f8; // page
+  --bg-primary: #eceef3; // containers
+  --bg-tertiary: #e2e5ec; // hover / secondary surfaces
+  --bg-hover: var(--bg-tertiary);
+  --bg-quinary: #f0f1f5;
+  --bg-error-light: color-mix(in srgb, var(--error-color) 10%, transparent);
+  --floating-surface: #ffffff;
+  --floating-shadow: 0 12px 28px rgb(29 34 48 / 0.14);
+
+  --text-primary: #1d2230;
+  --text-secondary: #545c6f;
+  --text-tertiary: #858da0;
+  --text-quaternary: #b2b8c5;
+  --text-muted: var(--text-tertiary);
+
+  --border-color: #dcdfe6;
+  --border-secondary: var(--border-color);
+  --border-primary: #ccd0d9;
+  --border-hover: #b9bfcb;
+
+  --primary-color: #4a57d9; // signal
+  --primary-hover: #3e4ac6;
+  --primary-active: #3540ad;
+  --primary-contrast: #ffffff;
+
+  --success-color: #1e9e77;
+  --quota-medium-color: #c88a12;
+  --warning-color: #d2493a;
+  --error-color: #d2493a;
+  --danger-color: var(--error-color);
+  --info-color: var(--primary-color);
+
+  --warning-bg: color-mix(in srgb, var(--warning-color) 12%, transparent);
+  --warning-border: color-mix(in srgb, var(--warning-color) 35%, transparent);
+  --warning-text: #a8382b;
+
+  --success-badge-bg: #d5f2e8;
+  --success-badge-text: #11674e;
+  --success-badge-border: #8fd9c0;
+
+  --failure-badge-bg: color-mix(in srgb, var(--error-color) 13%, transparent);
+  --failure-badge-text: #9c3326;
+  --failure-badge-border: color-mix(in srgb, var(--error-color) 35%, transparent);
+
+  --count-badge-bg: color-mix(in srgb, var(--text-primary) 9%, transparent);
+  --count-badge-text: var(--text-secondary);
+
+  --shadow: 0 1px 2px 0 rgb(29 34 48 / 0.08);
+  --shadow-lg: 0 10px 18px -3px rgb(29 34 48 / 0.12);
+
+  --radius-md: 8px;
+
+  --amber-color: #c88a12;
+  --amber-text: #8a5c06;
+
+  // Workbench tokens
+  --primary-8: color-mix(in srgb, var(--primary-color) 8%, transparent);
+  --primary-10: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  --primary-30: color-mix(in srgb, var(--primary-color) 30%, transparent);
+  --amber-10: color-mix(in srgb, var(--amber-color) 12%, transparent);
+  --amber-30: color-mix(in srgb, var(--amber-color) 34%, transparent);
+  --destructive-color: var(--error-color);
+  --destructive-10: color-mix(in srgb, var(--destructive-color) 12%, transparent);
+  --destructive-30: color-mix(in srgb, var(--destructive-color) 34%, transparent);
+  --muted-bg: var(--bg-tertiary);
+  --muted-foreground: var(--text-secondary);
+  --accent-bg: var(--bg-tertiary);
+
+  // Glass effect (blurred surfaces)
+  --glass-blur: 12px;
+  --glass-backdrop-filter: blur(var(--glass-blur));
+  --glass-filter: blur(var(--glass-blur));
+  --glass-bg: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  --glass-bg-secondary: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  --glass-border: color-mix(in srgb, var(--border-color) 60%, transparent);
+
+  // Quota and traffic data colours: full / running low / empty. Used for data only.
+  --viz-success: #1e9e77;
+  --viz-failure: #d2493a;
+
+  --font-display-casual: 0.6;
+
+  // Motion vocabulary: strong deceleration, presses 160ms, hovers 200ms.
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-press: 160ms;
+  --dur-hover: 200ms;
+}
+
+// Pure white variant of the light theme
+[data-theme='white'] {
+  --bg-secondary: #ffffff;
+  --bg-primary: #ffffff;
+  --bg-tertiary: #f1f2f6;
+  --bg-hover: var(--bg-tertiary);
+  --bg-quinary: #ffffff;
+  --floating-surface: #ffffff;
+  --border-color: #e3e5eb;
+  --border-secondary: var(--border-color);
+  --border-primary: #d5d8e0;
+  --border-hover: #c3c8d2;
+}
+
+[data-theme='dark'] {
+  // Papa Proxy, dark: blue-violet slate, not black; periwinkle signal.
+  --bg-secondary: #1a1c24; // page
+  --bg-primary: #21242e; // containers
+  --bg-tertiary: #292d38; // hover / secondary surfaces
+  --bg-hover: #303542;
+  --bg-quinary: #1e2029;
+  --bg-error-light: color-mix(in srgb, var(--error-color) 18%, transparent);
+  --floating-surface: #2a2e3a;
+  --floating-shadow: 0 16px 32px rgb(6 8 14 / 0.45);
+
+  --text-primary: #eceef3;
+  --text-secondary: #b3b9c7;
+  --text-tertiary: #868da0;
+  --text-quaternary: #5c6375;
+  --text-muted: var(--text-tertiary);
+
+  --border-color: #2f3340;
+  --border-secondary: var(--border-color);
+  --border-primary: #3b4050;
+  --border-hover: #4b5163;
+
+  --primary-color: #8e9bff; // signal
+  --primary-hover: #a2adff;
+  --primary-active: #b4bdff;
+  --primary-contrast: #141633;
+
+  --success-color: #43c59e;
+  --quota-medium-color: #e9b44c;
+  --warning-color: #ef6a5a;
+  --error-color: #ef6a5a;
+  --danger-color: var(--error-color);
+  --info-color: var(--primary-color);
+
+  --warning-bg: color-mix(in srgb, var(--warning-color) 18%, transparent);
+  --warning-border: color-mix(in srgb, var(--warning-color) 42%, transparent);
+  --warning-text: #f6a89e;
+
+  --success-badge-bg: color-mix(in srgb, var(--success-color) 16%, transparent);
+  --success-badge-text: #7fe0c1;
+  --success-badge-border: color-mix(in srgb, var(--success-color) 45%, transparent);
+
+  --failure-badge-bg: color-mix(in srgb, var(--error-color) 20%, transparent);
+  --failure-badge-text: #f6a89e;
+  --failure-badge-border: color-mix(in srgb, var(--error-color) 48%, transparent);
+
+  --count-badge-bg: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  --count-badge-text: var(--text-secondary);
+
+  --shadow: 0 1px 3px 0 rgb(6 8 14 / 0.35);
+  --shadow-lg: 0 10px 15px -3px rgb(6 8 14 / 0.35);
+
+  --radius-md: 8px;
+
+  --amber-color: #e9b44c;
+  --amber-text: #f3cf86;
+
+  // Workbench tokens
+  --primary-8: color-mix(in srgb, var(--primary-color) 8%, transparent);
+  --primary-10: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  --primary-30: color-mix(in srgb, var(--primary-color) 30%, transparent);
+  --amber-10: color-mix(in srgb, var(--amber-color) 12%, transparent);
+  --amber-30: color-mix(in srgb, var(--amber-color) 34%, transparent);
+  --destructive-color: var(--error-color);
+  --destructive-10: color-mix(in srgb, var(--destructive-color) 12%, transparent);
+  --destructive-30: color-mix(in srgb, var(--destructive-color) 34%, transparent);
+  --muted-bg: var(--bg-tertiary);
+  --muted-foreground: var(--text-secondary);
+  --accent-bg: var(--bg-tertiary);
+
+  --glass-border: color-mix(in srgb, var(--border-color) 55%, transparent);
+
+  --viz-success: #3dbb94;
+  --viz-failure: #e8604f;
+}
+
+@media (max-width: 768px),
+  (prefers-reduced-motion: reduce),
+  (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-backdrop-filter: none;
+    --glass-filter: none;
+    --glass-bg: var(--bg-primary);
+    --glass-bg-secondary: var(--bg-secondary);
+    --glass-border: var(--border-color);
+  }
+}

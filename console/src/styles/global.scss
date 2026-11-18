@@ -1,0 +1,58 @@
+/**
+ * 全局样式
+ */
+
+@use './variables.scss' as *;
+@use './mixins.scss' as *;
+@use './reset.scss';
+@use './themes.scss';
+@use './components.scss';
+@use './layout.scss';
+
+body {
+  font-variation-settings:
+    'MONO' 0,
+    'CASL' 0;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  transition:
+    background-color $transition-normal,
+    color $transition-normal;
+}
+
+html.modal-open,
+body.modal-open {
+  overflow: hidden;
+}
+
+body.modal-open .content {
+  overflow: hidden;
+}
+
+// 滚动条样式
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: $radius-full;
+
+  &:hover {
+    background: var(--border-hover);
+  }
+}
+
+// Page titles carry the console's one typographic flourish: Recursive leaning casual.
+h1 {
+  font-variation-settings: 'CASL' 0.6;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary-color) 32%, transparent);
+}

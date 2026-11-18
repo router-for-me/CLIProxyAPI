@@ -1,0 +1,20 @@
+/* ============================================================
+ * 赞助商强调色 —— Kimi 品牌蓝（logo 右上角的点就是这个色）。
+ *
+ * 只在赞助商卡与其授权对话框里出现，别处一律墨色语汇。
+ * - $sponsor-blue：光晕、描边、投影、「+」圆点等不承载文字的面
+ * - $sponsor-blue-strong：承载白字的按钮底（白字对比 4.7:1，过 AA）
+ * - sponsor-ink()：蓝色文字，向正文色混合 —— 浅色主题变深、深色主题变亮，两边都可读
+ * ============================================================ */
+
+$sponsor-blue: #1783ff;
+$sponsor-blue-strong: #0a6fe6;
+$sponsor-blue-strong-hover: #0862cc;
+
+@function sponsor-ink() {
+  @return color-mix(in srgb, #{$sponsor-blue} 74%, var(--text-primary));
+}
+
+@function sponsor-tint($percent) {
+  @return color-mix(in srgb, #{$sponsor-blue} $percent, transparent);
+}

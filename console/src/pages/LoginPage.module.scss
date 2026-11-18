@@ -1,0 +1,357 @@
+@use './login/palette' as *;
+
+.container {
+  @include login-palette;
+  position: relative;
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--login-bg);
+  color: var(--text-primary);
+
+  // 移动端顶部点阵横幅的高度
+  --hero-band: clamp(200px, 38dvh, 340px);
+}
+
+.brandPanel {
+  position: relative;
+  flex: 1.15 1 0;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+
+  // 移动端：点阵收为页面顶部的横幅，铺在品牌栏之后、向下淡入底色，表单在其下方
+  @media (max-width: $breakpoint-mobile) {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: 0;
+    height: var(--hero-band);
+    pointer-events: none;
+  }
+}
+
+.formPanel {
+  flex: 1 1 0;
+  min-width: min(400px, 100%);
+  max-width: 640px;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  // 列必须允许收缩到 0，否则长文案/固定宽度控件会把列撑出面板
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  padding: clamp(20px, 3.5vh, 36px) clamp(24px, 4vw, 56px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+
+  @media (max-width: $breakpoint-mobile) {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    max-width: none;
+    padding: 20px 24px;
+  }
+}
+
+@keyframes chromeFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+  animation: chromeFade 400ms ease 120ms both;
+}
+
+.brandMark {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.brandName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.brandLogo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.languageSelect {
+  flex: 0 0 auto;
+
+  button[aria-haspopup] {
+    justify-content: flex-end;
+    height: 32px;
+    padding: 0 10px;
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    color: var(--text-secondary);
+    font-size: 13px;
+    transition:
+      color var(--dur-hover) ease,
+      background-color var(--dur-hover) ease,
+      border-color var(--dur-hover) ease;
+
+    @media (hover: hover) and (pointer: fine) {
+      &:hover {
+        color: var(--text-primary);
+        background: var(--login-hover-bg);
+        border-color: transparent;
+      }
+    }
+
+    &:focus-visible,
+    &[aria-expanded='true'] {
+      color: var(--text-primary);
+      border-color: var(--border-color);
+      box-shadow: none;
+    }
+  }
+}
+
+// 下拉层挂在 body 上，需要单独带上登录页配色
+.languageDropdown {
+  @include login-palette;
+  // Select 下拉层：底色取 --bg-primary，悬停/高亮取 --bg-secondary
+  --bg-primary: var(--login-dropdown-bg);
+  --bg-secondary: var(--login-dropdown-hover);
+  border-color: var(--login-dropdown-border);
+  box-shadow: var(--login-dropdown-shadow);
+
+  [aria-selected='true'] {
+    border-color: transparent;
+    background: var(--login-dropdown-active);
+    color: var(--login-text);
+  }
+}
+
+.main {
+  // 固定在 1fr 行：启动页不渲染顶栏时也能占满剩余高度
+  grid-row: 2;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px 0 32px;
+}
+
+// 自动外边距在矮屏归零，避免居中内容向上溢出到不可滚动区域。
+.column {
+  width: 100%;
+  max-width: 360px;
+  margin-block: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+@keyframes headingRise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.title {
+  margin: 0;
+  animation: headingRise 480ms var(--ease-out-strong) 160ms both;
+  font-size: clamp(26px, 2.2vw, 32px);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+@media (max-height: 680px) {
+  .column {
+    gap: 24px;
+  }
+
+  .main {
+    padding: 16px 0;
+  }
+}
+
+@media (max-height: 560px) {
+  .title {
+    font-size: 24px;
+  }
+}
+
+// 移动端：表单落在顶部点阵横幅下缘附近，点阵在标题之上，不压住输入区。
+// 放在矮屏规则之后以覆盖其 padding；极矮屏（<560px）直接从顶部排布，交给滚动兜底。
+@media (max-width: $breakpoint-mobile) and (min-height: 560px) {
+  .main {
+    padding-top: calc(var(--hero-band) - 128px);
+  }
+}
+
+@media (max-height: 440px) {
+  .formPanel {
+    padding-block: 12px;
+  }
+
+  .main {
+    padding: 8px 0;
+  }
+
+  .column {
+    gap: 16px;
+  }
+}
+
+// 时长与 useLoginTransitionStore 的 exit 保持一致（320ms / 减少动效 150ms）
+
+@keyframes exitToBase {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes exitLift {
+  to {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translate3d(0, -8px, 0);
+  }
+}
+
+.container[data-phase='exiting'] {
+  .brandPanel,
+  .topBar {
+    animation: exitToBase 320ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+
+  .main > * {
+    animation: exitLift 320ms cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .brandPanel,
+    .topBar,
+    .main > * {
+      animation: exitToBase 150ms ease both;
+    }
+  }
+}
+
+@keyframes splashEnter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes splashLoading {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+
+// 在面板内垂直居中，底部留白略大使其视觉上稍偏上；矮屏时自动外边距归零。
+.splash {
+  margin-block: auto;
+  padding-bottom: 6vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  text-align: center;
+  animation: splashEnter 480ms var(--ease-out-strong) both;
+}
+
+.splashLogo {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  object-fit: cover;
+}
+
+.splashText {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.splashTitle {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.splashSubtitle {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.splashLoader {
+  width: 120px;
+  height: 2px;
+  margin-top: 4px;
+  border-radius: $radius-full;
+  background: var(--login-loader-track);
+  overflow: hidden;
+}
+
+.splashLoaderBar {
+  width: 40%;
+  height: 100%;
+  border-radius: $radius-full;
+  background: var(--login-loader-bar);
+  animation: splashLoading 1.1s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topBar,
+  .title,
+  .splash {
+    animation-name: chromeFade;
+    animation-duration: 200ms;
+  }
+
+  .splashLoaderBar {
+    width: 100%;
+    animation: none;
+    opacity: 0.6;
+  }
+}

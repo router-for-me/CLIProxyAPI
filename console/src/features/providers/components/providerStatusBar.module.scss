@@ -1,0 +1,163 @@
+@use '../../../styles/mixins' as *;
+@use '../../../styles/variables' as *;
+
+.statusBar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+}
+
+.statusBlocks {
+  display: flex;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  position: relative;
+}
+
+.statusBlockWrapper {
+  flex: 1 1 0;
+  min-width: 0;
+  position: relative;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.statusBlock {
+  width: 100%;
+  height: 6px;
+  border-radius: 2px;
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease;
+
+  .statusBlockWrapper:hover &,
+  .statusBlockWrapper.statusBlockActive & {
+    transform: scaleY(1.8);
+    opacity: 0.9;
+  }
+}
+
+.statusBlockIdle {
+  background-color: var(--border-color);
+}
+
+.statusTooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  z-index: $z-dropdown;
+  pointer-events: none;
+  color: var(--text-primary);
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-top-color: var(--bg-primary);
+  }
+
+  &::before {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: var(--border-color);
+  }
+}
+
+.statusTooltipLeft {
+  left: 0;
+  transform: translateX(0);
+
+  &::after,
+  &::before {
+    left: 8px;
+    transform: none;
+  }
+}
+
+.statusTooltipRight {
+  left: auto;
+  right: 0;
+  transform: translateX(0);
+
+  &::after,
+  &::before {
+    left: auto;
+    right: 8px;
+    transform: none;
+  }
+}
+
+.tooltipTime {
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 2px;
+}
+
+.tooltipStats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tooltipSuccess {
+  color: var(--success-color, #22c55e);
+}
+
+.tooltipFailure {
+  color: var(--danger-color, #ef4444);
+}
+
+.tooltipRate {
+  color: var(--text-secondary);
+  margin-left: 2px;
+}
+
+.statusRate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.statusRateHigh {
+  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg, #d1fae5);
+}
+
+.statusRateMedium {
+  color: var(--warning-text, #92400e);
+  background: var(--warning-bg, #fef3c7);
+}
+
+.statusRateLow {
+  color: var(--failure-badge-text);
+  background: var(--failure-badge-bg);
+}

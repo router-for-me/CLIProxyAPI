@@ -1,0 +1,13 @@
+.policyFields {
+  min-width: 0;
+}
+
+/* 自定义重试次数的 Input 自带 .form-group 下边距；说明移进 InfoTip 后它成了组内最后一项，
+   去掉这段多余留白，让组间距只由外层 .form-group 决定。 */
+.policyFields > :global(.form-group) > :global(.form-group:last-child) {
+  margin-bottom: 0;
+}
+
+.unsupported {
+  margin-top: $spacing-sm;
+}
