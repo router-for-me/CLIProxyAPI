@@ -830,7 +830,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, cch
 
 func checkSystemInstructionsWithSigningModeDoc(doc *ojson.Doc, strictMode bool, cchSigning bool, version, entrypoint, workload string, keepCallerSystemTopLevel ...bool) bool {
 	keepAtTopLevel := len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0]
-	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, "")
+	return checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, claudeCodeLocalDate(time.Now()), false, "", "", keepAtTopLevel, true, "")
 }
 
 // isClaudeFable51Model reports whether the model is specifically Fable 5.1 / Mythos 5.1,
@@ -920,7 +920,7 @@ func checkSystemInstructionsWithSigningModeAt(
 	turnOrigin ...string,
 ) []byte {
 	doc := ojson.NewDoc(payload)
-	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, turnOrigin...) {
+	if !checkSystemInstructionsWithSigningModeAtDoc(doc, strictMode, cchSigning, version, entrypoint, workload, currentDate, isSubagent, prevReq, promptID, keepCallerSystemTopLevel, true, turnOrigin...) {
 		return payload
 	}
 	return doc.Bytes()
@@ -935,6 +935,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 	isSubagent bool,
 	prevReq, promptID string,
 	keepCallerSystemTopLevel bool,
+	keepClassifierShape bool,
 	turnOrigin ...string,
 ) bool {
 	if doc == nil {
@@ -945,7 +946,7 @@ func checkSystemInstructionsWithSigningModeAtDoc(
 
 	billingText := generateBillingHeader(cchSigning, version, messageText, entrypoint, workload, isSubagent, prevReq, promptID, turnOrigin...)
 	billingBlock := buildTextBlock(billingText, nil)
-	if !strictMode && helps.IsClaudeAutoModeClassifierRequest(system, doc.Get("messages")) {
+	if keepClassifierShape && !strictMode && helps.IsClaudeAutoModeClassifierRequest(system, doc.Get("messages")) {
 		keepClaudeClassifierSystemPromptDoc(doc, system, billingBlock)
 		return true
 	}
@@ -1228,6 +1229,25 @@ func keepClaudeClassifierSystemPromptDoc(doc *ojson.Doc, system ojson.Result, bi
 		return true
 	})
 	_ = doc.SetRawBytes("system", []byte("["+strings.Join(blocks, ",")+"]"))
+}
+
+// claudeSystemTextRewrittenBy reports whether the sensitive-word rules would
+// change any system text. The classifier keeps its own prompt shape only when
+// that prompt reaches Anthropic unchanged; otherwise it takes the normal path.
+func claudeSystemTextRewrittenBy(system ojson.Result, matcher *helps.SensitiveWordMatcher) bool {
+	if matcher == nil {
+		return false
+	}
+	if system.Type == ojson.String {
+		return matcher.ObfuscateText(system.String()) != system.String()
+	}
+	rewritten := false
+	system.ForEach(func(_, part ojson.Result) bool {
+		text := part.Get("text").String()
+		rewritten = part.Get("type").String() == "text" && !util.IsClaudeCodeAttributionSystemText(text) && matcher.ObfuscateText(text) != text
+		return !rewritten
+	})
+	return rewritten
 }
 
 func collectForwardedClaudeSystemPromptBlocks(system ojson.Result) []string {
@@ -2791,6 +2811,7 @@ func applyCloakingInternalDoc(
 		prevReq,
 		promptID,
 		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
+		!claudeSystemTextRewrittenBy(doc.Get("system"), settings.buildSensitiveWordMatcher()),
 		turnOriginArgs...,
 	)
 
