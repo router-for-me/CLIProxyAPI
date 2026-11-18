@@ -1,12 +1,13 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ErrorCodeRequestScoped identifies failures tied to the current request rather
@@ -496,7 +497,7 @@ func withTrustedRetryAfter(err error, retryAfter *time.Duration) error {
 		return err
 	}
 	if _, ok := err.(*upstreamExecutionAttemptError); ok {
-		return markUpstreamExecutionAttempt(withTrustedRetryAfter(unwrapUpstreamExecutionAttempt(err), retryAfter))
+		return markUpstreamExecutionAttemptWithProvider(withTrustedRetryAfter(unwrapUpstreamExecutionAttempt(err), retryAfter), upstreamAttemptProviderFromError(err))
 	}
 	if bootstrap, ok := err.(*streamBootstrapError); ok && bootstrap != nil {
 		wrapped := withTrustedRetryAfter(bootstrap.cause, retryAfter)

@@ -1,11 +1,12 @@
 package responses
 
 import (
-	"encoding/json"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"

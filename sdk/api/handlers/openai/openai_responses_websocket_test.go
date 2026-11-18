@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +21,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -2782,6 +2782,12 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			name:   "cyber policy at 502",
 			status: http.StatusBadGateway,
 			body:   `{"error":{"type":"invalid_request","code":"cyber_policy","message":"flagged"}}`,
+			want:   true,
+		},
+		{
+			name:   "bio policy at 502",
+			status: http.StatusBadGateway,
+			body:   `{"error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`,
 			want:   true,
 		},
 		{
@@ -8228,4 +8234,319 @@ func TestForwardResponsesWebsocketPrefersBufferedErrorOverClosedData(t *testing.
 			}
 		}
 	}
+}
+
+func TestForwardResponsesWebsocketDuplexErrorClassificationAfterResponseCreated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const createdFrame = `{"type":"response.created","response":{"id":"r-quota"}}`
+
+	t.Run("quota_and_cooldown_consult_replay_guard_when_suppressed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			errorFrame string
+		}{
+			{
+				name:       "usage_limit_reached",
+				errorFrame: `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"exhausted"}}`,
+			},
+			{
+				name:       "model_cooldown",
+				errorFrame: `{"type":"error","status":429,"error":{"code":"model_cooldown","message":"cooling down"}}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var suppressCalls atomic.Int32
+				var cancelCalls atomic.Int32
+				serverErrCh := make(chan error, 1)
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+					if err != nil {
+						serverErrCh <- err
+						return
+					}
+					defer func() { _ = conn.Close() }()
+
+					ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+					ctx.Request = r
+
+					data := make(chan []byte, 2)
+					errCh := make(chan *interfaces.ErrorMessage)
+					data <- []byte(createdFrame)
+					data <- []byte(tc.errorFrame)
+					close(data)
+					close(errCh)
+
+					_, _, _, errMsg, errForward := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+						ctx,
+						newResponsesWebsocketWriter(conn),
+						func(...interface{}) { cancelCalls.Add(1) },
+						data,
+						errCh,
+						newInMemoryWebsocketTimelineLog(),
+						"session-duplex-quota",
+						responsesWebsocketForwardOptions{
+							duplexStream: func() bool { return true },
+							suppressError: func(msg *interfaces.ErrorMessage) bool {
+								suppressCalls.Add(1)
+								return msg != nil && isResponsesWebsocketQuotaOrCooldownError(msg.Error)
+							},
+						},
+					)
+					if errForward != nil {
+						serverErrCh <- fmt.Errorf("expected nil errForward when suppressed, got %v", errForward)
+						return
+					}
+					if errMsg == nil {
+						serverErrCh <- errors.New("expected non-nil errMsg when suppressed")
+						return
+					}
+					serverErrCh <- nil
+				}))
+				defer server.Close()
+
+				wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+				conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+				if err != nil {
+					t.Fatalf("dial websocket: %v", err)
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+				_, frame1, errRead1 := conn.ReadMessage()
+				if errRead1 != nil {
+					t.Fatalf("read response.created: %v", errRead1)
+				}
+				if got := ojson.GetBytesNoCopy(frame1, "type").String(); got != "response.created" {
+					t.Fatalf("frame1 type = %q, want response.created: %s", got, frame1)
+				}
+
+				if _, frame2, errRead2 := conn.ReadMessage(); errRead2 == nil {
+					t.Fatalf("expected suppressed quota frame not to be forwarded, got: %s", frame2)
+				}
+
+				if errServer := <-serverErrCh; errServer != nil {
+					t.Fatalf("server error: %v", errServer)
+				}
+				if got := suppressCalls.Load(); got != 1 {
+					t.Fatalf("suppressError calls = %d, want 1", got)
+				}
+				if got := cancelCalls.Load(); got != 1 {
+					t.Fatalf("cancel calls = %d, want 1", got)
+				}
+			})
+		}
+	})
+
+	t.Run("quota_and_cooldown_emit_terminal_error_when_not_suppressed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			errorFrame string
+			wantField  string
+			wantValue  string
+		}{
+			{
+				name:       "usage_limit_reached",
+				errorFrame: `{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"exhausted"}}`,
+				wantField:  "error.type",
+				wantValue:  "usage_limit_reached",
+			},
+			{
+				name:       "model_cooldown",
+				errorFrame: `{"type":"error","status":429,"error":{"code":"model_cooldown","message":"cooling down"}}`,
+				wantField:  "error.code",
+				wantValue:  "model_cooldown",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var suppressCalls atomic.Int32
+				var cancelCalls atomic.Int32
+				serverErrCh := make(chan error, 1)
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+					if err != nil {
+						serverErrCh <- err
+						return
+					}
+					defer func() { _ = conn.Close() }()
+
+					ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+					ctx.Request = r
+
+					data := make(chan []byte, 2)
+					errCh := make(chan *interfaces.ErrorMessage)
+					data <- []byte(createdFrame)
+					data <- []byte(tc.errorFrame)
+					close(data)
+					close(errCh)
+
+					_, _, _, errMsg, errForward := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+						ctx,
+						newResponsesWebsocketWriter(conn),
+						func(...interface{}) { cancelCalls.Add(1) },
+						data,
+						errCh,
+						newInMemoryWebsocketTimelineLog(),
+						"session-duplex-terminal",
+						responsesWebsocketForwardOptions{
+							duplexStream: func() bool { return true },
+							suppressError: func(*interfaces.ErrorMessage) bool {
+								suppressCalls.Add(1)
+								return false
+							},
+						},
+					)
+					if !errors.Is(errForward, websocket.ErrCloseSent) {
+						serverErrCh <- fmt.Errorf("errForward = %v, want websocket.ErrCloseSent", errForward)
+						return
+					}
+					if errMsg == nil || errMsg.StatusCode != http.StatusTooManyRequests {
+						serverErrCh <- fmt.Errorf("errMsg = %+v, want status 429", errMsg)
+						return
+					}
+					serverErrCh <- nil
+				}))
+				defer server.Close()
+
+				wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+				conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+				if err != nil {
+					t.Fatalf("dial websocket: %v", err)
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+				_, frame1, errRead1 := conn.ReadMessage()
+				if errRead1 != nil {
+					t.Fatalf("read response.created: %v", errRead1)
+				}
+				if got := ojson.GetBytesNoCopy(frame1, "type").String(); got != "response.created" {
+					t.Fatalf("frame1 type = %q, want response.created: %s", got, frame1)
+				}
+
+				_, frame2, errRead2 := conn.ReadMessage()
+				if errRead2 != nil {
+					t.Fatalf("read terminal error frame: %v", errRead2)
+				}
+				if got := ojson.GetBytesNoCopy(frame2, tc.wantField).String(); got != tc.wantValue {
+					t.Fatalf("frame2 %s = %q, want %q: %s", tc.wantField, got, tc.wantValue, frame2)
+				}
+
+				if _, extraFrame, errRead3 := conn.ReadMessage(); errRead3 == nil {
+					t.Fatalf("expected socket close after terminal quota frame, got: %s", extraFrame)
+				}
+
+				if errServer := <-serverErrCh; errServer != nil {
+					t.Fatalf("server error: %v", errServer)
+				}
+				if got := suppressCalls.Load(); got != 1 {
+					t.Fatalf("suppressError calls = %d, want 1", got)
+				}
+				if got := cancelCalls.Load(); got != 1 {
+					t.Fatalf("cancel calls = %d, want 1", got)
+				}
+			})
+		}
+	})
+
+	t.Run("request_and_client_rate_limit_errors_stay_on_duplex_path", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			errorFrame string
+		}{
+			{
+				name:       "rate_limit_exceeded",
+				errorFrame: `{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"rate limit exceeded"}}`,
+			},
+			{
+				name:       "invalid_request_error",
+				errorFrame: `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"bad request"}}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var suppressCalls atomic.Int32
+				serverErrCh := make(chan error, 1)
+
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					conn, err := responsesWebsocketUpgrader.Upgrade(w, r, nil)
+					if err != nil {
+						serverErrCh <- err
+						return
+					}
+					defer func() { _ = conn.Close() }()
+
+					ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+					ctx.Request = r
+
+					data := make(chan []byte, 4)
+					errCh := make(chan *interfaces.ErrorMessage)
+					data <- []byte(createdFrame)
+					data <- []byte(tc.errorFrame)
+					data <- []byte(`{"type":"response.created","response":{"id":"r-recovered"}}`)
+					data <- []byte(`{"type":"response.completed","response":{"id":"r-recovered","output":[]}}`)
+					close(data)
+					close(errCh)
+
+					_, completedID, _, errMsg, errForward := (*OpenAIResponsesAPIHandler)(nil).forwardResponsesWebsocket(
+						ctx,
+						newResponsesWebsocketWriter(conn),
+						func(...interface{}) {},
+						data,
+						errCh,
+						newInMemoryWebsocketTimelineLog(),
+						"session-duplex-preserved",
+						responsesWebsocketForwardOptions{
+							duplexStream: func() bool { return true },
+							suppressError: func(*interfaces.ErrorMessage) bool {
+								suppressCalls.Add(1)
+								return true
+							},
+						},
+					)
+					if !errors.Is(errForward, websocket.ErrCloseSent) {
+						serverErrCh <- fmt.Errorf("errForward = %v, want websocket.ErrCloseSent", errForward)
+						return
+					}
+					if errMsg != nil {
+						serverErrCh <- fmt.Errorf("errMsg = %v, want nil", errMsg)
+						return
+					}
+					if completedID != "r-recovered" {
+						serverErrCh <- fmt.Errorf("completedID = %q, want r-recovered", completedID)
+						return
+					}
+					serverErrCh <- nil
+				}))
+				defer server.Close()
+
+				wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+				conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+				if err != nil {
+					t.Fatalf("dial websocket: %v", err)
+				}
+				defer func() { _ = conn.Close() }()
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+				wantTypes := []string{"response.created", "error", "response.created", "response.completed"}
+				for idx, wantType := range wantTypes {
+					_, frame, errRead := conn.ReadMessage()
+					if errRead != nil {
+						t.Fatalf("read frame %d (%s): %v", idx, wantType, errRead)
+					}
+					if got := ojson.GetBytesNoCopy(frame, "type").String(); got != wantType {
+						t.Fatalf("frame %d type = %q, want %q: %s", idx, got, wantType, frame)
+					}
+				}
+
+				if errServer := <-serverErrCh; errServer != nil {
+					t.Fatalf("server error: %v", errServer)
+				}
+				if got := suppressCalls.Load(); got != 0 {
+					t.Fatalf("suppressError calls = %d, want 0", got)
+				}
+			})
+		}
+	})
 }

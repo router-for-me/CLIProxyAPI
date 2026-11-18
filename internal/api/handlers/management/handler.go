@@ -63,6 +63,7 @@ type Handler struct {
 	authCache               managementAuthCache
 	siwcOAuthFactory        func(*config.Config, string) siwcOAuthService
 	siwcCommitMu            sync.Mutex
+	v8AuthUploadMu          sync.Mutex
 	pluginLoginSaveMu       sync.Mutex
 }
 
@@ -152,11 +153,31 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	}
 }
 
-// configSnapshot reads h.cfg under h.mu, for code that runs outside the request holding it.
+// configSnapshot returns an independent copy of h.cfg under h.mu, for code that runs outside the request holding it.
 func (h *Handler) configSnapshot() *config.Config {
+	if h == nil {
+		return nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.cfg
+	if h.cfg == nil {
+		return nil
+	}
+	if cloned := h.cfg.CloneForRuntime(); cloned != nil {
+		return cloned
+	}
+	copied := *h.cfg
+	return &copied
+}
+
+// pluginHostSnapshot reads h.pluginHost under h.mu.
+func (h *Handler) pluginHostSnapshot() *pluginhost.Host {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pluginHost
 }
 
 // oauthConfigWithProxy returns a configuration snapshot for an OAuth session.
@@ -173,13 +194,8 @@ func (h *Handler) oauthConfigWithProxy(proxyURL string) *config.Config {
 			SDKConfig: config.SDKConfig{ProxyURL: proxyURL},
 		}
 	}
-	cloned := cfg.CloneForRuntime()
-	if cloned == nil {
-		copied := *cfg
-		cloned = &copied
-	}
-	cloned.ProxyURL = proxyURL
-	return cloned
+	cfg.ProxyURL = proxyURL
+	return cfg
 }
 
 // isStaleConfigFileSnapshotLocked reports whether cfg was parsed from config file

@@ -154,8 +154,11 @@ func TestPayloadBarrierXAIWebsocketRetry(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "grok-4.3"}
 	body := []byte(`{"previous_response_id":"previous","input":[{"content":"first"},{"content":"second"}]}`)
 	finalize := helps.NewPayloadFinalizer(cfg, "xai", req.Model, "codex", "", body, req, cliproxyexecutor.Options{})
-	first := buildXAIWebsocketRequestBody(body, finalize)
-	retry := buildXAIWebsocketRequestBody(body, finalize)
+	doc := ojson.NewDoc(body)
+	normalizeXAIWebsocketRequestDoc(doc)
+	finalize.FinalizeDoc(doc)
+	first := buildXAIWebsocketRequestBodyDoc(doc)
+	retry := buildXAIWebsocketRequestBodyDoc(ojson.NewDoc(first))
 	if !bytes.Equal(first, retry) {
 		t.Fatalf("retry changed configured body: %s != %s", first, retry)
 	}

@@ -136,14 +136,14 @@ func TestGeminiClaudePartMetadataPreservesSupportedPayload(t *testing.T) {
 }
 
 func TestGeminiClaudeDelayedTextSignaturePartBoundaryRoundTrip(t *testing.T) {
-	parts := []string{`{"text":"unsigned"}`, `{"text":"signed"}`, `{"thoughtSignature":"` + capturedGeminiThinkingSignature + `"}`}
+	parts := []string{`{"text":"first "}`, `{"text":"second"}`, `{"thoughtSignature":"` + capturedGeminiThinkingSignature + `"}`}
 	for _, mode := range []string{"nonstream", "stream same chunk", "stream split chunks"} {
 		t.Run(mode, func(t *testing.T) {
 			content := geminiClaudeContentForParts(t, parts, mode)
 			output := replayGeminiClaudeContent(t, content)
 			actual := ojson.GetBytes(output, "contents.0.parts").Array()
-			if len(actual) != 2 || actual[0].Get("text").String() != "unsigned" || actual[0].Get("thoughtSignature").Exists() || actual[1].Get("text").String() != "signed" || actual[1].Get("thoughtSignature").String() != capturedGeminiThinkingSignature {
-				t.Fatalf("delayed signature changed native text part contents: %s; content=%s", output, content)
+			if len(actual) != 1 || actual[0].Get("text").String() != "first second" || actual[0].Get("thoughtSignature").String() != capturedGeminiThinkingSignature {
+				t.Fatalf("delayed signature should bind to coalesced unsigned text block: %s; content=%s", output, content)
 			}
 		})
 	}

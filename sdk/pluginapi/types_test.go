@@ -2,11 +2,13 @@ package pluginapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type compileTimePlugin struct{}
@@ -423,6 +425,7 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 		wantReject   bool
 		wantCode     string
 		wantReason   string
+		wantExclude  []string
 	}{
 		{
 			name:         "legacy pascal case auth id",
@@ -472,6 +475,19 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 			wantCode:    "policy_violation",
 			wantReason:  "blocked by policy",
 		},
+		{
+			name:        "pascal case exclude candidates unhandled",
+			payload:     `{"Handled":false,"ExcludeCandidates":["ag-1","ag-2"]}`,
+			wantHandled: false,
+			wantExclude: []string{"ag-1", "ag-2"},
+		},
+		{
+			name:         "snake case exclude candidates with delegate",
+			payload:      `{"handled":true,"delegate_builtin":"round-robin","exclude_candidates":["ag-1","ag-3"]}`,
+			wantHandled:  true,
+			wantDelegate: "round-robin",
+			wantExclude:  []string{"ag-1", "ag-3"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -498,22 +514,26 @@ func TestSchedulerPickResponseUnmarshalJSONCompatibility(t *testing.T) {
 			if resp.RejectReason != tc.wantReason {
 				t.Fatalf("RejectReason = %q, want %q", resp.RejectReason, tc.wantReason)
 			}
+			if !slices.Equal(resp.ExcludeCandidates, tc.wantExclude) {
+				t.Fatalf("ExcludeCandidates = %v, want %v", resp.ExcludeCandidates, tc.wantExclude)
+			}
 		})
 	}
 }
 
 func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T) {
-	// Verify that explicit false or empty string in incoming JSON correctly overwrites pre-existing true/non-empty values.
+	// Verify that explicit false, empty string, or empty slice in incoming JSON correctly overwrites pre-existing values.
 	resp := SchedulerPickResponse{
-		AuthID:          "old-auth",
-		DelegateBuiltin: "old-delegate",
-		Handled:         true,
-		Reject:          true,
-		RejectCode:      "old-code",
-		RejectReason:    "old-reason",
+		AuthID:            "old-auth",
+		DelegateBuiltin:   "old-delegate",
+		Handled:           true,
+		Reject:            true,
+		RejectCode:        "old-code",
+		RejectReason:      "old-reason",
+		ExcludeCandidates: []string{"old-excluded"},
 	}
 
-	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`
+	payload := `{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":"","exclude_candidates":[]}`
 	if errUnmarshal := json.Unmarshal([]byte(payload), &resp); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
 	}
@@ -536,11 +556,26 @@ func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T
 	if resp.RejectReason != "" {
 		t.Fatalf("RejectReason = %q, want empty", resp.RejectReason)
 	}
+	if len(resp.ExcludeCandidates) != 0 {
+		t.Fatalf("ExcludeCandidates = %v, want empty", resp.ExcludeCandidates)
+	}
+
+	// Verify that explicit null in incoming JSON clears existing ExcludeCandidates.
+	respNull := SchedulerPickResponse{
+		ExcludeCandidates: []string{"old-excluded"},
+	}
+	if errUnmarshal := json.Unmarshal([]byte(`{"exclude_candidates":null}`), &respNull); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal(null) error = %v", errUnmarshal)
+	}
+	if len(respNull.ExcludeCandidates) != 0 {
+		t.Fatalf("ExcludeCandidates after null = %v, want empty", respNull.ExcludeCandidates)
+	}
 
 	// Verify that omitting fields in incoming JSON leaves existing fields intact.
 	resp2 := SchedulerPickResponse{
-		AuthID:  "keep-auth",
-		Handled: true,
+		AuthID:            "keep-auth",
+		Handled:           true,
+		ExcludeCandidates: []string{"keep-excluded"},
 	}
 	if errUnmarshal := json.Unmarshal([]byte(`{"reject":true}`), &resp2); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
@@ -553,6 +588,17 @@ func TestSchedulerPickResponseUnmarshalJSONOverwritesExistingFields(t *testing.T
 	}
 	if !resp2.Reject {
 		t.Fatalf("Reject = %v, want true", resp2.Reject)
+	}
+	if !slices.Equal(resp2.ExcludeCandidates, []string{"keep-excluded"}) {
+		t.Fatalf("ExcludeCandidates = %v, want [keep-excluded]", resp2.ExcludeCandidates)
+	}
+
+	// Verify that non-array or non-string exclude_candidates payloads fail cleanly.
+	for _, badPayload := range []string{`{"exclude_candidates":"not-array"}`, `{"exclude_candidates":["ok",123]}`} {
+		var badResp SchedulerPickResponse
+		if errBad := json.Unmarshal([]byte(badPayload), &badResp); errBad == nil {
+			t.Fatalf("json.Unmarshal(%s) error = nil, want error", badPayload)
+		}
 	}
 }
 
@@ -941,6 +987,65 @@ func TestUsageDetailModalityTokenCounters(t *testing.T) {
 	}
 }
 
+func TestUsageDetailCacheCreationTTLCounters(t *testing.T) {
+	int64Ptr := func(v int64) *int64 { return &v }
+	record := UsageRecord{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: UsageDetail{
+			InputTokens:           100,
+			OutputTokens:          50,
+			CacheCreationTokens:   1500,
+			TotalTokens:           1650,
+			CacheCreation5mTokens: int64Ptr(1000),
+			CacheCreation1hTokens: int64Ptr(500),
+		},
+	}
+
+	raw, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshal)
+	}
+	var decoded UsageRecord
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshal)
+	}
+	got := decoded.Detail
+	if got.CacheCreationTokens != 1500 {
+		t.Fatalf("CacheCreationTokens = %d, want 1500", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 1000 {
+		t.Fatalf("CacheCreation5mTokens = %v, want 1000", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || *got.CacheCreation1hTokens != 500 {
+		t.Fatalf("CacheCreation1hTokens = %v, want 500", got.CacheCreation1hTokens)
+	}
+
+	zeroAndNil := UsageRecord{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: UsageDetail{
+			CacheCreationTokens:   0,
+			CacheCreation5mTokens: int64Ptr(0),
+			CacheCreation1hTokens: nil,
+		},
+	}
+	rawZero, errMarshalZero := json.Marshal(zeroAndNil)
+	if errMarshalZero != nil {
+		t.Fatalf("Marshal(zeroAndNil) error = %v", errMarshalZero)
+	}
+	var decodedZero UsageRecord
+	if errUnmarshalZero := json.Unmarshal(rawZero, &decodedZero); errUnmarshalZero != nil {
+		t.Fatalf("Unmarshal(zeroAndNil) error = %v", errUnmarshalZero)
+	}
+	if decodedZero.Detail.CacheCreation5mTokens == nil || *decodedZero.Detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("CacheCreation5mTokens = %v, want explicit 0", decodedZero.Detail.CacheCreation5mTokens)
+	}
+	if decodedZero.Detail.CacheCreation1hTokens != nil {
+		t.Fatalf("CacheCreation1hTokens = %v, want nil", decodedZero.Detail.CacheCreation1hTokens)
+	}
+}
+
 func TestQuotaPayloadJSON(t *testing.T) {
 	// Test camelCase input
 	camelJSON := []byte(`{
@@ -1070,5 +1175,67 @@ func TestHostAuthModelsTypes(t *testing.T) {
 		decodedResp.Credentials[0].Provider != "codex" ||
 		len(decodedResp.Credentials[0].Models) != 2 {
 		t.Fatalf("decoded response = %#v, want %#v", decodedResp, resp)
+	}
+}
+
+func TestUsageAttributionAndExecutorResponsesJSON(t *testing.T) {
+	attr := UsageAttribution{
+		AuthIndex: "idx-1",
+		AuthType:  "oauth",
+		Source:    "acct@example.com",
+	}
+	raw, errMarshal := json.Marshal(attr)
+	if errMarshal != nil {
+		t.Fatalf("marshal UsageAttribution error = %v", errMarshal)
+	}
+	var decodedMap map[string]string
+	if errUnmarshalMap := json.Unmarshal(raw, &decodedMap); errUnmarshalMap != nil {
+		t.Fatalf("unmarshal UsageAttribution map error = %v", errUnmarshalMap)
+	}
+	for key, want := range map[string]string{
+		"auth_index": attr.AuthIndex,
+		"auth_type":  attr.AuthType,
+		"source":     attr.Source,
+	} {
+		if decodedMap[key] != want {
+			t.Fatalf("decodedMap[%q] = %q, want %q (raw=%s)", key, decodedMap[key], want, raw)
+		}
+	}
+
+	var decoded UsageAttribution
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("unmarshal UsageAttribution error = %v", errUnmarshal)
+	}
+	if decoded != attr {
+		t.Fatalf("decoded = %+v, want %+v", decoded, attr)
+	}
+
+	resp := ExecutorResponse{
+		Payload:     []byte(`{"ok":true}`),
+		Headers:     http.Header{"Content-Type": []string{"application/json"}},
+		Attribution: &attr,
+	}
+	respBytes, errRespMarshal := json.Marshal(resp)
+	if errRespMarshal != nil {
+		t.Fatalf("marshal ExecutorResponse error = %v", errRespMarshal)
+	}
+	var decodedResp ExecutorResponse
+	if errRespUnmarshal := json.Unmarshal(respBytes, &decodedResp); errRespUnmarshal != nil {
+		t.Fatalf("unmarshal ExecutorResponse error = %v", errRespUnmarshal)
+	}
+	if decodedResp.Attribution == nil || *decodedResp.Attribution != attr {
+		t.Fatalf("decodedResp.Attribution = %+v, want %+v", decodedResp.Attribution, attr)
+	}
+
+	streamJSON := []byte(`{"attribution":{"auth_index":"idx-stream","auth_type":"oauth","source":"stream-u"}}`)
+	var decodedStream ExecutorStreamResponse
+	if errStreamUnmarshal := json.Unmarshal(streamJSON, &decodedStream); errStreamUnmarshal != nil {
+		t.Fatalf("unmarshal ExecutorStreamResponse error = %v", errStreamUnmarshal)
+	}
+	if decodedStream.Attribution == nil ||
+		decodedStream.Attribution.AuthIndex != "idx-stream" ||
+		decodedStream.Attribution.AuthType != "oauth" ||
+		decodedStream.Attribution.Source != "stream-u" {
+		t.Fatalf("decodedStream = %+v", decodedStream)
 	}
 }
