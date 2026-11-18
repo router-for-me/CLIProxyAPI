@@ -150,6 +150,8 @@ func (h *ClaudeCodeAPIHandler) runCCSAdvisor(c *gin.Context, req ccsadvisor.Mess
 	alt := h.GetAlt(c)
 	var upstreamErr *interfaces.ErrorMessage
 	var headers http.Header
+	stopKeepAlive := h.startAdvisorKeepAlive(c, ctx, stream)
+	defer stopKeepAlive()
 	result, err := ccsadvisor.Run(ctx, req, advisor, func(callCtx context.Context, step ccsadvisor.Message) (ccsadvisor.Message, error) {
 		if err := callCtx.Err(); err != nil {
 			return nil, err
@@ -193,6 +195,7 @@ func (h *ClaudeCodeAPIHandler) runCCSAdvisor(c *gin.Context, req ccsadvisor.Mess
 		headers = resp.Headers
 		return message, nil
 	})
+	stopKeepAlive() // Join the heartbeat writer before accessing the response again.
 	if ctx.Err() != nil {
 		return
 	}
@@ -200,19 +203,72 @@ func (h *ClaudeCodeAPIHandler) runCCSAdvisor(c *gin.Context, req ccsadvisor.Mess
 		if upstreamErr == nil {
 			upstreamErr = &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		}
-		h.WriteErrorResponse(c, upstreamErr)
+		if !c.Writer.Written() {
+			h.WriteErrorResponse(c, upstreamErr)
+			return
+		}
+		body, _ := json.Marshal(h.toClaudeError(upstreamErr))
+		if stream {
+			h.LoggingAPIResponseError(c, upstreamErr)
+			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", body)
+			c.Writer.Flush()
+		} else {
+			appendClaudeAPIResponse(c, body)
+			_, _ = c.Writer.Write(body)
+		}
 		return
 	}
-	if !stream {
-		c.Header("Content-Type", "application/json")
+	if !c.Writer.Written() {
+		if stream {
+			setAdvisorSSEHeaders(c)
+		}
 		handlers.WriteUpstreamHeaders(c.Writer.Header(), headers)
+	}
+	if !stream {
 		c.JSON(http.StatusOK, result)
 		return
 	}
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	handlers.WriteUpstreamHeaders(c.Writer.Header(), headers)
 	if err := writeAdvisorEvents(ctx, c.Writer, result); err != nil && ctx.Err() == nil {
 		h.LoggingAPIResponseError(c, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err})
+	}
+}
+
+func setAdvisorSSEHeaders(c *gin.Context) {
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+}
+
+func (h *ClaudeCodeAPIHandler) startAdvisorKeepAlive(c *gin.Context, ctx context.Context, stream bool) func() {
+	if !stream {
+		c.Header("Content-Type", "application/json")
+		return h.StartNonStreamingKeepAlive(c, ctx)
+	}
+	ticks, stopTicker := handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	if ticks == nil {
+		return stopTicker
+	}
+	ctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer stopTicker()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticks:
+				if !c.Writer.Written() {
+					setAdvisorSSEHeaders(c)
+				}
+				if _, err := c.Writer.WriteString(": keep-alive\n\n"); err != nil {
+					return
+				}
+				c.Writer.Flush()
+			}
+		}
+	}()
+	return func() {
+		stop()
+		<-done
 	}
 }
