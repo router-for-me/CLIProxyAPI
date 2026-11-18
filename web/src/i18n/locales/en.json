@@ -356,8 +356,6 @@
     "models_empty_desc": "This credential may not be loaded by the server yet, or no models are bound to it.",
     "models_unsupported": "This feature is not supported in the current version",
     "models_unsupported_desc": "Please update CLI Proxy API to the latest version and try again",
-    "models_excluded_badge": "Disabled",
-    "models_excluded_hint": "This OAuth model is disabled",
     "status_toggle_label": "Enabled",
     "status_enabled_success": "\"{{name}}\" enabled",
     "status_disabled_success": "\"{{name}}\" disabled",

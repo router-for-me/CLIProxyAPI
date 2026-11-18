@@ -105,7 +105,6 @@ export function AuthFilesPage() {
     modelsLoading,
     modelsList,
     modelsFileName,
-    modelsFileType,
     modelsError,
     showModels,
     closeModelsModal,
@@ -791,11 +790,9 @@ export function AuthFilesPage() {
       <AuthFileModelsModal
         open={modelsModalOpen}
         fileName={modelsFileName}
-        fileType={modelsFileType}
         loading={modelsLoading}
         error={modelsError}
         models={modelsList}
-        excluded={excluded}
         onClose={closeModelsModal}
         onCopyText={copyTextWithNotification}
       />

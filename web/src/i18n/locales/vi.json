@@ -308,8 +308,6 @@
     "models_empty_desc": "Credential này có thể chưa được máy chủ nạp, hoặc chưa có model nào gắn với nó.",
     "models_unsupported": "Phiên bản hiện tại không hỗ trợ tính năng này",
     "models_unsupported_desc": "Vui lòng cập nhật CLI Proxy API lên phiên bản mới nhất và thử lại",
-    "models_excluded_badge": "Đã tắt",
-    "models_excluded_hint": "Model OAuth này đã bị tắt",
     "status_toggle_label": "Đang bật",
     "status_enabled_success": "\"{{name}}\" đã được bật",
     "status_disabled_success": "\"{{name}}\" đã được tắt",

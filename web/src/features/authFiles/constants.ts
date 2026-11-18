@@ -256,25 +256,3 @@ export const formatModified = (item: AuthFileItem): string => {
       : (parseTimestamp(raw) ?? new Date(String(raw)));
   return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString();
 };
-
-// 检查模型是否被 OAuth 排除
-export const isModelExcluded = (
-  modelId: string,
-  providerType: string,
-  excluded: Record<string, string[]>
-): boolean => {
-  const providerKey = normalizeProviderKey(providerType);
-  const excludedModels = excluded[providerKey] || excluded[providerType] || [];
-  return excludedModels.some((pattern) => {
-    if (pattern.includes('*')) {
-      // 支持通配符匹配：先转义正则特殊字符，再将 * 视为通配符
-      const regexSafePattern = pattern
-        .split('*')
-        .map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        .join('.*');
-      const regex = new RegExp(`^${regexSafePattern}$`, 'i');
-      return regex.test(modelId);
-    }
-    return pattern.toLowerCase() === modelId.toLowerCase();
-  });
-};

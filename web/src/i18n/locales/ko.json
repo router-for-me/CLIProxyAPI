@@ -356,8 +356,6 @@
     "models_empty_desc": "서버에서 아직 이 자격 증명을 로드하지 않았거나 연결된 모델이 없을 수 있습니다.",
     "models_unsupported": "현재 버전에서는 이 기능을 지원하지 않습니다",
     "models_unsupported_desc": "CLI Proxy API를 최신 버전으로 업데이트한 후 다시 시도하세요",
-    "models_excluded_badge": "비활성화됨",
-    "models_excluded_hint": "이 OAuth 모델은 비활성화되어 있습니다",
     "status_toggle_label": "활성화",
     "status_enabled_success": "\"{{name}}\"을(를) 활성화했습니다",
     "status_disabled_success": "\"{{name}}\"을(를) 비활성화했습니다",

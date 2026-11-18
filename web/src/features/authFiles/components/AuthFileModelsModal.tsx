@@ -3,24 +3,21 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import type { AuthFileModelItem } from '@/features/authFiles/constants';
-import { isModelExcluded } from '@/features/authFiles/constants';
 import styles from './AuthFileModelsModal.module.scss';
 
 export type AuthFileModelsModalProps = {
   open: boolean;
   fileName: string;
-  fileType: string;
   loading: boolean;
   error: 'unsupported' | null;
   models: AuthFileModelItem[];
-  excluded: Record<string, string[]>;
   onClose: () => void;
   onCopyText: (text: string) => void;
 };
 
 export function AuthFileModelsModal(props: AuthFileModelsModalProps) {
   const { t } = useTranslation();
-  const { open, fileName, fileType, loading, error, models, excluded, onClose, onCopyText } = props;
+  const { open, fileName, loading, error, models, onClose, onCopyText } = props;
 
   return (
     <Modal
@@ -53,36 +50,22 @@ export function AuthFileModelsModal(props: AuthFileModelsModalProps) {
         />
       ) : (
         <div className={styles.list}>
-          {models.map((model) => {
-            const excludedModel = isModelExcluded(model.id, fileType, excluded);
-            return (
-              <div
-                key={model.id}
-                className={`${styles.item} ${excludedModel ? styles.itemExcluded : ''}`}
-                onClick={() => {
-                  onCopyText(model.id);
-                }}
-                title={
-                  excludedModel
-                    ? t('auth_files.models_excluded_hint', {
-                        defaultValue: '此 OAuth 模型已被禁用',
-                      })
-                    : t('common.copy', { defaultValue: '点击复制' })
-                }
-              >
-                <span className={styles.modelId}>{model.id}</span>
-                {model.display_name && model.display_name !== model.id && (
-                  <span className={styles.modelDisplayName}>{model.display_name}</span>
-                )}
-                {model.type && <span className={styles.modelType}>{model.type}</span>}
-                {excludedModel && (
-                  <span className={styles.excludedBadge}>
-                    {t('auth_files.models_excluded_badge', { defaultValue: '已禁用' })}
-                  </span>
-                )}
-              </div>
-            );
-          })}
+          {models.map((model) => (
+            <div
+              key={model.id}
+              className={styles.item}
+              onClick={() => {
+                onCopyText(model.id);
+              }}
+              title={t('common.copy', { defaultValue: '点击复制' })}
+            >
+              <span className={styles.modelId}>{model.id}</span>
+              {model.display_name && model.display_name !== model.id && (
+                <span className={styles.modelDisplayName}>{model.display_name}</span>
+              )}
+              {model.type && <span className={styles.modelType}>{model.type}</span>}
+            </div>
+          ))}
         </div>
       )}
     </Modal>

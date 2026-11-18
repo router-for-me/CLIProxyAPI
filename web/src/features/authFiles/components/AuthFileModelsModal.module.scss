@@ -37,10 +37,6 @@
   }
 }
 
-.itemExcluded {
-  opacity: 0.55;
-}
-
 .modelId {
   font-family: $font-mono;
   font-size: 12.5px;
@@ -65,18 +61,6 @@
   padding: 1px 6px;
   border-radius: $radius-full;
   border: 1px solid var(--border-color);
-}
-
-.excludedBadge {
-  margin-left: auto;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--failure-badge-text);
-  background: var(--failure-badge-bg);
-  border: 1px solid var(--failure-badge-border);
-  border-radius: $radius-full;
-  padding: 1px 7px;
-  white-space: nowrap;
 }
 
 @media (prefers-reduced-motion: reduce) {

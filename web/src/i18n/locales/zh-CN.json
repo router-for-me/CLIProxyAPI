@@ -354,8 +354,6 @@
     "models_empty_desc": "该认证凭证可能尚未被服务器加载或没有绑定任何模型",
     "models_unsupported": "当前版本不支持此功能",
     "models_unsupported_desc": "请更新 CLI Proxy API 到最新版本后重试",
-    "models_excluded_badge": "已禁用",
-    "models_excluded_hint": "此 OAuth 模型已被禁用",
     "status_toggle_label": "启用",
     "status_enabled_success": "已启用 \"{{name}}\"",
     "status_disabled_success": "已停用 \"{{name}}\"",

@@ -12,7 +12,6 @@ export type UseAuthFilesModelsResult = {
   modelsLoading: boolean;
   modelsList: AuthFileModelItem[];
   modelsFileName: string;
-  modelsFileType: string;
   modelsError: ModelsError;
   showModels: (item: AuthFileItem) => Promise<void>;
   closeModelsModal: () => void;
@@ -28,7 +27,6 @@ export function useAuthFilesModels(): UseAuthFilesModelsResult {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsList, setModelsList] = useState<AuthFileModelItem[]>([]);
   const [modelsFileName, setModelsFileName] = useState('');
-  const [modelsFileType, setModelsFileType] = useState('');
   const [modelsError, setModelsError] = useState<ModelsError>(null);
   const modelsCacheRef = useRef<Map<string, AuthFileModelItem[]>>(new Map());
   const modelsCacheVersionRef = useRef(0);
@@ -60,7 +58,6 @@ export function useAuthFilesModels(): UseAuthFilesModelsResult {
       const requestId = ++activeModelsRequestIdRef.current;
 
       setModelsFileName(item.name);
-      setModelsFileType(item.type || '');
       setModelsList([]);
       setModelsError(null);
       setModelsModalOpen(true);
@@ -110,7 +107,6 @@ export function useAuthFilesModels(): UseAuthFilesModelsResult {
     modelsLoading,
     modelsList,
     modelsFileName,
-    modelsFileType,
     modelsError,
     showModels,
     closeModelsModal,

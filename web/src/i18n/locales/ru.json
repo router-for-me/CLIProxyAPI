@@ -359,8 +359,6 @@
     "models_empty_desc": "Возможно, учётные данные ещё не загружены сервером или к ним не привязаны модели.",
     "models_unsupported": "Функция не поддерживается в текущей версии",
     "models_unsupported_desc": "Обновите CLI Proxy API до последней версии и повторите попытку",
-    "models_excluded_badge": "Отключена",
-    "models_excluded_hint": "Эта OAuth-модель отключена",
     "status_toggle_label": "Включено",
     "status_enabled_success": "\"{{name}}\" включён",
     "status_disabled_success": "\"{{name}}\" отключён",
