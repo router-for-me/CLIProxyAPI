@@ -836,7 +836,37 @@ func sanitizeKiroHistory(history []KiroHistoryItem, currentToolResultIDs map[str
 		}
 		cleaned = append(cleaned, msg)
 	}
-	return trimLeadingAssistantHistory(cleaned)
+	cleaned = trimLeadingAssistantHistory(cleaned)
+	return mergeAdjacentHistoryRoles(cleaned, len(currentToolResultIDs) > 0)
+}
+
+func mergeAdjacentHistoryRoles(history []KiroHistoryItem, hasCurrentToolResults bool) []KiroHistoryItem {
+	if len(history) == 0 {
+		return history
+	}
+	merged := make([]KiroHistoryItem, 0, len(history)+1)
+	for _, item := range history {
+		if len(merged) == 0 {
+			merged = append(merged, item)
+			continue
+		}
+		prev := &merged[len(merged)-1]
+		if prev.UserInputMessage != nil && item.UserInputMessage != nil {
+			prev.UserInputMessage.Content = joinHistoryText(prev.UserInputMessage.Content, item.UserInputMessage.Content)
+			prev.UserInputMessage.Images = append(prev.UserInputMessage.Images, item.UserInputMessage.Images...)
+			continue
+		}
+		if prev.AssistantResponseMessage != nil && item.AssistantResponseMessage != nil {
+			prev.AssistantResponseMessage.Content = joinHistoryText(prev.AssistantResponseMessage.Content, item.AssistantResponseMessage.Content)
+			prev.AssistantResponseMessage.ToolUses = append(prev.AssistantResponseMessage.ToolUses, item.AssistantResponseMessage.ToolUses...)
+			continue
+		}
+		merged = append(merged, item)
+	}
+	if len(merged) > 0 && merged[len(merged)-1].UserInputMessage != nil && !hasCurrentToolResults {
+		merged = append(merged, KiroHistoryItem{AssistantResponseMessage: &KiroAssistantMessage{Content: "Understood."}})
+	}
+	return merged
 }
 
 func summarizeToolUses(toolUses []KiroToolUse) string {

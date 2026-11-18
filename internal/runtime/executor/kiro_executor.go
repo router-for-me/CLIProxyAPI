@@ -685,10 +685,10 @@ func classifyKiroStreamError(err error) error {
 	if errors.Is(err, kiroeventstream.ErrEmptyKiroStream) ||
 		errors.Is(err, kiroeventstream.ErrUnexpectedEOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) {
-		return kiroRequestScopedError{statusErr: statusErr{code: http.StatusRequestTimeout, msg: err.Error()}}
+		return kiroRequestScopedError{statusErr: statusErr{code: http.StatusUnprocessableEntity, msg: err.Error()}}
 	}
 	if errors.Is(err, kiroeventstream.ErrIncompleteKiroToolInput) {
-		return kiroRequestScopedError{statusErr: statusErr{code: http.StatusBadGateway, msg: err.Error()}}
+		return kiroRequestScopedError{statusErr: statusErr{code: http.StatusUnprocessableEntity, msg: err.Error()}}
 	}
 	if errors.Is(err, kiroeventstream.ErrKiroEventStreamUpstream) {
 		lower := strings.ToLower(err.Error())
@@ -710,7 +710,7 @@ func classifyKiroStreamError(err error) error {
 			strings.Contains(lower, "bad request") {
 			return kiroRequestScopedError{statusErr: statusErr{code: http.StatusBadRequest, msg: err.Error()}}
 		}
-		return kiroRequestScopedError{statusErr: statusErr{code: http.StatusBadGateway, msg: err.Error()}}
+		return kiroRequestScopedError{statusErr: statusErr{code: http.StatusUnprocessableEntity, msg: err.Error()}}
 	}
 	return err
 }
@@ -821,6 +821,9 @@ func streamOpenAIFromKiro(ctx context.Context, body io.Reader, retryOpen func() 
 		},
 		OnCredits: func(value float64) {
 			credits = value
+		},
+		OnStopReason: func(reason string) {
+			finishReason = mapOpenAIFinishReason(reason, toolIndex)
 		},
 	})
 	if errParse != nil {

@@ -164,3 +164,33 @@ func TestParseEventStreamTrackedInvalidStateEvent(t *testing.T) {
 		t.Fatalf("expected emitted=false")
 	}
 }
+
+func TestParseEventStreamTrackedMetadataOnlyDefaultsToRefusalStopReason(t *testing.T) {
+	headers := map[string]string{
+		":message-type": "event",
+		":event-type":   "meteringEvent",
+	}
+	frame := createTestEventStreamFrame(headers, []byte(`{"usage":0.05}`))
+	var stopReason string
+	var credits float64
+	emitted, err := ParseEventStreamTracked(bytes.NewReader(frame), &StreamCallback{
+		OnStopReason: func(reason string) {
+			stopReason = reason
+		},
+		OnCredits: func(v float64) {
+			credits = v
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected nil error for metadata-only refusal stream, got %v", err)
+	}
+	if emitted {
+		t.Fatalf("expected emitted=false")
+	}
+	if stopReason != "refusal" {
+		t.Fatalf("expected stopReason 'refusal', got %q", stopReason)
+	}
+	if credits != 0.05 {
+		t.Fatalf("expected credits 0.05, got %v", credits)
+	}
+}

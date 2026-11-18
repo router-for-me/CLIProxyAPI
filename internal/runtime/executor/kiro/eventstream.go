@@ -279,7 +279,9 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 	var inputTokens, outputTokens int
 	var totalCredits float64
 	var contextUsagePercentages []float64
+	var sawFrame bool
 	var sawOutput bool
+	var lastStopReason string
 	pending := &pendingToolUses{}
 	trackedCallback := *callback
 	originalOnToolUse := trackedCallback.OnToolUse
@@ -300,6 +302,7 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 			}
 			return emitted, errFrame
 		}
+		sawFrame = true
 
 		event := make(map[string]any)
 		if len(frame.Payload) > 0 {
@@ -314,6 +317,12 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 		}
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
+		if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
+			lastStopReason = reason
+			if callback.OnStopReason != nil {
+				callback.OnStopReason(reason)
+			}
+		}
 
 		switch frame.EventType() {
 		case "assistantResponseEvent", "codeEvent":
@@ -356,14 +365,6 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 			if pct, ok := numberAsFloat(event["contextUsagePercentage"]); ok {
 				contextUsagePercentages = append(contextUsagePercentages, pct)
 			}
-		case "metadataEvent":
-			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
-				callback.OnStopReason(reason)
-			}
-		case "messageStopEvent":
-			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" && callback.OnStopReason != nil {
-				callback.OnStopReason(reason)
-			}
 		}
 	}
 
@@ -371,7 +372,15 @@ func ParseEventStreamTracked(body io.Reader, callback *StreamCallback) (emitted 
 		return emitted, err
 	}
 	if !sawOutput {
-		return emitted, ErrEmptyKiroStream
+		if !sawFrame {
+			return emitted, ErrEmptyKiroStream
+		}
+		if lastStopReason == "" {
+			lastStopReason = "refusal"
+			if callback.OnStopReason != nil {
+				callback.OnStopReason(lastStopReason)
+			}
+		}
 	}
 	if callback.OnCredits != nil && totalCredits > 0 {
 		callback.OnCredits(totalCredits)

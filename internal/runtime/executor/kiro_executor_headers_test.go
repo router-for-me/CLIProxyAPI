@@ -62,8 +62,8 @@ func TestClassifyKiroStreamErrorIsRequestScoped(t *testing.T) {
 		t.Fatalf("expected ErrEmptyKiroStream to be request-scoped, got %T (%v)", emptyErr, emptyErr)
 	}
 	statusCoder, ok := emptyErr.(interface{ StatusCode() int })
-	if !ok || statusCoder.StatusCode() != http.StatusRequestTimeout {
-		t.Fatalf("expected status %d, got %v", http.StatusRequestTimeout, emptyErr)
+	if !ok || statusCoder.StatusCode() != http.StatusUnprocessableEntity {
+		t.Fatalf("expected status %d, got %v", http.StatusUnprocessableEntity, emptyErr)
 	}
 
 	contextErr := classifyKiroStreamError(fmt.Errorf("%w: CONTENT_LENGTH_EXCEEDS_THRESHOLD: Input is too long", kiroeventstream.ErrKiroEventStreamUpstream))
