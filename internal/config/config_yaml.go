@@ -433,8 +433,14 @@ func hasNonEmptySensitiveWordsReplace(node *yaml.Node) bool {
 	return false
 }
 
+// isPayloadReplacementsPath identifies replacement operands in the flattened save tree.
+// Empty strings in this subtree mean deletion, not an omitted default.
+func isPayloadReplacementsPath(path []string) bool {
+	return len(path) >= 3 && path[0] == "payload" && path[1] == "replace" && path[2] == "replacements"
+}
+
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
-	if isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) {
+	if isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) || isPayloadReplacementsPath(path) {
 		return false
 	}
 	if len(path) > 0 && path[len(path)-1] == "sensitive-words-replace" && node != nil && node.Kind == yaml.MappingNode && len(node.Content) > 0 {
@@ -522,7 +528,7 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 // pruneKnownDefaultsInNewNode removes default-valued descendants from a new node
 // before it is appended into the destination YAML tree.
 func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
-	if node == nil || isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) {
+	if node == nil || isPluginConfigsSubtreePath(path) || isSensitiveWordsReplaceEntryPath(path) || isSensitivePatternsReplaceEntryPath(path) || isPayloadReplacementsPath(path) {
 		return
 	}
 	if len(path) > 0 && (path[len(path)-1] == "sensitive-words-replace" || path[len(path)-1] == "sensitive-patterns-replace") {

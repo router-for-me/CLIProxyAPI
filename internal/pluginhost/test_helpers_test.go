@@ -2,13 +2,13 @@ package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -249,6 +249,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		resp, errPick := l.active.Capabilities.Scheduler.Pick(ctx, req)
 		if errPick != nil {
 			return nil, errPick
+		}
+		return marshalRPCResult(resp)
+	case pluginabi.MethodSchedulerContinuity:
+		if l.active.Capabilities.SchedulerContinuity == nil {
+			return nil, fmt.Errorf("missing scheduler continuity")
+		}
+		var req pluginapi.SchedulerContinuityRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errEval := l.active.Capabilities.SchedulerContinuity.Continuity(ctx, req)
+		if errEval != nil {
+			return nil, errEval
 		}
 		return marshalRPCResult(resp)
 	case pluginabi.MethodModelRoute:

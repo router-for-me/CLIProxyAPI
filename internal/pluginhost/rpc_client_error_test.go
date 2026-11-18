@@ -2,7 +2,6 @@ package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -10,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -31,18 +31,18 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 			Code:              "rate_limited",
 			Message:           "try later",
 			HTTPStatus:        http.StatusTooManyRequests,
-			RetryAfterSeconds: 37,
+			RetryAfterSeconds: 7,
 		},
 	})
 	if errDecode == nil {
 		t.Fatal("decodeEnvelopeResult returned nil error")
 	}
 	retryAfter, ok := errDecode.(interface{ RetryAfter() *time.Duration })
-	if !ok || retryAfter.RetryAfter() == nil || *retryAfter.RetryAfter() != 37*time.Second {
-		t.Fatalf("RetryAfter() = %#v, want 37s", retryAfter)
+	if !ok || retryAfter.RetryAfter() == nil || *retryAfter.RetryAfter() != 7*time.Second {
+		t.Fatalf("RetryAfter() = %#v, want 7s", retryAfter)
 	}
-	if got := coreauth.SafeResponseHeaders(errDecode).Get("Retry-After"); got != "37" {
-		t.Fatalf("SafeResponseHeaders Retry-After = %q, want 37", got)
+	if got := coreauth.SafeResponseHeaders(errDecode).Get("Retry-After"); got != "7" {
+		t.Fatalf("SafeResponseHeaders Retry-After = %q, want 7", got)
 	}
 
 	const (
@@ -92,16 +92,18 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 	if errExec == nil {
 		t.Fatal("authMgr.Execute returned nil error")
 	}
-	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "37" {
-		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 37", got)
+	// MarkResult clamps the 7s Retry-After hint up to the 10s quota cooldown
+	// floor for both the model state and the terminal pool Retry-After header.
+	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "10" {
+		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 10", got)
 	}
 	updated, okAuth := authMgr.GetByID(authID)
 	if !okAuth || updated == nil {
 		t.Fatalf("GetByID(%q) missing", authID)
 	}
 	state := updated.ModelStates[model]
-	if state == nil || state.NextRetryAfter.Before(before.Add(37*time.Second)) {
-		t.Fatalf("model NextRetryAfter = %v, want at least %v (37s cooldown)", state, before.Add(37*time.Second))
+	if state == nil || !state.NextRetryAfter.After(before.Add(9*time.Second)) {
+		t.Fatalf("model NextRetryAfter = %v, want at least %v (10s cooldown floor)", state, before.Add(10*time.Second))
 	}
 }
 

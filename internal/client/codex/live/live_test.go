@@ -2,7 +2,6 @@ package live
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -794,8 +794,10 @@ func TestHandlerReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
 			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
 				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
 			}
-			if test.name == "response read failure" && (!strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error())) {
-				t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+			if test.name == "response read failure" {
+				if !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+					t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
+				}
 			}
 		})
 	}

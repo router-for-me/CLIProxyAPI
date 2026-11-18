@@ -291,7 +291,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 							// transparently retry on another credential, and report the status the
 							// upstream refused to put on the wire.
 							helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d buffered lines, failing over", bufferedFrames)
-							return nil, newCodexBootstrapOverloadErr(terminalBody)
+							if streamErr.StatusCode() == http.StatusTooManyRequests && streamErr.RetryAfter() != nil {
+								return nil, streamErr
+							}
+							return nil, newCodexBootstrapOverloadErrWithRetryAfter(terminalBody, streamErr.RetryAfter())
 						}
 						helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap overload rejection after %d lines / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					}
