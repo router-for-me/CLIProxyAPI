@@ -335,6 +335,13 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 			}
 		}
 	}
+	// Codex subscriptions default to the WebSocket transport, which cuts the
+	// per-turn round trip; an explicit "websockets" in the auth file wins.
+	if provider == "codex" && (ctx.Config == nil || ctx.Config.Codex.OAuthWebsocketsEnabled()) {
+		if _, set := metadata["websockets"]; !set {
+			a.Attributes["websockets"] = "true"
+		}
+	}
 	a.BindFileSnapshot(fullPath, data)
 	return []*coreauth.Auth{a}, false, nil
 }

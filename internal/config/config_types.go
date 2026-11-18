@@ -363,6 +363,14 @@ type CodexConfig struct {
 	// for Codex Sign in with ChatGPT (SIWC) OAuth authorization and API requests.
 	// Defaults to "CLIProxyAPI".
 	SignInWithChatGPTIdentifier string `yaml:"signin-with-chatgpt-identifier,omitempty" json:"signin-with-chatgpt-identifier,omitempty"`
+	// OAuthWebsockets makes Codex OAuth credentials use the upstream WebSocket transport
+	// when the auth file does not set "websockets" itself. Unset means enabled.
+	OAuthWebsockets *bool `yaml:"oauth-websockets,omitempty" json:"oauth-websockets,omitempty"`
+}
+
+// OAuthWebsocketsEnabled reports whether Codex OAuth credentials default to WebSockets.
+func (c *CodexConfig) OAuthWebsocketsEnabled() bool {
+	return c == nil || c.OAuthWebsockets == nil || *c.OAuthWebsockets
 }
 
 // WebsocketCompressionEnabled reports whether WebSocket compression is enabled.
@@ -565,7 +573,8 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "reset-first" (spend the credential whose weekly quota resets soonest first).
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
