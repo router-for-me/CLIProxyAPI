@@ -2,7 +2,6 @@ package cliproxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"

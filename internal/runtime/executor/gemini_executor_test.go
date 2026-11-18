@@ -1442,6 +1442,54 @@ func assertMalformedFunctionCallFailedUsage(t *testing.T, records <-chan usage.R
 	}
 }
 
+type malformedFunctionCallResultHook struct {
+	cliproxyauth.NoopHook
+	authID  string
+	results chan cliproxyauth.Result
+}
+
+func (h *malformedFunctionCallResultHook) OnResult(_ context.Context, result cliproxyauth.Result) {
+	if h == nil || result.AuthID != h.authID {
+		return
+	}
+	select {
+	case h.results <- result:
+	default:
+	}
+}
+
+func assertMalformedFunctionCallConductorResultUncooled(t *testing.T, manager *cliproxyauth.Manager, authID, model string, results <-chan cliproxyauth.Result) {
+	t.Helper()
+	var res cliproxyauth.Result
+	select {
+	case res = <-results:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for conductor result")
+	}
+	if res.Success || res.Error == nil {
+		t.Fatalf("conductor result = %+v, want failure with error", res)
+	}
+	if res.Error.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("conductor result HTTPStatus = %d, want 502; err=%+v", res.Error.HTTPStatus, res.Error)
+	}
+	if res.Error.Code != cliproxyauth.ErrorCodeTransientTransport {
+		t.Fatalf("conductor result Code = %q, want %q", res.Error.Code, cliproxyauth.ErrorCodeTransientTransport)
+	}
+	updated, okAuth := manager.GetByID(authID)
+	if !okAuth || updated == nil {
+		t.Fatalf("expected auth %s to remain registered", authID)
+	}
+	if updated.Failed != 1 || updated.Success != 0 {
+		t.Fatalf("auth counters = (Success=%d, Failed=%d), want (0, 1)", updated.Success, updated.Failed)
+	}
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+		t.Fatalf("zero-output 502 unexpectedly cooled auth: unavailable=%v next_retry_after=%v", updated.Unavailable, updated.NextRetryAfter)
+	}
+	if state := updated.ModelStates[model]; state != nil && (state.Unavailable || !state.NextRetryAfter.IsZero()) {
+		t.Fatalf("zero-output 502 unexpectedly cooled model %s: %+v", model, state)
+	}
+}
+
 func TestGeminiExecutorClaudeMalformedFunctionCallReturnsRetryableError(t *testing.T) {
 	malformedBody := `{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"MALFORMED_FUNCTION_CALL"}],"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":10,"thoughtsTokenCount":313,"totalTokenCount":443},"modelVersion":"gemini-4-argon"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1547,7 +1595,8 @@ func TestGeminiExecutorClaudeMalformedFunctionCallSplitUsageAndConductorFailure(
 		usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
 	})
 
-	manager := cliproxyauth.NewManager(nil, nil, nil)
+	resultHook := &malformedFunctionCallResultHook{authID: auth.ID, results: make(chan cliproxyauth.Result, 1)}
+	manager := cliproxyauth.NewManager(nil, nil, resultHook)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
@@ -1581,10 +1630,7 @@ func TestGeminiExecutorClaudeMalformedFunctionCallSplitUsageAndConductorFailure(
 		t.Fatal("expected manager.ExecuteStream to receive terminal chunk.Err")
 	}
 	assertMalformedFunctionCallFailedUsage(t, capture.records)
-	updated, okAuth := manager.GetByID(auth.ID)
-	if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
-		t.Fatalf("expected conductor to record failure on model state, got %+v", updated)
-	}
+	assertMalformedFunctionCallConductorResultUncooled(t, manager, auth.ID, "gemini-4-argon", resultHook.results)
 }
 
 func TestGeminiExecutorClaudeMalformedFunctionCallCancelAfterErrorPreservesUsageAndConductorFailure(t *testing.T) {
@@ -1615,7 +1661,8 @@ func TestGeminiExecutorClaudeMalformedFunctionCallCancelAfterErrorPreservesUsage
 		usage.RegisterNamedPlugin(t.Name(), malformedFunctionCallUsageNoop{})
 	})
 
-	manager := cliproxyauth.NewManager(nil, nil, nil)
+	resultHook := &malformedFunctionCallResultHook{authID: auth.ID, results: make(chan cliproxyauth.Result, 1)}
+	manager := cliproxyauth.NewManager(nil, nil, resultHook)
 	manager.RegisterExecutor(exec)
 	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 		t.Fatalf("Register() error = %v", errRegister)
@@ -1647,13 +1694,7 @@ func TestGeminiExecutorClaudeMalformedFunctionCallCancelAfterErrorPreservesUsage
 		}
 	}
 	assertMalformedFunctionCallFailedUsage(t, capture.records)
-	updated, okAuth := manager.GetByID(auth.ID)
-	if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
-		t.Fatalf("expected conductor to record failure on model state after client cancel on error event, got %+v", updated)
-	}
-	if updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus != http.StatusBadGateway {
-		t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
-	}
+	assertMalformedFunctionCallConductorResultUncooled(t, manager, auth.ID, "gemini-4-argon", resultHook.results)
 }
 
 func TestGeminiExecutorPromptFeedbackBlockWithoutCandidatesReturnsError(t *testing.T) {

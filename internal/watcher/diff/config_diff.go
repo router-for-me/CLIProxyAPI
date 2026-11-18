@@ -611,18 +611,12 @@ func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.
 	changes = appendPayloadRuleChanges(changes, "default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
 	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
 	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
-	changes = appendPayloadFilterRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	changes = appendPayloadRuleChanges(changes, "replace", oldPayload.Replace, newPayload.Replace)
+	changes = appendPayloadRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
 	return changes
 }
 
-func appendPayloadRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadRule) []string {
-	if reflect.DeepEqual(oldRules, newRules) {
-		return changes
-	}
-	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
-}
-
-func appendPayloadFilterRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadFilterRule) []string {
+func appendPayloadRuleChanges[T any](changes []string, section string, oldRules, newRules []T) []string {
 	if reflect.DeepEqual(oldRules, newRules) {
 		return changes
 	}

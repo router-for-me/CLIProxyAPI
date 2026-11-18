@@ -2,12 +2,13 @@ package pluginapi
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 type compileTimePlugin struct{}
@@ -986,6 +987,65 @@ func TestUsageDetailModalityTokenCounters(t *testing.T) {
 	}
 }
 
+func TestUsageDetailCacheCreationTTLCounters(t *testing.T) {
+	int64Ptr := func(v int64) *int64 { return &v }
+	record := UsageRecord{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: UsageDetail{
+			InputTokens:           100,
+			OutputTokens:          50,
+			CacheCreationTokens:   1500,
+			TotalTokens:           1650,
+			CacheCreation5mTokens: int64Ptr(1000),
+			CacheCreation1hTokens: int64Ptr(500),
+		},
+	}
+
+	raw, errMarshal := json.Marshal(record)
+	if errMarshal != nil {
+		t.Fatalf("Marshal(UsageRecord) error = %v", errMarshal)
+	}
+	var decoded UsageRecord
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("Unmarshal(UsageRecord) error = %v", errUnmarshal)
+	}
+	got := decoded.Detail
+	if got.CacheCreationTokens != 1500 {
+		t.Fatalf("CacheCreationTokens = %d, want 1500", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 1000 {
+		t.Fatalf("CacheCreation5mTokens = %v, want 1000", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || *got.CacheCreation1hTokens != 500 {
+		t.Fatalf("CacheCreation1hTokens = %v, want 500", got.CacheCreation1hTokens)
+	}
+
+	zeroAndNil := UsageRecord{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: UsageDetail{
+			CacheCreationTokens:   0,
+			CacheCreation5mTokens: int64Ptr(0),
+			CacheCreation1hTokens: nil,
+		},
+	}
+	rawZero, errMarshalZero := json.Marshal(zeroAndNil)
+	if errMarshalZero != nil {
+		t.Fatalf("Marshal(zeroAndNil) error = %v", errMarshalZero)
+	}
+	var decodedZero UsageRecord
+	if errUnmarshalZero := json.Unmarshal(rawZero, &decodedZero); errUnmarshalZero != nil {
+		t.Fatalf("Unmarshal(zeroAndNil) error = %v", errUnmarshalZero)
+	}
+	if decodedZero.Detail.CacheCreation5mTokens == nil || *decodedZero.Detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("CacheCreation5mTokens = %v, want explicit 0", decodedZero.Detail.CacheCreation5mTokens)
+	}
+	if decodedZero.Detail.CacheCreation1hTokens != nil {
+		t.Fatalf("CacheCreation1hTokens = %v, want nil", decodedZero.Detail.CacheCreation1hTokens)
+	}
+}
+
 func TestQuotaPayloadJSON(t *testing.T) {
 	// Test camelCase input
 	camelJSON := []byte(`{
@@ -1115,5 +1175,67 @@ func TestHostAuthModelsTypes(t *testing.T) {
 		decodedResp.Credentials[0].Provider != "codex" ||
 		len(decodedResp.Credentials[0].Models) != 2 {
 		t.Fatalf("decoded response = %#v, want %#v", decodedResp, resp)
+	}
+}
+
+func TestUsageAttributionAndExecutorResponsesJSON(t *testing.T) {
+	attr := UsageAttribution{
+		AuthIndex: "idx-1",
+		AuthType:  "oauth",
+		Source:    "acct@example.com",
+	}
+	raw, errMarshal := json.Marshal(attr)
+	if errMarshal != nil {
+		t.Fatalf("marshal UsageAttribution error = %v", errMarshal)
+	}
+	var decodedMap map[string]string
+	if errUnmarshalMap := json.Unmarshal(raw, &decodedMap); errUnmarshalMap != nil {
+		t.Fatalf("unmarshal UsageAttribution map error = %v", errUnmarshalMap)
+	}
+	for key, want := range map[string]string{
+		"auth_index": attr.AuthIndex,
+		"auth_type":  attr.AuthType,
+		"source":     attr.Source,
+	} {
+		if decodedMap[key] != want {
+			t.Fatalf("decodedMap[%q] = %q, want %q (raw=%s)", key, decodedMap[key], want, raw)
+		}
+	}
+
+	var decoded UsageAttribution
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("unmarshal UsageAttribution error = %v", errUnmarshal)
+	}
+	if decoded != attr {
+		t.Fatalf("decoded = %+v, want %+v", decoded, attr)
+	}
+
+	resp := ExecutorResponse{
+		Payload:     []byte(`{"ok":true}`),
+		Headers:     http.Header{"Content-Type": []string{"application/json"}},
+		Attribution: &attr,
+	}
+	respBytes, errRespMarshal := json.Marshal(resp)
+	if errRespMarshal != nil {
+		t.Fatalf("marshal ExecutorResponse error = %v", errRespMarshal)
+	}
+	var decodedResp ExecutorResponse
+	if errRespUnmarshal := json.Unmarshal(respBytes, &decodedResp); errRespUnmarshal != nil {
+		t.Fatalf("unmarshal ExecutorResponse error = %v", errRespUnmarshal)
+	}
+	if decodedResp.Attribution == nil || *decodedResp.Attribution != attr {
+		t.Fatalf("decodedResp.Attribution = %+v, want %+v", decodedResp.Attribution, attr)
+	}
+
+	streamJSON := []byte(`{"attribution":{"auth_index":"idx-stream","auth_type":"oauth","source":"stream-u"}}`)
+	var decodedStream ExecutorStreamResponse
+	if errStreamUnmarshal := json.Unmarshal(streamJSON, &decodedStream); errStreamUnmarshal != nil {
+		t.Fatalf("unmarshal ExecutorStreamResponse error = %v", errStreamUnmarshal)
+	}
+	if decodedStream.Attribution == nil ||
+		decodedStream.Attribution.AuthIndex != "idx-stream" ||
+		decodedStream.Attribution.AuthType != "oauth" ||
+		decodedStream.Attribution.Source != "stream-u" {
+		t.Fatalf("decodedStream = %+v", decodedStream)
 	}
 }

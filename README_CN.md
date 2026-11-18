@@ -319,6 +319,10 @@ Claude Code 状态栏，按当前 CPA 实例展示 Codex / Grok / Antigravity / 
 
 全双工实时语音伙伴，带一块边聊边画、可点击交互的 SVG/HTML 画布。同时依赖 CLIProxyAPI 的两项能力：Codex GPT-Live 1.1 媒体中继（`gpt-live-1-codex`，WebRTC + Sideband）负责语音和随时打断；`ultrafast` 档 Responses（`gpt-6.1-sol` / `gpt-6-astra`）负责在对话过程中实时生成和修改画布。
 
+### [Hyphantria](https://hyphantria.com)
+
+原生 macOS 原理图与 PCB 设计应用，具备 AI 辅助元器件创建、参考设计复用以及联合布局布线优化功能。原生支持 CLIProxyAPI，可将其 AI 辅助功能连接到您的 AI 提供商。
+
 > [!NOTE]  
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 

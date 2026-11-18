@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // defaultPricesJSON holds public list prices, in USD per one million tokens.

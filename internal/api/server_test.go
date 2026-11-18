@@ -3,7 +3,6 @@ package api
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	gin "github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -536,8 +536,8 @@ func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *tes
 	}
 	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
 	apiResponse, _ := rawAPIResponse.([]byte)
-	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
-		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
 	}
 }
 
@@ -2225,9 +2225,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
 		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
-	serviceTiers, ok := gpt55["service_tiers"].([]any)
-	if !ok || len(serviceTiers) != 1 {
-		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	wantServiceTiers := codexClientTestTemplate(t, "gpt-5.5")["service_tiers"]
+	if serviceTiers, ok := gpt55["service_tiers"].([]any); !ok || !reflect.DeepEqual(serviceTiers, wantServiceTiers) {
+		t.Fatalf("gpt-5.5 service_tiers = %#v, want template %#v", gpt55["service_tiers"], wantServiceTiers)
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")
@@ -2564,7 +2564,7 @@ func codexClientTestPriority(raw any) int {
 	}
 }
 
-func codexClientTestMaxTemplatePriority(t *testing.T) int {
+func codexClientTestTemplates(t *testing.T) []map[string]any {
 	t.Helper()
 	var payload struct {
 		Models []map[string]any `json:"models"`
@@ -2572,8 +2572,24 @@ func codexClientTestMaxTemplatePriority(t *testing.T) int {
 	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
 		t.Fatalf("parse Codex client model templates: %v", err)
 	}
+	return payload.Models
+}
+
+func codexClientTestTemplate(t *testing.T, slug string) map[string]any {
+	t.Helper()
+	for _, model := range codexClientTestTemplates(t) {
+		if model["slug"] == slug {
+			return model
+		}
+	}
+	t.Fatalf("Codex client model template %q not found", slug)
+	return nil
+}
+
+func codexClientTestMaxTemplatePriority(t *testing.T) int {
+	t.Helper()
 	maxPriority := 0
-	for _, model := range payload.Models {
+	for _, model := range codexClientTestTemplates(t) {
 		if priority := codexClientTestPriority(model["priority"]); priority > maxPriority {
 			maxPriority = priority
 		}

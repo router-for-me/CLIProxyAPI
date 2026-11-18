@@ -1,9 +1,10 @@
 package usagestats
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func mustJSON(t *testing.T, value any) []byte {

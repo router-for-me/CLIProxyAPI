@@ -3,7 +3,6 @@ package live
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
