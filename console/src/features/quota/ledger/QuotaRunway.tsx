@@ -19,7 +19,12 @@ import {
   QUOTA_PROGRESS_HIGH_THRESHOLD,
   QUOTA_PROGRESS_MEDIUM_THRESHOLD,
 } from '../components/QuotaMeter';
-import { maskCredentialName, type LedgerRow, type LedgerSummary } from './ledgerModel';
+import {
+  maskCredentialName,
+  weeklyRemaining,
+  type LedgerRow,
+  type LedgerSummary,
+} from './ledgerModel';
 import { RUNWAY_SPAN_MS, placeRunwayMarkers, runwayDayTicks } from './runwayModel';
 
 const DAY_FRACTION = (24 * 3_600_000) / RUNWAY_SPAN_MS;
@@ -61,7 +66,7 @@ function Marker({
   t: TFunction;
 }) {
   const { i18n } = useTranslation();
-  const remaining = row.primary?.remaining ?? null;
+  const remaining = weeklyRemaining(row);
   const name = showEmails ? row.entry.file.name : maskCredentialName(row.entry.file.name);
   const reset = buildResetDisplay(null, row.weeklyResetAtMs, now, i18n.resolvedLanguage);
   const percent = remaining === null ? '--' : Math.round(remaining);

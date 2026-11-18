@@ -184,15 +184,25 @@ export function buildLedgerRows(
     return a.entry.file.name.localeCompare(b.entry.file.name);
   });
 
+  // Any exhausted window (shared weekly, 5-hour) keeps routing off the account.
   const next = rows.find(
     (row) =>
       !row.entry.file.disabled &&
       row.primary !== null &&
       (row.primary.remaining ?? 0) > 0 &&
+      row.meters.every((meter) => meter.remaining !== 0) &&
       resetKey(row) !== Number.POSITIVE_INFINITY
   );
   if (next) next.nextUp = true;
   return rows;
+}
+
+/** What a row has left of its weekly quota: the tighter of its weekly windows. */
+export function weeklyRemaining(row: LedgerRow): number | null {
+  const known = row.meters
+    .filter((meter) => meter.id !== 'five-hour' && meter.remaining !== null)
+    .map((meter) => meter.remaining as number);
+  return known.length ? Math.min(...known) : null;
 }
 
 /** Aggregate a provider's rows into the summary card at the top of the ledger. */
@@ -214,7 +224,8 @@ export function buildLedgerSummary(provider: LedgerProvider, rows: LedgerRow[]):
 }
 
 /** Auth file name prefix before the email: `claude-`, `claude-<hash>-`, `codex-<id>-`. */
-const FILE_PREFIX = /^[a-z]+-(?:[0-9a-f]{8,}-)?/i;
+const FILE_PREFIX =
+  /^(?:claude|codex|gemini|vertex|aistudio|antigravity|xai|devin|kimi|meta|qwen|iflow)-(?:[0-9a-f]{8}-)?/;
 
 /**
  * Hide the identifying parts of every email in a credential name:

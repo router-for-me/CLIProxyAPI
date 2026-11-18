@@ -4,6 +4,7 @@ import {
   buildLedgerSummary,
   maskCredentialName,
   selectLedgerMeters,
+  weeklyRemaining,
 } from '@/features/quota/ledger/ledgerModel';
 import type { QuotaFileEntry } from '@/features/quota/logic';
 
@@ -91,6 +92,29 @@ describe('ledger rows', () => {
     expect(ordered[0].weeklyResetAtMs).toBe(NOW + 10 * HOUR);
   });
 
+  test('an exhausted shared weekly limit is never next up', () => {
+    const quota = (sharedUsed: number, hours: number) => ({
+      status: 'success',
+      windows: [
+        { id: 'seven-day', usedPercent: sharedUsed, resetAtMs: NOW + hours * HOUR },
+        { id: 'seven-day-fable', usedPercent: 0, resetAtMs: NOW + hours * HOUR },
+      ],
+    });
+    const byName: Record<string, unknown> = { 'x.json': quota(100, 5), 'y.json': quota(30, 50) };
+    const ordered = buildLedgerRows(
+      'claude',
+      [claude('x.json'), claude('y.json')],
+      (e) => byName[e.file.name],
+      NOW
+    );
+    expect(ordered.map((r) => [r.entry.file.name, r.nextUp])).toEqual([
+      ['x.json', false],
+      ['y.json', true],
+    ]);
+    expect(weeklyRemaining(ordered[0])).toBe(0);
+    expect(weeklyRemaining(ordered[1])).toBe(70);
+  });
+
   test('a five-hour window alone gives no weekly reset', () => {
     const [only] = buildLedgerRows(
       'codex',
@@ -122,6 +146,10 @@ describe('maskCredentialName', () => {
     expect(maskCredentialName('claude-0123abcd-jane-doe@example.com.json')).toBe(
       'claude-0123abcd-j•••@e•••.com.json'
     );
+  });
+
+  test('keeps no prefix that is not a provider', () => {
+    expect(maskCredentialName('jane-doe@example.com.json')).toBe('j•••@e•••.com.json');
   });
 
   test('leaves names without an email alone', () => {
