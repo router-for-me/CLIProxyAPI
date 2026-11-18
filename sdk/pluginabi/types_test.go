@@ -1,9 +1,10 @@
 package pluginabi
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestEnvelopeRoundTrip(t *testing.T) {

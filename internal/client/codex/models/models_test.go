@@ -2,10 +2,10 @@ package models
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
