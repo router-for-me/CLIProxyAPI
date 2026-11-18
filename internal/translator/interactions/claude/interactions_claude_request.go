@@ -231,12 +231,47 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 				sendable++
 			}
 		case "image", "document", "container_upload":
-			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
+			flushReminders := func() {
 				if pendingSystemReminders != nil && len(*pendingSystemReminders) > 0 {
 					flushContent()
 					*items = append(*items, *pendingSystemReminders...)
 					*pendingSystemReminders = nil
 				}
+			}
+			emitInteractionsText := func(text string) {
+				flushReminders()
+				partDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+				_ = partDoc.Set("text", text)
+				stepContent = append(stepContent, partDoc.Bytes())
+				sendable++
+			}
+			if partType == "document" {
+				if docText, ok := translatorcommon.ClaudeDocumentTextBlock(part); ok {
+					emitInteractionsText(docText)
+					return true
+				}
+				var onImageDrop func()
+				if drops != nil && role == "user" {
+					onImageDrop = func() { drops.Drop("image") }
+				}
+				if translatorcommon.ExpandClaudeContentDocument(
+					part,
+					emitInteractionsText,
+					func(img ojson.Result) ([]byte, bool) {
+						return claudeMediaPartToInteractions(img, "image")
+					},
+					func(mediaPart []byte) {
+						flushReminders()
+						stepContent = append(stepContent, mediaPart)
+						sendable++
+					},
+					onImageDrop,
+				) {
+					return true
+				}
+			}
+			if mediaPart, ok := claudeMediaPartToInteractions(part, partType); ok {
+				flushReminders()
 				stepContent = append(stepContent, mediaPart)
 				sendable++
 			} else if drops != nil && role == "user" {
@@ -269,13 +304,32 @@ func appendClaudeMessageToInteractions(items *[][]byte, pendingToolUseIDs *[]str
 
 func claudeMediaPartToInteractions(part ojson.Result, partType string) ([]byte, bool) {
 	source := part.Get("source")
+	sourceType := source.Get("type").String()
 	mimeType := source.Get("media_type").String()
+	if mimeType == "" {
+		mimeType = part.Get("mime_type").String()
+	}
+	if sourceType == "url" {
+		rawURL := strings.TrimSpace(source.Get("url").String())
+		if !translatorcommon.IsHTTPURL(rawURL) {
+			return nil, false
+		}
+		outDoc := ojson.NewDocString(`{"type":"","uri":""}`)
+		_ = outDoc.Set("type", partType)
+		_ = outDoc.Set("uri", rawURL)
+		if mimeType != "" {
+			_ = outDoc.Set("mime_type", mimeType)
+		} else if partType == "document" {
+			_ = outDoc.Set("mime_type", "application/pdf")
+		}
+		return outDoc.Bytes(), true
+	}
+	if sourceType != "" && sourceType != "base64" {
+		return nil, false
+	}
 	data := source.Get("data").String()
 	if data == "" {
 		data = part.Get("data").String()
-	}
-	if mimeType == "" {
-		mimeType = part.Get("mime_type").String()
 	}
 	if mimeType == "" || data == "" {
 		return nil, false

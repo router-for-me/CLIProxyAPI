@@ -1,10 +1,11 @@
 package tui
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestNewClientWithBaseURL(t *testing.T) {
