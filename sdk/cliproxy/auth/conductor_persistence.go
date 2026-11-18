@@ -337,6 +337,7 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 		target.credentialRetryAfter = time.Time{}
 		target.nonQuotaCooldownUntil = time.Time{}
 	}
+	preserveQuotaRecoveryBindings(target, before, time.Now())
 }
 
 func equalSaveValue(a, b reflect.Value) bool {

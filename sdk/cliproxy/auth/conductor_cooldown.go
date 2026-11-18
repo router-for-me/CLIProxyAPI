@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -395,6 +396,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	reason := strings.TrimSpace(record.Reason)
 	model := strings.TrimSpace(record.Model)
 	quota := record.Quota
+	quota.recoveryBindings = mergeQuotaRecoveryBindings(now, record.RecoveryBindings)
 	if quota.Exceeded && quota.NextRecoverAt.IsZero() {
 		quota.NextRecoverAt = record.NextRetryAfter
 	}
@@ -474,6 +476,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 				mergedQuota.cooldownSignals = prevQuota.cooldownSignals
 			}
 		}
+		mergedQuota.recoveryBindings = mergeQuotaRecoveryBindings(now, prevQuota.recoveryBindings, quota.recoveryBindings)
 		applyCooldownFields(&auth.Quota, mergedQuota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, prevQuota)
 		auth.Quota = mergeQuotaObservation(auth.Quota, quota)
@@ -601,11 +604,12 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		state.credentialQuotaPropagated = true
 		applyCooldownFields(&state.Quota, QuotaState{
-			Exceeded:        true,
-			Reason:          "credential_quota",
-			NextRecoverAt:   auth.Quota.NextRecoverAt,
-			BackoffLevel:    auth.Quota.BackoffLevel,
-			cooldownSignals: auth.Quota.cooldownSignals,
+			Exceeded:         true,
+			Reason:           "credential_quota",
+			NextRecoverAt:    auth.Quota.NextRecoverAt,
+			BackoffLevel:     auth.Quota.BackoffLevel,
+			cooldownSignals:  auth.Quota.cooldownSignals,
+			recoveryBindings: mergeQuotaRecoveryBindings(now, auth.Quota.recoveryBindings),
 		})
 		if state.NextRetryAfter.Before(auth.Quota.NextRecoverAt) {
 			state.NextRetryAfter = auth.Quota.NextRecoverAt
@@ -620,6 +624,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		var restoredShadow *ModelState
 		if record.IndependentState != nil {
 			restoredShadow = record.IndependentState.cloneShallow()
+			restoredShadow.Quota.recoveryBindings = mergeQuotaRecoveryBindings(now, record.IndependentRecoveryBindings)
 			restoredShadow.claudeOverageCooldownUntil = record.IndependentClaudeOverageCooldownUntil
 			restoredShadow.claudeFablePoolCooldownUntil = record.IndependentClaudeFablePoolCooldownUntil
 			if !record.ClaudeFablePoolEvaluated && restoredShadow.claudeFablePoolCooldownUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeFablePoolSignals(record.IndependentCooldownSignals) {
@@ -842,6 +847,7 @@ func clampStateToForceDeadline(state *ModelState, now time.Time) (kept bool, mut
 		state.Quota.NextRecoverAt = state.forceCooldownUntil
 		mutated = true
 	}
+	mutated = capQuotaRecoveryBindingsToRetainedWindow(&state.Quota, now) || mutated
 	return true, mutated
 }
 
@@ -899,6 +905,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 				auth.NextRetryAfter = combinedAuthForceUntil
 				changed = true
 			}
+			changed = capQuotaRecoveryBindingsToRetainedWindow(&auth.Quota, now) || changed
 			if changed {
 				auth.Generation++
 				auth.UpdatedAt = now
@@ -963,6 +970,10 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 				}
 				if state.NextRetryAfter.After(effectiveOuter) {
 					state.NextRetryAfter = effectiveOuter
+					state.UpdatedAt = now
+					changed = true
+				}
+				if capQuotaRecoveryBindingsToRetainedWindow(&state.Quota, now) {
 					state.UpdatedAt = now
 					changed = true
 				}
@@ -1048,6 +1059,7 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			applyCooldownFields(&auth.Quota, savedAuthQuota)
 		}
 	}
+	changed = capQuotaRecoveryBindingsToRetainedWindow(&auth.Quota, now) || changed
 	if auth.Unavailable != prevUnavailable || !auth.NextRetryAfter.Equal(prevNextRetry) || !cooldownQuotaEqual(cooldownFieldsOf(auth.Quota), prevQuota) {
 		changed = true
 	}
@@ -1234,6 +1246,7 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth)
 		cooldownRecordsAfter := m.cooldownStateRecordsForAuthLocked(auth, now)
 		cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 	}
+	bindingsBeforePersist := auth.Clone()
 	errPersist := m.persistLocked(ctx, auth)
 	if expected != nil {
 		if errPersist != nil {
@@ -1245,6 +1258,10 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth)
 			return nil, nil, errContext
 		}
 		if !m.quotaResetMatchesLocked(m.auths[authID], expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		if !authQuotaRecoveryBindingsEqual(auth, bindingsBeforePersist, time.Now()) {
 			m.mu.Unlock()
 			return nil, nil, nil
 		}
@@ -1391,6 +1408,9 @@ func cooldownStateRecordsEqual(a, b []CooldownStateRecord) bool {
 }
 
 func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
+	if !reflect.DeepEqual(a.RecoveryBindings, b.RecoveryBindings) || !reflect.DeepEqual(a.IndependentRecoveryBindings, b.IndependentRecoveryBindings) {
+		return false
+	}
 	if a.ClaudeFablePoolEvaluated != b.ClaudeFablePoolEvaluated || !a.ClaudeFablePoolCooldownUntil.Equal(b.ClaudeFablePoolCooldownUntil) || !a.IndependentClaudeFablePoolCooldownUntil.Equal(b.IndependentClaudeFablePoolCooldownUntil) {
 		return false
 	}
@@ -1445,7 +1465,7 @@ func cooldownIndependentStateEqual(a, b *ModelState) bool {
 }
 
 func cooldownQuotaEqual(a, b QuotaState) bool {
-	return a.Exceeded == b.Exceeded &&
+	return reflect.DeepEqual(a.recoveryBindings, b.recoveryBindings) && a.Exceeded == b.Exceeded &&
 		a.Reason == b.Reason &&
 		a.BackoffLevel == b.BackoffLevel &&
 		a.NextRecoverAt.Equal(b.NextRecoverAt)
@@ -1497,6 +1517,7 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		ClaudeOverageCooldownUntil:   auth.claudeOverageCooldownUntil,
 		ClaudeFablePoolCooldownUntil: auth.claudeFablePoolCooldownUntil,
 		ClaudeFablePoolEvaluated:     true,
+		RecoveryBindings:             mergeQuotaRecoveryBindings(now, auth.Quota.recoveryBindings),
 		Provider:                     strings.TrimSpace(auth.Provider),
 		AuthID:                       auth.ID,
 		AuthFile:                     cooldownAuthFile(auth),
@@ -1549,6 +1570,7 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		ClaudeOverageCooldownUntil:   state.claudeOverageCooldownUntil,
 		ClaudeFablePoolCooldownUntil: state.claudeFablePoolCooldownUntil,
 		ClaudeFablePoolEvaluated:     true,
+		RecoveryBindings:             mergeQuotaRecoveryBindings(now, state.Quota.recoveryBindings),
 		Provider:                     strings.TrimSpace(auth.Provider),
 		AuthID:                       auth.ID,
 		AuthFile:                     cooldownAuthFile(auth),
@@ -1567,6 +1589,7 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 	}
 	if state.credentialQuotaShadow != nil {
 		record.IndependentState = state.credentialQuotaShadow.cloneShallow()
+		record.IndependentRecoveryBindings = mergeQuotaRecoveryBindings(now, state.credentialQuotaShadow.Quota.recoveryBindings)
 		record.IndependentClaudeOverageCooldownUntil = state.credentialQuotaShadow.claudeOverageCooldownUntil
 		record.IndependentClaudeFablePoolCooldownUntil = state.credentialQuotaShadow.claudeFablePoolCooldownUntil
 		if u := effectiveModelForceUntil(state.credentialQuotaShadow); u.After(now) {
@@ -1942,6 +1965,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							var next time.Time
 							var credentialNext time.Time
 							keptPriorStateQuota := false
+							causeBindings := mergeQuotaRecoveryBindings(now, state.Quota.recoveryBindings)
 							backoffLevel := state.Quota.BackoffLevel
 							if result.CredentialScope {
 								backoffLevel = 0
@@ -1953,6 +1977,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								independentQuota := state.Quota
 								independentQuota.BackoffLevel = backoffLevel
 								independentNext := independentRateLimitDeadline(independentQuota, result.RetryAfter, now)
+								causeBindings = quotaBindingsForCause(ctx, result, causeBindings, independentNext, now)
 								reusedOpenWindow := false
 								var baseBackoffBefore int
 								if result.RetryAfter != nil {
@@ -2018,11 +2043,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 							state.NextRetryAfter = next
 							applyCooldownFields(&state.Quota, QuotaState{
-								Exceeded:        true,
-								Reason:          "quota",
-								NextRecoverAt:   next,
-								BackoffLevel:    backoffLevel,
-								cooldownSignals: cooldownSignals,
+								recoveryBindings: causeBindings,
+								Exceeded:         true,
+								Reason:           "quota",
+								NextRecoverAt:    next,
+								BackoffLevel:     backoffLevel,
+								cooldownSignals:  cooldownSignals,
 							})
 							// Non-credential own failures re-derive their independent layer
 							// below, so a stale shadow is dropped. A credential-scoped
@@ -2073,6 +2099,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									auth.Quota.NextRecoverAt = authNext
 									auth.Quota.BackoffLevel = backoffLevel
 									auth.Quota.cooldownSignals = maps.Clone(credCooldownSignals)
+									auth.Quota.recoveryBindings = mergeQuotaRecoveryBindings(now, auth.Quota.recoveryBindings, state.Quota.recoveryBindings)
 									auth.Quota.cooldownEvaluated = true
 									auth.NextRetryAfter = authNext
 									if authNext.After(state.Quota.NextRecoverAt) || (prevAuthCredActive && result.RetryAfter == nil) {
@@ -2206,11 +2233,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 						if !(outer.Quota.Exceeded && outer.Quota.Reason == "credential_quota") {
 							applyCooldownFields(&outer.Quota, QuotaState{
-								Exceeded:        true,
-								Reason:          "credential_quota",
-								NextRecoverAt:   auth.Quota.NextRecoverAt,
-								BackoffLevel:    auth.Quota.BackoffLevel,
-								cooldownSignals: auth.Quota.cooldownSignals,
+								Exceeded:         true,
+								Reason:           "credential_quota",
+								NextRecoverAt:    auth.Quota.NextRecoverAt,
+								BackoffLevel:     auth.Quota.BackoffLevel,
+								cooldownSignals:  auth.Quota.cooldownSignals,
+								recoveryBindings: mergeQuotaRecoveryBindings(now, auth.Quota.recoveryBindings),
 							})
 						}
 						*outerState = *outer
@@ -2282,7 +2310,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 					m.recordClaudeOverage(ctx, auth, result, "", responseHeaders, now)
+					bindingDeadline := independentRateLimitDeadline(auth.Quota, result.RetryAfter, now)
+					previousBindings := append([]quotaRecoveryBinding(nil), auth.Quota.recoveryBindings...)
 					ownAuthForceDeadline, ownAuthRetryDeadline := applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
+					if !disableCooling && statusCodeFromResult(result.Error) == 429 && auth.Quota.Exceeded {
+						auth.Quota.recoveryBindings = quotaBindingsForCause(ctx, result, previousBindings, bindingDeadline, now)
+					}
 					cooldownSeq := m.currentExecutionSeq()
 					isQuota429 := !disableCooling &&
 						statusCodeFromResult(result.Error) == 429 &&
@@ -2638,6 +2671,7 @@ func mergeModelState(target, source *ModelState) *ModelState {
 		},
 		UpdatedAt: target.UpdatedAt,
 	}
+	merged.Quota.recoveryBindings = mergeQuotaRecoveryBindings(time.Now(), target.Quota.recoveryBindings, source.Quota.recoveryBindings)
 	merged.Quota = mergeQuotaObservation(merged.Quota, fallback.Quota)
 	merged.Quota = mergeQuotaObservation(merged.Quota, preferred.Quota)
 	if source.Quota.NextRecoverAt.After(target.Quota.NextRecoverAt) {
@@ -2996,6 +3030,10 @@ func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState
 	if auth == nil {
 		return
 	}
+	bindings := mergeQuotaRecoveryBindings(now, auth.Quota.recoveryBindings)
+	if exclude != nil {
+		bindings = mergeQuotaRecoveryBindings(now, bindings, exclude.Quota.recoveryBindings)
+	}
 	for _, otherState := range auth.ModelStates {
 		if otherState == nil || otherState == exclude {
 			continue
@@ -3046,11 +3084,12 @@ func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState
 		}
 		otherState.NextRetryAfter = otherRetryAfter
 		applyCooldownFields(&otherState.Quota, QuotaState{
-			Exceeded:        true,
-			Reason:          "credential_quota",
-			NextRecoverAt:   otherQuotaNext,
-			BackoffLevel:    backoffLevel,
-			cooldownSignals: otherSignals,
+			Exceeded:         true,
+			Reason:           "credential_quota",
+			NextRecoverAt:    otherQuotaNext,
+			BackoffLevel:     backoffLevel,
+			cooldownSignals:  otherSignals,
+			recoveryBindings: append([]quotaRecoveryBinding(nil), bindings...),
 		})
 	}
 }

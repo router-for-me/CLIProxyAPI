@@ -443,6 +443,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
 		ctx = withClaudeOverageIdentity(ctx, auth)
+		ctx = withQuotaRecoveryBinding(ctx, auth, routeModel, execReq, execOpts)
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {

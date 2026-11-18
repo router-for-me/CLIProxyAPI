@@ -368,11 +368,13 @@ type QuotaState struct {
 	// cooldown was recorded so out-of-order completions cannot overwrite them.
 	cooldownSignals   map[string]string
 	cooldownEvaluated bool
+	recoveryBindings  []quotaRecoveryBinding
 }
 
 // Clone returns an independent copy of the quota state.
 func (q QuotaState) Clone() QuotaState {
 	copyQuota := q
+	copyQuota.recoveryBindings = append([]quotaRecoveryBinding(nil), q.recoveryBindings...)
 	if len(q.Signals) > 0 {
 		copyQuota.Signals = make(map[string]string, len(q.Signals))
 		for key, value := range q.Signals {

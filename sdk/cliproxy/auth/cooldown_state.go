@@ -18,7 +18,9 @@ import (
 
 // CooldownStateRecord is a persisted runtime cooldown snapshot for one auth/model pair.
 type CooldownStateRecord struct {
-	ClaudeFablePoolEvaluated bool `json:"claude_fable_pool_evaluated,omitempty"`
+	RecoveryBindings            []quotaRecoveryBinding `json:"recovery_bindings,omitempty"`
+	IndependentRecoveryBindings []quotaRecoveryBinding `json:"independent_recovery_bindings,omitempty"`
+	ClaudeFablePoolEvaluated    bool                   `json:"claude_fable_pool_evaluated,omitempty"`
 	// ClaudeOverageEvaluated distinguishes a known zero marker from legacy records.
 	ClaudeOverageEvaluated                  bool       `json:"claude_overage_evaluated,omitempty"`
 	ClaudeOverageCooldownUntil              time.Time  `json:"claude_overage_cooldown_until,omitempty"`

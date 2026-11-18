@@ -1018,6 +1018,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			execCtx = withClaudeOverageIdentity(execCtx, auth)
+			execCtx = withQuotaRecoveryBinding(execCtx, auth, routeModel, execReq, execOpts)
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)

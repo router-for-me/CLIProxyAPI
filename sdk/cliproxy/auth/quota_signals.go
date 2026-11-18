@@ -69,10 +69,11 @@ func (q *QuotaState) ClearObservationSignals() bool {
 // omitted so cooldown persistence and restore cannot replace a live snapshot.
 func cooldownFieldsOf(q QuotaState) QuotaState {
 	return QuotaState{
-		Exceeded:      q.Exceeded,
-		Reason:        q.Reason,
-		NextRecoverAt: q.NextRecoverAt,
-		BackoffLevel:  q.BackoffLevel,
+		Exceeded:         q.Exceeded,
+		Reason:           q.Reason,
+		NextRecoverAt:    q.NextRecoverAt,
+		BackoffLevel:     q.BackoffLevel,
+		recoveryBindings: append([]quotaRecoveryBinding(nil), q.recoveryBindings...),
 	}
 }
 
@@ -88,6 +89,7 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
 	dst.cooldownSignals = maps.Clone(cooldown.cooldownSignals)
+	dst.recoveryBindings = append([]quotaRecoveryBinding(nil), cooldown.recoveryBindings...)
 	dst.cooldownEvaluated = cooldown.Exceeded || cooldown.cooldownEvaluated
 }
 

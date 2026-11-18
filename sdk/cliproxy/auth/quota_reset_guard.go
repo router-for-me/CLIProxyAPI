@@ -108,7 +108,7 @@ func quotaRecoveryState(provider string, status Status, message string, unavaila
 func (m *Manager) quotaResetMatchesLocked(auth, expected *Auth) bool {
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	return auth != nil && !(cfg != nil && cfg.Home.Enabled) && auth.ID == expected.ID && auth.Provider == expected.Provider &&
-		auth.RegistrationEpoch == expected.RegistrationEpoch && auth.Generation == expected.Generation &&
+		auth.RegistrationEpoch == expected.RegistrationEpoch && auth.Generation == expected.Generation && authQuotaRecoveryBindingsEqual(auth, expected, time.Now()) &&
 		QuotaRecoveryCandidate(expected) && QuotaRecoveryCandidate(auth) &&
 		m.quotaRecoveryModelHeadersMatchLocked(expected) && m.quotaRecoveryModelHeadersMatchLocked(auth)
 }

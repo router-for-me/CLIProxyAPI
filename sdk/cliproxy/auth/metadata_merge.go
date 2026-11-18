@@ -205,6 +205,7 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 		}
 	}
 
+	preserveQuotaRecoveryBindings(merged, current, time.Now())
 	return merged
 }
 

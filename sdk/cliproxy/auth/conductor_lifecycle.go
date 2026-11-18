@@ -701,6 +701,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		}
 	}
+	preserveQuotaRecoveryBindings(auth, existing, now)
 	cooldownStateChanged = retainClaudeOverageUpdate(auth, existing) || cooldownStateChanged
 	auth.UpdatedAt = now
 	cooldownStateChanged = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) || cooldownStateChanged

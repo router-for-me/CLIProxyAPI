@@ -2,6 +2,7 @@ package auth
 
 import (
 	"strings"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 
@@ -40,6 +41,11 @@ func (m *Manager) quotaRecoveryModelHeadersMatchLocked(auth *Auth) bool {
 		}
 	}
 	routing := m.loadAPIKeyModelRouting()
+	for _, binding := range authQuotaRecoveryBindings(auth, time.Now()) {
+		if !quotaRecoveryExecutionHeadersMatch(routing.config, binding.Selection, binding.Requested, []string{binding.Execution}, token, account, nestedToken) {
+			return false
+		}
+	}
 	for route := range routes {
 		requested := rewriteModelForAuth(route, auth)
 		alias := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requested)
@@ -58,61 +64,68 @@ func (m *Manager) quotaRecoveryModelHeadersMatchLocked(auth *Auth) bool {
 				candidates = []string{resolved}
 			}
 		}
-		var finalizedModels []string
-		for _, model := range candidates {
-			// Executors remove the thinking suffix before building the business payload.
-			model = thinking.ParseSuffix(model).ModelName
-			models, safe := quotaRecoveryPayloadModels(routing.config, model, route, requested)
-			if !safe {
-				return false
-			}
-			finalizedModels = append(finalizedModels, models...)
+		if !quotaRecoveryExecutionHeadersMatch(routing.config, route, requested, candidates, token, account, nestedToken) {
+			return false
 		}
-		// Legacy direct-image builders remove routing prefixes and thinking
-		// suffixes and lowercase builtin header-selection names. Check this
-		// possible identity alongside the original names. A snapshot has no
-		// request format/body or SDK-restored execution model to exclude it.
-		for _, model := range append([]string{route, requested}, candidates...) {
-			directModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
-			if idx := strings.LastIndex(directModel, "/"); idx >= 0 {
-				directModel = strings.TrimSpace(directModel[idx+1:])
-			}
-			if internalconfig.CodexImageModelUsesDirectEndpoint(directModel) {
-				finalizedModels = append(finalizedModels, strings.ToLower(directModel))
-			}
+	}
+	return true
+}
+
+func quotaRecoveryExecutionHeadersMatch(cfg *internalconfig.Config, route, requested string, candidates []string, token, account, nestedToken string) bool {
+	var finalizedModels []string
+	for _, model := range candidates {
+		// Executors remove the thinking suffix before building the business payload.
+		model = thinking.ParseSuffix(model).ModelName
+		models, safe := quotaRecoveryPayloadModels(cfg, model, route, requested)
+		if !safe {
+			return false
 		}
-		// The SDK can restore its execution model after auth selection. Include
-		// both selection names and candidates as possible openai-image routes. The
-		// snapshot has no source format or body, so this is a possible builder
-		// identity, not evidence that the failed call used that format. Even
-		// DisableImageGenerationAll only guards HTTP handlers, not this SDK path.
-		for _, model := range append([]string{route, requested}, candidates...) {
-			imageModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
-			if idx := strings.LastIndex(imageModel, "/"); idx >= 0 {
-				imageModel = strings.TrimSpace(imageModel[idx+1:])
-			}
-			if !internalconfig.CodexImageModelUsesDirectEndpoint(imageModel) {
-				finalizedModels = append(finalizedModels, internalconfig.ResolveCodexHostedImageBaseModel(routing.config, func(model string) bool {
-					slug := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
-					if idx := strings.LastIndex(slug, "/"); idx >= 0 {
-						slug = strings.TrimSpace(slug[idx+1:])
-					}
-					return strings.HasPrefix(slug, "gpt-6") || registry.CodexClientModelUsesResponsesLite(slug)
-				}))
-				break
-			}
+		finalizedModels = append(finalizedModels, models...)
+	}
+	// Legacy direct-image builders remove routing prefixes and thinking
+	// suffixes and lowercase builtin header-selection names. Check this
+	// possible identity alongside the original names. A snapshot has no
+	// request format/body or SDK-restored execution model to exclude it.
+	for _, model := range append([]string{route, requested}, candidates...) {
+		directModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+		if idx := strings.LastIndex(directModel, "/"); idx >= 0 {
+			directModel = strings.TrimSpace(directModel[idx+1:])
 		}
-		for _, model := range finalizedModels {
-			for key, value := range registry.ModelOverrideHeaders(model) {
-				switch strings.ToLower(strings.TrimSpace(key)) {
-				case "authorization":
-					if (token == "" || value != "Bearer "+token) && (nestedToken == "" || value != "Bearer "+nestedToken) {
-						return false
-					}
-				case "chatgpt-account-id":
-					if account == "" || value != account {
-						return false
-					}
+		if internalconfig.CodexImageModelUsesDirectEndpoint(directModel) {
+			finalizedModels = append(finalizedModels, strings.ToLower(directModel))
+		}
+	}
+	// The SDK can restore its execution model after auth selection. Include
+	// both selection names and candidates as possible openai-image routes. The
+	// snapshot has no source format or body, so this is a possible builder
+	// identity, not evidence that the failed call used that format. Even
+	// DisableImageGenerationAll only guards HTTP handlers, not this SDK path.
+	for _, model := range append([]string{route, requested}, candidates...) {
+		imageModel := strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+		if idx := strings.LastIndex(imageModel, "/"); idx >= 0 {
+			imageModel = strings.TrimSpace(imageModel[idx+1:])
+		}
+		if !internalconfig.CodexImageModelUsesDirectEndpoint(imageModel) {
+			finalizedModels = append(finalizedModels, internalconfig.ResolveCodexHostedImageBaseModel(cfg, func(model string) bool {
+				slug := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+				if idx := strings.LastIndex(slug, "/"); idx >= 0 {
+					slug = strings.TrimSpace(slug[idx+1:])
+				}
+				return strings.HasPrefix(slug, "gpt-6") || registry.CodexClientModelUsesResponsesLite(slug)
+			}))
+			break
+		}
+	}
+	for _, model := range finalizedModels {
+		for key, value := range registry.ModelOverrideHeaders(model) {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "authorization":
+				if (token == "" || value != "Bearer "+token) && (nestedToken == "" || value != "Bearer "+nestedToken) {
+					return false
+				}
+			case "chatgpt-account-id":
+				if account == "" || value != account {
+					return false
 				}
 			}
 		}
