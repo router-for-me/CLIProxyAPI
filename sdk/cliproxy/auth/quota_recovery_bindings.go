@@ -37,7 +37,7 @@ func mergeQuotaRecoveryBindings(now time.Time, sets ...[]quotaRecoveryBinding) [
 			if !b.Until.After(now) || strings.TrimSpace(b.Execution) == "" || strings.TrimSpace(b.Selection) == "" {
 				continue
 			}
-			b.Until = b.Until.Round(0)
+			b.Until = b.Until.UTC()
 			key := names{b.Selection, b.Execution, b.Requested}
 			if old, ok := byName[key]; !ok || b.Until.After(old.Until) {
 				byName[key] = b
