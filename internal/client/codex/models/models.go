@@ -3,6 +3,7 @@ package models
 
 import (
 	"bytes"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -685,6 +686,11 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		} else {
 			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
+		if outputs := info.SupportedOutputModalities; len(outputs) > 0 && !slices.ContainsFunc(outputs, func(modality string) bool {
+			return strings.EqualFold(strings.TrimSpace(modality), "text")
+		}) {
+			entry["visibility"] = "hide"
+		}
 		if thinkingSupport == nil {
 			thinkingSupport = info.Thinking
 		}
@@ -762,7 +768,7 @@ func isCodexClientImageOrVideoModel(id string) bool {
 		target = strings.TrimSpace(target[idx+1:])
 	}
 	switch target {
-	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst", "gpt-image-2.6", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-preview", "grok-tts", "grok-voice-tts-1.0":
+	case "grok-imagine-image-quality", "gpt-image-1.5", "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst", "gpt-image-2.6", "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-video", "grok-imagine-video-1.5", "grok-imagine-video-1.5-lite", "grok-imagine-video-1.5-preview", "grok-tts", "grok-voice-tts-1.0":
 		return true
 	default:
 		return false

@@ -1721,11 +1721,23 @@ func TestCodexClientModelsResponse_NonTemplateAPIVisibility(t *testing.T) {
 		t.Fatalf("load test catalog: %v", errLoad)
 	}
 
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "codex-output-modalities-test"
+	modelRegistry.RegisterClient(clientID, "openai-compatibility", []*registry.ModelInfo{
+		{ID: "video-output-alias", SupportedOutputModalities: []string{"video"}},
+		{ID: "text-and-audio-output", SupportedOutputModalities: []string{"audio", "TEXT"}},
+	})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
 	available := []map[string]any{
 		{"id": "gpt-5.5"},
 		{"id": "deepseek-flash"},
 		{"id": "deepseek-v4-pro"},
 		{"id": "gpt-image-2"},
+		{"id": "grok-imagine-video-1.5-lite"},
+		{"id": "xai/grok-imagine-video-1.5-lite"},
+		{"id": "video-output-alias"},
+		{"id": "text-and-audio-output"},
 	}
 	entries := buildCodexClientModels(available, nil, nil, false, "0.169.0")
 	bySlug := make(map[string]map[string]any, len(entries))
@@ -1741,6 +1753,10 @@ func TestCodexClientModelsResponse_NonTemplateAPIVisibility(t *testing.T) {
 		{"deepseek-flash", "list", true},
 		{"deepseek-v4-pro", "list", true},
 		{"gpt-image-2", "hide", false},
+		{"grok-imagine-video-1.5-lite", "hide", false},
+		{"xai/grok-imagine-video-1.5-lite", "hide", false},
+		{"video-output-alias", "hide", false},
+		{"text-and-audio-output", "list", true},
 	} {
 		entry := bySlug[tt.slug]
 		if entry["visibility"] != tt.visibility || entry["supported_in_api"] != tt.supported {
