@@ -35,6 +35,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/models/refresh", s.mgmt.RefreshModelDefinitions)
 
 	v8.GET("/observability/logs", s.mgmt.GetLogs)
+	v8.GET("/observability/cache", s.mgmt.GetCacheStats)
 	v8.DELETE("/observability/logs", s.mgmt.DeleteLogs)
 	v8.GET("/observability/logs/errors", s.mgmt.GetRequestErrorLogs)
 	v8.GET("/observability/logs/errors/:name", s.mgmt.DownloadRequestErrorLog)
