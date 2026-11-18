@@ -1,10 +1,10 @@
 package applypatch
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 )
 

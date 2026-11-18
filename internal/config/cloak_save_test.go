@@ -371,3 +371,129 @@ func TestSaveConfigPreserveComments_SensitiveWordsReplaceEmptyValueAndPruning(t 
 		})
 	}
 }
+
+func TestSaveConfigPreserveComments_SensitivePatternsReplaceEmptyValueAndPruning(t *testing.T) {
+	for _, v8Layout := range []bool{false, true} {
+		name := "legacy"
+		initialYAML := "port: 8317\nclaude-api-key:\n  - api-key: sk-ant-test\n"
+		if v8Layout {
+			name = "v8"
+			initialYAML = "config-version: 8\nserver:\n  port: 8317\napi-keys:\n  claude:\n    - name: claude-1\n      keys:\n        - api-key: sk-ant-test\n"
+		}
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if errWrite := os.WriteFile(configPath, []byte(initialYAML), 0o600); errWrite != nil {
+				t.Fatalf("os.WriteFile() error = %v", errWrite)
+			}
+			cfg, errLoad := LoadConfigOptional(configPath, false)
+			if errLoad != nil {
+				t.Fatalf("initial LoadConfigOptional() error = %v", errLoad)
+			}
+
+			cfg.Antigravity.SensitivePatternsReplace = []SensitivePatternRule{
+				{Pattern: `(?m)^RFC 2119[^\n]*\n?`, Replacement: ""},
+			}
+			cfg.Devin.SensitivePatternsReplace = []SensitivePatternRule{
+				{Pattern: `(?m)^You are omp[^\n]*\n?`, Replacement: ""},
+			}
+			cfg.ClaudeKey[0].Cloak = &CloakConfig{
+				SensitivePatternsReplace: []SensitivePatternRule{
+					{Pattern: `(?s)<system-conventions>.*?</system-conventions>\n?`, Replacement: ""},
+				},
+			}
+			if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+				t.Fatalf("SaveConfigPreserveComments() step 1 error = %v", errSave)
+			}
+			reloaded, errReload := LoadConfigOptional(configPath, false)
+			if errReload != nil {
+				t.Fatalf("reload step 1 error = %v", errReload)
+			}
+			if len(reloaded.Antigravity.SensitivePatternsReplace) != 1 || reloaded.Antigravity.SensitivePatternsReplace[0].Replacement != "" {
+				t.Fatalf("Antigravity patterns = %#v", reloaded.Antigravity.SensitivePatternsReplace)
+			}
+			if len(reloaded.Devin.SensitivePatternsReplace) != 1 || reloaded.Devin.SensitivePatternsReplace[0].Replacement != "" {
+				t.Fatalf("Devin patterns = %#v", reloaded.Devin.SensitivePatternsReplace)
+			}
+			if reloaded.ClaudeKey[0].Cloak == nil || len(reloaded.ClaudeKey[0].Cloak.SensitivePatternsReplace) != 1 {
+				t.Fatalf("Claude patterns = %#v", reloaded.ClaudeKey[0].Cloak)
+			}
+
+			reloaded.Antigravity.SensitivePatternsReplace = nil
+			reloaded.Devin.SensitivePatternsReplace = nil
+			reloaded.ClaudeKey[0].Cloak.SensitivePatternsReplace = nil
+			if errSave2 := SaveConfigPreserveComments(configPath, reloaded); errSave2 != nil {
+				t.Fatalf("SaveConfigPreserveComments() step 2 error = %v", errSave2)
+			}
+			reloaded2, errReload2 := LoadConfigOptional(configPath, false)
+			if errReload2 != nil {
+				t.Fatalf("reload step 2 error = %v", errReload2)
+			}
+			if len(reloaded2.Antigravity.SensitivePatternsReplace) != 0 {
+				t.Fatalf("cleared Antigravity patterns persisted: %#v", reloaded2.Antigravity.SensitivePatternsReplace)
+			}
+			if len(reloaded2.Devin.SensitivePatternsReplace) != 0 {
+				t.Fatalf("cleared Devin patterns persisted: %#v", reloaded2.Devin.SensitivePatternsReplace)
+			}
+			if reloaded2.ClaudeKey[0].Cloak != nil && len(reloaded2.ClaudeKey[0].Cloak.SensitivePatternsReplace) != 0 {
+				t.Fatalf("cleared Claude patterns persisted: %#v", reloaded2.ClaudeKey[0].Cloak.SensitivePatternsReplace)
+			}
+		})
+	}
+}
+
+func TestSaveConfigPreserveComments_SensitivePatternsReplacePreservesComments(t *testing.T) {
+	for _, v8Layout := range []bool{false, true} {
+		name := "legacy"
+		initialYAML := `port: 8317
+antigravity:
+  # keep section comment
+  sensitive-patterns-replace:
+    # keep rule comment
+    - pattern: '(?m)^RFC 2119[^\n]*\n?' # keep pattern comment
+      replacement: "" # keep replacement comment
+`
+		if v8Layout {
+			name = "v8"
+			initialYAML = `config-version: 8
+server:
+  port: 8317
+oauth:
+  providers:
+    antigravity:
+      # keep section comment
+      sensitive-patterns-replace:
+        # keep rule comment
+        - pattern: '(?m)^RFC 2119[^\n]*\n?' # keep pattern comment
+          replacement: "" # keep replacement comment
+`
+		}
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if errWrite := os.WriteFile(configPath, []byte(initialYAML), 0o600); errWrite != nil {
+				t.Fatalf("os.WriteFile() error = %v", errWrite)
+			}
+			cfg, errLoad := LoadConfigOptional(configPath, false)
+			if errLoad != nil {
+				t.Fatalf("LoadConfigOptional() error = %v", errLoad)
+			}
+			if errSave := SaveConfigPreserveComments(configPath, cfg); errSave != nil {
+				t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+			}
+			savedBytes, errRead := os.ReadFile(configPath)
+			if errRead != nil {
+				t.Fatalf("os.ReadFile() error = %v", errRead)
+			}
+			saved := string(savedBytes)
+			for _, comment := range []string{
+				"# keep section comment",
+				"# keep rule comment",
+				"# keep pattern comment",
+				"# keep replacement comment",
+			} {
+				if !strings.Contains(saved, comment) {
+					t.Fatalf("saved YAML lost comment %q:\n%s", comment, saved)
+				}
+			}
+		})
+	}
+}

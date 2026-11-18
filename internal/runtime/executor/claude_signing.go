@@ -2,12 +2,12 @@ package executor
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
@@ -653,13 +653,34 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 func resolveClaudeKeyCloakConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config.CloakConfig {
 	if cfg != nil && cfg.Home.Enabled && auth != nil {
 		if mode, strictMode, words, replacements, cacheUserID, ok := claudeauth.ReadMetadataHomeCloak(&auth.Metadata); ok {
-			return config.NormalizeCloakConfig(&config.CloakConfig{
-				Mode:                  mode,
-				StrictMode:            strictMode,
-				SensitiveWords:        words,
-				SensitiveWordsReplace: replacements,
-				CacheUserID:           cacheUserID,
-			})
+			rawPatterns := claudeauth.ReadMetadataHomeCloakPatterns(&auth.Metadata)
+			var patterns []config.SensitivePatternRule
+			if len(rawPatterns) > 0 {
+				patterns = make([]config.SensitivePatternRule, 0, len(rawPatterns))
+				for _, pair := range rawPatterns {
+					if strings.TrimSpace(pair[0]) == "" {
+						continue
+					}
+					patterns = append(patterns, config.SensitivePatternRule{
+						Pattern:     pair[0],
+						Replacement: pair[1],
+					})
+				}
+			}
+			var normalizedWords []string
+			for _, w := range words {
+				if trimmed := strings.TrimSpace(w); trimmed != "" {
+					normalizedWords = append(normalizedWords, trimmed)
+				}
+			}
+			return &config.CloakConfig{
+				Mode:                     strings.TrimSpace(mode),
+				StrictMode:               strictMode,
+				SensitiveWords:           normalizedWords,
+				SensitiveWordsReplace:    config.NormalizeSensitiveWordsReplace(replacements),
+				SensitivePatternsReplace: patterns,
+				CacheUserID:              cacheUserID,
+			}
 		}
 	}
 	entry := resolveClaudeKeyConfig(cfg, auth)

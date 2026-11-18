@@ -298,11 +298,23 @@ func TestDelegatedInterceptorHostImplementsPluginExecutorHost(t *testing.T) {
 	if !ok || executorHost == nil {
 		t.Fatal("delegated host does not implement PluginExecutorHost; plugin executor routes would 502")
 	}
+	if _, okAttr := any(wrapped).(interface {
+		ExecutePluginExecutorWithAttribution(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, *pluginapi.UsageAttribution, error)
+		ExecutePluginExecutorStreamWithAttribution(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, *pluginapi.UsageAttribution, error)
+	}); !okAttr {
+		t.Fatal("delegated host does not expose plugin executor attribution methods")
+	}
 	// Nil-pluginHost delegates must return an explicit unavailable error rather
 	// than panic, matching the handler's unavailable-host contract.
 	safeWrapped := &delegatedInterceptorHost{primary: custom, pluginHost: nil}
 	if _, err := safeWrapped.ExecutePluginExecutor(context.Background(), "p", coreexecutor.Request{}, coreexecutor.Options{}); err == nil {
 		t.Fatal("ExecutePluginExecutor with nil plugin host = nil error, want unavailable")
+	}
+	if _, _, err := safeWrapped.ExecutePluginExecutorWithAttribution(context.Background(), "p", coreexecutor.Request{}, coreexecutor.Options{}); err == nil {
+		t.Fatal("ExecutePluginExecutorWithAttribution with nil plugin host = nil error, want unavailable")
+	}
+	if _, _, err := safeWrapped.ExecutePluginExecutorStreamWithAttribution(context.Background(), "p", coreexecutor.Request{}, coreexecutor.Options{}); err == nil {
+		t.Fatal("ExecutePluginExecutorStreamWithAttribution with nil plugin host = nil error, want unavailable")
 	}
 }
 

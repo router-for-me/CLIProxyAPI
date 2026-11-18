@@ -14,3 +14,5 @@ require (
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
 )
+
+replace github.com/MoeForge/moego => github.com/router-for-me/moego v0.1.3

@@ -244,8 +244,6 @@ func TestDeferredAPIResponseCapturedAndAlignedAcrossAttempts(t *testing.T) {
 		"Authorization: Bearer supe...oken",
 		"Content-Type: text/event-stream",
 		"event: response.created\ndata: {\"type\":\"response.created\"}",
-		"Error: stream disconnected\n\n=== API RESPONSE 3 ===",
-		"Error: dial tcp timeout",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("rendered deferred response missing %q:\n%s", want, rendered)
@@ -256,9 +254,11 @@ func TestDeferredAPIResponseCapturedAndAlignedAcrossAttempts(t *testing.T) {
 			t.Fatalf("rendered deferred response leaked secret %q:\n%s", secret, rendered)
 		}
 	}
-	attempt3Section := rendered[strings.Index(rendered, "=== API RESPONSE 3 ==="):]
-	if strings.Contains(attempt3Section, "Headers:") {
-		t.Fatalf("dial error without HTTP response should not fabricate Headers section:\n%s", attempt3Section)
+	if strings.Contains(rendered, "=== API RESPONSE 3 ===") {
+		t.Fatalf("dial error without HTTP response should not fabricate a response section:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "Error:") || strings.Contains(rendered, "stream disconnected") || strings.Contains(rendered, "dial tcp timeout") {
+		t.Fatalf("local error polluted upstream response:\n%s", rendered)
 	}
 }
 
@@ -330,8 +330,8 @@ func TestDeferredAPIResponseBoundsLargeErrorsHeadersAndRetries(t *testing.T) {
 	if len(rendered) > maxTotalDeferredAPIResponseBodyBytes+(128<<10) {
 		t.Fatalf("rendered deferred response len = %d, exceeded bounded budget", len(rendered))
 	}
-	if !strings.Contains(rendered, "[API RESPONSE ERROR TRUNCATED:") {
-		t.Fatalf("rendered deferred response missing error truncation marker:\n%.512s", rendered)
+	if strings.Contains(rendered, "Error:") || strings.Contains(rendered, "ERROR TRUNCATED") {
+		t.Fatalf("local errors must not be rendered as upstream responses:\n%.512s", rendered)
 	}
 
 	t.Run("hundred thousand short headers do not allocate unbounded header map", func(t *testing.T) {
@@ -387,7 +387,7 @@ func TestDeferredAPIResponseBoundsLargeErrorsHeadersAndRetries(t *testing.T) {
 func TestDeferredAPIResponseSkippedWhenFullLogCommercialOrDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	t.Run("full request logging uses regular capture only", func(t *testing.T) {
+	t.Run("full request logging shares only local diagnostics", func(t *testing.T) {
 		ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 		ctx := context.WithValue(context.Background(), "gin", ginCtx)
 		cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
@@ -396,8 +396,12 @@ func TestDeferredAPIResponseSkippedWhenFullLogCommercialOrDisabled(t *testing.T)
 		AppendAPIResponseChunk(ctx, cfg, []byte(`data: {"type":"response.created"}`))
 		RecordAPIResponseError(ctx, cfg, errors.New("EOF"))
 
-		if _, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey); exists {
-			t.Fatal("full logging must not populate DeferredAPIResponseContextKey")
+		capture := deferredResponseCaptureFrom(ginCtx)
+		if capture.HasRequests() || len(capture.RenderAPIResponse()) != 0 {
+			t.Fatal("full logging must not duplicate upstream data in deferred capture")
+		}
+		if diagnostics := capture.ResponseDiagnostics(); len(diagnostics) != 1 || diagnostics[0].Error.Error() != "EOF" {
+			t.Fatalf("local diagnostics = %v, want EOF", diagnostics)
 		}
 		if _, exists := ginCtx.Get(apiResponseKey); !exists {
 			t.Fatal("expected regular API_RESPONSE capture")
@@ -488,9 +492,11 @@ func TestAPIResponseAttemptsAreSeparated(t *testing.T) {
 			if len(tt.firstResponseBody) > 0 {
 				AppendAPIResponseChunk(ctx, cfg, tt.firstResponseBody)
 			} else {
-				RecordAPIResponseError(ctx, cfg, errors.New("EOF"))
+				RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
 			}
+			RecordAPIResponseError(ctx, cfg, errors.New("EOF"))
 			RecordAPIRequest(ctx, cfg, UpstreamRequestLog{URL: "https://api.example.com/second", Method: http.MethodPost})
+			RecordAPIResponseMetadata(ctx, cfg, http.StatusBadGateway, nil)
 			RecordAPIResponseError(ctx, cfg, errors.New("retry failed"))
 
 			var response []byte
@@ -508,13 +514,16 @@ func TestAPIResponseAttemptsAreSeparated(t *testing.T) {
 				response, _ = value.([]byte)
 			}
 
-			previousEnd := "Error: EOF"
+			previousEnd := "Headers:\n<none>"
 			if len(tt.firstResponseBody) > 0 {
 				previousEnd = string(tt.firstResponseBody)
 			}
 			wantBoundary := previousEnd + "\n\n=== API RESPONSE 2 ==="
 			if !strings.Contains(string(response), wantBoundary) {
 				t.Fatalf("API response attempts are not separated by one blank line:\n%q\nwant boundary %q", response, wantBoundary)
+			}
+			if strings.Contains(string(response), "Error:") {
+				t.Fatalf("local errors polluted upstream capture: %s", response)
 			}
 		})
 	}

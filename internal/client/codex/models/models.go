@@ -3,12 +3,12 @@ package models
 
 import (
 	"bytes"
-	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 

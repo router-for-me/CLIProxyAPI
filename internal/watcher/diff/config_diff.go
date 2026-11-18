@@ -120,11 +120,17 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !equalStringMap(oldCfg.Antigravity.SensitiveWordsReplace, newCfg.Antigravity.SensitiveWordsReplace) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words-replace: %d -> %d", len(oldCfg.Antigravity.SensitiveWordsReplace), len(newCfg.Antigravity.SensitiveWordsReplace)))
 	}
+	if !equalSensitivePatternRules(oldCfg.Antigravity.SensitivePatternsReplace, newCfg.Antigravity.SensitivePatternsReplace) {
+		changes = append(changes, fmt.Sprintf("antigravity.sensitive-patterns-replace: %d -> %d", len(oldCfg.Antigravity.SensitivePatternsReplace), len(newCfg.Antigravity.SensitivePatternsReplace)))
+	}
 	if !reflect.DeepEqual(oldCfg.Devin.SensitiveWords, newCfg.Devin.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("devin.sensitive-words: %d -> %d", len(oldCfg.Devin.SensitiveWords), len(newCfg.Devin.SensitiveWords)))
 	}
 	if !equalStringMap(oldCfg.Devin.SensitiveWordsReplace, newCfg.Devin.SensitiveWordsReplace) {
 		changes = append(changes, fmt.Sprintf("devin.sensitive-words-replace: %d -> %d", len(oldCfg.Devin.SensitiveWordsReplace), len(newCfg.Devin.SensitiveWordsReplace)))
+	}
+	if !equalSensitivePatternRules(oldCfg.Devin.SensitivePatternsReplace, newCfg.Devin.SensitivePatternsReplace) {
+		changes = append(changes, fmt.Sprintf("devin.sensitive-patterns-replace: %d -> %d", len(oldCfg.Devin.SensitivePatternsReplace), len(newCfg.Devin.SensitivePatternsReplace)))
 	}
 	oldEnabled := "<nil>"
 	if oldCfg.Antigravity.ConnectionPool.Enabled != nil {
@@ -356,6 +362,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				}
 				if !equalStringMap(o.Cloak.SensitiveWordsReplace, n.Cloak.SensitiveWordsReplace) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words-replace: %d -> %d", i, len(o.Cloak.SensitiveWordsReplace), len(n.Cloak.SensitiveWordsReplace)))
+				}
+				if !equalSensitivePatternRules(o.Cloak.SensitivePatternsReplace, n.Cloak.SensitivePatternsReplace) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-patterns-replace: %d -> %d", i, len(o.Cloak.SensitivePatternsReplace), len(n.Cloak.SensitivePatternsReplace)))
 				}
 				changes = appendOptionalBoolChange(changes, fmt.Sprintf("claude[%d].cloak.cache-user-id", i), o.Cloak.CacheUserID, n.Cloak.CacheUserID)
 			}
@@ -602,18 +611,12 @@ func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.
 	changes = appendPayloadRuleChanges(changes, "default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
 	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
 	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
-	changes = appendPayloadFilterRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	changes = appendPayloadRuleChanges(changes, "replace", oldPayload.Replace, newPayload.Replace)
+	changes = appendPayloadRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
 	return changes
 }
 
-func appendPayloadRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadRule) []string {
-	if reflect.DeepEqual(oldRules, newRules) {
-		return changes
-	}
-	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
-}
-
-func appendPayloadFilterRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadFilterRule) []string {
+func appendPayloadRuleChanges[T any](changes []string, section string, oldRules, newRules []T) []string {
 	if reflect.DeepEqual(oldRules, newRules) {
 		return changes
 	}
@@ -707,6 +710,18 @@ func equalStringMap(a, b map[string]string) bool {
 	}
 	for k, v := range a {
 		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func equalSensitivePatternRules(a, b []config.SensitivePatternRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
