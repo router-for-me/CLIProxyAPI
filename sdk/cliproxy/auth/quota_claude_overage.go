@@ -103,14 +103,23 @@ func (m *Manager) recordClaudeOverage(ctx context.Context, a *Auth, result Resul
 	if result.Success || a == nil || !strings.EqualFold(strings.TrimSpace(a.Provider), "claude") || statusCodeFromResult(result.Error) != 429 || m.cooldownDisabledForAuth(a) || hasUnauthorizedAuthFailure(a) || shouldSkipCredentialCooldown(result.Error) || (result.Error != nil && result.Error.Code == ErrorCodeForceCooldown) || isTransientRateLimitResultError(result.Error) || !claudeOverageIdentityMatches(ctx, a) || !claudeOverageHeaders(headers) {
 		return
 	}
+	hint := result.RetryAfter
+	signals := collectQuotaSignals("claude", headers)
+	get := func(name string) string {
+		return strings.ToLower(strings.TrimSpace(signals[http.CanonicalHeaderKey(name)]))
+	}
+	if (get("Anthropic-Ratelimit-Unified-5h-Status") == "rejected" || get("Anthropic-Ratelimit-Unified-7d-Status") == "rejected") && !strings.Contains(get("Anthropic-Ratelimit-Unified-Representative-Claim"), "overage") {
+		// A mixed response's generic retry hint does not identify the paid pool.
+		hint = nil
+	}
 	if model != "" {
 		state := ensureModelState(a, model)
-		next := claudeOverageOwnDeadline(state.Quota, result.RetryAfter, now)
+		next := claudeOverageOwnDeadline(state.Quota, hint, now)
 		if next.After(state.claudeOverageCooldownUntil) {
 			state.claudeOverageCooldownUntil = next
 		}
 	} else {
-		next := claudeOverageOwnDeadline(a.Quota, result.RetryAfter, now)
+		next := claudeOverageOwnDeadline(a.Quota, hint, now)
 		if next.After(a.claudeOverageCooldownUntil) {
 			a.claudeOverageCooldownUntil = next
 		}
