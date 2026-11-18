@@ -688,6 +688,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	if quota.v8 {
+		if schedule := coreauth.EffectiveQuotaResetSchedule(auth); !schedule.ObservedAt.IsZero() {
+			entry["routing_reset_schedule"] = schedule
+		}
+	}
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}

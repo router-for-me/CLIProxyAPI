@@ -175,12 +175,11 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			bootstrapStart = nowCodexBootstrap()
 		}
 	}
-	httpResp, err := doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, responseReady)
+	httpResp, err := doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, responseReady, e.cfg)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {

@@ -791,7 +791,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 		// A business rejection followed by EOF with nothing outstanding stays terminal.
 		terminalBusinessRejection := false
 		for {
-			kind, payload, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
+			kind, payload, receivedAt, errRead := readCodexWebsocketMessage(streamCtx, sess, conn, readCh)
 			if errRead != nil {
 				preserveClassification := false
 				select {
@@ -950,7 +950,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				outputFallback = nil
 			}
 			observeCodexTokenEvent(reporter, payload)
-			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
+			helps.AppendCodexAPIWebsocketResponseAt(ctx, e.cfg, payload, receivedAt)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			// Steering acknowledgements, pending notifications and failures are opaque:
 			// preserve their IDs, input, sequence numbers and event types byte-for-byte.

@@ -214,8 +214,23 @@ func (h *Handler) APICall(c *gin.Context) {
 		Timeout: defaultAPICallTimeout,
 	}
 	httpClient.Transport = h.apiCallTransport(auth, requestProxyURL)
+	var routingSnapshot *coreauth.Auth
+	if c.GetBool(ConfigV8ContextKey) && h.authManager != nil && auth != nil && routingUsageRequestMatches(req, auth) {
+		routingSnapshot = auth.Clone()
+	}
+	routingRedirected := false
+	if routingSnapshot != nil {
+		httpClient.CheckRedirect = func(_ *http.Request, via []*http.Request) error {
+			routingRedirected = true
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
+	}
 
 	resp, errDo := httpClient.Do(req)
+	usageReceivedAt := time.Now()
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
@@ -231,6 +246,12 @@ func (h *Handler) APICall(c *gin.Context) {
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
+	}
+
+	if routingSnapshot != nil && !routingRedirected && resp.StatusCode == http.StatusOK {
+		if schedule, ok := routingUsageSchedule(routingSnapshot.Provider, respBody, usageReceivedAt); ok {
+			h.authManager.RecordQuotaResetScheduleIfUnchanged(c.Request.Context(), routingSnapshot, schedule)
+		}
 	}
 
 	c.JSON(http.StatusOK, apiCallResponse{

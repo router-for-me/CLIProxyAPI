@@ -1,0 +1,285 @@
+package auth
+
+import (
+	"context"
+	"crypto/sha256"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+)
+
+type quotaObservationIdentityKey struct{}
+
+// quotaObservationIdentity owns only immutable dispatch identity, never the
+// mutable auth state or secrets themselves.
+type quotaObservationIdentity struct {
+	provider   string
+	account    [5]string
+	hasAccount bool
+	grant      [32]byte
+}
+
+func quotaObservationIdentityFor(auth *Auth) quotaObservationIdentity {
+	identity := quotaObservationIdentity{provider: strings.ToLower(strings.TrimSpace(auth.Provider))}
+	keys := []string{"account_id", "email", "sub"}
+	if identity.provider == "claude" {
+		keys = append(keys, "account_uuid", "organization_uuid")
+	}
+	for i, key := range keys {
+		identity.account[i], _ = auth.Metadata[key].(string)
+		identity.hasAccount = identity.hasAccount || strings.TrimSpace(identity.account[i]) != ""
+	}
+	// Match the credential fallback of quotaScheduleIdentityMatches without
+	// retaining an Auth snapshot or plaintext credential material in context.
+	idToken := authMetadataString(auth, "id_token")
+	if idToken == "" {
+		idToken = authMetadataString(auth, "idToken")
+	}
+	apiKey := auth.Attributes[AttributeAPIKey]
+	if apiKey == "" {
+		apiKey = authMetadataString(auth, "api_key")
+	}
+	useSIWC, hasSIWC := parseBoolAny(auth.Metadata["use_siwc"])
+	parts := []string{authAccessToken(auth), authOuterAccessToken(auth), authRefreshToken(auth), idToken, apiKey,
+		authSIWCTokenField(auth, "access_token"), authSIWCTokenField(auth, "refresh_token"),
+		authSIWCTokenField(auth, "id_token"), authSIWCTokenField(auth, "client_id"),
+		strconv.FormatBool(useSIWC), strconv.FormatBool(hasSIWC)}
+	var encoded strings.Builder
+	for _, part := range parts {
+		encoded.WriteString(strconv.Itoa(len(part)))
+		encoded.WriteByte(':')
+		encoded.WriteString(part)
+	}
+	identity.grant = sha256.Sum256([]byte(encoded.String()))
+	return identity
+}
+
+func withQuotaObservationIdentity(ctx context.Context, auth *Auth) context.Context {
+	if auth == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, quotaObservationIdentityKey{}, quotaObservationIdentityFor(auth))
+}
+
+func quotaObservationIdentityMatches(ctx context.Context, current *Auth) bool {
+	identity, known := ctx.Value(quotaObservationIdentityKey{}).(quotaObservationIdentity)
+	if !known {
+		return true
+	} // Preserve direct/manual MarkResult compatibility.
+	if current == nil {
+		return false
+	}
+	now := quotaObservationIdentityFor(current)
+	return identity.provider == now.provider && identity.account == now.account &&
+		(identity.hasAccount || identity.grant == now.grant)
+}
+
+// QuotaResetSchedule is an in-memory observation from a provider usage endpoint.
+// It does not determine credential availability or release quota cooldowns.
+type QuotaResetSchedule struct {
+	WeeklyResetAt      time.Time `json:"weekly_reset_at"`
+	FiveHourResetAt    time.Time `json:"five_hour_reset_at"`
+	ObservedAt         time.Time `json:"observed_at"`
+	weeklyObservedAt   time.Time
+	fiveHourObservedAt time.Time
+}
+
+func quotaScheduleIdentityMatches(a, b *Auth) bool {
+	keys := []string{"account_id", "email", "sub"}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "claude") {
+		keys = append(keys, "account_uuid", "organization_uuid")
+	}
+	hasIdentity := false
+	for _, key := range keys {
+		left, _ := a.Metadata[key].(string)
+		right, _ := b.Metadata[key].(string)
+		if left != right {
+			return false
+		}
+		hasIdentity = hasIdentity || strings.TrimSpace(left) != ""
+	}
+	return hasIdentity || !CredentialsChanged(a, b)
+}
+
+// EffectiveQuotaResetSchedule merges the newest available provider observation.
+// Header observations arrive on ordinary requests and require no usage probe.
+func EffectiveQuotaResetSchedule(auth *Auth) QuotaResetSchedule {
+	if auth == nil {
+		return QuotaResetSchedule{}
+	}
+	schedule := auth.QuotaResetSchedule
+	if !auth.Quota.ObservedAt.After(schedule.ObservedAt) {
+		return schedule
+	}
+	headers := make(http.Header, len(auth.Quota.Signals))
+	for name, value := range auth.Quota.Signals {
+		headers.Set(name, value)
+	}
+	observed := quotaScheduleFromHeaders(auth.Provider, headers, auth.Quota.ObservedAt)
+	if observed.WeeklyResetAt.IsZero() && observed.FiveHourResetAt.IsZero() {
+		return schedule
+	}
+	return mergeQuotaResetSchedule(schedule, observed)
+}
+
+// Each reset window keeps its own receipt age: partial websocket events may
+// advance one window while retaining a window from an older response.
+func mergeQuotaResetSchedule(previous, observed QuotaResetSchedule) QuotaResetSchedule {
+	mergeWindow := func(oldReset, oldAt, reset, at time.Time) (time.Time, time.Time) {
+		if oldAt.IsZero() && !oldReset.IsZero() {
+			oldAt = previous.ObservedAt
+		}
+		if at.IsZero() {
+			at = observed.ObservedAt
+		}
+		if reset.IsZero() {
+			if oldReset.After(observed.ObservedAt) {
+				return oldReset, oldAt
+			}
+			return time.Time{}, oldAt
+		}
+		if at.Before(oldAt) {
+			return oldReset, oldAt
+		}
+		return reset, at
+	}
+	observed.WeeklyResetAt, observed.weeklyObservedAt = mergeWindow(previous.WeeklyResetAt, previous.weeklyObservedAt, observed.WeeklyResetAt, observed.weeklyObservedAt)
+	observed.FiveHourResetAt, observed.fiveHourObservedAt = mergeWindow(previous.FiveHourResetAt, previous.fiveHourObservedAt, observed.FiveHourResetAt, observed.fiveHourObservedAt)
+	if previous.ObservedAt.After(observed.ObservedAt) {
+		observed.ObservedAt = previous.ObservedAt
+	}
+	// Uniform-age schedules retain their existing value representation. Only
+	// windows older than the aggregate observation need a separate timestamp.
+	if observed.weeklyObservedAt.Equal(observed.ObservedAt) {
+		observed.weeklyObservedAt = time.Time{}
+	}
+	if observed.fiveHourObservedAt.Equal(observed.ObservedAt) {
+		observed.fiveHourObservedAt = time.Time{}
+	}
+	return observed
+}
+
+func quotaScheduleFromResponseHeaders(provider string, headers http.Header, receiptTimes map[string]time.Time, fallback time.Time) QuotaResetSchedule {
+	var observedAt time.Time
+	for _, at := range receiptTimes {
+		if at.After(observedAt) {
+			observedAt = at
+		}
+	}
+	if observedAt.IsZero() {
+		observedAt = fallback
+	}
+	schedule := quotaScheduleFromHeaders(provider, headers, observedAt)
+	receipt := func(name string) time.Time {
+		if at := receiptTimes[http.CanonicalHeaderKey(name)]; !at.IsZero() {
+			return at
+		}
+		return observedAt
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		schedule.weeklyObservedAt = receipt("Anthropic-Ratelimit-Unified-7d-Reset")
+		schedule.fiveHourObservedAt = receipt("Anthropic-Ratelimit-Unified-5h-Reset")
+	case "codex":
+		for _, window := range []string{"primary", "secondary"} {
+			prefix := "X-Codex-" + window
+			name := prefix + "-Reset-At"
+			absolute, err := strconv.ParseInt(strings.TrimSpace(headers.Get(name)), 10, 64)
+			if err != nil || absolute <= 0 || absolute > 253402300799 {
+				name = prefix + "-Reset-After-Seconds"
+			}
+			at := receipt(name)
+			windowSchedule := quotaScheduleFromHeaders(provider, headers, at)
+			switch strings.TrimSpace(headers.Get(prefix + "-Window-Minutes")) {
+			case "10080":
+				schedule.WeeklyResetAt, schedule.weeklyObservedAt = windowSchedule.WeeklyResetAt, at
+			case "300":
+				schedule.FiveHourResetAt, schedule.fiveHourObservedAt = windowSchedule.FiveHourResetAt, at
+			}
+		}
+	}
+	return schedule
+}
+
+func quotaScheduleFromHeaders(provider string, headers http.Header, observedAt time.Time) QuotaResetSchedule {
+	schedule := QuotaResetSchedule{ObservedAt: observedAt}
+	reset := func(name string) time.Time {
+		seconds, err := strconv.ParseInt(strings.TrimSpace(headers.Get(name)), 10, 64)
+		if err != nil || seconds <= 0 || seconds > 253402300799 {
+			return time.Time{}
+		}
+		return time.Unix(seconds, 0).UTC()
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		schedule.WeeklyResetAt = reset("Anthropic-Ratelimit-Unified-7d-Reset")
+		schedule.FiveHourResetAt = reset("Anthropic-Ratelimit-Unified-5h-Reset")
+	case "codex":
+		seenWindows := make(map[int64]bool, 2)
+		for _, window := range []string{"primary", "secondary"} {
+			prefix := "X-Codex-" + window
+			minutes, err := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Window-Minutes")), 10, 64)
+			if err != nil || (minutes != 10080 && minutes != 300) {
+				continue
+			}
+			if seenWindows[minutes] {
+				return QuotaResetSchedule{}
+			}
+			seenWindows[minutes] = true
+			at := reset(prefix + "-Reset-At")
+			if at.IsZero() {
+				seconds, errSeconds := strconv.ParseInt(strings.TrimSpace(headers.Get(prefix+"-Reset-After-Seconds")), 10, 64)
+				if errSeconds == nil && seconds >= 0 && seconds <= 604800 && !observedAt.IsZero() {
+					at = observedAt.Add(time.Duration(seconds) * time.Second)
+				}
+			}
+			if minutes == 10080 {
+				schedule.WeeklyResetAt = at
+			} else {
+				schedule.FiveHourResetAt = at
+			}
+		}
+	}
+	return schedule
+}
+
+// RecordQuotaResetScheduleIfUnchanged publishes usage reset times only while
+// the credential inspected before the request remains current. Availability,
+// cooldowns, tokens and persisted credential files are left untouched.
+func (m *Manager) RecordQuotaResetScheduleIfUnchanged(ctx context.Context, expected *Auth, schedule QuotaResetSchedule) *Auth {
+	if m == nil || expected == nil || expected.ID == "" || schedule.ObservedAt.IsZero() {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	release, err := m.lockAuthMutationContext(ctx, expected.ID)
+	if err != nil {
+		return nil
+	}
+	defer release()
+	m.mu.Lock()
+	current := m.auths[expected.ID]
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if ctx.Err() != nil || (cfg != nil && cfg.Home.Enabled) || current == nil || current.Disabled || current.Status == StatusDisabled ||
+		current.Provider != expected.Provider || current.RegistrationEpoch != expected.RegistrationEpoch || current.Generation != expected.Generation ||
+		current.QuotaResetSchedule.ObservedAt.After(schedule.ObservedAt) {
+		m.mu.Unlock()
+		return nil
+	}
+	updated := current.Clone()
+	updated.QuotaResetSchedule = mergeQuotaResetSchedule(current.QuotaResetSchedule, schedule)
+	updated.Generation++
+	updated.UpdatedAt = schedule.ObservedAt
+	m.auths[updated.ID] = updated
+	m.notifyAuthChangeLocked(updated.ID)
+	snapshot := updated.Clone()
+	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot)
+	}
+	return snapshot
+}

@@ -198,36 +198,36 @@ func frameCodexWebsocketRequestBody(body []byte) []byte {
 	return body
 }
 
-func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, error) {
+func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, readCh chan codexWebsocketRead) (int, []byte, time.Time, error) {
 	if sess == nil {
 		if conn == nil {
-			return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
+			return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: websocket conn is nil")
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
-		return msgType, payload, errRead
+		return msgType, payload, time.Now(), errRead
 	}
 	if conn == nil {
-		return 0, nil, fmt.Errorf("codex websockets executor: websocket conn is nil")
+		return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: websocket conn is nil")
 	}
 	if readCh == nil {
-		return 0, nil, fmt.Errorf("codex websockets executor: session read channel is nil")
+		return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: session read channel is nil")
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return 0, nil, ctx.Err()
+			return 0, nil, time.Time{}, ctx.Err()
 		case ev, ok := <-readCh:
 			if !ok {
-				return 0, nil, fmt.Errorf("codex websockets executor: session read channel closed")
+				return 0, nil, time.Time{}, fmt.Errorf("codex websockets executor: session read channel closed")
 			}
 			if ev.conn != conn {
 				continue
 			}
 			if ev.err != nil {
-				return 0, nil, ev.err
+				return 0, nil, time.Time{}, ev.err
 			}
-			return ev.msgType, ev.payload, nil
+			return ev.msgType, ev.payload, ev.receivedAt, nil
 		}
 	}
 }

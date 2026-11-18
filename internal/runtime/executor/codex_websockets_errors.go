@@ -9,6 +9,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	log "github.com/sirupsen/logrus"
 )
@@ -327,9 +328,14 @@ func websocketHandshakeBodyWithReadErr(resp *http.Response) ([]byte, error) {
 }
 
 func recordWebsocketUpgradeRejection(ctx context.Context, cfg *config.Config, wsReqLog helps.UpstreamRequestLog, resp *http.Response) []byte {
+	if resp != nil {
+		helps.RecordAPIWebsocketUpgradeRejection(ctx, cfg, websocketUpgradeRequestLog(wsReqLog), resp.StatusCode, resp.Header.Clone(), nil)
+	}
 	bodyErr, errRead := websocketHandshakeBodyWithReadErr(resp)
 	if resp != nil {
-		helps.RecordAPIWebsocketUpgradeRejection(ctx, cfg, websocketUpgradeRequestLog(wsReqLog), resp.StatusCode, resp.Header.Clone(), bodyErr)
+		if cfg != nil && !cfg.CommercialMode && (cfg.RequestLog || !logging.DeferredAPIRequestCaptureDisabled(ctx)) {
+			helps.AppendAPIResponseChunk(ctx, cfg, bodyErr)
+		}
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, cfg, errRead)
 		}
