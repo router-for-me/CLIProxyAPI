@@ -72,8 +72,9 @@ type rpcIdentifierResponse struct {
 }
 
 type rpcExecutorStreamResponse struct {
-	Headers http.Header                     `json:"headers,omitempty"`
-	Chunks  []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
+	Headers     http.Header                     `json:"headers,omitempty"`
+	Chunks      []pluginapi.ExecutorStreamChunk `json:"chunks,omitempty"`
+	Attribution *pluginapi.UsageAttribution     `json:"attribution,omitempty"`
 }
 
 type rpcAuthLoginStartRequest struct {

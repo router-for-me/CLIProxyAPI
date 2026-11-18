@@ -118,10 +118,20 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	var reporter *helps.UsageReporter
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)
+		reporter.ApplyPluginExecutorAttribution(executorPluginID, nil)
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
-	streamResult, errStream := host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
+	var (
+		streamResult *coreexecutor.StreamResult
+		attribution  *pluginapi.UsageAttribution
+		errStream    error
+	)
+	if attrHost, ok := host.(pluginExecutorAttributionHost); ok && attrHost != nil {
+		streamResult, attribution, errStream = attrHost.ExecutePluginExecutorStreamWithAttribution(execCtx, executorPluginID, req, opts)
+	} else {
+		streamResult, errStream = host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
+	}
 	if errStream != nil {
 		if reporter != nil && !nestedTracker.hasNestedExecution() {
 			reporter.PublishFailure(execCtx, errStream)
@@ -143,6 +153,9 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
+	}
+	if reporter != nil && !nestedTracker.hasNestedExecution() {
+		reporter.ApplyPluginExecutorAttribution(executorPluginID, attribution)
 	}
 
 	passthroughHeadersEnabled := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)

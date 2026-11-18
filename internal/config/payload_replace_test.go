@@ -30,6 +30,10 @@ requests:
           - "hero": "fool"
           - "fool": "friend"
           - "remove": ""
+          - pattern: '(?i)\bvillain\b'
+            replacement: "rival"
+          - pattern: '(?s)<debug>.*?</debug>'
+            replacement: ""
 `
 
 func TestPayloadReplaceConfigRoundTrip(t *testing.T) {
@@ -41,7 +45,9 @@ func TestPayloadReplaceConfigRoundTrip(t *testing.T) {
 		t.Fatalf("missing replace config: %#v", cfg.Payload)
 	}
 	rule := cfg.Payload.Replace[0]
-	if rule.Replacements[0]["hero"] != "fool" || rule.Replacements[1]["fool"] != "friend" || rule.Replacements[2]["remove"] != "" {
+	if rule.Replacements[0]["hero"] != "fool" || rule.Replacements[1]["fool"] != "friend" || rule.Replacements[2]["remove"] != "" ||
+		rule.Replacements[3]["pattern"] != `(?i)\bvillain\b` || rule.Replacements[3]["replacement"] != "rival" ||
+		rule.Replacements[4]["pattern"] != `(?s)<debug>.*?</debug>` || rule.Replacements[4]["replacement"] != "" {
 		t.Fatalf("replacement order/empty value lost: %#v", rule.Replacements)
 	}
 	if rule.Models[0].Protocol != "claude" || rule.Models[0].FromProtocol != "openai" {
@@ -93,10 +99,17 @@ func TestPayloadReplaceConfigRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(cfg.Payload.Replace, reloaded.Payload.Replace) {
 		t.Fatalf("save/load changed replacement config: %#v", reloaded.Payload.Replace)
 	}
-	// Both selector transitions and source-key edits must discard old YAML values.
-	for _, target := range []PayloadReplaceTarget{{Role: "user", All: true, Positions: []int{}}, {Role: "user", Positions: []int{2}}} {
+	// Both selector transitions and literal/pattern transitions must discard stale YAML keys.
+	for i, replacements := range [][]PayloadReplacement{
+		{{"pattern": `user-(\d+)`, "replacement": "account-${1}"}},
+		{{"new-source": "new-destination"}},
+	} {
+		target := PayloadReplaceTarget{Role: "user", All: true, Positions: []int{}}
+		if i == 1 {
+			target = PayloadReplaceTarget{Role: "user", Positions: []int{2}}
+		}
 		cfg.Payload.Replace[0].Target = target
-		cfg.Payload.Replace[0].Replacements = []PayloadReplacement{{"new-source": "new-destination"}}
+		cfg.Payload.Replace[0].Replacements = replacements
 		if errSave := SaveConfigPreserveComments(file, cfg, true); errSave != nil {
 			t.Fatal(errSave)
 		}
@@ -126,7 +139,8 @@ func TestPayloadReplaceSavePreservesEmptyReplacements(t *testing.T) {
 			values []PayloadReplacement
 		}{
 			{"delete-only", []PayloadReplacement{{"remove": ""}}},
-			{"mixed", []PayloadReplacement{{"hero": "fool"}, {"remove": ""}, {"fool": "friend"}}},
+			{"pattern-delete-only", []PayloadReplacement{{"pattern": `(?s)<debug>.*?</debug>`, "replacement": ""}}},
+			{"mixed", []PayloadReplacement{{"hero": "fool"}, {"remove": ""}, {"pattern": `(?i)\bfool\b`, "replacement": "friend"}}},
 		} {
 			for _, migrate := range []bool{false, true} {
 				layout := "preserve-layout"
@@ -170,7 +184,10 @@ func TestPayloadReplaceConfigValidation(t *testing.T) {
 		mutate func(*PayloadReplaceRule)
 	}{
 		{"missing role", func(r *PayloadReplaceRule) { r.Target.Role = "" }},
-		{"other role", func(r *PayloadReplaceRule) { r.Target.Role = "assistant" }},
+		{"assistant role", func(r *PayloadReplaceRule) { r.Target.Role = "assistant" }},
+		{"tool role", func(r *PayloadReplaceRule) { r.Target.Role = "tool" }},
+		{"other role", func(r *PayloadReplaceRule) { r.Target.Role = "model" }},
+		{"case sensitive role", func(r *PayloadReplaceRule) { r.Target.Role = "User" }},
 		{"missing target", func(r *PayloadReplaceRule) { r.Target.Positions = nil }},
 		{"zero", func(r *PayloadReplaceRule) { r.Target.Positions = []int{0} }},
 		{"negative", func(r *PayloadReplaceRule) { r.Target.Positions = []int{-1} }},
@@ -178,6 +195,10 @@ func TestPayloadReplaceConfigValidation(t *testing.T) {
 		{"no replacements", func(r *PayloadReplaceRule) { r.Replacements = nil }},
 		{"empty mapping", func(r *PayloadReplaceRule) { r.Replacements = []PayloadReplacement{{}} }},
 		{"multiple mappings", func(r *PayloadReplaceRule) { r.Replacements = []PayloadReplacement{{"a": "b", "c": "d"}} }},
+		{"three mappings", func(r *PayloadReplaceRule) {
+			r.Replacements = []PayloadReplacement{{"pattern": "a", "replacement": "b", "extra": "c"}}
+		}},
+		{"partial pattern mapping", func(r *PayloadReplaceRule) { r.Replacements = []PayloadReplacement{{"pattern": "a", "other": "b"}} }},
 		{"empty source", func(r *PayloadReplaceRule) { r.Replacements = []PayloadReplacement{{"": "b"}} }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,8 +214,33 @@ func TestPayloadReplaceConfigValidation(t *testing.T) {
 			}
 		})
 	}
+	for _, role := range []string{"system", "developer", "user"} {
+		for _, all := range []bool{false, true} {
+			rule := valid
+			rule.Target = PayloadReplaceTarget{Role: role, All: all}
+			if !all {
+				rule.Target.Positions = []int{1, 2}
+			}
+			if errValidate := rule.Validate(); errValidate != nil {
+				t.Fatalf("role=%s all=%v: %v", role, all, errValidate)
+			}
+			cfg := &Config{Payload: PayloadConfig{Replace: []PayloadReplaceRule{rule}}}
+			cfg.SanitizePayloadRules()
+			if len(cfg.Payload.Replace) != 1 {
+				t.Fatalf("sanitizer dropped role=%s all=%v", role, all)
+			}
+		}
+	}
 	valid.Target = PayloadReplaceTarget{Role: "user", All: true}
-	valid.Replacements = []PayloadReplacement{{" ": ""}}
+	valid.Replacements = []PayloadReplacement{
+		{" ": ""},
+		{"pattern": "schema"},
+		{"pattern": `(?i)\bhero\b`, "replacement": ""},
+		{"pattern": " ", "replacement": ""},
+		// Regex syntax is handled per entry without rejecting the entire rule.
+		{"pattern": "", "replacement": "b"},
+		{"pattern": "[invalid", "replacement": ""},
+	}
 	if errValidate := valid.Validate(); errValidate != nil {
 		t.Fatal(errValidate)
 	}
@@ -210,13 +256,13 @@ func TestPayloadReplaceRejectsNonIntegerPositions(t *testing.T) {
 }
 
 func TestPayloadReplacementRejectsInvalidYAML(t *testing.T) {
-	for _, input := range []string{`{1: "b"}`, `{"a": 1}`, `{"a": true}`, `{"a": null}`, `{"a": []}`, `{"a": "b", "c": "d"}`, `{"a": "b", "a": "c"}`, `[]`, `"a"`} {
+	for _, input := range []string{`{1: "b"}`, `{"a": 1}`, `{"a": true}`, `{"a": null}`, `{"a": []}`, `{"a": "b", "c": "d"}`, `{"a": "b", "a": "c"}`, `{"pattern": "a", "pattern": "b"}`, `{"pattern": "a", "other": "b"}`, `{"pattern": "a", "replacement": null}`, `{"pattern": 1, "replacement": "b"}`, `{"pattern": "a", "replacement": "b", "extra": "c"}`, `[]`, `"a"`} {
 		var replacement PayloadReplacement
 		if errDecode := yaml.Unmarshal([]byte(input), &replacement); errDecode == nil {
 			t.Fatalf("accepted invalid mapping %s", input)
 		}
 	}
-	for _, input := range []string{`{"a":1}`, `{"a":true}`, `{"a":null}`, `null`, `{}`, `{"a":"b","c":"d"}`} {
+	for _, input := range []string{`{"a":1}`, `{"a":true}`, `{"a":null}`, `null`, `{}`, `{"a":"b","c":"d"}`, `{"pattern":"a","other":"b"}`, `{"pattern":"a","replacement":null}`, `{"pattern":1,"replacement":"b"}`, `{"pattern":"a","replacement":"b","extra":"c"}`} {
 		var replacement PayloadReplacement
 		if errDecode := json.Unmarshal([]byte(input), &replacement); errDecode == nil {
 			t.Fatalf("accepted nonstring JSON %s", input)
@@ -226,5 +272,15 @@ func TestPayloadReplacementRejectsInvalidYAML(t *testing.T) {
 	var replacement PayloadReplacement
 	if errDecode := yaml.Unmarshal([]byte(`{"1": "false"}`), &replacement); errDecode != nil {
 		t.Fatal(errDecode)
+	}
+	// Pattern and replacement also accept YAML scalar aliases.
+	var aliasRule struct {
+		Replacements []PayloadReplacement `yaml:"replacements"`
+	}
+	if errDecode := yaml.Unmarshal([]byte("replacements:\n  - pattern: &p '(?i)hero'\n    replacement: ''\n  - pattern: *p\n    replacement: friend\n"), &aliasRule); errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if len(aliasRule.Replacements) != 2 || aliasRule.Replacements[1]["pattern"] != "(?i)hero" || aliasRule.Replacements[1]["replacement"] != "friend" {
+		t.Fatalf("unexpected alias decode: %#v", aliasRule.Replacements)
 	}
 }

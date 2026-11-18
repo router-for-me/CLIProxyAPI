@@ -26,6 +26,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -2194,5 +2195,53 @@ func TestImageDetailsCloneStringsFromReusableBuffer(t *testing.T) {
 	d, ok := b.Detail()
 	if !ok || d.ImageDetails == nil || d.ImageDetails.Size != "1024x1536" || d.ImageDetails.Quality != "high" || d.ImageDetails.Background != "transparent" || d.ImageDetails.OutputFormat != "png" {
 		t.Fatalf("ObserveOpenAIStream ImageDetails corrupted after buffer overwrite: %+v", d.ImageDetails)
+	}
+}
+
+type customUsageExecutorType struct{}
+
+func (*customUsageExecutorType) Identifier() string        { return "custom-prov" }
+func (*customUsageExecutorType) UsageExecutorType() string { return "plugin:custom-prov" }
+
+func TestUsageReporterApplyPluginExecutorAttribution(t *testing.T) {
+	ctx := usage.WithAPIKey(context.Background(), "sk-client-fallback")
+	reporter := NewUsageReporter(ctx, "my-plugin", "gpt-5.4", nil)
+	reporter.ApplyPluginExecutorAttribution("my-plugin", nil)
+
+	before := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if before.ExecutorType != "plugin:my-plugin" {
+		t.Fatalf("before.ExecutorType = %q, want %q", before.ExecutorType, "plugin:my-plugin")
+	}
+	if before.Source != "sk-client-fallback" {
+		t.Fatalf("before.Source = %q, want client fallback", before.Source)
+	}
+
+	reporter.ApplyPluginExecutorAttribution("my-plugin", &pluginapi.UsageAttribution{
+		AuthIndex: " idx-1 ",
+		AuthType:  " oauth ",
+		Source:    " acct@example.com ",
+	})
+	// Subsequent calls must not overwrite already-populated auth attribution fields.
+	reporter.ApplyPluginExecutorAttribution("my-plugin", &pluginapi.UsageAttribution{
+		AuthIndex: "idx-2",
+		AuthType:  "api_key",
+	})
+
+	after := reporter.buildRecord(usage.Detail{TotalTokens: 2}, false)
+	if after.Provider != "my-plugin" ||
+		after.ExecutorType != "plugin:my-plugin" ||
+		after.AuthIndex != "idx-1" ||
+		after.AuthType != "oauth" ||
+		after.Source != "acct@example.com" {
+		t.Fatalf("after record = %+v", after)
+	}
+
+	execReporter := NewExecutorUsageReporter(context.Background(), &customUsageExecutorType{}, "gpt-5.4", nil)
+	execRec := execReporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if execRec.ExecutorType != "plugin:custom-prov" {
+		t.Fatalf("execRec.ExecutorType = %q, want %q", execRec.ExecutorType, "plugin:custom-prov")
+	}
+	if PluginExecutorType("") != "" || PluginExecutorType("  ") != "" || PluginExecutorType(" my-plugin ") != "plugin:my-plugin" {
+		t.Fatalf("unexpected PluginExecutorType values")
 	}
 }
