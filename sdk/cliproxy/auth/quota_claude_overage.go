@@ -283,6 +283,26 @@ func claudeOverageIdentityMatches(ctx context.Context, a *Auth) bool {
 	return identity.account == current.account && (identity.known || identity.version == current.version)
 }
 
+// Legacy mixed responses retain the original failure age, rather than turning
+// a shared retry boundary into a new paid-pool restriction at restore time.
+func claudeOverageRestoreDeadline(quota QuotaState, retryAt, observedAt time.Time, signals map[string]string) time.Time {
+	if observedAt.IsZero() {
+		return retryAt
+	}
+	headers := make(http.Header, len(signals))
+	for key, value := range signals {
+		headers.Set(key, value)
+	}
+	signals = collectQuotaSignals("claude", headers)
+	get := func(name string) string {
+		return strings.ToLower(strings.TrimSpace(signals[http.CanonicalHeaderKey(name)]))
+	}
+	if (get("Anthropic-Ratelimit-Unified-5h-Status") == "rejected" || get("Anthropic-Ratelimit-Unified-7d-Status") == "rejected") && !strings.Contains(get("Anthropic-Ratelimit-Unified-Representative-Claim"), "overage") {
+		return claudeOverageOwnDeadline(quota, nil, observedAt)
+	}
+	return retryAt
+}
+
 func claudeOverageSignals(signals map[string]string) bool {
 	headers := make(http.Header, len(signals))
 	for key, value := range signals {

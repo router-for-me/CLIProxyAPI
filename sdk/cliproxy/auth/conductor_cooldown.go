@@ -413,7 +413,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	}
 
 	if !record.ClaudeOverageEvaluated && overageUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeOverageSignals(record.CooldownSignals) {
-		overageUntil = record.NextRetryAfter
+		overageUntil = claudeOverageRestoreDeadline(record.Quota, record.NextRetryAfter, record.UpdatedAt, record.CooldownSignals)
 	}
 	if model == "" {
 		if overageUntil.After(auth.claudeOverageCooldownUntil) {
@@ -626,7 +626,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 				restoredShadow.claudeFablePoolCooldownUntil = restoredShadow.NextRetryAfter
 			}
 			if !record.ClaudeOverageEvaluated && restoredShadow.claudeOverageCooldownUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeOverageSignals(record.IndependentCooldownSignals) {
-				restoredShadow.claudeOverageCooldownUntil = restoredShadow.NextRetryAfter
+				restoredShadow.claudeOverageCooldownUntil = claudeOverageRestoreDeadline(restoredShadow.Quota, restoredShadow.NextRetryAfter, restoredShadow.UpdatedAt, record.IndependentCooldownSignals)
 			}
 			restoredShadow.Quota.cooldownEvaluated = restoredShadow.Quota.Exceeded
 			if indepForceUntil.After(restoredShadow.forceCooldownUntil) {
