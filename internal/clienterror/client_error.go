@@ -420,6 +420,12 @@ func IsClaudeThreadNotFound(status int, err error) bool {
 	return strings.Contains(lower, "thread state") && strings.Contains(lower, "previous_message_id")
 }
 
+// IsClaudePromptTooLong reports Anthropic's input overflow, which carries no
+// OpenAI-style error code and is identified by its type and message prefix.
+func IsClaudePromptTooLong(errorType, message string) bool {
+	return errorType == "invalid_request_error" && strings.HasPrefix(message, "prompt is too long")
+}
+
 // IsDevinRequestPermissionDenied reports whether a 403 error from Devin is
 // deterministically caused by the request payload (such as the MCP tool
 // configuration filter or the prompt content policy filter) rather than

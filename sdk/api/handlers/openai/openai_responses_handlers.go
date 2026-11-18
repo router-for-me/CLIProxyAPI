@@ -1439,7 +1439,9 @@ func responsesStreamErrorText(errMsg *interfaces.ErrorMessage, status int) strin
 		}
 		data, errMarshal := json.Marshal(out)
 		if errMarshal == nil {
-			return string(data)
+			doc := ojson.NewDoc(data)
+			setClaudePromptTooLongCodeDoc(doc)
+			return doc.String()
 		}
 	}
 
@@ -1459,9 +1461,27 @@ type responsesStreamSanitizedError struct {
 func (e *responsesStreamSanitizedError) Error() string { return e.message }
 func (e *responsesStreamSanitizedError) Unwrap() error { return e.cause }
 
+// setClaudePromptTooLongCodeDoc adds the code Responses clients key on to an
+// Anthropic input overflow, which reports itself by message only.
+func setClaudePromptTooLongCodeDoc(doc *ojson.Doc) bool {
+	if strings.TrimSpace(doc.Get("error.code").String()) != "" || !clienterror.IsClaudePromptTooLong(doc.Get("error.type").String(), doc.Get("error.message").String()) {
+		return false
+	}
+	return doc.Set("error.code", "context_length_exceeded") == nil
+}
+
 func sanitizeResponsesInitialErrorMessage(errMsg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
 	if errMsg != nil && errMsg.DirectResponse {
-		return errMsg
+		if !ojson.ValidBytes(errMsg.Body) {
+			return errMsg
+		}
+		doc := ojson.NewDoc(errMsg.Body)
+		if !setClaudePromptTooLongCodeDoc(doc) {
+			return errMsg
+		}
+		direct := *errMsg
+		direct.Body = doc.Bytes()
+		return &direct
 	}
 	return sanitizeResponsesStreamErrorMessage(errMsg)
 }

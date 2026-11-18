@@ -28,6 +28,7 @@ const (
 	dataOnlyCleanCloseResponsesModel    = "data-only-clean-close-responses-model"
 	sensitiveInitialErrorResponsesModel = "sensitive-initial-error-responses-model"
 	directInitialErrorResponsesModel    = "direct-initial-error-responses-model"
+	directPromptTooLongResponsesModel   = "direct-prompt-too-long-responses-model"
 	crossChunkMultilineResponsesModel   = "cross-chunk-multiline-responses-model"
 	validThenMalformedResponsesModel    = "valid-then-malformed-responses-model"
 )
@@ -46,6 +47,13 @@ func (*prematureResponsesStreamExecutor) ExecuteStream(_ context.Context, _ *cor
 			HTTPStatus: http.StatusTooManyRequests,
 			Header:     http.Header{"Retry-After": []string{"17"}, "X-Plugin-Response": []string{"true"}},
 			Body:       []byte(`{"error":{"message":"plugin direct response"}}`),
+		}
+	}
+	if req.Model == directPromptTooLongResponsesModel {
+		return nil, &coreexecutor.RequestTerminatedError{
+			HTTPStatus: http.StatusBadRequest,
+			Header:     http.Header{"Request-Id": []string{"req_overflow"}},
+			Body:       []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1202540 tokens > 1000000 maximum"}}`),
 		}
 	}
 	chunks := make(chan coreexecutor.StreamChunk, 2)
@@ -240,6 +248,39 @@ func TestResponsesHandlerPreservesDirectResponseBeforeFirstFrame(t *testing.T) {
 	}
 	if recorder.Body.String() != `{"error":{"message":"plugin direct response"}}` {
 		t.Fatalf("direct response body = %q", recorder.Body.String())
+	}
+}
+
+func TestResponsesHandlerAddsContextLengthCodeToDirectClaudePromptTooLong(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	executor := &prematureResponsesStreamExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "direct-prompt-too-long-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: directPromptTooLongResponsesModel}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"direct-prompt-too-long-responses-model","input":"hi","stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest || recorder.Header().Get("Request-Id") != "req_overflow" {
+		t.Fatalf("direct response status=%d headers=%v body=%q", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"code":"context_length_exceeded"`) || !strings.Contains(body, "prompt is too long: 1202540 tokens") {
+		t.Fatalf("direct Claude prompt is too long body missing context_length_exceeded code: %q", body)
 	}
 }
 
@@ -1153,6 +1194,50 @@ func TestResponsesHandlerSendKeepAliveBeforeFT(t *testing.T) {
 		}
 		if !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "prompt is too long: 210000 tokens") {
 			t.Fatalf("response.failed missing prompt is too long detail: %q", body)
+		}
+	})
+
+	t.Run("disabled maps Claude prompt is too long before first byte to HTTP 400 context_length_exceeded", func(t *testing.T) {
+		chunks := make(chan coreexecutor.StreamChunk, 1)
+		executor := &preFTKeepAliveResponsesExecutor{chunks: chunks}
+		manager := coreauth.NewManager(nil, nil, nil)
+		manager.RegisterExecutor(executor)
+		model := "pre-ft-no-keepalive-prompt-too-long-responses-model"
+		auth := &coreauth.Auth{ID: "pre-ft-no-keepalive-prompt-too-long-responses-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("register auth: %v", errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		})
+
+		chunks <- coreexecutor.StreamChunk{
+			Err: preFTStatusError{
+				status: http.StatusBadRequest,
+				msg:    `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1202540 tokens > 1000000 maximum"}}`,
+			},
+		}
+		close(chunks)
+
+		base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+		h := NewOpenAIResponsesAPIHandler(base)
+		router := gin.New()
+		router.POST("/v1/responses", h.Responses)
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{\"model\":\""+model+"\",\"input\":\"hi\",\"stream\":true}"))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, request)
+
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 before any SSE byte; body=%q", recorder.Code, recorder.Body.String())
+		}
+		body := recorder.Body.String()
+		if !strings.Contains(body, `"code":"context_length_exceeded"`) {
+			t.Fatalf("pre-first-byte JSON error missing context_length_exceeded code: %q", body)
+		}
+		if !strings.Contains(body, `"type":"invalid_request_error"`) || !strings.Contains(body, "prompt is too long: 1202540 tokens") {
+			t.Fatalf("pre-first-byte JSON error missing prompt is too long detail: %q", body)
 		}
 	})
 

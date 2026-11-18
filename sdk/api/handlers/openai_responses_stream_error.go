@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 )
 
 type openAIResponsesStreamErrorChunk struct {
@@ -210,8 +211,7 @@ func applyOpenAIResponsesNestedErrorCodeDoc(doc *ojson.Doc, errorPath string) {
 		}
 	}
 	// Anthropic reports input overflow by message only; Responses clients key on this code.
-	if doc.Get(errorPath+".type").String() == "invalid_request_error" &&
-		strings.HasPrefix(doc.Get(errorPath+".message").String(), "prompt is too long") {
+	if clienterror.IsClaudePromptTooLong(doc.Get(errorPath+".type").String(), doc.Get(errorPath+".message").String()) {
 		_ = doc.Set(errorPath+".code", "context_length_exceeded")
 	}
 }
