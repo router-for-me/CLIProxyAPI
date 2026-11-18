@@ -402,11 +402,14 @@ func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
 	return nil
 }
 
-func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+func newAntigravityStatusErr(statusCode int, body []byte, headers ...http.Header) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
+		} else if len(headers) > 0 {
+			// Body hints, including explicit zero, remain authoritative.
+			err.retryAfter = parseRetryAfterHeader(headers[0], time.Now())
 		}
 	} else if statusCode == http.StatusForbidden {
 		if violation := parseAntigravityTOSViolation(body); violation != nil {

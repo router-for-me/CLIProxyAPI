@@ -197,7 +197,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes, httpResp.Header)
 		return nil, err
 	}
 
@@ -331,7 +331,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				if statusCode == http.StatusForbidden {
 					e.applyAntigravityTOSState(e.cfg, auth, payload)
 				}
-				streamErr = newAntigravityStatusErr(statusCode, payload)
+				streamErr = newAntigravityStatusErr(statusCode, payload, httpResp.Header)
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {
