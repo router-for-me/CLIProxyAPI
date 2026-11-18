@@ -3,6 +3,9 @@ package antigravity
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"github.com/MoeForge/moego/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -76,6 +79,29 @@ func (o *AntigravityAuth) nodeUserAgent() string {
 	return misc.AntigravityOnboardUserUserAgent("")
 }
 
+// GenerateState returns 16 random bytes as unpadded base64url, matching the
+// official 22-character OAuth state.
+func GenerateState() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("antigravity: generate state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// GeneratePKCE returns an RFC 7636 verifier and its S256 challenge. The
+// official client always uses PKCE, even on the loopback flow.
+func GeneratePKCE() (verifier, challenge string, err error) {
+	buf := make([]byte, 32)
+	if _, err = rand.Read(buf); err != nil {
+		return "", "", fmt.Errorf("antigravity: generate PKCE verifier: %w", err)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
+}
+
 func antigravityLoadCodeAssistMetadata() map[string]string {
 	return map[string]string{
 		"ideType": "ANTIGRAVITY",
@@ -83,11 +109,15 @@ func antigravityLoadCodeAssistMetadata() map[string]string {
 }
 
 func antigravityControlPlaneMetadata(userAgent string) map[string]string {
-	return map[string]string{
-		"ide_type":    "ANTIGRAVITY",
-		"ide_version": misc.AntigravityVersionFromUserAgent(userAgent),
-		"ide_name":    "antigravity",
+	metadata := map[string]string{
+		"ide_type":       "ANTIGRAVITY",
+		"ide_version":    misc.AntigravityVersionFromUserAgent(userAgent),
+		"ide_name":       "antigravity",
+		"platform":       misc.AntigravityPlatformEnum(),
+		"plugin_type":    "CLOUD_CODE",
+		"update_channel": "stable",
 	}
+	return metadata
 }
 
 func extractCloudaicompanionProject(data map[string]any) string {
@@ -138,15 +168,20 @@ func defaultAntigravityTierID(loadResp map[string]any) string {
 	return "free-tier"
 }
 
-// BuildAuthURL generates the OAuth authorization URL.
-func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
+// BuildAuthURL generates the OAuth authorization URL. codeChallenge is the
+// S256 challenge produced by GeneratePKCE; the official client sends PKCE and
+// does not force prompt=consent.
+func (o *AntigravityAuth) BuildAuthURL(state, redirectURI, codeChallenge string) string {
 	if strings.TrimSpace(redirectURI) == "" {
-		redirectURI = fmt.Sprintf("http://localhost:%d/oauth-callback", CallbackPort)
+		redirectURI = fmt.Sprintf("http://localhost:%d%s", CallbackPort, CallbackPath)
 	}
 	params := url.Values{}
 	params.Set("access_type", "offline")
 	params.Set("client_id", ClientID)
-	params.Set("prompt", "consent")
+	if codeChallenge != "" {
+		params.Set("code_challenge", codeChallenge)
+		params.Set("code_challenge_method", "S256")
+	}
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")
 	params.Set("scope", strings.Join(Scopes, " "))
@@ -154,12 +189,16 @@ func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
 	return AuthEndpoint + "?" + params.Encode()
 }
 
-// ExchangeCodeForTokens exchanges authorization code for access and refresh tokens
-func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
+// ExchangeCodeForTokens exchanges authorization code for access and refresh tokens.
+// codeVerifier must be the PKCE verifier paired with the authorization request.
+func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI, codeVerifier string) (*TokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", ClientID)
 	data.Set("client_secret", ClientSecret)
+	if codeVerifier != "" {
+		data.Set("code_verifier", codeVerifier)
+	}
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
 
@@ -210,7 +249,6 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", o.shortUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -309,10 +347,76 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	return projectID, nil
 }
 
+// callControlPlane performs one authenticated v1internal POST with the same
+// minimal header set the official language server uses.
+func (o *AntigravityAuth) callControlPlane(ctx context.Context, accessToken, method string, body any) ([]byte, error) {
+	rawBody, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("marshal request body: %w", errMarshal)
+	}
+	endpointURL := fmt.Sprintf("%s/%s:%s", DailyAPIEndpoint, APIVersion, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", o.shortUserAgent())
+	resp, errDo := o.httpClient.Do(req)
+	if errDo != nil {
+		return nil, fmt.Errorf("execute request: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity control plane: close body error: %v", errClose)
+		}
+	}()
+	bodyBytes, errRead := io.ReadAll(resp.Body)
+	if errRead != nil {
+		return nil, fmt.Errorf("read response: %w", errRead)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, &HTTPStatusError{
+			StatusCodeValue: resp.StatusCode,
+			Message:         fmt.Sprintf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes))),
+		}
+	}
+	return bodyBytes, nil
+}
+
+// WarmupAfterLogin replays the post-login control-plane calls the official
+// client makes right after a successful OAuth exchange. Errors are best effort:
+// the login itself has already succeeded.
+func (o *AntigravityAuth) WarmupAfterLogin(ctx context.Context, accessToken, projectID string) {
+	if strings.TrimSpace(accessToken) == "" {
+		return
+	}
+	if strings.TrimSpace(projectID) != "" {
+		_, _ = o.callControlPlane(ctx, accessToken, "loadCodeAssist", map[string]any{
+			"cloudaicompanionProject": projectID,
+			"metadata":                antigravityLoadCodeAssistMetadata(),
+		})
+	}
+	projectBody := map[string]any{}
+	if strings.TrimSpace(projectID) != "" {
+		projectBody["project"] = projectID
+	}
+	_, _ = o.callControlPlane(ctx, accessToken, "fetchUserInfo", projectBody)
+	_, _ = o.callControlPlane(ctx, accessToken, "fetchAvailableModels", projectBody)
+	experimentsBody := struct {
+		Project  string            `json:"project,omitempty"`
+		Metadata map[string]string `json:"metadata"`
+	}{
+		Project:  strings.TrimSpace(projectID),
+		Metadata: map[string]string{"updateChannel": "stable"},
+	}
+	_, _ = o.callControlPlane(ctx, accessToken, "listExperiments", experimentsBody)
+}
+
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
-	userAgent := o.nodeUserAgent()
+	userAgent := o.shortUserAgent()
 	requestBody := map[string]any{
 		"tier_id":  tierID,
 		"metadata": antigravityControlPlaneMetadata(userAgent),
@@ -341,10 +445,8 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("Accept", "*/*")
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("X-Goog-Api-Client", misc.AntigravityGoogAPIClientUA)
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {

@@ -22,7 +22,7 @@ func TestAntigravityConstantsAndURLBuilder(t *testing.T) {
 		t.Fatalf("expected callback port 51121, got %d", auth.AntigravityDefaultCallbackPort)
 	}
 
-	expectedDefaultURI := "http://localhost:51121/oauth-callback"
+	expectedDefaultURI := "http://localhost:51121/auth/callback"
 	if got := auth.AntigravityDefaultCallbackURI(); got != expectedDefaultURI {
 		t.Fatalf("expected default callback URI %q, got %q", expectedDefaultURI, got)
 	}
@@ -47,11 +47,23 @@ func TestAntigravityConstantsAndURLBuilder(t *testing.T) {
 	if q.Get("access_type") != "offline" {
 		t.Fatalf("expected access_type=offline, got %q", q.Get("access_type"))
 	}
-	if q.Get("prompt") != "consent" {
-		t.Fatalf("expected prompt=consent, got %q", q.Get("prompt"))
+	if q.Get("prompt") != "" {
+		t.Fatalf("expected no prompt parameter, got %q", q.Get("prompt"))
 	}
 	if !strings.Contains(q.Get("scope"), "cloud-platform") {
 		t.Fatalf("scope should include cloud-platform: %s", q.Get("scope"))
+	}
+
+	pkceURL := auth.BuildAntigravityAuthURLWithPKCE("state-pkce", customURI, "challenge-123")
+	parsedPKCE, err := url.Parse(pkceURL)
+	if err != nil {
+		t.Fatalf("failed to parse PKCE auth URL: %v", err)
+	}
+	if parsedPKCE.Query().Get("code_challenge") != "challenge-123" {
+		t.Fatalf("expected code_challenge, got %q", parsedPKCE.Query().Get("code_challenge"))
+	}
+	if parsedPKCE.Query().Get("code_challenge_method") != "S256" {
+		t.Fatalf("expected S256, got %q", parsedPKCE.Query().Get("code_challenge_method"))
 	}
 
 	// Test with empty redirect URI (should fallback to default)
@@ -95,7 +107,7 @@ func TestExchangeAntigravityCode(t *testing.T) {
 		}),
 	}
 
-	tokenResp, err := auth.ExchangeAntigravityCode(context.Background(), "auth-code-123", "http://localhost:51121/oauth-callback", client)
+	tokenResp, err := auth.ExchangeAntigravityCode(context.Background(), "auth-code-123", "http://localhost:51121/auth/callback", client)
 	if err != nil {
 		t.Fatalf("ExchangeAntigravityCode error: %v", err)
 	}
@@ -217,7 +229,7 @@ func TestCompleteAntigravityOAuth(t *testing.T) {
 		}),
 	}
 
-	record, err := auth.CompleteAntigravityOAuth(context.Background(), "auth-code-xyz", "http://localhost:51121/oauth-callback", client)
+	record, err := auth.CompleteAntigravityOAuth(context.Background(), "auth-code-xyz", "http://localhost:51121/auth/callback", client)
 	if err != nil {
 		t.Fatalf("CompleteAntigravityOAuth error: %v", err)
 	}

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -26,9 +29,10 @@ func NewAntigravityAuthenticator() Authenticator { return &AntigravityAuthentica
 // Provider returns the provider key for antigravity.
 func (AntigravityAuthenticator) Provider() string { return "antigravity" }
 
-// RefreshLead instructs the manager to refresh 30 minutes before expiry.
+// RefreshLead instructs the manager to refresh just before expiry. The
+// official client refreshes on demand (~10s skew), not 30 minutes early.
 func (AntigravityAuthenticator) RefreshLead() *time.Duration {
-	return new(30 * time.Minute)
+	return new(time.Minute)
 }
 
 // Login launches a local OAuth flow to obtain antigravity tokens and persists them.
@@ -50,9 +54,13 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 
 	authSvc := antigravity.NewAntigravityAuth(cfg, nil)
 
-	state, err := misc.GenerateRandomState()
+	state, err := antigravity.GenerateState()
 	if err != nil {
 		return nil, fmt.Errorf("antigravity: failed to generate state: %w", err)
+	}
+	codeVerifier, codeChallenge, errPKCE := antigravity.GeneratePKCE()
+	if errPKCE != nil {
+		return nil, errPKCE
 	}
 
 	srv, port, cbChan, errServer := startAntigravityCallbackServer(callbackPort)
@@ -65,8 +73,8 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", port)
-	authURL := authSvc.BuildAuthURL(state, redirectURI)
+	redirectURI := fmt.Sprintf("http://localhost:%d%s", port, antigravity.CallbackPath)
+	authURL := authSvc.BuildAuthURL(state, redirectURI, codeChallenge)
 
 	if !opts.NoBrowser {
 		fmt.Println("Opening browser for antigravity authentication")
@@ -153,7 +161,7 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: missing authorization code")
 	}
 
-	tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, cbRes.Code, redirectURI)
+	tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, cbRes.Code, redirectURI, codeVerifier)
 	if errToken != nil {
 		return nil, fmt.Errorf("antigravity: token exchange failed: %w", errToken)
 	}
@@ -187,13 +195,25 @@ waitForCallback:
 		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
+	// Replay the official post-login control-plane calls so the account looks
+	// like a freshly started Hub session.
+	authSvc.WarmupAfterLogin(ctx, accessToken, projectID)
+
 	fmt.Println("Antigravity authentication successful")
 	if projectID != "" {
 		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
+	refreshToken := strings.TrimSpace(tokenResp.RefreshToken)
+	if refreshToken == "" {
+		refreshToken = existingRefreshToken(cfg, email)
+		if refreshToken == "" {
+			return nil, fmt.Errorf("antigravity: no refresh token issued and none stored for %s; revoke the app's access in the Google account settings and log in again", email)
+		}
+		log.Infof("antigravity: no new refresh token issued, keeping the one already stored for %s", email)
+	}
 	return BuildAntigravityAuth(&AntigravityTokenResponse{
 		AccessToken:  tokenResp.AccessToken,
-		RefreshToken: tokenResp.RefreshToken,
+		RefreshToken: refreshToken,
 		ExpiresIn:    tokenResp.ExpiresIn,
 		TokenType:    tokenResp.TokenType,
 	}, email, projectID), nil
@@ -209,23 +229,32 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	if port <= 0 {
 		port = antigravity.CallbackPort
 	}
-	addr := fmt.Sprintf(":%d", port)
-	listener, err := net.Listen("tcp", addr)
+	// The official client binds loopback only (127.0.0.1 and ::1), never
+	// 0.0.0.0. Port 0 lets the OS pick a random port like the real client.
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, 0, nil, err
 	}
 	port = listener.Addr().(*net.TCPAddr).Port
+	var listeners []net.Listener
+	listeners = append(listeners, listener)
+	if ipv6, err6 := net.Listen("tcp", fmt.Sprintf("[::1]:%d", port)); err6 == nil {
+		listeners = append(listeners, ipv6)
+	}
 	resultCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(antigravity.CallbackPath, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		res := callbackResult{
 			Code:  strings.TrimSpace(q.Get("code")),
 			Error: strings.TrimSpace(q.Get("error")),
 			State: strings.TrimSpace(q.Get("state")),
 		}
-		resultCh <- res
+		select {
+		case resultCh <- res:
+		default:
+		}
 		if res.Code != "" && res.Error == "" {
 			_, _ = w.Write([]byte("<h1>Login successful</h1><p>You can close this window.</p>"))
 		} else {
@@ -234,11 +263,13 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	})
 
 	srv := &http.Server{Handler: mux}
-	go func() {
-		if errServe := srv.Serve(listener); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
-			log.Warnf("antigravity callback server error: %v", errServe)
-		}
-	}()
+	for _, l := range listeners {
+		go func(l net.Listener) {
+			if errServe := srv.Serve(l); errServe != nil && !strings.Contains(errServe.Error(), "Server closed") {
+				log.Warnf("antigravity callback server error: %v", errServe)
+			}
+		}(l)
+	}
 
 	return srv, port, resultCh, nil
 }
@@ -250,8 +281,9 @@ func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClie
 	return authSvc.FetchProjectID(ctx, accessToken)
 }
 
-// AntigravityDefaultCallbackPort is the default local port used for Antigravity OAuth loopback callbacks.
-const AntigravityDefaultCallbackPort = antigravity.CallbackPort
+// AntigravityDefaultCallbackPort is the legacy fixed local port. The login
+// flow itself uses a random port (CallbackPort 0).
+const AntigravityDefaultCallbackPort = 51121
 
 // AntigravityTokenResponse captures the tokens returned by Antigravity OAuth exchange.
 type AntigravityTokenResponse struct {
@@ -263,7 +295,7 @@ type AntigravityTokenResponse struct {
 
 // AntigravityDefaultCallbackURI returns the default loopback redirect URI for Antigravity OAuth.
 func AntigravityDefaultCallbackURI() string {
-	return fmt.Sprintf("http://localhost:%d/oauth-callback", AntigravityDefaultCallbackPort)
+	return fmt.Sprintf("http://localhost:%d%s", AntigravityDefaultCallbackPort, antigravity.CallbackPath)
 }
 
 // AntigravityUserAgent returns the canonical User-Agent string used by the Antigravity Hub family.
@@ -284,19 +316,36 @@ func AntigravityRequestUserAgent(userAgent string) string {
 }
 
 // BuildAntigravityAuthURL generates the OAuth authorization URL for Antigravity.
-// If redirectURI is empty, the default loopback callback URI is used.
+// If redirectURI is empty, the default loopback callback URI is used. The
+// legacy helper omits PKCE; use BuildAntigravityAuthURLWithPKCE for the
+// official shape.
 func BuildAntigravityAuthURL(state, redirectURI string) string {
+	return BuildAntigravityAuthURLWithPKCE(state, redirectURI, "")
+}
+
+// BuildAntigravityAuthURLWithPKCE generates the OAuth authorization URL with
+// an S256 code challenge.
+func BuildAntigravityAuthURLWithPKCE(state, redirectURI, codeChallenge string) string {
+	if strings.TrimSpace(redirectURI) == "" {
+		redirectURI = AntigravityDefaultCallbackURI()
+	}
 	authSvc := antigravity.NewAntigravityAuth(nil, nil)
-	return authSvc.BuildAuthURL(state, redirectURI)
+	return authSvc.BuildAuthURL(state, redirectURI, codeChallenge)
 }
 
 // ExchangeAntigravityCode exchanges an authorization code for access and refresh tokens.
 func ExchangeAntigravityCode(ctx context.Context, code, redirectURI string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
+	return ExchangeAntigravityCodeWithVerifier(ctx, code, redirectURI, "", httpClient)
+}
+
+// ExchangeAntigravityCodeWithVerifier exchanges an authorization code and
+// includes the PKCE verifier in the token request.
+func ExchangeAntigravityCodeWithVerifier(ctx context.Context, code, redirectURI, codeVerifier string, httpClient *http.Client) (*AntigravityTokenResponse, error) {
 	if strings.TrimSpace(redirectURI) == "" {
 		redirectURI = AntigravityDefaultCallbackURI()
 	}
 	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
-	tokenResp, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI)
+	tokenResp, errExchange := authSvc.ExchangeCodeForTokens(ctx, code, redirectURI, codeVerifier)
 	if errExchange != nil {
 		return nil, errExchange
 	}
@@ -315,6 +364,46 @@ func ExchangeAntigravityCode(ctx context.Context, code, redirectURI string, http
 func FetchAntigravityUserInfo(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
 	authSvc := antigravity.NewAntigravityAuth(nil, httpClient)
 	return authSvc.FetchUserInfo(ctx, accessToken)
+}
+
+
+// existingRefreshToken returns the refresh token already stored for this
+// account. Re-authorizing an existing grant can legitimately return no
+// refresh_token; without carrying the stored one forward, a successful
+// re-login would save a credential that cannot refresh at all.
+func existingRefreshToken(cfg *config.Config, email string) string {
+	if cfg == nil {
+		return ""
+	}
+	dir := strings.TrimSpace(cfg.AuthDir)
+	if dir == "" || strings.TrimSpace(email) == "" {
+		return ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, errRead := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if errRead != nil || len(raw) > 1<<20 {
+			continue
+		}
+		var record struct {
+			Type         string `json:"type"`
+			Email        string `json:"email"`
+			RefreshToken string `json:"refresh_token"`
+		}
+		if errUnmarshal := json.Unmarshal(raw, &record); errUnmarshal != nil {
+			continue
+		}
+		if record.Type == "antigravity" && strings.EqualFold(strings.TrimSpace(record.Email), strings.TrimSpace(email)) && strings.TrimSpace(record.RefreshToken) != "" {
+			return record.RefreshToken
+		}
+	}
+	return ""
 }
 
 // BuildAntigravityAuth constructs an in-memory *coreauth.Auth object from token credentials and metadata.

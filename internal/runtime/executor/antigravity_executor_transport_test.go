@@ -85,17 +85,17 @@ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected *http.Transport, got %T", first.Transport)
 			}
-			if transport.ForceAttemptHTTP2 {
-				t.Fatal("Antigravity transport must not attempt HTTP/2")
+			if !transport.ForceAttemptHTTP2 {
+				t.Fatal("Antigravity transport must attempt HTTP/2")
 			}
-			if len(transport.TLSNextProto) != 0 {
-				t.Fatal("Antigravity transport must not allow an implicit HTTP/2 upgrade")
+			if transport.TLSNextProto != nil {
+				t.Fatal("Antigravity transport must let net/http install HTTP/2")
 			}
 			if transport.TLSClientConfig == nil {
 				t.Fatal("Antigravity transport must carry an explicit TLS config")
 			}
-			if len(transport.TLSClientConfig.NextProtos) != 0 {
-				t.Fatalf("Antigravity must omit ALPN like the native client, got %v", transport.TLSClientConfig.NextProtos)
+			if len(transport.TLSClientConfig.NextProtos) == 0 || transport.TLSClientConfig.NextProtos[0] != "h2" {
+				t.Fatalf("Antigravity must advertise h2 via ALPN, got %v", transport.TLSClientConfig.NextProtos)
 			}
 			// Native Antigravity uses DefaultMaxIdleConnsPerHost of 2.
 			if transport.MaxIdleConnsPerHost < antigravityDefaultMaxIdleConnsPerHost {
@@ -194,11 +194,11 @@ func TestNewAntigravityHTTPClientRejectsTypedNilContextTransport(t *testing.T) {
 	if !ok || transport == nil {
 		t.Fatalf("expected a usable *http.Transport, got %#v", client.Transport)
 	}
-	if transport.ForceAttemptHTTP2 {
-		t.Fatal("fallback transport must not attempt HTTP/2")
+	if !transport.ForceAttemptHTTP2 {
+		t.Fatal("fallback transport must attempt HTTP/2")
 	}
-	if len(transport.TLSClientConfig.NextProtos) != 0 {
-		t.Fatalf("fallback transport must omit ALPN, got %v", transport.TLSClientConfig.NextProtos)
+	if len(transport.TLSClientConfig.NextProtos) == 0 || transport.TLSClientConfig.NextProtos[0] != "h2" {
+		t.Fatalf("fallback transport must advertise h2 via ALPN, got %v", transport.TLSClientConfig.NextProtos)
 	}
 }
 
@@ -615,6 +615,7 @@ func TestAntigravityTransportMatchesNativeTLSProfile(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
+	server.EnableHTTP2 = true
 	server.TLS = &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		MaxVersion: tls.VersionTLS13,
@@ -637,17 +638,17 @@ func TestAntigravityTransportMatchesNativeTLSProfile(t *testing.T) {
 		t.Fatalf("close response body: %v", errClose)
 	}
 
-	if len(clientHelloProtos) != 0 {
-		t.Fatalf("ClientHello ALPN = %v, want no ALPN extension", clientHelloProtos)
+	if len(clientHelloProtos) == 0 || clientHelloProtos[0] != "h2" {
+		t.Fatalf("ClientHello ALPN = %v, want h2 first", clientHelloProtos)
 	}
-	if requestProto != "HTTP/1.1" {
-		t.Fatalf("request protocol = %q, want HTTP/1.1", requestProto)
+	if requestProto != "HTTP/2.0" {
+		t.Fatalf("request protocol = %q, want HTTP/2.0", requestProto)
 	}
 	if tlsVersion != tls.VersionTLS13 {
 		t.Fatalf("TLS version = %#x, want TLS 1.3", tlsVersion)
 	}
-	if negotiatedProtocol != "" {
-		t.Fatalf("negotiated ALPN = %q, want empty", negotiatedProtocol)
+	if negotiatedProtocol != "h2" {
+		t.Fatalf("negotiated ALPN = %q, want h2", negotiatedProtocol)
 	}
 }
 

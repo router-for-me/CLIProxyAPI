@@ -161,10 +161,8 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	if errReq != nil {
 		return nil, errReq
 	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
+	// Match x/oauth2: Host is derived by net/http and the default Go UA is used.
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "oauth_refresh").Do(httpReq)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,27 +21,83 @@ const (
 	// manifest has not been fetched yet or cannot be reached. Cloud Code rejects
 	// newer models for clients below 2.23.0, so this floor must stay at or above
 	// that version.
-	antigravityFallbackVersion = "2.29.0"
-	antigravityHubPlatform     = "os_type=darwin; arch=arm64"
+	antigravityFallbackVersion = "2.32.1"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
 	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
 )
 
-var (
-	antigravityHubLatestManifestURL = "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml"
-)
+const antigravityHubManifestBase = "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/"
 
-// Changelists belong to specific Hub releases, not to the latest manifest in
-// general. Update the fallback release and its entry together. The 2.24.0 value
-// was verified in the official darwin-arm archive's webm_encoder build metadata.
-// Unknown releases keep their online version without claiming another build's CL.
+// antigravityHubManifestURLOverride replaces the per-platform manifest URL when
+// non-empty. Tests use it to point the resolver at a local server.
+var antigravityHubManifestURLOverride string
+
+// antigravityHubLatestManifestURL returns the updater manifest for the host
+// platform. The official Hub reports the real OS/arch in its UA; hardcoding
+// darwin/arm64 makes a Linux or Windows host stand out.
+func antigravityHubLatestManifestURL() string {
+	if antigravityHubManifestURLOverride != "" {
+		return antigravityHubManifestURLOverride
+	}
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/arm64":
+		return antigravityHubManifestBase + "latest-arm64-mac.yml"
+	case "darwin/amd64":
+		return antigravityHubManifestBase + "latest-x64-mac.yml"
+	case "linux/amd64":
+		return antigravityHubManifestBase + "latest-x64-linux.yml"
+	case "windows/amd64":
+		return antigravityHubManifestBase + "latest-x64-win.yml"
+	case "windows/arm64":
+		return antigravityHubManifestBase + "latest-arm64-win.yml"
+	default:
+		return antigravityHubManifestBase + "latest-x64-linux.yml"
+	}
+}
+
+// AntigravityPlatform returns the os_type/arch pair embedded in the UA.
+func AntigravityPlatform() (osType, arch string) {
+	osType = runtime.GOOS
+	arch = runtime.GOARCH
+	if osType == "windows" {
+		osType = "windows"
+	}
+	return osType, arch
+}
+
+// AntigravityPlatformEnum returns the ClientMetadata.Platform enum name.
+func AntigravityPlatformEnum() string {
+	switch runtime.GOOS + "/" + runtime.GOARCH {
+	case "darwin/amd64":
+		return "DARWIN_AMD64"
+	case "darwin/arm64":
+		return "DARWIN_ARM64"
+	case "linux/amd64":
+		return "LINUX_AMD64"
+	case "linux/arm64":
+		return "LINUX_ARM64"
+	case "windows/amd64":
+		return "WINDOWS_AMD64"
+	default:
+		return "PLATFORM_UNSPECIFIED"
+	}
+}
+
+// Changelists are the application build stamps embedded in the official
+// language_server binaries (the "changelist N with baseline" line), not the
+// toolchain CL. A real client always sends cl=, so unknown versions fall back
+// to the newest known stamp instead of omitting the field.
 var antigravityHubChangelists = map[string]string{
 	"2.23.0": "998057262",
 	"2.24.0": "1000335682",
 	"2.29.0": "1013060670",
+	"2.32.0": "1020489536",
+	"2.32.1": "1021296516",
 }
+
+const antigravityLatestKnownChangelist = "1021296516"
 
 type antigravityHubUpdaterManifest struct {
 	Version string `yaml:"version"`
@@ -125,10 +182,12 @@ func AntigravityLatestVersion() string {
 // AntigravityUserAgent returns the User-Agent string used by the Antigravity Hub family.
 func AntigravityUserAgent() string {
 	version := AntigravityLatestVersion()
-	metadata := "aidev_client; " + antigravityHubPlatform
-	if changelist := antigravityHubChangelists[version]; changelist != "" {
-		metadata += "; cl=" + changelist
+	osType, arch := AntigravityPlatform()
+	changelist := antigravityHubChangelists[version]
+	if changelist == "" {
+		changelist = antigravityLatestKnownChangelist
 	}
+	metadata := fmt.Sprintf("aidev_client; os_type=%s; arch=%s; cl=%s", osType, arch, changelist)
 	return fmt.Sprintf("antigravity/hub/%s (%s)", version, metadata)
 }
 
@@ -223,7 +282,7 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 }
 
 func fetchAntigravityHubLatestManifestVersion(ctx context.Context, client *http.Client) (string, error) {
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityHubLatestManifestURL, nil)
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityHubLatestManifestURL(), nil)
 	if errReq != nil {
 		return "", fmt.Errorf("build antigravity Hub updater manifest request: %w", errReq)
 	}

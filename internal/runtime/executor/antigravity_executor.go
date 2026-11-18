@@ -116,7 +116,7 @@ func (e *AntigravityExecutor) obfuscateSensitiveWordsDoc(doc *ojson.Doc) bool {
 	return helps.ObfuscateSensitiveWordsInSystemInstructionDoc(doc, matcher)
 }
 
-// Each Antigravity credential gets its own HTTP/1.1 connection pool. Sessions routed
+// Each Antigravity credential gets its own HTTP connection pool. Sessions routed
 // to the same auth reuse that pool, while different OAuth identities never share a
 // TCP/TLS connection, matching the native client's one-credential process model.
 // The cache is bounded so pools cannot accumulate when keys churn.
@@ -288,17 +288,16 @@ func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *htt
 	}
 
 	clone := base.Clone()
-	clone.ForceAttemptHTTP2 = false
-	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
-	clone.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	clone.ForceAttemptHTTP2 = true
+	// Let net/http install its HTTP/2 round tripper again.
+	clone.TLSNextProto = nil
 	if clone.TLSClientConfig == nil {
 		clone.TLSClientConfig = &tls.Config{}
 	} else {
 		clone.TLSClientConfig = clone.TLSClientConfig.Clone()
 	}
-	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
-	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
-	clone.TLSClientConfig.NextProtos = nil
+	// Native Antigravity negotiates h2 via ALPN on every cloudcode call.
+	clone.TLSClientConfig.NextProtos = []string{"h2", "http/1.1"}
 	applyAntigravityPoolLimits(clone, cfgs...)
 	return clone
 }
@@ -358,7 +357,7 @@ func applyAntigravityPoolLimits(transport *http.Transport, cfgs ...*config.Confi
 	}
 }
 
-// antigravityHTTP11Transport returns the HTTP/1.1 pool shared by every request that
+// antigravityHTTP11Transport returns the shared HTTP pool used by every request that
 // uses the same credential and the same base transport. The base is either the
 // process default or a transport provided through the request context.
 func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport, cfgs ...*config.Config) *http.Transport {
@@ -390,7 +389,7 @@ func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport, c
 	return transport
 }
 
-// antigravityProxiedHTTP11Transport returns the credential-scoped HTTP/1.1 pool for
+// antigravityProxiedHTTP11Transport returns the credential-scoped HTTP pool for
 // one proxy setting, or nil when the proxy setting cannot be turned into a
 // transport. Keying on the normalized proxy string rather than on a prebuilt
 // transport keeps one pool per credential and proxy instead of one per request.
@@ -476,7 +475,7 @@ func antigravityCredentialScope(prefix, secret string) string {
 }
 
 // newAntigravityHTTPClient creates an HTTP client specifically for Antigravity,
-// enforcing HTTP/1.1 by disabling HTTP/2 to match the native Antigravity client, which
+// matching the native Antigravity client, which
 // negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
 // The underlying Transport is always shared so keep-alive connections survive across
 // requests instead of forcing a fresh TCP + TLS handshake every time.
@@ -494,13 +493,13 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	}
 
 	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
-	// Direct requests share an HTTP/1.1 pool only within the selected credential.
+	// Direct requests share an HTTP pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
 		return client
 	}
 
-	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
+	// Preserve a context-provided transport. The cache key
 	// includes credential identity, so sharing the base does not share TLS pools.
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok {

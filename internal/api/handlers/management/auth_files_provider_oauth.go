@@ -39,8 +39,8 @@ type codexOAuthService interface {
 }
 
 type antigravityOAuthService interface {
-	BuildAuthURL(state, redirectURI string) string
-	ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*antigravity.TokenResponse, error)
+	BuildAuthURL(state, redirectURI, codeChallenge string) string
+	ExchangeCodeForTokens(ctx context.Context, code, redirectURI, codeVerifier string) (*antigravity.TokenResponse, error)
 	FetchUserInfo(ctx context.Context, accessToken string) (string, error)
 	FetchProjectID(ctx context.Context, accessToken string) (string, error)
 }
@@ -737,15 +737,25 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	cfg := h.oauthConfigWithProxy(sessionProxyURL)
 	authSvc := newAntigravityOAuthService(cfg)
 
-	state, errState := misc.GenerateRandomState()
+	state, errState := antigravity.GenerateState()
 	if errState != nil {
 		log.Errorf("Failed to generate state parameter: %v", errState)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
 		return
 	}
+	codeVerifier, codeChallenge, errPKCE := antigravity.GeneratePKCE()
+	if errPKCE != nil {
+		log.Errorf("Failed to generate PKCE codes: %v", errPKCE)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+	// The Web UI callback arrives through the port the deployment publishes
+	// (docker-compose forwards 51121), so this path keeps the fixed port
+	// instead of an ephemeral one the browser could never reach.
+	callbackPort := antigravityCallbackPort
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
-	authURL := authSvc.BuildAuthURL(state, redirectURI)
+	redirectURI := fmt.Sprintf("http://localhost:%d%s", callbackPort, antigravity.CallbackPath)
+	authURL := authSvc.BuildAuthURL(state, redirectURI, codeChallenge)
 
 	RegisterOAuthSessionWithProxy(state, "antigravity", sessionProxyURL)
 	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
@@ -761,7 +771,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 		var errStart error
-		if forwarder, errStart = startCallbackForwarder(antigravity.CallbackPort, "antigravity", targetURL); errStart != nil {
+		if forwarder, errStart = startCallbackForwarder(callbackPort, "antigravity", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start antigravity callback forwarder")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
@@ -770,7 +780,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 	go func() {
 		if isWebUI {
-			defer stopCallbackForwarderInstance(antigravity.CallbackPort, forwarder)
+			defer stopCallbackForwarderInstance(callbackPort, forwarder)
 		}
 
 		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-antigravity-%s.oauth", state))
@@ -810,7 +820,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			time.Sleep(500 * time.Millisecond)
 		}
 
-		tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI)
+		tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI, codeVerifier)
 		if errToken != nil {
 			log.Errorf("Failed to exchange token: %s", redactSessionProxyInString(errToken.Error(), sessionProxyURL))
 			SetOAuthSessionError(state, "Failed to exchange token")
