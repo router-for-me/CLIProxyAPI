@@ -2,9 +2,10 @@ package helps
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 func TestIsClaudeMCPToolName(t *testing.T) {

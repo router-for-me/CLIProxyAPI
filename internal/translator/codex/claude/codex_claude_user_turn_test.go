@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -197,5 +198,46 @@ func TestClaudeToCodexEmptyTextDoesNotHideAnUnrepresentableImage(t *testing.T) {
 	var unsupported *translatorcommon.UnsupportedPartError
 	if !errors.As(envelope.Err, &unsupported) || unsupported.Type != "image" {
 		t.Fatalf("envelope.Err = %v, want unsupported content part: image; body = %s", envelope.Err, envelope.Body)
+	}
+}
+
+func TestClaudeToCodexDocumentTextContentAndURLSources(t *testing.T) {
+	envelope := claudeImageTurnToCodex(`{"type":"document","title":"note.txt","context":"secret note","source":{"type":"text","media_type":"text/plain","data":"Secret codeword: ORANGE-42"}},{"type":"text","text":"What is the secret codeword?"}`)
+	if envelope.Err != nil {
+		t.Fatalf("envelope.Err = %v, body = %s", envelope.Err, envelope.Body)
+	}
+	parts := ojson.GetBytesNoCopy(envelope.Body, "input.2.content").Array()
+	if len(parts) != 2 {
+		t.Fatalf("got %d parts, want 2: %s", len(parts), envelope.Body)
+	}
+	if !strings.Contains(parts[0].Get("text").String(), "ORANGE-42") || !strings.Contains(parts[0].Get("text").String(), "note.txt") {
+		t.Fatalf("document text was dropped: %s", envelope.Body)
+	}
+
+	contentEnv := claudeImageTurnToCodex(`{"type":"document","title":"bundle","context":"mixed","source":{"type":"content","content":[{"type":"text","text":"inside doc"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}}`)
+	if contentEnv.Err != nil {
+		t.Fatalf("content document err = %v, body = %s", contentEnv.Err, contentEnv.Body)
+	}
+	cParts := ojson.GetBytesNoCopy(contentEnv.Body, "input.2.content").Array()
+	var sawText, sawImage bool
+	for _, p := range cParts {
+		if strings.Contains(p.Get("text").String(), "inside doc") {
+			sawText = true
+		}
+		if p.Get("type").String() == "input_image" && p.Get("image_url").String() == "data:image/png;base64,aGVsbG8=" {
+			sawImage = true
+		}
+	}
+	if !sawText || !sawImage {
+		t.Fatalf("content document lost parts (sawText=%v, sawImage=%v): %s", sawText, sawImage, contentEnv.Body)
+	}
+
+	urlEnv := claudeImageTurnToCodex(`{"type":"document","title":"spec.pdf","source":{"type":"url","url":"https://example.test/spec.pdf"}}`)
+	if urlEnv.Err != nil {
+		t.Fatalf("url document err = %v, body = %s", urlEnv.Err, urlEnv.Body)
+	}
+	uPart := ojson.GetBytesNoCopy(urlEnv.Body, "input.2.content.0")
+	if uPart.Get("type").String() != "input_file" || uPart.Get("file_url").String() != "https://example.test/spec.pdf" {
+		t.Fatalf("url document part = %s, body = %s", uPart.Raw, urlEnv.Body)
 	}
 }

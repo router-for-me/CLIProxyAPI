@@ -9,7 +9,11 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-const placementFormatJSON = `"text":{"format":{"type":"json_schema","name":"facts","schema":{"type":"object","properties":{"facts":{"type":"string"}}}}}`
+// Native json_schema now maps to output_config.format, so system placement
+// tests use json_object, which still emits a trailing structured-output block.
+const placementFormatJSON = `"text":{"format":{"type":"json_object"}}`
+
+const placementInstructionText = "valid JSON object"
 
 func convertPlacement(t *testing.T, ctx context.Context, model, body string) ojson.Result {
 	t.Helper()
@@ -168,7 +172,7 @@ func TestResponsesMidSessionSystemItemTopLevelFallbacks(t *testing.T) {
 	if got := root.Get("system.4.text").String(); got != "after_trailing" {
 		t.Fatalf("system[4] = %q, want after_trailing in source order", got)
 	}
-	if got := root.Get("system.5.text").String(); !strings.Contains(got, "facts") {
+	if got := root.Get("system.5.text").String(); !strings.Contains(got, placementInstructionText) {
 		t.Fatalf("structured-output instruction must stay last, got %q", got)
 	}
 }
@@ -252,7 +256,7 @@ func TestResponsesSystemItemPlacementFollowsPinnedDecision(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := convertPlacement(t, test.ctx, test.model, body)
 			texts := root.Get("system.#.text").Array()
-			if len(texts) == 0 || !strings.Contains(texts[len(texts)-1].String(), "facts") {
+			if len(texts) == 0 || !strings.Contains(texts[len(texts)-1].String(), placementInstructionText) {
 				t.Fatalf("structured-output instruction must stay last: %s", root.Get("system").Raw)
 			}
 			gotSystem := root.Get("system.#.text").Raw

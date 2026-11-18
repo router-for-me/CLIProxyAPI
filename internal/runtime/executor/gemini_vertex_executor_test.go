@@ -3,13 +3,13 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -271,7 +271,8 @@ func TestGeminiVertexExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsF
 			})
 
 			exec := NewGeminiVertexExecutor(&config.Config{})
-			manager := cliproxyauth.NewManager(nil, nil, nil)
+			resultHook := &malformedFunctionCallResultHook{authID: auth.ID, results: make(chan cliproxyauth.Result, 1)}
+			manager := cliproxyauth.NewManager(nil, nil, resultHook)
 			manager.RegisterExecutor(exec)
 			if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
 				t.Fatalf("Register() error = %v", errRegister)
@@ -303,13 +304,7 @@ func TestGeminiVertexExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsF
 				}
 			}
 			assertMalformedFunctionCallFailedUsage(t, capture.records)
-			updated, okAuth := manager.GetByID(auth.ID)
-			if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
-				t.Fatalf("expected conductor to record failure on model state after client cancel on error event, got %+v", updated)
-			}
-			if updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus != http.StatusBadGateway {
-				t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
-			}
+			assertMalformedFunctionCallConductorResultUncooled(t, manager, auth.ID, "gemini-4-argon", resultHook.results)
 		})
 	}
 }
@@ -541,5 +536,131 @@ func TestVertexBaseURL(t *testing.T) {
 				t.Errorf("vertexBaseURL(%q) = %q, want %q", tc.location, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGeminiVertexExecutor_AliasedHydrogenPreservesNativeThinkingLevelWhenShadowed(t *testing.T) {
+	for _, shadowCase := range []struct {
+		name      string
+		shadowMod *registry.ModelInfo
+	}{
+		{
+			name: "shadowed_by_user_defined_model",
+			shadowMod: &registry.ModelInfo{
+				ID:          "gemini-4-hydrogen",
+				Type:        "gemini",
+				UserDefined: true,
+			},
+		},
+		{
+			name: "shadowed_by_non_thinking_model",
+			shadowMod: &registry.ModelInfo{
+				ID:          "gemini-4-hydrogen",
+				Type:        "openai",
+				UserDefined: false,
+				Thinking:    nil,
+			},
+		},
+	} {
+		for _, level := range []string{"medium", "xhigh"} {
+			t.Run(shadowCase.name+"_"+level, func(t *testing.T) {
+				capturedBodies := make(chan []byte, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/token" {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, `{"access_token":"local-token","token_type":"Bearer","expires_in":3600}`)
+						return
+					}
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Error(errRead)
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					capturedBodies <- body
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}],\"modelVersion\":\"gemini-4-hydrogen\"}\n\n")
+				}))
+				defer server.Close()
+
+				serviceAccount, okSA := ojson.ParseBytes(testVertexServiceAccountJSON(t, server.URL+"/token")).Value().(map[string]any)
+				if !okSA {
+					t.Fatal("failed to parse test service account JSON into map")
+				}
+				auth := &cliproxyauth.Auth{
+					ID:       t.Name() + "-vertex",
+					Provider: "vertex",
+					Status:   cliproxyauth.StatusActive,
+					Metadata: map[string]any{
+						"project_id":      "proxy-test",
+						"location":        "global",
+						"service_account": serviceAccount,
+					},
+				}
+
+				target, errParse := parseTestURL(t, server.URL)
+				if errParse != nil {
+					t.Fatal(errParse)
+				}
+				transport := http.DefaultTransport.(*http.Transport).Clone()
+				transport.Proxy = nil
+				t.Cleanup(transport.CloseIdleConnections)
+				ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", issue6258RedirectTransport{target: target, base: transport})
+
+				exec := NewGeminiVertexExecutor(&config.Config{})
+				manager := cliproxyauth.NewManager(nil, nil, nil)
+				manager.SetOAuthModelAlias(map[string][]config.OAuthModelAlias{
+					"vertex": {{Name: "gemini-4-hydrogen", Alias: "vertex/gemini-4-hydrogen", Fork: false}},
+				})
+				manager.RegisterExecutor(exec)
+				if _, errRegister := manager.Register(ctx, auth); errRegister != nil {
+					t.Fatalf("Register() error = %v", errRegister)
+				}
+
+				reg := registry.GetGlobalRegistry()
+				shadowClientID := t.Name() + "-shadow"
+				reg.RegisterClient(auth.ID, "vertex", []*registry.ModelInfo{{
+					ID:       "vertex/gemini-4-hydrogen",
+					Type:     "gemini",
+					Thinking: &registry.ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+				}})
+				reg.RegisterClient(shadowClientID, "other-plugin", []*registry.ModelInfo{shadowCase.shadowMod})
+				t.Cleanup(func() {
+					reg.UnregisterClient(auth.ID)
+					reg.UnregisterClient(shadowClientID)
+				})
+
+				req := cliproxyexecutor.Request{
+					Model:   "vertex/gemini-4-hydrogen",
+					Payload: []byte(`{"generationConfig":{"maxOutputTokens":1030323,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + level + `"}},"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`),
+				}
+				opts := cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatGemini,
+					ResponseFormat: sdktranslator.FormatGemini,
+					Stream:         true,
+				}
+
+				streamRes, errStream := manager.ExecuteStream(ctx, []string{"vertex"}, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range streamRes.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+
+				upstreamBody := <-capturedBodies
+				if got := ojson.GetBytes(upstreamBody, "generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
+					t.Fatalf("upstream thinkingLevel = %q, want %q; body=%s", got, level, upstreamBody)
+				}
+				if ojson.GetBytes(upstreamBody, "generationConfig.thinkingConfig.thinkingBudget").Exists() {
+					t.Fatalf("unexpected thinkingBudget in upstream Vertex payload: %s", upstreamBody)
+				}
+				if !ojson.GetBytes(upstreamBody, "generationConfig.thinkingConfig.includeThoughts").Bool() {
+					t.Fatalf("expected includeThoughts=true in upstream Vertex payload: %s", upstreamBody)
+				}
+			})
+		}
 	}
 }
