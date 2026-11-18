@@ -789,6 +789,25 @@ func isClaudeTitleHelperRequest(body []byte) bool {
 	return false
 }
 
+// claudeAutoModeClassifierPrompt opens the system prompt of Claude Code's
+// auto-mode permission classifier.
+const claudeAutoModeClassifierPrompt = "You are a security monitor for autonomous AI coding agents."
+
+// IsClaudeAutoModeClassifierSystem reports whether a request "system" field is
+// the one of Claude Code's auto-mode permission classifier. Claude Code sends
+// it with its own system prompt and no CLI identity block.
+func IsClaudeAutoModeClassifierSystem(system ojson.Result) bool {
+	if system.Type == ojson.String {
+		return strings.HasPrefix(system.String(), claudeAutoModeClassifierPrompt)
+	}
+	found := false
+	system.ForEach(func(_, part ojson.Result) bool {
+		found = strings.HasPrefix(part.Get("text").String(), claudeAutoModeClassifierPrompt)
+		return !found
+	})
+	return found
+}
+
 // IsClaudeProbeOrHelperRequest reports whether the request is a minimal
 // probe/preflight (max_tokens: 1) or an automated title generation helper,
 // which in native Claude Code do not emit cc_prompt_id or cc_prev_req.
