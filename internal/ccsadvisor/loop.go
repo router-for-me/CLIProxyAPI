@@ -155,6 +155,61 @@ func toolResult(id, text string) Message {
 	return Message{"type": "tool_result", "tool_use_id": id, "content": text}
 }
 
+func replayBlocks(content any) []any {
+	if block := obj(content); block != nil {
+		return []any{block}
+	}
+	return list(content)
+}
+
+// Return nil for ordinary tool results, whose content and IDs must stay intact.
+func replayAdvisorResult(block Message) (Message, error) {
+	var payloads []any
+	switch block["type"] {
+	case "advisor_redacted_result":
+		payloads = []any{block}
+	case "advisor_tool_result", "tool_result":
+		payloads = replayBlocks(block["content"])
+	default:
+		return nil, nil
+	}
+	var text []string
+	var failure string
+	for _, raw := range payloads {
+		p := obj(raw)
+		switch p["type"] {
+		case "advisor_redacted_result":
+			// Only the originating provider can interpret this result.
+			failure = "Earlier advisor guidance is unavailable on this provider (encrypted result)."
+		case "advisor_tool_result_error":
+			if code, ok := p["error_code"].(string); ok && failure == "" {
+				failure = "Advisor failed: " + code
+			}
+		case "advisor_result":
+			if s, ok := p["text"].(string); ok {
+				text = append(text, s)
+			}
+		}
+	}
+	if failure == "" && len(text) == 0 && block["type"] == "tool_result" {
+		return nil, nil
+	}
+	id, _ := block["tool_use_id"].(string)
+	id = strings.TrimPrefix(id, "srv")
+	if !strings.HasPrefix(id, "toolu_") {
+		return nil, errors.New("invalid advisor result id")
+	}
+	if failure != "" {
+		result := toolResult(id, failure)
+		result["is_error"] = true
+		return result, nil
+	}
+	if len(text) == 0 || len(text) != len(payloads) {
+		return nil, errors.New("cannot replay non-text advisor result")
+	}
+	return toolResult(id, strings.Join(text, "\n")), nil
+}
+
 // Public messages can collapse several internal turns into one assistant turn.
 // Keep each parallel tool batch together, including results supplied by the client.
 func projectHistory(messages []any) ([]any, error) {
@@ -162,7 +217,7 @@ func projectHistory(messages []any) ([]any, error) {
 	var pending []any
 	for _, v := range messages {
 		m := obj(v)
-		blocks := list(m["content"])
+		blocks := replayBlocks(m["content"])
 		if len(pending) > 0 && m["role"] == "user" {
 			if text, ok := m["content"].(string); ok {
 				blocks = []any{Message{"type": "text", "text": text}}
@@ -181,24 +236,11 @@ func projectHistory(messages []any) ([]any, error) {
 		changed := false
 		for _, raw := range blocks {
 			b := obj(raw)
-			if b["type"] == "advisor_tool_result" {
-				id, _ := b["tool_use_id"].(string)
-				payload := obj(b["content"])
-				s, ok := payload["text"].(string)
-				if !strings.HasPrefix(id, "srvtoolu_") {
-					return nil, errors.New("invalid advisor result id")
-				}
-				result := toolResult(strings.TrimPrefix(id, "srv"), s)
-				if payload["type"] == "advisor_tool_result_error" {
-					result["is_error"] = true
-					result["content"] = fmt.Sprintf("Advisor failed: %v", payload["error_code"])
-				} else if payload["type"] == "advisor_redacted_result" {
-					// Only the originating provider can interpret this result.
-					result["is_error"] = true
-					result["content"] = "Earlier advisor guidance is unavailable on this provider (encrypted result)."
-				} else if payload["type"] != "advisor_result" || !ok {
-					return nil, errors.New("cannot replay non-text advisor result")
-				}
+			result, err := replayAdvisorResult(b)
+			if err != nil {
+				return nil, err
+			}
+			if result != nil {
 				changed = true
 				if m["role"] == "user" {
 					group = append(group, result)
@@ -245,6 +287,9 @@ func consultRequest(model string, decl Message, history, blocks []any, question 
 	var contextText strings.Builder
 	for _, v := range append(slices.Clone(history), turn("assistant", blocks)) {
 		m := obj(v)
+		if m["role"] != "user" && m["role"] != "assistant" {
+			continue
+		}
 		fmt.Fprintf(&contextText, "%v: ", m["role"])
 		writeContext(&contextText, m["content"])
 		contextText.WriteByte('\n')
