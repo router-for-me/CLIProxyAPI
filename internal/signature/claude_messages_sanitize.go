@@ -40,8 +40,8 @@ func IsCodexCommentarySignatureMarker(rawSignature string) bool {
 // provider signature compatibility policy: the marker must never reach any
 // upstream, including Claude-compatible endpoints whose model name maps to a
 // non-Claude family and therefore skips full signature sanitization. Blocks
-// with empty thinking text are dropped because they carry no history. When no
-// marker is present the payload is returned unchanged.
+// with empty thinking text or an exact adjacent visible mirror are dropped.
+// When no marker is present the payload is returned unchanged.
 func RestoreCodexCommentaryMarkers(payload []byte) ([]byte, int) {
 	messages := ojson.GetBytesNoCopy(payload, "messages")
 	if !messages.IsArray() {
@@ -81,7 +81,7 @@ func RestoreCodexCommentaryMarkersDoc(doc *ojson.Doc) int {
 			}
 			restored++
 			partPath := fmt.Sprintf("messages.%d.content.%d", i, j)
-			if text := part.Get("thinking").String(); text != "" {
+			if text := part.Get("thinking").String(); text != "" && !hasAdjacentCommentaryMirror(messageResults, contentResults, i, j, text) {
 				_ = doc.Set(partPath+".type", "text")
 				_ = doc.Delete(partPath + ".thinking")
 				_ = doc.Delete(partPath + ".signature")
@@ -105,6 +105,24 @@ func RestoreCodexCommentaryMarkersDoc(doc *ojson.Doc) int {
 		_ = doc.Delete(fmt.Sprintf("messages.%d", droppedMessages[k]))
 	}
 	return restored
+}
+
+// hasAdjacentCommentaryMirror also handles clients that replay the visible
+// text as a separate assistant message immediately after the thinking block.
+func hasAdjacentCommentaryMirror(messages, content []ojson.Result, messageIndex, partIndex int, text string) bool {
+	if messages[messageIndex].Get("role").String() != "assistant" {
+		return false
+	}
+	var next ojson.Result
+	if partIndex+1 < len(content) {
+		next = content[partIndex+1]
+	} else if messageIndex+1 < len(messages) {
+		message := messages[messageIndex+1]
+		if message.Get("role").String() == "assistant" {
+			next = message.Get("content.0")
+		}
+	}
+	return next.Get("type").String() == "text" && next.Get("text").String() == text
 }
 
 type SignatureSanitizeReport struct {
@@ -213,7 +231,7 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				// The internal commentary marker is not a provider signature:
 				// restore its text as a plain assistant text block so neither
 				// the marker nor a fake signature reaches the upstream.
-				if text := part.Get("thinking").String(); text != "" {
+				if text := part.Get("thinking").String(); text != "" && !hasAdjacentCommentaryMirror(messageResults, contentResults, i, j, text) {
 					_ = doc.Set(partPath+".type", "text")
 					_ = doc.Delete(partPath + ".thinking")
 					_ = doc.Delete(partPath + ".signature")
