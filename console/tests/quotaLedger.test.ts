@@ -66,13 +66,44 @@ describe('ledger rows', () => {
     expect(rows.filter((r) => r.nextUp).map((r) => r.entry.file.name)).toEqual(['b.json']);
   });
 
-  test('summary sums remaining primary quota and finds the soonest reset', () => {
-    const summary = buildLedgerSummary('claude', rows, NOW);
+  test('summary sums remaining primary quota', () => {
+    const summary = buildLedgerSummary('claude', rows);
     expect(summary.remainingTotal).toBe(0 + 51 + 100);
     expect(summary.capacity).toBe(300);
-    expect(summary.segments).toEqual([0, 51, 100, null]);
-    expect(summary.soonestResetAtMs).toBe(NOW + 2 * HOUR);
-    expect(summary.secondary).toEqual({ labelKey: 'ledger.window_seven_day', remainingTotal: 240 });
+  });
+
+  test('orders claude by the shared weekly reset, as routing does', () => {
+    const quota = (fableHours: number, sharedHours: number) => ({
+      status: 'success',
+      windows: [
+        { id: 'seven-day', usedPercent: 0, resetAtMs: NOW + sharedHours * HOUR },
+        { id: 'seven-day-fable', usedPercent: 0, resetAtMs: NOW + fableHours * HOUR },
+      ],
+    });
+    const byName: Record<string, unknown> = { 'x.json': quota(1, 50), 'y.json': quota(40, 10) };
+    const ordered = buildLedgerRows(
+      'claude',
+      [claude('x.json'), claude('y.json')],
+      (e) => byName[e.file.name],
+      NOW
+    );
+    expect(ordered.map((r) => r.entry.file.name)).toEqual(['y.json', 'x.json']);
+    expect(ordered[0].weeklyResetAtMs).toBe(NOW + 10 * HOUR);
+  });
+
+  test('a five-hour window alone gives no weekly reset', () => {
+    const [only] = buildLedgerRows(
+      'codex',
+      [{ type: 'codex', file: { name: 'z.json' } }],
+      () => ({
+        status: 'success',
+        windows: [{ id: 'five-hour', usedPercent: 0, resetAtMs: NOW + HOUR }],
+      }),
+      NOW
+    );
+    expect(only.primary?.id).toBe('five-hour');
+    expect(only.weeklyResetAtMs).toBeNull();
+    expect(only.nextUp).toBe(false);
   });
 });
 
@@ -81,6 +112,15 @@ describe('maskCredentialName', () => {
     expect(maskCredentialName('claude-theo@ping.gg.json')).toBe('claude-t•••@p•••.gg.json');
     expect(maskCredentialName('codex-ae5d455f-sam@example.com-pro.json')).toBe(
       'codex-ae5d455f-s•••@e•••.com-pro.json'
+    );
+  });
+
+  test('masks every hyphenated part of the local name', () => {
+    expect(maskCredentialName('claude-jane-doe@example.com.json')).toBe(
+      'claude-j•••@e•••.com.json'
+    );
+    expect(maskCredentialName('claude-0123abcd-jane-doe@example.com.json')).toBe(
+      'claude-0123abcd-j•••@e•••.com.json'
     );
   });
 

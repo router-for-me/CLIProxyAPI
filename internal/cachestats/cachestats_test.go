@@ -48,3 +48,21 @@ func TestStatsRecentWindowAndTotals(t *testing.T) {
 		t.Fatalf("credential 2 = %+v", got["2"].Recent)
 	}
 }
+
+func TestStatsLateRecordKeepsNewerMinute(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	s := New()
+	s.now = func() time.Time { return now }
+
+	s.HandleUsage(context.Background(), record("1", now, 1, 300, 0))
+	// A stream that started an hour ago lands in the same ring slot.
+	s.HandleUsage(context.Background(), record("1", now.Add(-time.Hour), 1, 50, 0))
+
+	got := s.Snapshot()["1"]
+	if got.Recent.CacheRead != 300 || got.Recent.Requests != 1 {
+		t.Fatalf("recent = %+v, want the newer minute kept", got.Recent)
+	}
+	if got.Total.CacheRead != 350 || got.Total.Requests != 2 {
+		t.Fatalf("total = %+v", got.Total)
+	}
+}

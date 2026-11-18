@@ -280,7 +280,7 @@ export function QuotaLedger(props: QuotaLedgerProps) {
     () =>
       LEDGER_PROVIDERS.map((provider: LedgerProvider) => {
         const rows = buildLedgerRows(provider, entries, quotaFor, now);
-        return { provider, rows, summary: buildLedgerSummary(provider, rows, now) };
+        return { provider, rows, summary: buildLedgerSummary(provider, rows) };
       }).filter((group) => group.rows.length > 0),
     [entries, quotaFor, now]
   );

@@ -103,10 +103,14 @@ func (s *Stats) add(authIndex string, at time.Time, t Tokens) {
 		s.creds[authIndex] = c
 	}
 	b := &c.ring[minute%buckets]
-	if b.minute != minute {
+	if b.minute < minute {
 		*b = bucket{minute: minute}
 	}
-	b.tokens.add(t)
+	// A record older than its slot's minute (a long stream reported late)
+	// only counts toward the total, so it can't erase a newer minute.
+	if b.minute == minute {
+		b.tokens.add(t)
+	}
 	c.total.add(t)
 }
 

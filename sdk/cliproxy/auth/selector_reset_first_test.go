@@ -159,3 +159,32 @@ func TestWeeklyResetAt(t *testing.T) {
 		})
 	}
 }
+
+// The manager hands reset-first candidates it already validated against each
+// credential's resolved model. A cooldown recorded under the public alias must
+// not reject them again.
+func TestResetFirstTrustsManagerValidatedCandidates(t *testing.T) {
+	const routeModel = "client-alias"
+	next := time.Now().Add(time.Hour)
+	auth := &Auth{
+		ID:       "a",
+		Provider: "claude",
+		ModelStates: map[string]*ModelState{
+			routeModel: {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: next,
+				Quota:          QuotaState{Exceeded: true, NextRecoverAt: next},
+			},
+		},
+	}
+	selector := &ResetFirstSelector{}
+	ctx := selectorContextForAvailableAuths(context.Background(), selector, routeModel)
+	got, err := selector.Pick(ctx, "claude", selectionArgForSelector(selector, routeModel), cliproxyexecutor.Options{}, []*Auth{auth})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got != auth {
+		t.Fatalf("Pick() = %v, want a", got)
+	}
+}

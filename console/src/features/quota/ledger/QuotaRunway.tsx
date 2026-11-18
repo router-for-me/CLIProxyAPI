@@ -63,12 +63,7 @@ function Marker({
   const { i18n } = useTranslation();
   const remaining = row.primary?.remaining ?? null;
   const name = showEmails ? row.entry.file.name : maskCredentialName(row.entry.file.name);
-  const reset = buildResetDisplay(
-    row.primary?.resetLabel,
-    row.primary?.resetAtMs,
-    now,
-    i18n.resolvedLanguage
-  );
+  const reset = buildResetDisplay(null, row.weeklyResetAtMs, now, i18n.resolvedLanguage);
   const percent = remaining === null ? '--' : Math.round(remaining);
   const when = reset?.relative ?? reset?.absolute;
   const label = when

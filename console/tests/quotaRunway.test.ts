@@ -24,6 +24,7 @@ const row = (name: string, resetInHours: number | null, loaded = true): LedgerRo
         muted: false,
       }
     : null,
+  weeklyResetAtMs: loaded && resetInHours !== null ? NOW + resetInHours * HOUR : null,
   planType: null,
   renewsAt: null,
   resetCredits: null,

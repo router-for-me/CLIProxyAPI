@@ -38,6 +38,8 @@ export interface LedgerRow {
   meters: LedgerMeter[];
   /** The window routing spends first; null until quota has loaded. */
   primary: LedgerMeter | null;
+  /** The weekly (or longer) reset reset-first routing ranks by; null when not reported. */
+  weeklyResetAtMs: number | null;
   planType: string | null;
   renewsAt: string | number | null;
   resetCredits: { available: number; nextExpiresAt: string | null } | null;
@@ -52,11 +54,6 @@ export interface LedgerSummary {
   remainingTotal: number | null;
   /** 100 per loaded credential. */
   capacity: number;
-  /** One segment per credential, in ledger order; null while unknown. */
-  segments: (number | null)[];
-  soonestResetAtMs: number | null;
-  soonestResetLabel: string;
-  secondary: { labelKey: string; remainingTotal: number } | null;
 }
 
 interface WindowLike {
@@ -79,6 +76,20 @@ interface QuotaLike {
 /* Primary window candidates per provider; the first one present is spent first. */
 const CLAUDE_PRIMARY = ['seven-day-fable', 'seven-day'];
 const CODEX_PRIMARY = ['weekly', 'monthly'];
+
+/* The window papa-proxy's reset-first selector ranks by: Claude's shared weekly
+ * limit, and Codex's longest window. Mirrors sdk/cliproxy/auth/selector_reset_first.go. */
+const CLAUDE_ROUTING = ['seven-day', 'seven-day-fable'];
+const CODEX_ROUTING = ['monthly', 'weekly'];
+
+const routingResetOf = (provider: LedgerProvider, windows: WindowLike[]): number | null => {
+  const ids = provider === 'claude' ? CLAUDE_ROUTING : CODEX_ROUTING;
+  for (const id of ids) {
+    const at = windows.find((w) => w.id === id)?.resetAtMs;
+    if (typeof at === 'number' && Number.isFinite(at)) return at;
+  }
+  return null;
+};
 
 const LABEL_KEYS: Record<string, string> = {
   'claude:seven-day-fable': 'ledger.window_seven_day_fable',
@@ -125,7 +136,7 @@ export function selectLedgerMeters(provider: LedgerProvider, windows: WindowLike
 
 /**
  * Build ledger rows for one provider, ordered for reset-first routing:
- * soonest primary reset first, unknown resets last, then by file name.
+ * soonest weekly reset first, unknown resets last, then by file name.
  */
 export function buildLedgerRows(
   provider: LedgerProvider,
@@ -151,6 +162,8 @@ export function buildLedgerRows(
         error: quota.error,
         meters,
         primary: meters.find((meter) => !meter.muted) ?? null,
+        weeklyResetAtMs:
+          status === 'success' ? routingResetOf(provider, quota.windows ?? []) : null,
         planType: quota.planType ?? null,
         renewsAt: quota.subscriptionActiveUntil ?? null,
         resetCredits:
@@ -162,8 +175,8 @@ export function buildLedgerRows(
     });
 
   const resetKey = (row: LedgerRow) => {
-    const at = row.primary?.resetAtMs;
-    return typeof at === 'number' && at > nowMs ? at : Number.POSITIVE_INFINITY;
+    const at = row.weeklyResetAtMs;
+    return at !== null && at > nowMs ? at : Number.POSITIVE_INFINITY;
   };
   rows.sort((a, b) => {
     const diff = resetKey(a) - resetKey(b);
@@ -183,34 +196,12 @@ export function buildLedgerRows(
 }
 
 /** Aggregate a provider's rows into the summary card at the top of the ledger. */
-export function buildLedgerSummary(
-  provider: LedgerProvider,
-  rows: LedgerRow[],
-  nowMs: number
-): LedgerSummary {
+export function buildLedgerSummary(provider: LedgerProvider, rows: LedgerRow[]): LedgerSummary {
   const loaded = rows.filter((row) => row.primary !== null);
   const primaryLabelKey = loaded[0]?.primary?.labelKey ?? null;
   const known = loaded.filter((row) => row.primary?.remaining !== null);
   const remainingTotal = known.length
     ? known.reduce((sum, row) => sum + (row.primary?.remaining ?? 0), 0)
-    : null;
-
-  let soonest: LedgerMeter | null = null;
-  for (const row of loaded) {
-    const meter = row.primary as LedgerMeter;
-    if (meter.resetAtMs === null || meter.resetAtMs <= nowMs) continue;
-    if (!soonest || meter.resetAtMs < (soonest.resetAtMs as number)) soonest = meter;
-  }
-
-  // The second meter on each row (Claude's shared weekly, or a 5-hour window).
-  const secondaryMeters = loaded
-    .map((row) => row.meters.find((meter) => meter !== row.primary && meter.id !== 'five-hour'))
-    .filter((meter): meter is LedgerMeter => Boolean(meter) && meter?.remaining !== null);
-  const secondary = secondaryMeters.length
-    ? {
-        labelKey: secondaryMeters[0].labelKey,
-        remainingTotal: secondaryMeters.reduce((sum, meter) => sum + (meter.remaining ?? 0), 0),
-      }
     : null;
 
   return {
@@ -219,25 +210,25 @@ export function buildLedgerSummary(
     primaryLabelKey,
     remainingTotal,
     capacity: known.length * 100,
-    segments: rows.map((row) => row.primary?.remaining ?? null),
-    soonestResetAtMs: soonest?.resetAtMs ?? null,
-    soonestResetLabel: soonest?.resetLabel ?? '',
-    secondary,
   };
 }
+
+/** Auth file name prefix before the email: `claude-`, `claude-<hash>-`, `codex-<id>-`. */
+const FILE_PREFIX = /^[a-z]+-(?:[0-9a-f]{8,}-)?/i;
 
 /**
  * Hide the identifying parts of every email in a credential name:
  * `claude-theo@ping.gg.json` → `claude-t•••@p•••.gg.json`.
- * A hyphenated prefix before the local part (`claude-`, `codex-<id>-`) is kept.
+ * Only the auth file's own prefix is kept; the rest of the local part is masked,
+ * hyphens included.
  */
 export function maskCredentialName(name: string): string {
   return name.replace(
     /([A-Za-z0-9._%+-]+)@([A-Za-z0-9][A-Za-z0-9-]*)((?:\.[A-Za-z0-9-]+)*)/g,
-    (_match, local: string, domain: string, rest: string) => {
-      const cut = local.lastIndexOf('-') + 1;
-      const user = local.slice(cut);
-      return `${local.slice(0, cut)}${user ? user[0] : ''}•••@${domain[0]}•••${rest}`;
+    (_match, local: string, domain: string, rest: string, offset: number) => {
+      const prefix = offset === 0 ? (local.match(FILE_PREFIX)?.[0] ?? '') : '';
+      const user = local.slice(prefix.length);
+      return `${prefix}${user ? user[0] : ''}•••@${domain[0]}•••${rest}`;
     }
   );
 }

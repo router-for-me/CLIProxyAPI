@@ -26,13 +26,16 @@ export interface RunwayTick {
   atMs: number;
 }
 
-/** Place every row that has a primary window; rows still loading are left out. */
+/**
+ * Place every loaded row at the weekly reset routing ranks it by; rows still
+ * loading are left out. Resets past the seven days sit at the far edge.
+ */
 export function placeRunwayMarkers(rows: LedgerRow[], nowMs: number): RunwayMarker[] {
   const known: RunwayMarker[] = [];
   const unknown: RunwayMarker[] = [];
   for (const row of rows) {
     if (!row.primary) continue;
-    const at = row.primary.resetAtMs;
+    const at = row.weeklyResetAtMs;
     if (at === null || at <= nowMs) {
       unknown.push({ row, x: null, level: unknown.length });
       continue;
