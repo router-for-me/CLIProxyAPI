@@ -589,3 +589,40 @@ func TestNormalizeClaudeAdvisorToolModels(t *testing.T) {
 		t.Errorf("inline advisor tool model = %q, want %q", got, "claude-opus-5-5")
 	}
 }
+
+func TestClaudeAdvisorBetaForInlineToolDefinitions(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"inline advisor without top-level tools", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"advisor_20260301","model":"claude-opus-5-5(high)"}}}]}]}`, true},
+		{"inline bare advisor with empty tools", `{"model":"claude-opus-5-5","tools":[],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":" Advisor ","model":"claude-opus-5-5"}}}]}]}`, true},
+		{"top-level bare advisor", `{"model":"claude-opus-5-5","tools":[{"type":"advisor","model":"claude-opus-5-5"}]}`, true},
+		{"ordinary inline tool", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"custom","name":"read_file"}}}]}]}`, false},
+		{"removal is not a declaration", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"type":"advisor_20260301"}}}]}]}`, false},
+		{"reference is not a definition", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","definition":{"type":"advisor_20260301"}}}]}]}`, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			if got := claudeBodyHasAdvisorTool(body); got != tt.want {
+				t.Errorf("advisor declaration detected = %v, want %v", got, tt.want)
+			}
+			betas := claudeCodeCLIBetas(body, nil, false)
+			count := 0
+			for _, beta := range strings.Split(betas, ",") {
+				if beta == claudeAdvisorToolBeta {
+					count++
+				}
+			}
+			wantCount := 0
+			if tt.want {
+				wantCount = 1
+			}
+			if count != wantCount {
+				t.Errorf("advisor beta count = %d, want %d in %q", count, wantCount, betas)
+			}
+		})
+	}
+}

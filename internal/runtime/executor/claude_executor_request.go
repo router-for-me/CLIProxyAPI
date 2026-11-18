@@ -639,16 +639,34 @@ func claudeBodyUsesAdvancedToolUse(body []byte) bool {
 }
 
 // claudeBodyHasAdvisorTool reports whether the request body declares an
-// advisor server tool.
+// advisor server tool at the top level or through an inline tool definition.
 func claudeBodyHasAdvisorTool(body []byte) bool {
-	tools := ojson.GetBytesNoCopy(body, "tools")
-	if !tools.IsArray() {
-		return false
-	}
-	for _, tool := range tools.Array() {
+	isAdvisor := func(tool ojson.Result) bool {
 		toolType := strings.ToLower(strings.TrimSpace(tool.Get("type").String()))
-		if strings.HasPrefix(toolType, "advisor_") {
-			return true
+		return strings.HasPrefix(toolType, "advisor_") || toolType == "advisor"
+	}
+	tools := ojson.GetBytesNoCopy(body, "tools")
+	if tools.IsArray() {
+		for _, tool := range tools.Array() {
+			if isAdvisor(tool) {
+				return true
+			}
+		}
+	}
+	messages := ojson.GetBytesNoCopy(body, "messages")
+	if messages.IsArray() {
+		for _, message := range messages.Array() {
+			content := message.Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			for _, part := range content.Array() {
+				if part.Get("type").String() == "tool_addition" &&
+					part.Get("tool.type").String() == "tool_definition" &&
+					isAdvisor(part.Get("tool.definition")) {
+					return true
+				}
+			}
 		}
 	}
 	return false
