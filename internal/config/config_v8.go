@@ -100,6 +100,7 @@ func buildV8Paths() []configPath {
 		{"codex.upstream-request-compression-min-bytes", "upstream.codex.upstream-request-compression-min-bytes"},
 		{"codex.websocket-compression", "upstream.codex.websocket-compression"},
 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
+		{"claude.oauth-include-create-api-key", "oauth.providers.claude.oauth-include-create-api-key"},
 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},
 		{"disable-claude-cloak-mode", "upstream.claude.disable-claude-cloak-mode"},
 		{"claude-header-defaults", "upstream.claude.header-defaults"},
@@ -316,16 +317,18 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 	for _, path := range append(append([]configPath(nil), v8Paths...), v8Aliases...) {
 		parts := strings.Split(path.current, ".")
 		for i := 1; i < len(parts); i++ {
-			parent := yamlPath(node, strings.Join(parts[:i], "."))
+			parentPath := strings.Join(parts[:i], ".")
+			parent := yamlPath(node, parentPath)
 			if parent == nil {
 				break
 			}
-			// Routing is shared with the legacy layout, where null means defaults.
-			if i == 1 && parts[0] == "routing" && parent.Tag == "!!null" {
+			// Routing is shared with the legacy layout, where null means defaults,
+			// and null oauth.providers.claude is migrated as an empty shared container.
+			if parent.Tag == "!!null" && ((i == 1 && parts[0] == "routing") || parentPath == "oauth.providers.claude") {
 				break
 			}
 			if parent.Kind != yaml.MappingNode {
-				return nil, fmt.Errorf("%s must be a mapping", strings.Join(parts[:i], "."))
+				return nil, fmt.Errorf("%s must be a mapping", parentPath)
 			}
 		}
 	}
@@ -557,9 +560,28 @@ func normalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, []ArchivedV
 	if err != nil {
 		return nil, false, nil, err
 	}
+	// Move leaf fields before checking empty containers so migrating a leaf into
+	// an existing empty container (e.g. claude.oauth-include-create-api-key into
+	// oauth.providers.claude: {}) populates it instead of moving it away.
+	paths := append(append([]configPath(nil), v8Aliases...), v8Paths...)
+	for _, path := range paths {
+		old := legacyPath(root, path.old)
+		if old == nil {
+			continue
+		}
+		current := yamlPath(root, path.current)
+		if current == nil && !migrate {
+			continue
+		}
+		copy := copyYAMLPathValue(root, path.old)
+		deleteYAMLPath(root, path.old)
+		if current == nil {
+			setYAMLPathWithComments(root, path.current, copy)
+		}
+		changed = true
+	}
 	// Empty legacy structs have no leaf fields to move. Preserve them as empty v8
 	// mappings; null structs also mean defaults. User-owned maps are not included.
-	paths := append(append([]configPath(nil), v8Aliases...), v8Paths...)
 	for _, path := range append(append([]configPath(nil), v8StructPaths...), v8SharedStructPaths...) {
 		old := yamlPath(root, path.old)
 		if old == nil || (!migrate && yamlPath(root, path.current) == nil) {
@@ -570,17 +592,7 @@ func normalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, []ArchivedV
 		} else if old.Kind != yaml.MappingNode || len(old.Content) != 0 {
 			continue
 		}
-		paths = append(paths, path)
-	}
-	for _, path := range paths {
-		old := legacyPath(root, path.old)
-		if old == nil {
-			continue
-		}
 		current := yamlPath(root, path.current)
-		if current == nil && !migrate {
-			continue
-		}
 		copy := copyYAMLPathValue(root, path.old)
 		deleteYAMLPath(root, path.old)
 		if current == nil {
@@ -1035,8 +1047,13 @@ func ValidateV8Config(data []byte) error {
 	}
 	root = expandConfigAliases(root)
 	allowedRoots := v8AllowedRoots()
-	for _, path := range append(append(append([]configPath(nil), v8Paths...), v8Aliases...), v8SharedStructPaths...) {
+	for _, path := range append(append([]configPath(nil), v8Paths...), v8Aliases...) {
 		if legacyPath(root, path.old) != nil {
+			return fmt.Errorf("legacy field %s is not accepted by v8; use %s", path.old, path.current)
+		}
+	}
+	for _, path := range v8SharedStructPaths {
+		if value := legacyPath(root, path.old); value != nil && (path.old != "oauth.providers.claude" || value.Tag == "!!null" || (value.Kind == yaml.MappingNode && len(value.Content) == 0)) {
 			return fmt.Errorf("legacy field %s is not accepted by v8; use %s", path.old, path.current)
 		}
 	}

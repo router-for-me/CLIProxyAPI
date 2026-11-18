@@ -176,7 +176,15 @@ type OAuthProfile struct {
 // It provides methods for generating authorization URLs, exchanging codes for tokens,
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
-	httpClient *http.Client
+	httpClient     *http.Client
+	authorizeScope string
+}
+
+func resolveClaudeAuthorizeScope(cfg *config.Config) string {
+	if cfg != nil && !cfg.Claude.OAuthIncludeCreateAPIKeyEnabled() {
+		return ClaudeOAuthScope
+	}
+	return claudeOAuthAuthorizeScope
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
@@ -212,7 +220,8 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains.
 	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(sdkCfg),
+		httpClient:     NewAnthropicHttpClient(sdkCfg),
+		authorizeScope: resolveClaudeAuthorizeScope(cfg),
 	}
 }
 
@@ -329,12 +338,17 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
 
+	scope := claudeOAuthAuthorizeScope
+	if o != nil && o.authorizeScope != "" {
+		scope = o.authorizeScope
+	}
+
 	params := url.Values{
 		"code":                  {"true"},
 		"client_id":             {ClientID},
 		"response_type":         {"code"},
 		"redirect_uri":          {RedirectURI},
-		"scope":                 {claudeOAuthAuthorizeScope},
+		"scope":                 {scope},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
