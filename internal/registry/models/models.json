@@ -3093,6 +3093,76 @@
   ],
   "codex-team": [
     {
+      "id": "gpt-6.2-astra",
+      "object": "model",
+      "created": 1794942000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Astra",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra is our most capable model for your hardest projects, from start to finish.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "object": "model",
+      "created": 1794942000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra is our go-to model for everyday work, from coding to powering agents at scale.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1783616400,
@@ -3446,6 +3516,76 @@
   ],
   "codex-plus": [
     {
+      "id": "gpt-6.2-astra",
+      "object": "model",
+      "created": 1794942000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Astra",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra is our most capable model for your hardest projects, from start to finish.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "object": "model",
+      "created": 1794942000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra is our go-to model for everyday work, from coding to powering agents at scale.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-6-astra",
       "object": "model",
       "created": 1783616400,
@@ -3798,6 +3938,76 @@
     }
   ],
   "codex-pro": [
+    {
+      "id": "gpt-6.2-astra",
+      "object": "model",
+      "created": 1794942000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Astra",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra is our most capable model for your hardest projects, from start to finish.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "object": "model",
+      "created": 1794942000,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra is our go-to model for everyday work, from coding to powering agents at scale.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
     {
       "id": "gpt-6-astra",
       "object": "model",
