@@ -2788,12 +2788,10 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 	for _, want := range []string{
 		"=== API RESPONSE 1 ===",
 		"Status: 101",
-		"Error: send:",
 		"=== API RESPONSE 2 ===",
 		"Status: 429",
 		"Retry-After: 9",
 		`{"error":{"message":"xai websocket reconnect rate limited"}}`,
-		"Error: dial_retry:",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
@@ -2869,9 +2867,6 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 		subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
 		for _, want := range []string{
 			"=== API RESPONSE 1 ===",
-			"Error: send:",
-			"=== API RESPONSE 2 ===",
-			"Error: dial_retry:",
 		} {
 			if !strings.Contains(subRendered, want) {
 				t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
@@ -2942,10 +2937,8 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 				if invalid101 {
 					wantStatus = "Status: 101"
 				}
-				for _, want := range []string{wantStatus, "Error: dial:"} {
-					if !strings.Contains(initRendered, want) {
-						t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
-					}
+				if !strings.Contains(initRendered, wantStatus) || strings.Contains(initRendered, "Error: dial:") {
+					t.Fatalf("initial handshake response must contain only upstream details:\n%s", initRendered)
 				}
 			})
 		}
