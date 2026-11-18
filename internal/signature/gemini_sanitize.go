@@ -1,26 +1,19 @@
 package signature
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // geminiSanitizeOptions scopes Gemini replay policy to the upstream endpoint.
 type geminiSanitizeOptions struct {
-	// rejectBareTink treats Vertex bare-Tink signatures as incompatible. Live
-	// replay on 2026-10-26 showed Antigravity (cloudcode-pa) and AI Studio
-	// (generativelanguage) reject them with 400 "Corrupted thought signature",
-	// while they are the native form for Vertex AI.
 	rejectBareTink bool
 }
 
 // GeminiReplaySignatureOrBypass returns a Gemini-replayable thoughtSignature.
-// Compatible Gemini signatures are normalized and preserved. Missing, unknown,
-// or cross-provider signatures are replaced with Gemini's bypass sentinel.
 func GeminiReplaySignatureOrBypass(rawSignature string, blockKind SignatureBlockKind) string {
 	return geminiReplaySignatureOrBypass(rawSignature, blockKind, geminiSanitizeOptions{})
 }
@@ -36,8 +29,6 @@ func geminiReplaySignatureOrBypass(rawSignature string, blockKind SignatureBlock
 	return GeminiSkipThoughtSignatureValidator
 }
 
-// geminiSanitizeDecision applies endpoint scoping on top of the family-level
-// compatibility decision.
 func geminiSanitizeDecision(rawSignature string, blockKind SignatureBlockKind, opts geminiSanitizeOptions) SignatureCompatibilityDecision {
 	decision := DecideSignatureCompatibility(SignatureProviderGemini, rawSignature, blockKind)
 	if !opts.rejectBareTink || !decision.Compatible || !IsGeminiVertexBareTinkSignature(rawSignature) {
@@ -52,42 +43,135 @@ func geminiSanitizeDecision(rawSignature string, blockKind SignatureBlockKind, o
 }
 
 // SanitizeGeminiRequestThoughtSignatures applies Gemini replay policy to a
-// Gemini-shaped request. Existing provider signatures stay on their original
-// model parts. Server-side tool blocks (toolCall and toolResponse) are echoed back
-// untouched per the Gemini API contract. Only a missing or incompatible first
-// functionCall in each parallel-call group (at the start of a model turn or after
-// a non-thought part) gets the bypass sentinel; unsigned sibling calls remain
-// unsigned, matching native Gemini parallel-call history. functionResponse parts
-// never carry signatures.
-//
-// Vertex bare-Tink signatures are preserved here because the target endpoint is
-// not known at this layer; executors for other Gemini endpoints must also call
-// SanitizeNonVertexGeminiRequestThoughtSignatures before sending.
+// Gemini-shaped request.
 func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string) []byte {
 	return sanitizeGeminiRequestThoughtSignatures(payload, contentsPath, geminiSanitizeOptions{})
 }
 
+// SanitizeGeminiRequestThoughtSignaturesDoc applies Gemini replay policy onto doc in place.
+func SanitizeGeminiRequestThoughtSignaturesDoc(doc *ojson.Doc, contentsPath string) {
+	_ = sanitizeGeminiRequestThoughtSignaturesDoc(doc, contentsPath, geminiSanitizeOptions{})
+}
+
 // SanitizeNonVertexGeminiRequestThoughtSignatures applies the same policy for
 // Gemini endpoints other than Vertex AI (Antigravity, AI Studio, Gemini API).
-// Vertex bare-Tink signatures are treated as incompatible: the first
-// functionCall in a group gets the bypass sentinel and other parts drop it.
 func SanitizeNonVertexGeminiRequestThoughtSignatures(payload []byte, contentsPath string) []byte {
 	return sanitizeGeminiRequestThoughtSignatures(payload, contentsPath, geminiSanitizeOptions{rejectBareTink: true})
 }
 
+// SanitizeNonVertexGeminiRequestThoughtSignaturesDoc applies non-Vertex Gemini
+// signature sanitization onto doc in place.
+func SanitizeNonVertexGeminiRequestThoughtSignaturesDoc(doc *ojson.Doc, contentsPath string) {
+	_ = sanitizeGeminiRequestThoughtSignaturesDoc(doc, contentsPath, geminiSanitizeOptions{rejectBareTink: true})
+}
+
+// SanitizeGeminiSystemInstruction removes empty part objects ({}) from
+// systemInstruction.parts (and system_instruction.parts) at the same envelope
+// level as contentsPath.
+func SanitizeGeminiSystemInstruction(payload []byte, contentsPath string) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !sanitizeGeminiSystemInstructionDoc(doc, contentsPath) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+// SanitizeGeminiSystemInstructionDoc removes empty part objects ({}) from
+// systemInstruction.parts (and system_instruction.parts) on doc in place.
+func SanitizeGeminiSystemInstructionDoc(doc *ojson.Doc, contentsPath string) {
+	_ = sanitizeGeminiSystemInstructionDoc(doc, contentsPath)
+}
+
+func sanitizeGeminiSystemInstructionDoc(doc *ojson.Doc, contentsPath string) bool {
+	if doc == nil {
+		return false
+	}
+	prefix := ""
+	if trimmed := strings.TrimSpace(contentsPath); trimmed != "" {
+		if idx := strings.LastIndex(trimmed, "."); idx > 0 {
+			prefix = trimmed[:idx+1]
+		}
+	}
+	modified := false
+	for _, key := range []string{"systemInstruction", "system_instruction"} {
+		sysPath := prefix + key
+		sys := doc.Get(sysPath)
+		if !sys.Exists() || !sys.IsObject() {
+			continue
+		}
+		parts := sys.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		var emptyIndices []int
+		totalParts := 0
+		parts.ForEach(func(_, part ojson.Result) bool {
+			if isEmptyGeminiPartObject(part) {
+				emptyIndices = append(emptyIndices, totalParts)
+			}
+			totalParts++
+			return true
+		})
+		if len(emptyIndices) == 0 {
+			continue
+		}
+		if len(emptyIndices) == totalParts {
+			if doc.Delete(sysPath) == nil {
+				modified = true
+			}
+			continue
+		}
+		for i := len(emptyIndices) - 1; i >= 0; i-- {
+			if doc.Delete(fmt.Sprintf("%s.parts.%d", sysPath, emptyIndices[i])) == nil {
+				modified = true
+			}
+		}
+	}
+	return modified
+}
+
+func isEmptyGeminiPartObject(part ojson.Result) bool {
+	if !part.IsObject() {
+		return false
+	}
+	hasField := false
+	part.ForEach(func(_, _ ojson.Result) bool {
+		hasField = true
+		return false
+	})
+	return !hasField
+}
+
 func sanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string, opts geminiSanitizeOptions) []byte {
+	if len(payload) == 0 {
+		return payload
+	}
+	doc := ojson.NewDoc(payload)
+	if !sanitizeGeminiRequestThoughtSignaturesDoc(doc, contentsPath, opts) {
+		return payload
+	}
+	return doc.Bytes()
+}
+
+func sanitizeGeminiRequestThoughtSignaturesDoc(doc *ojson.Doc, contentsPath string, opts geminiSanitizeOptions) bool {
+	if doc == nil {
+		return false
+	}
 	contentsPath = strings.TrimSpace(contentsPath)
 	if contentsPath == "" {
 		contentsPath = "contents"
 	}
+	modified := sanitizeGeminiSystemInstructionDoc(doc, contentsPath)
 
-	contents := util.GetGJSONBytesNoCopy(payload, contentsPath)
+	contents := doc.Get(contentsPath)
 	if !contents.IsArray() || !geminiContentsThoughtSignaturesNeedSanitize(contents, opts) {
-		return payload
+		return modified
 	}
 
 	contentsChanged := false
-	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
 	type sanitizeLogKey struct {
 		action           SignatureCompatibilityAction
 		reason           string
@@ -109,24 +193,28 @@ func sanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string,
 		sanitizeCounts[key]++
 	}
 
-	contents.ForEach(func(_, content gjson.Result) bool {
+	contentIdx := 0
+	contents.ForEach(func(_, content ojson.Result) bool {
+		cIdx := contentIdx
+		contentIdx++
 		parts := content.Get("parts")
 		if !parts.IsArray() {
-			contentItems = append(contentItems, []byte(content.Raw))
 			return true
 		}
 
 		isModelTurn := content.Get("role").String() == "model"
 		firstFunctionCallSeen := false
-		partsChanged := false
-		partItems := make([][]byte, 0, int(parts.Get("#").Int()))
-		parts.ForEach(func(_, part gjson.Result) bool {
-			partJSON := []byte(part.Raw)
+		partIdx := 0
+		parts.ForEach(func(_, part ojson.Result) bool {
+			pIdx := partIdx
+			partIdx++
+			partPath := fmt.Sprintf("%s.%d.parts.%d", contentsPath, cIdx, pIdx)
 			rawSignature, hasSignature := geminiPartThoughtSignature(part)
 			if part.Get("functionResponse").Exists() {
 				if hasSignature {
-					partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
-					partsChanged = true
+					if deleteGeminiPartThoughtSignatureFieldsDoc(doc, partPath) {
+						contentsChanged = true
+					}
 					countSanitize(SignatureCompatibilityDecision{
 						TargetProvider:   SignatureProviderGemini,
 						DetectedProvider: DetectSignatureProviderForBlock(rawSignature, SignatureBlockKindGeminiModelPart),
@@ -135,27 +223,21 @@ func sanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string,
 						Reason:           "tool responses cannot carry signatures",
 					})
 				}
-				partItems = append(partItems, partJSON)
 				return true
 			}
 			if !isModelTurn {
-				partItems = append(partItems, partJSON)
 				return true
 			}
 			if part.Get("toolCall").Exists() || part.Get("tool_call").Exists() || part.Get("toolResponse").Exists() || part.Get("tool_response").Exists() {
-				partItems = append(partItems, partJSON)
 				return true
 			}
 
 			hasFunctionCall := part.Get("functionCall").Exists()
 			isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
-			// A text part, even an empty signature carrier, ends the parallel group:
-			// the Gemini API rejects an unsigned functionCall after it. Thought parts do not.
 			if hasFunctionCall || !part.Get("thought").Bool() {
 				firstFunctionCallSeen = hasFunctionCall
 			}
 			if !hasFunctionCall && !hasSignature {
-				partItems = append(partItems, partJSON)
 				return true
 			}
 
@@ -186,39 +268,28 @@ func sanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string,
 			partChanged := false
 			if replaySignature != "" {
 				if !hasNormalizedGeminiPartThoughtSignature(part, replaySignature) {
-					partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
-					partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", replaySignature)
+					deleteGeminiPartThoughtSignatureFieldsDoc(doc, partPath)
+					_ = doc.Set(partPath+".thoughtSignature", replaySignature)
 					partChanged = true
 				}
 			} else if hasSignature {
-				partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
-				partChanged = true
+				if deleteGeminiPartThoughtSignatureFieldsDoc(doc, partPath) {
+					partChanged = true
+				}
 			}
 			if partChanged {
-				partsChanged = true
+				contentsChanged = true
 				if decision.Action != SignatureActionPreserve {
 					countSanitize(decision)
 				}
 			}
-			partItems = append(partItems, partJSON)
 			return true
 		})
-
-		contentJSON := []byte(content.Raw)
-		if partsChanged {
-			contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", joinGeminiSignatureRawArray(partItems))
-			contentsChanged = true
-		}
-		contentItems = append(contentItems, contentJSON)
 		return true
 	})
 
 	if !contentsChanged {
-		return payload
-	}
-	updated, errSet := sjson.SetRawBytes(payload, contentsPath, joinGeminiSignatureRawArray(contentItems))
-	if errSet != nil {
-		return payload
+		return modified
 	}
 	for _, key := range sanitizeOrder {
 		count := sanitizeCounts[key]
@@ -235,7 +306,7 @@ func sanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string,
 			contentsPath,
 			key.reason)
 	}
-	return updated
+	return true
 }
 
 func sanitizeActionName(action SignatureCompatibilityAction) string {
@@ -271,16 +342,16 @@ func sanitizeSigTypeName(provider SignatureProvider) string {
 	}
 }
 
-func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result, opts geminiSanitizeOptions) bool {
+func geminiContentsThoughtSignaturesNeedSanitize(contents ojson.Result, opts geminiSanitizeOptions) bool {
 	needsSanitize := false
-	contents.ForEach(func(_, content gjson.Result) bool {
+	contents.ForEach(func(_, content ojson.Result) bool {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			return true
 		}
 		isModelTurn := content.Get("role").String() == "model"
 		firstFunctionCallSeen := false
-		parts.ForEach(func(_, part gjson.Result) bool {
+		parts.ForEach(func(_, part ojson.Result) bool {
 			rawSignature, hasSignature := geminiPartThoughtSignature(part)
 			if part.Get("functionResponse").Exists() {
 				needsSanitize = hasSignature
@@ -332,7 +403,7 @@ var geminiPartThoughtSignaturePaths = []string{
 	"extra_content.google.thought_signature",
 }
 
-func geminiPartThoughtSignature(part gjson.Result) (string, bool) {
+func geminiPartThoughtSignature(part ojson.Result) (string, bool) {
 	for _, path := range geminiPartThoughtSignaturePaths {
 		result := part.Get(path)
 		if result.Exists() {
@@ -342,16 +413,16 @@ func geminiPartThoughtSignature(part gjson.Result) (string, bool) {
 	return "", false
 }
 
-func hasNormalizedGeminiPartThoughtSignature(part gjson.Result, replaySignature string) bool {
+func hasNormalizedGeminiPartThoughtSignature(part ojson.Result, replaySignature string) bool {
 	canonicalCount := 0
-	part.ForEach(func(key, _ gjson.Result) bool {
+	part.ForEach(func(key, _ ojson.Result) bool {
 		if key.String() == "thoughtSignature" {
 			canonicalCount++
 		}
 		return true
 	})
 	canonical := part.Get("thoughtSignature")
-	if canonicalCount != 1 || canonical.Type != gjson.String || canonical.String() != replaySignature {
+	if canonicalCount != 1 || canonical.Type != ojson.String || canonical.String() != replaySignature {
 		return false
 	}
 	for _, path := range geminiPartThoughtSignaturePaths[1:] {
@@ -362,31 +433,20 @@ func hasNormalizedGeminiPartThoughtSignature(part gjson.Result, replaySignature 
 	return true
 }
 
-func deleteGeminiPartThoughtSignatureFields(payload []byte) []byte {
-	for _, path := range geminiPartThoughtSignaturePaths {
-		for gjson.GetBytes(payload, path).Exists() {
-			updated, errDelete := sjson.DeleteBytes(payload, path)
-			if errDelete != nil || len(updated) >= len(payload) {
+func deleteGeminiPartThoughtSignatureFieldsDoc(doc *ojson.Doc, partPath string) bool {
+	modified := false
+	for _, relPath := range geminiPartThoughtSignaturePaths {
+		path := relPath
+		if partPath != "" {
+			path = partPath + "." + relPath
+		}
+		for doc.Get(path).Exists() {
+			beforeLen := doc.Len()
+			if errDelete := doc.Delete(path); errDelete != nil || doc.Len() >= beforeLen {
 				break
 			}
-			payload = updated
+			modified = true
 		}
 	}
-	return payload
-}
-
-func joinGeminiSignatureRawArray(items [][]byte) []byte {
-	size := len(items) + 1
-	for _, item := range items {
-		size += len(item)
-	}
-	out := make([]byte, 0, size)
-	out = append(out, '[')
-	for index, item := range items {
-		if index > 0 {
-			out = append(out, ',')
-		}
-		out = append(out, item...)
-	}
-	return append(out, ']')
+	return modified
 }

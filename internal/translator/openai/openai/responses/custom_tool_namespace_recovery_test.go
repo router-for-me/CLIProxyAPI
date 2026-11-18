@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const namespaceRecoveryRequest = `{"input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"exec"},{"type":"function","name":"wait"}]}]}]}`
@@ -19,7 +19,7 @@ func TestCustomToolNamespaceRecoveryPreservesStreamAndNonStream(t *testing.T) {
 			call := fmt.Sprintf(`{"index":0,"id":"call_fixture","type":"function","function":{"name":%q,"arguments":%q}}`, name, args)
 			raw := fmt.Sprintf(`{"id":"fixture","choices":[{"index":0,"message":{"tool_calls":[%s]},"finish_reason":"tool_calls"}]}`, call)
 			response := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "fixture", request, nil, []byte(raw), nil)
-			assertRecoveredCustomCall(t, gjson.GetBytes(response, "output.0"), true)
+			assertRecoveredCustomCall(t, ojson.GetBytesNoCopy(response, "output.0"), true)
 			var state any
 			counts := map[string]int{}
 			for _, line := range []string{
@@ -50,7 +50,7 @@ func TestCustomToolNamespaceRecoveryPreservesStreamAndNonStream(t *testing.T) {
 	}
 }
 
-func assertRecoveredCustomCall(t *testing.T, item gjson.Result, withInput bool) {
+func assertRecoveredCustomCall(t *testing.T, item ojson.Result, withInput bool) {
 	t.Helper()
 	for key, want := range map[string]string{"type": "custom_tool_call", "name": "exec", "namespace": "functions", "call_id": "call_fixture"} {
 		if got := item.Get(key).String(); got != want {
@@ -69,10 +69,10 @@ func TestCustomToolReplayPreservesNamespaceAndResultPair(t *testing.T) {
 	for _, namespace := range []string{`,"namespace":"functions"`, ""} {
 		request := strings.TrimSuffix(namespaceRecoveryRequest, "]}") + fmt.Sprintf(`,{"type":"custom_tool_call","name":"exec"%s,"call_id":"call_fixture","input":"text(1);"},{"type":"custom_tool_call_output","call_id":"call_fixture","output":[{"type":"input_text","text":"1"}]}]}`, namespace)
 		body, _ := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("fixture", []byte(request), false)
-		if got := gjson.GetBytes(body, "messages.0.tool_calls.0.function.name").String(); got != "functions__exec" {
+		if got := ojson.GetBytesNoCopy(body, "messages.0.tool_calls.0.function.name").String(); got != "functions__exec" {
 			t.Fatalf("replay name %q: %s", got, body)
 		}
-		if got := gjson.GetBytes(body, "messages.1.tool_call_id").String(); got != "call_fixture" {
+		if got := ojson.GetBytesNoCopy(body, "messages.1.tool_call_id").String(); got != "call_fixture" {
 			t.Fatalf("result pair lost: %s", body)
 		}
 	}

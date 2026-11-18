@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	translatorapi "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/translator"
-	"github.com/tidwall/gjson"
 )
 
 var benchmarkResponseTranslationOutput []byte
@@ -49,7 +49,7 @@ func BenchmarkResponseTranslationLargePayload(b *testing.B) {
 	for _, testCase := range cases {
 		b.Run(testCase.name, func(b *testing.B) {
 			output := translatorapi.ResponseNonStream(testCase.from, testCase.to, context.Background(), "benchmark-model", nil, nil, testCase.rawJSON, nil)
-			if !gjson.ValidBytes(output) {
+			if !ojson.ValidBytes(output) {
 				b.Fatalf("translator generated invalid JSON: %s", output)
 			}
 			if !bytes.Contains(output, []byte(payload)) {

@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -44,8 +46,9 @@ func TestCodexHTMLForbiddenClassification(t *testing.T) {
 				if err.RetryAfter() == nil || *err.RetryAfter() != 5*time.Second || err.IsCredentialScoped() {
 					t.Fatalf("HTML rejection must have short, non-quota retry: %#v", err)
 				}
-				if strings.Contains(err.Error(), "<html") || !strings.Contains(err.Error(), "upstream_html_rejection") {
-					t.Fatalf("expected sanitized edge error, got %q", err.Error())
+				body := handlers.BuildErrorResponseBodyWithError(err.StatusCode(), err.Error(), err)
+				if code := ojson.GetBytesNoCopy(body, "error.code").String(); code != "upstream_html_rejection" || strings.Contains(string(body), "<html") {
+					t.Fatalf("expected sanitized edge error, got %s", body)
 				}
 			}
 		})

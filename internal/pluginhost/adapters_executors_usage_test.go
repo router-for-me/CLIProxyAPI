@@ -389,6 +389,76 @@ func TestExecutorAdapterExecuteStreamPublishesUsage(t *testing.T) {
 	}
 }
 
+// TestExecutorAdapterExecuteStreamSameFormatStripsSSEFraming pins the contract
+// that same-format plugin executor streams are normalized like built-in
+// executor streams: SSE-framed chunks ("data: {...}\n\n") must reach callers
+// as bare JSON payloads without the "[DONE]" marker, because the HTTP handlers
+// add their own "data:" prefix and terminal marker. Forwarding the framed
+// chunks unchanged produced a doubled "data: data:" prefix on the wire.
+func TestExecutorAdapterExecuteStreamSameFormatStripsSSEFraming(t *testing.T) {
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-stream-framing"})
+	host := newHostWithRecords(executorRecord)
+
+	streamChunks := make(chan pluginapi.ExecutorStreamChunk, 4)
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")}
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")}
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+	close(streamChunks)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider-stream-framing",
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: streamChunks}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+	adapter.provider = "plugin-provider-stream-framing"
+
+	auth := &coreauth.Auth{ID: "auth-stream-framing-1", Provider: "plugin-provider-stream-framing"}
+	req := coreexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","stream":true}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+		Stream:         true,
+	}
+
+	streamRes, errStream := adapter.ExecuteStream(context.Background(), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream returned unexpected error: %v", errStream)
+	}
+
+	var received []string
+	for chunk := range streamRes.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		received = append(received, string(chunk.Payload))
+	}
+
+	want := []string{
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	}
+	if len(received) != len(want) {
+		t.Fatalf("received %d chunks %q, want %d %q", len(received), received, len(want), want)
+	}
+	for i := range want {
+		if received[i] != want[i] {
+			t.Errorf("chunk %d = %q, want %q", i, received[i], want[i])
+		}
+		if strings.HasPrefix(received[i], "data:") {
+			t.Errorf("chunk %d still carries SSE framing: %q", i, received[i])
+		}
+	}
+}
+
 func TestExecutorAdapterExecuteStreamThroughAuthManagerPublishesUsage(t *testing.T) {
 	plugin := newTestUsageCapturePlugin("plugin-provider-stream-mgr")
 	registerTestUsagePlugin(t, "test-executor-adapter-auth-manager-stream-usage", plugin)
@@ -936,6 +1006,75 @@ func TestUsageAdapterPropagatesNativeKeyAndAccessProvider(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterDeliversClaudeStreamingAndNonStreamingCacheCreationTTL(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 2)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-claude-ttl",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-claude-ttl",
+		plugin:   plugin,
+	}
+
+	// Non-streaming Claude usage payload with 5m + 1h breakdown.
+	nonStreamDetail := helps.ParseClaudeUsage([]byte(`{
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 50,
+			"cache_creation_input_tokens": 1500,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 1000,
+				"ephemeral_1h_input_tokens": 500
+			}
+		}
+	}`))
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Stream:   false,
+		Detail:   nonStreamDetail,
+	})
+	recNonStream := <-plugin.captured
+	if recNonStream.Detail.CacheCreationTokens != 1500 {
+		t.Fatalf("non-stream CacheCreationTokens = %d, want 1500", recNonStream.Detail.CacheCreationTokens)
+	}
+	if recNonStream.Detail.CacheCreation5mTokens == nil || *recNonStream.Detail.CacheCreation5mTokens != 1000 {
+		t.Fatalf("non-stream CacheCreation5mTokens = %v, want 1000", recNonStream.Detail.CacheCreation5mTokens)
+	}
+	if recNonStream.Detail.CacheCreation1hTokens == nil || *recNonStream.Detail.CacheCreation1hTokens != 500 {
+		t.Fatalf("non-stream CacheCreation1hTokens = %v, want 500", recNonStream.Detail.CacheCreation1hTokens)
+	}
+
+	// Streaming Claude SSE events with 5m=0 and 1h=45045 preserved across message_start + message_delta.
+	var streamBuf helps.StreamUsageBuffer
+	streamBuf.ObserveClaudeStream([]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":16,"cache_creation_input_tokens":45045,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":45045},"output_tokens":4}}}`))
+	streamBuf.ObserveClaudeStream([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":24}}`))
+	streamDetail, ok := streamBuf.Detail()
+	if !ok {
+		t.Fatal("expected streaming Claude usage detail")
+	}
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Stream:   true,
+		Detail:   streamDetail,
+	})
+	recStream := <-plugin.captured
+	if recStream.Detail.CacheCreationTokens != 45045 {
+		t.Fatalf("stream CacheCreationTokens = %d, want 45045", recStream.Detail.CacheCreationTokens)
+	}
+	if recStream.Detail.CacheCreation5mTokens == nil || *recStream.Detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("stream CacheCreation5mTokens = %v, want explicit 0", recStream.Detail.CacheCreation5mTokens)
+	}
+	if recStream.Detail.CacheCreation1hTokens == nil || *recStream.Detail.CacheCreation1hTokens != 45045 {
+		t.Fatalf("stream CacheCreation1hTokens = %v, want 45045", recStream.Detail.CacheCreation1hTokens)
+	}
+}
+
 func TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth(t *testing.T) {
 	plugin := newTestUsageCapturePlugin("plugin-provider-responses")
 	registerTestUsagePlugin(t, "test-executor-adapter-responses-auth-usage", plugin)
@@ -1236,5 +1375,120 @@ func waitPluginUsageRecord(t *testing.T, ch <-chan pluginapi.UsageRecord) plugin
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pluginapi.UsageRecord")
 		return pluginapi.UsageRecord{}
+	}
+}
+
+func TestExecutorAdapterPropagatesAttributionAndPluginExecutorType(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("")
+	registerTestUsagePlugin(t, "test-executor-adapter-plugin-type", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "custom-plugin-id"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload:  []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+				Metadata: map[string]any{"k": "v"},
+				Attribution: &pluginapi.UsageAttribution{
+					AuthIndex: " idx-1 ",
+					AuthType:  " oauth ",
+					Source:    " acct@example.com ",
+				},
+			}, nil
+		},
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			ch := make(chan pluginapi.ExecutorStreamChunk, 1)
+			ch <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			close(ch)
+			return pluginapi.ExecutorStreamResponse{
+				Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Attribution: &pluginapi.UsageAttribution{
+					AuthIndex: "idx-stream",
+					AuthType:  "api_key",
+					Source:    "stream-acct",
+				},
+				Chunks: ch,
+			}, nil
+		},
+	}
+
+	executorRecord.plugin.Capabilities.Executor = exec
+	executorRecord.plugin.Capabilities.ExecutorInputFormats = []string{"openai"}
+	executorRecord.plugin.Capabilities.ExecutorOutputFormats = []string{"openai"}
+	host = newHostWithRecords(executorRecord)
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+
+	req := coreexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, attr, errExec := host.ExecutePluginExecutorWithAttribution(context.Background(), "custom-plugin-id", req, opts)
+	if errExec != nil {
+		t.Fatalf("ExecutePluginExecutorWithAttribution error = %v", errExec)
+	}
+	if attr == nil ||
+		attr.AuthIndex != " idx-1 " ||
+		attr.AuthType != " oauth " ||
+		attr.Source != " acct@example.com " {
+		t.Fatalf("attr = %+v", attr)
+	}
+
+	streamRes, streamAttr, errStream := host.ExecutePluginExecutorStreamWithAttribution(context.Background(), "custom-plugin-id", req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecutePluginExecutorStreamWithAttribution error = %v", errStream)
+	}
+	if streamAttr == nil ||
+		streamAttr.AuthIndex != "idx-stream" ||
+		streamAttr.AuthType != "api_key" ||
+		streamAttr.Source != "stream-acct" {
+		t.Fatalf("streamAttr = %+v", streamAttr)
+	}
+	for range streamRes.Chunks {
+	}
+
+	// Verify auth-backed executions report "plugin:<id>", preserve auth credentials, and apply source attribution.
+	auth := &coreauth.Auth{
+		ID:         "auth-1",
+		Provider:   "plugin-provider",
+		FileName:   "auth-1.json",
+		Attributes: map[string]string{coreauth.AttributeAuthKind: "oauth"},
+	}
+	if _, errAuthExec := adapter.Execute(context.Background(), auth, req, opts); errAuthExec != nil {
+		t.Fatalf("Execute(auth!=nil) error = %v", errAuthExec)
+	}
+	rec := plugin.waitRecord(t, 2*time.Second)
+	if rec.ExecutorType != "plugin:custom-plugin-id" ||
+		rec.Provider != "plugin-provider" ||
+		rec.AuthID != "auth-1" ||
+		rec.AuthIndex != auth.EnsureIndex() ||
+		rec.AuthType != "oauth" ||
+		rec.Source != "acct@example.com" {
+		t.Fatalf("auth-backed Execute rec = %+v", rec)
+	}
+
+	authStreamRes, errAuthStream := adapter.ExecuteStream(context.Background(), auth, req, opts)
+	if errAuthStream != nil {
+		t.Fatalf("ExecuteStream(auth!=nil) error = %v", errAuthStream)
+	}
+	for range authStreamRes.Chunks {
+	}
+	streamRec := plugin.waitRecord(t, 2*time.Second)
+	if streamRec.ExecutorType != "plugin:custom-plugin-id" ||
+		streamRec.Provider != "plugin-provider" ||
+		streamRec.AuthID != "auth-1" ||
+		streamRec.AuthIndex != auth.EnsureIndex() ||
+		streamRec.AuthType != "oauth" ||
+		streamRec.Source != "stream-acct" {
+		t.Fatalf("auth-backed ExecuteStream rec = %+v", streamRec)
 	}
 }

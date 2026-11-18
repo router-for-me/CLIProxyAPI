@@ -6,23 +6,21 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
-func openaiResponsesReasoningSummaryIsEmpty(summary gjson.Result) bool {
-	if !summary.Exists() || summary.Type == gjson.Null {
+func openaiResponsesReasoningSummaryIsEmpty(summary ojson.Result) bool {
+	if !summary.Exists() || summary.Type == ojson.Null {
 		return true
 	}
 	return summary.IsArray() && len(summary.Array()) == 0
 }
 
-func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.Result) (string, error) {
+func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content ojson.Result) (string, error) {
 	var b strings.Builder
 	b.WriteByte('[')
 	n := 0
@@ -34,7 +32,7 @@ func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.
 		if text == "" {
 			continue
 		}
-		partJSON, err := sjson.Set(`{"type":"summary_text"}`, "text", text)
+		partJSON, err := ojson.Set(`{"type":"summary_text"}`, "text", text)
 		if err != nil {
 			return itemRaw, err
 		}
@@ -48,7 +46,36 @@ func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.
 	if n == 0 {
 		return itemRaw, nil
 	}
-	return sjson.SetRaw(itemRaw, "summary", b.String())
+	return ojson.SetRaw(itemRaw, "summary", b.String())
+}
+
+func promoteOpenAIResponsesReasoningTextToSummaryDoc(itemDoc *ojson.Doc, content ojson.Result) error {
+	var b strings.Builder
+	b.WriteByte('[')
+	n := 0
+	for _, part := range content.Array() {
+		if strings.TrimSpace(part.Get("type").String()) != "reasoning_text" {
+			continue
+		}
+		text := part.Get("text").String()
+		if text == "" {
+			continue
+		}
+		partJSON, err := ojson.Set(`{"type":"summary_text"}`, "text", text)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(partJSON)
+		n++
+	}
+	b.WriteByte(']')
+	if n == 0 {
+		return nil
+	}
+	return itemDoc.SetRawBytes("summary", []byte(b.String()))
 }
 
 type metaSignaturePolicy int
@@ -66,8 +93,16 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(ctx context.Context, provi
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, false, metaSignatureForeign, signature.SignatureProviderUnknown, false)
 }
 
+func sanitizeOpenAIResponsesReasoningEncryptedContentDoc(ctx context.Context, provider string, doc *ojson.Doc) bool {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx, provider, doc, false, false, metaSignatureForeign, signature.SignatureProviderUnknown, false)
+}
+
 func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Context, provider string, body []byte, isCompat bool) []byte {
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(ctx, provider, body, isCompat, "")
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatDoc(ctx context.Context, provider string, doc *ojson.Doc, isCompat bool) bool {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelDoc(ctx, provider, doc, isCompat, "")
 }
 
 // sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel is the
@@ -107,7 +142,19 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModel(ctx context
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, provider, body, isCompat, targetModel, "")
 }
 
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelDoc(ctx context.Context, provider string, doc *ojson.Doc, isCompat bool, targetModel string) bool {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, provider, doc, isCompat, targetModel, "")
+}
+
 func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx context.Context, provider string, body []byte, isCompat bool, targetModel string, baseURL string) []byte {
+	doc := ojson.NewDoc(body)
+	if !sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx, provider, doc, isCompat, targetModel, baseURL) {
+		return body
+	}
+	return doc.Bytes()
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURLDoc(ctx context.Context, provider string, doc *ojson.Doc, isCompat bool, targetModel string, baseURL string) bool {
 	targetProvider := signature.SignatureProviderFromModelName(targetModel)
 	metaPolicy := metaSignatureForeign
 	if targetProvider == signature.SignatureProviderMeta {
@@ -117,11 +164,15 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(c
 			metaPolicy = metaSignatureAllowRouted
 		}
 	}
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, isCompat, isCompat, metaPolicy, targetProvider, isOpenRouterUpstreamURL(baseURL))
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx, provider, doc, isCompat, isCompat, metaPolicy, targetProvider, isOpenRouterUpstreamURL(baseURL))
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx context.Context, provider string, body []byte) []byte {
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true, metaSignatureForeign, signature.SignatureProviderUnknown, false)
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeignDoc(ctx context.Context, provider string, doc *ojson.Doc) bool {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx, provider, doc, false, true, metaSignatureForeign, signature.SignatureProviderUnknown, false)
 }
 
 // sanitizeOpenAIResponsesReasoningEncryptedContentForMeta is the Meta-target
@@ -136,6 +187,10 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(ctx context.Context
 	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true, metaSignatureNativeOnly, signature.SignatureProviderMeta, false)
 }
 
+func sanitizeOpenAIResponsesReasoningEncryptedContentForMetaDoc(ctx context.Context, provider string, doc *ojson.Doc) bool {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx, provider, doc, false, true, metaSignatureNativeOnly, signature.SignatureProviderMeta, false)
+}
+
 // sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL gates Meta
 // reasoning signatures by whether baseURL is the native Meta upstream
 // (api.meta.ai, which accepts only unsuffixed envelopes) or a third-party
@@ -143,10 +198,18 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(ctx context.Context
 // router-suffixed Meta Muse envelopes verbatim when targeting OpenRouter, or
 // strip the OpenRouter suffix for other providers).
 func sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURL(ctx context.Context, provider string, body []byte, baseURL string) []byte {
-	if isNativeMetaUpstreamURL(baseURL) {
-		return sanitizeOpenAIResponsesReasoningEncryptedContentForMeta(ctx, provider, body)
+	doc := ojson.NewDoc(body)
+	if !sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURLDoc(ctx, provider, doc, baseURL) {
+		return body
 	}
-	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true, metaSignatureAllowRouted, signature.SignatureProviderMeta, isOpenRouterUpstreamURL(baseURL))
+	return doc.Bytes()
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentForMetaBaseURLDoc(ctx context.Context, provider string, doc *ojson.Doc, baseURL string) bool {
+	if isNativeMetaUpstreamURL(baseURL) {
+		return sanitizeOpenAIResponsesReasoningEncryptedContentForMetaDoc(ctx, provider, doc)
+	}
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx, provider, doc, false, true, metaSignatureAllowRouted, signature.SignatureProviderMeta, isOpenRouterUpstreamURL(baseURL))
 }
 
 func isNativeMetaUpstreamURL(rawURL string) bool {
@@ -183,9 +246,20 @@ func stripRouterSuffix(rawSignature, suffix string) string {
 }
 
 func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat bool, keepForeign bool, metaPolicy metaSignaturePolicy, targetProvider signature.SignatureProvider, allowRouterSuffix bool) []byte {
-	inputResult := util.GetGJSONBytesNoCopy(body, "input")
-	if !inputResult.Exists() || !inputResult.IsArray() {
+	doc := ojson.NewDoc(body)
+	if !sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx, provider, doc, isCompat, keepForeign, metaPolicy, targetProvider, allowRouterSuffix) {
 		return body
+	}
+	return doc.Bytes()
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptionsDoc(ctx context.Context, provider string, doc *ojson.Doc, isCompat bool, keepForeign bool, metaPolicy metaSignaturePolicy, targetProvider signature.SignatureProvider, allowRouterSuffix bool) bool {
+	if doc == nil || doc.Len() == 0 {
+		return false
+	}
+	inputResult := doc.Get("input")
+	if !inputResult.Exists() || !inputResult.IsArray() {
+		return false
 	}
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
@@ -197,14 +271,14 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 	// treated as a store lookup and returns:
 	//   Item with id '...' not found. Items are not persisted when `store` is set to false.
 	// Strip those orphan ids unless the request explicitly opts into store=true.
-	stripOrphanReasoningIDs := !gjson.GetBytes(body, "store").Bool()
+	stripOrphanReasoningIDs := !doc.Get("store").Bool()
 
 	items := inputResult.Array()
 
 	// rebuilt accumulates the edited "input" array as JSON array bytes. It
 	// stays nil while no item needs editing so the common case (nothing to
 	// sanitize) does no allocation or rebuilding. Edits are applied directly
-	// to each item's own raw JSON rather than re-parsing the whole body,
+	// to each item's own Doc rather than re-parsing the whole body,
 	// keeping the cost proportional to the item being edited.
 	var rebuilt []byte
 	itemsWritten := 0
@@ -243,7 +317,13 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 			itemID = fmt.Sprintf("input[%d]", index)
 		}
 
-		nextItem := item.Raw
+		var itemDoc *ojson.Doc
+		ensureItemDoc := func() *ojson.Doc {
+			if itemDoc == nil {
+				itemDoc = ojson.NewDoc([]byte(item.Raw))
+			}
+			return itemDoc
+		}
 		changed := false
 
 		// Official Codex schema sets maxItems: 0 on reasoning.content. Third-party
@@ -254,18 +334,15 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 		content := item.Get("content")
 		if !isCompat && content.IsArray() && len(content.Array()) > 0 {
 			if openaiResponsesReasoningSummaryIsEmpty(item.Get("summary")) {
-				promoted, errPromote := promoteOpenAIResponsesReasoningTextToSummary(nextItem, content)
-				if errPromote != nil {
+				if errPromote := promoteOpenAIResponsesReasoningTextToSummaryDoc(ensureItemDoc(), content); errPromote != nil {
 					helps.LogWithRequestID(ctx).Debugf("%s: failed to promote reasoning_text into summary at input[%d]: %v", provider, index, errPromote)
 				} else {
-					nextItem = promoted
+					changed = true
 				}
 			}
-			cleared, errClear := sjson.SetRaw(nextItem, "content", "[]")
-			if errClear != nil {
+			if errClear := ensureItemDoc().SetRawBytes("content", []byte("[]")); errClear != nil {
 				helps.LogWithRequestID(ctx).Debugf("%s: failed to clear reasoning content at input[%d]: %v", provider, index, errClear)
 			} else {
-				nextItem = cleared
 				changed = true
 				helps.LogWithRequestID(ctx).Debugf("%s: cleared reasoning content at input[%d] item_id=%q", provider, index, itemID)
 			}
@@ -273,37 +350,30 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 
 		if !encryptedContent.Exists() {
 			if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
-				dropped, err := sjson.Delete(nextItem, "id")
-				if err != nil {
-					helps.LogWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err)
+				if errDel := ensureItemDoc().Delete("id"); errDel != nil {
+					helps.LogWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, errDel)
 				} else {
-					nextItem = dropped
 					changed = true
 					helps.LogWithRequestID(ctx).Debugf("%s: dropped orphan reasoning id at input[%d] item_id=%q reason=missing encrypted_content with store disabled", provider, index, itemID)
 				}
 			}
-			if !changed {
+			if !changed || itemDoc == nil {
 				keep(item.Raw)
 				continue
 			}
 			startRebuild(index)
-			keep(nextItem)
+			keep(itemDoc.String())
 			continue
 		}
 
 		reason := ""
 		rewrittenSignature := ""
 		switch encryptedContent.Type {
-		case gjson.String:
+		case ojson.String:
 			rawSignature := encryptedContent.String()
 			if rawSignature != strings.TrimSpace(rawSignature) {
 				reason = "encrypted_content has leading or trailing whitespace"
 			} else if metaPolicy != metaSignatureForeign {
-				// Meta targets never reach the GPT-first gate: a GPT,
-				// foreign-provider, or unknown-format blob must not replay to
-				// Meta. Only a positively recognized Meta envelope survives,
-				// and the native Meta upstream additionally refuses the
-				// router suffix a router such as OpenRouter appends.
 				if info, err := signature.InspectMetaReasoningSignature(rawSignature); err != nil {
 					reason = err.Error()
 				} else if info.RouterSuffix != "" {
@@ -330,94 +400,83 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Con
 					reason = err.Error()
 				}
 			} else {
-				// Target model belongs to a known non-GPT, non-Meta family (such as
-				// Grok or Gemini served through a Responses router like OpenRouter).
-				// Only preserve signatures that match that target family (or
-				// unknown-format blobs when keepForeign is enabled); foreign GPT or
-				// other known-provider envelopes are stripped.
-				keep := false
+				keepSig := false
 				if rawSignature != "" {
 					switch targetProvider {
 					case signature.SignatureProviderGrok:
 						if grokInfo, errGrok := signature.InspectGrokEncryptedContent(rawSignature); errGrok == nil {
-							keep = true
+							keepSig = true
 							if grokInfo.RouterSuffix != "" && !allowRouterSuffix {
 								rewrittenSignature = stripRouterSuffix(rawSignature, grokInfo.RouterSuffix)
 							}
 						}
 					case signature.SignatureProviderGemini, signature.SignatureProviderClaude, signature.SignatureProviderKimi, signature.SignatureProviderSWE:
 						var normalized string
-						normalized, keep = signature.CompatibleSignatureForProvider(targetProvider, rawSignature)
-						if keep && normalized != "" && normalized != rawSignature {
+						normalized, keepSig = signature.CompatibleSignatureForProvider(targetProvider, rawSignature)
+						if keepSig && normalized != "" && normalized != rawSignature {
 							rewrittenSignature = normalized
 						}
 					}
-					if !keep && keepForeign {
-						keep = signature.DetectSignatureProvider(rawSignature) == signature.SignatureProviderUnknown
+					if !keepSig && keepForeign {
+						keepSig = signature.DetectSignatureProvider(rawSignature) == signature.SignatureProviderUnknown
 					}
 				}
-				if !keep {
+				if !keepSig {
 					reason = fmt.Sprintf("reasoning encrypted_content is not compatible with target provider %s", targetProvider)
 				}
 			}
-		case gjson.Null:
+		case ojson.Null:
 			reason = "encrypted_content is null"
 		default:
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
 			if rewrittenSignature != "" {
-				if updatedItem, errSet := sjson.Set(nextItem, "encrypted_content", rewrittenSignature); errSet == nil {
-					nextItem = updatedItem
+				if errSet := ensureItemDoc().Set("encrypted_content", rewrittenSignature); errSet == nil {
 					changed = true
 					helps.LogWithRequestID(ctx).Debugf("%s: stripped router suffix from reasoning encrypted_content at input[%d] item_id=%q", provider, index, itemID)
 				}
 			}
-			if !changed {
+			if !changed || itemDoc == nil {
 				keep(item.Raw)
 				continue
 			}
 			startRebuild(index)
-			keep(nextItem)
+			keep(itemDoc.String())
 			continue
 		}
 
-		dropped, err := sjson.Delete(nextItem, "encrypted_content")
-		if err != nil {
-			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop invalid reasoning encrypted_content at input[%d]: %v", provider, index, err)
-			if !changed {
+		if errDel := ensureItemDoc().Delete("encrypted_content"); errDel != nil {
+			helps.LogWithRequestID(ctx).Debugf("%s: failed to drop invalid reasoning encrypted_content at input[%d]: %v", provider, index, errDel)
+			if !changed || itemDoc == nil {
 				keep(item.Raw)
 				continue
 			}
 			startRebuild(index)
-			keep(nextItem)
+			keep(itemDoc.String())
 			continue
 		}
-		nextItem = dropped
 		changed = true
 		if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
-			if nextID, errID := sjson.Delete(nextItem, "id"); errID != nil {
+			if errID := ensureItemDoc().Delete("id"); errID != nil {
 				helps.LogWithRequestID(ctx).Debugf("%s: failed to drop reasoning id after invalid encrypted_content at input[%d]: %v", provider, index, errID)
-			} else {
-				nextItem = nextID
 			}
 		}
 
 		startRebuild(index)
-		keep(nextItem)
+		keep(itemDoc.String())
 
 		helps.LogWithRequestID(ctx).Debugf("%s: dropped invalid reasoning encrypted_content at input[%d] item_id=%q reason=%s", provider, index, itemID, reason)
 	}
 
 	if rebuilt == nil {
-		return body
+		return false
 	}
 	rebuilt = append(rebuilt, ']')
 
-	updated, err := sjson.SetRawBytes(body, "input", rebuilt)
-	if err != nil {
-		helps.LogWithRequestID(ctx).Debugf("%s: failed to rebuild input array while sanitizing reasoning encrypted_content: %v", provider, err)
-		return body
+	if errSet := doc.SetRawBytes("input", rebuilt); errSet != nil {
+		helps.LogWithRequestID(ctx).Debugf("%s: failed to rebuild input array while sanitizing reasoning encrypted_content: %v", provider, errSet)
+		return false
 	}
-	return updated
+	return true
 }

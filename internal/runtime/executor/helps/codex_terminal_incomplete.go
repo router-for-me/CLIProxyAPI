@@ -3,7 +3,7 @@ package helps
 import (
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const (
@@ -15,13 +15,13 @@ const (
 // HasMeaningfulCodexOutputDelta reports whether an event carries non-empty generated content
 // (such as non-empty text, reasoning, or function call arguments delta).
 func HasMeaningfulCodexOutputDelta(eventData []byte) bool {
-	eventType := gjson.GetBytes(eventData, "type").String()
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 	switch eventType {
 	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-		delta := gjson.GetBytes(eventData, "delta")
+		delta := ojson.GetBytesNoCopy(eventData, "delta")
 		return delta.Exists() && len(strings.TrimSpace(delta.String())) > 0
 	case "response.function_call_arguments.delta":
-		delta := gjson.GetBytes(eventData, "delta")
+		delta := ojson.GetBytesNoCopy(eventData, "delta")
 		return delta.Exists() && len(strings.TrimSpace(delta.String())) > 0
 	}
 	return false
@@ -31,7 +31,7 @@ func HasMeaningfulCodexOutputDelta(eventData []byte) bool {
 // an upstream silent abort where explicitly zero output tokens were generated and zero
 // output content (no output items and no non-empty output deltas) was produced.
 func IsCodexTerminalEmptyIncomplete(eventData []byte, outputItemsCount int, sawOutputDelta bool) bool {
-	eventType := gjson.GetBytes(eventData, "type").String()
+	eventType := ojson.GetBytesNoCopy(eventData, "type").String()
 	if eventType != "response.incomplete" {
 		return false
 	}
@@ -44,13 +44,13 @@ func IsCodexTerminalEmptyIncomplete(eventData []byte, outputItemsCount int, sawO
 		return false
 	}
 	// If response.output contains any items, output was produced.
-	output := gjson.GetBytes(eventData, "response.output")
+	output := ojson.GetBytesNoCopy(eventData, "response.output")
 	if output.Exists() && output.IsArray() && len(output.Array()) > 0 {
 		return false
 	}
 	// Require explicit numeric zero for output tokens (reject floats like 0.5, non-numbers, missing, or null).
-	outputTokens := gjson.GetBytes(eventData, "response.usage.output_tokens")
-	if !outputTokens.Exists() || outputTokens.Type != gjson.Number {
+	outputTokens := ojson.GetBytesNoCopy(eventData, "response.usage.output_tokens")
+	if !outputTokens.Exists() || outputTokens.Type != ojson.Number {
 		return false
 	}
 	if outputTokens.Num != 0 || strings.TrimSpace(outputTokens.Raw) != "0" {

@@ -7,7 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 type sseEvent struct {
@@ -76,7 +77,7 @@ func toolUseStarts(events []sseEvent) []sseEvent {
 		if e.Type != "content_block_start" {
 			continue
 		}
-		if gjson.Get(e.Payload, "content_block.type").String() == "tool_use" {
+		if ojson.Get(e.Payload, "content_block.type").String() == "tool_use" {
 			out = append(out, e)
 		}
 	}
@@ -87,7 +88,7 @@ func blockIndices(events []sseEvent) []int64 {
 	var idx []int64
 	for _, e := range events {
 		if e.Type == "content_block_start" {
-			idx = append(idx, gjson.Get(e.Payload, "index").Int())
+			idx = append(idx, ojson.Get(e.Payload, "index").Int())
 		}
 	}
 	return idx
@@ -96,7 +97,7 @@ func blockIndices(events []sseEvent) []int64 {
 func lastStopReason(events []sseEvent) string {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Type == "message_delta" {
-			return gjson.Get(events[i].Payload, "delta.stop_reason").String()
+			return ojson.Get(events[i].Payload, "delta.stop_reason").String()
 		}
 	}
 	return ""
@@ -176,21 +177,21 @@ func TestStreaming_SplitUsageFinishReasonThenTrailingUsageChunk_PreservesCachedT
 				t.Fatalf("missing message_delta event in %+v", events)
 			}
 
-			if gotStop := gjson.Get(deltaPayload, "delta.stop_reason").String(); gotStop != tt.wantStopType {
+			if gotStop := ojson.Get(deltaPayload, "delta.stop_reason").String(); gotStop != tt.wantStopType {
 				t.Fatalf("stop_reason = %q, want %q", gotStop, tt.wantStopType)
 			}
 
-			cached := gjson.Get(deltaPayload, "usage.cache_read_input_tokens").Int()
+			cached := ojson.Get(deltaPayload, "usage.cache_read_input_tokens").Int()
 			if cached != 139136 {
 				t.Fatalf("expected cache_read_input_tokens = 139136, got %d (payload=%s)", cached, deltaPayload)
 			}
 
-			input := gjson.Get(deltaPayload, "usage.input_tokens").Int()
+			input := ojson.Get(deltaPayload, "usage.input_tokens").Int()
 			if input != 889 {
 				t.Fatalf("expected deducted input_tokens = 889, got %d (payload=%s)", input, deltaPayload)
 			}
 
-			output := gjson.Get(deltaPayload, "usage.output_tokens").Int()
+			output := ojson.Get(deltaPayload, "usage.output_tokens").Int()
 			if output != 741 {
 				t.Fatalf("expected output_tokens = 741, got %d (payload=%s)", output, deltaPayload)
 			}
@@ -243,10 +244,10 @@ func TestStreamingTool_EmptyNameThroughout(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected one tool_use content_block_start with synthetic name, got %d (events=%+v)", len(starts), events)
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
 		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
 		t.Fatalf("announced tool id = %q, want %q", id, "call_a")
 	}
 	if got := countByType(events, "content_block_delta"); got != 1 {
@@ -269,10 +270,10 @@ func TestStreamingTool_NullName(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("null name with id should belated-emit synthetic tool name; got %d", len(starts))
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
 		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_a" {
 		t.Fatalf("announced tool id = %q, want %q", id, "call_a")
 	}
 	if got := countByType(events, "content_block_stop"); got != 1 {
@@ -292,7 +293,7 @@ func TestStreamingTool_NonStringName(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("non-string name with id should belated-emit synthetic tool name; got %d", len(starts))
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
 		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
 }
@@ -309,7 +310,7 @@ func TestStreamingTool_RepeatedName(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected exactly one tool_use start, got %d", len(starts))
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
 		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
 	}
 	if got := countByType(events, "content_block_stop"); got != 1 {
@@ -334,10 +335,10 @@ func TestStreamingTool_MixedEmptyNameAndValid(t *testing.T) {
 		t.Fatalf("expected two tool_use starts (valid mid-stream + synthetic empty-name), got %d", len(starts))
 	}
 	// Valid name+id is emitted mid-stream first; empty-name is belated at finish.
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
 		t.Fatalf("first tool name = %q, want %q", name, "do_it")
 	}
-	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "tool_0" {
+	if name := ojson.Get(starts[1].Payload, "content_block.name").String(); name != "tool_0" {
 		t.Fatalf("second tool name = %q, want %q", name, "tool_0")
 	}
 	if got := countByType(events, "content_block_stop"); got != 2 {
@@ -374,7 +375,7 @@ func TestStreamingTool_EmptyIDDeferStart(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected exactly one tool_use start once id arrived, got %d", len(starts))
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
 		t.Fatalf("announced tool id = %q, want %q", id, "call_real")
 	}
 }
@@ -391,10 +392,10 @@ func TestStreamingTool_IDInDeltaWithoutFunction(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected exactly one tool_use start when id arrives in a function-less delta, got %d", len(starts))
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_real" {
 		t.Fatalf("announced tool id = %q, want %q", id, "call_real")
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
 		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
 	}
 	if got := countByType(events, "content_block_stop"); got != 1 {
@@ -423,11 +424,11 @@ func TestStreamingTool_StopReasonWhenIDNeverArrives(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected one belated tool_use start with synthetic id, got %d", len(starts))
 	}
-	id := gjson.Get(starts[0].Payload, "content_block.id").String()
+	id := ojson.Get(starts[0].Payload, "content_block.id").String()
 	if !strings.HasPrefix(id, "toolu_") {
 		t.Fatalf("synthetic id should match toolu_<nanos>_<n>, got %q", id)
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "do_it" {
 		t.Fatalf("announced tool name = %q, want %q", name, "do_it")
 	}
 	if got := lastStopReason(events); got != "tool_use" {
@@ -452,10 +453,10 @@ func TestStreamingTool_BelatedStartsUseOpenAIToolIndexOrder(t *testing.T) {
 
 	wantNames := []string{"first_tool", "second_tool", "third_tool"}
 	for i, wantName := range wantNames {
-		if name := gjson.Get(starts[i].Payload, "content_block.name").String(); name != wantName {
+		if name := ojson.Get(starts[i].Payload, "content_block.name").String(); name != wantName {
 			t.Fatalf("tool_use start %d name = %q, want %q (starts=%+v)", i, name, wantName, starts)
 		}
-		if blockIndex := gjson.Get(starts[i].Payload, "index").Int(); blockIndex != int64(i) {
+		if blockIndex := ojson.Get(starts[i].Payload, "index").Int(); blockIndex != int64(i) {
 			t.Fatalf("tool_use start %d block index = %d, want %d", i, blockIndex, i)
 		}
 	}
@@ -513,10 +514,10 @@ func TestStreamingTool_EmptyNameArgsOnlyNoID(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected one belated tool_use start for empty-name args-only call, got %d", len(starts))
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "tool_0" {
 		t.Fatalf("announced tool name = %q, want %q", name, "tool_0")
 	}
-	id := gjson.Get(starts[0].Payload, "content_block.id").String()
+	id := ojson.Get(starts[0].Payload, "content_block.id").String()
 	if !strings.HasPrefix(id, "toolu_") {
 		t.Fatalf("synthetic id should match toolu_<nanos>_<n>, got %q", id)
 	}
@@ -582,10 +583,10 @@ func TestStreamingTool_UsageWithoutFinishReasonEmitsMessageDelta(t *testing.T) {
 	if deltaEvent == nil {
 		t.Fatalf("missing message_delta event")
 	}
-	if input := gjson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 10 {
+	if input := ojson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 10 {
 		t.Fatalf("input_tokens = %d, want 10", input)
 	}
-	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 5 {
+	if output := ojson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 5 {
 		t.Fatalf("output_tokens = %d, want 5", output)
 	}
 	if got := countByType(events, "message_stop"); got != 1 {
@@ -604,16 +605,16 @@ func TestStreamingTool_PerChunkUsagePreservesToolArguments(t *testing.T) {
 	if len(starts) != 1 {
 		t.Fatalf("expected one tool_use start, got %d (starts=%+v)", len(starts), starts)
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "Skill" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "Skill" {
 		t.Fatalf("tool name = %q, want %q", name, "Skill")
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_1" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_1" {
 		t.Fatalf("tool id = %q, want %q", id, "call_1")
 	}
 
 	var deltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			deltas = append(deltas, e)
 		}
 	}
@@ -623,7 +624,7 @@ func TestStreamingTool_PerChunkUsagePreservesToolArguments(t *testing.T) {
 
 	var mergedArgs strings.Builder
 	for _, d := range deltas {
-		mergedArgs.WriteString(gjson.Get(d.Payload, "delta.partial_json").String())
+		mergedArgs.WriteString(ojson.Get(d.Payload, "delta.partial_json").String())
 	}
 	if merged := mergedArgs.String(); merged != `{"skill": "stop-slop"}` {
 		t.Fatalf("merged arguments = %q, want %q", merged, `{"skill": "stop-slop"}`)
@@ -649,10 +650,10 @@ func TestStreamingTool_PerChunkUsagePreservesToolArguments(t *testing.T) {
 	if deltaEvent == nil {
 		t.Fatalf("missing message_delta event")
 	}
-	if input := gjson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 191 {
+	if input := ojson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 191 {
 		t.Fatalf("input_tokens = %d, want 191", input)
 	}
-	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 15 {
+	if output := ojson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 15 {
 		t.Fatalf("output_tokens = %d, want 15", output)
 	}
 }
@@ -668,13 +669,13 @@ func TestStreamingTool_PerChunkUsageOmittedFinishReasonPreservesToolArguments(t 
 	if len(starts) != 1 {
 		t.Fatalf("expected one tool_use start, got %d (starts=%+v)", len(starts), starts)
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "Skill" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "Skill" {
 		t.Fatalf("tool name = %q, want %q", name, "Skill")
 	}
 
 	var deltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			deltas = append(deltas, e)
 		}
 	}
@@ -684,7 +685,7 @@ func TestStreamingTool_PerChunkUsageOmittedFinishReasonPreservesToolArguments(t 
 
 	var mergedArgs strings.Builder
 	for _, d := range deltas {
-		mergedArgs.WriteString(gjson.Get(d.Payload, "delta.partial_json").String())
+		mergedArgs.WriteString(ojson.Get(d.Payload, "delta.partial_json").String())
 	}
 	if merged := mergedArgs.String(); merged != `{"skill": "stop-slop"}` {
 		t.Fatalf("merged arguments = %q, want %q", merged, `{"skill": "stop-slop"}`)
@@ -710,10 +711,10 @@ func TestStreamingTool_PerChunkUsageOmittedFinishReasonPreservesToolArguments(t 
 	if deltaEvent == nil {
 		t.Fatalf("missing message_delta event")
 	}
-	if input := gjson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 191 {
+	if input := ojson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != 191 {
 		t.Fatalf("input_tokens = %d, want 191", input)
 	}
-	if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 15 {
+	if output := ojson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != 15 {
 		t.Fatalf("output_tokens = %d, want 15", output)
 	}
 }
@@ -731,22 +732,22 @@ func TestStreamingTool_OmittedToolCallIndexPreservesParallelCalls(t *testing.T) 
 		t.Fatalf("expected two tool_use starts, got %d (starts=%+v)", len(starts), starts)
 	}
 
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_weather" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_weather" {
 		t.Fatalf("first tool id = %q, want %q", id, "call_weather")
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
 		t.Fatalf("first tool name = %q, want %q", name, "get_weather")
 	}
-	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_time" {
+	if id := ojson.Get(starts[1].Payload, "content_block.id").String(); id != "call_time" {
 		t.Fatalf("second tool id = %q, want %q", id, "call_time")
 	}
-	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "get_time" {
+	if name := ojson.Get(starts[1].Payload, "content_block.name").String(); name != "get_time" {
 		t.Fatalf("second tool name = %q, want %q", name, "get_time")
 	}
 
 	var deltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			deltas = append(deltas, e)
 		}
 	}
@@ -754,20 +755,20 @@ func TestStreamingTool_OmittedToolCallIndexPreservesParallelCalls(t *testing.T) 
 		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
 	}
 
-	firstJSON := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
-	secondJSON := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
+	firstJSON := ojson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondJSON := ojson.Get(deltas[1].Payload, "delta.partial_json").String()
 
-	if !gjson.Valid(firstJSON) {
+	if !ojson.Valid(firstJSON) {
 		t.Fatalf("first input_json_delta is not valid JSON: %q", firstJSON)
 	}
-	if !gjson.Valid(secondJSON) {
+	if !ojson.Valid(secondJSON) {
 		t.Fatalf("second input_json_delta is not valid JSON: %q", secondJSON)
 	}
 
-	if gotCity := gjson.Get(firstJSON, "city").String(); gotCity != "Paris" {
+	if gotCity := ojson.Get(firstJSON, "city").String(); gotCity != "Paris" {
 		t.Fatalf("first tool args city = %q, want %q", gotCity, "Paris")
 	}
-	if gotTz := gjson.Get(secondJSON, "tz").String(); gotTz != "UTC" {
+	if gotTz := ojson.Get(secondJSON, "tz").String(); gotTz != "UTC" {
 		t.Fatalf("second tool args tz = %q, want %q", gotTz, "UTC")
 	}
 
@@ -856,20 +857,20 @@ func TestStreamingUsage_PreservesCacheWriteTokens(t *testing.T) {
 			if deltaEvent == nil {
 				t.Fatalf("missing message_delta event")
 			}
-			if input := gjson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != tt.wantInputTokens {
+			if input := ojson.Get(deltaEvent.Payload, "usage.input_tokens").Int(); input != tt.wantInputTokens {
 				t.Fatalf("input_tokens = %d, want %d", input, tt.wantInputTokens)
 			}
-			if output := gjson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != tt.wantOutputTokens {
+			if output := ojson.Get(deltaEvent.Payload, "usage.output_tokens").Int(); output != tt.wantOutputTokens {
 				t.Fatalf("output_tokens = %d, want %d", output, tt.wantOutputTokens)
 			}
-			if cacheRead := gjson.Get(deltaEvent.Payload, "usage.cache_read_input_tokens").Int(); cacheRead != tt.wantCacheReadTokens {
+			if cacheRead := ojson.Get(deltaEvent.Payload, "usage.cache_read_input_tokens").Int(); cacheRead != tt.wantCacheReadTokens {
 				t.Fatalf("cache_read_input_tokens = %d, want %d", cacheRead, tt.wantCacheReadTokens)
 			}
 			if tt.wantCacheWriteTokens == 0 {
-				if gjson.Get(deltaEvent.Payload, "usage.cache_creation_input_tokens").Exists() {
-					t.Fatalf("cache_creation_input_tokens should not be emitted when zero; got %v", gjson.Get(deltaEvent.Payload, "usage.cache_creation_input_tokens").Raw)
+				if ojson.Get(deltaEvent.Payload, "usage.cache_creation_input_tokens").Exists() {
+					t.Fatalf("cache_creation_input_tokens should not be emitted when zero; got %v", ojson.Get(deltaEvent.Payload, "usage.cache_creation_input_tokens").Raw)
 				}
-			} else if cacheWrite := gjson.Get(deltaEvent.Payload, "usage.cache_creation_input_tokens").Int(); cacheWrite != tt.wantCacheWriteTokens {
+			} else if cacheWrite := ojson.Get(deltaEvent.Payload, "usage.cache_creation_input_tokens").Int(); cacheWrite != tt.wantCacheWriteTokens {
 				t.Fatalf("cache_creation_input_tokens = %d, want %d", cacheWrite, tt.wantCacheWriteTokens)
 			}
 		})
@@ -950,7 +951,7 @@ func TestNonStreamingUsage_PreservesCacheWriteTokens(t *testing.T) {
 			reqJSON := []byte(`{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"Hello"}]}`)
 
 			out := ConvertOpenAIResponseToClaudeNonStream(ctx, "", reqJSON, reqJSON, rawJSON, nil)
-			parsed := gjson.ParseBytes(out)
+			parsed := util.ParseGJSONBytesNoCopy(out)
 
 			usage := parsed.Get("usage")
 			if got := usage.Get("input_tokens").Int(); got != tt.wantInputTokens {
@@ -981,11 +982,11 @@ func assertSequentialContentBlocks(t *testing.T, events []sseEvent) {
 		case "content_block_start":
 			if activeBlockIndex != -1 {
 				t.Fatalf("content_block_start emitted for index %d while block %d is still open (events=%+v)",
-					gjson.Get(e.Payload, "index").Int(), activeBlockIndex, events)
+					ojson.Get(e.Payload, "index").Int(), activeBlockIndex, events)
 			}
-			activeBlockIndex = gjson.Get(e.Payload, "index").Int()
+			activeBlockIndex = ojson.Get(e.Payload, "index").Int()
 		case "content_block_delta":
-			idx := gjson.Get(e.Payload, "index").Int()
+			idx := ojson.Get(e.Payload, "index").Int()
 			if activeBlockIndex == -1 {
 				t.Fatalf("content_block_delta emitted for index %d but no block is open (events=%+v)", idx, events)
 			}
@@ -993,7 +994,7 @@ func assertSequentialContentBlocks(t *testing.T, events []sseEvent) {
 				t.Fatalf("content_block_delta emitted for index %d but active block is %d (events=%+v)", idx, activeBlockIndex, events)
 			}
 		case "content_block_stop":
-			idx := gjson.Get(e.Payload, "index").Int()
+			idx := ojson.Get(e.Payload, "index").Int()
 			if activeBlockIndex == -1 {
 				t.Fatalf("content_block_stop emitted for index %d but no block is open (events=%+v)", idx, events)
 			}
@@ -1021,15 +1022,15 @@ func TestStreaming_InterleavedContentAndToolUse_StrictSequentialBlocks(t *testin
 	// Ensure tool call arguments were preserved and complete
 	var toolDeltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			toolDeltas = append(toolDeltas, e)
 		}
 	}
 	if len(toolDeltas) != 1 {
 		t.Fatalf("expected 1 tool input_json_delta, got %d", len(toolDeltas))
 	}
-	partialJSON := gjson.Get(toolDeltas[0].Payload, "delta.partial_json").String()
-	if gotCmd := gjson.Get(partialJSON, "command").String(); gotCmd != "ls" {
+	partialJSON := ojson.Get(toolDeltas[0].Payload, "delta.partial_json").String()
+	if gotCmd := ojson.Get(partialJSON, "command").String(); gotCmd != "ls" {
 		t.Fatalf("expected command 'ls', got %q", gotCmd)
 	}
 }
@@ -1048,32 +1049,32 @@ func TestStreaming_ParallelToolCalls_StrictSequentialBlocks(t *testing.T) {
 	if len(starts) != 2 {
 		t.Fatalf("expected 2 tool_use starts, got %d", len(starts))
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_1" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_1" {
 		t.Fatalf("first tool id = %q, want %q", id, "call_1")
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "Bash" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "Bash" {
 		t.Fatalf("first tool name = %q, want %q", name, "Bash")
 	}
-	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_2" {
+	if id := ojson.Get(starts[1].Payload, "content_block.id").String(); id != "call_2" {
 		t.Fatalf("second tool id = %q, want %q", id, "call_2")
 	}
-	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "Read" {
+	if name := ojson.Get(starts[1].Payload, "content_block.name").String(); name != "Read" {
 		t.Fatalf("second tool name = %q, want %q", name, "Read")
 	}
 
 	var toolDeltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			toolDeltas = append(toolDeltas, e)
 		}
 	}
 	if len(toolDeltas) != 2 {
 		t.Fatalf("expected 2 tool input_json_delta, got %d", len(toolDeltas))
 	}
-	if cmd := gjson.Get(gjson.Get(toolDeltas[0].Payload, "delta.partial_json").String(), "command").String(); cmd != "ls" {
+	if cmd := ojson.Get(ojson.Get(toolDeltas[0].Payload, "delta.partial_json").String(), "command").String(); cmd != "ls" {
 		t.Fatalf("first tool cmd = %q, want 'ls'", cmd)
 	}
-	if path := gjson.Get(gjson.Get(toolDeltas[1].Payload, "delta.partial_json").String(), "path").String(); path != "/tmp" {
+	if path := ojson.Get(ojson.Get(toolDeltas[1].Payload, "delta.partial_json").String(), "path").String(); path != "/tmp" {
 		t.Fatalf("second tool path = %q, want '/tmp'", path)
 	}
 }
@@ -1099,7 +1100,7 @@ func TestStreaming_InterleavedTextAndThinkingPreservesOrder(t *testing.T) {
 	var blockStarts []string
 	for _, e := range events {
 		if e.Type == "content_block_start" {
-			blockStarts = append(blockStarts, gjson.Get(e.Payload, "content_block.type").String())
+			blockStarts = append(blockStarts, ojson.Get(e.Payload, "content_block.type").String())
 		}
 	}
 	expectedStarts := []string{"tool_use", "text", "thinking", "text"}
@@ -1118,19 +1119,19 @@ func TestStreaming_InterleavedTextAndThinkingPreservesOrder(t *testing.T) {
 	var toolDelta string
 	for _, e := range events {
 		if e.Type == "content_block_delta" {
-			dt := gjson.Get(e.Payload, "delta.type").String()
+			dt := ojson.Get(e.Payload, "delta.type").String()
 			switch dt {
 			case "text_delta":
-				textDeltas = append(textDeltas, gjson.Get(e.Payload, "delta.text").String())
+				textDeltas = append(textDeltas, ojson.Get(e.Payload, "delta.text").String())
 			case "thinking_delta":
-				thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
+				thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
 			case "input_json_delta":
-				toolDelta = gjson.Get(e.Payload, "delta.partial_json").String()
+				toolDelta = ojson.Get(e.Payload, "delta.partial_json").String()
 			}
 		}
 	}
 
-	if gotCmd := gjson.Get(toolDelta, "command").String(); gotCmd != "pwd" {
+	if gotCmd := ojson.Get(toolDelta, "command").String(); gotCmd != "pwd" {
 		t.Fatalf("tool command = %q, want 'pwd'", gotCmd)
 	}
 	if len(textDeltas) != 2 || textDeltas[0] != "Note A: running check" || textDeltas[1] != "Note B: done" {
@@ -1247,8 +1248,8 @@ func TestStreaming_ReasoningFieldEmitsThinkingDelta(t *testing.T) {
 
 	var thinkingDeltas []string
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
-			thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
+			thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
 		}
 	}
 	if len(thinkingDeltas) != 1 || thinkingDeltas[0] != "I am thinking" {
@@ -1264,8 +1265,8 @@ func TestStreaming_ReasoningContentStillPreferred(t *testing.T) {
 
 	var thinkingDeltas []string
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
-			thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
+			thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
 		}
 	}
 	if len(thinkingDeltas) != 1 || thinkingDeltas[0] != "primary reasoning" {
@@ -1282,8 +1283,8 @@ func TestStreaming_ReasoningDetailsOnlyEmitsThinkingDelta(t *testing.T) {
 
 	var thinkingDeltas []string
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
-			thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
+			thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
 		}
 	}
 	if len(thinkingDeltas) != 1 || thinkingDeltas[0] != "Only details thinking" {
@@ -1300,8 +1301,8 @@ func TestStreaming_EmptyReasoningContentFallsBackToReasoning(t *testing.T) {
 
 	var thinkingDeltas []string
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
-			thinkingDeltas = append(thinkingDeltas, gjson.Get(e.Payload, "delta.thinking").String())
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "thinking_delta" {
+			thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
 		}
 	}
 	if len(thinkingDeltas) != 2 || thinkingDeltas[0] != "fallback from empty" || thinkingDeltas[1] != "fallback from null" {
@@ -1314,7 +1315,7 @@ func TestNonStream_ReasoningFieldEmitsThinkingBlock(t *testing.T) {
 
 	// Test ConvertOpenAIResponseToClaudeNonStream
 	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", nil, nil, rawJSON, nil)
-	content := gjson.GetBytes(out, "content").Array()
+	content := ojson.GetBytesNoCopy(out, "content").Array()
 	var thinkingTexts []string
 	for _, block := range content {
 		if block.Get("type").String() == "thinking" {
@@ -1332,7 +1333,7 @@ func TestNonStream_ReasoningFieldEmitsThinkingBlock(t *testing.T) {
 		t.Fatalf("expected non-empty emitted for non-chunk json")
 	}
 	thinkingTexts = nil
-	for _, block := range gjson.GetBytes(emitted[0], "content").Array() {
+	for _, block := range ojson.GetBytesNoCopy(emitted[0], "content").Array() {
 		if block.Get("type").String() == "thinking" {
 			thinkingTexts = append(thinkingTexts, block.Get("thinking").String())
 		}
@@ -1451,7 +1452,7 @@ func TestExtractOpenAIUsage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			usage := gjson.Parse(tt.rawUsage)
+			usage := ojson.Parse(tt.rawUsage)
 			input, output, cached, cacheWrite := extractOpenAIUsage(usage)
 			if input != tt.wantInputTokens {
 				t.Fatalf("input_tokens = %d, want %d", input, tt.wantInputTokens)
@@ -1508,7 +1509,7 @@ func TestConvertOpenAIResponseToClaude_NonStreamingRequestStaysNonStreaming(t *t
 		var param any
 		out := ConvertOpenAIResponseToClaude(context.Background(), "test-model", []byte(original), nil, []byte(streamFlagTestChunk), &param)
 		joined := bytes.Join(out, nil)
-		if len(out) != 1 || gjson.GetBytes(joined, "type").String() != "message" {
+		if len(out) != 1 || ojson.GetBytesNoCopy(joined, "type").String() != "message" {
 			t.Fatalf("request %s expected a single non-streaming message payload, got %q", original, joined)
 		}
 		if bytes.Contains(joined, []byte("content_block_delta")) {
@@ -1518,7 +1519,7 @@ func TestConvertOpenAIResponseToClaude_NonStreamingRequestStaysNonStreaming(t *t
 		// Subsequent call with stream:true must still use the cached non-streaming decision.
 		second := ConvertOpenAIResponseToClaude(context.Background(), "test-model", []byte(`{"model":"m","stream":true}`), nil, []byte(streamFlagTestChunk), &param)
 		secondJoined := bytes.Join(second, nil)
-		if len(second) != 1 || gjson.GetBytes(secondJoined, "type").String() != "message" || bytes.Contains(secondJoined, []byte("content_block_delta")) {
+		if len(second) != 1 || ojson.GetBytesNoCopy(secondJoined, "type").String() != "message" || bytes.Contains(secondJoined, []byte("content_block_delta")) {
 			t.Fatalf("request %s expected cached non-streaming flag on second call, got %q", original, secondJoined)
 		}
 	}
@@ -1586,7 +1587,7 @@ func TestNonStreamingTool_StopReasonWithFinishReason(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", nil, nil, []byte(tt.payload), nil)
-			if got := gjson.GetBytes(out, "stop_reason").String(); got != tt.wantStopType {
+			if got := ojson.GetBytesNoCopy(out, "stop_reason").String(); got != tt.wantStopType {
 				t.Fatalf("ConvertOpenAIResponseToClaudeNonStream stop_reason = %q, want %q (out=%s)", got, tt.wantStopType, string(out))
 			}
 
@@ -1595,7 +1596,7 @@ func TestNonStreamingTool_StopReasonWithFinishReason(t *testing.T) {
 			if len(emitted) != 1 {
 				t.Fatalf("expected 1 non-streaming chunk, got %d", len(emitted))
 			}
-			if got := gjson.GetBytes(emitted[0], "stop_reason").String(); got != tt.wantStopType {
+			if got := ojson.GetBytesNoCopy(emitted[0], "stop_reason").String(); got != tt.wantStopType {
 				t.Fatalf("convertOpenAINonStreamingToAnthropic stop_reason = %q, want %q (out=%s)", got, tt.wantStopType, string(emitted[0]))
 			}
 		})
@@ -1615,22 +1616,22 @@ func TestStreamingTool_OmittedToolCallIndexSeparateChunksPreservesParallelCalls(
 	if len(starts) != 2 {
 		t.Fatalf("expected two tool_use starts, got %d (starts=%+v)", len(starts), starts)
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_paris" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_paris" {
 		t.Fatalf("first tool id = %q, want %q", id, "call_paris")
 	}
-	if name := gjson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
+	if name := ojson.Get(starts[0].Payload, "content_block.name").String(); name != "get_weather" {
 		t.Fatalf("first tool name = %q, want %q", name, "get_weather")
 	}
-	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_tokyo" {
+	if id := ojson.Get(starts[1].Payload, "content_block.id").String(); id != "call_tokyo" {
 		t.Fatalf("second tool id = %q, want %q", id, "call_tokyo")
 	}
-	if name := gjson.Get(starts[1].Payload, "content_block.name").String(); name != "get_weather" {
+	if name := ojson.Get(starts[1].Payload, "content_block.name").String(); name != "get_weather" {
 		t.Fatalf("second tool name = %q, want %q", name, "get_weather")
 	}
 
 	var deltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			deltas = append(deltas, e)
 		}
 	}
@@ -1638,12 +1639,12 @@ func TestStreamingTool_OmittedToolCallIndexSeparateChunksPreservesParallelCalls(
 		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
 	}
 
-	firstJSON := gjson.Get(deltas[0].Payload, "delta.partial_json").String()
-	secondJSON := gjson.Get(deltas[1].Payload, "delta.partial_json").String()
-	if gotCity := gjson.Get(firstJSON, "city").String(); gotCity != "Paris" {
+	firstJSON := ojson.Get(deltas[0].Payload, "delta.partial_json").String()
+	secondJSON := ojson.Get(deltas[1].Payload, "delta.partial_json").String()
+	if gotCity := ojson.Get(firstJSON, "city").String(); gotCity != "Paris" {
 		t.Fatalf("first tool args city = %q, want %q (json=%q)", gotCity, "Paris", firstJSON)
 	}
-	if gotCity := gjson.Get(secondJSON, "city").String(); gotCity != "Tokyo" {
+	if gotCity := ojson.Get(secondJSON, "city").String(); gotCity != "Tokyo" {
 		t.Fatalf("second tool args city = %q, want %q (json=%q)", gotCity, "Tokyo", secondJSON)
 	}
 
@@ -1670,29 +1671,200 @@ func TestStreamingTool_OmittedToolCallIndexSeparateChunksWithFragmentedArgs(t *t
 	if len(starts) != 2 {
 		t.Fatalf("expected two tool_use starts, got %d (starts=%+v)", len(starts), starts)
 	}
-	if id := gjson.Get(starts[0].Payload, "content_block.id").String(); id != "call_paris" {
+	if id := ojson.Get(starts[0].Payload, "content_block.id").String(); id != "call_paris" {
 		t.Fatalf("first tool id = %q, want %q", id, "call_paris")
 	}
-	if id := gjson.Get(starts[1].Payload, "content_block.id").String(); id != "call_tokyo" {
+	if id := ojson.Get(starts[1].Payload, "content_block.id").String(); id != "call_tokyo" {
 		t.Fatalf("second tool id = %q, want %q", id, "call_tokyo")
 	}
 
 	var deltas []sseEvent
 	for _, e := range events {
-		if e.Type == "content_block_delta" && gjson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
+		if e.Type == "content_block_delta" && ojson.Get(e.Payload, "delta.type").String() == "input_json_delta" {
 			deltas = append(deltas, e)
 		}
 	}
 	if len(deltas) != 2 {
 		t.Fatalf("expected two input_json_delta events, got %d (deltas=%+v)", len(deltas), deltas)
 	}
-	if gotCity := gjson.Get(gjson.Get(deltas[0].Payload, "delta.partial_json").String(), "city").String(); gotCity != "Paris" {
+	if gotCity := ojson.Get(ojson.Get(deltas[0].Payload, "delta.partial_json").String(), "city").String(); gotCity != "Paris" {
 		t.Fatalf("first tool args city = %q, want %q", gotCity, "Paris")
 	}
-	if gotCity := gjson.Get(gjson.Get(deltas[1].Payload, "delta.partial_json").String(), "city").String(); gotCity != "Tokyo" {
+	if gotCity := ojson.Get(ojson.Get(deltas[1].Payload, "delta.partial_json").String(), "city").String(); gotCity != "Tokyo" {
 		t.Fatalf("second tool args city = %q, want %q", gotCity, "Tokyo")
 	}
 	if got := lastStopReason(events); got != "tool_use" {
 		t.Fatalf("stop_reason = %q, want %q", got, "tool_use")
+	}
+}
+
+func TestStreaming_DeltaContentTypedPartsArrayEmitsThinkingAndTextBlocks(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"choices":[{"index":0,"delta":{"index":0,"content":[{"type":"thinking","thinking":[{"type":"text","text":"The"}],"closed":true}]},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"index":0,"content":[{"type":"thinking","thinking":[{"type":"text","text":" done."}],"closed":true},{"type":"text","text":"hello"}]},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"index":0,"content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":19,"total_tokens":57,"completion_tokens":38,"completion_tokens_details":{"reasoning_tokens":35}}}`,
+	)
+
+	assertSequentialContentBlocks(t, events)
+
+	var blockStarts []string
+	var thinkingDeltas []string
+	var textDeltas []string
+	for _, e := range events {
+		switch e.Type {
+		case "content_block_start":
+			blockStarts = append(blockStarts, ojson.Get(e.Payload, "content_block.type").String())
+		case "content_block_delta":
+			switch ojson.Get(e.Payload, "delta.type").String() {
+			case "thinking_delta":
+				thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
+			case "text_delta":
+				textDeltas = append(textDeltas, ojson.Get(e.Payload, "delta.text").String())
+			}
+		}
+	}
+
+	if len(blockStarts) != 2 || blockStarts[0] != "thinking" || blockStarts[1] != "text" {
+		t.Fatalf("expected block starts [thinking, text], got %v (events=%+v)", blockStarts, events)
+	}
+	if len(thinkingDeltas) != 2 || thinkingDeltas[0] != "The" || thinkingDeltas[1] != " done." {
+		t.Fatalf("expected thinking deltas [The,  done.], got %v", thinkingDeltas)
+	}
+	if len(textDeltas) != 1 || textDeltas[0] != "hello" {
+		t.Fatalf("expected text deltas [hello], got %v", textDeltas)
+	}
+}
+
+func TestStreaming_DeltaContentTypedPartsArrayPlainThinkingAndUnknownPassthrough(t *testing.T) {
+	events := runStream(t, streamReq,
+		`{"choices":[{"index":0,"delta":{"content":[]},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"content":[{"type":"thinking","thinking":"step 1"},{"type":"reasoning","text":" step 2"},{"type":"text","text":"answer: "},{"type":"custom_part","payload":"raw"}]},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)
+
+	assertSequentialContentBlocks(t, events)
+
+	var thinkingDeltas []string
+	var textDeltas []string
+	for _, e := range events {
+		if e.Type == "content_block_delta" {
+			switch ojson.Get(e.Payload, "delta.type").String() {
+			case "thinking_delta":
+				thinkingDeltas = append(thinkingDeltas, ojson.Get(e.Payload, "delta.thinking").String())
+			case "text_delta":
+				textDeltas = append(textDeltas, ojson.Get(e.Payload, "delta.text").String())
+			}
+		}
+	}
+
+	if got := strings.Join(thinkingDeltas, ""); got != "step 1 step 2" {
+		t.Fatalf("thinking text = %q, want %q (deltas=%v)", got, "step 1 step 2", thinkingDeltas)
+	}
+	if len(textDeltas) != 2 || textDeltas[0] != "answer: " || textDeltas[1] != `{"type":"custom_part","payload":"raw"}` {
+		t.Fatalf("unexpected text deltas: %v", textDeltas)
+	}
+}
+
+func TestNonStream_ContentPartsArrayThinkingAndBlockOrder(t *testing.T) {
+	contentPartsResp := []byte(`{"id":"chatcmpl-1","object":"chat.completion","model":"zai-glm-5-3","choices":[{"index":0,"message":{"role":"assistant","content":[{"type":"thinking","thinking":[{"type":"text","text":"First "},{"type":"text","text":"thought."}],"closed":true},{"type":"text","text":"hello"}]},"finish_reason":"stop"}]}`)
+
+	out := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", nil, nil, contentPartsResp, nil)
+	blocks := ojson.GetBytesNoCopy(out, "content").Array()
+	if len(blocks) != 2 {
+		t.Fatalf("ConvertOpenAIResponseToClaudeNonStream expected 2 blocks, got %d (out=%s)", len(blocks), string(out))
+	}
+	if blocks[0].Get("type").String() != "thinking" || blocks[0].Get("thinking").String() != "First thought." {
+		t.Fatalf("block[0] = %s, want thinking 'First thought.'", blocks[0].Raw)
+	}
+	if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != "hello" {
+		t.Fatalf("block[1] = %s, want text 'hello'", blocks[1].Raw)
+	}
+
+	var paramAny any
+	emitted := ConvertOpenAIResponseToClaude(context.Background(), "", []byte(`{"stream":false}`), nil, append([]byte("data: "), contentPartsResp...), &paramAny)
+	if len(emitted) != 1 {
+		t.Fatalf("expected 1 non-stream response from ConvertOpenAIResponseToClaude, got %d", len(emitted))
+	}
+	emittedBlocks := ojson.GetBytesNoCopy(emitted[0], "content").Array()
+	if len(emittedBlocks) != 2 || emittedBlocks[0].Get("type").String() != "thinking" || emittedBlocks[0].Get("thinking").String() != "First thought." || emittedBlocks[1].Get("type").String() != "text" || emittedBlocks[1].Get("text").String() != "hello" {
+		t.Fatalf("convertOpenAINonStreamingToAnthropic blocks = %s, want [thinking, text]", string(emitted[0]))
+	}
+
+	// Verify top-level reasoning_content + string message.content emits [thinking, text] order
+	topLevelReasoningResp := []byte(`{"id":"chatcmpl-2","object":"chat.completion","model":"deepseek","choices":[{"index":0,"message":{"role":"assistant","content":"Final answer","reasoning_content":"Step by step"},"finish_reason":"stop"}]}`)
+	outTopLevel := ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", nil, nil, topLevelReasoningResp, nil)
+	topBlocks := ojson.GetBytesNoCopy(outTopLevel, "content").Array()
+	if len(topBlocks) != 2 || topBlocks[0].Get("type").String() != "thinking" || topBlocks[0].Get("thinking").String() != "Step by step" || topBlocks[1].Get("type").String() != "text" || topBlocks[1].Get("text").String() != "Final answer" {
+		t.Fatalf("ConvertOpenAIResponseToClaudeNonStream block order = %s, want [thinking, text]", string(outTopLevel))
+	}
+}
+
+func TestStreaming_WhitespaceReasoningNeverOpensThinkingBlock(t *testing.T) {
+	toolCall := `{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{}"}}]}`
+	tests := []struct {
+		name   string
+		deltas []string
+		want   []string
+	}{
+		{"whitespace only then text", []string{`{"reasoning_content":" "}`, `{"content":"Hi"}`}, []string{"text:Hi"}},
+		{"whitespace inside a thought", []string{`{"reasoning_content":"a"}`, `{"reasoning_content":"\n\n"}`, `{"reasoning_content":"b"}`}, []string{"thinking:a\n\nb"}},
+		{"whitespace after text closed the thought", []string{`{"reasoning_content":"a"}`, `{"content":"x"}`, `{"reasoning_content":" "}`, `{"content":"y"}`}, []string{"thinking:a", "text:xy"}},
+		{"whitespace only while a tool call is open", []string{toolCall, `{"reasoning_content":" "}`}, []string{"tool_use:"}},
+		{"whitespace inside a thought while a tool call is open", []string{toolCall, `{"reasoning_content":"a"}`, `{"reasoning_content":" "}`, `{"reasoning_content":"b"}`}, []string{"tool_use:", "thinking:a b"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var chunks []string
+			for _, delta := range tt.deltas {
+				chunks = append(chunks, `{"id":"c1","model":"m","choices":[{"index":0,"delta":`+delta+`,"finish_reason":null}]}`)
+			}
+			chunks = append(chunks, `{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+			events := runStream(t, streamReq, chunks...)
+			assertSequentialContentBlocks(t, events)
+
+			var got []string
+			for _, e := range events {
+				switch e.Type {
+				case "content_block_start":
+					got = append(got, ojson.Get(e.Payload, "content_block.type").String()+":")
+				case "content_block_delta":
+					got[len(got)-1] += ojson.Get(e.Payload, "delta.thinking").String() + ojson.Get(e.Payload, "delta.text").String()
+				}
+			}
+			if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", tt.want) {
+				t.Fatalf("blocks = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNonStream_WhitespaceReasoningNeverOpensThinkingBlock(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    []string
+	}{
+		{"whitespace only reasoning_content", `{"role":"assistant","content":"Hi","reasoning_content":" "}`, []string{"text:Hi"}},
+		{"whitespace only thinking part", `{"role":"assistant","content":[{"type":"thinking","thinking":" "},{"type":"text","text":"Hi"}]}`, []string{"text:Hi"}},
+		{"whitespace inside thinking parts", `{"role":"assistant","content":[{"type":"thinking","thinking":"a"},{"type":"thinking","thinking":" "},{"type":"thinking","thinking":"b"},{"type":"text","text":"Hi"}]}`, []string{"thinking:a b", "text:Hi"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := []byte(`{"id":"c1","model":"m","choices":[{"index":0,"message":` + tt.message + `,"finish_reason":"stop"}]}`)
+			var paramAny any
+			outputs := [][]byte{
+				ConvertOpenAIResponseToClaudeNonStream(context.Background(), "", nil, nil, resp, nil),
+				ConvertOpenAIResponseToClaude(context.Background(), "", []byte(`{"stream":false}`), nil, append([]byte("data: "), resp...), &paramAny)[0],
+			}
+			for i, out := range outputs {
+				var got []string
+				for _, block := range ojson.GetBytesNoCopy(out, "content").Array() {
+					got = append(got, block.Get("type").String()+":"+block.Get("thinking").String()+block.Get("text").String())
+				}
+				if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", tt.want) {
+					t.Fatalf("outputs[%d] blocks = %q, want %q (out=%s)", i, got, tt.want, out)
+				}
+			}
+		})
 	}
 }

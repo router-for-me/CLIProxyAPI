@@ -129,6 +129,7 @@ func TestExchangeCodeForTokensUsesNative220ControlPlaneShape(t *testing.T) {
 	var order []string
 	headers := make(map[string]http.Header)
 	var tokenBody []byte
+	state := strings.Repeat("Ab9-_", 8) + "AbA"
 
 	auth := &ClaudeAuth{
 		httpClient: &http.Client{
@@ -168,7 +169,7 @@ func TestExchangeCodeForTokensUsesNative220ControlPlaneShape(t *testing.T) {
 		},
 	}
 
-	bundle, errExchange := auth.ExchangeCodeForTokens(t.Context(), "auth-code", "state-value", &PKCECodes{CodeVerifier: "verifier"})
+	bundle, errExchange := auth.ExchangeCodeForTokens(t.Context(), "auth-code", state, &PKCECodes{CodeVerifier: "verifier"})
 	if errExchange != nil {
 		t.Fatalf("ExchangeCodeForTokens() error = %v", errExchange)
 	}
@@ -184,7 +185,7 @@ func TestExchangeCodeForTokensUsesNative220ControlPlaneShape(t *testing.T) {
 	}
 
 	// Key order mirrors the captured native exchange body.
-	wantBody := `{"grant_type":"authorization_code","code":"auth-code","redirect_uri":"` + RedirectURI + `","client_id":"` + ClientID + `","code_verifier":"verifier","state":"state-value"}`
+	wantBody := `{"grant_type":"authorization_code","code":"auth-code","redirect_uri":"` + RedirectURI + `","client_id":"` + ClientID + `","code_verifier":"verifier","state":"` + state + `"}`
 	if got := string(tokenBody); got != wantBody {
 		t.Fatalf("exchange body = %q, want %q", got, wantBody)
 	}
@@ -499,7 +500,7 @@ func TestRefreshTokensUsesNative220ControlPlaneShape(t *testing.T) {
 					if errRead != nil {
 						t.Fatal(errRead)
 					}
-					wantBody := `{"client_id":"` + ClientID + `","grant_type":"refresh_token","refresh_token":"` + refreshToken + `","scope":"` + ClaudeOAuthScope + `"}`
+					wantBody := `{"client_id":"` + ClientID + `","grant_type":"refresh_token","refresh_token":"` + refreshToken + `","scope":"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}`
 					if got := string(body); got != wantBody {
 						t.Fatalf("refresh body = %q, want %q", got, wantBody)
 					}

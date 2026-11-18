@@ -3,7 +3,6 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -25,7 +25,10 @@ type rpcPluginAdapter struct {
 
 type rpcAuthProvider struct {
 	*rpcPluginAdapter
-	identifier string
+	identifier          string
+	identifiers         []string
+	credentialProviders []string
+	entries             []pluginapi.AuthProviderEntry
 }
 
 type rpcFrontendAuthProvider struct {
@@ -50,14 +53,35 @@ type rpcError struct {
 	message           string
 	statusCode        int
 	retryAfterSeconds int
+	credentialScoped  bool
 }
 
 func (e rpcError) Error() string {
 	return e.message
 }
 
+func (e rpcError) ErrorCode() string {
+	return e.Code
+}
+
 func (e rpcError) StatusCode() int {
 	return e.statusCode
+}
+
+func (e rpcError) IsCredentialScoped() bool {
+	return e.credentialScoped || strings.EqualFold(strings.TrimSpace(e.Code), pluginabi.ErrorCodeCredentialQuota)
+}
+
+func (e rpcError) IsRequestScoped() bool {
+	return !e.IsCredentialScoped() && strings.EqualFold(strings.TrimSpace(e.Code), pluginabi.ErrorCodeRequestScoped)
+}
+
+func (e rpcError) IsTransientRateLimit() bool {
+	return !e.IsCredentialScoped() && strings.EqualFold(strings.TrimSpace(e.Code), pluginabi.ErrorCodeTransientRateLimit)
+}
+
+func (e rpcError) IsStreamTruncated() bool {
+	return !e.IsCredentialScoped() && strings.EqualFold(strings.TrimSpace(e.Code), pluginabi.ErrorCodeStreamTruncated)
 }
 
 func (e rpcError) RetryAfter() *time.Duration {
@@ -100,8 +124,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
 	}
 	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
-		ConfigYAML:    bytes.Clone(configYAML),
-		SchemaVersion: pluginabi.SchemaVersion,
+		ConfigYAML:         bytes.Clone(configYAML),
+		SchemaVersion:      pluginabi.SchemaVersion,
+		MultiAuthProviders: pluginabi.SchemaVersion >= pluginabi.SchemaVersionMultiAuthProviders,
 	})
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall
@@ -135,13 +160,16 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 		if err := ctx.Err(); err != nil {
 			return pluginapi.Plugin{}, err
 		}
-		identifier := callPluginIdentifier(ctx, adapter.client, pluginabi.MethodAuthIdentifier)
+		identifier, identifiers, credentialProviders, entries := callPluginAuthIdentifiers(ctx, adapter.client)
 		if err := ctx.Err(); err != nil {
 			return pluginapi.Plugin{}, err
 		}
 		plugin.Capabilities.AuthProvider = rpcAuthProvider{
-			rpcPluginAdapter: adapter,
-			identifier:       identifier,
+			rpcPluginAdapter:    adapter,
+			identifier:          identifier,
+			identifiers:         identifiers,
+			credentialProviders: credentialProviders,
+			entries:             entries,
 		}
 	}
 	if resp.Capabilities.FrontendAuthProvider {
@@ -153,6 +181,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
 	if resp.Capabilities.Scheduler {
 		plugin.Capabilities.Scheduler = adapter
 		plugin.Capabilities.SchedulerAcrossPriorities = resp.Capabilities.SchedulerAcrossPriorities
+	}
+	if resp.Capabilities.SchedulerContinuity {
+		plugin.Capabilities.SchedulerContinuity = adapter
 	}
 	if resp.Capabilities.ModelRouter {
 		plugin.Capabilities.ModelRouter = adapter
@@ -284,6 +315,9 @@ func sanitizePluginRequest(request any) any {
 		for index := range req.Candidates {
 			req.Candidates[index].Metadata = sanitizePluginMetadata(req.Candidates[index].Metadata)
 		}
+		return req
+	case pluginapi.SchedulerContinuityRequest:
+		req.Options.Metadata = sanitizePluginMetadata(req.Options.Metadata)
 		return req
 	case pluginapi.ModelRouteRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
@@ -429,6 +463,7 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 				message:           message,
 				statusCode:        envelope.Error.HTTPStatus,
 				retryAfterSeconds: envelope.Error.RetryAfterSeconds,
+				credentialScoped:  envelope.Error.CredentialScoped,
 			}
 		}
 		return zero, fmt.Errorf("plugin call failed")
@@ -483,6 +518,10 @@ func (a *rpcPluginAdapter) Pick(ctx context.Context, req pluginapi.SchedulerPick
 	return callPlugin[pluginapi.SchedulerPickResponse](ctx, a.client, pluginabi.MethodSchedulerPick, req)
 }
 
+func (a *rpcPluginAdapter) Continuity(ctx context.Context, req pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, error) {
+	return callPlugin[pluginapi.SchedulerContinuityResponse](ctx, a.client, pluginabi.MethodSchedulerContinuity, req)
+}
+
 func (a *rpcPluginAdapter) RouteModel(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, error) {
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
 	defer closeCallback()
@@ -503,8 +542,78 @@ func callPluginIdentifier(ctx context.Context, client pluginClient, method strin
 	return strings.TrimSpace(resp.Identifier)
 }
 
+func callPluginAuthIdentifiers(ctx context.Context, client pluginClient) (string, []string, []string, []pluginapi.AuthProviderEntry) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, errCall := callPlugin[rpcIdentifierResponse](ctx, client, pluginabi.MethodAuthIdentifier, rpcEmptyResponse{})
+	if errCall != nil {
+		return "", nil, nil, nil
+	}
+	primary := strings.TrimSpace(resp.Identifier)
+	identifiers := make([]string, 0, 1+len(resp.Identifiers)+len(resp.Entries))
+	if primary != "" {
+		identifiers = append(identifiers, primary)
+	}
+	for _, item := range resp.Identifiers {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if primary == "" {
+			primary = trimmed
+		}
+		identifiers = append(identifiers, trimmed)
+	}
+	var entries []pluginapi.AuthProviderEntry
+	if len(resp.Entries) > 0 {
+		entries = make([]pluginapi.AuthProviderEntry, 0, len(resp.Entries))
+		for _, item := range resp.Entries {
+			normalizedIDs := normalizeAuthProviderIdentifiers(item.Identifier)
+			if len(normalizedIDs) == 0 {
+				continue
+			}
+			name := strings.TrimSpace(item.Name)
+			logo := strings.TrimSpace(item.Logo)
+			for _, id := range normalizedIDs {
+				if primary == "" {
+					primary = id
+				}
+				identifiers = append(identifiers, id)
+				entries = append(entries, pluginapi.AuthProviderEntry{
+					Identifier: id,
+					Name:       name,
+					Logo:       logo,
+				})
+			}
+		}
+		if len(entries) == 0 {
+			entries = nil
+		}
+	}
+	credentialProviders := make([]string, 0, len(resp.CredentialProviders))
+	for _, item := range resp.CredentialProviders {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			credentialProviders = append(credentialProviders, trimmed)
+		}
+	}
+	return primary, identifiers, credentialProviders, entries
+}
+
 func (a rpcAuthProvider) Identifier() string {
 	return a.identifier
+}
+
+func (a rpcAuthProvider) Identifiers() []string {
+	return append([]string(nil), a.identifiers...)
+}
+
+func (a rpcAuthProvider) AuthEntries() []pluginapi.AuthProviderEntry {
+	return append([]pluginapi.AuthProviderEntry(nil), a.entries...)
+}
+
+func (a rpcAuthProvider) CredentialProviders() []string {
+	return append([]string(nil), a.credentialProviders...)
 }
 
 func (a rpcFrontendAuthProvider) Identifier() string {
@@ -663,9 +772,25 @@ func (a rpcThinkingApplier) ApplyThinking(ctx context.Context, req pluginapi.Thi
 }
 
 func (a *rpcPluginAdapter) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
+	if a == nil {
+		return
+	}
+	if a.host != nil {
+		a.host.dispatchPluginUsageRecord(ctx, a.id, record)
+		return
+	}
+	_ = a.deliverUsage(ctx, record)
+}
+
+func (a *rpcPluginAdapter) deliverUsage(ctx context.Context, record pluginapi.UsageRecord) error {
+	if a == nil {
+		return nil
+	}
 	if _, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record); errCall != nil {
 		log.Debugf("pluginhost: usage.handle to %s failed: %v", a.id, errCall)
+		return errCall
 	}
+	return nil
 }
 
 func (a *rpcPluginAdapter) RegisterCommandLine(ctx context.Context, req pluginapi.CommandLineRegistrationRequest) (pluginapi.CommandLineRegistrationResponse, error) {

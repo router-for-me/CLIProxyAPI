@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestVertexPartialArgsAssembler_ComplexTypesAndPaths(t *testing.T) {
@@ -20,7 +20,7 @@ func TestVertexPartialArgsAssembler_ComplexTypesAndPaths(t *testing.T) {
 	asm := NewVertexPartialArgsAssembler()
 	var deltas []string
 	for i, raw := range chunks {
-		delta, done := asm.PushFunctionCall(gjson.Parse(raw))
+		delta, done := asm.PushFunctionCall(ojson.Parse(raw))
 		if asm.Err() != nil {
 			t.Fatalf("chunk %d unexpected error: %v", i, asm.Err())
 		}
@@ -57,7 +57,7 @@ func TestVertexPartialArgsAssembler_InterleavedStringContinuations(t *testing.T)
 	asm := NewVertexPartialArgsAssembler()
 	var deltas []string
 	for i, raw := range chunks {
-		delta, done := asm.PushFunctionCall(gjson.Parse(raw))
+		delta, done := asm.PushFunctionCall(ojson.Parse(raw))
 		if asm.Err() != nil {
 			t.Fatalf("chunk %d unexpected error: %v", i, asm.Err())
 		}
@@ -83,7 +83,7 @@ func TestVertexPartialArgsAssembler_NonDepthFirstAndArrayOrdering(t *testing.T) 
 		asm := NewVertexPartialArgsAssembler()
 		var deltas []string
 		for _, raw := range chunks {
-			d, _ := asm.PushFunctionCall(gjson.Parse(raw))
+			d, _ := asm.PushFunctionCall(ojson.Parse(raw))
 			if asm.Err() != nil {
 				t.Fatalf("unexpected error: %v", asm.Err())
 			}
@@ -104,7 +104,7 @@ func TestVertexPartialArgsAssembler_NonDepthFirstAndArrayOrdering(t *testing.T) 
 		asm := NewVertexPartialArgsAssembler()
 		var deltas []string
 		for _, raw := range chunks {
-			d, _ := asm.PushFunctionCall(gjson.Parse(raw))
+			d, _ := asm.PushFunctionCall(ojson.Parse(raw))
 			if asm.Err() != nil {
 				t.Fatalf("unexpected error: %v", asm.Err())
 			}
@@ -124,7 +124,7 @@ func TestVertexPartialArgsAssembler_NonDepthFirstAndArrayOrdering(t *testing.T) 
 		asm := NewVertexPartialArgsAssembler()
 		var deltas []string
 		for _, raw := range chunks {
-			d, _ := asm.PushFunctionCall(gjson.Parse(raw))
+			d, _ := asm.PushFunctionCall(ojson.Parse(raw))
 			if asm.Err() != nil {
 				t.Fatalf("unexpected error: %v", asm.Err())
 			}
@@ -138,7 +138,7 @@ func TestVertexPartialArgsAssembler_NonDepthFirstAndArrayOrdering(t *testing.T) 
 }
 
 func TestVertexPartialArgsAssembler_SingleChunkParameterlessAndEmptyPartialArgsFallback(t *testing.T) {
-	ping := gjson.Parse(`{"name":"ping","willContinue":false}`)
+	ping := ojson.Parse(`{"name":"ping","willContinue":false}`)
 	if !IsVertexStreamingFunctionCall(ping) {
 		t.Fatalf("expected IsVertexStreamingFunctionCall=true for single-chunk willContinue:false call")
 	}
@@ -148,7 +148,7 @@ func TestVertexPartialArgsAssembler_SingleChunkParameterlessAndEmptyPartialArgsF
 		t.Fatalf("got delta=%q done=%v, want {} true", deltaPing, donePing)
 	}
 
-	withArgs := gjson.Parse(`{"name":"get_weather","args":{"city":"Paris"},"partialArgs":[]}`)
+	withArgs := ojson.Parse(`{"name":"get_weather","args":{"city":"Paris"},"partialArgs":[]}`)
 	if IsVertexStreamingFunctionCall(withArgs) {
 		t.Fatalf("expected IsVertexStreamingFunctionCall=false when complete args is present with empty partialArgs")
 	}
@@ -160,18 +160,18 @@ func TestVertexPartialArgsAssembler_SingleChunkParameterlessAndEmptyPartialArgsF
 }
 
 func TestVertexStreamingToolCall_CanContinueWith(t *testing.T) {
-	c1 := gjson.Parse(`{"id":"call_1","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}`)
+	c1 := ojson.Parse(`{"id":"call_1","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"New ","willContinue":true}],"willContinue":true}`)
 	active := NewVertexStreamingToolCall("get_weather", "get_weather", "call_1", "call_1", 0)
 	if _, done := active.Assembler.PushFunctionCall(c1); done {
 		t.Fatalf("expected done=false on chunk 1")
 	}
 
-	c2OmittedID := gjson.Parse(`{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"York"}],"willContinue":false}`)
+	c2OmittedID := ojson.Parse(`{"name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"York"}],"willContinue":false}`)
 	if !active.CanContinueWith(c2OmittedID) {
 		t.Fatalf("expected CanContinueWith=true when continuation repeats name and omits id")
 	}
 
-	c2DifferentID := gjson.Parse(`{"id":"call_2","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"LA"}],"willContinue":false}`)
+	c2DifferentID := ojson.Parse(`{"id":"call_2","name":"get_weather","partialArgs":[{"jsonPath":"$.city","stringValue":"LA"}],"willContinue":false}`)
 	if active.CanContinueWith(c2DifferentID) {
 		t.Fatalf("expected CanContinueWith=false when explicit id differs")
 	}
@@ -183,7 +183,7 @@ func TestVertexPartialArgsAssembler_QuotedJSONPathUnicodeAndLimits(t *testing.T)
 			`{"name":"fn","partialArgs":[{"jsonPath":"$['\\u0061']","numberValue":1},{"jsonPath":"$[\"\\uD83D\\uDE00\"]","stringValue":"smile"},{"jsonPath":"$['k\\'ey\\\\name']","boolValue":true}],"willContinue":false}`,
 		}
 		asm := NewVertexPartialArgsAssembler()
-		delta, done := asm.PushFunctionCall(gjson.Parse(chunks[0]))
+		delta, done := asm.PushFunctionCall(ojson.Parse(chunks[0]))
 		if asm.Err() != nil {
 			t.Fatalf("unexpected error: %v", asm.Err())
 		}
@@ -205,7 +205,7 @@ func TestVertexPartialArgsAssembler_QuotedJSONPathUnicodeAndLimits(t *testing.T)
 		}
 		for _, raw := range invalidChunks {
 			asm := NewVertexPartialArgsAssembler()
-			_, done := asm.PushFunctionCall(gjson.Parse(raw))
+			_, done := asm.PushFunctionCall(ojson.Parse(raw))
 			if asm.Err() == nil {
 				t.Fatalf("expected error for invalid chunk %s, got nil", raw)
 			}

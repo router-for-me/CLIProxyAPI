@@ -2,7 +2,7 @@
 package signaturetest
 
 import (
-	"encoding/base64"
+	"github.com/MoeForge/moego/base64"
 
 	"google.golang.org/protobuf/encoding/protowire"
 )

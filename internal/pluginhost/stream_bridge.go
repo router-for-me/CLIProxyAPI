@@ -79,6 +79,7 @@ func rpcStreamError(message string, detail *pluginabi.Error) error {
 			message:           text,
 			statusCode:        detail.HTTPStatus,
 			retryAfterSeconds: detail.RetryAfterSeconds,
+			credentialScoped:  detail.CredentialScoped,
 		}
 	}
 	if message != "" {

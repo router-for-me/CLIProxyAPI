@@ -3,7 +3,6 @@ package api
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	gin "github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -43,7 +44,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
-	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
 )
 
@@ -536,8 +536,8 @@ func TestHomeCodexAlphaSearchRequestLogPreservesBodyReturnedWithReadError(t *tes
 	}
 	rawAPIResponse, okResponse := c.Get("API_RESPONSE")
 	apiResponse, _ := rawAPIResponse.([]byte)
-	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
-		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	if !okResponse || !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
 	}
 }
 
@@ -2159,6 +2159,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		{ID: "gpt-image-2.5-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "gpt-image-2.5-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "gpt-image-2.5", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.6-flare", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.6-sunburst", Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: "gpt-image-2.6", Object: "model", OwnedBy: "openai", Type: "openai"},
 		{ID: "grok-imagine-image", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-image-2.0", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "grok-imagine-video", Object: "model", OwnedBy: "xai", Type: "openai"},
@@ -2275,6 +2278,9 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 		"gpt-image-2.5-flare":            false,
 		"gpt-image-2.5-sunburst":         false,
 		"gpt-image-2.5":                  false,
+		"gpt-image-2.6-flare":            false,
+		"gpt-image-2.6-sunburst":         false,
+		"gpt-image-2.6":                  false,
 		"grok-imagine-image":             false,
 		"grok-imagine-image-2.0":         false,
 		"grok-imagine-video":             false,
@@ -3900,7 +3906,18 @@ func (e *serverResponsesWebsocketCaptureExecutor) HttpRequest(context.Context, *
 }
 
 func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
-	server := newTestServer(t)
+	for _, requestLog := range []bool{false, true} {
+		t.Run(fmt.Sprintf("request_log=%t", requestLog), func(t *testing.T) {
+			testServerResponsesWebsocketReauthorizesEachTurn(t, requestLog)
+		})
+	}
+}
+
+func testServerResponsesWebsocketReauthorizesEachTurn(t *testing.T, requestLog bool) {
+	t.Helper()
+	server := newTestServerWithConfig(t, &proxyconfig.Config{
+		SDKConfig: sdkconfig.SDKConfig{RequestLog: requestLog},
+	})
 	provider := &revocableServerAccessProvider{}
 	server.accessManager.SetProviders([]sdkaccess.Provider{provider})
 
@@ -3921,8 +3938,17 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 		registry.GetGlobalRegistry().UnregisterClient(authEntry.ID)
 	})
 
-	httpServer := httptest.NewServer(server.engine)
-	defer httpServer.Close()
+	var requests sync.WaitGroup
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		defer requests.Done()
+		server.engine.ServeHTTP(w, r)
+	}))
+	defer func() {
+		httpServer.Close()
+		// Close does not wait for hijacked WebSocket handlers or their logging middleware.
+		requests.Wait()
+	}()
 
 	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/v1/responses"
 	headers := http.Header{"Authorization": []string{"Bearer key-1"}}
@@ -3930,7 +3956,11 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errDial != nil {
 		t.Fatalf("dial websocket: %v", errDial)
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Errorf("close websocket: %v", errClose)
+		}
+	}()
 
 	turn1 := []byte(`{"type":"response.create","model":"ws-reauth-model","input":[{"type":"message","role":"user","content":"turn 1"}]}`)
 	if errWrite := conn.WriteMessage(websocket.TextMessage, turn1); errWrite != nil {
@@ -3940,7 +3970,7 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errRead1 != nil {
 		t.Fatalf("read turn 1: %v", errRead1)
 	}
-	if got := gjson.GetBytes(msg1, "type").String(); got != "response.completed" {
+	if got := ojson.GetBytesNoCopy(msg1, "type").String(); got != "response.completed" {
 		t.Fatalf("turn 1 event type = %q, want response.completed (%s)", got, msg1)
 	}
 
@@ -3972,13 +4002,32 @@ func TestServerResponsesWebsocketReauthorizesEachTurn(t *testing.T) {
 	if errRead2 != nil {
 		t.Fatalf("read turn 2: %v", errRead2)
 	}
-	if got := gjson.GetBytes(msg2, "type").String(); got != "error" {
+	if got := ojson.GetBytesNoCopy(msg2, "type").String(); got != "error" {
 		t.Fatalf("turn 2 event type = %q, want error (%s)", got, msg2)
 	}
-	if got := int(gjson.GetBytes(msg2, "status").Int()); got != http.StatusUnauthorized {
+	if got := int(ojson.GetBytesNoCopy(msg2, "status").Int()); got != http.StatusUnauthorized {
 		t.Fatalf("turn 2 error status = %d, want %d (%s)", got, http.StatusUnauthorized, msg2)
 	}
 	if gotCalls := wsExec.calls.Load(); gotCalls != 1 {
 		t.Fatalf("executor calls after revoked turn = %d, want 1", gotCalls)
 	}
+	t.Cleanup(func() {
+		// Deferred connection shutdown and request draining must finish before inspecting logs.
+		entries, errReadDir := os.ReadDir(filepath.Join(server.cfg.AuthDir, "logs"))
+		if errReadDir != nil {
+			t.Fatalf("read request logs: %v", errReadDir)
+		}
+		var logCount int
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".tmp") || strings.HasPrefix(entry.Name(), "request-log-parts-") {
+				t.Errorf("request log temporary entry remains after handler completion: %s", entry.Name())
+			}
+			if strings.HasSuffix(entry.Name(), ".log") {
+				logCount++
+			}
+		}
+		if logCount == 0 {
+			t.Error("expected a completed request log for the revoked credential")
+		}
+	})
 }

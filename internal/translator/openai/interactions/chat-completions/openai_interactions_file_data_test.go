@@ -3,14 +3,14 @@ package chat_completions
 import (
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIRequestToInteractionsNormalizesFileDataURL(t *testing.T) {
 	input := []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0xLjQK"}}]}]}`)
 
 	out, _ := ConvertOpenAIRequestToInteractions("gemini-3.5-flash", input, false)
-	document := gjson.GetBytes(out, "input.0.content.0")
+	document := ojson.GetBytesNoCopy(out, "input.0.content.0")
 	if got := document.Get("mime_type").String(); got != "application/pdf" {
 		t.Fatalf("document.mime_type = %q, want application/pdf. Output: %s", got, out)
 	}
@@ -23,7 +23,7 @@ func TestConvertOpenAIRequestToInteractionsPreservesRawFileDataWithMIMEType(t *t
 	input := []byte(`{"model":"gemini-3.5-flash","messages":[{"role":"user","content":[{"type":"document","mime_type":"application/pdf","data":"JVBERi0xLjQK"}]}]}`)
 
 	out, _ := ConvertOpenAIRequestToInteractions("gemini-3.5-flash", input, false)
-	document := gjson.GetBytes(out, "input.0.content.0")
+	document := ojson.GetBytesNoCopy(out, "input.0.content.0")
 	if got := document.Get("mime_type").String(); got != "application/pdf" {
 		t.Fatalf("document.mime_type = %q, want application/pdf. Output: %s", got, out)
 	}

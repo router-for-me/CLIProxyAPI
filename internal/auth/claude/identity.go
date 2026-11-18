@@ -189,6 +189,283 @@ func ReadMetadataString(metadata *map[string]any, key string) string {
 	return value
 }
 
+// ReadMetadataStringMap reads a map[string]string metadata entry under the metadata
+// lock, copying out string pairs from either map[string]string or map[string]any.
+func ReadMetadataStringMap(metadata *map[string]any, key string) map[string]string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	switch typed := (*metadata)[key].(type) {
+	case map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(typed))
+		for k, v := range typed {
+			out[k] = v
+		}
+		return out
+	case map[string]any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(typed))
+		for k, rawVal := range typed {
+			if strVal, ok := rawVal.(string); ok {
+				out[k] = strVal
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func copyStringSliceFromAny(raw any) []string {
+	switch typed := raw.(type) {
+	case []string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(typed))
+		for _, s := range typed {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(typed))
+		for _, elem := range typed {
+			if s, ok := elem.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func copyStringMapFromAny(raw any) map[string]string {
+	switch typed := raw.(type) {
+	case map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(typed))
+		for k, v := range typed {
+			out[k] = v
+		}
+		return out
+	case map[string]any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make(map[string]string, len(typed))
+		for k, rawVal := range typed {
+			if strVal, ok := rawVal.(string); ok {
+				out[k] = strVal
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func copyPatternPairsFromAny(raw any) [][2]string {
+	switch typed := raw.(type) {
+	case [][2]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, len(typed))
+		copy(out, typed)
+		return out
+	case []map[string]string:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, 0, len(typed))
+		for _, item := range typed {
+			if p, ok := item["pattern"]; ok {
+				out = append(out, [2]string{p, item["replacement"]})
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []map[string]any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, 0, len(typed))
+		for _, item := range typed {
+			p, ok := item["pattern"].(string)
+			if !ok {
+				continue
+			}
+			r, _ := item["replacement"].(string)
+			out = append(out, [2]string{p, r})
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	case []any:
+		if len(typed) == 0 {
+			return nil
+		}
+		out := make([][2]string, 0, len(typed))
+		for _, rawItem := range typed {
+			switch item := rawItem.(type) {
+			case map[string]string:
+				if p, ok := item["pattern"]; ok {
+					out = append(out, [2]string{p, item["replacement"]})
+				}
+			case map[string]any:
+				p, ok := item["pattern"].(string)
+				if !ok {
+					continue
+				}
+				r, _ := item["replacement"].(string)
+				out = append(out, [2]string{p, r})
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// ReadMetadataPatternPairs reads a slice of [pattern, replacement] pairs from metadata under the metadata lock.
+func ReadMetadataPatternPairs(metadata *map[string]any, key string) [][2]string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	return copyPatternPairsFromAny((*metadata)[key])
+}
+
+// ReadMetadataHomeCloakPatterns extracts credential_options.cloak.sensitive-patterns-replace
+// from metadata under the metadata lock.
+func ReadMetadataHomeCloakPatterns(metadata *map[string]any) [][2]string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	opts, ok := (*metadata)["credential_options"].(map[string]any)
+	if !ok || opts == nil {
+		return nil
+	}
+	rawCloak, exists := opts["cloak"]
+	if !exists || rawCloak == nil {
+		return nil
+	}
+	cloakMap, ok := rawCloak.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return copyPatternPairsFromAny(cloakMap["sensitive-patterns-replace"])
+}
+
+// ReadMetadataStringSlice reads a []string metadata entry under the metadata lock,
+// copying string elements from either []string or []any.
+func ReadMetadataStringSlice(metadata *map[string]any, key string) []string {
+	if metadata == nil {
+		return nil
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return nil
+	}
+	return copyStringSliceFromAny((*metadata)[key])
+}
+
+// ReadMetadataHomeCloak extracts credential_options.cloak from metadata under
+// the metadata lock without JSON serialization.
+func ReadMetadataHomeCloak(metadata *map[string]any) (
+	mode string,
+	strictMode bool,
+	sensitiveWords []string,
+	sensitiveWordsReplace map[string]string,
+	cacheUserID *bool,
+	present bool,
+) {
+	if metadata == nil {
+		return "", false, nil, nil, nil, false
+	}
+	claudeDevicePoolMu.Lock()
+	defer claudeDevicePoolMu.Unlock()
+
+	if *metadata == nil {
+		return "", false, nil, nil, nil, false
+	}
+	opts, ok := (*metadata)["credential_options"].(map[string]any)
+	if !ok || opts == nil {
+		return "", false, nil, nil, nil, false
+	}
+	rawCloak, exists := opts["cloak"]
+	if !exists || rawCloak == nil {
+		return "", false, nil, nil, nil, false
+	}
+	cloakMap, ok := rawCloak.(map[string]any)
+	if !ok {
+		return "", false, nil, nil, nil, false
+	}
+	mode, _ = cloakMap["mode"].(string)
+	strictMode, _ = cloakMap["strict-mode"].(bool)
+	sensitiveWords = copyStringSliceFromAny(cloakMap["sensitive-words"])
+	sensitiveWordsReplace = copyStringMapFromAny(cloakMap["sensitive-words-replace"])
+	if rawCache, hasCache := cloakMap["cache-user-id"]; hasCache {
+		if b, okBool := rawCache.(bool); okBool {
+			cacheCopy := b
+			cacheUserID = &cacheCopy
+		}
+	}
+	return mode, strictMode, sensitiveWords, sensitiveWordsReplace, cacheUserID, true
+}
+
 // StoreMetadataString writes a string-valued metadata entry under the metadata
 // lock, initializing the map when needed. Empty values are skipped so callers can
 // forward optional fields without erasing a previously resolved value.

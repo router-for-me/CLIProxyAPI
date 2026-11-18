@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // GPT-5.x models answer with two message output items: a "commentary" preamble
@@ -35,7 +35,7 @@ func collectCodexClaudeBlocks(t *testing.T, chunks [][]byte) codexClaudeBlocks {
 			if !strings.HasPrefix(line, "data: ") {
 				continue
 			}
-			data := gjson.Parse(strings.TrimPrefix(line, "data: "))
+			data := ojson.Parse(strings.TrimPrefix(line, "data: "))
 			switch data.Get("type").String() {
 			case "content_block_start":
 				curType = data.Get("content_block.type").String()
@@ -231,7 +231,7 @@ func TestConvertCodexResponseToClaudeNonStream_CommentaryPhaseIsThinking(t *test
 	],"usage":{"input_tokens":1,"output_tokens":1}}}`)
 	var param any
 	out := ConvertCodexResponseToClaudeNonStream(context.Background(), "", []byte(`{"messages":[]}`), nil, raw, &param)
-	content := gjson.GetBytes(out, "content").Array()
+	content := ojson.GetBytesNoCopy(out, "content").Array()
 	if len(content) != 2 {
 		t.Fatalf("expected 2 content blocks, got %s", out)
 	}

@@ -3,14 +3,15 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -486,11 +487,104 @@ func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 	if lookup.lastLifecycle.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("lifecycle schema_version = %d, want %d", lookup.lastLifecycle.SchemaVersion, pluginabi.SchemaVersion)
 	}
+	if !lookup.lastLifecycle.MultiAuthProviders {
+		t.Fatal("lifecycle multi_auth_providers = false, want true")
+	}
 	if registered.SchemaVersion != pluginabi.SchemaVersion {
 		t.Fatalf("registered SchemaVersion = %d, want %d", registered.SchemaVersion, pluginabi.SchemaVersion)
 	}
 	if string(lookup.lastLifecycle.ConfigYAML) != "mode: test" {
 		t.Fatalf("lifecycle config = %q, want input config", lookup.lastLifecycle.ConfigYAML)
+	}
+}
+
+func TestRPCAuthIdentifierEntriesAndMetadataFallback(t *testing.T) {
+	lookup := newTestSymbolLookup(&testPlugin{
+		registerResult: pluginapi.Plugin{
+			Metadata: pluginapi.Metadata{
+				Name:             "OMC ZCode OAuth",
+				Version:          "1.0.0",
+				Author:           "test",
+				GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+				Logo:             "https://default.example/zcode.svg",
+			},
+			Capabilities: pluginapi.Capabilities{
+				AuthProvider: fakeAuthProvider{
+					identifier: " ZCode-ZAI ",
+					entries: []pluginapi.AuthProviderEntry{
+						{Identifier: " ZCode-ZAI ", Name: "Z.ai", Logo: "https://chat.z.ai/logo.svg"},
+						{Identifier: "zcode-bigmodel", Name: "", Logo: ""},
+					},
+				},
+			},
+		},
+	})
+
+	plugin, errRegister := registerRPCPlugin(context.Background(), nil, "omc-zcode-oauth", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	host := newHostWithRecords(capabilityRecord{
+		id:       "omc-zcode-oauth",
+		priority: 10,
+		meta:     plugin.Metadata,
+		plugin:   plugin,
+	})
+	infos := host.RegisteredPlugins()
+	if len(infos) != 1 {
+		t.Fatalf("RegisteredPlugins() len = %d, want 1", len(infos))
+	}
+	if infos[0].OAuthProvider != "zcode-zai" {
+		t.Fatalf("OAuthProvider = %q, want zcode-zai", infos[0].OAuthProvider)
+	}
+	wantProviders := []string{"zcode-zai", "zcode-bigmodel"}
+	if !reflect.DeepEqual(infos[0].OAuthProviders, wantProviders) {
+		t.Fatalf("OAuthProviders = %#v, want %#v", infos[0].OAuthProviders, wantProviders)
+	}
+	wantEntries := []pluginapi.AuthProviderEntry{
+		{Identifier: "zcode-zai", Name: "Z.ai", Logo: "https://chat.z.ai/logo.svg"},
+		{Identifier: "zcode-bigmodel", Name: "OMC ZCode OAuth", Logo: "https://default.example/zcode.svg"},
+	}
+	if !reflect.DeepEqual(infos[0].OAuthProviderEntries, wantEntries) {
+		t.Fatalf("OAuthProviderEntries = %#v, want %#v", infos[0].OAuthProviderEntries, wantEntries)
+	}
+
+	// Verify wire-level tolerance when auth.identifier returns only entries (empty identifier/identifiers) and unknown keys.
+	rawWireClient := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		switch method {
+		case pluginabi.MethodPluginRegister:
+			return marshalRPCResult(rpcRegistration{
+				SchemaVersion: pluginabi.SchemaVersion,
+				Metadata: pluginapi.Metadata{
+					Name:             "OMC ZCode OAuth",
+					Version:          "1.0.0",
+					Author:           "test",
+					GitHubRepository: "https://github.com/router-for-me/CLIProxyAPI",
+					Logo:             "https://default.example/zcode.svg",
+				},
+				Capabilities: rpcCapabilities{
+					AuthProvider: true,
+				},
+			})
+		case pluginabi.MethodAuthIdentifier:
+			return []byte(`{"ok":true,"result":{"identifier":"","entries":[{"identifier":" zcode-zai ","name":"Z.ai","logo":"https://chat.z.ai/logo.svg","extra_future_field":true},{"identifier":"zcode-bigmodel","unknown_key":"ignored"}],"future_top_level":"ignored"}}`), nil
+		default:
+			return marshalRPCResult(rpcEmptyResponse{})
+		}
+	}}
+	wirePlugin, errWire := registerRPCPlugin(context.Background(), nil, "omc-wire", rawWireClient, pluginabi.MethodPluginRegister, nil)
+	if errWire != nil {
+		t.Fatalf("registerRPCPlugin(wirePlugin) error = %v", errWire)
+	}
+	wireHost := newHostWithRecords(capabilityRecord{
+		id:       "omc-wire",
+		priority: 10,
+		meta:     wirePlugin.Metadata,
+		plugin:   wirePlugin,
+	})
+	wireInfos := wireHost.RegisteredPlugins()
+	if len(wireInfos) != 1 || wireInfos[0].OAuthProvider != "zcode-zai" || !reflect.DeepEqual(wireInfos[0].OAuthProviders, wantProviders) || !reflect.DeepEqual(wireInfos[0].OAuthProviderEntries, wantEntries) {
+		t.Fatalf("wireInfos = %#v, want primary=zcode-zai providers=%#v entries=%#v", wireInfos, wantProviders, wantEntries)
 	}
 }
 
@@ -810,6 +904,201 @@ func TestRPCSchedulerAndUsageSelectionIDCompatibility(t *testing.T) {
 	}
 	if legacy.Provider != "openai" || legacy.RequestID != "req-1" || legacy.TraceID != "trace-1" {
 		t.Fatalf("legacyUsageRecord = %+v", legacy)
+	}
+}
+
+func TestUsageRecordRPCModalityTokenCounters(t *testing.T) {
+	var deliveredRaw []byte
+	var deliveredRecord pluginapi.UsageRecord
+	rpcAdapter := &rpcPluginAdapter{
+		id: "rpc-usage-modality",
+		client: &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+			if method != pluginabi.MethodUsageHandle {
+				return nil, io.ErrUnexpectedEOF
+			}
+			deliveredRaw = bytes.Clone(request)
+			if errUnmarshal := json.Unmarshal(request, &deliveredRecord); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		}},
+	}
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "rpc-usage-modality",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: rpcAdapter,
+		}},
+	})
+	rpcAdapter.host = host
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "rpc-usage-modality",
+		plugin:   rpcAdapter,
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "openai",
+		Model:    "gpt-image-2.5-flare",
+		Detail: coreusage.Detail{
+			InputTokens:       80,
+			OutputTokens:      1056,
+			CachedTokens:      40,
+			CacheReadTokens:   40,
+			TotalTokens:       1136,
+			TextInputTokens:   coreusage.Int64Ptr(30),
+			ImageInputTokens:  coreusage.Int64Ptr(50),
+			CachedTextTokens:  coreusage.Int64Ptr(25),
+			CachedImageTokens: coreusage.Int64Ptr(15),
+			TextOutputTokens:  coreusage.Int64Ptr(0),
+			ImageOutputTokens: coreusage.Int64Ptr(1056),
+		},
+	})
+
+	got := deliveredRecord.Detail
+	if got.InputTokens != 80 || got.OutputTokens != 1056 || got.CachedTokens != 40 || got.CacheReadTokens != 40 || got.TotalTokens != 1136 {
+		t.Fatalf("delivered aggregate Detail = %+v", got)
+	}
+	if got.TextInputTokens == nil || *got.TextInputTokens != 30 {
+		t.Fatalf("delivered TextInputTokens = %v, want 30", got.TextInputTokens)
+	}
+	if got.ImageInputTokens == nil || *got.ImageInputTokens != 50 {
+		t.Fatalf("delivered ImageInputTokens = %v, want 50", got.ImageInputTokens)
+	}
+	if got.CachedTextTokens == nil || *got.CachedTextTokens != 25 {
+		t.Fatalf("delivered CachedTextTokens = %v, want 25", got.CachedTextTokens)
+	}
+	if got.CachedImageTokens == nil || *got.CachedImageTokens != 15 {
+		t.Fatalf("delivered CachedImageTokens = %v, want 15", got.CachedImageTokens)
+	}
+	if got.TextOutputTokens == nil || *got.TextOutputTokens != 0 {
+		t.Fatalf("delivered TextOutputTokens = %v, want explicit 0", got.TextOutputTokens)
+	}
+	if got.ImageOutputTokens == nil || *got.ImageOutputTokens != 1056 {
+		t.Fatalf("delivered ImageOutputTokens = %v, want 1056", got.ImageOutputTokens)
+	}
+	if got.AudioInputTokens != nil || got.VideoInputTokens != nil || got.FileInputTokens != nil ||
+		got.CachedAudioTokens != nil || got.AudioOutputTokens != nil {
+		t.Fatalf("expected absent modality counters to remain nil over RPC, got %+v", got)
+	}
+
+	// Legacy plugins compiled against the 7-field UsageDetail must still unmarshal cleanly.
+	type legacyUsageDetail struct {
+		InputTokens         int64
+		OutputTokens        int64
+		ReasoningTokens     int64
+		CachedTokens        int64
+		CacheReadTokens     int64
+		CacheCreationTokens int64
+		TotalTokens         int64
+	}
+	type legacyUsageRecordWithDetail struct {
+		Provider string
+		Model    string
+		Detail   legacyUsageDetail
+	}
+	var legacyRec legacyUsageRecordWithDetail
+	if errLegacy := json.Unmarshal(deliveredRaw, &legacyRec); errLegacy != nil {
+		t.Fatalf("Unmarshal(legacyUsageRecordWithDetail) error = %v", errLegacy)
+	}
+	if legacyRec.Detail.InputTokens != 80 || legacyRec.Detail.OutputTokens != 1056 || legacyRec.Detail.TotalTokens != 1136 {
+		t.Fatalf("legacyUsageRecordWithDetail.Detail = %+v", legacyRec.Detail)
+	}
+}
+
+func TestUsageRecordRPCCacheCreationTTLCounters(t *testing.T) {
+	var deliveredRaw []byte
+	var deliveredRecord pluginapi.UsageRecord
+	rpcAdapter := &rpcPluginAdapter{
+		id: "rpc-usage-cache-ttl",
+		client: &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+			if method != pluginabi.MethodUsageHandle {
+				return nil, io.ErrUnexpectedEOF
+			}
+			deliveredRaw = bytes.Clone(request)
+			if errUnmarshal := json.Unmarshal(request, &deliveredRecord); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		}},
+	}
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "rpc-usage-cache-ttl",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: rpcAdapter,
+		}},
+	})
+	rpcAdapter.host = host
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "rpc-usage-cache-ttl",
+		plugin:   rpcAdapter,
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: coreusage.Detail{
+			InputTokens:           100,
+			OutputTokens:          50,
+			CacheCreationTokens:   1500,
+			TotalTokens:           1650,
+			CacheCreation5mTokens: coreusage.Int64Ptr(1000),
+			CacheCreation1hTokens: coreusage.Int64Ptr(500),
+		},
+	})
+
+	got := deliveredRecord.Detail
+	if got.CacheCreationTokens != 1500 {
+		t.Fatalf("delivered CacheCreationTokens = %d, want 1500", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 1000 {
+		t.Fatalf("delivered CacheCreation5mTokens = %v, want 1000", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || *got.CacheCreation1hTokens != 500 {
+		t.Fatalf("delivered CacheCreation1hTokens = %v, want 500", got.CacheCreation1hTokens)
+	}
+
+	// Legacy plugins compiled against the 7-field UsageDetail must still unmarshal cleanly.
+	type legacyUsageDetail struct {
+		InputTokens         int64
+		OutputTokens        int64
+		ReasoningTokens     int64
+		CachedTokens        int64
+		CacheReadTokens     int64
+		CacheCreationTokens int64
+		TotalTokens         int64
+	}
+	type legacyUsageRecordWithDetail struct {
+		Provider string
+		Model    string
+		Detail   legacyUsageDetail
+	}
+	var legacyRec legacyUsageRecordWithDetail
+	if errLegacy := json.Unmarshal(deliveredRaw, &legacyRec); errLegacy != nil {
+		t.Fatalf("Unmarshal(legacyUsageRecordWithDetail) error = %v", errLegacy)
+	}
+	if legacyRec.Detail.CacheCreationTokens != 1500 {
+		t.Fatalf("legacyUsageRecordWithDetail.Detail.CacheCreationTokens = %d, want 1500", legacyRec.Detail.CacheCreationTokens)
+	}
+
+	// Verify explicit zero and nil over RPC.
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: coreusage.Detail{
+			CacheCreationTokens:   500,
+			CacheCreation5mTokens: coreusage.Int64Ptr(0),
+			CacheCreation1hTokens: nil,
+		},
+	})
+	got = deliveredRecord.Detail
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 0 {
+		t.Fatalf("delivered CacheCreation5mTokens = %v, want explicit 0", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens != nil {
+		t.Fatalf("delivered CacheCreation1hTokens = %v, want nil", got.CacheCreation1hTokens)
 	}
 }
 

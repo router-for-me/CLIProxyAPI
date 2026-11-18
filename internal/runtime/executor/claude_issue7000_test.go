@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 func TestClaudeExecutor_Issue7000ForcedToolChoiceFallsBackToAuto(t *testing.T) {
@@ -74,7 +74,7 @@ func TestClaudeExecutor_Issue7000ForcedToolChoiceFallsBackToAuto(t *testing.T) {
 						t.Fatalf("Execute() error = %v", errExecute)
 					}
 
-					if !gjson.ValidBytes(upstreamBody) {
+					if !ojson.ValidBytes(upstreamBody) {
 						t.Fatalf("expected a captured JSON upstream request, got %q", upstreamBody)
 					}
 					for _, assertion := range []struct {
@@ -85,14 +85,14 @@ func TestClaudeExecutor_Issue7000ForcedToolChoiceFallsBackToAuto(t *testing.T) {
 						{path: "tool_choice.disable_parallel_tool_use", want: true},
 						{path: "thinking.type", want: "adaptive"},
 						{path: "output_config.effort", want: "high"},
-						{path: "tools", want: gjson.Parse(tools).Value()},
-						{path: "messages", want: gjson.Parse(messages).Value()},
+						{path: "tools", want: ojson.Parse(tools).Value()},
+						{path: "messages", want: ojson.Parse(messages).Value()},
 					} {
-						if got := gjson.GetBytes(upstreamBody, assertion.path).Value(); !reflect.DeepEqual(got, assertion.want) {
+						if got := ojson.GetBytes(upstreamBody, assertion.path).Value(); !reflect.DeepEqual(got, assertion.want) {
 							t.Errorf("upstream %s = %#v, want %#v", assertion.path, got, assertion.want)
 						}
 					}
-					if got := gjson.GetBytes(upstreamBody, "tool_choice.name"); got.Exists() {
+					if got := ojson.GetBytes(upstreamBody, "tool_choice.name"); got.Exists() {
 						t.Errorf("upstream tool_choice.name = %s, want absent after fallback to auto", got.Raw)
 					}
 				})

@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 // antigravityNoFinishReasonSSE mirrors a real upstream stream captured from
@@ -243,10 +243,10 @@ func TestAntigravityStreamDoesNotFinalizeEmptyUpstreamStream(t *testing.T) {
 				if chunk.Err != nil {
 					t.Fatalf("unexpected stream error: %v", chunk.Err)
 				}
-				if finish := gjson.GetBytes(chunk.Payload, "candidates.0.finishReason").String(); finish != "" {
+				if finish := ojson.GetBytes(chunk.Payload, "candidates.0.finishReason").String(); finish != "" {
 					t.Fatalf("empty upstream stream must not synthesize a terminal chunk: %s", chunk.Payload)
 				}
-				if finish := gjson.GetBytes(chunk.Payload, "choices.0.finish_reason").String(); finish != "" {
+				if finish := ojson.GetBytes(chunk.Payload, "choices.0.finish_reason").String(); finish != "" {
 					t.Fatalf("empty upstream stream must not synthesize a terminal chunk: %s", chunk.Payload)
 				}
 			}
@@ -262,28 +262,28 @@ func TestAntigravityStreamSynthesizesGeminiTerminalChunkWithUsage(t *testing.T) 
 		`{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
 
 	terminal := chunks[len(chunks)-1]
-	if fr := gjson.GetBytes(terminal, "candidates.0.finishReason").String(); fr != "STOP" {
+	if fr := ojson.GetBytes(terminal, "candidates.0.finishReason").String(); fr != "STOP" {
 		t.Fatalf("terminal finishReason = %q, want STOP", fr)
 	}
-	if role := gjson.GetBytes(terminal, "candidates.0.content.role").String(); role != "model" {
+	if role := ojson.GetBytes(terminal, "candidates.0.content.role").String(); role != "model" {
 		t.Fatalf("terminal content role = %q, want model", role)
 	}
-	if got := gjson.GetBytes(terminal, "usageMetadata.totalTokenCount").Int(); got != 153720 {
+	if got := ojson.GetBytes(terminal, "usageMetadata.totalTokenCount").Int(); got != 153720 {
 		t.Fatalf("terminal totalTokenCount = %d, want 153720", got)
 	}
-	if got := gjson.GetBytes(terminal, "usageMetadata.promptTokenCount").Int(); got != 153609 {
+	if got := ojson.GetBytes(terminal, "usageMetadata.promptTokenCount").Int(); got != 153609 {
 		t.Fatalf("terminal promptTokenCount = %d, want 153609", got)
 	}
-	if got := gjson.GetBytes(terminal, "modelVersion").String(); got != "gemini-3.7-flash" {
+	if got := ojson.GetBytes(terminal, "modelVersion").String(); got != "gemini-3.7-flash" {
 		t.Fatalf("terminal modelVersion = %q, want gemini-3.7-flash", got)
 	}
-	if got := gjson.GetBytes(terminal, "responseId").String(); got != "resp-nofr" {
+	if got := ojson.GetBytes(terminal, "responseId").String(); got != "resp-nofr" {
 		t.Fatalf("terminal responseId = %q, want resp-nofr", got)
 	}
 
 	var finishReasonCount int
 	for _, chunk := range chunks {
-		if gjson.GetBytes(chunk, "candidates.0.finishReason").String() != "" {
+		if ojson.GetBytes(chunk, "candidates.0.finishReason").String() != "" {
 			finishReasonCount++
 		}
 	}
@@ -300,22 +300,22 @@ func TestAntigravityStreamSynthesizesOpenAIToolCallsFinishReason(t *testing.T) {
 		`{"model":"gemini-3.7-flash","messages":[{"role":"user","content":"hello"}],"stream":true}`)
 
 	terminal := chunks[len(chunks)-1]
-	if fr := gjson.GetBytes(terminal, "choices.0.finish_reason").String(); fr != "tool_calls" {
+	if fr := ojson.GetBytes(terminal, "choices.0.finish_reason").String(); fr != "tool_calls" {
 		t.Fatalf("terminal finish_reason = %q, want tool_calls", fr)
 	}
-	if got := gjson.GetBytes(terminal, "usage.total_tokens").Int(); got != 153720 {
+	if got := ojson.GetBytes(terminal, "usage.total_tokens").Int(); got != 153720 {
 		t.Fatalf("terminal total_tokens = %d, want 153720", got)
 	}
-	if got := gjson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 153609 {
+	if got := ojson.GetBytes(terminal, "usage.prompt_tokens").Int(); got != 153609 {
 		t.Fatalf("terminal prompt_tokens = %d, want 153609", got)
 	}
-	if got := gjson.GetBytes(terminal, "model").String(); got != "gemini-3.7-flash" {
+	if got := ojson.GetBytes(terminal, "model").String(); got != "gemini-3.7-flash" {
 		t.Fatalf("terminal model = %q, want gemini-3.7-flash", got)
 	}
 
 	var finishReasonCount int
 	for _, chunk := range chunks {
-		if gjson.GetBytes(chunk, "choices.0.finish_reason").String() != "" {
+		if ojson.GetBytes(chunk, "choices.0.finish_reason").String() != "" {
 			finishReasonCount++
 		}
 	}
@@ -334,15 +334,37 @@ func TestAntigravityAssemblyReplacesOnlyContentParts(t *testing.T) {
 			exec := &AntigravityExecutor{}
 			first := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}}`)
 			out := exec.convertStreamChunksToNonStream([][]byte{first, raw})
-			if !gjson.ValidBytes(out) || gjson.GetBytes(out, "response.candidates.0.content.parts.0.text").String() != "hello" {
+			if !ojson.ValidBytes(out) || ojson.GetBytes(out, "response.candidates.0.content.parts.0.text").String() != "hello" {
 				t.Fatalf("assembled parts replaced the wrong value: %s", out)
 			}
-			before := gjson.GetBytes(raw, "response.candidates.0")
-			after := gjson.GetBytes(out, "response.candidates.0")
+			before := ojson.GetBytes(raw, "response.candidates.0")
+			after := ojson.GetBytes(out, "response.candidates.0")
 			if before.Get("groundingMetadata").Raw != after.Get("groundingMetadata").Raw ||
 				before.Get("marker").Raw != after.Get("marker").Raw {
 				t.Fatalf("assembly changed unrelated metadata: %s", out)
 			}
 		})
+	}
+}
+
+func TestAntigravityStreamPreservesQuotedFilterNoticeWithUsageMetadata(t *testing.T) {
+	quotedNotice := "This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"response":{"candidates":[{"content":{"parts":[{"text":"`+quotedNotice+`"}]}}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":40,"totalTokenCount":52}}}`+"\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	chunks := collectAntigravityStream(t, server.URL, sdktranslator.FormatGemini, sdktranslator.FormatGemini,
+		`{"contents":[{"role":"user","parts":[{"text":"explain the filter message"}]}]}`)
+	var joined bytes.Buffer
+	for _, chunk := range chunks {
+		joined.Write(chunk)
+	}
+	if !bytes.Contains(joined.Bytes(), []byte(quotedNotice)) {
+		t.Fatalf("expected quoted filter notice in stream output, got %s", joined.String())
 	}
 }

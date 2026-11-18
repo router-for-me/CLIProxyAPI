@@ -10,12 +10,12 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
-	"github.com/tidwall/gjson"
 )
 
 type auditTestTransport struct {
@@ -120,8 +120,8 @@ func TestExecutorAttemptDecoratorObservesTranslatedPayloadAndStatusWithoutReques
 				if errRead != nil {
 					return nil, errRead
 				}
-				observedModel = gjson.GetBytes(bodyBytes, "model").String()
-				observedTemp = gjson.GetBytes(bodyBytes, "temperature").Float()
+				observedModel = ojson.GetBytes(bodyBytes, "model").String()
+				observedTemp = ojson.GetBytes(bodyBytes, "temperature").Float()
 				req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			}
 			resp, errRT := next.RoundTrip(req)

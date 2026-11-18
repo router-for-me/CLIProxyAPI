@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -17,7 +18,6 @@ import (
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/tidwall/gjson"
 )
 
 // An unknown interrupt while a websocket response is running belongs to the
@@ -52,7 +52,7 @@ func TestResponsesUnknownInterruptDoesNotCancelWebsocketTurn(t *testing.T) {
 		if errRead != nil {
 			return
 		}
-		if gjson.GetBytes(create, "type").String() != "response.create" {
+		if ojson.GetBytesNoCopy(create, "type").String() != "response.create" {
 			t.Errorf("expected response.create, got %s", create)
 			return
 		}
@@ -68,7 +68,7 @@ func TestResponsesUnknownInterruptDoesNotCancelWebsocketTurn(t *testing.T) {
 		if errInterrupt != nil {
 			return
 		}
-		if gjson.GetBytes(interrupt, "response_id").String() != "r1" {
+		if ojson.GetBytesNoCopy(interrupt, "response_id").String() != "r1" {
 			t.Errorf("upstream received unexpected frame: %s", interrupt)
 			return
 		}
@@ -128,7 +128,7 @@ func TestResponsesUnknownInterruptDoesNotCancelWebsocketTurn(t *testing.T) {
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		if gjson.GetBytes(payload, "type").String() != event || gjson.GetBytes(payload, "response.id").String() != id {
+		if ojson.GetBytesNoCopy(payload, "type").String() != event || ojson.GetBytesNoCopy(payload, "response.id").String() != id {
 			t.Fatalf("expected %s for %s, got %s", event, id, payload)
 		}
 	}

@@ -5,10 +5,9 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // Codex declares client-executed tool search as {"type":"tool_search",
@@ -84,7 +83,7 @@ const responsesDeferredAnchorJSON = `{"name":"` + responsesDeferredAnchorName + 
 // keeps the client's tool and simply has no anchor.
 func responsesDeferredAnchorTool(toolItems [][]byte) ([]byte, bool) {
 	for _, tool := range toolItems {
-		if gjson.GetBytes(tool, "name").String() == responsesDeferredAnchorName {
+		if ojson.GetBytesNoCopy(tool, "name").String() == responsesDeferredAnchorName {
 			return nil, false
 		}
 	}
@@ -93,56 +92,62 @@ func responsesDeferredAnchorTool(toolItems [][]byte) ([]byte, bool) {
 
 // isResponsesClientToolSearch reports whether a tool declaration asks the
 // client to execute tool search. Hosted (server) search cannot run on Claude.
-func isResponsesClientToolSearch(tool gjson.Result) bool {
+func isResponsesClientToolSearch(tool ojson.Result) bool {
 	return strings.TrimSpace(tool.Get("type").String()) == responsesToolSearchType &&
 		strings.TrimSpace(tool.Get("execution").String()) == "client"
 }
 
 // convertResponsesToolSearchToolToClaude keeps the client's declared schema
 // but guarantees the required query field Codex parses.
-func convertResponsesToolSearchToolToClaude(tool gjson.Result, claudeName string) ([]byte, bool) {
+func convertResponsesToolSearchToolToClaude(tool ojson.Result, claudeName string) ([]byte, bool) {
 	schema := []byte(claudeToolSearchDefaultSchema)
 	if parameters := tool.Get("parameters"); parameters.IsObject() {
 		schema = util.NormalizeClaudeToolInputSchema([]byte(parameters.Raw))
 	}
-	if gjson.GetBytes(schema, "properties.query.type").String() != "string" {
-		schema, _ = sjson.SetRawBytes(schema, "properties.query", []byte(`{"type":"string","description":"Search query for deferred tools."}`))
-	}
-	if !gjson.GetBytes(schema, `required.#(=="query")`).Exists() {
-		schema, _ = sjson.SetBytes(schema, "required.-1", "query")
+	needQueryProp := ojson.GetBytesNoCopy(schema, "properties.query.type").String() != "string"
+	needQueryReq := !ojson.GetBytesNoCopy(schema, `required.#(=="query")`).Exists()
+	if needQueryProp || needQueryReq {
+		schemaDoc := ojson.NewDoc(schema)
+		if needQueryProp {
+			_ = schemaDoc.SetRawBytes("properties.query", []byte(`{"type":"string","description":"Search query for deferred tools."}`))
+		}
+		if needQueryReq {
+			_ = schemaDoc.Set("required.-1", "query")
+		}
+		schema = schemaDoc.Bytes()
 	}
 
-	tJSON := []byte(`{"name":"","description":"","input_schema":{}}`)
-	tJSON, _ = sjson.SetBytes(tJSON, "name", claudeName)
-	tJSON, _ = sjson.SetBytes(tJSON, "description", responsesToolDescription(tool))
-	tJSON, _ = sjson.SetRawBytes(tJSON, "input_schema", schema)
-	return tJSON, true
+	tDoc := ojson.NewDocString(`{"name":"","description":"","input_schema":{}}`)
+	_ = tDoc.Set("name", claudeName)
+	_ = tDoc.Set("description", responsesToolDescription(tool))
+	_ = tDoc.SetRawBytes("input_schema", schema)
+	return tDoc.Bytes(), true
 }
 
 // convertResponsesToolSearchCallToClaude replays a client tool_search_call as
 // an assistant tool_use and returns it with its raw call id. Hosted calls have
 // no call id and return nil.
-func convertResponsesToolSearchCallToClaude(item gjson.Result, claudeName string) ([]byte, string) {
+func convertResponsesToolSearchCallToClaude(item ojson.Result, claudeName string) ([]byte, string) {
 	callID := strings.TrimSpace(item.Get("call_id").String())
 	if callID == "" || strings.TrimSpace(item.Get("execution").String()) != "client" {
 		return nil, ""
 	}
-	toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-	toolUse, _ = sjson.SetBytes(toolUse, "id", util.SanitizeClaudeToolID(callID))
-	toolUse, _ = sjson.SetBytes(toolUse, "name", claudeName)
+	toolUseDoc := ojson.NewDocString(`{"type":"tool_use","id":"","name":"","input":{}}`)
+	_ = toolUseDoc.Set("id", util.SanitizeClaudeToolID(callID))
+	_ = toolUseDoc.Set("name", claudeName)
 	arguments := item.Get("arguments")
-	if arguments.Type == gjson.String {
-		arguments = gjson.Parse(arguments.String())
+	if arguments.Type == ojson.String {
+		arguments = ojson.Parse(arguments.String())
 	}
 	if arguments.IsObject() {
-		toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(arguments.Raw))
+		_ = toolUseDoc.SetRawBytes("input", []byte(arguments.Raw))
 	}
-	return toolUse, callID
+	return toolUseDoc.Bytes(), callID
 }
 
 // responsesToolSearchOutputText summarizes discovered tools for the model.
 // Their full definitions are declared in tools[], so names suffice here.
-func responsesToolSearchOutputText(item gjson.Result, names claudeToolNames) string {
+func responsesToolSearchOutputText(item ojson.Result, names claudeToolNames) string {
 	var discovered []string
 	for _, descriptor := range appendResponsesToolDescriptors(nil, item.Get("tools"), responsesDiscoveredToolPriority, true) {
 		discovered = append(discovered, names.claudeName(descriptor.name))
@@ -158,7 +163,7 @@ func responsesToolSearchOutputText(item gjson.Result, names claudeToolNames) str
 // for each tool that only loads through search, so Claude expands the deferred
 // definition at this point in the conversation. Tools that are already declared
 // directly need no reference; when none qualify, the text summary is used.
-func responsesToolSearchOutputContent(item gjson.Result, names claudeToolNames, winners map[string]responsesToolDescriptor, nativeReferences bool) []byte {
+func responsesToolSearchOutputContent(item ojson.Result, names claudeToolNames, winners map[string]responsesToolDescriptor, nativeReferences bool) []byte {
 	if nativeReferences {
 		var references [][]byte
 		seen := make(map[string]struct{})
@@ -172,15 +177,15 @@ func responsesToolSearchOutputContent(item gjson.Result, names claudeToolNames, 
 				continue
 			}
 			seen[claudeName] = struct{}{}
-			reference, _ := sjson.SetBytes([]byte(`{"type":"tool_reference","tool_name":""}`), "tool_name", claudeName)
+			reference, _ := ojson.SetBytes([]byte(`{"type":"tool_reference","tool_name":""}`), "tool_name", claudeName)
 			references = append(references, reference)
 		}
 		if len(references) > 0 {
 			return common.JoinRawArray(references)
 		}
 	}
-	text, _ := sjson.SetBytes([]byte(`{"text":""}`), "text", responsesToolSearchOutputText(item, names))
-	return []byte(gjson.GetBytes(text, "text").Raw)
+	text, _ := ojson.SetBytes([]byte(`{"text":""}`), "text", responsesToolSearchOutputText(item, names))
+	return []byte(ojson.GetBytesNoCopy(text, "text").Raw)
 }
 
 // toolSearchCallStatus downgrades a completed call whose arguments are not a
@@ -193,30 +198,30 @@ func toolSearchCallStatus(status, arguments string) string {
 }
 
 func isJSONObject(raw string) bool {
-	return gjson.Valid(raw) && gjson.Parse(raw).IsObject()
+	return ojson.Valid(raw) && ojson.Parse(raw).IsObject()
 }
 
 // buildResponsesToolSearchCallItem renders the tool_search_call item Codex
 // parses: call_id, execution "client" and an arguments object.
 func buildResponsesToolSearchCallItem(callID, status, arguments string) []byte {
-	item := []byte(`{"id":"","type":"tool_search_call","status":"","call_id":"","execution":"client","arguments":{}}`)
-	item, _ = sjson.SetBytes(item, "id", responsesToolSearchIDPrefix+callID)
-	item, _ = sjson.SetBytes(item, "status", status)
-	item, _ = sjson.SetBytes(item, "call_id", callID)
+	itemDoc := ojson.NewDocString(`{"id":"","type":"tool_search_call","status":"","call_id":"","execution":"client","arguments":{}}`)
+	_ = itemDoc.Set("id", responsesToolSearchIDPrefix+callID)
+	_ = itemDoc.Set("status", status)
+	_ = itemDoc.Set("call_id", callID)
 	if isJSONObject(arguments) {
-		item, _ = sjson.SetRawBytes(item, "arguments", []byte(arguments))
+		_ = itemDoc.SetRawBytes("arguments", []byte(arguments))
 	}
-	return item
+	return itemDoc.Bytes()
 }
 
 // toolSearchCallEvent wraps a tool_search_call item in an output_item event.
 // Responses has no argument delta events for it; Codex dispatches the search
 // from output_item.done.
 func toolSearchCallEvent(event string, sequence, outputIndex int, item []byte) []byte {
-	payload := []byte(`{"type":"","sequence_number":0,"output_index":0,"item":{}}`)
-	payload, _ = sjson.SetBytes(payload, "type", event)
-	payload, _ = sjson.SetBytes(payload, "sequence_number", sequence)
-	payload, _ = sjson.SetBytes(payload, "output_index", outputIndex)
-	payload, _ = sjson.SetRawBytes(payload, "item", item)
-	return emitEvent(event, payload)
+	payloadDoc := ojson.NewDocString(`{"type":"","sequence_number":0,"output_index":0,"item":{}}`)
+	_ = payloadDoc.Set("type", event)
+	_ = payloadDoc.Set("sequence_number", sequence)
+	_ = payloadDoc.Set("output_index", outputIndex)
+	_ = payloadDoc.SetRawBytes("item", item)
+	return emitEvent(event, payloadDoc.Bytes())
 }

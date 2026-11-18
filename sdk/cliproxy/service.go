@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
@@ -15,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
@@ -45,6 +47,10 @@ type Service struct {
 	configSequence         uint64
 	appliedRoutingState    *routingRuntimeState
 
+	// proxyPoolPublisher scopes connection-pool fencing to this service, so a reload
+	// here never retires config snapshots served by another service.
+	proxyPoolPublisher uint64
+
 	// configPath is the path to the configuration file.
 	configPath string
 
@@ -60,6 +66,16 @@ type Service struct {
 	// hooks provides lifecycle callbacks.
 	hooks Hooks
 
+	// executorWrapper optionally wraps every built-in executor before registration.
+	executorWrapper ExecutorWrapper
+
+	// ownedExecutors tracks the service-owned underlying executor per provider
+	// so reuse and rebinding decisions survive embedder wrapping.
+	// ownedRevisions tracks the manager revision at registration time so
+	// external overwrites and removals invalidate the cache.
+	ownedExecutors map[string]coreauth.ProviderExecutor
+	ownedRevisions map[string]uint64
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 
@@ -71,6 +87,9 @@ type Service struct {
 
 	// discoveryManager manages local network mDNS / DNS-SD service advertising.
 	discoveryManager *discoveryAdvertiserManager
+
+	// kvStoreManaged tracks whether this service instance owns local KVStore lifecycle.
+	kvStoreManaged atomic.Bool
 
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
@@ -101,6 +120,10 @@ type Service struct {
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
+
+	// pluginInterceptorHost optionally overrides the PluginInterceptorHost
+	// installed on request handlers. Nil means the internal pluginHost is used.
+	pluginInterceptorHost handlers.PluginInterceptorHost
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once

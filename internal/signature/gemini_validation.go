@@ -69,12 +69,12 @@
 package signature
 
 import (
-	"encoding/base64"
 	"fmt"
+	"github.com/MoeForge/moego/base64"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
-	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -147,7 +147,7 @@ type geminiFunctionCallRef struct {
 }
 
 type geminiFunctionResponseRef struct {
-	part gjson.Result
+	part ojson.Result
 	path string
 }
 
@@ -302,7 +302,7 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 
 	var pending []geminiFunctionCallRef
 	var validationErr error
-	contents.ForEach(func(contentIndex, content gjson.Result) bool {
+	contents.ForEach(func(contentIndex, content ojson.Result) bool {
 		i := int(contentIndex.Int())
 		parts := content.Get("parts")
 		if !parts.IsArray() || parts.Raw == "[]" || !parts.Get("0").Exists() {
@@ -319,7 +319,7 @@ func ValidateGeminiFunctionCallPairing(inputRawJSON []byte) error {
 
 		var calls []geminiFunctionCallRef
 		var responses []geminiFunctionResponseRef
-		parts.ForEach(func(partIndex, part gjson.Result) bool {
+		parts.ForEach(func(partIndex, part ojson.Result) bool {
 			j := int(partIndex.Int())
 			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, i, j)
 			if call := part.Get("functionCall"); call.Exists() {
@@ -665,7 +665,7 @@ func isASCIIUUIDBytes(decoded []byte) bool {
 	return true
 }
 
-func geminiContents(inputRawJSON []byte) (gjson.Result, string) {
+func geminiContents(inputRawJSON []byte) (ojson.Result, string) {
 	if contents := util.GetGJSONBytesNoCopy(inputRawJSON, "contents"); contents.Exists() {
 		return contents, "contents"
 	}
