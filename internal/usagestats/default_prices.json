@@ -1,6 +1,6 @@
 {
   "source": "https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json",
-  "retrieved": "2026-11-12",
+  "retrieved": "2026-11-18",
   "unit": "USD per 1M tokens",
   "models": {
     "claude-fable-5": {
@@ -332,6 +332,11 @@
       "input": 4.0,
       "output": 20.0,
       "cache_read": 0.2
+    },
+    "gemini-4-hydrogen": {
+      "input": 1.5,
+      "output": 7.5,
+      "cache_read": 0.075
     },
     "gemini-flash-latest": {
       "input": 0.75,
@@ -710,10 +715,10 @@
       "cache_write_5m": 0.125
     },
     "gpt-6-rosalind": {
-      "input": 15.0,
-      "output": 75.0,
-      "cache_read": 1.5,
-      "cache_write_5m": 18.75
+      "input": 10.0,
+      "output": 50.0,
+      "cache_read": 1.0,
+      "cache_write_5m": 12.5
     },
     "gpt-6-sol": {
       "input": 2.0,
@@ -732,6 +737,18 @@
       "output": 5.0,
       "cache_read": 0.05,
       "cache_write_5m": 1.25
+    },
+    "gpt-6.2-astra": {
+      "input": 8.0,
+      "output": 40.0,
+      "cache_read": 0.4,
+      "cache_write_5m": 10.0
+    },
+    "gpt-6.2-sol": {
+      "input": 2.0,
+      "output": 10.0,
+      "cache_read": 0.1,
+      "cache_write_5m": 2.5
     },
     "gpt-daybreak-blue-latest": {
       "input": 4.0,
