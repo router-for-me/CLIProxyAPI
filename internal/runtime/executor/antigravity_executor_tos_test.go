@@ -86,10 +86,23 @@ func TestAntigravityTOSPoolPause(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
-	cfg := &config.Config{}
-	// default 6h window
 	auth := &cliproxyauth.Auth{ID: "tos-auth", Provider: "antigravity"}
+	other := &cliproxyauth.Auth{ID: "sibling-auth", Provider: "antigravity"}
 
+	// By default (empty TOSPauseWindow or nil config), TOS_VIOLATION must not pause the pool.
+	defaultCfg := &config.Config{}
+	markAntigravityTOSPause(defaultCfg, auth)
+	if antigravityInTOSPause(defaultCfg, auth) || antigravityInTOSPause(defaultCfg, other) {
+		t.Fatal("antigravityInTOSPause() = true by default, want no pool-wide pause unless explicitly configured")
+	}
+	markAntigravityTOSPause(nil, auth)
+	if antigravityInTOSPause(nil, auth) || antigravityInTOSPause(nil, other) {
+		t.Fatal("antigravityInTOSPause(nil) = true, want no pool-wide pause")
+	}
+
+	// When explicitly configured, TOS_VIOLATION pauses the entire pool.
+	cfg := &config.Config{}
+	cfg.Antigravity.TOSPauseWindow = "6h"
 	if antigravityInTOSPause(cfg, auth) {
 		t.Fatal("antigravityInTOSPause() = true before any TOS violation")
 	}
@@ -98,7 +111,6 @@ func TestAntigravityTOSPoolPause(t *testing.T) {
 		t.Fatal("antigravityInTOSPause() = false after TOS violation, want pool-wide pause")
 	}
 	// A different auth in the same pool must also be paused.
-	other := &cliproxyauth.Auth{ID: "sibling-auth", Provider: "antigravity"}
 	if !antigravityInTOSPause(cfg, other) {
 		t.Fatal("antigravityInTOSPause() = false for sibling credential, want pool-wide pause")
 	}
@@ -118,16 +130,20 @@ func TestAntigravityTOSPauseWindowConfigurable(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
-	// A disabled (zero) window must not pause the pool.
-	disabled := &config.Config{}
-	disabled.Antigravity.TOSPauseWindow = "0"
 	auth := &cliproxyauth.Auth{ID: "tos-auth", Provider: "antigravity"}
-	markAntigravityTOSPause(disabled, auth)
-	if antigravityInTOSPause(disabled, auth) {
-		t.Fatal("antigravityInTOSPause() = true with window disabled, want no pause")
+
+	// Unset, disabled, zero, negative, and invalid windows must not pause the pool.
+	for _, raw := range []string{"", "0", "off", "false", "none", "disabled", "0s", "-1m", "invalid"} {
+		resetAntigravityCreditsRetryState()
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = raw
+		markAntigravityTOSPause(cfg, auth)
+		if antigravityInTOSPause(cfg, auth) {
+			t.Fatalf("antigravityInTOSPause() = true for TOSPauseWindow=%q, want no pause", raw)
+		}
 	}
 
-	// A custom window must be honored.
+	// A custom positive window must be honored.
 	custom := &config.Config{}
 	custom.Antigravity.TOSPauseWindow = "2h"
 	markAntigravityTOSPause(custom, auth)

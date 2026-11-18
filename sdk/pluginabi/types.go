@@ -1,8 +1,9 @@
 package pluginabi
 
 import (
-	"encoding/json"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (
@@ -88,6 +89,8 @@ const (
 
 	// MethodSchedulerPick asks a scheduler plugin to select an auth candidate.
 	MethodSchedulerPick = "scheduler.pick"
+	// MethodSchedulerContinuity asks a scheduler plugin whether a request should proceed, wait, or disable continuity.
+	MethodSchedulerContinuity = "scheduler.continuity"
 	// MethodModelRoute asks a router plugin to select a plugin executor for a matching request.
 	MethodModelRoute = "model.route"
 

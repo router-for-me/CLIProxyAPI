@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +14,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/gorilla/websocket"
 	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
