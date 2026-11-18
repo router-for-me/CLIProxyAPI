@@ -481,13 +481,20 @@ func normalizeClaudeToolSchema(parameters ojson.Result) []byte {
 }
 
 func lowercaseClaudeToolSchemaTypes(tool []byte) []byte {
+	schema := util.ParseGJSONBytesNoCopy(tool).Get("input_schema")
+	if !schema.Exists() {
+		return tool
+	}
 	var pathsToLower []string
-	util.Walk(util.ParseGJSONBytesNoCopy(tool), "", "type", &pathsToLower)
+	util.WalkSchema(schema, "input_schema", "type", &pathsToLower)
 	var toolDoc *ojson.Doc
 	for _, path := range pathsToLower {
 		typeValue := ojson.GetBytesNoCopy(tool, path)
+		if typeValue.Type != ojson.String {
+			continue
+		}
 		normalizedType := strings.ToLower(typeValue.String())
-		if typeValue.Type == ojson.String && normalizedType == typeValue.String() {
+		if normalizedType == typeValue.String() {
 			continue
 		}
 		if toolDoc == nil {
