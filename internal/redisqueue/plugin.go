@@ -2,11 +2,11 @@ package redisqueue
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"

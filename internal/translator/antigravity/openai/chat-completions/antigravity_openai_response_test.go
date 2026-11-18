@@ -521,3 +521,55 @@ func TestConvertAntigravityResponseToOpenAI_SignatureOnlyEmptyTextDoesNotStartSt
 		t.Fatalf("signature-only empty-text stream must not synthesize stop on [DONE], got %d chunk(s): %s", len(done), done[0])
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("streaming drops thought draft image and keeps deliverable image at index 0", func(t *testing.T) {
+		var param any
+
+		thoughtImgChunk := []byte(`{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"inlineData":{"mimeType":"image/png","data":"RFJBRlRfSU1BR0U="}}]}}],"cpaUsageMetadata":{"promptTokenCount":12},"modelVersion":"gemini-3-pro-image","responseId":"resp_ag_7566"}}`)
+		if out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, thoughtImgChunk, &param); len(out) != 0 {
+			t.Fatalf("standalone thought inlineData chunk must not emit delta, got %d chunk(s): %s", len(out), out[0])
+		}
+
+		finalChunk := []byte(`{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Refining."},{"thought":true,"inline_data":{"mime_type":"image/png","data":"RFJBRlRfMg=="}},{"inlineData":{"mimeType":"image/png","data":"RklOQUxfSU1BR0U="},"thoughtSignature":"EjQKDg=="}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":1120,"thoughtsTokenCount":584,"totalTokenCount":1716},"modelVersion":"gemini-3-pro-image","responseId":"resp_ag_7566"}}`)
+		out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, finalChunk, &param)
+		if len(out) != 1 {
+			t.Fatalf("finalChunk count = %d, want 1", len(out))
+		}
+		images := ojson.GetBytesNoCopy(out[0], "choices.0.delta.images").Array()
+		if len(images) != 1 {
+			t.Fatalf("len(delta.images) = %d, want 1; payload=%s", len(images), out[0])
+		}
+		if got := images[0].Get("index").Int(); got != 0 {
+			t.Fatalf("delta.images[0].index = %d, want 0; payload=%s", got, out[0])
+		}
+		if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
+			t.Fatalf("delta.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out[0])
+		}
+	})
+
+	t.Run("non-streaming delegates and skips thought draft image", func(t *testing.T) {
+		raw := []byte(`{"response":{"candidates":[{"index":0,"content":{"role":"model","parts":[{"thought":true,"text":"Drafting."},{"thought":true,"inlineData":{"mimeType":"image/png","data":"RFJBRlRfSU1BR0U="}},{"inlineData":{"mimeType":"image/png","data":"RklOQUxfSU1BR0U="}}]},"finishReason":"STOP"}]}}`)
+		out := ConvertAntigravityResponseToOpenAINonStream(ctx, "gemini-3-pro-image", nil, nil, raw, nil)
+		images := ojson.GetBytesNoCopy(out, "choices.0.message.images").Array()
+		if len(images) != 1 {
+			t.Fatalf("len(message.images) = %d, want 1; payload=%s", len(images), out)
+		}
+		if got := images[0].Get("image_url.url").String(); got != "data:image/png;base64,RklOQUxfSU1BR0U=" {
+			t.Fatalf("message.images[0].image_url.url = %q, want deliverable image URL; payload=%s", got, out)
+		}
+	})
+
+	t.Run("thought-only image chunk without output tokens does not start stream on DONE", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"inlineData":{"mimeType":"image/png","data":"RFJBRlRfSU1BR0U="}}]}}],"cpaUsageMetadata":{"promptTokenCount":12,"totalTokenCount":12},"modelVersion":"gemini-3-pro-image","responseId":"resp_ag_empty"}}`)
+		if out := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, chunk, &param); len(out) != 0 {
+			t.Fatalf("expected 0 chunks for thought-only image, got %d: %s", len(out), out[0])
+		}
+		if done := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3-pro-image", nil, nil, []byte("[DONE]"), &param); len(done) != 0 {
+			t.Fatalf("thought-only image stream must not synthesize stop on [DONE], got %d: %s", len(done), done[0])
+		}
+	})
+}

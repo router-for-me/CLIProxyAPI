@@ -1,10 +1,11 @@
 package util
 
 import (
-	"encoding/json"
 	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // The legacy mapper is kept as a differential oracle for collision semantics.

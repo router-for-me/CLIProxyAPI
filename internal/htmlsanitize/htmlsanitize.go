@@ -2,11 +2,12 @@ package htmlsanitize
 
 import (
 	"bytes"
-	"encoding/json"
 	"html"
 	"io"
 	"mime"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // String escapes text before it is returned to browser-facing management clients.

@@ -4029,3 +4029,61 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		}
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_ToolResultDocumentExtractedToParts(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		wantResult string
+	}{
+		{
+			name:       "array text and pdf document",
+			content:    `[{"type":"text","text":"Loaded sample.pdf"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]`,
+			wantResult: `{"text":"Loaded sample.pdf","type":"text"}`,
+		},
+		{
+			name:       "array pdf document only",
+			content:    `[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]`,
+			wantResult: `""`,
+		},
+		{
+			name:       "object pdf document",
+			content:    `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}`,
+			wantResult: `""`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(fmt.Sprintf(`{
+				"model": "claude-sonnet-4-6",
+				"messages": [
+					{"role": "assistant", "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_file", "input": {}}]},
+					{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_pdf", "content": %s}]}
+				]
+			}`, tt.content))
+
+			output, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", input, false)
+			if err != nil {
+				t.Fatalf("ConvertClaudeRequestToAntigravity failed: %v", err)
+			}
+			fr := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse")
+			if !fr.Exists() {
+				t.Fatalf("functionResponse missing: %s", output)
+			}
+			if got := fr.Get("parts.0.inlineData").Raw; got != `{"mimeType":"application/pdf","data":"JVBERi0xLjQK"}` {
+				t.Fatalf("functionResponse.parts[0].inlineData = %s, want pdf inlineData; fr=%s", got, fr.Raw)
+			}
+			if strings.Contains(fr.Get("response.result").Raw, "JVBERi0xLjQK") {
+				t.Fatalf("base64 PDF leaked into response.result: %s", fr.Get("response.result").Raw)
+			}
+			if tt.wantResult == `""` {
+				if fr.Get("response.result").String() != "" {
+					t.Fatalf("response.result = %s, want empty string", fr.Get("response.result").Raw)
+				}
+			} else if got := fr.Get("response.result.text").String(); got != "Loaded sample.pdf" {
+				t.Fatalf("response.result.text = %q, want Loaded sample.pdf (raw=%s)", got, fr.Get("response.result").Raw)
+			}
+		})
+	}
+}

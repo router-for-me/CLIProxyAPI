@@ -1,11 +1,12 @@
 package responses
 
 import (
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"net/url"
 	"path/filepath"
 	"strings"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"

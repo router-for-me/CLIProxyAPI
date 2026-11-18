@@ -764,7 +764,8 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsCondu
 
 			exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
 			auth := &cliproxyauth.Auth{ID: authID, Provider: "aistudio", Status: cliproxyauth.StatusActive}
-			manager := cliproxyauth.NewManager(nil, nil, nil)
+			resultHook := &malformedFunctionCallResultHook{authID: auth.ID, results: make(chan cliproxyauth.Result, 1)}
+			manager := cliproxyauth.NewManager(nil, nil, resultHook)
 			manager.RegisterExecutor(exec)
 			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
 				t.Fatalf("Register() error = %v", errRegister)
@@ -800,13 +801,7 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsCondu
 				}
 			}
 			assertMalformedFunctionCallFailedUsage(t, capture.records)
-			updated, okAuth := manager.GetByID(auth.ID)
-			if !okAuth || updated.ModelStates["gemini-4-argon"] == nil || updated.ModelStates["gemini-4-argon"].LastError == nil {
-				t.Fatalf("expected conductor to record failure on model state after client cancel on error event, got %+v", updated)
-			}
-			if updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus != http.StatusBadGateway {
-				t.Fatalf("LastError.HTTPStatus = %d, want 502; err=%+v", updated.ModelStates["gemini-4-argon"].LastError.HTTPStatus, updated.ModelStates["gemini-4-argon"].LastError)
-			}
+			assertMalformedFunctionCallConductorResultUncooled(t, manager, auth.ID, "gemini-4-argon", resultHook.results)
 			if errClient := <-clientDone; errClient != nil {
 				t.Fatal(errClient)
 			}

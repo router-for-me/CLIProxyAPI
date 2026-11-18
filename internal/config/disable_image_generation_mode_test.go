@@ -1,9 +1,9 @@
 package config
 
 import (
-	"encoding/json"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"gopkg.in/yaml.v3"
 )
 

@@ -123,7 +123,7 @@ func TestConvertOpenAIRequestToCodex_AudioAfterHistoryStaysAudio(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	part := ojson.GetBytesNoCopy(body, "input.2.content.0")
-	if part.Get("type").String() != "input_audio" || part.Get("data").String() != "UklGRg==" {
+	if part.Get("type").String() != "input_audio" || part.Get("input_audio.data").String() != "UklGRg==" || part.Get("input_audio.format").String() != "wav" {
 		t.Fatalf("part = %s, body = %s", part.Raw, body)
 	}
 }

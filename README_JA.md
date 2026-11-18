@@ -162,7 +162,7 @@ CLIProxyAPI 向けのセルフホスト型管理コンソールと可観測性�
 
 ### [Oh-My-CPA](https://github.com/WizisCool/oh-my-cpa)
 
-Ant Design を採用した CLIProxyAPI v8+ 向けのモダンな管理コンソール。CPAMC に相当する主要な管理機能と、SQLite に永続化するリクエスト記録・使用量分析を統合し、OAuth アカウント、API プロバイダー、クライアントキー、クォータ、料金設定、CPA 運用を一つの画面で管理できます。リクエストごとのレイテンシ、最初のトークンまでの時間（TTFT）、トークン数、コストを追跡し、多条件フィルター、リアルタイムダッシュボード、トークンヒートマップを提供します。OpenRouter の価格同期、カスタム料金、リクエストごとの価格スナップショットで過去のコストを保持し、組み込み Agent と MCP ツールで分析と日常管理を支援します。
+CLIProxyAPI v8+ 向けの Web コンソールです。`shadcn/ui` を基盤に、モダンな UI/UX と滑らかなモーション、デスクトップ・モバイル両対応のレイアウトを備えています。プロバイダー、OAuth、ルーティング、組み込みプラグインを一元管理し、充実したリクエスト記録（レイテンシ、TTFT、トークン、障害診断、モデル置換検知）、リアルタイムルーティング、多次元の料金統計、クォータウィンドウのウォームアップと予測、Agent/MCP を提供。AES-GCM 暗号化と設定自動バックアップを備え、バイナリ直接実行、Docker デプロイ、OMC/CPA のワンクリック更新に対応しています。
 
 ## SDKドキュメント
 
@@ -313,6 +313,10 @@ CLIProxyAPI のアカウントプール向けのネイティブ macOS メニュ�
 ### [Nia Live Demo](https://github.com/nia-teams/nia-live-demo)
 
 話しながらリアルタイムで描画・操作できるインタラクティブな SVG/HTML キャンバスを備えた、全二重音声コンパニオン。CLIProxyAPI の 2 つの機能を組み合わせています：音声対話と即時割り込みを担う Codex GPT-Live 1.1 メディアリレー（`gpt-live-1-codex`、WebRTC + Sideband）と、会話中にキャンバスをリアルタイムで生成・編集する `ultrafast` Responses（`gpt-6.1-sol` / `gpt-6-astra`）です。
+
+### [Hyphantria](https://hyphantria.com)
+
+AI 支援による部品作成、リファレンスデザインの採用、および配置・配線の同時最適化を備えたネイティブ macOS 向け回路図・PCB 設計アプリ。CLIProxyAPI をネイティブサポートしており、AI 支援機能をお使いの AI プロバイダーに接続できます。
 
 > [!NOTE]
 > CLIProxyAPIをベースにプロジェクトを開発した場合は、PRを送ってこのリストに追加してください。
