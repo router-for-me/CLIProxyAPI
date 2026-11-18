@@ -1237,10 +1237,11 @@ func (s *targetedRecoveryTestCodexOAuthService) CreateTokenStorage(bundle *codex
 
 func pollOAuthStatusUntilDone(t *testing.T, router http.Handler, state string) map[string]any {
 	t.Helper()
-	// The OAuth flow polls for its callback file every 500ms, so a slow CI host
-	// needs a generous deadline. Pause between polls so this loop does not
-	// starve the flow goroutine it is waiting on.
-	deadline := time.Now().Add(15 * time.Second)
+	// The poll returns as soon as the session settles. The deadline only bounds
+	// a hung session: the flow polls for its callback file every 500ms, and a
+	// loaded Windows run has taken over 15s to save the credential. Pause
+	// between polls so this loop does not starve the flow goroutine.
+	deadline := time.Now().Add(30 * time.Second)
 	for first := true; time.Now().Before(deadline); first = false {
 		if !first {
 			time.Sleep(10 * time.Millisecond)

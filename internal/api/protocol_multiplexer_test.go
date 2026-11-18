@@ -342,7 +342,9 @@ func TestServerRejectsIncompleteUnauthenticatedRequestBodiesPromptly(t *testing.
 			}
 
 			// Verify authenticated requests and /healthz still work and capture bodies on errors.
-			httpClient := &http.Client{Timeout: 2 * time.Second}
+			// The authenticated request writes a request log too, so it shares the
+			// temp-file stall bound above.
+			httpClient := &http.Client{Timeout: 15 * time.Second}
 			healthResp, errHealth := httpClient.Get("http://" + addr + "/healthz")
 			if errHealth != nil {
 				t.Fatalf("healthz failed: %v", errHealth)
