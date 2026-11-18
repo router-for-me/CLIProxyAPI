@@ -731,6 +731,18 @@ func (m *Manager) buildCodexContinuityCandidates(
 			InCooldown: blocked && reason == blockReasonCooldown,
 			Attributes: schedulerSafeAttributes(candidate.Attributes),
 		}
+		// Retry rounds skip a cooling-disabled credential until the reset its 429
+		// announced has passed (coolingDisabledRetryExclusions), so the gate must
+		// see it cooling down until then rather than ready.
+		if retryRound > 0 && m.cooldownDisabledForAuth(candidate) {
+			if reset := m.coolingDisabledRetryAtForRoute(candidate, model, checkModel, now); !reset.IsZero() {
+				// An ordinary block with no end (next is zero) keeps no deadline.
+				if !item.InCooldown || (!next.IsZero() && reset.After(next)) {
+					next = reset
+				}
+				item.InCooldown = true
+			}
+		}
 		if item.InCooldown {
 			item.CooldownReason = continuityCooldownReason(candidate, checkModel)
 			if !next.IsZero() {

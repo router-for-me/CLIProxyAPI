@@ -1932,3 +1932,43 @@ type codexCredScoped503Err struct{}
 func (codexCredScoped503Err) Error() string            { return "upstream 503" }
 func (codexCredScoped503Err) StatusCode() int          { return http.StatusServiceUnavailable }
 func (codexCredScoped503Err) IsCredentialScoped() bool { return true }
+
+// A retry round skips a cooling-disabled credential until the reset its 429
+// announced has passed, so the continuity gate must report it cooling down
+// until then: a Ready decision would start a round with nothing to pick. The
+// first round still offers it, as selection does.
+func TestCodexContinuityCandidatesReportCoolingDisabledReset(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&continuityTestExecutor{provider: "codex"})
+	const id, model = "codex-cooling-disabled-reset", "gpt-5-codex"
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); errRegister != nil {
+		t.Fatalf("register: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+
+	retryAfter := time.Hour
+	manager.MarkResult(context.Background(), Result{AuthID: id, Provider: "codex", Model: model,
+		Error: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage limit reached"}, RetryAfter: &retryAfter})
+	manager.mu.RLock()
+	reset := coolingDisabledRetryAt(manager.auths[id], model)
+	manager.mu.RUnlock()
+	now := time.Now()
+	if !reset.After(now) {
+		t.Fatalf("reset = %v, want a live reset after the 429", reset)
+	}
+
+	retry := manager.buildCodexContinuityCandidates(context.Background(), []string{"codex"}, model, cliproxyexecutor.Options{}, 1, true, 1, now)
+	if len(retry) != 1 || !retry[0].InCooldown || retry[0].CooldownUntil == nil || !retry[0].CooldownUntil.Equal(reset) {
+		t.Fatalf("retry-round candidates = %+v, want %s cooling down until %v", retry, id, reset.UTC())
+	}
+
+	first := manager.buildCodexContinuityCandidates(context.Background(), []string{"codex"}, model, cliproxyexecutor.Options{}, 0, false, 1, now)
+	if len(first) != 1 || first[0].InCooldown {
+		t.Fatalf("first-round candidates = %+v, want %s offered as ready", first, id)
+	}
+}
