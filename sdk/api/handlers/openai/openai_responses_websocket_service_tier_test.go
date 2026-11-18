@@ -24,7 +24,7 @@ func TestResponsesWebsocketUltrafastCreateLeavesIneligiblePinnedAuth(t *testing.
 	manager.RegisterExecutor(executor)
 	model := "ultrafast-ws-model"
 	for _, auth := range []*coreauth.Auth{
-		{ID: "ws-pro", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true", "plan_type": "pro", "priority": "10"}, Metadata: map[string]any{"access_token": "pro-token"}},
+		{ID: "ws-pro", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true", "plan_type": "prolite", "priority": "10"}, Metadata: map[string]any{"access_token": "pro-token"}},
 		{ID: "ws-promax", Provider: "codex", Status: coreauth.StatusActive, Attributes: map[string]string{"websockets": "true", "plan_type": "promax"}, Metadata: map[string]any{"access_token": "promax-token"}},
 	} {
 		if _, err := manager.Register(context.Background(), auth); err != nil {

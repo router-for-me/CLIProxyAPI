@@ -24,8 +24,8 @@ func AllowsServiceTier(auth *Auth, serviceTier string) bool {
 }
 
 // allowsCodexUltrafast reports whether auth may receive service_tier=ultrafast.
-// Codex accounts other than API keys need the ProMax plan; API keys and other
-// providers keep their upstream's service-tier contract.
+// Codex OAuth accounts on Pro and ProMax plans support Ultrafast. API keys and
+// other providers keep their upstream's service-tier contract.
 func allowsCodexUltrafast(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -33,7 +33,12 @@ func allowsCodexUltrafast(auth *Auth) bool {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || auth.AuthKind() == AuthKindAPIKey {
 		return true
 	}
-	return strings.EqualFold(authAttribute(auth, "plan_type"), "promax")
+	switch strings.ToLower(strings.TrimSpace(authAttribute(auth, "plan_type"))) {
+	case "pro", "promax":
+		return true
+	default:
+		return false
+	}
 }
 
 // codexUltrafastUnavailableError explains a selection failure caused only by
@@ -75,9 +80,9 @@ func (m *Manager) codexUltrafastUnavailableError(ctx context.Context, providers 
 	if !excluded {
 		return nil
 	}
-	message := fmt.Sprintf("service_tier ultrafast is unavailable for model %s: no enabled credential eligible for it serves this model (Codex accounts need plan_type promax); request priority or default instead", model)
+	message := fmt.Sprintf("service_tier ultrafast is unavailable for model %s: no enabled credential eligible for it serves this model (Codex accounts need plan_type pro or promax); request priority or default instead", model)
 	if pinnedAuthID != "" {
-		message = fmt.Sprintf("service_tier ultrafast is unavailable for model %s: this session is pinned to a credential that is not eligible for it (Codex accounts need plan_type promax); start a new session or request priority or default instead", model)
+		message = fmt.Sprintf("service_tier ultrafast is unavailable for model %s: this session is pinned to a credential that is not eligible for it (Codex accounts need plan_type pro or promax); start a new session or request priority or default instead", model)
 	}
 	return &Error{Code: ErrorCodeServiceTierUnavailable, Message: message, HTTPStatus: http.StatusBadRequest}
 }

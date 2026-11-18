@@ -40,7 +40,7 @@ func TestExecuteStreamWithAuthManagerRoutesUltrafastFromRequestBody(t *testing.T
 			}
 		}
 	}
-	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "handler-promax" || got[1] != "handler-pro" {
-		t.Fatalf("selected auths = %v, want [handler-promax handler-pro]", got)
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != "handler-pro" || got[1] != "handler-pro" {
+		t.Fatalf("selected auths = %v, want [handler-pro handler-pro]", got)
 	}
 }

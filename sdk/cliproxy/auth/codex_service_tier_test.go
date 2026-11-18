@@ -101,10 +101,10 @@ func TestUltrafastSelectionUsesOnlyEligibleCodexAccounts(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			manager, _, model := newUltrafastManager(t, testCase.selector())
 			for _, tier := range []string{"ultrafast", "Ultrafast"} {
-				for index := 0; index < 3; index++ {
+				for index := 0; index < 6; index++ {
 					got, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"codex"}, model, tierOptions(tier, nil), nil)
-					if errPick != nil || got == nil || got.ID != "promax" {
-						t.Fatalf("%s pick #%d = %s, %v; want promax", tier, index, authID(got), errPick)
+					if errPick != nil || got == nil || (got.ID != "pro" && got.ID != "promax") {
+						t.Fatalf("%s pick #%d = %s, %v; want pro or promax", tier, index, authID(got), errPick)
 					}
 				}
 			}
@@ -135,11 +135,11 @@ func TestUltrafastSessionAffinityNeverReusesIneligibleBinding(t *testing.T) {
 	if got := pick("priority"); got != "pro" {
 		t.Fatalf("initial binding = %s, want pro", got)
 	}
-	if got := pick("ultrafast"); got != "promax" {
-		t.Fatalf("ultrafast on a pro-bound session = %s, want promax", got)
+	if got := pick("ultrafast"); got != "pro" {
+		t.Fatalf("ultrafast on a pro-bound session = %s, want pro", got)
 	}
-	if got := pick("ultrafast"); got != "promax" {
-		t.Fatalf("repeated ultrafast = %s, want promax", got)
+	if got := pick("ultrafast"); got != "pro" {
+		t.Fatalf("repeated ultrafast = %s, want pro", got)
 	}
 }
 
@@ -152,7 +152,7 @@ func TestUltrafastFailoverAndRetriesStayOnEligibleAccounts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			manager, executor, model := newUltrafastManager(t, NewSessionAffinitySelector(&RoundRobinSelector{}))
 			manager.SetRetryConfig(2, time.Millisecond, 0)
-			executor.fail["promax"] = ultrafastQuotaError{}
+			executor.fail["pro"] = ultrafastQuotaError{}
 			opts := tierOptions("ultrafast", map[string]any{cliproxyexecutor.DerivedSessionIDMetadataKey: "session-" + uuid.NewString()})
 			execute := func() error {
 				if stream {
@@ -163,21 +163,26 @@ func TestUltrafastFailoverAndRetriesStayOnEligibleAccounts(t *testing.T) {
 				return err
 			}
 
-			// The first request exhausts ProMax; the second finds it cooling down.
+			// The first request exhausts Pro; the second finds it cooling down.
 			for attempt := 0; attempt < 2; attempt++ {
-				err := execute()
-				var authErr *Error
-				if err == nil || (errors.As(err, &authErr) && authErr.Code == ErrorCodeServiceTierUnavailable) {
-					t.Fatalf("attempt %d error = %v, want the eligible account's quota error", attempt, err)
+				if err := execute(); err != nil {
+					t.Fatalf("attempt %d error = %v, want failover to the other eligible account", attempt, err)
 				}
 			}
 			for _, id := range executor.recorded() {
-				if id != "promax" {
-					t.Fatalf("executor calls = %v, want promax only", executor.recorded())
+				if id != "pro" && id != "promax" {
+					t.Fatalf("executor calls = %v, want pro or promax only", executor.recorded())
 				}
 			}
 			if len(executor.recorded()) == 0 {
-				t.Fatal("promax was never attempted")
+				t.Fatal("no eligible account was attempted")
+			}
+			seenPromax := false
+			for _, id := range executor.recorded() {
+				seenPromax = seenPromax || id == "promax"
+			}
+			if !seenPromax {
+				t.Fatalf("executor calls = %v, want failover to promax", executor.recorded())
 			}
 
 			_, _, _, errPick := manager.pickNextMixed(context.Background(), []string{"codex"}, model, tierOptions("priority", nil), nil)
@@ -203,6 +208,11 @@ func TestUltrafastReportsUnavailableTierWithoutCallingIneligibleAccounts(t *test
 	t.Run("no eligible account", func(t *testing.T) {
 		manager, executor, model := newUltrafastManager(t, &RoundRobinSelector{})
 		manager.SetRetryConfig(2, time.Millisecond, 0)
+		pro, _ := manager.GetByID("pro")
+		pro.Attributes["plan_type"] = "prolite"
+		if _, errUpdate := manager.Update(WithSkipPersist(context.Background()), pro); errUpdate != nil {
+			t.Fatalf("Update(pro) error = %v", errUpdate)
+		}
 		promax, _ := manager.GetByID("promax")
 		promax.Disabled = true
 		promax.Status = StatusDisabled
@@ -216,8 +226,9 @@ func TestUltrafastReportsUnavailableTierWithoutCallingIneligibleAccounts(t *test
 	})
 
 	t.Run("session pinned to ineligible account", func(t *testing.T) {
-		manager, executor, model := newUltrafastManager(t, &RoundRobinSelector{})
-		opts := tierOptions("ultrafast", map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "pro"})
+		ineligible := &Auth{ID: "prolite", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"plan_type": "prolite"}, Metadata: map[string]any{"access_token": "prolite-token"}}
+		manager, executor, model := newUltrafastManager(t, &RoundRobinSelector{}, ineligible)
+		opts := tierOptions("ultrafast", map[string]any{cliproxyexecutor.PinnedAuthMetadataKey: "prolite"})
 		_, err := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, opts)
 		assertUnavailable(t, err, executor)
 	})
