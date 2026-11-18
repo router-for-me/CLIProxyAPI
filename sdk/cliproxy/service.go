@@ -131,12 +131,17 @@ type Service struct {
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
 
-	homeLifecycleMu              sync.Mutex
-	homeOwnershipMu              sync.Mutex
-	homeConfigCommitMu           sync.Mutex
-	homeConfigStageHook          func()
-	homeConfigCommitHook         func()
-	homeConfigRuntimeHook        func()
+	homeLifecycleMu       sync.Mutex
+	homeOwnershipMu       sync.Mutex
+	homeConfigCommitMu    sync.Mutex
+	homeConfigStageHook   func()
+	homeConfigCommitHook  func()
+	homeConfigRuntimeHook func()
+	// homeSubscriberRetryWaitFn replaces the Home subscriber's retry waits (after
+	// a lifetime ends, and after a pre-ACK staging failure) in tests, so they can
+	// release a retry instead of racing a randomized timer. Nil uses
+	// waitForHomeSubscriberRetry.
+	homeSubscriberRetryWaitFn    func(context.Context, time.Duration) bool
 	applyPprofConfigContextFn    func(context.Context, *config.Config) bool
 	updateServerClientsContextFn func(context.Context, *config.Config) bool
 	homeSupervisor               *homeSubscriberSupervisor
