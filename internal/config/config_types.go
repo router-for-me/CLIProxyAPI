@@ -276,6 +276,11 @@ type AntigravityConfig struct {
 	// is explicitly configured. Set to "0", "off", "false", "none", or
 	// "disabled" to explicitly disable the pause.
 	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
+
+	// CloudCodePassthrough exposes /antigravity-cloudcode/<api-key>/v1internal:<method>
+	// so native Antigravity clients (started with --cloud_code_endpoint) reach Cloud Code
+	// through a pooled Antigravity credential. Defaults to false.
+	CloudCodePassthrough bool `yaml:"cloud-code-passthrough,omitempty" json:"cloud-code-passthrough,omitempty"`
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.

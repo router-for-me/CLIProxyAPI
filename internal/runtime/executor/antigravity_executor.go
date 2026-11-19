@@ -1054,6 +1054,12 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 
 	// --- Whitelist: save only the headers we need from the original request ---
 	contentType := httpReq.Header.Get("Content-Type")
+	// A native Antigravity client (e.g. a Cloud Code passthrough) keeps its own UA so
+	// the upstream fingerprint matches the payload it built.
+	userAgent := strings.TrimSpace(httpReq.Header.Get("User-Agent"))
+	if !strings.HasPrefix(strings.ToLower(userAgent), "antigravity/") {
+		userAgent = resolveUserAgent(auth)
+	}
 
 	// Wipe ALL incoming headers
 	for k := range httpReq.Header {
@@ -1065,7 +1071,7 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 		httpReq.Header.Set("Content-Type", contentType)
 	}
 	// Content-Length is managed automatically by Go's http.Client from the Body
-	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
+	httpReq.Header.Set("User-Agent", userAgent)
 
 	// Inject Authorization: Bearer <token>
 	if err := e.PrepareRequest(httpReq, auth); err != nil {

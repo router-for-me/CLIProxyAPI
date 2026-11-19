@@ -1,0 +1,33 @@
+#!/bin/sh
+# Antigravity ACP wrapper that routes Cloud Code traffic through CLIProxyAPI.
+#
+# Point T3 Code at this file (Settings -> Providers -> Antigravity -> Binary path).
+# The file must stay named "antigravity" so T3 Code launches it like the stock CLI.
+#
+# The endpoint (it embeds the CLIProxyAPI key) is read from
+#   $CLIPROXY_ANTIGRAVITY_ENDPOINT, or
+#   ~/.config/cliproxy/antigravity-endpoint (one line, chmod 600), e.g.
+#   https://proxy-host:8317/antigravity-cloudcode/<api-key>
+# The real binary is $ANTIGRAVITY_REAL_BINARY or the newest one T3 Code downloaded.
+set -eu
+
+endpoint="${CLIPROXY_ANTIGRAVITY_ENDPOINT:-}"
+endpoint_file="${HOME}/.config/cliproxy/antigravity-endpoint"
+if [ -z "$endpoint" ] && [ -r "$endpoint_file" ]; then
+	endpoint="$(tr -d ' \t\r\n' < "$endpoint_file")"
+fi
+
+real="${ANTIGRAVITY_REAL_BINARY:-}"
+if [ -z "$real" ]; then
+	# shellcheck disable=SC2012 # version directories are hex hashes, no odd names
+	real="$(ls -t "${HOME}"/.t3/tools/antigravity-acp/*/versions/*/antigravity 2>/dev/null | head -n 1 || true)"
+fi
+if [ -z "$real" ] || [ ! -x "$real" ]; then
+	echo "antigravity wrapper: real Antigravity binary not found; set ANTIGRAVITY_REAL_BINARY" >&2
+	exit 127
+fi
+
+if [ "${1:-}" = "acp" ] && [ -n "$endpoint" ]; then
+	exec "$real" "$@" --cloud_code_endpoint "$endpoint"
+fi
+exec "$real" "$@"

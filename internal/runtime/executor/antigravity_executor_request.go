@@ -655,6 +655,11 @@ func resolveAntigravityRequestBaseURL(auth *cliproxyauth.Auth) string {
 	return antigravityBaseURLDaily
 }
 
+// AntigravityRequestBaseURL returns the Cloud Code base URL used for requests made with auth.
+func AntigravityRequestBaseURL(auth *cliproxyauth.Auth) string {
+	return resolveAntigravityRequestBaseURL(auth)
+}
+
 func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
 	return resolveAntigravityRequestBaseURL(auth)
 }

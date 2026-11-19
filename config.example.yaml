@@ -1277,6 +1277,10 @@ oauth:
       #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2)
       # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
                                     # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
+      # cloud-code-passthrough: false # optional: expose /antigravity-cloudcode/<api-key>/v1internal:<method> so native
+                                    # Antigravity clients (e.g. `antigravity acp --cloud_code_endpoint=https://host:8317/antigravity-cloudcode/<api-key>`)
+                                    # reach Cloud Code through a pooled Antigravity credential; requests are forwarded verbatim
+                                    # except for the credential and the top-level "project" field
       # Use credits as a last resort after free-tier Claude quota is exhausted.
       antigravity-credits: true
 

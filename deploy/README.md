@@ -194,3 +194,39 @@ If a process was forcibly killed and left `.deploy.lock`, confirm no deploy is
 running before removing that empty directory. Keep the previous image cached for
 offline automatic rollback. Do not run `docker compose down -v` or broad cleanup
 commands as part of deployment.
+
+## Antigravity ACP through the proxy
+
+T3 Code's Antigravity provider runs the native `antigravity acp` binary, which
+talks to Cloud Code directly with its own Google login. To send that traffic
+through the proxy's Antigravity pool instead:
+
+1. Enable the passthrough in the runtime config and let hot reload pick it up:
+
+   ```yaml
+   oauth:
+     providers:
+       antigravity:
+         cloud-code-passthrough: true
+   ```
+
+2. On each Mac, store the endpoint (it embeds a client API key from `access.api-keys`):
+
+   ```sh
+   mkdir -p ~/.config/cliproxy
+   printf '%s\n' 'https://<proxy-host>/antigravity-cloudcode/<api-key>' > ~/.config/cliproxy/antigravity-endpoint
+   chmod 600 ~/.config/cliproxy/antigravity-endpoint
+   ```
+
+3. Copy [`antigravity-acp/antigravity`](antigravity-acp/antigravity) somewhere
+   stable (keep the file name `antigravity`), make it executable, and set it as
+   T3 Code → Settings → Providers → Antigravity → Binary path. Restart the
+   provider.
+
+The wrapper starts the newest T3-managed Antigravity binary with
+`--cloud_code_endpoint`. The proxy replaces the client's Google token with a
+pooled credential and the request `project` with that credential's project; the
+rest of each `v1internal:*` call, including the client User-Agent, is forwarded
+unchanged. The key in the path is masked in proxy logs. Keep the provider
+signed in as usual; its own Google token is replaced by the proxy and never
+sent upstream.

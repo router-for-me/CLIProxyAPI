@@ -198,6 +198,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Add middleware
+	// Must precede logging: it masks the API key embedded in Antigravity Cloud Code paths.
+	engine.Use(antigravityCloudCodeKeyMiddleware())
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.CPATraceIDMiddleware())
 	engine.Use(s.maxRequestBodyBytesMiddleware())
