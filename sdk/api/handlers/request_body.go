@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -65,6 +66,12 @@ func decodeRequestBody(raw []byte, encoding string, maxBytes int64) ([]byte, err
 				return nil, err
 			}
 			body = decoded
+		case "gzip", "x-gzip":
+			decoded, err := decodeGzipRequestBody(body, maxBytes)
+			if err != nil {
+				return nil, err
+			}
+			body = decoded
 		default:
 			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
 		}
@@ -86,6 +93,27 @@ func decodeZstdRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
 	decoded, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode zstd request body: %w", err)
+	}
+	if maxBytes > 0 && int64(len(decoded)) > maxBytes {
+		return nil, &http.MaxBytesError{Limit: maxBytes}
+	}
+	return decoded, nil
+}
+
+func decodeGzipRequestBody(raw []byte, maxBytes int64) ([]byte, error) {
+	decoder, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip request decoder: %w", err)
+	}
+	defer func() { _ = decoder.Close() }()
+
+	var reader io.Reader = decoder
+	if maxBytes > 0 && maxBytes < math.MaxInt64 {
+		reader = io.LimitReader(decoder, maxBytes+1)
+	}
+	decoded, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode gzip request body: %w", err)
 	}
 	if maxBytes > 0 && int64(len(decoded)) > maxBytes {
 		return nil, &http.MaxBytesError{Limit: maxBytes}
