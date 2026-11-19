@@ -40,6 +40,21 @@ func ClaudeAgentSessionUUIDForRequest(headers http.Header, originalPayload, tran
 	return claudeAgentSessionUUID(headers, originalPayload, translatedPayload, metadataSets...)
 }
 
+// ClaudeSessionDatePinID returns the session the currentDate pin is keyed on.
+// An unconfirmed caller's session is derived from message text, so it is shared
+// by every conversation with the same opening until the first assistant text,
+// and changes when that text joins the history. When such a caller sends
+// X-Claude-Code-Session-Id, the pin follows that ID instead.
+func ClaudeSessionDatePinID(ctx context.Context, headers http.Header, sessionID string, confirmedClaudeCode bool) string {
+	if confirmedClaudeCode {
+		return sessionID
+	}
+	if parsed, errParse := uuid.Parse(claudeCodeHeader(ctx, headers, ClaudeCodeSessionHeader)); errParse == nil {
+		return parsed.String()
+	}
+	return sessionID
+}
+
 type claudeExecutionMetadataKey struct{}
 
 // WithClaudeExecutionMetadata attaches whether the request had an explicit execution session metadata to ctx.
