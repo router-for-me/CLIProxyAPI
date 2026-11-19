@@ -4879,6 +4879,41 @@
       }
     },
     {
+      "id": "gemini-4-neon-xhigh",
+      "object": "model",
+      "owned_by": "antigravity",
+      "type": "antigravity",
+      "supports_web_search": true,
+      "display_name": "Gemini 4 Neon",
+      "name": "gemini-4-neon-xhigh",
+      "description": "Gemini 4 Neon (XHigh)",
+      "context_length": 1048576,
+      "max_completion_tokens": 1048576,
+      "thinking": {
+        "min": 1,
+        "max": 65535,
+        "dynamic_allowed": true,
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image",
+        "audio",
+        "video"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      }
+    },
+    {
       "id": "gemini-3.8-flash-high",
       "object": "model",
       "owned_by": "antigravity",

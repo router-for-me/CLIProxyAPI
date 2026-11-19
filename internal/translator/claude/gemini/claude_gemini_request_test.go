@@ -618,3 +618,120 @@ func TestConvertGeminiRequestToClaude_FunctionResponsePartsMedia(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertGeminiRequestToClaude_PreservesPropertyNamedTypeAndSchemaValues(t *testing.T) {
+	for _, schemaField := range []string{"parameters", "parametersJsonSchema"} {
+		t.Run(schemaField, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"contents": [{"role": "user", "parts": [{"text": "Reply with exactly hi."}]}],
+				"tools": [{
+					"functionDeclarations": [{
+						"name": "inspect_schedule",
+						"description": "Inspect a sample schedule.",
+						"` + schemaField + `": {
+							"type": "OBJECT",
+							"properties": {
+								"schedule": {
+									"type": "OBJECT",
+									"properties": {
+										"type": {
+											"type": "STRING",
+											"enum": ["interval", "once"]
+										}
+									}
+								},
+								"kind_only": {
+									"type": "OBJECT",
+									"properties": {
+										"type": {
+											"enum": ["alpha", "beta"],
+											"description": "Kind without nested type keyword"
+										}
+									}
+								},
+								"flag": {
+									"properties": {
+										"type": true
+									}
+								},
+								"tags": {
+									"type": "ARRAY",
+									"items": false
+								},
+								"tuple_items": {
+									"type": "ARRAY",
+									"items": [true, {"type": "STRING"}]
+								},
+								"nullable_count": {
+									"type": ["integer", "null"]
+								},
+								"metadata": {
+									"type": "OBJECT",
+									"default": {"type": "KeepCase"},
+									"example": {"type": "AlsoKeepCase"}
+								}
+							}
+						}
+					}]
+				}]
+			}`)
+
+			out, errConvert := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, true)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToClaude() error = %v", errConvert)
+			}
+
+			schema := ojson.GetBytesNoCopy(out, "tools.0.input_schema")
+			if !schema.IsObject() {
+				t.Fatalf("tools.0.input_schema = %s, want object", schema.Raw)
+			}
+			if got := schema.Get("type").String(); got != "object" {
+				t.Fatalf("input_schema.type = %q, want object", got)
+			}
+			if got := schema.Get("properties.schedule.type").String(); got != "object" {
+				t.Fatalf("properties.schedule.type = %q, want object", got)
+			}
+
+			nestedTypeProp := schema.Get("properties.schedule.properties.type")
+			if !nestedTypeProp.IsObject() {
+				t.Fatalf("properties.schedule.properties.type = %s (type=%v), want object; out=%s", nestedTypeProp.Raw, nestedTypeProp.Type, out)
+			}
+			if got := nestedTypeProp.Get("type").String(); got != "string" {
+				t.Fatalf("properties.schedule.properties.type.type = %q, want string", got)
+			}
+			if enumArr := nestedTypeProp.Get("enum").Array(); len(enumArr) != 2 || enumArr[0].String() != "interval" || enumArr[1].String() != "once" {
+				t.Fatalf("properties.schedule.properties.type.enum = %s, want [\"interval\",\"once\"]", nestedTypeProp.Get("enum").Raw)
+			}
+
+			boolProp := schema.Get("properties.flag.properties.type")
+			if boolProp.Type != ojson.True {
+				t.Fatalf("properties.flag.properties.type = %s (type=%v), want boolean true", boolProp.Raw, boolProp.Type)
+			}
+			kindOnlyType := schema.Get("properties.kind_only.properties.type")
+			if !kindOnlyType.IsObject() || kindOnlyType.Get("description").String() != "Kind without nested type keyword" {
+				t.Fatalf("properties.kind_only.properties.type = %s, want object with description preserved", kindOnlyType.Raw)
+			}
+			if itemsBool := schema.Get("properties.tags.items"); itemsBool.Type != ojson.False {
+				t.Fatalf("properties.tags.items = %s (type=%v), want boolean false", itemsBool.Raw, itemsBool.Type)
+			}
+			if tupleBool := schema.Get("properties.tuple_items.items.0"); tupleBool.Type != ojson.True {
+				t.Fatalf("properties.tuple_items.items.0 = %s (type=%v), want boolean true", tupleBool.Raw, tupleBool.Type)
+			}
+			if tupleElemType := schema.Get("properties.tuple_items.items.1.type").String(); tupleElemType != "string" {
+				t.Fatalf("properties.tuple_items.items.1.type = %q, want string", tupleElemType)
+			}
+
+			arrayType := schema.Get("properties.nullable_count.type")
+			if !arrayType.IsArray() || len(arrayType.Array()) != 2 || arrayType.Array()[0].String() != "integer" || arrayType.Array()[1].String() != "null" {
+				t.Fatalf("properties.nullable_count.type = %s (type=%v), want [\"integer\",\"null\"]", arrayType.Raw, arrayType.Type)
+			}
+
+			if defType := schema.Get("properties.metadata.default.type").String(); defType != "KeepCase" {
+				t.Fatalf("properties.metadata.default.type = %q, want KeepCase", defType)
+			}
+			if exType := schema.Get("properties.metadata.example.type").String(); exType != "AlsoKeepCase" {
+				t.Fatalf("properties.metadata.example.type = %q, want AlsoKeepCase", exType)
+			}
+		})
+	}
+}
