@@ -46,10 +46,10 @@ def metadata(target):
             "version": "test-1", "target": target, "host_contract_version": "1",
             "source": {"repository": runtime.REPOSITORY, "commit": COMMIT,
                        "commit_time": "2026-09-22T00:00:00Z"},
-            "build": {"go_version": "go1.26.0", "cgo_enabled": False,
+            "build": {"go_version": "go1.26.0", "cgo_enabled": target.startswith("darwin/"),
                       "trimpath": True, "buildvcs": False,
                       "signing": "ad-hoc" if target.startswith("darwin/") else "unsigned"},
-            "capabilities": {"dynamic_library_plugins": target.startswith("windows/"),
+            "capabilities": {"dynamic_library_plugins": target.startswith(("windows/", "darwin/")),
                              "dynamic_library_plugins_tested": False, "parent_monitor": True,
                              "runtime_control": True, "ephemeral_api_key": True}}
 
@@ -127,6 +127,25 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime.package(self.root / "fixture-1", self.license, path.parent, metadata("linux/amd64"))
         self.assertEqual(path.read_bytes(), original)
+
+    def test_historical_macos_manifests_remain_readable(self):
+        for target in ("darwin/amd64", "darwin/arm64"):
+            meta = metadata(target)
+            meta["build"]["cgo_enabled"] = False
+            meta["capabilities"]["dynamic_library_plugins"] = False
+            runtime.verify(self.bundle(target, meta), COMMIT)
+
+    def test_cgo_and_plugin_capability_must_agree(self):
+        for target in runtime.TARGETS:
+            meta = metadata(target)
+            meta["capabilities"]["dynamic_library_plugins"] = not meta["capabilities"]["dynamic_library_plugins"]
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "capabilities"):
+                self.bundle(target, meta)
+        for target in ("linux/amd64", "windows/amd64"):
+            meta = metadata(target)
+            meta["build"]["cgo_enabled"] = True
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, "profile"):
+                self.bundle(target, meta)
 
     def test_tampered_archive_rejected(self):
         path = self.bundle()
@@ -248,17 +267,20 @@ class RuntimeTests(unittest.TestCase):
             if args[:2] == ("go", "env"):
                 return "go1.26.0"
             if args[:2] == ("go", "build"):
-                Path(args[args.index("-o") + 1]).write_bytes(executable("linux/amd64"))
+                Path(args[args.index("-o") + 1]).write_bytes(executable(target))
             return ""
-        with mock.patch.object(runtime, "run", side_effect=command):
-            path = runtime.build(self.root, self.root / "out", "linux/amd64", "test")
-        manifest, _ = runtime.verify(path, COMMIT)
-        args, kwargs = next(item for item in commands if item[0][:2] == ("go", "build"))
-        self.assertIn("-trimpath", args)
-        self.assertIn("-buildvcs=false", args)
-        self.assertEqual(kwargs["env"]["CGO_ENABLED"], "0")
-        self.assertEqual(kwargs["env"]["GOTOOLCHAIN"], "local")
-        self.assertEqual(manifest["build"]["go_version"], "go1.26.0")
+        for target in runtime.TARGETS:
+            commands.clear()
+            with mock.patch.object(runtime, "run", side_effect=command), mock.patch.object(runtime.sys, "platform", "darwin"):
+                path = runtime.build(self.root, self.root / target.replace("/", "-"), target, "test")
+            manifest, _ = runtime.verify(path, COMMIT)
+            args, kwargs = next(item for item in commands if item[0][:2] == ("go", "build"))
+            self.assertIn("-trimpath", args)
+            self.assertIn("-buildvcs=false", args)
+            self.assertEqual(kwargs["env"]["CGO_ENABLED"], "1" if target.startswith("darwin/") else "0")
+            self.assertEqual(kwargs["env"]["GOTOOLCHAIN"], "local")
+            self.assertEqual(manifest["build"]["cgo_enabled"], target.startswith("darwin/"))
+            self.assertEqual(manifest["build"]["go_version"], "go1.26.0")
 
 
 if __name__ == "__main__":

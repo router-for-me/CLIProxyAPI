@@ -72,7 +72,8 @@ jobs:
             id: linux-arm64
             runner: ubuntu-22.04-arm
     env:
-      CGO_ENABLED: '0'
+      # The Darwin build must be native so it can load plugins and be smoke tested on the same runner.
+      CGO_ENABLED: ${{ startsWith(matrix.target, 'darwin/') && '1' || '0' }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v6
@@ -158,6 +159,7 @@ jobs:
           index = json.loads((output / 'runtime-index.json').read_text())
           hashes = {m['target']: m['binary']['sha256'] for m in index['targets']}
           assert all(r['binary_sha256'] == hashes[r['target']] for r in reports)
+          assert all(r.get('dynamic_library_plugins_tested') is r['target'].startswith('darwin/') for r in reports)
           (output / 'validation.json').write_text(json.dumps({'source_commit':os.environ['SOURCE_SHA'],'quality':'passed','native_smoke':reports}, indent=2)+'\n')
           import hashlib
           with (output / 'SHA256SUMS').open('a') as sums:

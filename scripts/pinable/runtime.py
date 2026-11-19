@@ -143,11 +143,14 @@ def validate_manifest(manifest: dict) -> str:
             "invalid build metadata")
     require(isinstance(build["go_version"], str) and build["go_version"].startswith("go1."),
             "invalid Go toolchain")
-    require(build["cgo_enabled"] is False and build["trimpath"] is True and
+    # Keep historical CGO=0 macOS artifacts verifiable without weakening other targets.
+    require(type(build["cgo_enabled"]) is bool and
+            (system == "darwin" or build["cgo_enabled"] is False) and
+            build["trimpath"] is True and
             build["buildvcs"] is False, "runtime does not use the pinned portable build profile")
     require(build["signing"] == ("ad-hoc" if system == "darwin" else "unsigned"),
             "unexpected signing policy")
-    require(manifest["capabilities"] == {"dynamic_library_plugins": system == "windows",
+    require(manifest["capabilities"] == {"dynamic_library_plugins": system == "windows" or build["cgo_enabled"],
             "dynamic_library_plugins_tested": False,
             "parent_monitor": True, "runtime_control": True, "ephemeral_api_key": True},
             "unexpected runtime capabilities")
@@ -287,7 +290,8 @@ def build(root: Path, output: Path, target: str, version: str) -> Path:
     version = version or stamp.strftime("%Y%m%d%H%M%S") + "-" + commit[:12]
     archive_name(version, target)
     # Force the embedded toolchain, not an implicit download or a user's GOFLAGS.
-    env = dict(os.environ, CGO_ENABLED="0", GOOS=system, GOARCH=arch, GOAMD64="v1",
+    cgo_enabled = system == "darwin"
+    env = dict(os.environ, CGO_ENABLED="1" if cgo_enabled else "0", GOOS=system, GOARCH=arch, GOAMD64="v1",
                GOARM64="v8.0", GOFLAGS="", GOEXPERIMENT="", GOTOOLCHAIN="local",
                GOWORK="off", GOENV="off")
     go_version = run("go", "env", "GOVERSION", env=env)
@@ -297,9 +301,9 @@ def build(root: Path, output: Path, target: str, version: str) -> Path:
     metadata = {"schema_version": 1, "component": "cliproxyapi", "profile": PROFILE,
                 "version": version, "target": target, "host_contract_version": "1",
                 "source": {"repository": REPOSITORY, "commit": commit, "commit_time": commit_time},
-                "build": {"go_version": go_version, "cgo_enabled": False, "trimpath": True,
+                "build": {"go_version": go_version, "cgo_enabled": cgo_enabled, "trimpath": True,
                           "buildvcs": False, "signing": "ad-hoc" if system == "darwin" else "unsigned"},
-                "capabilities": {"dynamic_library_plugins": system == "windows",
+                "capabilities": {"dynamic_library_plugins": system == "windows" or cgo_enabled,
                                  "dynamic_library_plugins_tested": False, "parent_monitor": True,
                                  "runtime_control": True, "ephemeral_api_key": True}}
     with tempfile.TemporaryDirectory(prefix="pinable-runtime-build-") as work:

@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import runtime
 
 
-def request(port, path, key="", method="GET", data: bytes | None = None):
+def request(port, path, key="", method="GET", data: bytes | None = None, include_headers=False):
     headers = {"Authorization": "Bearer " + key} if key else {}
     if data is not None:
         headers["Content-Type"] = "application/json"
@@ -31,9 +31,11 @@ def request(port, path, key="", method="GET", data: bytes | None = None):
     client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         with client.open(req, timeout=2) as response:
-            return response.status, response.read()
+            result = (response.status, response.read())
+            return (*result, response.headers) if include_headers else result
     except urllib.error.HTTPError as error:
-        return error.code, error.read()
+        result = (error.code, error.read())
+        return (*result, error.headers) if include_headers else result
 
 
 def discovery_probe(command, cwd, env, allow_unavailable_multicast=False):
@@ -79,6 +81,81 @@ def stop(process):
         process.wait(timeout=10)
 
 
+def build_darwin_plugin(root: Path, arch: str, env):
+    """Compile only the checked-in, dependency-free C ABI demo; never fetch plugins."""
+    runtime.require(arch in ("amd64", "arm64"), "unsupported Darwin plugin architecture")
+    source = Path(__file__).resolve().parents[2] / "examples/plugin/management-api/c/src/plugin.c"
+    runtime.require(source.is_file(), "trusted repository management-api C demo is missing")
+    plugin_dir = root / "plugins" / "darwin" / arch
+    plugin_dir.mkdir(parents=True)
+    library = plugin_dir / "management-api-c.dylib"
+    native_arch = {"amd64": "x86_64", "arm64": "arm64"}[arch]
+    subprocess.run(["/usr/bin/xcrun", "clang", "-dynamiclib", "-arch", native_arch,
+                    "-o", str(library), str(source)], check=True, env=env, timeout=60)
+    result = subprocess.check_output(["/usr/bin/lipo", "-archs", str(library)],
+                                     env=env, text=True, timeout=10)
+    runtime.require(result.strip().split() == [native_arch], "demo plugin architecture mismatch")
+    subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(library)],
+                   check=True, env=env, timeout=15)
+    subprocess.run(["/usr/bin/codesign", "--verify", "--strict", str(library)],
+                   check=True, env=env, timeout=15)
+    return library
+
+
+def verify_plugin_response(code, body, headers):
+    runtime.require(code == 200 and headers.get("X-CPA-SUPPORT-PLUGIN") == "1",
+                    "Darwin release must advertise native plugin support")
+    listing = json.loads(body)
+    entries = listing.get("plugins", [])
+    matches = [entry for entry in entries if entry.get("id") == "management-api-c"]
+    runtime.require(listing.get("plugins_enabled") is True and len(matches) == 1,
+                    "isolated demo plugin not discovered")
+    plugin = matches[0]
+    runtime.require(plugin.get("registered") is True and plugin.get("effective_enabled") is True
+                    and (plugin.get("metadata") or {}).get("name") == "example-management-api-c",
+                    "demo plugin was not actually registered and enabled")
+
+
+def smoke_darwin_plugin(binary: Path, root: Path, arch: str, env):
+    """Exercise the staged release binary, not a separately rebuilt Go host."""
+    case = root / "native-plugin"
+    case.mkdir()
+    build_darwin_plugin(case, arch, env)
+    key = secrets.token_hex(24)
+    api_key = secrets.token_hex(24)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    cfg = case / "config.yaml"
+    cfg.write_text(
+        f'host: "127.0.0.1"\nport: {port}\nauth-dir: "auths"\n'
+        f'api-keys: ["{api_key}"]\nremote-management:\n  allow-remote: false\n'
+        f'  secret-key: "{key}"\n  disable-control-panel: true\n  disable-auto-update-panel: true\n'
+        'discovery:\n  enabled: false\nplugins:\n  enabled: true\n  dir: "plugins"\n'
+        '  configs:\n    management-api-c:\n      enabled: true\n'
+        'logging-to-file: false\nusage-statistics-enabled: false\n', encoding="utf-8")
+    process = None
+    try:
+        with (case / "process.log").open("wb") as log:
+            process = subprocess.Popen([str(binary), "--config", str(cfg), "--local-model",
+                                        "--parent-pid", str(os.getpid())], cwd=case, env=env,
+                                       stdout=log, stderr=subprocess.STDOUT)
+            wait_until(lambda: request(port, "/v8/management/plugins", key)[0] == 200,
+                       process, "native plugin management endpoint")
+            verify_plugin_response(*request(port, "/v8/management/plugins", key, include_headers=True))
+            runtime.require(request(port, "/v8/management/plugins")[0] in (401, 403),
+                            "plugin management must remain authenticated")
+            code, body = request(port, "/v0/resource/plugins/management-api-c/status", key)
+            runtime.require(code == 200 and b"<main>Management API resource</main>" in body,
+                            "loaded demo plugin resource callback did not execute")
+            runtime.require(request(port, "/v0/management/runtime-shutdown", key, "POST")[0] == 202,
+                            "plugin fixture shutdown rejected")
+            process.wait(timeout=15)
+            runtime.require(process.returncode == 0, "plugin fixture did not exit cleanly")
+    finally:
+        stop(process)
+
+
 def smoke(artifact_dir: Path, allow_unavailable_multicast=False):
     manifests = list(artifact_dir.glob("*.manifest.json"))
     runtime.require(len(manifests) == 1, "expected one native platform artifact")
@@ -87,6 +164,7 @@ def smoke(artifact_dir: Path, allow_unavailable_multicast=False):
     arch = {"x86_64": "amd64", "AMD64": "amd64", "arm64": "arm64", "aarch64": "arm64", "ARM64": "arm64"}[platform.machine()]
     runtime.require(manifest["target"] == target + "/" + arch, "smoke must run on the native target architecture")
     checks = []
+    dynamic_library_plugins_tested = False
     with tempfile.TemporaryDirectory(prefix="pinable-runtime-smoke-") as tmp:
         root = Path(tmp)
         binary = root / runtime.binary_name(manifest["target"])
@@ -113,6 +191,9 @@ def smoke(artifact_dir: Path, allow_unavailable_multicast=False):
         if target == "darwin":
             subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
             checks.append("ad-hoc signature verified after extraction")
+            smoke_darwin_plugin(binary, root, arch, env)
+            dynamic_library_plugins_tested = True
+            checks.append("native same-architecture demo dylib registered and resource callback executed; support header 1")
 
         for test_parent_exit in (False, True):
             case = root / ("parent-exit" if test_parent_exit else "management")
@@ -243,7 +324,8 @@ def smoke(artifact_dir: Path, allow_unavailable_multicast=False):
                 stop(parent)
     report = {"schema_version": 1, "target": manifest["target"], "source_commit": manifest["source"]["commit"],
               "binary_sha256": manifest["binary"]["sha256"], "status": "passed", "checks": checks,
-              "live_provider_api_tested": False}
+              "live_provider_api_tested": False,
+              "dynamic_library_plugins_tested": dynamic_library_plugins_tested}
     (artifact_dir / "smoke-report.json").write_bytes(runtime.encoded(report))
     print(json.dumps(report, indent=2))
 

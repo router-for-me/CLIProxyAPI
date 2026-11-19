@@ -31,17 +31,26 @@ maintainer validation of a locked binary.
 | linux/amd64 | ubuntu-22.04 | tar.gz |
 | linux/arm64 | ubuntu-22.04-arm | tar.gz |
 
-All use `desktop-portable`: CGO=0, baseline CPU settings, `-trimpath`,
+All use `desktop-portable`: CGO=1 on macOS and CGO=0 on Linux/Windows, baseline CPU settings, `-trimpath`,
 `-buildvcs=false`, exact go.mod toolchain, and explicit version/full source SHA/
 source commit timestamp in the executable. The builder requires clean source and
 does not fetch source, refresh model catalogs, or modify source files. Normal Go
 dependency downloads retain checksum verification. Linux binaries are checked for
 absence of a dynamic interpreter.
 
-Dynamic-library support is platform-specific. CGO=0 removes that loader on
-macOS/Linux; Windows retains the existing syscall-based DLL loader. Manifests
-record this difference and `dynamic_library_plugins_tested=false`: this pipeline
-certifies the core runtime, not third-party plugins. No plugins are bundled.
+Dynamic-library support is platform-specific. Native macOS builds use CGO=1
+and Apple's C toolchain for the loader; Linux remains CGO=0 and Windows retains
+the existing syscall-based DLL loader. This does not enable plugins in user
+configuration. No plugins are bundled.
+
+Manifests describe build capabilities, with `dynamic_library_plugins_tested=false`
+at packaging time. Native smoke reports separately record successful loading of
+a benign test plugin; both macOS reports must provide this evidence before
+publication. This checks the loader, not arbitrary third-party plugin compatibility.
+Historical CGO=0 macOS manifests remain valid for verification/staging, while
+new releases require the current platform CGO defaults. Archive names, schema
+and Desktop host contract stay unchanged; Desktop still needs a reviewed hash
+lock update before consuming the new binaries.
 
 macOS thin amd64/arm64 executables are ad-hoc signed and verified before hashing.
 They are not Universal 2, Developer ID signed or notarized. Windows executables
