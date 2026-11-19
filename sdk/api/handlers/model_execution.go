@@ -30,6 +30,9 @@ type modelExecutionOptions struct {
 	Path                    string
 	CallerScope             string
 	AllowSpeechModel        bool
+	// Action carries a Gemini-compatible model action (for example embedContent) that
+	// must reach the executor through req.Metadata, since executors dispatch on it.
+	Action string
 }
 
 // ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.

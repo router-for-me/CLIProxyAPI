@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -2053,5 +2055,315 @@ func TestGeminiExecutorNativeInteractionsFromGeminiIssue7544(t *testing.T) {
 	searchTypes := ojson.GetBytesNoCopy(upstreamBody, "tools.0.search_types").Array()
 	if len(searchTypes) != 2 || searchTypes[0].String() != "web_search" || searchTypes[1].String() != "image_search" {
 		t.Fatalf("tools.0.search_types = %s, want [web_search, image_search]; body=%s", ojson.GetBytesNoCopy(upstreamBody, "tools.0.search_types").Raw, string(upstreamBody))
+	}
+}
+
+func TestGeminiExecutorEmbeddingRequestStaysNative(t *testing.T) {
+	type capture struct {
+		path string
+		body []byte
+		auth string
+	}
+	var got capture
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read request body: %v", errRead)
+		}
+		got = capture{path: r.URL.String(), body: append([]byte(nil), body...), auth: r.Header.Get("x-goog-api-key")}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"embedding":{"values":[0.1,0.2]},"usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}}`))
+	}))
+	defer server.Close()
+
+	for _, tt := range []struct {
+		name    string
+		action  string
+		payload string
+		want    string
+	}{
+		{
+			name:    "embedContent",
+			action:  helps.GeminiEmbedContentAction,
+			payload: `{"content":{"parts":[{"text":"hi"}]}}`,
+			want:    `/v1beta/models/gemini-embedding-001:embedContent`,
+		},
+		{
+			name:    "batchEmbedContents",
+			action:  helps.GeminiBatchEmbedContentsAction,
+			payload: `{"requests":[{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"a"}]}},{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"b"}]}}]}`,
+			want:    `/v1beta/models/gemini-embedding-001:batchEmbedContents`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got = capture{}
+			calls = 0
+			exec := NewGeminiExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{
+				Model:    "gemini-embedding-001",
+				Payload:  []byte(tt.payload),
+				Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: tt.action},
+			}
+			resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+			if err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if calls != 1 {
+				t.Fatalf("upstream calls = %d, want 1", calls)
+			}
+			if got.path != tt.want {
+				t.Fatalf("upstream path = %q, want %q", got.path, tt.want)
+			}
+			if got.auth != "test-key" {
+				t.Fatalf("x-goog-api-key = %q, want test-key", got.auth)
+			}
+			if strings.Contains(got.path, "alt=") {
+				t.Fatalf("embedding request must not carry alt: %q", got.path)
+			}
+			for _, field := range []string{"contents", "safetySettings", "tools", "generationConfig"} {
+				if ojson.GetBytes(got.body, field).Exists() {
+					t.Fatalf("upstream body must not contain %q: %s", field, got.body)
+				}
+			}
+			if string(resp.Payload) != `{"embedding":{"values":[0.1,0.2]},"usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}}` {
+				t.Fatalf("response payload = %s, want upstream body unchanged", resp.Payload)
+			}
+		})
+	}
+}
+
+func TestGeminiExecutorEmbeddingIgnoresAltAndZeroOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.String(), "alt=") {
+			t.Errorf("embedding request must not carry alt: %q", r.URL.String())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// No candidates and no usage metadata: still a valid embedding response.
+		_, _ = w.Write([]byte(`{"embedding":{"values":[]}}`))
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-embedding-001",
+		Payload:  []byte(`{"content":{"parts":[{"text":"hi"}]}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiEmbedContentAction},
+	}
+	resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, Alt: "sse"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"embedding":{"values":[]}}` {
+		t.Fatalf("response payload = %s", resp.Payload)
+	}
+}
+
+func TestGeminiExecutorEmbeddingMapsUpstreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":400,"message":"bad embedding input","status":"INVALID_ARGUMENT"}}`))
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-embedding-001",
+		Payload:  []byte(`{"content":{"parts":[{"text":"hi"}]}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiEmbedContentAction},
+	}
+	_, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want upstream error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("error = %v, want status %d", err, http.StatusBadRequest)
+	}
+}
+
+func TestGeminiExecutorEmbeddingRejectsInvalidPayloadWithoutUpstream(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-embedding-001",
+		Payload:  []byte(`[]`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiEmbedContentAction},
+	}
+	_, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want client error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+		t.Fatalf("error = %v, want status %d", err, http.StatusBadRequest)
+	}
+	if calls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls)
+	}
+}
+
+func TestGeminiInteractionsExecutorStillEmbedsNatively(t *testing.T) {
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"embedding":{"values":[1]}}`))
+	}))
+	defer server.Close()
+
+	exec := NewGeminiInteractionsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-embedding-001",
+		Payload:  []byte(`{"content":{"parts":[{"text":"hi"}]}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiEmbedContentAction},
+	}
+	if _, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if path != "/v1beta/models/gemini-embedding-001:embedContent" {
+		t.Fatalf("path = %q, want native embedding endpoint", path)
+	}
+}
+
+func TestGeminiExecutorDecisionsRequestStaysNative(t *testing.T) {
+	const upstreamBody = `{"answers":{"is_damaged":{"type":"noul","noul":0.99,"confidence":0.99}},"usage":{"total_input_tokens":100,"total_output_tokens":0,"total_tokens":100}}`
+	var gotPath, gotQuery, gotKey string
+	var gotBody []byte
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		body, _ := io.ReadAll(r.Body)
+		gotPath, gotQuery, gotKey, gotBody = r.URL.Path, r.URL.RawQuery, r.Header.Get("x-goog-api-key"), append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, upstreamBody)
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"is_damaged":{"type":"noul","instructions":"damaged?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}
+	resp, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, Alt: "sse"})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls)
+	}
+	if gotPath != "/v1beta/decisions" {
+		t.Fatalf("upstream path = %q, want model-less /v1beta/decisions", gotPath)
+	}
+	if gotQuery != "" {
+		t.Fatalf("upstream query = %q, want empty (no alt)", gotQuery)
+	}
+	if gotKey != "test-key" {
+		t.Fatalf("x-goog-api-key = %q, want test-key", gotKey)
+	}
+	if got := ojson.GetBytes(gotBody, "model").String(); got != "gemini-decision-1" {
+		t.Fatalf("upstream model = %q, want bare gemini-decision-1", got)
+	}
+	for _, field := range []string{"contents", "safetySettings", "tools", "generationConfig"} {
+		if ojson.GetBytes(gotBody, field).Exists() {
+			t.Fatalf("upstream body must not contain %q: %s", field, gotBody)
+		}
+	}
+	if string(resp.Payload) != upstreamBody {
+		t.Fatalf("response payload = %s, want upstream body unchanged", resp.Payload)
+	}
+}
+
+func TestGeminiExecutorDecisionsRejectsInvalidPayloadWithoutUpstream(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	for _, payload := range []string{`[]`, `{"input":"hi"}`, `{"input":"hi","questions":{},"stream":true}`} {
+		req := cliproxyexecutor.Request{
+			Model:    "gemini-decision-1",
+			Payload:  []byte(payload),
+			Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+		}
+		_, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+		if err == nil {
+			t.Fatalf("payload %s: Execute() error = nil, want client error", payload)
+		}
+		var status interface{ StatusCode() int }
+		if !errors.As(err, &status) || status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("payload %s: error = %v, want status %d", payload, err, http.StatusBadRequest)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", calls)
+	}
+}
+
+func TestGeminiExecutorDecisionsMapsUpstreamError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"code":429,"message":"quota","status":"RESOURCE_EXHAUSTED"}}`)
+	}))
+	defer server.Close()
+
+	exec := NewGeminiExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}
+	_, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if err == nil {
+		t.Fatal("Execute() error = nil, want upstream error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(err, &status) || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("error = %v, want status %d", err, http.StatusTooManyRequests)
+	}
+}
+
+func TestGeminiInteractionsExecutorRoutesDecisionsNatively(t *testing.T) {
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"answers":{},"usage":{"total_input_tokens":1,"total_output_tokens":0,"total_tokens":1}}`)
+	}))
+	defer server.Close()
+
+	exec := NewGeminiInteractionsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}
+	if _, err := exec.Execute(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if path != "/v1beta/decisions" {
+		t.Fatalf("path = %q, want native decisions endpoint (interactions must not hijack)", path)
 	}
 }

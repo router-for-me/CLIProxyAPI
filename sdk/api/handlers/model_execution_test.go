@@ -1697,3 +1697,73 @@ func TestMixedProviderStreamBootstrapRetriesDoNotShareNonCodexAttemptCount(t *te
 		t.Fatalf("chunks = %v, want response.completed", got)
 	}
 }
+
+func TestExecuteGeminiActionWithAuthManagerCarriesActionInRequestMetadata(t *testing.T) {
+	const model = "gemini-embedding-001"
+	for _, action := range []string{"embedContent", "batchEmbedContents"} {
+		t.Run(action, func(t *testing.T) {
+			executor := &modelExecutionCaptureExecutor{
+				provider: "gemini",
+				execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+					return coreexecutor.Response{Payload: []byte(`{"embedding":{"values":[1]}}`)}, nil
+				},
+			}
+			handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+			body, _, errMsg := handler.ExecuteGeminiActionWithAuthManager(context.Background(), "gemini", model, action, []byte(`{"content":{"parts":[{"text":"hi"}]}}`), "")
+			if errMsg != nil {
+				t.Fatalf("ExecuteGeminiActionWithAuthManager() error = %+v", errMsg)
+			}
+			if string(body) != `{"embedding":{"values":[1]}}` {
+				t.Fatalf("body = %q, want native embedding response", body)
+			}
+
+			gotReq, gotOpts := executor.captured()
+			if got, _ := gotReq.Metadata[coreexecutor.RequestActionMetadataKey].(string); got != action {
+				t.Fatalf("req.Metadata[action] = %#v, want %q", gotReq.Metadata[coreexecutor.RequestActionMetadataKey], action)
+			}
+			if got, _ := gotOpts.Metadata[coreexecutor.RequestActionMetadataKey].(string); got != action {
+				t.Fatalf("opts.Metadata[action] = %#v, want %q", gotOpts.Metadata[coreexecutor.RequestActionMetadataKey], action)
+			}
+		})
+	}
+}
+
+func TestExecuteWithAuthManagerLeavesRequestMetadataWithoutAction(t *testing.T) {
+	const model = "model-execution-no-action-model"
+	executor := &modelExecutionCaptureExecutor{provider: "gemini"}
+	handler := newModelExecutionHandler(t, model, executor, &sdkconfig.SDKConfig{})
+
+	if _, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "gemini", model, []byte(`{"contents":[]}`), ""); errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+	gotReq, gotOpts := executor.captured()
+	if _, ok := gotReq.Metadata[coreexecutor.RequestActionMetadataKey]; ok {
+		t.Fatalf("req.Metadata[action] = %#v, want absent", gotReq.Metadata[coreexecutor.RequestActionMetadataKey])
+	}
+	if _, ok := gotOpts.Metadata[coreexecutor.RequestActionMetadataKey]; ok {
+		t.Fatalf("opts.Metadata[action] = %#v, want absent", gotOpts.Metadata[coreexecutor.RequestActionMetadataKey])
+	}
+}
+
+func TestReapplyRequestActionMetadataRestoresDroppedAction(t *testing.T) {
+	rebuilt := coreexecutor.Request{Model: "gemini-embedding-001"}
+	got := reapplyRequestActionMetadata(rebuilt, "embedContent")
+	if v, _ := got.Metadata[coreexecutor.RequestActionMetadataKey].(string); v != "embedContent" {
+		t.Fatalf("restored action = %#v, want embedContent", got.Metadata[coreexecutor.RequestActionMetadataKey])
+	}
+
+	preserved := coreexecutor.Request{Metadata: map[string]any{"keep": "yes"}}
+	merged := reapplyRequestActionMetadata(preserved, "batchEmbedContents")
+	if merged.Metadata["keep"] != "yes" {
+		t.Fatalf("existing metadata dropped: %#v", merged.Metadata)
+	}
+	if v, _ := merged.Metadata[coreexecutor.RequestActionMetadataKey].(string); v != "batchEmbedContents" {
+		t.Fatalf("merged action = %#v", merged.Metadata[coreexecutor.RequestActionMetadataKey])
+	}
+
+	untouched := reapplyRequestActionMetadata(coreexecutor.Request{}, "")
+	if untouched.Metadata != nil {
+		t.Fatalf("empty action must not add metadata, got %#v", untouched.Metadata)
+	}
+}

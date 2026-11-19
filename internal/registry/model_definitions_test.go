@@ -462,3 +462,187 @@ func TestGetDevinModelsFallback(t *testing.T) {
 		t.Errorf("info.DisplayName = %q, want SWE-2", info.DisplayName)
 	}
 }
+
+func TestGeminiEmbeddingBuiltinsAreListedForGeminiAndAIStudio(t *testing.T) {
+	wantMethods := []string{"embedContent", "batchEmbedContents"}
+	for _, tt := range []struct {
+		name   string
+		models func() []*ModelInfo
+		want   bool
+	}{
+		{name: "gemini", models: GetGeminiModels, want: true},
+		{name: "aistudio", models: GetAIStudioModels, want: true},
+		{name: "vertex", models: GetGeminiVertexModels},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			byID := make(map[string]*ModelInfo)
+			for _, info := range tt.models() {
+				if info != nil {
+					byID[info.ID] = info
+				}
+			}
+			for _, id := range []string{geminiEmbedding001ModelID, geminiEmbedding2ModelID} {
+				info := byID[id]
+				if info == nil {
+					if tt.want {
+						t.Fatalf("%s is missing", id)
+					}
+					continue
+				}
+				if !tt.want {
+					t.Fatalf("%s must not be advertised in this channel", id)
+				}
+				if !reflect.DeepEqual(info.SupportedGenerationMethods, wantMethods) {
+					t.Errorf("%s supportedGenerationMethods = %v, want %v", id, info.SupportedGenerationMethods, wantMethods)
+				}
+				if info.Name != "models/"+id {
+					t.Errorf("%s name = %q, want %q", id, info.Name, "models/"+id)
+				}
+				if info.Thinking != nil {
+					t.Errorf("%s must not inherit thinking metadata", id)
+				}
+				if info.OutputTokenLimit != 0 {
+					t.Errorf("%s must not advertise an output token limit, got %d", id, info.OutputTokenLimit)
+				}
+			}
+		})
+	}
+}
+
+func TestWithGeminiEmbeddingBuiltinsReplacesCatalogEntries(t *testing.T) {
+	remote := []*ModelInfo{{ID: geminiEmbedding001ModelID, Object: "model", Type: "gemini"}}
+	merged := WithGeminiEmbeddingBuiltins(remote)
+
+	count := 0
+	for _, info := range merged {
+		if info != nil && info.ID == geminiEmbedding001ModelID {
+			count++
+			if len(info.SupportedGenerationMethods) == 0 {
+				t.Error("builtin entry must replace the remote definition")
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("found %d entries for %s, want 1", count, geminiEmbedding001ModelID)
+	}
+}
+
+func TestGeminiEmbeddingBuiltinsSurviveCatalogRefresh(t *testing.T) {
+	modelsCatalogStore.mu.Lock()
+	original := modelsCatalogStore.data
+	modelsCatalogStore.mu.Unlock()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+
+	// A refreshed catalog without any embedding definitions must not drop the built-ins.
+	catalog := []byte(`{"gemini":[{"id":"gemini-2.5-pro","object":"model","type":"gemini"}]}`)
+	if _, errPublish := publishCatalogBytes(catalog); errPublish != nil {
+		t.Fatalf("publishCatalogBytes() error = %v", errPublish)
+	}
+
+	byID := make(map[string]struct{})
+	for _, info := range GetGeminiModels() {
+		if info != nil {
+			byID[info.ID] = struct{}{}
+		}
+	}
+	for _, id := range []string{geminiEmbedding001ModelID, geminiEmbedding2ModelID} {
+		if _, ok := byID[id]; !ok {
+			t.Fatalf("%s disappeared after catalog refresh", id)
+		}
+	}
+}
+
+func TestGeminiDecisionBuiltinIsListedForGeminiAndAIStudioOnly(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		models func() []*ModelInfo
+		want   bool
+	}{
+		{name: "gemini", models: GetGeminiModels, want: true},
+		{name: "aistudio", models: GetAIStudioModels, want: true},
+		{name: "vertex", models: GetGeminiVertexModels},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var found *ModelInfo
+			for _, info := range tt.models() {
+				if info != nil && info.ID == geminiDecision1ModelID {
+					found = info
+				}
+			}
+			if !tt.want {
+				if found != nil {
+					t.Fatalf("%s must not be advertised in this channel", geminiDecision1ModelID)
+				}
+				return
+			}
+			if found == nil {
+				t.Fatalf("%s is missing", geminiDecision1ModelID)
+			}
+			if !reflect.DeepEqual(found.SupportedGenerationMethods, []string{"decisions"}) {
+				t.Errorf("supportedGenerationMethods = %v, want [decisions]", found.SupportedGenerationMethods)
+			}
+			if found.Name != "models/"+geminiDecision1ModelID {
+				t.Errorf("name = %q, want %q", found.Name, "models/"+geminiDecision1ModelID)
+			}
+			if found.Type != "gemini" || found.OwnedBy != "google" {
+				t.Errorf("type/ownedBy = %q/%q, want gemini/google", found.Type, found.OwnedBy)
+			}
+			if found.Thinking != nil {
+				t.Error("decision entry must not inherit thinking metadata")
+			}
+			if found.OutputTokenLimit != 0 {
+				t.Errorf("decision entry must not advertise an output token limit, got %d", found.OutputTokenLimit)
+			}
+		})
+	}
+}
+
+func TestWithGeminiDecisionBuiltinsReplacesCatalogEntry(t *testing.T) {
+	remote := []*ModelInfo{{ID: geminiDecision1ModelID, Object: "model", Type: "gemini"}}
+	merged := WithGeminiDecisionBuiltins(remote)
+
+	count := 0
+	for _, info := range merged {
+		if info != nil && info.ID == geminiDecision1ModelID {
+			count++
+			if len(info.SupportedGenerationMethods) == 0 {
+				t.Error("builtin entry must replace the remote definition")
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("found %d entries for %s, want 1", count, geminiDecision1ModelID)
+	}
+}
+
+func TestGeminiDecisionBuiltinSurvivesCatalogRefresh(t *testing.T) {
+	modelsCatalogStore.mu.Lock()
+	original := modelsCatalogStore.data
+	modelsCatalogStore.mu.Unlock()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+
+	catalog := []byte(`{"gemini":[{"id":"gemini-2.5-pro","object":"model","type":"gemini"}],"aistudio":[{"id":"gemini-2.5-flash","object":"model","type":"gemini"}]}`)
+	if _, errPublish := publishCatalogBytes(catalog); errPublish != nil {
+		t.Fatalf("publishCatalogBytes() error = %v", errPublish)
+	}
+
+	for name, models := range map[string]func() []*ModelInfo{"gemini": GetGeminiModels, "aistudio": GetAIStudioModels} {
+		found := false
+		for _, info := range models() {
+			if info != nil && info.ID == geminiDecision1ModelID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s: %s disappeared after catalog refresh", name, geminiDecision1ModelID)
+		}
+	}
+}

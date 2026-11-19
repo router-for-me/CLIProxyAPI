@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -129,6 +130,16 @@ func (e *GeminiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	// Native embedding actions are not chat requests and must bypass interactions,
+	// translation, thinking normalization, content synthesis, and zero-output checks.
+	if action := helps.GeminiEmbeddingAction(req); action != "" {
+		return e.executeEmbedding(ctx, auth, req, opts, action)
+	}
+	// The Decisions API is also native and non-streaming, and its model is named in
+	// the body, so it must never reach the interactions or chat paths.
+	if helps.GeminiDecisionAction(req) != "" {
+		return e.executeDecisions(ctx, auth, req, opts)
 	}
 	if shouldExecuteNativeInteractions(auth, opts) {
 		return e.executeInteractions(ctx, auth, req, opts)
@@ -1099,6 +1110,117 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	count := ojson.GetBytesNoCopy(data, "totalTokens").Int()
 	translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, data)
 	return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
+}
+
+// executeEmbedding performs a native non-streaming Gemini embedding request.
+//
+// The upstream body is returned unchanged: embedding responses are not chat
+// responses, so no translation, zero-output detection, or prompt-block handling
+// applies. Payload rules run once, after native preparation, as the final
+// semantic barrier.
+func (e *GeminiExecutor) executeEmbedding(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, action string) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	doc, errPrepare := helps.PrepareGeminiEmbeddingDoc(req.Payload, baseModel, action)
+	if errPrepare != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
+	}
+	url := fmt.Sprintf("%s/%s/models/%s:%s", resolveGeminiBaseURL(auth), glAPIVersion, baseModel, action)
+	return e.executeNativeNonStream(ctx, auth, req, opts, baseModel, url, "embedding", doc, helps.ParseGeminiUsage)
+}
+
+// executeDecisions performs a native non-streaming Gemini Decisions request.
+//
+// The Decisions API takes the model in the request body and exposes a model-less
+// endpoint, so the upstream URL carries no models/<id> segment. The response is
+// returned unchanged, and its usage uses the snake_case top-level "usage" shape.
+func (e *GeminiExecutor) executeDecisions(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	doc, errPrepare := helps.PrepareGeminiDecisionsDoc(req.Payload, baseModel)
+	if errPrepare != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
+	}
+	url := fmt.Sprintf("%s/%s/%s", resolveGeminiBaseURL(auth), glAPIVersion, helps.GeminiDecisionsAction)
+	return e.executeNativeNonStream(ctx, auth, req, opts, baseModel, url, "decisions", doc, helps.ParseGeminiDecisionsUsage)
+}
+
+// executeNativeNonStream posts a prepared native Gemini payload and returns the raw
+// upstream body. Shared by the embedding and decisions paths, which are both
+// non-chat, non-streaming endpoints that must not be translated or inspected for
+// zero-output chat artifacts.
+func (e *GeminiExecutor) executeNativeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel, url, logLabel string, doc *ojson.Doc, parseUsage func([]byte) usage.Detail) (resp cliproxyexecutor.Response, err error) {
+	apiKey := geminiAPIKey(auth)
+
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	original := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		original = opts.OriginalRequest
+	}
+
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "gemini", "", original, req, opts))
+	helps.FinalizePayloadDoc(ctx, doc)
+	body := doc.Bytes()
+
+	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if errNewReq != nil {
+		return resp, errNewReq
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		httpReq.Header.Set("x-goog-api-key", apiKey)
+	}
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   httpReq.Header.Clone(),
+		Body:      body,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient = reporter.TrackHTTPClient(httpClient)
+	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errDo)
+		return resp, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("gemini executor: close %s response body error: %v", logLabel, errClose)
+		}
+	}()
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+
+	data, errRead := io.ReadAll(httpResp.Body)
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	if errRead != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+		return resp, errRead
+	}
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		helps.LogWithRequestID(ctx).Debugf("%s request error, error status: %d, error message: %s", logLabel, httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		return resp, newGeminiStatusErr(httpResp.StatusCode, httpResp.Header, data)
+	}
+
+	reporter.ObserveResponseModel(data)
+	reporter.Publish(ctx, parseUsage(data))
+	resp = cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}
+	reporter.EnsurePublished(ctx)
+	return resp, nil
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini API key).
