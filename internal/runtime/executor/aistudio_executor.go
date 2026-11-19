@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -129,6 +130,16 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	}
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Native embedding actions must bypass chat translation and its content,
+	// thinking, and replay normalization.
+	if action := helps.GeminiEmbeddingAction(req); action != "" {
+		return e.executeEmbedding(ctx, auth, req, opts, baseModel, action)
+	}
+	// The Decisions API is native, non-streaming, and names its model in the body,
+	// so it must bypass chat translation as well.
+	if helps.GeminiDecisionAction(req) != "" {
+		return e.executeDecisions(ctx, auth, req, opts, baseModel)
+	}
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
@@ -221,6 +232,101 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
 	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON(out), Headers: wsResp.Headers.Clone()}
+	return resp, nil
+}
+
+// executeEmbedding performs a native non-streaming embedding request over the ws relay.
+//
+// Embedding responses are returned unchanged: no translation, zero-output
+// detection, or prompt-block handling applies, and no alt/SSE parameters are added.
+func (e *AIStudioExecutor) executeEmbedding(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel, action string) (resp cliproxyexecutor.Response, err error) {
+	doc, errPrepare := helps.PrepareGeminiEmbeddingDoc(req.Payload, baseModel, action)
+	if errPrepare != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
+	}
+	return e.executeNativeRelayNonStream(ctx, auth, req, opts, baseModel, e.buildEndpoint(baseModel, action, ""), doc, helps.ParseGeminiUsage)
+}
+
+// executeDecisions performs a native non-streaming Decisions request over the ws relay.
+//
+// The Decisions endpoint is model-less (the model travels in the body), so the
+// chat-oriented buildEndpoint helper must not be used here. The response is returned
+// unchanged and reports usage with the snake_case top-level "usage" shape.
+func (e *AIStudioExecutor) executeDecisions(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (resp cliproxyexecutor.Response, err error) {
+	doc, errPrepare := helps.PrepareGeminiDecisionsDoc(req.Payload, baseModel)
+	if errPrepare != nil {
+		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
+	}
+	endpoint := fmt.Sprintf("%s/%s/%s", glEndpoint, glAPIVersion, helps.GeminiDecisionsAction)
+	return e.executeNativeRelayNonStream(ctx, auth, req, opts, baseModel, endpoint, doc, helps.ParseGeminiDecisionsUsage)
+}
+
+// executeNativeRelayNonStream sends a prepared native payload over the ws relay and
+// returns the raw upstream body. Shared by the embedding and decisions paths, which
+// are both non-chat, non-streaming endpoints.
+func (e *AIStudioExecutor) executeNativeRelayNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel, endpoint string, doc *ojson.Doc, parseUsage func([]byte) usage.Detail) (resp cliproxyexecutor.Response, err error) {
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
+
+	original := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		original = opts.OriginalRequest
+	}
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, "gemini", "", original, req, opts))
+	helps.FinalizePayloadDoc(ctx, doc)
+	payload := doc.Bytes()
+
+	wsReq := &wsrelay.HTTPRequest{
+		Method:  http.MethodPost,
+		URL:     endpoint,
+		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Body:    payload,
+	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	customHeaderReq := &http.Request{Header: wsReq.Headers}
+	if ctx != nil {
+		customHeaderReq = customHeaderReq.WithContext(ctx)
+	}
+	util.ApplyCustomHeadersFromAttrs(customHeaderReq, attrs, opts.Headers)
+
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+		URL:       endpoint,
+		Method:    http.MethodPost,
+		Headers:   wsReq.Headers.Clone(),
+		Body:      payload,
+		Provider:  e.Identifier(),
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
+
+	wsResp, errRelay := e.relay.NonStream(ctx, authID, wsReq)
+	if errRelay != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errRelay)
+		return resp, errRelay
+	}
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers.Clone())
+	if len(wsResp.Body) > 0 {
+		helps.AppendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
+	}
+	if wsResp.Status < 200 || wsResp.Status >= 300 {
+		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
+	}
+
+	reporter.ObserveResponseModel(wsResp.Body)
+	reporter.Publish(ctx, parseUsage(wsResp.Body))
+	resp = cliproxyexecutor.Response{Payload: wsResp.Body, Headers: wsResp.Headers.Clone()}
+	reporter.EnsurePublished(ctx)
 	return resp, nil
 }
 

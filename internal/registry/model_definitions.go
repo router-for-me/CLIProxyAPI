@@ -24,7 +24,18 @@ const (
 	xaiBuiltinVideo15LiteModelID       = "grok-imagine-video-1.5-lite"
 	xaiBuiltinSpeechModelID            = "grok-tts"
 	xaiBuiltinSpeechVoiceModelID       = "grok-voice-tts-1.0"
+	geminiEmbedding001ModelID          = "gemini-embedding-001"
+	geminiEmbedding2ModelID            = "gemini-embedding-2"
+	geminiDecision1ModelID             = "gemini-decision-1"
 )
+
+// geminiEmbeddingBuiltinCreated is a display-only catalog timestamp shared by the
+// built-in Gemini embedding entries.
+const geminiEmbeddingBuiltinCreated int64 = 1750118400 // 2025-06-17
+
+// geminiDecisionBuiltinCreated is a display-only catalog timestamp for the
+// built-in Gemini decision entry.
+const geminiDecisionBuiltinCreated int64 = 1767225600 // 2026-01-01
 
 // staticModelsJSON mirrors the top-level structure of models.json.
 type staticModelsJSON struct {
@@ -56,7 +67,7 @@ func GetCopilotModels() []*ModelInfo {
 
 // GetGeminiModels returns the standard Gemini model definitions.
 func GetGeminiModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Gemini)
+	return WithGeminiDecisionBuiltins(WithGeminiEmbeddingBuiltins(cloneModelInfos(getModels().Gemini)))
 }
 
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
@@ -66,7 +77,7 @@ func GetGeminiVertexModels() []*ModelInfo {
 
 // GetAIStudioModels returns model definitions for AI Studio.
 func GetAIStudioModels() []*ModelInfo {
-	return cloneModelInfos(getModels().AIStudio)
+	return WithGeminiDecisionBuiltins(WithGeminiEmbeddingBuiltins(cloneModelInfos(getModels().AIStudio)))
 }
 
 // GetCodexFreeModels returns model definitions for the Codex free plan tier.
@@ -149,6 +160,28 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // that should not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo(), xaiBuiltinVideo15LiteModelInfo(), xaiBuiltinSpeechModelInfo(), xaiBuiltinSpeechVoiceModelInfo())
+}
+
+// WithGeminiEmbeddingBuiltins injects hard-coded Gemini embedding model definitions
+// that should not depend on remote models.json updates.
+//
+// Vertex is intentionally excluded: its embedding endpoints are model-specific
+// (predict instances/predictions for some models, embedContent for others), so the
+// Vertex catalog must not advertise these IDs until execution is implemented.
+func WithGeminiEmbeddingBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models,
+		geminiEmbedding001ModelInfo(),
+		geminiEmbedding2ModelInfo(),
+	)
+}
+
+// WithGeminiDecisionBuiltins injects the hard-coded Gemini decision model definition
+// that should not depend on remote models.json updates.
+//
+// Vertex is intentionally excluded: the Decisions API is only available on the
+// Gemini Developer API, so the Vertex catalog must not advertise this ID.
+func WithGeminiDecisionBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, geminiDecision1ModelInfo())
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {
@@ -371,6 +404,50 @@ func xaiBuiltinSpeechVoiceModelInfo() *ModelInfo {
 		DisplayName: "Grok Voice TTS 1.0",
 		Name:        xaiBuiltinSpeechVoiceModelID,
 		Description: "xAI Grok unary text-to-speech model.",
+	}
+}
+
+func geminiEmbedding001ModelInfo() *ModelInfo {
+	return geminiEmbeddingModelInfo(
+		geminiEmbedding001ModelID,
+		"Gemini Embedding 001",
+		"Stable Gemini text embedding model. Batch requests use batchEmbedContents.",
+	)
+}
+
+func geminiEmbedding2ModelInfo() *ModelInfo {
+	return geminiEmbeddingModelInfo(
+		geminiEmbedding2ModelID,
+		"Gemini Embedding 2",
+		"Gemini multimodal embedding model. Batch requests use batchEmbedContents.",
+	)
+}
+
+func geminiEmbeddingModelInfo(id, displayName, description string) *ModelInfo {
+	return &ModelInfo{
+		ID:                         id,
+		Object:                     "model",
+		Created:                    geminiEmbeddingBuiltinCreated,
+		OwnedBy:                    "google",
+		Type:                       "gemini",
+		DisplayName:                displayName,
+		Name:                       "models/" + id,
+		Description:                description,
+		SupportedGenerationMethods: []string{"embedContent", "batchEmbedContents"},
+	}
+}
+
+func geminiDecision1ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                         geminiDecision1ModelID,
+		Object:                     "model",
+		Created:                    geminiDecisionBuiltinCreated,
+		OwnedBy:                    "google",
+		Type:                       "gemini",
+		DisplayName:                "Gemini Decision 1",
+		Name:                       "models/" + geminiDecision1ModelID,
+		Description:                "Gemini structured-decision model. Non-streaming, returns calibrated probabilities, and emits zero output tokens.",
+		SupportedGenerationMethods: []string{"decisions"},
 	}
 }
 
