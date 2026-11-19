@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    runs-on: instabox-medium
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
