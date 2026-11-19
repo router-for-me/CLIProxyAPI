@@ -101,6 +101,10 @@ func (s *Service) Run(ctx context.Context) error {
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
 		})
+		// Register the models of stored credentials before the server listens. The
+		// watcher's first scan registers them too, but only after the port is open,
+		// and a request in between gets "unknown provider for model".
+		s.runModelRegistrationBatch(ctx, s.servableStoredCredentials(s.coreManager.List()))
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
@@ -403,6 +407,24 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		usage.StopDefault()
 	})
 	return shutdownErr
+}
+
+// servableStoredCredentials keeps the stored credentials whose provider already
+// has an executor. It drops config API-key auths, whose models
+// registerConfigAPIKeyAuths has already registered, and plugin-backed
+// credentials, whose executors register only after the server starts.
+func (s *Service) servableStoredCredentials(auths []*coreauth.Auth) []*coreauth.Auth {
+	stored := make([]*coreauth.Auth, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil || coreauth.IsConfigAPIKeyAuth(auth) {
+			continue
+		}
+		if _, ok := s.coreManager.Executor(auth.Provider); !ok {
+			continue
+		}
+		stored = append(stored, auth)
+	}
+	return stored
 }
 
 func (s *Service) ensureAuthDir() error {

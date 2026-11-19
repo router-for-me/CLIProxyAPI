@@ -177,7 +177,29 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 	if s == nil || s.coreManager == nil || len(auths) == 0 {
 		return
 	}
-	var registeredGen sync.Map
+	registeredGen := s.runModelRegistrationBatch(ctx, auths)
+	if ctx != nil && ctx.Err() != nil {
+		return
+	}
+
+	compatCache := s.newOpenAICompatibilityRegistrationCache()
+	for _, latest := range s.coreManager.List() {
+		if latest == nil || latest.ID == "" {
+			continue
+		}
+		lastGenVal, loaded := registeredGen.Load(latest.ID)
+		lastGen, _ := lastGenVal.(uint64)
+		if !loaded || latest.Generation != lastGen {
+			s.ensureExecutorsForAuthWithContext(ctx, latest, false)
+			s.completeModelRegistrationForAuthWithCache(ctx, latest, compatCache)
+		}
+	}
+}
+
+// runModelRegistrationBatch registers the models of auths and returns the
+// generation each one was registered at. It does not revisit other auths.
+func (s *Service) runModelRegistrationBatch(ctx context.Context, auths []*coreauth.Auth) *sync.Map {
+	registeredGen := &sync.Map{}
 	tasks := make([]modelRegistrationTask, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil {
@@ -197,22 +219,7 @@ func (s *Service) registerModelsForAuthBatch(ctx context.Context, auths []*corea
 		})
 	}
 	s.runModelRegistrationTasks(ctx, tasks)
-	if ctx != nil && ctx.Err() != nil {
-		return
-	}
-
-	compatCache := s.newOpenAICompatibilityRegistrationCache()
-	for _, latest := range s.coreManager.List() {
-		if latest == nil || latest.ID == "" {
-			continue
-		}
-		lastGenVal, loaded := registeredGen.Load(latest.ID)
-		lastGen, _ := lastGenVal.(uint64)
-		if !loaded || latest.Generation != lastGen {
-			s.ensureExecutorsForAuthWithContext(ctx, latest, false)
-			s.completeModelRegistrationForAuthWithCache(ctx, latest, compatCache)
-		}
-	}
+	return registeredGen
 }
 
 func (s *Service) runModelRegistrationTasks(ctx context.Context, tasks []modelRegistrationTask) {
