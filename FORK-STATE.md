@@ -12,22 +12,43 @@ Last updated: 2026-11-19
   `go vet` runs as an advisory step only).
 - Upstream PR-policy and release workflows removed from the fork:
   `agents-md-guard`, `pr-path-guard`, `auto-retarget-main-pr-to-dev`, `release`, `docker-image`.
+- Fork is level with upstream `main` (0 behind) as of `db7f177d`.
+- Local source checkout: `G:\Tools\CLIProxyAPI\src` (this repo). Runtime stays
+  `G:\Tools\CLIProxyAPI\core\cli-proxy-api.exe`, still upstream v8.0.78.
+
+## Merged upstream fixes (2026-11-19)
+
+| PR | What it fixes |
+| --- | --- |
+| router-for-me#7629 | Refresh token kept when the response omits it (was writing `""` → `invalid_grant` → account outage) |
+| router-for-me#7663 | Stored models registered before listen (400 `unknown provider` burst after restart) |
+| router-for-me#7636 | Rotation stops after an Antigravity `TOS_VIOLATION` instead of burning the pool |
+
+Not taken yet: #7666 (`context_length_exceeded` before first byte), #7678 (management saved-vs-runtime
+state, 14 files), #7643 (shorten overlong Codex call IDs — cheap follow-up).
+
+## CI
+
+`fork-ci` runs build + tests. Upstream never runs `go test`, so its own
+`TestModelsWithClientVersionReturnsCodexCatalog` assertion has been stale since `a5e8f69e`
+(dropped gpt-5.5's priority tier). That single test is skipped with a comment in
+`fork-ci.yml`; everything else enforces. `go vet` stays advisory because upstream's
+`internal/pluginhost/host_test.go` trips copylocks.
 
 ## Touched upstream files
 
-None. Our additions: `FORK.md`, `docs/agents/STATE.md`, `.github/workflows/fork-ci.yml`,
-`.github/workflows/sync-upstream.yml`.
+- `.github/workflows/fork-ci.yml` — advisory vet + one skipped upstream assertion (both commented).
+- Our additions: `FORK.md`, `FORK-STATE.md`, `.github/workflows/sync-upstream.yml`.
 
 ## Not verified yet
 
-- First green run of `fork-ci` on GitHub (no local Go toolchain on this machine; CI is the only
-  build evidence). Confirm with `gh run list -R ArcticSlayy/CLIProxyAPI`.
-- First `sync-upstream` run (expected "Nothing new upstream" while the fork sits on v8.0.78).
-- Scratch-run path of the sync workflow (branch input) — untested.
+- First green `fork-ci` run with the merged PRs (running now).
+- First `sync-upstream` run (expected "Nothing new upstream").
+- No local Go toolchain on this machine, so CI is the only build evidence.
 
 ## Next
 
-- Build the management UI against `docs/management-api-v8.md` in a fork-owned `ui/` directory.
-  Upstream ships no frontend; the API is the contract.
-- Only replace `G:\Tools\CLIProxyAPI\core\cli-proxy-api.exe` with a fork build after the fork's
-  CI is green and the local `update-core.ps1` verify/revert path has been exercised.
+- After CI is green: build a fork binary, exercise `update-core.ps1 -Rollback` against it, then
+  replace the running core.
+- Point `internal/managementasset/updater.go` at the UI fork's release so the core serves our
+  management build instead of upstream's.
