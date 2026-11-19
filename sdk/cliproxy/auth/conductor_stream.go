@@ -172,6 +172,13 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				result.CredentialScope = isCredentialScopedError(chunk.Err)
 				applyRequestScopedActionToResult(action, okAction, &result)
 				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				if okAction && !isRequestTerminatedError(chunk.Err) && !isRequestStopError(chunk.Err) && !isTOSViolationError(chunk.Err) {
+					if isRequestScopedStop(action, okAction) {
+						chunk.Err = wrapRequestStopError(chunk.Err)
+					} else {
+						chunk.Err = wrapRequestScopedContinueError(chunk.Err)
+					}
+				}
 			}
 			if !forward {
 				return false
@@ -427,6 +434,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		var errIntercept error
 		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		if errIntercept != nil {
+			if isCredentialTerminatedError(errIntercept) {
+				if auth != nil {
+					recordRequestRefusedAuth(ctx, auth.ID)
+				}
+				if upstreamErr != nil {
+					return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+				}
+			}
 			return nil, errIntercept
 		}
 		execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, execModel, executionModel != "")
@@ -503,6 +518,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 			errStream = annotateTrustedRetryAfterByHint(errStream)
 			syncPreferredUpstreamError(&upstreamErr, errStream)
+			if isRequestTerminatedError(errStream) || isRequestStopError(errStream) || isTOSViolationError(errStream) {
+				return nil, errStream
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(errStream)
@@ -596,6 +614,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 				discardStreamChunks(streamResult.Chunks)
+				if isRequestTerminatedError(bootstrapErr) || isRequestStopError(bootstrapErr) || isTOSViolationError(bootstrapErr) {
+					return nil, bootstrapErr
+				}
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(bootstrapErr)
 				}
@@ -606,7 +627,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				continue
 			}
-			if isRequestInvalidError(bootstrapErr) || cliproxyexecutor.IsUpstreamWebsocketTurnError(bootstrapErr) {
+			if isRequestTerminatedError(bootstrapErr) || isRequestStopError(bootstrapErr) || isTOSViolationError(bootstrapErr) || isRequestInvalidError(bootstrapErr) || cliproxyexecutor.IsUpstreamWebsocketTurnError(bootstrapErr) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)

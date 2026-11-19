@@ -219,6 +219,9 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			}
 			if resp.Terminate {
 				current.Terminate = true
+				if !beforeAuth {
+					current.TerminateScope = resp.TerminateScope
+				}
 				current.StatusCode = resp.StatusCode
 				current.ResponseHeaders = cloneHeader(resp.ResponseHeaders)
 				current.ResponseBody = bytes.Clone(resp.ResponseBody)

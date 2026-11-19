@@ -40,13 +40,19 @@ func TestLowercaseClaudeToolSchemaTypesReusesLowercaseSchema(t *testing.T) {
 	}
 }
 
-func TestLowercaseClaudeToolSchemaTypesNormalizesNonStringType(t *testing.T) {
-	input := []byte(`{"input_schema":{"type":123}}`)
+func TestLowercaseClaudeToolSchemaTypesPreservesNonStringType(t *testing.T) {
+	input := []byte(`{"input_schema":{"type":123,"properties":{"type":{"type":"STRING","enum":["a","b"]}}}}`)
 
 	output := lowercaseClaudeToolSchemaTypes(input)
 
-	if got := ojson.GetBytesNoCopy(output, "input_schema.type"); got.Type != ojson.String || got.String() != "123" {
-		t.Fatalf("input_schema.type = %s, want string 123", got.Raw)
+	if got := ojson.GetBytesNoCopy(output, "input_schema.type"); got.Type != ojson.Number || got.Int() != 123 {
+		t.Fatalf("input_schema.type = %s (type=%v), want number 123", got.Raw, got.Type)
+	}
+	if prop := ojson.GetBytesNoCopy(output, "input_schema.properties.type"); !prop.IsObject() {
+		t.Fatalf("input_schema.properties.type = %s, want object", prop.Raw)
+	}
+	if got := ojson.GetBytesNoCopy(output, "input_schema.properties.type.type").String(); got != "string" {
+		t.Fatalf("input_schema.properties.type.type = %q, want string", got)
 	}
 }
 

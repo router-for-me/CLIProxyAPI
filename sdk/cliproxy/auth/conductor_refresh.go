@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -1162,9 +1163,9 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if m == nil || auth == nil || execErr == nil {
 		return auth, false
 	}
-	// Request-scoped failures describe this request, not stale credentials.
-	// Refreshing would turn a direct error response into an implicit retry.
-	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
+	// Request-scoped and explicit hard-stop failures describe this request, not stale credentials.
+	// Refreshing would turn a direct stop/error response into an implicit retry.
+	if isRequestScopedError(execErr) || isRequestStopError(execErr) || isRequestTerminatedError(execErr) || isTOSViolationError(execErr) || !isUnauthorizedError(execErr) {
 		return auth, false
 	}
 	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
@@ -1504,7 +1505,8 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		return nil, err
 	}
 	now := time.Now()
-	refreshCanceled := (errors.Is(err, context.Canceled) || errors.Is(err, codex.ErrSIWCRefreshDeferred)) && !codex.IsRefreshOutcomeUnknown(err)
+	isRefreshDeferred := errors.Is(err, baseauth.ErrRefreshDeferred) || errors.Is(err, codex.ErrSIWCRefreshDeferred)
+	refreshCanceled := (errors.Is(err, context.Canceled) || isRefreshDeferred) && !codex.IsRefreshOutcomeUnknown(err)
 	if refreshCanceled {
 		var partitions interface {
 			OuterRefreshError() error
@@ -1512,7 +1514,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		}
 		if errors.As(err, &partitions) {
 			for _, partitionErr := range []error{partitions.OuterRefreshError(), partitions.SIWCRefreshError()} {
-				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
+				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, baseauth.ErrRefreshDeferred) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
 					refreshCanceled = false
 					break
 				}
@@ -1522,7 +1524,7 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	if refreshCanceled {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		backoff := time.Second
-		if errors.Is(err, codex.ErrSIWCRefreshDeferred) {
+		if isRefreshDeferred {
 			backoff = refreshCheckInterval
 		}
 		retryAfter := now.Add(backoff)
