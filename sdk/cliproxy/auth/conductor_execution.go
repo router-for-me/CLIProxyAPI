@@ -396,6 +396,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
+				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) {
+					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errCredits)
+				}
+				errCredits = unwrapExecutionBoundaryError(errCredits)
+				if pinnedThread {
+					errCredits = claudeThreadReplayError(errCredits)
+				}
 				return cliproxyexecutor.Response{}, errCredits
 			} else if ok {
 				return resp, nil
@@ -694,6 +701,18 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
+				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) ||
+					isTOSViolationError(errCredits) || isAntigravityValidationRequiredError(errCredits) {
+					return nil, unwrapExecutionBoundaryError(errCredits)
+				}
+				errCredits = unwrapExecutionBoundaryError(errCredits)
+				if pinnedThread {
+					errCredits = claudeThreadReplayError(errCredits)
+				}
+				var bootstrapErr *streamBootstrapError
+				if errors.As(errCredits, &bootstrapErr) && bootstrapErr != nil {
+					return streamErrorResult(bootstrapErr.Headers(), errCredits), nil
+				}
 				return nil, errCredits
 			} else if ok {
 				return result, nil
