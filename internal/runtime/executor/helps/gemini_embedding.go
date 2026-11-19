@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -71,19 +72,41 @@ func PrepareGeminiEmbeddingDoc(payload []byte, baseModel, action string) (*ojson
 		// body form must use the Google-native "models/<id>" resource name.
 		SetStringIfDifferentDoc(doc, "model", "models/"+baseModel)
 	case GeminiBatchEmbedContentsAction:
-		// Batch entries carry their own model fields; rewrites there would change
-		// caller-provided ordering and per-entry intent, so only validate the shape.
+		// Batch entries carry their own model fields and the upstream service validates
+		// them per entry, while the path model is not used for that check. Entries that
+		// already name a model (including mixed-model batches) are left untouched; only
+		// missing/empty/null entries inherit the path model so callers do not have to
+		// repeat it. Order and per-entry intent are preserved.
 		requests := doc.Get("requests")
 		if !requests.IsArray() {
 			return nil, fmt.Errorf("batchEmbedContents requires a requests array")
 		}
 		seen := false
-		requests.ForEach(func(_, _ ojson.Result) bool {
+		var modelLessEntries []int
+		index := 0
+		requests.ForEach(func(_, entry ojson.Result) bool {
 			seen = true
-			return false
+			position := index
+			index++
+			if !entry.IsObject() {
+				return true
+			}
+			model := entry.Get("model")
+			if model.Type == ojson.String && strings.TrimSpace(model.String()) != "" {
+				return true
+			}
+			modelLessEntries = append(modelLessEntries, position)
+			return true
 		})
 		if !seen {
 			return nil, fmt.Errorf("batchEmbedContents requires at least one request")
+		}
+		// Mutate only after the read pass: Set invalidates results obtained from doc.
+		resourceName := "models/" + strings.TrimPrefix(strings.TrimSpace(baseModel), "models/")
+		for _, position := range modelLessEntries {
+			if errSet := doc.Set("requests."+strconv.Itoa(position)+".model", resourceName); errSet != nil {
+				return nil, fmt.Errorf("batchEmbedContents entry %d: set model: %w", position, errSet)
+			}
 		}
 	}
 	return doc, nil

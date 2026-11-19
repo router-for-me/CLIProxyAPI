@@ -67,6 +67,10 @@ curl -sS http://localhost:8317/v1beta/models/gemini-embedding-2:batchEmbedConten
 
 Batch responses are returned in request order; the proxy never reorders, merges, or splits entries.
 
+Each entry may omit `model`: missing, empty, or `null` per-entry models are filled with the model from the request
+path (`models/<model>`), because the upstream service validates the model per entry and ignores the path model for that
+check. Entries that already name a model — including mixed-model batches — are forwarded untouched.
+
 ### SDK example
 
 ```python
