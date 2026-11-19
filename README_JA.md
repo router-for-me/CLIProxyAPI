@@ -133,6 +133,7 @@ PackyCodeは当ソフトウェアのユーザーに特別割引を提供して�
 - ラウンドロビン負荷分散による複数アカウント対応（Gemini、OpenAI、Claude、Grok）
 - シンプルなCLI認証フロー（Gemini、OpenAI、Claude、Grok）
 - Generative Language APIキーのサポート
+- `/v1beta` でのネイティブGemini埋め込み（`embedContent`/`batchEmbedContents`）とDecisions API（`docs/gemini-native-api.md`を参照）
 - AI Studioビルドのマルチアカウント負荷分散
 - Claude Codeのマルチアカウント負荷分散
 - OpenAI Codexのマルチアカウント負荷分散
