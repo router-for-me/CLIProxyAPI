@@ -424,14 +424,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	ctx = coreauth.WithRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
-	selectedProvider := trackSelectedProvider(opts.Metadata)
+	selectedAuth := trackSelectedAuth(opts.Metadata)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- h.antigravityGuardReply(ctx, entryProtocol, selectedProvider.get(), errMsg)
+		errChan <- h.antigravityGuardReply(ctx, entryProtocol, selectedAuth.get(), errMsg)
 		close(errChan)
 		return nil, nil, errChan
 	}

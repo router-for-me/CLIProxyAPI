@@ -9,7 +9,7 @@ import (
 	"github.com/MoeForge/moego/json"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // Antigravity answers flagged prompt content with a signal-less 429 (see
@@ -24,58 +24,58 @@ const (
 	antigravityGuardCode    = "google_flagged_prompt"
 )
 
-// selectedProviderRecorder keeps the provider of the last auth the auth
-// manager selected for a request.
-type selectedProviderRecorder struct {
-	mu       sync.Mutex
-	provider string
+// selectedAuthRecorder keeps a copy of the last auth the auth manager selected
+// for a request.
+type selectedAuthRecorder struct {
+	mu   sync.Mutex
+	auth *coreauth.Auth
 }
 
-func (r *selectedProviderRecorder) set(provider string) {
+func (r *selectedAuthRecorder) set(auth *coreauth.Auth) {
 	r.mu.Lock()
-	r.provider = provider
+	r.auth = auth
 	r.mu.Unlock()
 }
 
-func (r *selectedProviderRecorder) get() string {
+func (r *selectedAuthRecorder) get() *coreauth.Auth {
 	if r == nil {
-		return ""
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.provider
+	return r.auth
 }
 
-// trackSelectedProvider registers a selected-provider callback in meta,
-// chained before any callback already present. The provider is captured at
+// trackSelectedAuth registers a selected-auth snapshot callback in meta,
+// chained before any callback already present. The auth is captured at
 // selection time because the auth manager clones metadata and Home runtime
 // auths are released after a failed attempt.
-func trackSelectedProvider(meta map[string]any) *selectedProviderRecorder {
+func trackSelectedAuth(meta map[string]any) *selectedAuthRecorder {
 	if meta == nil {
 		return nil
 	}
-	recorder := &selectedProviderRecorder{}
-	previous, _ := meta[coreexecutor.SelectedAuthProviderCallbackMetadataKey].(func(string))
-	meta[coreexecutor.SelectedAuthProviderCallbackMetadataKey] = func(provider string) {
-		recorder.set(provider)
+	recorder := &selectedAuthRecorder{}
+	previous, _ := meta[coreauth.SelectedAuthSnapshotCallbackMetadataKey].(func(*coreauth.Auth))
+	meta[coreauth.SelectedAuthSnapshotCallbackMetadataKey] = func(auth *coreauth.Auth) {
+		recorder.set(auth)
 		if previous != nil {
-			previous(provider)
+			previous(auth)
 		}
 	}
 	return recorder
 }
 
-// antigravityGuardReply returns the fixed guard reply when the auth that
-// produced msg is an Antigravity one, msg is Google's content-filter 429 and a
-// request-scoped stop rule ended the request. Without that rule, e.g. after the
-// explicit `antigravity: []` opt-out, and for every other error msg is
-// returned unchanged.
-func (h *BaseAPIHandler) antigravityGuardReply(ctx context.Context, entryProtocol, provider string, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+// antigravityGuardReply returns the fixed guard reply when auth, the auth that
+// produced msg, is an Antigravity one, msg is Google's content-filter 429 and
+// a request-scoped stop rule of auth ended the request. Without such a rule,
+// e.g. after the explicit `antigravity: []` opt-out or a per-credential
+// override, and for every other error msg is returned unchanged.
+func (h *BaseAPIHandler) antigravityGuardReply(ctx context.Context, entryProtocol string, auth *coreauth.Auth, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
 	if msg == nil || msg.Error == nil || msg.DirectResponse || msg.StatusCode != http.StatusTooManyRequests ||
-		!strings.EqualFold(provider, "antigravity") || !internalconfig.IsAntigravityContentFilter429(msg.Error.Error()) {
+		auth == nil || !strings.EqualFold(auth.Provider, "antigravity") || !internalconfig.IsAntigravityContentFilter429(msg.Error.Error()) {
 		return msg
 	}
-	if h == nil || h.AuthManager == nil || !h.AuthManager.StoppedByOAuthRequestScopedRule(ctx, provider, msg.Error) {
+	if h == nil || h.AuthManager == nil || !h.AuthManager.StoppedByRequestScopedRule(ctx, auth, msg.Error) {
 		return msg
 	}
 	return &interfaces.ErrorMessage{

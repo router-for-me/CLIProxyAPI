@@ -31,7 +31,7 @@ func TestAntigravityGuardReplyReplacesContentFilter429(t *testing.T) {
 		"gemini":          `"status":"PERMISSION_DENIED"`,
 	} {
 		original := guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)
-		got := handler.antigravityGuardReply(context.Background(), protocol, "antigravity", original)
+		got := handler.antigravityGuardReply(context.Background(), protocol, guardTestAuth("antigravity", nil), original)
 		assertAntigravityGuardReply(t, protocol, got, want)
 		if got.Error != original.Error {
 			t.Fatalf("%s: original error not kept", protocol)
@@ -42,35 +42,43 @@ func TestAntigravityGuardReplyReplacesContentFilter429(t *testing.T) {
 func TestAntigravityGuardReplyKeepsOtherErrors(t *testing.T) {
 	direct := guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)
 	direct.DirectResponse = true
+	continueOverride := map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
+		Status: http.StatusTooManyRequests, Match: []string{"RESOURCE_EXHAUSTED"}, Action: coreauth.RequestScopedActionContinue,
+	}}}
+	contentFilter := func() *interfaces.ErrorMessage {
+		return guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)
+	}
 	cases := map[string]struct {
-		yaml     string
-		provider string
-		msg      *interfaces.ErrorMessage
+		yaml string
+		auth *coreauth.Auth
+		msg  *interfaces.ErrorMessage
 	}{
-		"quota 429":        {guardTestDefaultYAML, "antigravity", guardTestMessage(http.StatusTooManyRequests, guardTestQuota)},
-		"other provider":   {guardTestDefaultYAML, "vertex", guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)},
-		"no provider":      {guardTestDefaultYAML, "", guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)},
-		"other status":     {guardTestDefaultYAML, "antigravity", guardTestMessage(http.StatusBadGateway, guardTestContentFilter)},
-		"direct":           {guardTestDefaultYAML, "antigravity", direct},
-		"explicit opt-out": {guardTestOptOutYAML, "antigravity", guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)},
+		"quota 429":               {guardTestDefaultYAML, guardTestAuth("antigravity", nil), guardTestMessage(http.StatusTooManyRequests, guardTestQuota)},
+		"other provider":          {guardTestDefaultYAML, guardTestAuth("vertex", nil), contentFilter()},
+		"no selected auth":        {guardTestDefaultYAML, nil, contentFilter()},
+		"other status":            {guardTestDefaultYAML, guardTestAuth("antigravity", nil), guardTestMessage(http.StatusBadGateway, guardTestContentFilter)},
+		"direct":                  {guardTestDefaultYAML, guardTestAuth("antigravity", nil), direct},
+		"explicit opt-out":        {guardTestOptOutYAML, guardTestAuth("antigravity", nil), contentFilter()},
+		"per-credential continue": {guardTestDefaultYAML, guardTestAuth("antigravity", continueOverride), contentFilter()},
 	}
 	for name, tc := range cases {
 		handler, _ := guardTestHandler(t, tc.yaml)
-		if got := handler.antigravityGuardReply(context.Background(), "openai", tc.provider, tc.msg); got != tc.msg {
+		if got := handler.antigravityGuardReply(context.Background(), "openai", tc.auth, tc.msg); got != tc.msg {
 			t.Fatalf("%s: message was replaced: %+v", name, got)
 		}
 	}
 }
 
-func TestTrackSelectedProviderChainsExistingCallback(t *testing.T) {
-	var previous string
-	meta := map[string]any{coreexecutor.SelectedAuthProviderCallbackMetadataKey: func(provider string) { previous = provider }}
-	recorder := trackSelectedProvider(meta)
-	meta[coreexecutor.SelectedAuthProviderCallbackMetadataKey].(func(string))("antigravity")
-	if recorder.get() != "antigravity" || previous != "antigravity" {
-		t.Fatalf("recorder=%q previous=%q, want antigravity for both", recorder.get(), previous)
+func TestTrackSelectedAuthChainsExistingCallback(t *testing.T) {
+	var previous *coreauth.Auth
+	meta := map[string]any{coreauth.SelectedAuthSnapshotCallbackMetadataKey: func(auth *coreauth.Auth) { previous = auth }}
+	recorder := trackSelectedAuth(meta)
+	selected := guardTestAuth("antigravity", nil)
+	meta[coreauth.SelectedAuthSnapshotCallbackMetadataKey].(func(*coreauth.Auth))(selected)
+	if recorder.get() != selected || previous != selected {
+		t.Fatalf("recorder=%v previous=%v, want the selected auth for both", recorder.get(), previous)
 	}
-	if trackSelectedProvider(nil).get() != "" {
+	if trackSelectedAuth(nil).get() != nil {
 		t.Fatal("nil metadata recorder is not empty")
 	}
 }
@@ -123,6 +131,10 @@ func guardTestHandler(t *testing.T, yaml string) (*BaseAPIHandler, *coreauth.Man
 	return NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager), manager
 }
 
+func guardTestAuth(provider string, metadata map[string]any) *coreauth.Auth {
+	return &coreauth.Auth{ID: provider + "-1", Provider: provider, Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth}, Metadata: metadata}
+}
+
 func guardTestMessage(status int, body string) *interfaces.ErrorMessage {
 	return &interfaces.ErrorMessage{StatusCode: status, Error: &coreauth.Error{HTTPStatus: status, Message: body}}
 }
@@ -145,7 +157,8 @@ func (*guardHomeDispatcher) RPopAuth(_ context.Context, model string, _ string, 
 	return json.Marshal(map[string]any{
 		"model":      model,
 		"auth_index": "guard-cred",
-		"auth":       map[string]any{"id": "guard-cred", "provider": "antigravity", "status": coreauth.StatusActive},
+		"auth": map[string]any{"id": "guard-cred", "provider": "antigravity", "status": coreauth.StatusActive,
+			"attributes": map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth}},
 	})
 }
 func (*guardHomeDispatcher) AbortAmbiguousDispatch() {}

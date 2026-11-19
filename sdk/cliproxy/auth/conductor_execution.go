@@ -2240,7 +2240,7 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 	if len(meta) == 0 || auth == nil {
 		return
 	}
-	publishSelectedAuthProvider(meta, auth)
+	publishSelectedAuthSnapshot(meta, auth)
 	if authID := strings.TrimSpace(auth.ID); authID != "" {
 		meta[cliproxyexecutor.SelectedAuthMetadataKey] = authID
 		if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {

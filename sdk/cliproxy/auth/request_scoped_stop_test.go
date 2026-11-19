@@ -8,21 +8,29 @@ import (
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
-func TestStoppedByOAuthRequestScopedRuleFollowsEffectiveConfig(t *testing.T) {
+func TestStoppedByRequestScopedRuleUsesEffectiveRules(t *testing.T) {
 	contentFilter := &Error{HTTPStatus: http.StatusTooManyRequests, Message: "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"}
 	quota := &Error{HTTPStatus: http.StatusTooManyRequests, Message: `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"reason":"QUOTA_EXHAUSTED"}]}}`}
+	oauth := func(provider string, metadata map[string]any) *Auth {
+		return &Auth{ID: provider + "-1", Provider: provider, Attributes: map[string]string{AttributeAuthKind: AuthKindOAuth}, Metadata: metadata}
+	}
+	continueOverride := map[string]any{"request_scoped_errors": []internalconfig.RequestScopedErrorRule{{
+		Status: http.StatusTooManyRequests, Match: []string{"RESOURCE_EXHAUSTED"}, Action: RequestScopedActionContinue,
+	}}}
 
 	cases := map[string]struct {
-		yaml     string
-		provider string
-		err      error
-		want     bool
+		yaml string
+		auth *Auth
+		err  error
+		want bool
 	}{
-		"default rule":      {yaml: "port: 8317", provider: "antigravity", err: contentFilter, want: true},
-		"quota 429":         {yaml: "port: 8317", provider: "antigravity", err: quota, want: false},
-		"other provider":    {yaml: "port: 8317", provider: "claude", err: contentFilter, want: false},
-		"explicit opt-out":  {yaml: "port: 8317\noauth-request-scoped-errors:\n  antigravity: []\n", provider: "antigravity", err: contentFilter, want: false},
-		"continue override": {yaml: "port: 8317\noauth-request-scoped-errors:\n  antigravity:\n    - status: 429\n      match: [RESOURCE_EXHAUSTED]\n      action: continue\n", provider: "antigravity", err: contentFilter, want: false},
+		"default rule":              {yaml: "port: 8317", auth: oauth("antigravity", nil), err: contentFilter, want: true},
+		"quota 429":                 {yaml: "port: 8317", auth: oauth("antigravity", nil), err: quota, want: false},
+		"other provider":            {yaml: "port: 8317", auth: oauth("claude", nil), err: contentFilter, want: false},
+		"explicit opt-out":          {yaml: "port: 8317\noauth-request-scoped-errors:\n  antigravity: []\n", auth: oauth("antigravity", nil), err: contentFilter, want: false},
+		"per-credential continue":   {yaml: "port: 8317", auth: oauth("antigravity", continueOverride), err: contentFilter, want: false},
+		"no auth":                   {yaml: "port: 8317", auth: nil, err: contentFilter, want: false},
+		"non-oauth antigravity key": {yaml: "port: 8317", auth: &Auth{ID: "k", Provider: "antigravity", Attributes: map[string]string{AttributeAPIKey: "k"}}, err: contentFilter, want: false},
 	}
 	for name, tc := range cases {
 		cfg, errParse := internalconfig.ParseConfigBytes([]byte(tc.yaml))
@@ -31,8 +39,17 @@ func TestStoppedByOAuthRequestScopedRuleFollowsEffectiveConfig(t *testing.T) {
 		}
 		manager := NewManager(nil, nil, nil)
 		manager.SetConfig(cfg)
-		if got := manager.StoppedByOAuthRequestScopedRule(context.Background(), tc.provider, tc.err); got != tc.want {
-			t.Fatalf("%s: StoppedByOAuthRequestScopedRule = %v, want %v", name, got, tc.want)
+		if got := manager.StoppedByRequestScopedRule(context.Background(), tc.auth, tc.err); got != tc.want {
+			t.Fatalf("%s: StoppedByRequestScopedRule = %v, want %v", name, got, tc.want)
 		}
+	}
+}
+
+func TestPublishSelectedAuthMetadataReportsSnapshot(t *testing.T) {
+	var got *Auth
+	selected := &Auth{ID: "auth-1", Provider: "antigravity"}
+	publishSelectedAuthMetadata(map[string]any{SelectedAuthSnapshotCallbackMetadataKey: func(auth *Auth) { got = auth }}, selected)
+	if got == nil || got == selected || got.ID != "auth-1" || got.Provider != "antigravity" {
+		t.Fatalf("snapshot = %#v, want a copy of the selected auth", got)
 	}
 }
