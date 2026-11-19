@@ -970,6 +970,10 @@ type HostModelExecutionRequest struct {
 	// request so the host execution resolves the same caller-scoped session and alias state
 	// without exposing the downstream client API key.
 	CallerScope string `json:"caller_scope,omitempty"`
+	// Action carries a native Gemini-compatible model action (for example embedContent,
+	// batchEmbedContents, or decisions) so a plugin-delegated request keeps its native
+	// semantics instead of falling back to chat generation.
+	Action string `json:"action,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.

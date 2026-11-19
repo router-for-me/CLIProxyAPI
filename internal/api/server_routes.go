@@ -1282,17 +1282,21 @@ func homeGeminiModelGenerationMethods(entry homeModelEntry) []string {
 	if methods := registry.NativeModelGenerationMethods(entry.generationMethods); len(methods) > 0 {
 		return methods
 	}
-	modelID := strings.TrimPrefix(strings.TrimSpace(entry.id), "models/")
-	if modelID == "" {
-		return []string{"generateContent"}
-	}
-	for _, channel := range []string{"gemini", "gemini-interactions", "aistudio"} {
-		staticInfo := registry.LookupStaticModelInfoByChannel(modelID, channel)
-		if staticInfo == nil {
+	// Home entries may be aliases, so probe the alias ID, the canonical model name, and the
+	// metadata model ID before giving up on the local static catalog.
+	for _, candidate := range []string{entry.id, entry.modelName, entry.metadataModelID} {
+		modelID := strings.TrimPrefix(strings.TrimSpace(candidate), "models/")
+		if modelID == "" {
 			continue
 		}
-		if methods := registry.NativeModelGenerationMethods(staticInfo.SupportedGenerationMethods); len(methods) > 0 {
-			return methods
+		for _, channel := range []string{"gemini", "gemini-interactions", "aistudio"} {
+			staticInfo := registry.LookupStaticModelInfoByChannel(modelID, channel)
+			if staticInfo == nil {
+				continue
+			}
+			if methods := registry.NativeModelGenerationMethods(staticInfo.SupportedGenerationMethods); len(methods) > 0 {
+				return methods
+			}
 		}
 	}
 	return []string{"generateContent"}

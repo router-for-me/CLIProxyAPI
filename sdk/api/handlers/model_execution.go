@@ -67,6 +67,8 @@ type ModelExecutionRequest struct {
 	ProxyURL                string
 	Path                    string
 	CallerScope             string
+	// Action carries a native model action so the inner execution keeps its native path.
+	Action string
 }
 
 // ModelExecutionResponse describes a non-streaming internal model execution response.
@@ -134,6 +136,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
 		CallerScope:             strings.TrimSpace(req.CallerScope),
+		Action:                  strings.TrimSpace(req.Action),
 	})
 	if errMsg != nil {
 		return ModelExecutionResponse{}, errMsg
@@ -172,6 +175,7 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
 		CallerScope:             strings.TrimSpace(req.CallerScope),
+		Action:                  strings.TrimSpace(req.Action),
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {

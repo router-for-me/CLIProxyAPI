@@ -369,6 +369,11 @@ func (h *BaseAPIHandler) applyModelRouter(ctx context.Context, handlerType, mode
 	addCallerScopeMetadata(meta, execOptions.CallerScope)
 	meta[coreexecutor.RequestedModelMetadataKey] = modelName
 	addModelExecutionSourceMetadata(meta, execOptions.InternalSource)
+	// The stored path is the wildcard models route, so the native action is the only way
+	// router rules can tell embedContent, batchEmbedContents, and decisions apart.
+	if action := strings.TrimSpace(execOptions.Action); action != "" {
+		meta[coreexecutor.RequestActionMetadataKey] = action
+	}
 	resp, ok := routeModel(ctx, host, pluginapi.ModelRouteRequest{
 		SourceFormat:   handlerType,
 		RequestedModel: modelName,

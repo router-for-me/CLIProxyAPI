@@ -69,3 +69,18 @@ func TestDecodeHomeModelsKeepsSupportedGenerationMethods(t *testing.T) {
 		t.Fatalf("supportedGenerationMethods = %v, want it retained", entries[0].generationMethods)
 	}
 }
+
+// TestFormatHomeGeminiModelResolvesAliasEntries covers Home aliases: the alias ID is not in
+// the static catalog, but the canonical name recorded on the entry is.
+func TestFormatHomeGeminiModelResolvesAliasEntries(t *testing.T) {
+	for _, entry := range []homeModelEntry{
+		{id: "my-embed", modelName: "models/gemini-embedding-001"},
+		{id: "my-embed", metadataModelID: "gemini-embedding-001"},
+	} {
+		model := formatHomeGeminiModel(entry)
+		methods := model["supportedGenerationMethods"].([]string)
+		if len(methods) != 2 || methods[0] != "embedContent" {
+			t.Fatalf("alias entry %+v methods = %v, want the native embedding methods", entry, methods)
+		}
+	}
+}
