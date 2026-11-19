@@ -10,6 +10,7 @@ import platform
 import re
 import secrets
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -81,14 +82,29 @@ def stop(process):
         process.wait(timeout=10)
 
 
-def build_darwin_plugin(root: Path, arch: str, env):
+def build_native_plugin(root: Path, target: str, arch: str, env):
     """Compile only the checked-in, dependency-free C ABI demo; never fetch plugins."""
-    runtime.require(arch in ("amd64", "arm64"), "unsupported Darwin plugin architecture")
+    runtime.target_parts(target + "/" + arch)
     source = Path(__file__).resolve().parents[2] / "examples/plugin/management-api/c/src/plugin.c"
     runtime.require(source.is_file(), "trusted repository management-api C demo is missing")
-    plugin_dir = root / "plugins" / "darwin" / arch
+    plugin_dir = root / "plugins" / target / arch
     plugin_dir.mkdir(parents=True)
-    library = plugin_dir / "management-api-c.dylib"
+    library = plugin_dir / ("management-api-c" + {"darwin": ".dylib", "linux": ".so", "windows": ".dll"}[target])
+    if target != "darwin":
+        build_dir = root / "plugin-build"
+        build_dir.mkdir()
+        if target == "windows":
+            # VsDevCmd must supply the native compiler, SDK and linker environment.
+            # Each path is a separate argv item; all intermediate files stay in this fixture.
+            command = ["cl.exe", "/nologo", "/LD", "/TC", "/O2", "/MT",
+                       "/Fo" + str(build_dir / "plugin.obj"), str(source), "/link",
+                       "/OUT:" + str(library), "/IMPLIB:" + str(build_dir / "plugin.lib"),
+                       "/MACHINE:" + {"amd64": "X64", "arm64": "ARM64"}[arch]]
+        else:
+            command = ["cc", "-fPIC", "-shared", "-o", str(library), str(source)]
+        subprocess.run(command, cwd=build_dir, check=True, env=env, timeout=60)
+        verify_plugin_library(library.read_bytes(), target, arch)
+        return library
     native_arch = {"amd64": "x86_64", "arm64": "arm64"}[arch]
     subprocess.run(["/usr/bin/xcrun", "clang", "-dynamiclib", "-arch", native_arch,
                     "-o", str(library), str(source)], check=True, env=env, timeout=60)
@@ -102,9 +118,20 @@ def build_darwin_plugin(root: Path, arch: str, env):
     return library
 
 
+def verify_plugin_library(data: bytes, target: str, arch: str):
+    runtime.validate_binary(data, target + "/" + arch)
+    if target == "windows":
+        offset = struct.unpack_from("<I", data, 60)[0]
+        runtime.require(struct.unpack_from("<H", data, offset + 22)[0] & 0x2000 != 0,
+                        "demo plugin must be a PE DLL")
+    elif target == "linux":
+        runtime.require(struct.unpack_from("<H", data, 16)[0] == 3,
+                        "demo plugin must be an ELF shared library")
+
+
 def verify_plugin_response(code, body, headers):
     runtime.require(code == 200 and headers.get("X-CPA-SUPPORT-PLUGIN") == "1",
-                    "Darwin release must advertise native plugin support")
+                    "release must advertise native plugin support")
     listing = json.loads(body)
     entries = listing.get("plugins", [])
     matches = [entry for entry in entries if entry.get("id") == "management-api-c"]
@@ -116,11 +143,11 @@ def verify_plugin_response(code, body, headers):
                     "demo plugin was not actually registered and enabled")
 
 
-def smoke_darwin_plugin(binary: Path, root: Path, arch: str, env):
+def smoke_native_plugin(binary: Path, root: Path, target: str, arch: str, env):
     """Exercise the staged release binary, not a separately rebuilt Go host."""
     case = root / "native-plugin"
     case.mkdir()
-    build_darwin_plugin(case, arch, env)
+    build_native_plugin(case, target, arch, env)
     key = secrets.token_hex(24)
     api_key = secrets.token_hex(24)
     with socket.socket() as sock:
@@ -191,9 +218,9 @@ def smoke(artifact_dir: Path, allow_unavailable_multicast=False):
         if target == "darwin":
             subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
             checks.append("ad-hoc signature verified after extraction")
-            smoke_darwin_plugin(binary, root, arch, env)
-            dynamic_library_plugins_tested = True
-            checks.append("native same-architecture demo dylib registered and resource callback executed; support header 1")
+        smoke_native_plugin(binary, root, target, arch, env)
+        dynamic_library_plugins_tested = True
+        checks.append("native same-architecture demo library registered and resource callback executed; support header 1")
 
         for test_parent_exit in (False, True):
             case = root / ("parent-exit" if test_parent_exit else "management")

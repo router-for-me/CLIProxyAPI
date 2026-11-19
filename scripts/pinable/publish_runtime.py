@@ -40,11 +40,11 @@ def validate(directory, expected_commit):
                     and all(r["status"] == "passed" and r["source_commit"] == expected_commit
                             and r["binary_sha256"] == hashes[r["target"]] for r in reports),
                     "native smoke validation incomplete")
-    runtime.require(all(m["build"]["cgo_enabled"] is m["target"].startswith("darwin/")
+    runtime.require(all(m["build"]["cgo_enabled"] is (not m["target"].startswith("windows/"))
                         for m in manifests), "release requires current platform CGO defaults")
     runtime.require(all(r.get("dynamic_library_plugins_tested") is True
-                        for r in reports if r["target"].startswith("darwin/")),
-                    "macOS dynamic-library plugin smoke validation incomplete")
+                        for r in reports),
+                    "dynamic-library plugin smoke validation incomplete")
     files = {m["archive"]["file"] for m in manifests} | {p.name for p in paths}
     files |= {"runtime-index.json", "validation.json", "SHA256SUMS"}
     runtime.require({p.name for p in directory.iterdir()} == files, "unexpected release file")
@@ -80,9 +80,9 @@ def publish(directory, expected_commit):
              "All six platform executables passed native host-contract smoke checks. "
              "Normal Go regression tests passed before publication.\n\n"
              "Use runtime-index.json and SHA256SUMS to approve exact binary hashes in Desktop's "
-             "component lock. No lock is changed automatically. CGO=1 enables the macOS "
-             "dynamic-library loader, checked with a benign native fixture; Linux keeps CGO=0 and "
-             "Windows retains its DLL loader. Third-party plugin compatibility is not certified "
+             "component lock. No lock is changed automatically. CGO=1 enables the macOS/Linux "
+             "dynamic-library loader; Linux requires glibc (built on Ubuntu 22.04, versions capped at 2.35). "
+             "Windows retains its DLL loader. All six loaders passed a benign native fixture. Third-party plugin compatibility is not certified "
              "by this pipeline. macOS binaries are ad-hoc signed, not Developer ID signed/notarized; Windows "
              "binaries are unsigned. This is not a Desktop application installer.")
     release = api(f"repos/{repo}/releases", {"tag_name": tag, "target_commitish": expected_commit,

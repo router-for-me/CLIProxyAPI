@@ -72,8 +72,8 @@ jobs:
             id: linux-arm64
             runner: ubuntu-22.04-arm
     env:
-      # The Darwin build must be native so it can load plugins and be smoke tested on the same runner.
-      CGO_ENABLED: ${{ startsWith(matrix.target, 'darwin/') && '1' || '0' }}
+      # Unix uses the CGO loader; Windows already has a native DLL loader.
+      CGO_ENABLED: ${{ startsWith(matrix.target, 'windows/') && '0' || '1' }}
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v6
@@ -99,7 +99,8 @@ jobs:
           ARTIFACT_DIR: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}
         shell: bash
         run: python scripts/pinable/runtime.py build --target "$TARGET" --version "$RUNTIME_VERSION" --output "$ARTIFACT_DIR"
-      - name: Exercise the actual packaged executable
+      - name: Exercise the actual packaged executable (macOS and Linux)
+        if: runner.os != 'Windows'
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}
         shell: bash
@@ -111,6 +112,29 @@ jobs:
             args+=(--allow-unavailable-multicast)
           fi
           python scripts/pinable/smoke_runtime.py --artifact-dir "$ARTIFACT_DIR" "${args[@]}"
+      - name: Exercise the actual packaged executable (Windows)
+        if: runner.os == 'Windows'
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/pinable-runtime-${{ matrix.id }}
+        shell: pwsh
+        run: |
+          $env:PINABLE_VS_ARCH = if ($env:TARGET -eq 'windows/arm64') { 'arm64' } else { 'amd64' }
+          $component = if ($env:PINABLE_VS_ARCH -eq 'arm64') { 'ARM64' } else { 'x86.x64' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $installation = & $vswhere -latest -products '*' -requires "Microsoft.VisualStudio.Component.VC.Tools.$component" -property installationPath | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0 -or -not $installation) { throw 'Visual Studio build tools not found' }
+          $env:PINABLE_VSDEV = Join-Path $installation 'Common7/Tools/VsDevCmd.bat'
+          if (-not (Test-Path -LiteralPath $env:PINABLE_VSDEV -PathType Leaf)) { throw 'VsDevCmd.bat not found' }
+          $command = Join-Path $env:RUNNER_TEMP 'pinable-native-smoke.cmd'
+          @'
+          @echo off
+          call "%PINABLE_VSDEV%" -no_logo -arch=%PINABLE_VS_ARCH% -host_arch=%PINABLE_VS_ARCH%
+          if errorlevel 1 exit /b 1
+          python scripts/pinable/smoke_runtime.py --artifact-dir "%ARTIFACT_DIR%"
+          exit /b %errorlevel%
+          '@ | Set-Content -LiteralPath $command -Encoding ascii
+          & $command
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         id: upload
         with:
@@ -159,7 +183,7 @@ jobs:
           index = json.loads((output / 'runtime-index.json').read_text())
           hashes = {m['target']: m['binary']['sha256'] for m in index['targets']}
           assert all(r['binary_sha256'] == hashes[r['target']] for r in reports)
-          assert all(r.get('dynamic_library_plugins_tested') is r['target'].startswith('darwin/') for r in reports)
+          assert all(r.get('dynamic_library_plugins_tested') is True for r in reports)
           (output / 'validation.json').write_text(json.dumps({'source_commit':os.environ['SOURCE_SHA'],'quality':'passed','native_smoke':reports}, indent=2)+'\n')
           import hashlib
           with (output / 'SHA256SUMS').open('a') as sums:

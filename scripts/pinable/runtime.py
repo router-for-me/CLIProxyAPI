@@ -88,8 +88,8 @@ def archive_name(version: str, target: str) -> str:
     return f"CLIProxyAPI_pinable_{version}_{system}_{arch}.{extension}"
 
 
-def validate_binary(data: bytes, target: str) -> None:
-    """Check real executable headers, including static Linux linkage, not suffixes."""
+def validate_binary(data: bytes, target: str, cgo_enabled: bool = False) -> None:
+    """Check executable headers and the declared Linux linkage profile, not suffixes."""
     system, arch = target_parts(target)
     require(64 <= len(data) <= MAX_BINARY, "invalid executable size")
     if system == "windows":
@@ -115,9 +115,21 @@ def validate_binary(data: bytes, target: str) -> None:
         size, count = struct.unpack_from("<HH", data, 54)
         require(size >= 56 and count > 0 and offset + size * count <= len(data),
                 "invalid ELF program headers")
+        interpreter_count = 0
         for i in range(count):
-            require(struct.unpack_from("<I", data, offset + i * size)[0] != 3,
-                    "portable Linux runtime must not depend on a dynamic interpreter")
+            header = offset + i * size
+            if struct.unpack_from("<I", data, header)[0] != 3:
+                continue
+            interpreter_count += 1
+            require(cgo_enabled, "portable Linux runtime must not depend on a dynamic interpreter")
+            start = struct.unpack_from("<Q", data, header + 8)[0]
+            length = struct.unpack_from("<Q", data, header + 32)[0]
+            expected = {"amd64": b"/lib64/ld-linux-x86-64.so.2\0",
+                        "arm64": b"/lib/ld-linux-aarch64.so.1\0"}[arch]
+            require(length == len(expected) and start + length <= len(data) and
+                    data[start:start + length] == expected, "unexpected Linux dynamic interpreter")
+        require(interpreter_count == (1 if cgo_enabled else 0),
+                "Linux CGO runtime must have exactly one dynamic interpreter")
 
 
 def validate_manifest(manifest: dict) -> str:
@@ -143,9 +155,9 @@ def validate_manifest(manifest: dict) -> str:
             "invalid build metadata")
     require(isinstance(build["go_version"], str) and build["go_version"].startswith("go1."),
             "invalid Go toolchain")
-    # Keep historical CGO=0 macOS artifacts verifiable without weakening other targets.
+    # Keep historical CGO=0 Unix artifacts verifiable without weakening other targets.
     require(type(build["cgo_enabled"]) is bool and
-            (system == "darwin" or build["cgo_enabled"] is False) and
+            (system != "windows" or build["cgo_enabled"] is False) and
             build["trimpath"] is True and
             build["buildvcs"] is False, "runtime does not use the pinned portable build profile")
     require(build["signing"] == ("ad-hoc" if system == "darwin" else "unsigned"),
@@ -246,14 +258,14 @@ def verify(manifest_path: Path, expected_commit: str | None = None,
         require(file_record(manifest[field]["file"], members[manifest[field]["file"]]) == manifest[field],
                 f"{field} checksum/size mismatch")
     binary = members[manifest["binary"]["file"]]
-    validate_binary(binary, target)
+    validate_binary(binary, target, manifest["build"]["cgo_enabled"])
     return manifest, binary
 
 
 def package(binary: Path, license_path: Path, output: Path, metadata: dict) -> Path:
     require(not output.exists(), f"refusing to overwrite output directory: {output}")
     data = binary.read_bytes()
-    validate_binary(data, metadata["target"])
+    validate_binary(data, metadata["target"], metadata["build"]["cgo_enabled"])
     manifest = copy.deepcopy(metadata)
     # Normalize Git's Windows checkout line endings to the canonical license text.
     license_data = license_path.read_bytes().replace(b"\r\n", b"\n")
@@ -275,6 +287,15 @@ def package(binary: Path, license_path: Path, output: Path, metadata: dict) -> P
     return output / destination.name
 
 
+
+def validate_linux_glibc_versions(output: str) -> None:
+    """Reject binaries requiring a newer libc than the Ubuntu 22.04 build baseline."""
+    versions = re.findall(r"\bGLIBC_(\d+(?:\.\d+)+)\b", output)
+    require(versions and "GLIBC_PRIVATE" not in output, "missing/unsupported GLIBC version requirements")
+    require(all(tuple(map(int, value.split("."))) <= (2, 35) for value in versions),
+            "Linux runtime requires GLIBC newer than 2.35")
+
+
 def build(root: Path, output: Path, target: str, version: str) -> Path:
     system, arch = target_parts(target)
     root = root.resolve()
@@ -290,7 +311,7 @@ def build(root: Path, output: Path, target: str, version: str) -> Path:
     version = version or stamp.strftime("%Y%m%d%H%M%S") + "-" + commit[:12]
     archive_name(version, target)
     # Force the embedded toolchain, not an implicit download or a user's GOFLAGS.
-    cgo_enabled = system == "darwin"
+    cgo_enabled = system != "windows"
     env = dict(os.environ, CGO_ENABLED="1" if cgo_enabled else "0", GOOS=system, GOARCH=arch, GOAMD64="v1",
                GOARM64="v8.0", GOFLAGS="", GOEXPERIMENT="", GOTOOLCHAIN="local",
                GOWORK="off", GOENV="off")
@@ -311,6 +332,8 @@ def build(root: Path, output: Path, target: str, version: str) -> Path:
         flags = f"-s -w -X main.Version={version} -X main.Commit={commit} -X main.BuildDate={commit_time}"
         run("go", "build", "-trimpath", "-buildvcs=false", "-ldflags=" + flags,
             "-o", str(binary), "./cmd/server", cwd=root, env=env)
+        if system == "linux":
+            validate_linux_glibc_versions(run("readelf", "--version-info", str(binary)))
         if system == "darwin":
             require(sys.platform == "darwin", "macOS artifacts require a native macOS signing host")
             run("codesign", "--force", "--sign", "-", "--timestamp=none", "--identifier",

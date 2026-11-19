@@ -19,7 +19,7 @@ import runtime
 COMMIT = "a" * 40
 
 
-def executable(target):
+def executable(target, cgo_enabled=True):
     data = bytearray(256)
     system, arch = target.split("/")
     if system == "windows":
@@ -38,6 +38,14 @@ def executable(target):
         struct.pack_into("<Q", data, 32, 64)
         struct.pack_into("<HH", data, 54, 56, 1)
         struct.pack_into("<I", data, 64, 1)
+        # Model the linkage profile, not just ELF architecture, in package fixtures.
+        if cgo_enabled:
+            interpreter = {"amd64": b"/lib64/ld-linux-x86-64.so.2\0",
+                           "arm64": b"/lib/ld-linux-aarch64.so.1\0"}[arch]
+            struct.pack_into("<I", data, 64, 3)
+            struct.pack_into("<Q", data, 72, 192)
+            struct.pack_into("<Q", data, 96, len(interpreter))
+            data[192:192 + len(interpreter)] = interpreter
     return bytes(data)
 
 
@@ -46,10 +54,10 @@ def metadata(target):
             "version": "test-1", "target": target, "host_contract_version": "1",
             "source": {"repository": runtime.REPOSITORY, "commit": COMMIT,
                        "commit_time": "2026-09-22T00:00:00Z"},
-            "build": {"go_version": "go1.26.0", "cgo_enabled": target.startswith("darwin/"),
+            "build": {"go_version": "go1.26.0", "cgo_enabled": not target.startswith("windows/"),
                       "trimpath": True, "buildvcs": False,
                       "signing": "ad-hoc" if target.startswith("darwin/") else "unsigned"},
-            "capabilities": {"dynamic_library_plugins": target.startswith(("windows/", "darwin/")),
+            "capabilities": {"dynamic_library_plugins": True,
                              "dynamic_library_plugins_tested": False, "parent_monitor": True,
                              "runtime_control": True, "ephemeral_api_key": True}}
 
@@ -66,7 +74,7 @@ class RuntimeTests(unittest.TestCase):
     def bundle(self, target="linux/amd64", meta=None):
         self.serial += 1
         binary = self.root / f"fixture-{self.serial}"
-        binary.write_bytes(executable(target))
+        binary.write_bytes(executable(target, (meta or metadata(target))["build"]["cgo_enabled"]))
         return runtime.package(binary, self.license,
                                self.root / f"bundle-{self.serial}", meta or metadata(target))
 
@@ -100,6 +108,41 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dynamic interpreter"):
             runtime.validate_binary(binary, "linux/amd64")
 
+    def test_linux_cgo_allows_only_matching_glibc_interpreter(self):
+        for arch, interpreter in (("amd64", b"/lib64/ld-linux-x86-64.so.2\0"),
+                                  ("arm64", b"/lib/ld-linux-aarch64.so.1\0")):
+            target = "linux/" + arch
+            binary = bytearray(executable(target))
+            struct.pack_into("<I", binary, 64, 3)
+            struct.pack_into("<Q", binary, 72, 160)
+            struct.pack_into("<Q", binary, 96, len(interpreter))
+            binary[160:160 + len(interpreter)] = interpreter
+            runtime.validate_binary(binary, target, True)
+            with self.assertRaisesRegex(ValueError, "dynamic interpreter"):
+                runtime.validate_binary(binary, target, False)
+            binary[160] = ord("x")
+            with self.assertRaisesRegex(ValueError, "dynamic interpreter"):
+                runtime.validate_binary(binary, target, True)
+
+    def test_linux_cgo_rejects_missing_and_duplicate_interpreters(self):
+        for arch in ("amd64", "arm64"):
+            target = "linux/" + arch
+            static = executable(target, False)
+            runtime.validate_binary(static, target, False)
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                runtime.validate_binary(static, target, True)
+            duplicate = bytearray(executable(target))
+            struct.pack_into("<H", duplicate, 56, 2)
+            duplicate[120:176] = duplicate[64:120]
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                runtime.validate_binary(duplicate, target, True)
+
+    def test_linux_glibc_baseline(self):
+        runtime.validate_linux_glibc_versions("Name: GLIBC_2.17 Name: GLIBC_2.35")
+        for output in ("", "Name: GLIBC_2.36", "Name: GLIBC_PRIVATE", "Name: GLIBC_2.35.1"):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                runtime.validate_linux_glibc_versions(output)
+
     def test_invalid_targets_and_versions_rejected(self):
         for target in ("windows/386", "darwin/universal", "../../windows", "linux/armv7"):
             with self.assertRaises(ValueError):
@@ -128,8 +171,8 @@ class RuntimeTests(unittest.TestCase):
             runtime.package(self.root / "fixture-1", self.license, path.parent, metadata("linux/amd64"))
         self.assertEqual(path.read_bytes(), original)
 
-    def test_historical_macos_manifests_remain_readable(self):
-        for target in ("darwin/amd64", "darwin/arm64"):
+    def test_historical_unix_manifests_remain_readable(self):
+        for target in ("darwin/amd64", "darwin/arm64", "linux/amd64", "linux/arm64"):
             meta = metadata(target)
             meta["build"]["cgo_enabled"] = False
             meta["capabilities"]["dynamic_library_plugins"] = False
@@ -141,7 +184,7 @@ class RuntimeTests(unittest.TestCase):
             meta["capabilities"]["dynamic_library_plugins"] = not meta["capabilities"]["dynamic_library_plugins"]
             with self.subTest(target=target), self.assertRaisesRegex(ValueError, "capabilities"):
                 self.bundle(target, meta)
-        for target in ("linux/amd64", "windows/amd64"):
+        for target in ("windows/amd64", "windows/arm64"):
             meta = metadata(target)
             meta["build"]["cgo_enabled"] = True
             with self.subTest(target=target), self.assertRaisesRegex(ValueError, "profile"):
@@ -171,7 +214,7 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 runtime.verify(path)
         for change in (lambda m: m.update(host_contract_version="2"),
-                       lambda m: m["build"].update(cgo_enabled=True),
+                       lambda m: m["build"].update(cgo_enabled="1"),
                        lambda m: m["source"].update(repository="https://example.invalid"),
                        lambda m: m.update(extra="unexpected")):
             path = self.bundle()
@@ -264,6 +307,8 @@ class RuntimeTests(unittest.TestCase):
                 return COMMIT
             if args[:2] == ("git", "show"):
                 return "1789948800"
+            if args[:2] == ("readelf", "--version-info"):
+                return "Name: GLIBC_2.34"
             if args[:2] == ("go", "env"):
                 return "go1.26.0"
             if args[:2] == ("go", "build"):
@@ -277,9 +322,9 @@ class RuntimeTests(unittest.TestCase):
             args, kwargs = next(item for item in commands if item[0][:2] == ("go", "build"))
             self.assertIn("-trimpath", args)
             self.assertIn("-buildvcs=false", args)
-            self.assertEqual(kwargs["env"]["CGO_ENABLED"], "1" if target.startswith("darwin/") else "0")
+            self.assertEqual(kwargs["env"]["CGO_ENABLED"], "0" if target.startswith("windows/") else "1")
             self.assertEqual(kwargs["env"]["GOTOOLCHAIN"], "local")
-            self.assertEqual(manifest["build"]["cgo_enabled"], target.startswith("darwin/"))
+            self.assertEqual(manifest["build"]["cgo_enabled"], not target.startswith("windows/"))
             self.assertEqual(manifest["build"]["go_version"], "go1.26.0")
 
 

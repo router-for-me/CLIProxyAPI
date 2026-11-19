@@ -31,23 +31,25 @@ maintainer validation of a locked binary.
 | linux/amd64 | ubuntu-22.04 | tar.gz |
 | linux/arm64 | ubuntu-22.04-arm | tar.gz |
 
-All use `desktop-portable`: CGO=1 on macOS and CGO=0 on Linux/Windows, baseline CPU settings, `-trimpath`,
+All use `desktop-portable`: CGO=1 on macOS/Linux and CGO=0 on Windows, baseline CPU settings, `-trimpath`,
 `-buildvcs=false`, exact go.mod toolchain, and explicit version/full source SHA/
 source commit timestamp in the executable. The builder requires clean source and
 does not fetch source, refresh model catalogs, or modify source files. Normal Go
-dependency downloads retain checksum verification. Linux binaries are checked for
-absence of a dynamic interpreter.
+dependency downloads retain checksum verification. Linux builds run on Ubuntu 22.04 (glibc 2.35). Their dynamic interpreter must
+match the target glibc loader; readelf rejects required GLIBC versions newer than
+2.35. These are glibc runtimes, not static binaries or Alpine/musl builds. Older
+glibc systems are not a supported baseline; plugins may have their own requirements.
 
-Dynamic-library support is platform-specific. Native macOS builds use CGO=1
-and Apple's C toolchain for the loader; Linux remains CGO=0 and Windows retains
+Dynamic-library support is platform-specific. Native macOS/Linux builds use CGO=1
+and the platform C toolchain for the loader; Windows retains
 the existing syscall-based DLL loader. This does not enable plugins in user
 configuration. No plugins are bundled.
 
 Manifests describe build capabilities, with `dynamic_library_plugins_tested=false`
 at packaging time. Native smoke reports separately record successful loading of
-a benign test plugin; both macOS reports must provide this evidence before
+a benign test plugin; all six platform reports must provide this evidence before
 publication. This checks the loader, not arbitrary third-party plugin compatibility.
-Historical CGO=0 macOS manifests remain valid for verification/staging, while
+Historical CGO=0 Unix manifests remain valid for verification/staging, while
 new releases require the current platform CGO defaults. Archive names, schema
 and Desktop host contract stay unchanged; Desktop still needs a reviewed hash
 lock update before consuming the new binaries.
@@ -208,7 +210,8 @@ python scripts/pinable/runtime.py build --target linux/amd64 --output /tmp/new-r
 python scripts/pinable/smoke_runtime.py --artifact-dir /tmp/new-runtime-output
 ```
 
-Use exactly the Go version declared in go.mod. Native macOS is required for signing.
+Use exactly the Go version declared in go.mod. Native macOS is required for signing; native Linux builds need a C toolchain
+and binutils/readelf on Ubuntu 22.04 for the glibc baseline.
 The optional safe `--version` label defaults to source timestamp plus SHA. No pip
 modules, Node, Docker, GoReleaser or zip/unzip executables are required by these
 packaging tools. CI pins Python 3.12 on every job to keep archive validation
