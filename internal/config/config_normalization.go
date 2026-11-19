@@ -246,6 +246,9 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 	out := make(map[string][]RequestScopedErrorRule, len(cfg.OAuthRequestScopedErrors))
 	for rawChannel, rules := range cfg.OAuthRequestScopedErrors {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if KeepAntigravityGuardOptOut(out, channel, rules) {
+			continue
+		}
 		if channel == "" || len(rules) == 0 {
 			continue
 		}

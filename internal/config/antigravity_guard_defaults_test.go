@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestAntigravityGuardDefaultsApplyWithoutConfig(t *testing.T) {
 	cfg := mustParseGuardConfig(t, "config-version: 8\n")
@@ -38,11 +42,54 @@ oauth:
 	if plugin := cfg.Plugins.Configs[AntigravityGuardPluginID]; plugin.Enabled == nil || *plugin.Enabled {
 		t.Fatalf("explicit plugin enabled: false was overridden: %#v", plugin)
 	}
-	if rules, ok := cfg.OAuthRequestScopedErrors[antigravityGuardChannel]; ok {
-		t.Fatalf("explicit empty antigravity rules were replaced: %#v", rules)
+	if rules, ok := cfg.OAuthRequestScopedErrors[antigravityGuardChannel]; !ok || len(rules) != 0 {
+		t.Fatalf("explicit empty antigravity rules = %#v (present %v), want kept and empty", rules, ok)
 	}
 	if len(cfg.OAuthRequestScopedErrors["gemini"]) != 1 {
 		t.Fatalf("other channels changed: %#v", cfg.OAuthRequestScopedErrors)
+	}
+}
+
+// A config save must neither drop the synthesized defaults nor revoke the
+// empty-list opt-out.
+func TestAntigravityGuardDefaultsSurviveConfigSave(t *testing.T) {
+	cases := map[string]struct {
+		yaml     string
+		wantRule bool
+	}{
+		"defaults": {yaml: `config-version: 8
+port: 8317
+`, wantRule: true},
+		"opt-out": {yaml: `config-version: 8
+port: 8317
+oauth:
+  request-scoped-errors:
+    antigravity: []
+`, wantRule: false},
+	}
+	for name, tc := range cases {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(tc.yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(path)
+		if err != nil {
+			t.Fatalf("%s: LoadConfig: %v", name, err)
+		}
+		if err = SaveConfigPreserveComments(path, cfg); err != nil {
+			t.Fatalf("%s: SaveConfigPreserveComments: %v", name, err)
+		}
+		saved, _ := os.ReadFile(path)
+		reloaded, err := LoadConfig(path)
+		if err != nil {
+			t.Fatalf("%s: reload: %v", name, err)
+		}
+		if plugin := reloaded.Plugins.Configs[AntigravityGuardPluginID]; !reloaded.Plugins.Enabled || plugin.Enabled == nil || !*plugin.Enabled {
+			t.Fatalf("%s: bundled plugin disabled after save:\n%s", name, saved)
+		}
+		if got := len(reloaded.OAuthRequestScopedErrors[antigravityGuardChannel]) == 1; got != tc.wantRule {
+			t.Fatalf("%s: stop rule present = %v, want %v after save:\n%s", name, got, tc.wantRule, saved)
+		}
 	}
 }
 
