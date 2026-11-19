@@ -119,6 +119,15 @@ func lookupTunnelPeer(t *testing.T, hub *Hub, key, uuid string) *peer {
 	return tenant.peers[uuid]
 }
 
+// awaitIdleTunnelWriter returns once no write is in flight. A client can read
+// a frame before the server's writer unlocks, and a protocol error during an
+// active write reclaims the socket without sending a close frame.
+func awaitIdleTunnelWriter(p *peer) {
+	p.writeMu.Lock()
+	// Empty critical section: it only waits for the writer.
+	p.writeMu.Unlock()
+}
+
 func assertTunnelClose(t *testing.T, conn *websocket.Conn, code int) {
 	t.Helper()
 	_, _, errRead := readTunnelTestMessage(conn)

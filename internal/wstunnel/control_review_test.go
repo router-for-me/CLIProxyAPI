@@ -178,6 +178,7 @@ func TestPeerControl_UnknownWebSocketOpcodeIsFatalProtocolError(t *testing.T) {
 			client := dialRole(t, srv.URL, "key", RoleClient, "device", "Device")
 			_ = readTextJSONFrame(t, client)
 			p := lookupTunnelPeer(t, hub, "key", "device")
+			awaitIdleTunnelWriter(p)
 			transport := p.conn.UnderlyingConn().(*deadlineGuardConn).Conn.(*deadlineTrackingTunnelConn)
 			transport.monitoring.Store(true)
 			// Send a final, masked, empty frame using a reserved data/control opcode.
