@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -147,5 +148,92 @@ func assertNoChatFields(t *testing.T, payload []byte) {
 		if ojson.GetBytes(payload, path).Exists() {
 			t.Fatalf("embedding payload must not contain %q: %s", path, payload)
 		}
+	}
+}
+
+func TestPrepareGeminiEmbeddingDocDefaultsMissingBatchEntryModels(t *testing.T) {
+	raw := `{"requests":[{"content":{"parts":[{"text":"first"}]}},{"content":{"parts":[{"text":"second"}]}}]}`
+	doc, err := PrepareGeminiEmbeddingDoc([]byte(raw), "gemini-embedding-2", GeminiBatchEmbedContentsAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() error = %v", err)
+	}
+	out := doc.Bytes()
+	for i := 0; i < 2; i++ {
+		path := "requests." + strconv.Itoa(i) + ".model"
+		if got := ojson.GetBytes(out, path).String(); got != "models/gemini-embedding-2" {
+			t.Errorf("%s = %q, want models/gemini-embedding-2", path, got)
+		}
+	}
+	// Order and per-entry content must survive the fill.
+	if got := ojson.GetBytes(out, "requests.0.content.parts.0.text").String(); got != "first" {
+		t.Errorf("requests[0] text = %q, want first", got)
+	}
+	if got := ojson.GetBytes(out, "requests.1.content.parts.0.text").String(); got != "second" {
+		t.Errorf("requests[1] text = %q, want second", got)
+	}
+}
+
+func TestPrepareGeminiEmbeddingDocFillsOnlyEmptyBatchEntryModels(t *testing.T) {
+	raw := `{"requests":[` +
+		`{"content":{"parts":[{"text":"a"}]}},` +
+		`{"model":"","content":{"parts":[{"text":"b"}]}},` +
+		`{"model":null,"content":{"parts":[{"text":"c"}]}},` +
+		`{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"d"}]}},` +
+		`{"model":"models/other-embedding","content":{"parts":[{"text":"e"}]}}` +
+		`]}`
+	doc, err := PrepareGeminiEmbeddingDoc([]byte(raw), "gemini-embedding-2", GeminiBatchEmbedContentsAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() error = %v", err)
+	}
+	out := doc.Bytes()
+	want := []string{
+		"models/gemini-embedding-2",
+		"models/gemini-embedding-2",
+		"models/gemini-embedding-2",
+		"models/gemini-embedding-001",
+		"models/other-embedding",
+	}
+	for i, expected := range want {
+		path := "requests." + strconv.Itoa(i) + ".model"
+		if got := ojson.GetBytes(out, path).String(); got != expected {
+			t.Errorf("%s = %q, want %q", path, got, expected)
+		}
+	}
+}
+
+func TestPrepareGeminiEmbeddingDocLeavesExplicitBatchModelsAlone(t *testing.T) {
+	raw := `{"requests":[{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"only"}]}}]}`
+	doc, err := PrepareGeminiEmbeddingDoc([]byte(raw), "gemini-embedding-2", GeminiBatchEmbedContentsAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() error = %v", err)
+	}
+	if got := ojson.GetBytes(doc.Bytes(), "requests.0.model").String(); got != "models/gemini-embedding-001" {
+		t.Fatalf("requests[0].model = %q, want caller value untouched", got)
+	}
+}
+
+func TestPrepareGeminiEmbeddingDocBatchFillIsFinalBarrierSafe(t *testing.T) {
+	// A payload rule that filters entry model fields must win over the default fill,
+	// because rules are evaluated after native preparation.
+	cfg := &config.Config{Payload: config.PayloadConfig{
+		Filter: []config.PayloadFilterRule{{
+			Models: []config.PayloadModelRule{{Name: "gemini-embedding-2"}},
+			Params: []string{"requests.0.model"},
+		}},
+	}}
+	raw := []byte(`{"requests":[{"content":{"parts":[{"text":"a"}]}},{"content":{"parts":[{"text":"b"}]}}]}`)
+	doc, err := PrepareGeminiEmbeddingDoc(raw, "gemini-embedding-2", GeminiBatchEmbedContentsAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() error = %v", err)
+	}
+	req := cliproxyexecutor.Request{Model: "gemini-embedding-2", Payload: raw}
+	ctx := WithPayloadFinalizer(context.Background(), NewPayloadFinalizer(cfg, "gemini", "gemini-embedding-2", "gemini", "", raw, req, cliproxyexecutor.Options{}))
+	FinalizePayloadDoc(ctx, doc)
+	out := doc.Bytes()
+	if ojson.GetBytes(out, "requests.0.model").Exists() {
+		t.Errorf("filtered field was restored: %s", out)
+	}
+	if got := ojson.GetBytes(out, "requests.1.model").String(); got != "models/gemini-embedding-2" {
+		t.Errorf("requests[1].model = %q, want default fill kept", got)
 	}
 }

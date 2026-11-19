@@ -66,6 +66,10 @@ curl -sS http://localhost:8317/v1beta/models/gemini-embedding-2:batchEmbedConten
 
 批量响应按请求顺序返回；代理不会重排、合并或拆分条目。
 
+每个 entry 可以省略 `model`：缺失、空字符串或 `null` 的 entry 级 model 会用请求路径上的模型
+（`models/<model>`）填充，因为上游按 entry 逐个校验模型，不参考路径上的模型。entry 已自带 model 时
+（包括多模型混批）原样转发。
+
 ### SDK 示例
 
 ```python
