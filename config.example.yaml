@@ -650,6 +650,10 @@ upstream:
 # api-keys:
 #
 #   # Gemini API keys
+#   #
+#   # These credentials also serve the native non-chat /v1beta endpoints:
+#   # models/{model}:embedContent, models/{model}:batchEmbedContents, and decisions.
+#   # See docs/gemini-native-api.md for models, examples, and channel support.
 #
 #   gemini:
 #     - name: gemini-1
