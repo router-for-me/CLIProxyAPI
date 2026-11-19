@@ -34,6 +34,7 @@ func (cfg *Config) NormalizePluginsConfig() {
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
 	}
+	cfg.applyAntigravityGuardPluginDefault()
 }
 
 // NormalizeClaudeConfig applies default Claude provider configuration values.

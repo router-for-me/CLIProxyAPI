@@ -209,6 +209,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
+	applyAntigravityGuardLoadDefaults(&cfg)
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -335,6 +336,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SanitizeOAuthSettings()
 
 	// Normalize global OAuth request-scoped error rules.
+	cfg.applyAntigravityGuardScopedErrorDefault()
 	cfg.SanitizeOAuthRequestScopedErrors()
 
 	// Validate raw payload rules and drop invalid entries.

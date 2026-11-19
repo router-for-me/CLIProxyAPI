@@ -109,6 +109,7 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 
+	installBundledPlugins(cfg)
 	if s.pluginHost != nil {
 		s.pluginHost.ApplyConfig(ctx, cfg)
 	}
