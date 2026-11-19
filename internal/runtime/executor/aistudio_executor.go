@@ -310,6 +310,7 @@ func (e *AIStudioExecutor) executeNativeRelayNonStream(ctx context.Context, auth
 		AuthValue: authValue,
 	})
 
+	reporter.StartResponseTTFT()
 	wsResp, errRelay := e.relay.NonStream(ctx, authID, wsReq)
 	if errRelay != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, errRelay)
@@ -317,6 +318,7 @@ func (e *AIStudioExecutor) executeNativeRelayNonStream(ctx context.Context, auth
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers.Clone())
 	if len(wsResp.Body) > 0 {
+		reporter.MarkFirstResponseByte()
 		helps.AppendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
 	}
 	if wsResp.Status < 200 || wsResp.Status >= 300 {
