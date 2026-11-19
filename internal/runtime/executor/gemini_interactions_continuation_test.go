@@ -16,6 +16,109 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
+func TestGeminiInteractionsResponsesSendsToolResultImages(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream bool
+		rules  bool
+	}{
+		{name: "stream", stream: true},
+		{name: "non-stream"},
+		{name: "payload-rules", stream: true, rules: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Error(errRead)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				requests <- body
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"i1\",\"status\":\"completed\"}}\n\n")
+				} else {
+					_, _ = io.WriteString(w, `{"id":"i1","status":"completed","steps":[]}`)
+				}
+			}))
+			defer server.Close()
+
+			const model = "gemini-4-neon"
+			cfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: true}}
+			if tc.rules {
+				models := []config.PayloadModelRule{{Name: model, Protocol: "interactions"}}
+				cfg.Payload.Default = []config.PayloadRule{{
+					Models: models, Params: map[string]any{"input.2.result.0.mime_type": "image/jpeg"},
+				}}
+				cfg.Payload.Filter = []config.PayloadFilterRule{{
+					Models: []config.PayloadModelRule{{Name: model, Protocol: "interactions", Exist: []string{"input.2.result.0.data"}}},
+					Params: []string{"input.2.result.0.data"},
+				}}
+			}
+			exec := NewGeminiInteractionsExecutor(cfg)
+			auth := &cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"base_url": server.URL, "api_key": "test-key"}}
+			const orphanOutput = `[{"type":"input_text","text":"Keep the original delegation output."}]`
+			req := cliproxyexecutor.Request{Model: model, Payload: []byte(`{"input":[
+				{"type":"message","role":"user","content":"Look at the tool result."},
+				{"type":"function_call","name":"view_image","call_id":"call_1","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_1","output":[
+					{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8=","detail":"auto"},
+					{"type":"input_text","text":"Screenshot"},
+					{"type":"input_image","image_url":"https://example.com/image.png","detail":"high"},
+					{"type":"image","mime_type":"image/webp","data":"bmF0aXZl"}
+				]},
+				{"type":"function_call","name":"lookup","call_id":"call_2","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_2","output":"{\"ok\":true}"},
+				{"type":"function_call","name":"lookup","call_id":"call_3","arguments":"{}"},
+				{"type":"function_call_output","call_id":"call_3","output":"[{\"type\":\"input_text\",\"text\":\"literal\",\"id\":123}]"},
+				{"type":"function_call_output","namespace":"codex_app","name":"create_thread","call_id":"orphan","output":` + orphanOutput + `}
+			]}`)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: tc.stream, Headers: http.Header{"X-Openai-Subagent": {"collab_spawn"}}}
+			if tc.stream {
+				result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+				}
+			} else if _, errExecute := exec.Execute(context.Background(), auth, req, opts); errExecute != nil {
+				t.Fatal(errExecute)
+			}
+
+			body := ojson.ParseBytes(<-requests)
+			step := body.Get("input.2")
+			if step.Get("type").String() != "function_result" || step.Get("call_id").String() != "call_1" || step.Get("name").String() != "view_image" {
+				t.Fatalf("unexpected tool result step: %s", step.Raw)
+			}
+			parts := step.Get("result").Array()
+			if len(parts) != 4 || parts[0].Get("type").String() != "image" || parts[0].Get("mime_type").String() != "image/png" ||
+				parts[0].Get("image_url").Exists() || parts[0].Get("detail").Exists() ||
+				parts[1].Get("type").String() != "text" || parts[1].Get("text").String() != "Screenshot" ||
+				parts[2].Get("type").String() != "image" || parts[2].Get("uri").String() != "https://example.com/image.png" ||
+				parts[3].Get("mime_type").String() != "image/webp" || parts[3].Get("data").String() != "bmF0aXZl" {
+				t.Fatalf("unexpected tool result parts: %s", step.Get("result").Raw)
+			}
+			if data := parts[0].Get("data"); (!tc.rules && data.String() != "aGVsbG8=") || (tc.rules && data.Exists()) {
+				t.Fatalf("unexpected inline image data for %s: %q", tc.name, data.String())
+			}
+			if !body.Get("input.4.result.ok").Bool() {
+				t.Fatalf("structured tool output changed: %s", body.Get("input.4.result").Raw)
+			}
+			if part := body.Get("input.6.result.0"); part.Get("type").String() != "input_text" || part.Get("id").Int() != 123 {
+				t.Fatalf("JSON array encoded as tool output text was rewritten: %s", part.Raw)
+			}
+			if got, want := body.Get("input.7.content.0.text").String(), "Tool output from codex_app__create_thread:\n"+orphanOutput; got != want {
+				t.Fatalf("orphan delegation output = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestGeminiInteractionsResponsesReplaysThoughtBeforeToolCalls(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

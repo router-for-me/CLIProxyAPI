@@ -10,6 +10,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	interactionsresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/interactions/responses"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -145,7 +146,7 @@ func TranslateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Con
 		return bytes.Clone(payload), nil
 	}
 	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
-		ctx = interactionsresponses.WithGeminiThoughtReplay(ctx)
+		ctx = interactionsresponses.WithGeminiInteractionsTarget(ctx, geminiInteractionsResponsesToolResultPart)
 	}
 	return TranslateRequestReturningError(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream, isCompat)
 }
@@ -184,6 +185,34 @@ func geminiInteractionsSameByteSlice(a, b []byte) bool {
 		return true
 	}
 	return &a[0] == &b[0]
+}
+
+func geminiInteractionsResponsesToolResultPart(part ojson.Result) *ojson.Doc {
+	switch part.Get("type").String() {
+	case "input_text":
+		if value := part.Get("text"); value.Type == ojson.String {
+			text := ojson.NewDocString(`{"type":"text"}`)
+			_ = text.Set("text", value.String())
+			return text
+		}
+	case "input_image":
+		imageURL := strings.TrimSpace(part.Get("image_url").String())
+		if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", imageURL); ok {
+			image := ojson.NewDocString(`{"type":"image"}`)
+			_ = image.Set("mime_type", mimeType)
+			_ = image.Set("data", data)
+			return image
+		}
+		if translatorcommon.IsHTTPURL(imageURL) {
+			image := ojson.NewDocString(`{"type":"image"}`)
+			_ = image.Set("uri", imageURL)
+			if mimeType := part.Get("mime_type").String(); mimeType != "" {
+				_ = image.Set("mime_type", mimeType)
+			}
+			return image
+		}
+	}
+	return nil
 }
 
 // ApplyGeminiInteractionsThinking applies thinking/reasoning configuration to the interactions payload.

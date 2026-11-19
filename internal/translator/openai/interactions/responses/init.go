@@ -3,18 +3,23 @@ package responses
 import (
 	"context"
 
+	"github.com/MoeForge/moego/ojson"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/translator"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-type geminiThoughtReplayKey struct{}
+type geminiInteractionsTargetKey struct{}
 
-// WithGeminiThoughtReplay allows Responses reasoning replay on a native Gemini
-// Interactions request. Other providers use the same translation format.
-func WithGeminiThoughtReplay(ctx context.Context) context.Context {
-	return context.WithValue(ctx, geminiThoughtReplayKey{}, true)
+type geminiInteractionsTarget struct {
+	convertToolResultPart func(ojson.Result) *ojson.Doc
+}
+
+// WithGeminiInteractionsTarget enables native Gemini thought replay and
+// provider-specific tool result conversion.
+func WithGeminiInteractionsTarget(ctx context.Context, convertToolResultPart func(ojson.Result) *ojson.Doc) context.Context {
+	return context.WithValue(ctx, geminiInteractionsTargetKey{}, &geminiInteractionsTarget{convertToolResultPart: convertToolResultPart})
 }
 
 func init() {
@@ -29,8 +34,8 @@ func init() {
 	)
 	sdktranslator.RegisterRequestEnvelope(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions,
 		func(ctx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
-			replayGeminiThought, _ := ctx.Value(geminiThoughtReplayKey{}).(bool)
-			req.Body, req.Err = convertOpenAIResponsesRequestToInteractions(req.Model, req.Body, req.Stream, replayGeminiThought)
+			target, _ := ctx.Value(geminiInteractionsTargetKey{}).(*geminiInteractionsTarget)
+			req.Body, req.Err = convertOpenAIResponsesRequestToInteractions(req.Model, req.Body, req.Stream, target)
 			return req
 		},
 	)

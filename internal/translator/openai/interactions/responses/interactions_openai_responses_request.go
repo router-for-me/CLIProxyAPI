@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -11,12 +12,12 @@ import (
 )
 
 func ConvertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertOpenAIResponsesRequestToInteractions(modelName, inputRawJSON, stream, false)
+	return convertOpenAIResponsesRequestToInteractions(modelName, inputRawJSON, stream, nil)
 }
 
 // convertOpenAIResponsesRequestToInteractions also reports a file, audio or video
 // part Interactions cannot receive when it leaves a user turn with nothing to send.
-func convertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream, replayGeminiThought bool) ([]byte, error) {
+func convertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON []byte, stream bool, target *geminiInteractionsTarget) ([]byte, error) {
 	var drops translatorcommon.UserTurnDrops
 	root := util.ParseGJSONBytesNoCopy(inputRawJSON)
 	outDoc := ojson.NewDocString(`{"model":"","input":[]}`)
@@ -40,7 +41,7 @@ func convertOpenAIResponsesRequestToInteractions(modelName string, inputRawJSON 
 	forAntigravity := isAntigravityModel(model)
 	forDevin := isDevinModel(model) || !forAntigravity
 	if input := root.Get("input"); input.Exists() {
-		setResponsesInputOnInteractionsDoc(outDoc, input, forAntigravity, replayGeminiThought, &drops)
+		setResponsesInputOnInteractionsDoc(outDoc, input, forAntigravity, target, &drops)
 	}
 	appendResponsesToolsToInteractionsDoc(outDoc, root, forAntigravity, forDevin)
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
@@ -237,20 +238,20 @@ func interactionsThinkingEffort(root ojson.Result) string {
 	return ""
 }
 
-func setResponsesInputOnInteractionsDoc(outDoc *ojson.Doc, input ojson.Result, forAntigravity, replayGeminiThought bool, drops *translatorcommon.UserTurnDrops) {
+func setResponsesInputOnInteractionsDoc(outDoc *ojson.Doc, input ojson.Result, forAntigravity bool, target *geminiInteractionsTarget, drops *translatorcommon.UserTurnDrops) {
 	functionNamesByCallID := make(map[string]string)
 	items := make([][]byte, 0)
 	if input.Type == ojson.String {
 		items = append(items, interactionsTextStep("user_input", input.String()))
 	} else if input.IsArray() {
 		input.ForEach(func(_, item ojson.Result) bool {
-			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity, replayGeminiThought, drops); converted != nil {
+			if converted := responsesInputItemToInteractions(item, functionNamesByCallID, forAntigravity, target, drops); converted != nil {
 				items = append(items, converted)
 			}
 			return true
 		})
 	} else if input.IsObject() {
-		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity, replayGeminiThought, drops); converted != nil {
+		if converted := responsesInputItemToInteractions(input, functionNamesByCallID, forAntigravity, target, drops); converted != nil {
 			items = append(items, converted)
 		}
 	}
@@ -269,7 +270,7 @@ func responsesUserTurnDrops(role string, drops *translatorcommon.UserTurnDrops) 
 	return nil
 }
 
-func responsesInputItemToInteractions(item ojson.Result, functionNamesByCallID map[string]string, forAntigravity, replayGeminiThought bool, drops *translatorcommon.UserTurnDrops) []byte {
+func responsesInputItemToInteractions(item ojson.Result, functionNamesByCallID map[string]string, forAntigravity bool, target *geminiInteractionsTarget, drops *translatorcommon.UserTurnDrops) []byte {
 	switch item.Get("type").String() {
 	case "message":
 		stepType := "user_input"
@@ -304,9 +305,9 @@ func responsesInputItemToInteractions(item ojson.Result, functionNamesByCallID m
 		}
 		return responsesCustomToolCallToInteractions(item, forAntigravity)
 	case "function_call_output", "custom_tool_call_output":
-		return responsesFunctionOutputToInteractions(item, functionNamesByCallID, forAntigravity)
+		return responsesFunctionOutputToInteractions(item, functionNamesByCallID, forAntigravity, target)
 	case "reasoning":
-		return responsesReasoningToInteractions(item, replayGeminiThought)
+		return responsesReasoningToInteractions(item, target != nil)
 	case "input_text", "output_text", "text":
 		stepType := "user_input"
 		if item.Get("type").String() == "output_text" {
@@ -523,7 +524,7 @@ func responsesCustomToolCallToInteractions(item ojson.Result, forAntigravity boo
 	return outDoc.Bytes()
 }
 
-func responsesFunctionOutputToInteractions(item ojson.Result, functionNamesByCallID map[string]string, forAntigravity bool) []byte {
+func responsesFunctionOutputToInteractions(item ojson.Result, functionNamesByCallID map[string]string, forAntigravity bool, target *geminiInteractionsTarget) []byte {
 	outDoc := ojson.NewDocString(`{"type":"function_result","name":"","result":{}}`)
 	callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
 	name := item.Get("name").String()
@@ -547,6 +548,15 @@ func responsesFunctionOutputToInteractions(item ojson.Result, functionNamesByCal
 		result = item.Get("result")
 	}
 	setJSONValueDoc(outDoc, "result", result, `{}`)
+	// Typed arrays carry content parts. JSON strings remain tool data even
+	// when setJSONValueDoc parses them into arrays.
+	if target != nil && target.convertToolResultPart != nil && result.IsArray() {
+		for i, part := range result.Array() {
+			if converted := target.convertToolResultPart(part); converted != nil {
+				_ = outDoc.SetRaw("result."+strconv.Itoa(i), converted.String())
+			}
+		}
+	}
 	return outDoc.Bytes()
 }
 
