@@ -99,36 +99,45 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 }
 
 func WriteConfig(path string, data []byte) error {
+	_, commented, err := writeConfig(path, data)
+	if err == nil {
+		config.WarnUnrecognizedV8Sections(commented)
+	}
+	return err
+}
+
+// writeConfig returns the exact saved bytes and any migration warnings for the
+// caller to emit after persistence. Keep the inode for mounted configuration files.
+func writeConfig(path string, data []byte) ([]byte, []config.ArchivedV8Section, error) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return err
+		return nil, nil, err
 	}
 	var commented []config.ArchivedV8Section
 	if len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
 		var errNorm error
 		data, _, commented, errNorm = config.NormalizeConfigLayoutSilent(data, true)
 		if errNorm != nil {
-			return errNorm
+			return nil, nil, errNorm
 		}
 	}
 	data = config.NormalizeCommentIndentation(data)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	if _, errWrite := f.Write(data); errWrite != nil {
 		_ = f.Close()
-		return errWrite
+		return nil, nil, errWrite
 	}
 	if errSync := f.Sync(); errSync != nil {
 		_ = f.Close()
-		return errSync
+		return nil, nil, errSync
 	}
 	if errClose := f.Close(); errClose != nil {
-		return errClose
+		return nil, nil, errClose
 	}
-	config.WarnUnrecognizedV8Sections(commented)
-	return nil
+	return data, commented, nil
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
@@ -150,12 +159,6 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		return
 	}
 	tempFile := tmpFile.Name()
-	if _, errWrite := tmpFile.Write(body); errWrite != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tempFile)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errWrite.Error()})
-		return
-	}
 	if errClose := tmpFile.Close(); errClose != nil {
 		_ = os.Remove(tempFile)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errClose.Error()})
@@ -164,24 +167,35 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	_, err = config.LoadConfigOptional(tempFile, false)
+	// Validate the layout that will actually be saved, including any migration.
+	_, commented, err := writeConfig(tempFile, body)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
+		return
+	}
+	validated, err := config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
+	// Loading prepares the secret hash and removes conflicting legacy fields.
+	// Persist those prepared bytes and publish this same validated snapshot.
+	prepared, err := os.ReadFile(tempFile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if WriteConfig(h.configFilePath, body) != nil {
+	saved, finalCommented, err := writeConfig(h.configFilePath, prepared)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
-	// Reload into handler to keep memory in sync
-	newCfg, err := config.LoadConfig(h.configFilePath)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
-		return
-	}
-	h.cfg = newCfg
+	config.WarnUnrecognizedV8Sections(config.FilterArchivedV8Sections(saved, commented))
+	config.WarnUnrecognizedV8Sections(finalCommented)
+	validated.SourceHash = config.ComputeSourceHash(saved)
+	h.cfg = validated
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
