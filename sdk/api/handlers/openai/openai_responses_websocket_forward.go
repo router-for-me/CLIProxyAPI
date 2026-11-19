@@ -106,6 +106,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), errMsg, nil
 		}
 		markAPIResponseTimestamp(c)
+		if opts.localInterrupt != nil {
+			opts.localInterrupt.end()
+		}
 		if matched, errClose := writer.closeForUpstreamError(errMsg.Error); matched {
 			cancel(errMsg.Error)
 			if errClose != nil {
@@ -293,6 +296,9 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 				}
 				markAPIResponseTimestamp(c)
 				if payloadErrMsg != nil {
+					if opts.localInterrupt != nil {
+						opts.localInterrupt.end()
+					}
 					if matched, errClose := writer.closeForUpstreamError(payloadErrMsg.Error); matched {
 						cancel(payloadErrMsg.Error)
 						if errClose != nil {

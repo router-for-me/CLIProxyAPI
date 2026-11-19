@@ -92,17 +92,18 @@ func TestPluginErrorCarriesRetryAfterIntoCooldownAndHTTPHeader(t *testing.T) {
 	if errExec == nil {
 		t.Fatal("authMgr.Execute returned nil error")
 	}
-	// MarkResult clamps the 7s Retry-After hint up to the 10s quota cooldown
-	// floor for both the model state and the terminal pool Retry-After header.
+	// The raw plugin hint remains 7s, but the exhausted single-credential pool
+	// applies the 10s quota cooldown floor. Report the actual recovery deadline
+	// to the caller rather than the shorter upstream hint (upstream issue #7521).
 	if got := coreauth.SafeResponseHeaders(errExec).Get("Retry-After"); got != "10" {
-		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 10", got)
+		t.Fatalf("SafeResponseHeaders(errExec) Retry-After = %q, want 10 (pool cooldown floor)", got)
 	}
 	updated, okAuth := authMgr.GetByID(authID)
 	if !okAuth || updated == nil {
 		t.Fatalf("GetByID(%q) missing", authID)
 	}
 	state := updated.ModelStates[model]
-	if state == nil || !state.NextRetryAfter.After(before.Add(9*time.Second)) {
+	if state == nil || state.NextRetryAfter.Before(before.Add(10*time.Second)) {
 		t.Fatalf("model NextRetryAfter = %v, want at least %v (10s cooldown floor)", state, before.Add(10*time.Second))
 	}
 }

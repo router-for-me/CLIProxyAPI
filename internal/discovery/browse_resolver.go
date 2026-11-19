@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -12,8 +13,6 @@ import (
 	"github.com/libp2p/zeroconf/v2"
 	"github.com/miekg/dns"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
 const (
@@ -470,27 +469,8 @@ func browseLAN(ctx context.Context, ifaces []net.Interface, serviceType, domain 
 		return nil, fmt.Errorf("discovery: no allowed browse interfaces")
 	}
 	cache := newBrowseCache(ifaces, serviceType, domain)
-	conn4, err4 := openMDNSConn4(ifaces)
-	conn6, err6 := openMDNSConn6(ifaces)
-	// Interface and destination metadata are mandatory for receive isolation.
-	if conn4 != nil {
-		if err := conn4.SetControlMessage(ipv4.FlagInterface|ipv4.FlagDst, true); err != nil {
-			err4 = err
-			if errClose := conn4.Close(); errClose != nil {
-				log.WithError(errClose).Debug("discovery: close unusable IPv4 browse socket")
-			}
-			conn4 = nil
-		}
-	}
-	if conn6 != nil {
-		if err := conn6.SetControlMessage(ipv6.FlagInterface|ipv6.FlagDst, true); err != nil {
-			err6 = err
-			if errClose := conn6.Close(); errClose != nil {
-				log.WithError(errClose).Debug("discovery: close unusable IPv6 browse socket")
-			}
-			conn6 = nil
-		}
-	}
+	conn4, err4 := openBrowseConn4(ifaces)
+	conn6, err6 := openBrowseConn6(ifaces)
 	if conn4 == nil && conn6 == nil {
 		return nil, fmt.Errorf("discovery: open mDNS sockets: IPv4: %v; IPv6: %v", err4, err6)
 	}
@@ -533,33 +513,17 @@ func browseLAN(ctx context.Context, ifaces []net.Interface, serviceType, domain 
 			buf := make([]byte, 65536)
 			for {
 				var p browsePacket
-				var from net.Addr
+				conn := conn4
 				if v6 {
-					n, cm, src, e := conn6.ReadFrom(buf)
-					if e != nil {
-						readerErrors <- e
-						return
-					}
-					if cm != nil {
-						p.index = cm.IfIndex
-						p.dst = cm.Dst
-					}
-					from = src
-					p.data = append([]byte(nil), buf[:n]...)
-				} else {
-					n, cm, src, e := conn4.ReadFrom(buf)
-					if e != nil {
-						readerErrors <- e
-						return
-					}
-					if cm != nil {
-						p.index = cm.IfIndex
-						p.dst = cm.Dst
-					}
-					from = src
-					p.data = append([]byte(nil), buf[:n]...)
+					conn = conn6
 				}
-				p.src, _ = from.(*net.UDPAddr)
+				n, index, src, dst, errRead := conn.ReadPacket(buf)
+				if errRead != nil {
+					readerErrors <- errRead
+					return
+				}
+				p.index, p.src, p.dst = index, src, dst
+				p.data = append([]byte(nil), buf[:n]...)
 				select {
 				case packets <- p:
 				case <-stop:
@@ -574,7 +538,7 @@ func browseLAN(ctx context.Context, ifaces []net.Interface, serviceType, domain 
 	send := func(now time.Time) error {
 		active := make(map[string]bool)
 		attempted, sent := 0, 0
-		var lastSendErr error
+		var sendErrors []error
 		for _, iface := range ifaces {
 			qs := cache.queries(iface.Index, now)
 			for _, q := range qs {
@@ -593,24 +557,18 @@ func browseLAN(ctx context.Context, ifaces []net.Interface, serviceType, domain 
 					}
 					if conn4 != nil {
 						attempted++
-						errSend := conn4.SetMulticastInterface(&iface)
-						if errSend == nil {
-							_, errSend = conn4.WriteTo(wire, nil, mdnsGroupAddrIPv4)
-						}
+						errSend := conn4.WriteQuery(wire, &iface)
 						if errSend != nil {
-							lastSendErr = errSend
+							sendErrors = append(sendErrors, fmt.Errorf("interface %s: %w", iface.Name, errSend))
 						} else {
 							sent++
 						}
 					}
 					if conn6 != nil {
 						attempted++
-						errSend := conn6.SetMulticastInterface(&iface)
-						if errSend == nil {
-							_, errSend = conn6.WriteTo(wire, nil, mdnsGroupAddrIPv6)
-						}
+						errSend := conn6.WriteQuery(wire, &iface)
 						if errSend != nil {
-							lastSendErr = errSend
+							sendErrors = append(sendErrors, fmt.Errorf("interface %s: %w", iface.Name, errSend))
 						} else {
 							sent++
 						}
@@ -624,7 +582,7 @@ func browseLAN(ctx context.Context, ifaces []net.Interface, serviceType, domain 
 			}
 		}
 		if attempted > 0 && sent == 0 && ctx.Err() == nil {
-			return fmt.Errorf("discovery: send browse queries: %w", lastSendErr)
+			return fmt.Errorf("discovery: send browse queries: %w", errors.Join(sendErrors...))
 		}
 		return nil
 	}

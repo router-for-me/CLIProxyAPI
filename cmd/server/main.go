@@ -84,6 +84,9 @@ func logStartupErrorf(format string, args ...any) {
 
 // run finishes deferred cleanup before main applies the process exit status.
 func run() (exitStatus int) {
+	if printHostVersion(os.Args[1:], os.Stdout) {
+		return 0
+	}
 	log.SetOutput(os.Stderr)
 
 	if len(os.Args) > 1 && os.Args[1] == "discover" {
@@ -148,6 +151,7 @@ func run() (exitStatus int) {
 	var standalone bool
 	var managementBaseURL string
 	var localModel bool
+	var parentPID int
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
@@ -179,6 +183,8 @@ func run() (exitStatus int) {
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.StringVar(&managementBaseURL, "management-base-url", "", "Base URL of remote management API for TUI client mode (e.g. https://proxy.example.com)")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalogs unless models.catalog, models.codex-catalog, or models.devin-catalog explicitly overrides the source")
+
+	flag.IntVar(&parentPID, "parent-pid", 0, "Exit when the specified parent process is no longer running")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -217,6 +223,10 @@ func run() (exitStatus int) {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	if parentPID < 0 {
+		logStartupErrorf("parent pid must be positive")
+		return 1
+	}
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -678,7 +688,9 @@ func run() (exitStatus int) {
 	commandMode := vertexImport != "" || siwcBind != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
+	hostOptions := hostOptionsFromEnv(parentPID)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
+	exampleAPIKeySafeMode = applyHostSafeMode(exampleAPIKeySafeMode, hostOptions)
 	serverOptions := []api.ServerOption(nil)
 	if exampleAPIKeySafeMode {
 		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
@@ -800,7 +812,7 @@ func run() (exitStatus int) {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
+				cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost, hostOptions, serverOptions...)
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -864,7 +876,7 @@ func run() (exitStatus int) {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			registry.SetLocalModelCatalogs(localModel)
-			if errStart := cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...); errStart != nil {
+			if errStart := cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, hostOptions, serverOptions...); errStart != nil {
 				if log.StandardLogger().Out != os.Stderr {
 					_, _ = fmt.Fprintf(os.Stderr, "proxy service error: %v\n", errStart)
 				}

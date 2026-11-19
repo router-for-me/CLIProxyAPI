@@ -60,6 +60,7 @@ func (s *targetedTestAntigravityOAuthService) FetchProjectID(_ context.Context, 
 }
 
 type targetedTestKimiOAuthService struct {
+	pollDone     chan struct{}
 	domain       string
 	accessToken  string
 	refreshToken string
@@ -77,7 +78,12 @@ func (s *targetedTestKimiOAuthService) StartDeviceFlow(_ context.Context) (*kimi
 	}, nil
 }
 
-func (s *targetedTestKimiOAuthService) WaitForAuthorization(_ context.Context, _ *kimi.DeviceCodeResponse) (*kimi.KimiAuthBundle, error) {
+func (s *targetedTestKimiOAuthService) WaitForAuthorization(ctx context.Context, _ *kimi.DeviceCodeResponse) (*kimi.KimiAuthBundle, error) {
+	if s.pollDone != nil {
+		defer close(s.pollDone)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return &kimi.KimiAuthBundle{
 		TokenData: &kimi.KimiTokenData{
 			AccessToken:  s.accessToken,
@@ -143,6 +149,8 @@ func (s *targetedTestClaudeOAuthService) CreateTokenStorage(bundle *claude.Claud
 }
 
 type targetedTestXAIOAuthService struct {
+	// pollDone keeps registration-only tests pending until session cancellation.
+	pollDone    chan struct{}
 	email       string
 	subject     string
 	accessToken string
@@ -159,7 +167,12 @@ func (s *targetedTestXAIOAuthService) StartDeviceFlow(_ context.Context) (*xaiau
 	}, nil
 }
 
-func (s *targetedTestXAIOAuthService) WaitForAuthorization(_ context.Context, _ *xaiauth.DeviceCodeResponse) (*xaiauth.AuthBundle, error) {
+func (s *targetedTestXAIOAuthService) WaitForAuthorization(ctx context.Context, _ *xaiauth.DeviceCodeResponse) (*xaiauth.AuthBundle, error) {
+	if s.pollDone != nil {
+		defer close(s.pollDone)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return &xaiauth.AuthBundle{
 		TokenData: xaiauth.TokenData{
 			AccessToken:  s.accessToken,
@@ -192,6 +205,7 @@ func (s *targetedTestXAIOAuthService) CreateTokenStorage(bundle *xaiauth.AuthBun
 }
 
 type targetedTestMetaOAuthService struct {
+	pollDone    chan struct{}
 	email       string
 	accessToken string
 }
@@ -207,7 +221,12 @@ func (s *targetedTestMetaOAuthService) StartDeviceFlow(_ context.Context) (*meta
 	}, nil
 }
 
-func (s *targetedTestMetaOAuthService) WaitForAuthorization(_ context.Context, _ *metaauth.DeviceCodeResponse) (*metaauth.MetaAuthBundle, error) {
+func (s *targetedTestMetaOAuthService) WaitForAuthorization(ctx context.Context, _ *metaauth.DeviceCodeResponse) (*metaauth.MetaAuthBundle, error) {
+	if s.pollDone != nil {
+		defer close(s.pollDone)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return &metaauth.MetaAuthBundle{
 		TokenData: &metaauth.TokenData{
 			AccessToken: s.accessToken,
@@ -241,22 +260,6 @@ func (s *targetedTestMetaOAuthService) CreateTokenStorage(bundle *metaauth.MetaA
 func TestStartOAuthV8TargetedSessionRegistrationAcrossBuiltinProviders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		rec := httptest.NewRecorder()
-		rec.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(req.URL.Path, "openid-configuration"):
-			_, _ = rec.WriteString(`{"device_authorization_endpoint":"https://auth.x.ai/device","token_endpoint":"https://auth.x.ai/token"}`)
-		case strings.Contains(req.URL.Path, "device"):
-			_, _ = rec.WriteString(`{"device_code":"dev-code","user_code":"ABCD-1234","verification_uri":"https://example.test/verify","verification_uri_complete":"https://example.test/verify?code=ABCD-1234","expires_in":600,"interval":5}`)
-		default:
-			_, _ = rec.WriteString(`{"error":"authorization_pending"}`)
-		}
-		return rec.Result(), nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = origTransport })
-
 	origCodexFactory := newCodexOAuthService
 	newCodexOAuthService = func(*config.Config) codexOAuthService {
 		return &targetedRecoveryTestCodexOAuthService{authDir: t.TempDir(), email: "a@x.test", accountID: "acc-1"}
@@ -268,6 +271,44 @@ func TestStartOAuthV8TargetedSessionRegistrationAcrossBuiltinProviders(t *testin
 		return &targetedTestAntigravityOAuthService{email: "a@x.test"}
 	}
 	t.Cleanup(func() { newAntigravityOAuthService = origAgFactory })
+
+	// Device-flow handlers poll asynchronously. Do not temporarily replace the
+	// global transport: delayed polls could outlive it and reach real providers.
+	// These fakes stay pending until subtest session cleanup cancels them.
+	newPollDone := func(provider string) chan struct{} {
+		done := make(chan struct{})
+		t.Cleanup(func() {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Errorf("%s registration poll did not stop after session cancellation", provider)
+			}
+		})
+		return done
+	}
+	origXAIFactory := newXAIOAuthService
+	newXAIOAuthService = func(*config.Config, string) xaiOAuthService {
+		return &targetedTestXAIOAuthService{pollDone: newPollDone("xai")}
+	}
+	t.Cleanup(func() { newXAIOAuthService = origXAIFactory })
+
+	origKimiFactory := newKimiOAuthService
+	newKimiOAuthService = func(_ *config.Config, domain string) kimiOAuthService {
+		return &targetedTestKimiOAuthService{domain: domain, pollDone: newPollDone(domain)}
+	}
+	t.Cleanup(func() { newKimiOAuthService = origKimiFactory })
+
+	origMetaFactory := newMetaOAuthService
+	newMetaOAuthService = func(*config.Config, string) metaOAuthService {
+		return &targetedTestMetaOAuthService{pollDone: newPollDone("meta")}
+	}
+	t.Cleanup(func() { newMetaOAuthService = origMetaFactory })
+
+	origClaudeFactory := newClaudeOAuthService
+	newClaudeOAuthService = func(*config.Config, string) claudeOAuthService {
+		return &targetedTestClaudeOAuthService{}
+	}
+	t.Cleanup(func() { newClaudeOAuthService = origClaudeFactory })
 
 	origDevinFactory := newDevinOAuthService
 	newDevinOAuthService = func(*config.Config) devinOAuthService {

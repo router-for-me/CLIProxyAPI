@@ -74,8 +74,8 @@ func (s *Service) registerPluginAuthParser() {
 		parser = s.pluginHost
 	}
 	sdkAuth.RegisterPluginAuthParser(parser)
-	if watcher := s.currentWatcher(); watcher != nil {
-		watcher.SetPluginAuthParser(parser)
+	if s != nil && s.watcher != nil {
+		s.watcher.SetPluginAuthParser(parser)
 	}
 }
 
@@ -127,7 +127,8 @@ func (s *Service) syncPluginRuntimeConfigForConfig(ctx context.Context, cfg *con
 		return false
 	}
 	if s.accessManager != nil {
-		s.accessManager.SetProviders(sdkaccess.RegisteredProviders())
+		providers := sdkaccess.MergeProviders(sdkaccess.RegisteredProviders(), s.runtimeAccessProviders)
+		s.accessManager.SetProviders(providers)
 	}
 	s.pluginHost.RegisterUsagePlugins()
 	sdktranslator.SetPluginHooks(s.pluginHost)

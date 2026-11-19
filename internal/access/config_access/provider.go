@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -18,6 +19,13 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	keys := normalizeKeys(cfg.APIKeys)
 	if len(keys) == 0 {
+		if safemode.HasExampleAPIKeys(cfg.APIKeys) {
+			sdkaccess.RegisterProvider(
+				sdkaccess.AccessProviderTypeConfigAPIKey,
+				newProvider(sdkaccess.DefaultAccessProviderName, nil),
+			)
+			return
+		}
 		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
 		return
 	}
@@ -29,8 +37,9 @@ func Register(cfg *sdkconfig.SDKConfig) {
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name      string
+	keys      map[string]struct{}
+	principal string
 }
 
 func newProvider(name string, keys []string) *provider {
@@ -43,6 +52,17 @@ func newProvider(name string, keys []string) *provider {
 		keySet[key] = struct{}{}
 	}
 	return &provider{name: providerName, keys: keySet}
+}
+
+// NewRuntimeAPIKeyProvider creates an in-memory API key provider without persisting the key.
+func NewRuntimeAPIKeyProvider(name, key string) sdkaccess.Provider {
+	trimmedKey := strings.TrimSpace(key)
+	if trimmedKey == "" {
+		return nil
+	}
+	runtimeProvider := newProvider(name, []string{trimmedKey})
+	runtimeProvider.principal = "runtime"
+	return runtimeProvider
 }
 
 func (p *provider) Identifier() string {
@@ -90,9 +110,13 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			continue
 		}
 		if _, ok := p.keys[candidate.value]; ok {
+			principal := candidate.value
+			if p.principal != "" {
+				principal = p.principal
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
-				Principal: candidate.value,
+				Principal: principal,
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
@@ -123,9 +147,16 @@ func normalizeKeys(keys []string) []string {
 	}
 	normalized := make([]string, 0, len(keys))
 	seen := make(map[string]struct{}, len(keys))
+	exampleKeys := make(map[string]struct{})
+	for _, key := range safemode.ExampleAPIKeys(keys) {
+		exampleKeys[key] = struct{}{}
+	}
 	for _, key := range keys {
 		trimmedKey := strings.TrimSpace(key)
 		if trimmedKey == "" {
+			continue
+		}
+		if _, unsafe := exampleKeys[trimmedKey]; unsafe {
 			continue
 		}
 		if _, exists := seen[trimmedKey]; exists {

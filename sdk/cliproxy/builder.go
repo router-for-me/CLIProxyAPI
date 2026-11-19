@@ -72,6 +72,8 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+
+	ephemeralAPIKey string
 }
 
 // ExecutorWrapper rewrites a built-in executor before it is registered with
@@ -355,6 +357,7 @@ func (b *Builder) Build() (*Service, error) {
 			service.reloadConfigFromWatcher()
 		}),
 	)
+	service.configureRuntimeAccess(b.ephemeralAPIKey)
 	return service, nil
 }
 

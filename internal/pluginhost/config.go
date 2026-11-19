@@ -162,6 +162,9 @@ func normalizedConfigNode(item config.PluginInstanceConfig, enabled bool) *yaml.
 	if node.Kind != yaml.MappingNode {
 		return node
 	}
+	// store is host-owned plugin store metadata; keep it out of the config
+	// handed to plugins so strict decoders do not reject unknown fields.
+	removeMappingKey(node, "store")
 	ensureMappingScalar(node, "enabled", boolYAMLValue(enabled), "!!bool")
 	ensureMappingScalar(node, "priority", intYAMLValue(item.Priority), "!!int")
 	return node
@@ -178,6 +181,20 @@ func defaultRuntimeConfigNode(enabled bool, priority int) *yaml.Node {
 			{Kind: yaml.ScalarNode, Tag: "!!int", Value: intYAMLValue(priority)},
 		},
 	}
+}
+
+func removeMappingKey(node *yaml.Node, key string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	content := make([]*yaml.Node, 0, len(node.Content))
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i] != nil && node.Content[i].Value == key {
+			continue
+		}
+		content = append(content, node.Content[i], node.Content[i+1])
+	}
+	node.Content = content
 }
 
 func ensureMappingScalar(node *yaml.Node, key, value, tag string) {
