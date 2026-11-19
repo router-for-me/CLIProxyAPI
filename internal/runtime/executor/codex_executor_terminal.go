@@ -300,13 +300,23 @@ func codexTerminalTopLevelErrorBody(eventData []byte) *ojson.Doc {
 	code := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "code").String())
 	errorType := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "error_type").String())
 	param := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "param").String())
-	if message == "" && code == "" && errorType == "" && param == "" {
+	detail := strings.TrimSpace(ojson.GetBytesNoCopy(eventData, "detail").String())
+	if message == "" && code == "" && errorType == "" && param == "" && detail == "" {
 		return nil
+	}
+	// A top-level detail-only body (issue 7691) carries the whole signal in
+	// "detail"; keep it as both the display message and the structured
+	// detail field so downstream classifiers still see it.
+	if message == "" && detail != "" {
+		message = detail
 	}
 
 	doc := ojson.NewDoc([]byte(`{"error":{}}`))
 	if message != "" {
 		_ = doc.Set("error.message", message)
+	}
+	if detail != "" {
+		_ = doc.Set("error.detail", detail)
 	}
 	if code != "" {
 		_ = doc.Set("error.code", code)
@@ -505,11 +515,45 @@ func codexErrorCodeOf(errorBody []byte) string {
 	return ""
 }
 
+// isCodexDetailRateLimitError reports whether the error body is Codex's
+// detail-only rate limit rejection (issue 7691): a 429 whose body carries
+// only {"detail":"Rate limit exceeded"}, with no error code, no
+// usage_limit_reached signal and no reset timing. It is a transient
+// per-minute rate limit, not quota exhaustion, so it is classified with
+// the turn-rate and model-capacity rejections. An explicit error code
+// keeps its existing handling, and any quota signal (usage limit type or
+// reset timing) keeps the body on the quota path.
+func isCodexDetailRateLimitError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+	if isCodexUsageLimitError(errorBody) {
+		return false
+	}
+	if codexErrorCodeOf(errorBody) != "" {
+		return false
+	}
+	for _, path := range []string{"resets_in_seconds", "resets_at", "error.resets_in_seconds", "error.resets_at", "body.error.resets_in_seconds", "body.error.resets_at"} {
+		if ojson.GetBytesNoCopy(errorBody, path).Int() > 0 {
+			return false
+		}
+	}
+	for _, path := range []string{"detail", "error.detail", "body.detail", "body.error.detail"} {
+		detail := strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String())
+		if detail == "" {
+			continue
+		}
+		return strings.EqualFold(detail, "Rate limit exceeded")
+	}
+	return false
+}
+
 // isCodexTransientCapacityError covers every Codex capacity rejection that
-// is transient and model-scoped: the legacy model-at-capacity wording and
-// the per-turn admission rejection. An explicit error code other than the
-// capacity codes keeps its existing handling, so a generic
-// rate_limit_exceeded rejection is never downgraded by message text.
+// is transient and model-scoped: the legacy model-at-capacity wording, the
+// per-turn admission rejection, and the detail-only rate limit rejection
+// (issue 7691). An explicit error code other than the capacity codes keeps
+// its existing handling, so a generic rate_limit_exceeded rejection is
+// never downgraded by message text.
 func isCodexTransientCapacityError(errorBody []byte) bool {
 	if code := codexErrorCodeOf(errorBody); code != "" &&
 		!strings.EqualFold(code, "turn_rate_limit_exceeded") &&
@@ -517,7 +561,7 @@ func isCodexTransientCapacityError(errorBody []byte) bool {
 		!strings.EqualFold(code, "model_is_at_capacity") {
 		return false
 	}
-	return isCodexModelCapacityError(errorBody) || isCodexTurnRateLimitError(errorBody)
+	return isCodexModelCapacityError(errorBody) || isCodexTurnRateLimitError(errorBody) || isCodexDetailRateLimitError(errorBody)
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {
