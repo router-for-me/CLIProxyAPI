@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -76,14 +77,25 @@ func TestFullDocumentSavePublishesConsistentSnapshot(t *testing.T) {
 			if !os.SameFile(before, after) {
 				t.Fatal("save replaced the mounted config inode")
 			}
+			if disk.RemoteManagement.SecretKey != published.RemoteManagement.SecretKey {
+				t.Fatal("save did not persist the published management-key hash")
+			}
 			if tc.legacy {
-				if disk.RemoteManagement.SecretKey != published.RemoteManagement.SecretKey {
-					t.Fatal("legacy save did not persist the published management-key hash")
-				}
 				if h.cfg.SourceHash != config.ComputeSourceHash(saved) {
 					t.Fatal("legacy snapshot source hash does not identify the saved bytes")
 				}
 			} else {
+				if rec.Header().Get("ETag") != fmt.Sprintf(`"%x"`, sha256.Sum256(saved)) {
+					t.Fatal("save ETag does not identify finalized disk bytes")
+				}
+				loaded, err := config.LoadConfig(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reloaded, err := os.ReadFile(path)
+				if err != nil || string(reloaded) != string(saved) || loaded.RemoteManagement.SecretKey != published.RemoteManagement.SecretKey {
+					t.Fatal("reload changed the saved key or finalized bytes")
+				}
 				select {
 				case next := <-reloads:
 					if !reflect.DeepEqual(next, published) {
@@ -113,6 +125,7 @@ func newFullDocumentHandler(t *testing.T) (*Handler, string, *gin.Engine) {
 	for _, method := range []string{http.MethodPut, http.MethodPatch} {
 		router.Handle(method, "/v8/management/config", h.ConfigV8)
 		router.Handle(method, "/v8/management/config.yaml", h.ConfigV8)
+		router.Handle(method, "/v8/management/config/*path", h.ConfigV8)
 	}
 	return h, path, router
 }
@@ -131,6 +144,8 @@ func TestFullDocumentSaveRejectsAmbiguousOAuthChannels(t *testing.T) {
 			{"v8 YAML", http.MethodPut, "/v8/management/config.yaml", "config-version: 8\noauth:\n  %s: %s\n"},
 			{"v8 JSON", http.MethodPut, "/v8/management/config", `{"oauth":{"%s":%s}}`},
 			{"v8 PATCH", http.MethodPatch, "/v8/management/config", `{"oauth":{"%s":%s}}`},
+			{"v8 map PUT", http.MethodPut, "/v8/management/config/oauth/" + field.name, `%[2]s`},
+			{"v8 map PATCH", http.MethodPatch, "/v8/management/config/oauth/" + field.name, `%[2]s`},
 		} {
 			t.Run(field.name+"/"+endpoint.name, func(t *testing.T) {
 				h, path, router := newFullDocumentHandler(t)
@@ -210,5 +225,61 @@ func TestFullDocumentSaveWriteFailureDoesNotPublish(t *testing.T) {
 	}
 	if entries := hook.AllEntries(); len(entries) != 1 || !strings.Contains(entries[0].Message, `"retired-option" commented out during v8 migration`) {
 		t.Fatal("successful save did not emit exactly one migration warning")
+	}
+}
+
+func TestFullDocumentSaveValidatesRawScalarContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct{ name, url, body string }{
+		{"legacy", "/v0/management/config.yaml", "trusted-proxies:\n  - |-\n    127.0.0.1\n    # invalid proxy suffix\n"},
+		{"v0 v8", "/v0/management/config.yaml", "config-version: 8\nserver:\n  trusted-proxies:\n    - |-\n      127.0.0.1\n      # invalid proxy suffix\n"},
+		{"v8", "/v8/management/config.yaml", "config-version: 8\nserver:\n  trusted-proxies:\n    - |-\n      127.0.0.1\n      # invalid proxy suffix\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, path, router := newFullDocumentHandler(t)
+			before := h.cfg.CloneForRuntime()
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, tc.url, strings.NewReader(tc.body)))
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "invalid trusted-proxies entry") {
+				t.Errorf("raw scalar validation status=%d, want invalid_config rejection", rec.Code)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(original) || !reflect.DeepEqual(h.cfg, before) || h.reloadGeneration != 0 {
+				t.Fatal("rejected raw scalar changed disk, handler, or reload generation")
+			}
+		})
+	}
+}
+
+func TestFullDocumentSavePreservesScalarContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct{ name, url, body string }{
+		{"legacy", "/v0/management/config.yaml", "host: |-\n  first\n  # scalar data\nport: 8320\n"},
+		{"v0 v8", "/v0/management/config.yaml", "config-version: 8\nserver:\n  host: |-\n    first\n    # scalar data\n  port: 8320\n"},
+		{"v8", "/v8/management/config.yaml", "config-version: 8\nserver:\n  host: |-\n    first\n    # scalar data\n  port: 8320\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, path, router := newFullDocumentHandler(t)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, tc.url, strings.NewReader(tc.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("save status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			loaded, err := config.LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const want = "first\n# scalar data"
+			if loaded.Host != want || h.cfg.Host != want || loaded.Port != 8320 || h.cfg.Port != 8320 {
+				t.Fatal("save changed scalar contents on disk or in the published config")
+			}
+		})
 	}
 }

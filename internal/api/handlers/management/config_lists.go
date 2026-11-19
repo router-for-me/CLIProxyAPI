@@ -3,6 +3,7 @@ package management
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/MoeForge/moego/json"
@@ -1242,6 +1243,11 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		}
 		entries = wrapper.Items
 	}
+	candidate := config.Config{OAuthExcludedModels: entries}
+	if err := candidate.ValidateOAuthChannelKeys(); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
@@ -1332,6 +1338,11 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 			return
 		}
 		entries = wrapper.Items
+	}
+	candidate := config.Config{OAuthModelAlias: entries}
+	if err := candidate.ValidateOAuthChannelKeys(); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
+		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1435,6 +1446,11 @@ func (h *Handler) PutOAuthRequestScopedErrors(c *gin.Context) {
 			return
 		}
 		entries = wrapper.Items
+	}
+	candidate := config.Config{OAuthRequestScopedErrors: entries}
+	if err := candidate.ValidateOAuthChannelKeys(); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
+		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

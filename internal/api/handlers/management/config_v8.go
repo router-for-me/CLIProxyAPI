@@ -190,6 +190,16 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
+	// ParseConfigBytes prepares the runtime hash without changing its input.
+	// Persist that same hash in the canonical tree before publishing either one.
+	if secret := configV8Node(root, []string{"management", "secret-key"}); secret != nil && next.RemoteManagement.SecretKey != "" && secret.Value != next.RemoteManagement.SecretKey {
+		secret.Tag, secret.Value = "!!str", next.RemoteManagement.SecretKey
+		data, err = yaml.Marshal(&doc)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
+			return
+		}
+	}
 	var finalCommented []config.ArchivedV8Section
 	data, _, finalCommented, err = config.NormalizeConfigLayoutSilent(data, true)
 	if err != nil {
@@ -198,24 +208,24 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	// Save the validated canonical tree directly: projecting runtime defaults
 	// back onto it loses explicit nulls, empty maps, and opaque plugin settings.
-	// WriteConfig retains the inode of a mounted configuration file.
-	if err = WriteConfig(h.configFilePath, data); err != nil {
+	// writeConfig retains the inode and returns the exact finalized bytes.
+	saved, writtenCommented, err := writeConfig(h.configFilePath, data)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
 	}
 	// Emit migration warnings only after the migrated document is persisted
 	// and only for sections whose archived comment block is in the written document.
+	// Match archives before comment alignment can make nested documentation
+	// resemble a root archive marker.
 	config.WarnUnrecognizedV8Sections(config.FilterArchivedV8Sections(data, commentedSections))
 	config.WarnUnrecognizedV8Sections(finalCommented)
+	config.WarnUnrecognizedV8Sections(writtenCommented)
 	// Runtime-only ownership state is never sourced from an uploaded YAML document.
 	next.Home = h.cfg.Home
-	// WriteConfig may normalize the bytes, so report the version actually on
-	// disk. If it cannot be read back, omit the ETag instead of guessing one.
 	// Like Home, SourceHash keeps its runtime owner and is published by the
 	// reload, so it is not overwritten on next here.
-	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
-		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
-	}
+	c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
 	prevSecretHash := ""
 	if h.cfg != nil {
 		prevSecretHash = h.cfg.RemoteManagement.SecretKey

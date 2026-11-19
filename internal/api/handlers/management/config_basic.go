@@ -99,6 +99,9 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 }
 
 func WriteConfig(path string, data []byte) error {
+	if _, err := config.ParseConfigBytes(data); err != nil {
+		return err
+	}
 	_, commented, err := writeConfig(path, data)
 	if err == nil {
 		config.WarnUnrecognizedV8Sections(commented)
@@ -151,7 +154,12 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_yaml", "message": err.Error()})
 		return
 	}
-	// Validate config using LoadConfigOptional with optional=false to enforce parsing
+	// Validate submitted values before any formatting or layout changes.
+	if _, err = config.ParseConfigBytes(body); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
+		return
+	}
+	// Validate a staged file and require all loader rewrites to succeed.
 	tmpDir := filepath.Dir(h.configFilePath)
 	tmpFile, err := os.CreateTemp(tmpDir, "config-validate-*.yaml")
 	if err != nil {
@@ -173,7 +181,7 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
 	}
-	validated, err := config.LoadConfigOptional(tempFile, false)
+	validated, err := config.LoadConfigForSave(tempFile)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return

@@ -155,6 +155,16 @@ func managementSecretKeyPath(data []byte) []string {
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
+	return loadConfigOptional(configFile, optional, false)
+}
+
+// LoadConfigForSave loads a staged configuration and requires its management-key
+// hash to be persisted before the caller can publish the staged bytes.
+func LoadConfigForSave(configFile string) (*Config, error) {
+	return loadConfigOptional(configFile, false, true)
+}
+
+func loadConfigOptional(configFile string, optional, requireSecretPersistence bool) (*Config, error) {
 	// Read the entire configuration file into memory.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -219,7 +229,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
-	if errValidate := cfg.validateOAuthChannelKeys(); errValidate != nil {
+	if errValidate := cfg.ValidateOAuthChannelKeys(); errValidate != nil {
 		return nil, errValidate
 	}
 	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
@@ -254,7 +264,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
 		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		// Startup can use the in-memory hash with a read-only config. A staged
+		// save must instead fail so it cannot publish bytes without that hash.
+		if errSave := SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed); errSave != nil && requireSecretPersistence {
+			return nil, fmt.Errorf("failed to persist remote management key hash: %w", errSave)
+		}
 	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)

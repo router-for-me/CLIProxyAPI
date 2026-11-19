@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-// Validate before sanitization discards the original channel spellings. Keep the
-// field and key order stable so ambiguous documents always report the same error.
-func (cfg *Config) validateOAuthChannelKeys() error {
+// ValidateOAuthChannelKeys rejects ambiguous channel spellings before sanitization.
+// Field and key order stay stable so ambiguous documents report the same error.
+func (cfg *Config) ValidateOAuthChannelKeys() error {
 	if err := validateOAuthChannelMap("oauth-model-alias", cfg.OAuthModelAlias); err != nil {
 		return err
 	}

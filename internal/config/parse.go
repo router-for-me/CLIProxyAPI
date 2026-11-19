@@ -44,7 +44,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
-	if errValidate := cfg.validateOAuthChannelKeys(); errValidate != nil {
+	if errValidate := cfg.ValidateOAuthChannelKeys(); errValidate != nil {
 		return nil, errValidate
 	}
 	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
