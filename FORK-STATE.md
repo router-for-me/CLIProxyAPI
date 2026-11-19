@@ -8,7 +8,8 @@ Last updated: 2026-11-19
 - Issues enabled, Actions enabled, "allow Actions to create and approve PRs" on.
 - `.github/workflows/sync-upstream.yml` installed (daily 09:23 UTC merge of `upstream/main`,
   green-only push to `main`, conflict issue / red PR fallback).
-- `.github/workflows/fork-ci.yml` installed (vet + build + `go test ./...` on PR and on push to `main`).
+- `.github/workflows/fork-ci.yml` installed (build + `go test ./...` on PR and on push to `main`;
+  `go vet` runs as an advisory step only).
 - Upstream PR-policy and release workflows removed from the fork:
   `agents-md-guard`, `pr-path-guard`, `auto-retarget-main-pr-to-dev`, `release`, `docker-image`.
 
