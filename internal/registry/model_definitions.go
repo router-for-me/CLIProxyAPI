@@ -673,6 +673,23 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	}
 }
 
+// NativeModelGenerationMethods returns the generation methods of a model catalog entry
+// that serve native, non-chat actions such as embeddings and the Decisions API. Chat-only
+// methods are dropped on purpose so callers can keep their existing advertised surface.
+func NativeModelGenerationMethods(methods []string) []string {
+	var out []string
+	for _, method := range methods {
+		switch strings.TrimSpace(method) {
+		case "embedContent", "batchEmbedContents", "decisions":
+			out = append(out, strings.TrimSpace(method))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // LookupStaticModelInfoByChannel searches one provider-specific static section.
 // It does not fall back across providers, so callers can preserve provenance.
 func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {

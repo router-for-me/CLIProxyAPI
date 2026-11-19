@@ -943,28 +943,11 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 			// Configured entries start with no generation methods and are advertised as
 			// generateContent only. Native catalog entries (embeddings, decisions) must keep
 			// declaring their real actions, otherwise the catalog misreports them.
-			if methods := nativeModelGenerationMethods(staticInfo.SupportedGenerationMethods); len(methods) > 0 {
+			if methods := registry.NativeModelGenerationMethods(staticInfo.SupportedGenerationMethods); len(methods) > 0 {
 				info.SupportedGenerationMethods = methods
 			}
 		}
 		out = append(out, info)
-	}
-	return out
-}
-
-// nativeModelGenerationMethods keeps the generation methods of static entries that serve
-// native, non-chat model actions. Chat-only methods are dropped on purpose so configured
-// chat models keep their existing advertised surface.
-func nativeModelGenerationMethods(methods []string) []string {
-	var out []string
-	for _, method := range methods {
-		switch strings.TrimSpace(method) {
-		case "embedContent", "batchEmbedContents", "decisions":
-			out = append(out, strings.TrimSpace(method))
-		}
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }
