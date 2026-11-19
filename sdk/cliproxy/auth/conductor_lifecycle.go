@@ -695,15 +695,9 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
-	if mode == updateModeRefresh && base.UsesLazyRefresh() && m.store != nil && lazyPersistenceUnsupported(auth) {
-		m.mu.Unlock()
-		return nil, false, false, &lazyPersistenceError{
-			auth: auth.Clone(),
-			err:  fmt.Errorf("lazy refresh requires a persistable physical credential"),
-		}
-	}
-	if errPersist := m.persistLocked(ctx, auth); errPersist != nil {
-		if mode == updateModeRefresh && (auth.UsesLazyRefresh() || base.UsesLazyRefresh()) {
+	lazyRotation := mode == updateModeRefresh && (auth.UsesLazyRefresh() || base.UsesLazyRefresh() || existing.UsesLazyRefresh())
+	if errPersist := m.persistLockedWithStoreRequirement(ctx, auth, lazyRotation); errPersist != nil {
+		if lazyRotation {
 			m.mu.Unlock()
 			return nil, false, false, &lazyPersistenceError{auth: auth.Clone(), err: errPersist}
 		}
@@ -1019,28 +1013,29 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	m.mu.RLock()
 	store := m.store
 	m.mu.RUnlock()
+	return m.persistToStore(ctx, auth, store, false)
+}
+
+func (m *Manager) persistToStore(ctx context.Context, auth *Auth, store Store, requireSave bool) error {
 	if store == nil || auth == nil {
+		if requireSave {
+			return errLazyRefreshStoreRequired
+		}
 		return nil
 	}
 	if errWeight := ValidateAuthWeight(auth); errWeight != nil {
 		return fmt.Errorf("persist auth: %w", errWeight)
 	}
-	if auth.UsesLazyRefresh() && lazyPersistenceUnsupported(auth) {
-		return fmt.Errorf("lazy refresh requires a persistable physical credential")
-	}
-	if IsConfigAPIKeyAuth(auth) {
-		return nil
-	}
-	if auth.Attributes != nil {
-		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
-			return nil
+	if lazyPersistenceUnsupported(auth) {
+		if requireSave || auth.UsesLazyRefresh() {
+			return errLazyRefreshStoreRequired
 		}
-	}
-	if IsPluginVirtualAuth(auth) {
 		return nil
 	}
-	// Skip persistence when metadata is absent (e.g., runtime-only auths).
 	if auth.Metadata == nil {
+		if requireSave {
+			return errLazyRefreshStoreRequired
+		}
 		return nil
 	}
 
@@ -1050,6 +1045,9 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		pLock.mu.Lock()
 		defer pLock.mu.Unlock()
 		if auth.RegistrationEpoch < pLock.lastEpoch || (auth.RegistrationEpoch == pLock.lastEpoch && auth.Generation < pLock.lastGeneration) {
+			if requireSave {
+				return fmt.Errorf("refreshed credential was superseded before persistence")
+			}
 			return nil
 		}
 		pLock.lastEpoch = auth.RegistrationEpoch

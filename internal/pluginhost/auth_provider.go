@@ -1025,6 +1025,11 @@ func (h *Host) authProviderCredentialEntryForAuth(auth *coreauth.Auth) (*capabil
 	return nil, nil
 }
 
+func (h *Host) canRefreshPluginAuth(auth *coreauth.Auth) bool {
+	record, provider := h.authProviderCredentialEntryForAuth(auth)
+	return record != nil && provider != nil && h.recordCurrent(*record) && !h.isPluginFused(record.id)
+}
+
 func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, handled bool, err error) {
 	if h == nil || auth == nil {
 		return nil, false, nil
@@ -1033,7 +1038,7 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	if record == nil || authProv == nil {
 		return nil, false, nil
 	}
-	if !h.recordCurrent(*record) {
+	if !h.recordCurrent(*record) || auth.UsesLazyRefresh() && h.isPluginFused(record.id) {
 		return nil, false, nil
 	}
 	defer func() {

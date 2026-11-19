@@ -224,13 +224,29 @@ func (m *Manager) lockAuthMutationWithPersistCancel(ctx context.Context, id stri
 // published object to Store.Save: readers and runtime-only writers remain live
 // during I/O. Only the store's delta is merged back, preserving intervening edits.
 func (m *Manager) persistLocked(ctx context.Context, auth *Auth) error {
+	return m.persistLockedWithStoreRequirement(ctx, auth, false)
+}
+
+func (m *Manager) persistLockedWithStoreRequirement(ctx context.Context, auth *Auth, requireStore bool) error {
+	store, epoch := m.store, m.storeEpoch
+	if requireStore && (store == nil || lazyPersistenceUnsupported(auth)) {
+		return errLazyRefreshStoreRequired
+	}
 	syncRefreshPolicyMetadata(auth)
 	before := auth.Clone()
 	saved := auth.Clone()
 	m.mu.Unlock()
-	err := m.persist(ctx, saved)
+	var err error
+	if requireStore {
+		err = m.persistToStore(WithoutSkipPersist(ctx), saved, store, true)
+	} else {
+		err = m.persist(ctx, saved)
+	}
 	m.mu.Lock()
 	mergeAuthSaveDelta(auth, before, saved, true)
+	if requireStore && err == nil && m.storeEpoch != epoch {
+		return errLazyRefreshStoreRequired
+	}
 	return err
 }
 

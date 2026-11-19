@@ -834,6 +834,7 @@ func (m *Manager) SetStore(store Store) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.store = store
+	m.storeEpoch++
 }
 
 // SetCooldownStateStore swaps the independent runtime cooldown state store.

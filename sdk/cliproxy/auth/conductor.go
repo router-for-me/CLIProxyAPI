@@ -193,6 +193,7 @@ type resultPolicyHolder struct {
 type Manager struct {
 	inFlightTracker           *inFlightTracker
 	store                     Store
+	storeEpoch                uint64
 	cooldownStore             CooldownStateStore
 	pendingCooldownStateStore CooldownStateStore
 	executors                 map[string]ProviderExecutor

@@ -1176,7 +1176,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if failedToken != "" {
 		m.markRejectedAccessToken(auth.ID, failedToken)
 	}
-	if alreadyTried || !authHasRefreshCredential(auth) || hasUnauthorizedAuthFailure(auth) {
+	if alreadyTried || (!auth.UsesLazyRefresh() && !authHasRefreshCredential(auth)) || hasUnauthorizedAuthFailure(auth) {
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
@@ -1368,8 +1368,8 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		if !auth.UsesLazyRefresh() {
 			return auth, nil
 		}
-		if store != nil && lazyPersistenceUnsupported(auth) {
-			return nil, &Error{Code: "lazy_refresh_not_persistable", Message: "lazy refresh requires a persistable physical credential", HTTPStatus: http.StatusServiceUnavailable}
+		if lazyPersistenceUnsupported(auth) {
+			return nil, &Error{Code: "lazy_refresh_not_persistable", Message: errLazyRefreshStoreRequired.Error(), HTTPStatus: http.StatusServiceUnavailable}
 		}
 
 		if !lazyRefreshDueForRequest(ctx, auth, time.Now()) {
@@ -1489,8 +1489,19 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		return nil, &Error{Code: "unauthorized", Message: "unauthorized (refresh token invalid)", HTTPStatus: http.StatusUnauthorized}
 	}
 
-	if auth.UsesLazyRefresh() && store != nil && lazyPersistenceUnsupported(auth) {
-		return nil, &Error{Code: "lazy_refresh_not_persistable", Message: "lazy refresh requires a persistable physical credential", HTTPStatus: http.StatusServiceUnavailable}
+	if auth.UsesLazyRefresh() {
+		if store == nil || lazyPersistenceUnsupported(auth) {
+			return nil, &Error{Code: "lazy_refresh_not_persistable", Message: errLazyRefreshStoreRequired.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
+		if (!forceRefresh && !lazyRefreshEligible(auth)) || !canCallLazyRefresh(exec, auth) {
+			return nil, &Error{Code: "auth_unavailable", Message: "credential cannot refresh", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		m.mu.RLock()
+		hasStore := m.store != nil
+		m.mu.RUnlock()
+		if !hasStore {
+			return nil, &Error{Code: "lazy_refresh_not_persistable", Message: errLazyRefreshStoreRequired.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
 	}
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())

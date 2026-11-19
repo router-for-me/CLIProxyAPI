@@ -3571,7 +3571,7 @@ func renewalError(auth *Auth, err error, safeOnly bool) *Error {
 		case "invalid_refresh_identity":
 			code, message = structuredCode, "plugin refresh changed credential identity or provider"
 		case "lazy_refresh_not_persistable":
-			code, message = structuredCode, "lazy refresh requires a persistable physical credential"
+			code, message = structuredCode, errLazyRefreshStoreRequired.Error()
 		case "refresh_not_fresh":
 			code, message = structuredCode, "plugin refresh did not return a fresh access token"
 		default:

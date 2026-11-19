@@ -20,7 +20,15 @@ func (a *Auth) UsesLazyRefresh() bool {
 func lazyRefreshEligible(a *Auth) bool {
 	return a.UsesLazyRefresh() && !a.Disabled && a.Status != StatusDisabled &&
 		!hasUnauthorizedAuthFailure(a) && !a.RequiresSignIn &&
-		!authHasAnyRejectedRefreshPartition(a) && authHasRefreshCredential(a)
+		!authHasAnyRejectedRefreshPartition(a)
+}
+
+func canCallLazyRefresh(executor ProviderExecutor, auth *Auth) bool {
+	type pluginRefresher interface{ CanRefreshPluginAuth(*Auth) bool }
+	if plugin, ok := executor.(pluginRefresher); ok {
+		return plugin.CanRefreshPluginAuth(auth)
+	}
+	return authHasRefreshCredential(auth)
 }
 
 func accessExpiryBlocksSelection(ctx context.Context, auth *Auth, now time.Time, headers ...http.Header) bool {
@@ -112,13 +120,21 @@ func (m *Manager) ensureAuthFresh(ctx context.Context, auth *Auth, model string,
 	}
 	m.mu.RLock()
 	current := m.auths[auth.ID]
-	if !auth.UsesLazyRefresh() && !current.UsesLazyRefresh() && !m.HasLazyRefreshWork(auth.ID) {
+	hasWork := m.HasLazyRefreshWork(auth.ID)
+	if current == nil {
+		m.mu.RUnlock()
+		if auth.RegistrationEpoch != 0 || auth.UsesLazyRefresh() || hasWork {
+			return auth, true, &authFreshnessError{errors.New("credential changed before lazy refresh")}
+		}
+		return auth, false, nil
+	}
+	if !auth.UsesLazyRefresh() && !current.UsesLazyRefresh() && !hasWork {
 		m.mu.RUnlock()
 		return auth, false, nil
 	}
 	current = current.Clone()
 	m.mu.RUnlock()
-	if current == nil || auth.RegistrationEpoch != 0 && current.RegistrationEpoch != auth.RegistrationEpoch ||
+	if auth.RegistrationEpoch != 0 && current.RegistrationEpoch != auth.RegistrationEpoch ||
 		auth.Provider != "" && !refreshBindingMatches(auth, current) {
 		return auth, true, &authFreshnessError{errors.New("credential changed before lazy refresh")}
 	}
@@ -147,6 +163,8 @@ func lazyPersistenceUnsupported(auth *Auth) bool {
 	return IsPluginVirtualAuth(auth) || IsConfigAPIKeyAuth(auth) ||
 		strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
 }
+
+var errLazyRefreshStoreRequired = errors.New("lazy refresh requires a persistent store and persistable physical credential")
 
 type safeLazyError struct {
 	public     *Error
