@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 // TestBuildGeminiConfigModelsKeepsNativeGenerationMethods guards the native capability
@@ -63,8 +64,8 @@ func TestNativeModelGenerationMethods(t *testing.T) {
 		{name: "padded", in: []string{"  decisions  "}, want: []string{"decisions"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := nativeModelGenerationMethods(tt.in); !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("nativeModelGenerationMethods(%v) = %v, want %v", tt.in, got, tt.want)
+			if got := registry.NativeModelGenerationMethods(tt.in); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("registry.NativeModelGenerationMethods(%v) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -54,5 +55,38 @@ func TestReapplyRequestActionMetadataSurvivesInterceptorRebuild(t *testing.T) {
 	}
 	if again := reapplyRequestActionMetadata(got, "decisions"); again.Metadata[coreexecutor.RequestActionMetadataKey] != "decisions" {
 		t.Fatal("reapplying an identical action must be a no-op")
+	}
+}
+
+// TestParsePluginExecutorActionResponseUsageDecisions guards usage accounting for a
+// decisions response returned directly by an executor plugin: the protocol is gemini,
+// but the payload uses the snake_case top-level "usage" shape.
+func TestParsePluginExecutorActionResponseUsageDecisions(t *testing.T) {
+	payload := []byte(`{"answers":{"is_damaged":{"type":"yes_no","answer":true}},"usage":{"total_input_tokens":42,"total_output_tokens":0,"total_tokens":42}}`)
+
+	detail := parsePluginExecutorActionResponseUsage("gemini", helps.GeminiDecisionsAction, payload)
+	if detail.InputTokens != 42 || detail.TotalTokens != 42 {
+		t.Fatalf("decisions usage = %+v, want input/total 42", detail)
+	}
+	if generic := parsePluginExecutorResponseUsage("gemini", payload); generic.InputTokens != 0 {
+		t.Fatalf("the gemini chat parser must not read decisions usage, got %+v", generic)
+	}
+}
+
+// TestParsePluginExecutorActionResponseUsageFallsBack keeps chat-shaped plugin responses
+// on the existing parser even when an action is recorded.
+func TestParsePluginExecutorActionResponseUsageFallsBack(t *testing.T) {
+	payload := []byte(`{"candidates":[{"content":{"parts":[{"text":"hi"}]}}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":3,"totalTokenCount":10}}`)
+	detail := parsePluginExecutorActionResponseUsage("gemini", helps.GeminiDecisionsAction, payload)
+	if detail.InputTokens != 7 || detail.OutputTokens != 3 {
+		t.Fatalf("fallback usage = %+v, want 7/3", detail)
+	}
+}
+
+func TestParsePluginExecutorActionResponseUsageWithoutAction(t *testing.T) {
+	payload := []byte(`{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}`)
+	detail := parsePluginExecutorActionResponseUsage("gemini", "", payload)
+	if detail.InputTokens != 5 || detail.OutputTokens != 2 {
+		t.Fatalf("usage = %+v, want 5/2", detail)
 	}
 }

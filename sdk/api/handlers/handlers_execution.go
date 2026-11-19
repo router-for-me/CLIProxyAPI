@@ -328,7 +328,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	if reporter != nil && !nestedTracker.hasNestedExecution() {
 		reporter.ApplyPluginExecutorAttribution(executorPluginID, attribution)
 		reporter.RecordFirstPacket()
-		detail := parsePluginExecutorResponseUsage(responseProtocol, resp.Payload)
+		detail := parsePluginExecutorActionResponseUsage(responseProtocol, execOptions.Action, resp.Payload)
 		reporter.Publish(execCtx, detail)
 		reporter.EnsurePublished(execCtx)
 	}
