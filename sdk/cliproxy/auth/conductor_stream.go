@@ -434,6 +434,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		var errIntercept error
 		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		if errIntercept != nil {
+			if isCredentialTerminatedError(errIntercept) {
+				if auth != nil {
+					recordRequestRefusedAuth(ctx, auth.ID)
+				}
+				if upstreamErr != nil {
+					return nil, preferredExecutionAttemptError(lastErr, upstreamErr)
+				}
+			}
 			return nil, errIntercept
 		}
 		execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, execModel, executionModel != "")

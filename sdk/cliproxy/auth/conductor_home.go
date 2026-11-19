@@ -1785,6 +1785,7 @@ func isAntigravityCreditsCapacity503(err error) bool {
 
 func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, providers []string) bool {
 	if isRequestTerminatedError(lastErr) ||
+		isCredentialTerminatedError(lastErr) ||
 		isRequestStopError(lastErr) ||
 		isSchedulerRejectError(lastErr) ||
 		hasRoundEndedBySchedulerReject(lastErr) ||
@@ -1890,10 +1891,14 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		return cliproxyexecutor.Response{}, false, errCandidates
 	}
 	maxRetryCredentials := m.MaxRetryCredentials()
+	refusedAuths := requestRefusedAuthsFromContext(ctx)
 	attempted := make(map[string]struct{})
 	for _, c := range candidates {
 		if errCtx := ctx.Err(); errCtx != nil {
 			return cliproxyexecutor.Response{}, false, errCtx
+		}
+		if _, refused := refusedAuths[c.auth.ID]; refused {
+			continue
 		}
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			break
@@ -1931,6 +1936,10 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(creditsCtx, c.executor, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
+				if isCredentialTerminatedError(errIntercept) {
+					recordRequestRefusedAuth(ctx, c.auth.ID)
+					break
+				}
 				return cliproxyexecutor.Response{}, false, errIntercept
 			}
 			creditsCtx = syncMetadataSessionToContext(creditsCtx, execOpts.Metadata)
@@ -1992,10 +2001,14 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		return nil, false, errCandidates
 	}
 	maxRetryCredentials := m.MaxRetryCredentials()
+	refusedAuths := requestRefusedAuthsFromContext(ctx)
 	attempted := make(map[string]struct{})
 	for _, c := range candidates {
 		if errCtx := ctx.Err(); errCtx != nil {
 			return nil, false, errCtx
+		}
+		if _, refused := refusedAuths[c.auth.ID]; refused {
+			continue
 		}
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			break
@@ -2027,6 +2040,10 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = syncMetadataSessionToContext(creditsCtx, creditsOpts.Metadata)
 		result, errStream := m.executeStreamWithModelPool(creditsCtx, c.executor, c.auth, c.provider, req, creditsOpts, routeModel, "", models, pooled, aliasResult, routing, true, false)
 		if errStream != nil {
+			if isCredentialTerminatedError(errStream) {
+				recordRequestRefusedAuth(ctx, c.auth.ID)
+				continue
+			}
 			if errCtx := creditsCtx.Err(); errCtx != nil {
 				return nil, false, errCtx
 			}
