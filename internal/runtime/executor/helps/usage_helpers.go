@@ -802,7 +802,17 @@ func failFromErrorsWithRules(rules []internalconfig.RequestScopedErrorRule, errs
 			ResponseBody() []byte
 		}
 		var responseErr responseBodyProvider
-		if errors.As(err, &responseErr) && responseErr != nil {
+		type usageFailureBodyProvider interface {
+			UsageFailureBody() []byte
+		}
+		var usageErr usageFailureBodyProvider
+		var usageBody []byte
+		if errors.As(err, &usageErr) && usageErr != nil {
+			usageBody = usageErr.UsageFailureBody()
+		}
+		if len(usageBody) > 0 {
+			body = string(usageBody)
+		} else if errors.As(err, &responseErr) && responseErr != nil {
 			if responseBody := responseErr.ResponseBody(); len(responseBody) > 0 {
 				body = string(responseBody)
 			}

@@ -272,6 +272,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	sawOutputDelta := false
+	lastEvent := "none"
 	for events.Scan() {
 		line := events.Bytes()
 		if !bytes.HasPrefix(line, dataTag) {
@@ -282,6 +283,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		eventData = helps.RestoreCodexMultiAgentV2Response(eventData, optimizeMultiAgentV2)
 		reporter.ObserveResponseModel(eventData)
 		eventType := ojson.GetBytesNoCopy(eventData, "type").String()
+		lastEvent = strings.Clone(eventType)
 
 		if helps.HasMeaningfulCodexOutputDelta(eventData) {
 			sawOutputDelta = true
@@ -320,7 +322,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		if helps.IsCodexTerminalEmptyIncomplete(eventData, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-			err = newCodexEmptyIncompleteStreamError()
+			err = newCodexEmptyIncompleteStreamError(eventData)
 			if detail, hasDetail := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); hasDetail {
 				reporter.PublishFailureWithDetail(ctx, detail, err)
 			}
@@ -385,7 +387,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 		helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 	}
-	err = newCodexIncompleteStreamError()
+	err = newCodexIncompleteStreamError(httpResp.StatusCode, lastEvent, errRead)
 	return resp, err
 }
 

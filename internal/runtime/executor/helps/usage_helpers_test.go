@@ -1096,6 +1096,30 @@ func TestFailFromErrorsPrefersResponseBody(t *testing.T) {
 	}
 }
 
+type usageFailureBodyError struct {
+	usageResponseBodyError
+	diagnostics []byte
+}
+
+func (e usageFailureBodyError) UsageFailureBody() []byte { return e.diagnostics }
+
+func TestFailFromErrorsPrefersUsageOnlyDiagnostics(t *testing.T) {
+	for _, diagnostic := range [][]byte{nil, []byte(" \ncomplete usage-only diagnostic\r\n")} {
+		err := usageFailureBodyError{
+			usageResponseBodyError: usageResponseBodyError{status: 400, message: "classified error", body: []byte("recovery-facing body")},
+			diagnostics:            diagnostic,
+		}
+		failure := failFromErrors(fmt.Errorf("wrapped: %w", err))
+		want := "recovery-facing body"
+		if len(diagnostic) > 0 {
+			want = string(diagnostic)
+		}
+		if failure.StatusCode != 400 || failure.Body != want || string(err.ResponseBody()) != "recovery-facing body" {
+			t.Fatalf("usage-only body changed recovery data: %+v", failure)
+		}
+	}
+}
+
 func TestFailFromErrorsMapsContextStatuses(t *testing.T) {
 	tests := []struct {
 		name string

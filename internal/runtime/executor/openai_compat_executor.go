@@ -1278,6 +1278,8 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 type statusErr struct {
 	code               int
 	msg                string
+	usageFailureBody   []byte
+	cause              error
 	retryAfter         *time.Duration
 	credentialScoped   bool
 	streamTruncated    bool
@@ -1299,6 +1301,11 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+
+// UsageFailureBody is observation-only. ResponseBody also participates in
+// request-scoped rules and quota classification, so it must keep its meaning.
+func (e statusErr) UsageFailureBody() []byte { return bytes.Clone(e.usageFailureBody) }
+func (e statusErr) Unwrap() error            { return e.cause }
 
 // LogDiagnostic lets upstream failure logs explain a sanitized client message.
 func (e statusErr) LogDiagnostic() string { return e.diagnostic }
