@@ -23,7 +23,7 @@ type geminiTerminalDisconnectUsageCapture struct {
 }
 
 func (c *geminiTerminalDisconnectUsageCapture) HandleUsage(_ context.Context, record usage.Record) {
-	if record.Provider == "gemini" && record.AuthID == c.authID {
+	if record.AuthID == c.authID {
 		c.records <- record
 	}
 }
@@ -31,6 +31,98 @@ func (c *geminiTerminalDisconnectUsageCapture) HandleUsage(_ context.Context, re
 type geminiTerminalDisconnectUsageNoop struct{}
 
 func (geminiTerminalDisconnectUsageNoop) HandleUsage(context.Context, usage.Record) {}
+
+func TestGeminiInteractionsStream_TerminalDisconnectUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		format       sdktranslator.Format
+		cancelEvent  string
+		beforeFinish bool
+		readError    bool
+		wantStatus   int
+	}{
+		{name: "responses_eof", format: sdktranslator.FormatOpenAIResponse},
+		{name: "responses_cancel_after_completion", format: sdktranslator.FormatOpenAIResponse, cancelEvent: "response.completed"},
+		{name: "native_cancel_after_completion", format: sdktranslator.FormatInteractions, cancelEvent: "interaction.completed"},
+		{name: "responses_cancel_before_completion", format: sdktranslator.FormatOpenAIResponse, cancelEvent: "response.created", beforeFinish: true, wantStatus: 499},
+		{name: "responses_read_error_after_completion", format: sdktranslator.FormatOpenAIResponse, readError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sse := "event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"i1\"}}\n\n"
+			if !tc.beforeFinish {
+				sse += "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"i1\",\"status\":\"requires_action\",\"usage\":{\"total_input_tokens\":80,\"total_output_tokens\":20,\"total_tokens\":100}}}\n\n"
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				if tc.readError {
+					w.Header().Set("Content-Length", fmt.Sprint(len(sse)+100))
+				}
+				if _, errWrite := io.WriteString(w, sse); errWrite != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+				if tc.cancelEvent != "" {
+					<-r.Context().Done()
+				}
+			}))
+			defer func() {
+				cancel()
+				server.Close()
+			}()
+
+			capture := &geminiTerminalDisconnectUsageCapture{authID: t.Name(), records: make(chan usage.Record, 2)}
+			usage.RegisterNamedPlugin(t.Name(), capture)
+			t.Cleanup(func() {
+				usage.RegisterNamedPlugin(t.Name(), geminiTerminalDisconnectUsageNoop{})
+			})
+			auth := &cliproxyauth.Auth{
+				ID: capture.authID, Provider: "gemini-interactions",
+				Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+			}
+			result, errExecute := NewGeminiInteractionsExecutor(&config.Config{}).ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+				Model: "gemini-4-neon", Payload: []byte(`{"input":"Look up the color of a pear.","stream":true}`),
+			}, cliproxyexecutor.Options{SourceFormat: tc.format, Stream: true})
+			if errExecute != nil {
+				t.Fatal(errExecute)
+			}
+
+			canceled := false
+			var streamErr error
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				}
+				if tc.cancelEvent != "" && strings.Contains(string(chunk.Payload), "event: "+tc.cancelEvent+"\n") {
+					canceled = true
+					cancel()
+				}
+			}
+			if tc.cancelEvent != "" && !canceled {
+				t.Fatalf("stream never delivered %s", tc.cancelEvent)
+			}
+
+			select {
+			case record := <-capture.records:
+				wantFailed := tc.beforeFinish || tc.readError
+				if record.Failed != wantFailed || record.Fail.StatusCode != tc.wantStatus {
+					t.Fatalf("usage outcome = failed %t, status %d, body %q; want failed %t, status %d", record.Failed, record.Fail.StatusCode, record.Fail.Body, wantFailed, tc.wantStatus)
+				}
+				if !tc.beforeFinish && (record.Detail.InputTokens != 80 || record.Detail.OutputTokens != 20 || record.Detail.TotalTokens != 100) {
+					t.Fatalf("usage = %+v; want input 80, output 20, total 100", record.Detail)
+				}
+				if tc.readError && (streamErr != io.ErrUnexpectedEOF || record.Fail.Body != io.ErrUnexpectedEOF.Error()) {
+					t.Fatalf("expected unexpected EOF, got stream error %v, usage failure %q", streamErr, record.Fail.Body)
+				}
+				if !wantFailed && streamErr != nil {
+					t.Fatalf("unexpected stream error: %v", streamErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for usage")
+			}
+		})
+	}
+}
 
 func TestGeminiStream_TerminalDisconnectUsage(t *testing.T) {
 	const usageJSON = `"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":4,"totalTokenCount":15}`

@@ -910,7 +910,23 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 		}
 		claudeInputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, sdktranslator.FormatInteractions, responseFormat, originalRequest)
 		var streamUsage helps.StreamUsageBuffer
-		defer streamUsage.Publish(ctx, reporter)
+		var terminalDelivered bool
+		defer func() {
+			if errContext := ctx.Err(); errContext != nil && !terminalDelivered {
+				streamUsage.PublishFailure(ctx, reporter, errContext)
+				return
+			}
+			streamUsage.Publish(ctx, reporter)
+		}()
+		sendChunk := func(payload []byte, terminal bool) bool {
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+				terminalDelivered = terminalDelivered || terminal
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		var param any
 		helps.InitializeApplyPatchStream(ctx, sdktranslator.FormatInteractions, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, &param)
 		var frame []byte
@@ -935,14 +951,11 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 					streamUsage.Observe(detail, true)
 				}
 			}
+			eventType := ojson.GetBytesNoCopy(payload, "event_type").String()
+			completed := eventType == "interaction.completed" || eventType == "finish"
 			if responseFormat == sdktranslator.FormatInteractions {
 				visibleFrame := append(bytes.TrimRight(rawFrame, "\r\n"), '\n', '\n')
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: visibleFrame}:
-				case <-ctx.Done():
-					return false
-				}
-				return true
+				return sendChunk(visibleFrame, completed)
 			}
 			if len(payload) == 0 {
 				return true
@@ -950,10 +963,8 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 			var lines [][]byte
 			lines = helps.TranslateStreamWithClaudeInputTokens(ctx, sdktranslator.FormatInteractions, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, payload, &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
-			for i := range lines {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}:
-				case <-ctx.Done():
+			for _, line := range lines {
+				if !sendChunk(line, completed && helps.IsGeminiTerminalStreamChunk(line)) {
 					return false
 				}
 			}
@@ -984,8 +995,12 @@ func (e *GeminiExecutor) executeInteractionsStream(ctx context.Context, auth *cl
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
+			// A downstream client can close as soon as it receives completion.
+			if terminalDelivered && errors.Is(errScan, context.Canceled) {
+				return
+			}
 			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
+			streamUsage.PublishFailure(ctx, reporter, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
