@@ -173,6 +173,7 @@ func markHomeRetryRoundExhausted(err error, retryAfter *time.Duration, retryNow 
 		return nil
 	}
 	upstreamAttempt := hasUpstreamExecutionAttempt(err)
+	upstreamProvider := upstreamAttemptProviderFromError(err)
 	err = unwrapUpstreamExecutionAttempt(err)
 	marked := &homeRetryRoundExhaustedError{cause: err, retryNow: retryNow}
 	if retryAfter != nil {
@@ -180,7 +181,7 @@ func markHomeRetryRoundExhausted(err error, retryAfter *time.Duration, retryNow 
 		marked.hasRetryAfter = true
 	}
 	if upstreamAttempt {
-		return markUpstreamExecutionAttempt(marked)
+		return markUpstreamExecutionAttemptWithProvider(marked, upstreamProvider)
 	}
 	return marked
 }
@@ -296,7 +297,7 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	if !homeMode {
 		return true
 	}
-	if isHomeRequestRetryExceededError(errPick) {
+	if isSchedulerRejectError(errPick) || isHomeRequestRetryExceededError(errPick) {
 		return true
 	}
 	var authErr *Error
@@ -353,6 +354,7 @@ func repeatedHomeAuthError() *Error {
 }
 
 type homeAuthDispatchResponse struct {
+	SelectionID   string                 `json:"selection_id,omitempty"`
 	Model         string                 `json:"model"`
 	Provider      string                 `json:"provider"`
 	AuthIndex     string                 `json:"auth_index"`
@@ -1097,6 +1099,19 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 			dispatchHeaders.Set("X-Node-Kind", nodeKind)
 		}
 	}
+	requestID := stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestIDMetadataKey)
+	if requestID == "" {
+		requestID = logging.GetRequestID(ctx)
+	}
+	traceID := stringMetadataValue(opts.Metadata, cliproxyexecutor.TraceIDMetadataKey)
+	if traceID == "" {
+		traceID = coreusage.TraceIDFromContext(ctx)
+	}
+	ctx = home.WithSchedulerContext(ctx, home.SchedulerContext{
+		Stream: opts.Stream, RequestID: requestID, TraceID: traceID,
+		ExecutionSessionID: homeExecutionSessionIDFromMetadata(opts.Metadata),
+		RequestedModel:     stringMetadataValue(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey),
+	})
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
@@ -1301,6 +1316,7 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 			return nil, errEnd
 		}
 	}
+	selection.SelectionID = strings.TrimSpace(dispatch.SelectionID)
 	selection.CanonicalSessionID = sessionID
 	selection.ParentSessionID = parentSessionID
 	return selection, nil
