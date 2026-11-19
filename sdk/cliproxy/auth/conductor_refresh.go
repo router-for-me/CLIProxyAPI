@@ -1777,6 +1777,33 @@ func (m *Manager) refreshWorkers() int {
 	return workers
 }
 
+// RefreshDue synchronously refreshes every credential the auto-refresh loop
+// would refresh now, by the same rule, for a one-shot caller with no loop running.
+func (m *Manager) RefreshDue(ctx context.Context) []ForceRefreshResult {
+	if m == nil {
+		return nil
+	}
+	now := time.Now()
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.auths))
+	for id, auth := range m.auths {
+		if auth != nil && !auth.Disabled && m.shouldRefresh(auth, now) {
+			ids = append(ids, id)
+		}
+	}
+	m.mu.RUnlock()
+	results := make([]ForceRefreshResult, 0, len(ids))
+	for _, id := range ids {
+		_, err := m.refreshAuthForRequest(ctx, id, "")
+		res := ForceRefreshResult{ID: id, Success: err == nil}
+		if err != nil {
+			res.Error = err.Error()
+		}
+		results = append(results, res)
+	}
+	return results
+}
+
 // ForceRefreshResult records the outcome of a forced refresh for one credential.
 type ForceRefreshResult struct {
 	ID      string `json:"id"`
