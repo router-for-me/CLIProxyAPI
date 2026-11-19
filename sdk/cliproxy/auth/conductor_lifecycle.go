@@ -484,6 +484,22 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		existingVersion = 1
 	}
 	credChanged := CredentialsChanged(existing, auth)
+	preserveIndependentCooldown := (!credChanged && strings.EqualFold(auth.Provider, "codex") && auth.Provider == existing.Provider) || sameClaudeOverageAccount(auth, existing)
+	if preserveIndependentCooldown && existing.nonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
+		auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+	}
+	if preserveIndependentCooldown {
+		if existing.forceCooldownUntil.After(auth.forceCooldownUntil) {
+			auth.forceCooldownUntil = existing.forceCooldownUntil
+		}
+		if existing.quotaForceCooldownUntil.After(auth.quotaForceCooldownUntil) {
+			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+		}
+		if existing.credQuotaForceUntil.After(auth.credQuotaForceUntil) {
+			auth.credQuotaForceUntil = existing.credQuotaForceUntil
+		}
+		auth.forceCooldownSeeded = auth.forceCooldownSeeded || existing.forceCooldownSeeded
+	}
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
 	} else {
@@ -501,6 +517,29 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		} else if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
 			auth.ModelStates = existing.ModelStates
+		} else if mode == updateModeReplace && preserveIndependentCooldown {
+			// Public model snapshots omit private independent cooldown layers.
+			auth.ModelStates = auth.Clone().ModelStates
+			for model, state := range auth.ModelStates {
+				old := existing.ModelStates[model]
+				if state == nil || old == nil {
+					continue
+				}
+				if old.nonQuotaCooldownUntil.After(state.nonQuotaCooldownUntil) {
+					state.nonQuotaCooldownUntil = old.nonQuotaCooldownUntil
+				}
+				if old.forceCooldownUntil.After(state.forceCooldownUntil) {
+					state.forceCooldownUntil = old.forceCooldownUntil
+				}
+				if old.quotaForceCooldownUntil.After(state.quotaForceCooldownUntil) {
+					state.quotaForceCooldownUntil = old.quotaForceCooldownUntil
+				}
+				state.forceCooldownSeeded = state.forceCooldownSeeded || old.forceCooldownSeeded
+				state.credentialQuotaPropagated = state.credentialQuotaPropagated || old.credentialQuotaPropagated
+				if state.credentialQuotaShadow == nil && isModelStateActiveCooldown(old.credentialQuotaShadow, now) {
+					state.credentialQuotaShadow = old.credentialQuotaShadow.cloneShallow()
+				}
+			}
 		}
 		if isFileSnapshot || (credChanged && mode == updateModeReplace && existing.Quota.Exceeded && existing.Quota.NextRecoverAt.After(now) && !auth.Quota.NextRecoverAt.After(now)) {
 			if (auth.Status == "" || auth.Status == StatusActive) && existing.Status != "" {
@@ -662,6 +701,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			}
 		}
 	}
+	cooldownStateChanged = retainClaudeOverageUpdate(auth, existing) || cooldownStateChanged
 	auth.UpdatedAt = now
 	cooldownStateChanged = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) || cooldownStateChanged
 	seedInitialForceCooldownDeadlines(auth)
@@ -698,6 +738,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		return nil, false, false, fmt.Errorf("auth %s changed registration during persistence", auth.ID)
 	}
 	mergeAuthSaveDelta(auth, existingBeforeSave, existing, false)
+	cooldownStateChanged = retainClaudeOverageUpdate(auth, existing) || cooldownStateChanged
 	if m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) {
 		cooldownStateChanged = true
 		updateAggregatedAvailability(auth, now)

@@ -406,7 +406,22 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	seedInitialForceCooldownDeadlines(auth)
 	outerForceUntil := recordOuterForceUntil(record)
 	indepForceUntil := recordIndependentForceUntil(record)
+	overageUntil := record.ClaudeOverageCooldownUntil
+	fablePoolUntil := record.ClaudeFablePoolCooldownUntil
+	if !record.ClaudeFablePoolEvaluated && fablePoolUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeFablePoolSignals(record.CooldownSignals) {
+		fablePoolUntil = record.NextRetryAfter
+	}
+
+	if !record.ClaudeOverageEvaluated && overageUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeOverageSignals(record.CooldownSignals) {
+		overageUntil = claudeOverageRestoreDeadline(record.Quota, record.NextRetryAfter, record.UpdatedAt, record.CooldownSignals)
+	}
 	if model == "" {
+		if overageUntil.After(auth.claudeOverageCooldownUntil) {
+			auth.claudeOverageCooldownUntil = overageUntil
+		}
+		if fablePoolUntil.After(auth.claudeFablePoolCooldownUntil) {
+			auth.claudeFablePoolCooldownUntil = fablePoolUntil
+		}
 		prevNextRetry := auth.NextRetryAfter
 		prevQuota := auth.Quota.Clone()
 		prevUpdatedAt := auth.UpdatedAt
@@ -537,17 +552,19 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		recordNonQuotaUntil = record.NonQuotaCooldownUntil
 	}
 	mergeModelState(state, &ModelState{
-		Unavailable:             true,
-		Status:                  StatusError,
-		StatusMessage:           reason,
-		NextRetryAfter:          record.NextRetryAfter,
-		Quota:                   quota,
-		LastError:               cloneError(record.LastError),
-		UpdatedAt:               updatedAt,
-		forceCooldownUntil:      recordModelForceUntil,
-		quotaForceCooldownUntil: recordQuotaForceUntil,
-		nonQuotaCooldownUntil:   recordNonQuotaUntil,
-		forceCooldownSeeded:     true,
+		Unavailable:                  true,
+		Status:                       StatusError,
+		StatusMessage:                reason,
+		NextRetryAfter:               record.NextRetryAfter,
+		Quota:                        quota,
+		LastError:                    cloneError(record.LastError),
+		UpdatedAt:                    updatedAt,
+		claudeOverageCooldownUntil:   overageUntil,
+		claudeFablePoolCooldownUntil: fablePoolUntil,
+		forceCooldownUntil:           recordModelForceUntil,
+		quotaForceCooldownUntil:      recordQuotaForceUntil,
+		nonQuotaCooldownUntil:        recordNonQuotaUntil,
+		forceCooldownSeeded:          true,
 	})
 	// The persisted independent layer joins the merge newest-wins; a newer
 	// live independent layer (shadow or freshly captured unwrapped state,
@@ -561,17 +578,19 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		// presenting the propagated credential quota.
 		if !isDevinQuotaExhaustionMessage(devinRecordErrorText(record)) {
 			recordShadow := &ModelState{
-				Unavailable:             true,
-				Status:                  StatusError,
-				StatusMessage:           reason,
-				NextRetryAfter:          record.NextRetryAfter,
-				Quota:                   quota,
-				LastError:               cloneError(record.LastError),
-				UpdatedAt:               updatedAt,
-				forceCooldownUntil:      recordModelForceUntil,
-				quotaForceCooldownUntil: recordQuotaForceUntil,
-				nonQuotaCooldownUntil:   recordNonQuotaUntil,
-				forceCooldownSeeded:     true,
+				Unavailable:                  true,
+				Status:                       StatusError,
+				StatusMessage:                reason,
+				NextRetryAfter:               record.NextRetryAfter,
+				Quota:                        quota,
+				LastError:                    cloneError(record.LastError),
+				UpdatedAt:                    updatedAt,
+				claudeOverageCooldownUntil:   overageUntil,
+				claudeFablePoolCooldownUntil: fablePoolUntil,
+				forceCooldownUntil:           recordModelForceUntil,
+				quotaForceCooldownUntil:      recordQuotaForceUntil,
+				nonQuotaCooldownUntil:        recordNonQuotaUntil,
+				forceCooldownSeeded:          true,
 			}
 			preferred := state.credentialQuotaShadow.cloneShallow()
 			if liveShadow != nil {
@@ -601,6 +620,14 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		var restoredShadow *ModelState
 		if record.IndependentState != nil {
 			restoredShadow = record.IndependentState.cloneShallow()
+			restoredShadow.claudeOverageCooldownUntil = record.IndependentClaudeOverageCooldownUntil
+			restoredShadow.claudeFablePoolCooldownUntil = record.IndependentClaudeFablePoolCooldownUntil
+			if !record.ClaudeFablePoolEvaluated && restoredShadow.claudeFablePoolCooldownUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeFablePoolSignals(record.IndependentCooldownSignals) {
+				restoredShadow.claudeFablePoolCooldownUntil = restoredShadow.NextRetryAfter
+			}
+			if !record.ClaudeOverageEvaluated && restoredShadow.claudeOverageCooldownUntil.IsZero() && strings.EqualFold(auth.Provider, "claude") && claudeOverageSignals(record.IndependentCooldownSignals) {
+				restoredShadow.claudeOverageCooldownUntil = claudeOverageRestoreDeadline(restoredShadow.Quota, restoredShadow.NextRetryAfter, restoredShadow.UpdatedAt, record.IndependentCooldownSignals)
+			}
 			restoredShadow.Quota.cooldownEvaluated = restoredShadow.Quota.Exceeded
 			if indepForceUntil.After(restoredShadow.forceCooldownUntil) {
 				restoredShadow.forceCooldownUntil = indepForceUntil
@@ -968,6 +995,8 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 			state.forceCooldownUntil = time.Time{}
 			state.quotaForceCooldownUntil = time.Time{}
 			state.nonQuotaCooldownUntil = time.Time{}
+			state.claudeOverageCooldownUntil = time.Time{}
+			state.claudeFablePoolCooldownUntil = time.Time{}
 			state.credentialQuotaShadow = nil
 			state.credentialQuotaPropagated = false
 			state.UpdatedAt = now
@@ -988,6 +1017,8 @@ func clearDisabledCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	}
 	if !keepAuthLevelForce && !auth.nonQuotaCooldownUntil.IsZero() {
 		auth.nonQuotaCooldownUntil = time.Time{}
+		auth.claudeOverageCooldownUntil = time.Time{}
+		auth.claudeFablePoolCooldownUntil = time.Time{}
 	}
 
 	prevUnavailable := auth.Unavailable
@@ -1034,6 +1065,8 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	auth.credQuotaForceUntil = time.Time{}
 	auth.credentialRetryAfter = time.Time{}
 	auth.nonQuotaCooldownUntil = time.Time{}
+	auth.claudeOverageCooldownUntil = time.Time{}
+	auth.claudeFablePoolCooldownUntil = time.Time{}
 	auth.cooldownRecordedSeq = 0
 	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
@@ -1049,6 +1082,8 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		state.forceCooldownUntil = time.Time{}
 		state.quotaForceCooldownUntil = time.Time{}
 		state.nonQuotaCooldownUntil = time.Time{}
+		state.claudeOverageCooldownUntil = time.Time{}
+		state.claudeFablePoolCooldownUntil = time.Time{}
 		state.cooldownRecordedSeq = 0
 		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
 			state.Unavailable = false
@@ -1092,6 +1127,10 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	return m.resetQuota(ctx, authID, nil)
+}
+
+func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -1106,13 +1145,39 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 	registeredModels := modelsForRegisteredAuth(authID)
 	cooldownStateChanged := false
 
-	releaseMutation := m.lockAuthMutation(authID)
+	var releaseMutation func()
+	if expected != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		var errMutation error
+		releaseMutation, errMutation = m.lockAuthMutationContext(ctx, authID)
+		if errMutation != nil {
+			return nil, nil, errMutation
+		}
+	} else {
+		releaseMutation = m.lockAuthMutation(authID)
+	}
 	defer releaseMutation()
 	m.mu.Lock()
 	auth, ok := m.auths[authID]
 	if !ok || auth == nil {
 		m.mu.Unlock()
 		return nil, nil, nil
+	}
+
+	if expected != nil {
+		if errContext := ctx.Err(); errContext != nil {
+			m.mu.Unlock()
+			return nil, nil, errContext
+		}
+		if !m.quotaResetMatchesLocked(auth, expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		// Stage recovery independently so cancellation during persistence cannot
+		// publish a partially applied recovery.
+		auth = auth.Clone()
 	}
 
 	var cooldownRecordsBefore []CooldownStateRecord
@@ -1150,7 +1215,13 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 			auth.Status = StatusActive
 		}
 	}
-	auth.Generation++
+	if expected != nil {
+		// A staged recovery is one publication. Do not let its speculative
+		// persistence watermark outrun the next edit if this save aborts.
+		auth.Generation = expected.Generation + 1
+	} else {
+		auth.Generation++
+	}
 	auth.UpdatedAt = now
 	snapshot = auth.Clone()
 	if trackCooldownState {
@@ -1158,6 +1229,26 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		cooldownStateChanged = !cooldownStateRecordsEqual(cooldownRecordsBefore, cooldownRecordsAfter)
 	}
 	errPersist := m.persistLocked(ctx, auth)
+	if expected != nil {
+		if errPersist != nil {
+			m.mu.Unlock()
+			return nil, nil, errPersist
+		}
+		if errContext := ctx.Err(); errContext != nil {
+			m.mu.Unlock()
+			return nil, nil, errContext
+		}
+		if !m.quotaResetMatchesLocked(m.auths[authID], expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		if !quotaRecoverySavedIdentityMatches(auth, expected) {
+			m.mu.Unlock()
+			return nil, nil, nil
+		}
+		m.auths[authID] = auth
+		snapshot = auth.Clone()
+	}
 	m.mu.Unlock()
 	releaseMutation()
 
@@ -1294,6 +1385,16 @@ func cooldownStateRecordsEqual(a, b []CooldownStateRecord) bool {
 }
 
 func cooldownStateRecordEqual(a, b CooldownStateRecord) bool {
+	if a.ClaudeFablePoolEvaluated != b.ClaudeFablePoolEvaluated || !a.ClaudeFablePoolCooldownUntil.Equal(b.ClaudeFablePoolCooldownUntil) || !a.IndependentClaudeFablePoolCooldownUntil.Equal(b.IndependentClaudeFablePoolCooldownUntil) {
+		return false
+	}
+
+	if a.ClaudeOverageEvaluated != b.ClaudeOverageEvaluated {
+		return false
+	}
+	if !a.ClaudeOverageCooldownUntil.Equal(b.ClaudeOverageCooldownUntil) || !a.IndependentClaudeOverageCooldownUntil.Equal(b.IndependentClaudeOverageCooldownUntil) {
+		return false
+	}
 	if a.CredentialQuotaPropagated != b.CredentialQuotaPropagated {
 		return false
 	}
@@ -1328,7 +1429,7 @@ func cooldownIndependentStateEqual(a, b *ModelState) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.Status == b.Status &&
+	return a.claudeFablePoolCooldownUntil.Equal(b.claudeFablePoolCooldownUntil) && a.claudeOverageCooldownUntil.Equal(b.claudeOverageCooldownUntil) && a.Status == b.Status &&
 		a.StatusMessage == b.StatusMessage &&
 		a.Unavailable == b.Unavailable &&
 		a.NextRetryAfter.Equal(b.NextRetryAfter) &&
@@ -1386,22 +1487,26 @@ func authCooldownStateRecord(auth *Auth, now time.Time) (CooldownStateRecord, bo
 		nonQuotaUntil = auth.nonQuotaCooldownUntil
 	}
 	return CooldownStateRecord{
-		Provider:                    strings.TrimSpace(auth.Provider),
-		AuthID:                      auth.ID,
-		AuthFile:                    cooldownAuthFile(auth),
-		Status:                      "cooling",
-		NextRetryAfter:              auth.NextRetryAfter,
-		Reason:                      cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
-		Quota:                       cooldownFieldsOf(auth.Quota),
-		LastError:                   cloneError(auth.LastError),
-		UpdatedAt:                   auth.UpdatedAt,
-		CooldownSignals:             cooldownSignals,
-		ForceCooldownUntil:          authForceUntil,
-		QuotaForceCooldownUntil:     authQuotaForceUntil,
-		CredQuotaForceCooldownUntil: credQuotaForceUntil,
-		ForceCooldownEvaluated:      true,
-		CredentialRetryAfter:        credentialRetryAfter,
-		NonQuotaCooldownUntil:       nonQuotaUntil,
+		ClaudeOverageEvaluated:       true,
+		ClaudeOverageCooldownUntil:   auth.claudeOverageCooldownUntil,
+		ClaudeFablePoolCooldownUntil: auth.claudeFablePoolCooldownUntil,
+		ClaudeFablePoolEvaluated:     true,
+		Provider:                     strings.TrimSpace(auth.Provider),
+		AuthID:                       auth.ID,
+		AuthFile:                     cooldownAuthFile(auth),
+		Status:                       "cooling",
+		NextRetryAfter:               auth.NextRetryAfter,
+		Reason:                       cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError),
+		Quota:                        cooldownFieldsOf(auth.Quota),
+		LastError:                    cloneError(auth.LastError),
+		UpdatedAt:                    auth.UpdatedAt,
+		CooldownSignals:              cooldownSignals,
+		ForceCooldownUntil:           authForceUntil,
+		QuotaForceCooldownUntil:      authQuotaForceUntil,
+		CredQuotaForceCooldownUntil:  credQuotaForceUntil,
+		ForceCooldownEvaluated:       true,
+		CredentialRetryAfter:         credentialRetryAfter,
+		NonQuotaCooldownUntil:        nonQuotaUntil,
 	}, true
 }
 
@@ -1434,24 +1539,30 @@ func modelCooldownStateRecord(auth *Auth, model string, state *ModelState, now t
 		modelNonQuotaUntil = state.nonQuotaCooldownUntil
 	}
 	record := CooldownStateRecord{
-		Provider:                strings.TrimSpace(auth.Provider),
-		AuthID:                  auth.ID,
-		AuthFile:                cooldownAuthFile(auth),
-		Model:                   model,
-		Status:                  "cooling",
-		NextRetryAfter:          state.NextRetryAfter,
-		Reason:                  cooldownReason(state.StatusMessage, state.Quota, state.LastError),
-		Quota:                   cooldownFieldsOf(state.Quota),
-		LastError:               cloneError(state.LastError),
-		UpdatedAt:               state.UpdatedAt,
-		CooldownSignals:         cooldownSignals,
-		ForceCooldownUntil:      outerForceUntil,
-		QuotaForceCooldownUntil: modelQuotaForceUntil,
-		ForceCooldownEvaluated:  true,
-		NonQuotaCooldownUntil:   modelNonQuotaUntil,
+		ClaudeOverageEvaluated:       true,
+		ClaudeOverageCooldownUntil:   state.claudeOverageCooldownUntil,
+		ClaudeFablePoolCooldownUntil: state.claudeFablePoolCooldownUntil,
+		ClaudeFablePoolEvaluated:     true,
+		Provider:                     strings.TrimSpace(auth.Provider),
+		AuthID:                       auth.ID,
+		AuthFile:                     cooldownAuthFile(auth),
+		Model:                        model,
+		Status:                       "cooling",
+		NextRetryAfter:               state.NextRetryAfter,
+		Reason:                       cooldownReason(state.StatusMessage, state.Quota, state.LastError),
+		Quota:                        cooldownFieldsOf(state.Quota),
+		LastError:                    cloneError(state.LastError),
+		UpdatedAt:                    state.UpdatedAt,
+		CooldownSignals:              cooldownSignals,
+		ForceCooldownUntil:           outerForceUntil,
+		QuotaForceCooldownUntil:      modelQuotaForceUntil,
+		ForceCooldownEvaluated:       true,
+		NonQuotaCooldownUntil:        modelNonQuotaUntil,
 	}
 	if state.credentialQuotaShadow != nil {
 		record.IndependentState = state.credentialQuotaShadow.cloneShallow()
+		record.IndependentClaudeOverageCooldownUntil = state.credentialQuotaShadow.claudeOverageCooldownUntil
+		record.IndependentClaudeFablePoolCooldownUntil = state.credentialQuotaShadow.claudeFablePoolCooldownUntil
 		if u := effectiveModelForceUntil(state.credentialQuotaShadow); u.After(now) {
 			record.IndependentForceCooldownUntil = u
 		}
@@ -1739,6 +1850,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
+					m.recordClaudeOverage(ctx, auth, result, modelKey, responseHeaders, now)
 					statusCode := statusCodeFromResult(result.Error)
 					if isModelSupportResultError(result.Error) {
 						if disableCooling {
@@ -1832,6 +1944,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							if !disableCooling {
+								independentQuota := state.Quota
+								independentQuota.BackoffLevel = backoffLevel
+								independentNext := independentRateLimitDeadline(independentQuota, result.RetryAfter, now)
 								reusedOpenWindow := false
 								var baseBackoffBefore int
 								if result.RetryAfter != nil {
@@ -1855,6 +1970,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 									next, backoffLevel = quotaCooldownAfterFailure(quotaForFailure, now)
 								}
 								credentialNext = next
+								if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(result.Error) && independentNext.After(state.nonQuotaCooldownUntil) {
+									state.nonQuotaCooldownUntil = independentNext
+								}
+								if strings.EqualFold(auth.Provider, "codex") && !isForceResult && !isCodexQuotaRejectionResult(result.Error) {
+									ownModelNonQuotaDeadline = independentNext
+								}
 								if isForceResult {
 									if result.RetryAfter != nil || !reusedOpenWindow {
 										ownModelForceDeadline = credentialNext
@@ -2154,6 +2275,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							}
 						}
 					}
+					m.recordClaudeOverage(ctx, auth, result, "", responseHeaders, now)
 					ownAuthForceDeadline, ownAuthRetryDeadline := applyAuthFailureState(auth, result.Error, result.RetryAfter, now, disableCooling)
 					cooldownSeq := m.currentExecutionSeq()
 					isQuota429 := !disableCooling &&
@@ -2549,6 +2671,14 @@ func mergeModelState(target, source *ModelState) *ModelState {
 	if source.quotaForceCooldownUntil.After(merged.quotaForceCooldownUntil) {
 		merged.quotaForceCooldownUntil = source.quotaForceCooldownUntil
 	}
+	merged.claudeOverageCooldownUntil = target.claudeOverageCooldownUntil
+	if source.claudeOverageCooldownUntil.After(merged.claudeOverageCooldownUntil) {
+		merged.claudeOverageCooldownUntil = source.claudeOverageCooldownUntil
+	}
+	merged.claudeFablePoolCooldownUntil = target.claudeFablePoolCooldownUntil
+	if source.claudeFablePoolCooldownUntil.After(merged.claudeFablePoolCooldownUntil) {
+		merged.claudeFablePoolCooldownUntil = source.claudeFablePoolCooldownUntil
+	}
 	merged.nonQuotaCooldownUntil = target.nonQuotaCooldownUntil
 	if source.nonQuotaCooldownUntil.After(merged.nonQuotaCooldownUntil) {
 		merged.nonQuotaCooldownUntil = source.nonQuotaCooldownUntil
@@ -2602,6 +2732,8 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.forceCooldownUntil = time.Time{}
 	state.quotaForceCooldownUntil = time.Time{}
 	state.nonQuotaCooldownUntil = time.Time{}
+	state.claudeOverageCooldownUntil = time.Time{}
+	state.claudeFablePoolCooldownUntil = time.Time{}
 	state.credentialQuotaShadow = nil
 	state.credentialQuotaPropagated = false
 	state.UpdatedAt = now
@@ -2951,6 +3083,8 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.credQuotaForceUntil = time.Time{}
 	auth.credentialRetryAfter = time.Time{}
 	auth.nonQuotaCooldownUntil = time.Time{}
+	auth.claudeOverageCooldownUntil = time.Time{}
+	auth.claudeFablePoolCooldownUntil = time.Time{}
 	auth.UpdatedAt = now
 }
 
@@ -3077,6 +3211,7 @@ func resultErrorFromError(err error) *Error {
 	if resultErr.HTTPStatus == 0 {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
+
 	type tosMetadataProvider interface {
 		TOSAppealMetadata() map[string]string
 	}
@@ -3132,6 +3267,16 @@ func resultErrorFromError(err error) *Error {
 		if resultErr.Code == "" || resultErr.Code == transientTransportErrorCode {
 			resultErr.Code = transientTransportErrorCode
 		}
+	}
+	// Preserve the original positive-quota fact only if conversion lost it.
+	// Metadata carries one bounded classification, never the response body.
+	if isPositiveQuotaRejectionError(err) && !isCodexQuotaRejectionResult(resultErr) {
+		metadata := maps.Clone(resultErr.Metadata)
+		if metadata == nil {
+			metadata = make(map[string]string, 1)
+		}
+		metadata[positiveQuotaRejectionMetadataKey] = "true"
+		resultErr.Metadata = metadata
 	}
 	return resultErr
 }
@@ -4329,6 +4474,7 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.Quota.Reason = "quota"
 			var next time.Time
 			if !disableCooling {
+				independentNext := independentRateLimitDeadline(auth.Quota, retryAfter, now)
 				if retryAfter != nil {
 					cooldown := *retryAfter
 					if cooldown < minQuotaCooldownFloor {
@@ -4351,6 +4497,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 							ownAuthForceDeadline, _ = quotaCooldownAfterFailure(QuotaState{BackoffLevel: baseAuthBackoff}, now)
 						}
 					}
+				}
+				if strings.EqualFold(auth.Provider, "codex") && !isForceAuth && !isCodexQuotaRejectionResult(resultErr) {
+					ownAuthNonQuotaDeadline = independentNext
+				}
+				if strings.EqualFold(auth.Provider, "claude") && quotaClaudePerMinuteError(resultErr) && independentNext.After(auth.nonQuotaCooldownUntil) {
+					auth.nonQuotaCooldownUntil = independentNext
 				}
 				if auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(next) {
 					next = auth.Quota.NextRecoverAt
@@ -4388,9 +4540,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if isForceAuth && ownAuthForceDeadline.After(ownAuthNonQuotaDeadline) {
 			ownAuthNonQuotaDeadline = ownAuthForceDeadline
 		}
-		if ownAuthNonQuotaDeadline.After(auth.nonQuotaCooldownUntil) {
-			auth.nonQuotaCooldownUntil = ownAuthNonQuotaDeadline
-		}
+	}
+	if ownAuthNonQuotaDeadline.After(auth.nonQuotaCooldownUntil) {
+		auth.nonQuotaCooldownUntil = ownAuthNonQuotaDeadline
 	}
 	if isForceAuth {
 		if ownAuthForceDeadline.IsZero() {

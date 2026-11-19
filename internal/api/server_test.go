@@ -2225,9 +2225,25 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
 		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
+	var expectedServiceTiers []any
+	templateFound := false
+	for _, template := range codexClientTestTemplates(t) {
+		if template["slug"] == "gpt-5.5" {
+			var ok bool
+			expectedServiceTiers, ok = template["service_tiers"].([]any)
+			if !ok {
+				t.Fatalf("canonical gpt-5.5 service_tiers must be an array, got %#v", template["service_tiers"])
+			}
+			templateFound = true
+			break
+		}
+	}
+	if !templateFound {
+		t.Fatal("canonical gpt-5.5 catalog template missing")
+	}
 	serviceTiers, ok := gpt55["service_tiers"].([]any)
-	if !ok || len(serviceTiers) != 1 {
-		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	if !ok || !reflect.DeepEqual(serviceTiers, expectedServiceTiers) {
+		t.Fatalf("gpt-5.5 service_tiers = %#v, want canonical template %#v", gpt55["service_tiers"], expectedServiceTiers)
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")
@@ -2564,7 +2580,7 @@ func codexClientTestPriority(raw any) int {
 	}
 }
 
-func codexClientTestMaxTemplatePriority(t *testing.T) int {
+func codexClientTestTemplates(t *testing.T) []map[string]any {
 	t.Helper()
 	var payload struct {
 		Models []map[string]any `json:"models"`
@@ -2572,8 +2588,13 @@ func codexClientTestMaxTemplatePriority(t *testing.T) int {
 	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
 		t.Fatalf("parse Codex client model templates: %v", err)
 	}
+	return payload.Models
+}
+
+func codexClientTestMaxTemplatePriority(t *testing.T) int {
+	t.Helper()
 	maxPriority := 0
-	for _, model := range payload.Models {
+	for _, model := range codexClientTestTemplates(t) {
 		if priority := codexClientTestPriority(model["priority"]); priority > maxPriority {
 			maxPriority = priority
 		}

@@ -763,12 +763,7 @@ func codexOpenAIImageBaseModel(model string) string {
 }
 
 func codexIsDirectOpenAIImageModel(model string) bool {
-	switch strings.ToLower(strings.TrimSpace(model)) {
-	case codexGPTImage15Model, codexDefaultImageToolModel, codexGPTImage25FlareModel, codexGPTImage25SunburstModel, codexGPTImage25Model, codexGPTImage26FlareModel, codexGPTImage26SunburstModel, codexGPTImage26Model:
-		return true
-	default:
-		return false
-	}
+	return config.CodexImageModelUsesDirectEndpoint(model)
 }
 
 func (e *CodexExecutor) prepareCodexOpenAIImageBody(ctx context.Context, auth *cliproxyauth.Auth, body []byte, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, mainModel string) ([]byte, error) {
