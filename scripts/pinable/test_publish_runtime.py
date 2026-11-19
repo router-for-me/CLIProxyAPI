@@ -29,7 +29,8 @@ class PublishTests(unittest.TestCase):
         self.index = runtime.index(self.source, self.output, COMMIT)
         self.validation = {'source_commit': COMMIT, 'quality': 'passed', 'native_smoke': [
             {'target': m['target'], 'status': 'passed', 'source_commit': COMMIT,
-             'binary_sha256': m['binary']['sha256']} for m in self.index['targets']]}
+             'binary_sha256': m['binary']['sha256'],
+             'dynamic_library_plugins_tested': True} for m in self.index['targets']]}
         (self.output / 'validation.json').write_bytes(runtime.encoded(self.validation))
         self.checksums()
         self.env = {'GITHUB_REPOSITORY': 'PinableAgents/CLIProxyAPI',
@@ -45,6 +46,32 @@ class PublishTests(unittest.TestCase):
         index, files = publish_runtime.validate(self.output, COMMIT)
         self.assertEqual(index, self.index)
         self.assertEqual(len(files), 15)
+
+    def test_missing_or_false_any_platform_plugin_evidence_cannot_publish(self):
+        for report in self.validation["native_smoke"]:
+            for value in (None, False, "true", "missing"):
+                report["dynamic_library_plugins_tested"] = value
+                if value == "missing":
+                    del report["dynamic_library_plugins_tested"]
+                (self.output / "validation.json").write_bytes(runtime.encoded(self.validation))
+                self.checksums()
+                with self.subTest(target=report["target"], value=value), self.assertRaisesRegex(ValueError, "plugin smoke"):
+                    publish_runtime.validate(self.output, COMMIT)
+            report["dynamic_library_plugins_tested"] = True
+
+    def test_historical_unix_profile_is_readable_but_not_new_release(self):
+        manifests = []
+        for manifest in self.index["targets"]:
+            manifest = json.loads(json.dumps(manifest))
+            if not manifest["target"].startswith("windows/"):
+                manifest["build"]["cgo_enabled"] = False
+                manifest["capabilities"]["dynamic_library_plugins"] = False
+            manifests.append(manifest)
+        self.index["targets"] = manifests
+        (self.output / "runtime-index.json").write_bytes(runtime.encoded(self.index))
+        with mock.patch.object(runtime, "verify", side_effect=[(m, b"") for m in sorted(manifests, key=lambda m: m["target"])]):
+            with self.assertRaisesRegex(ValueError, "CGO defaults"):
+                publish_runtime.validate(self.output, COMMIT)
 
     def test_extra_file_cannot_be_published(self):
         (self.output / 'accidental-secret.txt').write_text('not a release file')
