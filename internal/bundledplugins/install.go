@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // SourceDirEnv overrides the bundled plugin directory; the default is
@@ -99,7 +101,7 @@ func copyAtomic(source, target string) error {
 	if err != nil {
 		return fmt.Errorf("open bundled plugin: %w", err)
 	}
-	defer in.Close()
+	defer closeLogged(in)
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".bundled-*")
 	if err != nil {
 		return fmt.Errorf("create plugin copy: %w", err)
@@ -124,12 +126,19 @@ func fileHash(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer closeLogged(file)
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// closeLogged closes a file opened for reading and logs a close failure.
+func closeLogged(file *os.File) {
+	if errClose := file.Close(); errClose != nil {
+		log.Errorf("bundled plugins: close %s: %v", file.Name(), errClose)
+	}
 }
 
 func readMarker(target string) string {

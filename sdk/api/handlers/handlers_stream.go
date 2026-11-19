@@ -431,7 +431,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- antigravityGuardReply(entryProtocol, selectedProvider.get(), errMsg)
+		errChan <- h.antigravityGuardReply(ctx, entryProtocol, selectedProvider.get(), errMsg)
 		close(errChan)
 		return nil, nil, errChan
 	}

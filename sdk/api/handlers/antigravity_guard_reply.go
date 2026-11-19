@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"sync"
@@ -65,11 +66,16 @@ func trackSelectedProvider(meta map[string]any) *selectedProviderRecorder {
 }
 
 // antigravityGuardReply returns the fixed guard reply when the auth that
-// produced msg is an Antigravity one and msg is Google's content-filter 429.
-// Every other error is returned unchanged.
-func antigravityGuardReply(entryProtocol, provider string, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+// produced msg is an Antigravity one, msg is Google's content-filter 429 and a
+// request-scoped stop rule ended the request. Without that rule, e.g. after the
+// explicit `antigravity: []` opt-out, and for every other error msg is
+// returned unchanged.
+func (h *BaseAPIHandler) antigravityGuardReply(ctx context.Context, entryProtocol, provider string, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
 	if msg == nil || msg.Error == nil || msg.DirectResponse || msg.StatusCode != http.StatusTooManyRequests ||
 		!strings.EqualFold(provider, "antigravity") || !internalconfig.IsAntigravityContentFilter429(msg.Error.Error()) {
+		return msg
+	}
+	if h == nil || h.AuthManager == nil || !h.AuthManager.StoppedByOAuthRequestScopedRule(ctx, provider, msg.Error) {
 		return msg
 	}
 	return &interfaces.ErrorMessage{

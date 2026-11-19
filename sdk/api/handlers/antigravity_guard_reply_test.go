@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,17 +18,20 @@ import (
 const (
 	guardTestContentFilter = "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"
 	guardTestQuota         = `{"error":{"code":429,"message":"You have exhausted your capacity on this model.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"}]}}`
+	guardTestDefaultYAML   = "port: 8317"
+	guardTestOptOutYAML    = "port: 8317\noauth-request-scoped-errors:\n  antigravity: []\n"
 )
 
 func TestAntigravityGuardReplyReplacesContentFilter429(t *testing.T) {
+	handler, _ := guardTestHandler(t, guardTestDefaultYAML)
 	for protocol, want := range map[string]string{
 		"openai":          `"code":"google_flagged_prompt"`,
 		"openai-response": `"code":"google_flagged_prompt"`,
 		"claude":          `"type":"permission_error"`,
 		"gemini":          `"status":"PERMISSION_DENIED"`,
 	} {
-		original := &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New(guardTestContentFilter)}
-		got := antigravityGuardReply(protocol, "antigravity", original)
+		original := guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)
+		got := handler.antigravityGuardReply(context.Background(), protocol, "antigravity", original)
 		assertAntigravityGuardReply(t, protocol, got, want)
 		if got.Error != original.Error {
 			t.Fatalf("%s: original error not kept", protocol)
@@ -38,18 +40,23 @@ func TestAntigravityGuardReplyReplacesContentFilter429(t *testing.T) {
 }
 
 func TestAntigravityGuardReplyKeepsOtherErrors(t *testing.T) {
+	direct := guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)
+	direct.DirectResponse = true
 	cases := map[string]struct {
+		yaml     string
 		provider string
 		msg      *interfaces.ErrorMessage
 	}{
-		"quota 429":      {"antigravity", &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New(guardTestQuota)}},
-		"other provider": {"vertex", &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New(guardTestContentFilter)}},
-		"no provider":    {"", &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New(guardTestContentFilter)}},
-		"other status":   {"antigravity", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errors.New(guardTestContentFilter)}},
-		"direct":         {"antigravity", &interfaces.ErrorMessage{StatusCode: http.StatusTooManyRequests, Error: errors.New(guardTestContentFilter), DirectResponse: true}},
+		"quota 429":        {guardTestDefaultYAML, "antigravity", guardTestMessage(http.StatusTooManyRequests, guardTestQuota)},
+		"other provider":   {guardTestDefaultYAML, "vertex", guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)},
+		"no provider":      {guardTestDefaultYAML, "", guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)},
+		"other status":     {guardTestDefaultYAML, "antigravity", guardTestMessage(http.StatusBadGateway, guardTestContentFilter)},
+		"direct":           {guardTestDefaultYAML, "antigravity", direct},
+		"explicit opt-out": {guardTestOptOutYAML, "antigravity", guardTestMessage(http.StatusTooManyRequests, guardTestContentFilter)},
 	}
 	for name, tc := range cases {
-		if got := antigravityGuardReply("openai", tc.provider, tc.msg); got != tc.msg {
+		handler, _ := guardTestHandler(t, tc.yaml)
+		if got := handler.antigravityGuardReply(context.Background(), "openai", tc.provider, tc.msg); got != tc.msg {
 			t.Fatalf("%s: message was replaced: %+v", name, got)
 		}
 	}
@@ -71,18 +78,16 @@ func TestTrackSelectedProviderChainsExistingCallback(t *testing.T) {
 // Home runtime auths are not in the manager's auth map and are released after
 // the failed attempt, so the reply must not depend on looking the auth up.
 func TestAntigravityGuardReplyThroughHomeDispatch(t *testing.T) {
-	cfg, errParse := internalconfig.ParseConfigBytes([]byte("port: 8317"))
+	handler, manager := guardTestHandler(t, guardTestDefaultYAML)
+	cfg, errParse := internalconfig.ParseConfigBytes([]byte(guardTestDefaultYAML))
 	if errParse != nil {
 		t.Fatalf("ParseConfigBytes: %v", errParse)
 	}
 	cfg.Home.Enabled = true
-	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(cfg)
 	executor := &guardContentFilterExecutor{}
 	manager.RegisterExecutor(executor)
-	dispatcher := &guardHomeDispatcher{}
-	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	manager.PublishHomeDispatch(&guardHomeDispatcher{}, executionregistry.New(), 1)
 
 	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", "home-model", []byte(`{"model":"home-model"}`), "")
 	assertAntigravityGuardReply(t, "execute", errMsg, `"code":"google_flagged_prompt"`)
@@ -105,6 +110,21 @@ func TestAntigravityGuardReplyThroughHomeDispatch(t *testing.T) {
 	if _, ok := manager.GetByID("guard-cred"); ok {
 		t.Fatal("Home runtime auth unexpectedly in the manager auth map")
 	}
+}
+
+func guardTestHandler(t *testing.T, yaml string) (*BaseAPIHandler, *coreauth.Manager) {
+	t.Helper()
+	cfg, errParse := internalconfig.ParseConfigBytes([]byte(yaml))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes: %v", errParse)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	return NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager), manager
+}
+
+func guardTestMessage(status int, body string) *interfaces.ErrorMessage {
+	return &interfaces.ErrorMessage{StatusCode: status, Error: &coreauth.Error{HTTPStatus: status, Message: body}}
 }
 
 func assertAntigravityGuardReply(t *testing.T, name string, got *interfaces.ErrorMessage, want string) {

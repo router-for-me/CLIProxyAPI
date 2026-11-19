@@ -119,7 +119,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
-		return nil, nil, antigravityGuardReply(entryProtocol, selectedProvider.get(), errMsg)
+		return nil, nil, h.antigravityGuardReply(ctx, entryProtocol, selectedProvider.get(), errMsg)
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)

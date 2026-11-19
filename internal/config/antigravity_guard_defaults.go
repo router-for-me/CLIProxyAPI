@@ -46,11 +46,11 @@ func IsAntigravityContentFilter429(body string) bool {
 	return antigravityContentFilter429.MatchString(body)
 }
 
-// KeepAntigravityGuardOptOut stores an explicitly empty Antigravity rule list
-// in out and reports whether channel/rules was one. Sanitizers call it before
-// dropping empty channels, so the opt-out from the default stop rule is kept
-// in memory and written back by config saves.
-func KeepAntigravityGuardOptOut(out map[string][]RequestScopedErrorRule, channel string, rules []RequestScopedErrorRule) bool {
+// keepAntigravityGuardOptOut stores an explicitly empty Antigravity rule list
+// in out and reports whether channel/rules was one. SanitizeOAuthRequestScopedErrors
+// calls it before dropping empty channels, so the opt-out from the default stop
+// rule is kept in memory and written back by config saves.
+func keepAntigravityGuardOptOut(out map[string][]RequestScopedErrorRule, channel string, rules []RequestScopedErrorRule) bool {
 	if out == nil || len(rules) != 0 || !strings.EqualFold(strings.TrimSpace(channel), antigravityGuardChannel) {
 		return false
 	}

@@ -2288,9 +2288,6 @@ func sanitizedOAuthRequestScopedErrors(entries map[string][]config.RequestScoped
 	}
 	copied := make(map[string][]config.RequestScopedErrorRule, len(entries))
 	for channel, rules := range entries {
-		if config.KeepAntigravityGuardOptOut(copied, channel, rules) {
-			continue
-		}
 		if len(rules) == 0 {
 			continue
 		}
