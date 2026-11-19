@@ -35,6 +35,13 @@ state, 14 files), #7643 (shorten overlong Codex call IDs — cheap follow-up).
 `fork-ci.yml`; everything else enforces. `go vet` stays advisory because upstream's
 `internal/pluginhost/host_test.go` trips copylocks.
 
+First run with the merged PRs failed once in
+`TestServiceHeartbeatFailoverDoesNotDrainBlockingScope` and passed on rerun of the same
+commit. That test asserts a 50 ms "nothing happened yet" window against a 100 ms heartbeat
+timeout and 1 s loopback ceilings, so it is load-sensitive, not a regression from #7663
+(which only touches `service_lifecycle.go` / `service_plugins.go`). Treat a failure there as a
+rerun first; only investigate if it repeats.
+
 ## Touched upstream files
 
 - `.github/workflows/fork-ci.yml` — advisory vet + one skipped upstream assertion (both commented).
