@@ -196,7 +196,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		if readErr != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
-			diagnostic := ojson.NewDoc(codexStreamFailureBody(readErr.Error(), httpResp.StatusCode, "", readErr))
+			diagnostic := codexStreamFailureDoc(readErr.Error(), httpResp.StatusCode, "", readErr)
 			_ = diagnostic.Set("upstream_body", string(data))
 			return nil, statusErr{msg: readErr.Error(), cause: readErr, usageFailureBody: diagnostic.Bytes()}
 		}
@@ -218,10 +218,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	scanner.SetOnLine(func(rawLine []byte) {
 		if bytes.HasPrefix(rawLine, []byte("event:")) {
 			lastEvent = strings.TrimSpace(string(rawLine[len("event:"):]))
-		} else if bytes.HasPrefix(rawLine, dataTag) {
-			if kind := ojson.GetBytesNoCopy(bytes.TrimSpace(rawLine[len(dataTag):]), "type").String(); kind != "" {
-				lastEvent = strings.Clone(kind)
-			}
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, rawLine)
 	})
@@ -277,6 +273,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				streamStarted = true
 				break
 			}
+			eventType := ""
+			if bytes.HasPrefix(line, dataTag) {
+				eventType = ojson.GetBytesNoCopy(bytes.TrimSpace(line[len(dataTag):]), "type").String()
+				if eventType != "" {
+					lastEvent = strings.Clone(eventType)
+				}
+			}
 			var translatedLine []byte
 			isHandshake := false
 			terminalSuccess := false
@@ -286,11 +289,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				isHandshake = true
 			} else if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				upstreamEvent := data
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
-				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+					streamErr.usageFailureBody = bytes.Clone(upstreamEvent)
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -323,7 +327,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
 					closeBootstrapBody()
-					streamErr := newCodexEmptyIncompleteStreamError(data)
+					streamErr := newCodexEmptyIncompleteStreamError(upstreamEvent)
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					// Not an overload rejection, so it keeps its in-stream delivery: flush what is
@@ -413,15 +417,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return nil, ctx.Err()
 				}
 				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-				reporter.PublishFailure(ctx, errScan)
-				return nil, statusErr{msg: errScan.Error(), cause: errScan, usageFailureBody: codexStreamFailureBody(errScan.Error(), httpResp.StatusCode, lastEvent, errScan)}
+				streamErr := statusErr{msg: errScan.Error(), cause: errScan, usageFailureBody: codexStreamFailureDoc(errScan.Error(), httpResp.StatusCode, lastEvent, errScan).Bytes()}
+				reporter.PublishFailure(ctx, streamErr)
+				return nil, streamErr
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			if len(bufferedChunks) == 0 && len(initialChunks) == 0 {
 				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
-				emptyErr.usageFailureBody = codexStreamFailureBody(emptyErr.msg, httpResp.StatusCode, lastEvent, scanner.Err())
+				emptyErr.usageFailureBody = codexStreamFailureDoc(emptyErr.msg, httpResp.StatusCode, lastEvent, scanner.Err()).Bytes()
 				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 				reporter.PublishFailure(ctx, emptyErr)
 				closedCh := make(chan cliproxyexecutor.StreamChunk)
@@ -482,6 +487,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}()
 		for scanner.Scan() {
 			line := scanner.Bytes()
+			eventType := ""
+			if bytes.HasPrefix(line, dataTag) {
+				eventType = ojson.GetBytesNoCopy(bytes.TrimSpace(line[len(dataTag):]), "type").String()
+				if eventType != "" {
+					lastEvent = strings.Clone(eventType)
+				}
+			}
 			var translatedLine []byte
 			terminalSuccess := false
 			isIncompleteEvent := false
@@ -490,11 +502,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				translatedLine = transformed
 			} else if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				upstreamEvent := data
 				data = helps.RestoreCodexMultiAgentV2Response(data, optimizeMultiAgentV2)
 				observeCodexTokenEvent(reporter, data)
 				translatedLine = append([]byte("data: "), data...)
-				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+					streamErr.usageFailureBody = bytes.Clone(upstreamEvent)
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -516,7 +529,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					sawOutputDelta = true
 				}
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-					streamErr := newCodexEmptyIncompleteStreamError(data)
+					streamErr := newCodexEmptyIncompleteStreamError(upstreamEvent)
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
@@ -579,7 +592,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		if emittedCount == 0 {
 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
-			emptyErr.usageFailureBody = codexStreamFailureBody(emptyErr.msg, httpResp.StatusCode, lastEvent, scanner.Err())
+			emptyErr.usageFailureBody = codexStreamFailureDoc(emptyErr.msg, httpResp.StatusCode, lastEvent, scanner.Err()).Bytes()
 			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 			reporter.PublishFailure(ctx, emptyErr)
 			return

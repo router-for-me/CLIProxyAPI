@@ -22,27 +22,25 @@ type codexIncompleteStreamError struct {
 }
 
 func newCodexIncompleteStreamError(upstreamStatus int, lastEvent string, cause error) codexIncompleteStreamError {
-	if cause == nil {
-		cause = io.EOF
-	}
 	return codexIncompleteStreamError{statusErr: statusErr{
 		code:             http.StatusRequestTimeout,
 		msg:              codexIncompleteStreamMessage,
-		usageFailureBody: codexStreamFailureBody(codexIncompleteStreamMessage, upstreamStatus, lastEvent, cause),
+		usageFailureBody: codexStreamFailureDoc(codexIncompleteStreamMessage, upstreamStatus, lastEvent, cause).Bytes(),
 	}}
 }
 
-func codexStreamFailureBody(message string, upstreamStatus int, lastEvent string, cause error) []byte {
+func codexStreamFailureDoc(message string, upstreamStatus int, lastEvent string, cause error) *ojson.Doc {
+	if cause == nil {
+		cause = io.EOF
+	}
 	doc := ojson.NewDocString(`{}`)
 	_ = doc.Set("message", message)
 	_ = doc.Set("upstream_http_status", upstreamStatus)
 	if lastEvent != "" {
 		_ = doc.Set("last_event", lastEvent)
 	}
-	if cause != nil {
-		_ = doc.Set("cause", cause.Error())
-	}
-	return doc.Bytes()
+	_ = doc.Set("cause", cause.Error())
+	return doc
 }
 
 func (codexIncompleteStreamError) IsRequestScoped() bool {

@@ -280,16 +280,20 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		eventData := bytes.TrimSpace(line[5:])
+		upstreamEvent := eventData
 		eventData = helps.RestoreCodexMultiAgentV2Response(eventData, optimizeMultiAgentV2)
 		reporter.ObserveResponseModel(eventData)
 		eventType := ojson.GetBytesNoCopy(eventData, "type").String()
-		lastEvent = strings.Clone(eventType)
+		if eventType != "" {
+			lastEvent = strings.Clone(eventType)
+		}
 
 		if helps.HasMeaningfulCodexOutputDelta(eventData) {
 			sawOutputDelta = true
 		}
 
 		if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(eventData, e.modelLevelCooling()); ok {
+			streamErr.usageFailureBody = bytes.Clone(upstreamEvent)
 			if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 				if detail, hasDetail := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); hasDetail {
 					reporter.PublishFailureWithDetail(ctx, detail, errClearReplay)
@@ -322,7 +326,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		if helps.IsCodexTerminalEmptyIncomplete(eventData, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-			err = newCodexEmptyIncompleteStreamError(eventData)
+			err = newCodexEmptyIncompleteStreamError(upstreamEvent)
 			if detail, hasDetail := helps.ParseCodexUsageWithOutputItems(eventData, outputItemsByIndex, outputItemsFallback); hasDetail {
 				reporter.PublishFailureWithDetail(ctx, detail, err)
 			}
