@@ -10,10 +10,126 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
+
+func TestGeminiInteractionsResponsesReplaysThoughtBeforeToolCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream bool
+		filter bool
+	}{
+		{name: "stream", stream: true},
+		{name: "non-stream"},
+		{name: "payload-filter", stream: true, filter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			thoughtSignature := testNativeGemini3ThoughtSignature()
+			const call = `{"type":"function_call","id":"call_1","name":"lookup_color","arguments":{"object":"pear"}}`
+			requests := make(chan []byte, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Error(errRead)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				requests <- body
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"i1\"}}\n\n"+
+						"data: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"thought\"}}\n\n"+
+						"data: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"thought_signature\",\"signature\":%q}}\n\n"+
+						"data: {\"event_type\":\"step.stop\",\"index\":0}\n\n"+
+						"data: {\"event_type\":\"step.start\",\"index\":1,\"step\":%s}\n\n"+
+						"data: {\"event_type\":\"step.stop\",\"index\":1}\n\n"+
+						"data: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"i1\",\"status\":\"requires_action\"}}\n\n", thoughtSignature, call)
+				} else {
+					_, _ = fmt.Fprintf(w, `{"id":"i1","status":"requires_action","steps":[{"type":"thought","signature":%q},%s]}`, thoughtSignature, call)
+				}
+			}))
+			defer server.Close()
+
+			const model = "custom-model"
+			cfg := &config.Config{}
+			if tc.filter {
+				cfg.Payload.Filter = []config.PayloadFilterRule{{
+					Models: []config.PayloadModelRule{{Name: model, Protocol: "interactions"}},
+					Params: []string{"input.1.signature"},
+				}}
+			}
+			exec := NewGeminiInteractionsExecutor(cfg)
+			auth := &cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"base_url": server.URL, "api_key": "test-key"}}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+			execute := func(payload []byte) ojson.Result {
+				t.Helper()
+				req := cliproxyexecutor.Request{Model: model, Payload: payload}
+				if !tc.stream {
+					result, errExecute := exec.Execute(context.Background(), auth, req, opts)
+					if errExecute != nil {
+						t.Fatal(errExecute)
+					}
+					return ojson.GetBytes(result.Payload, "output")
+				}
+				result, errExecute := exec.ExecuteStream(context.Background(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatal(errExecute)
+				}
+				var output ojson.Result
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+					item := ojson.ParseBytes(geminiInteractionsSSEPayload(chunk.Payload))
+					if item.Get("type").String() == "response.completed" {
+						output = item.Get("response.output")
+					}
+				}
+				return output
+			}
+
+			payload := ojson.NewDocString(`{
+				"input":[{"type":"message","role":"user","content":"Look up the color of a pear."}],
+				"tools":[{"type":"function","name":"lookup_color","parameters":{"type":"object"}}],
+				"include":["reasoning.encrypted_content"],"store":false
+			}`)
+			output := execute(payload.Bytes()).Array()
+			<-requests
+			if len(output) != 2 || output[0].Get("encrypted_content").String() != thoughtSignature || output[1].Get("call_id").String() != "call_1" {
+				t.Fatalf("first response didn't return the signed reasoning and its tool call: %v", output)
+			}
+
+			_ = payload.SetRaw("input.-1", `{"type":"reasoning","encrypted_content":"gAAAAother-provider"}`)
+			_ = payload.SetRaw("input.-1", fmt.Sprintf(`{"type":"reasoning","encrypted_content":%q}`, signature.GeminiSkipThoughtSignatureValidator))
+			for _, item := range output {
+				_ = payload.SetRaw("input.-1", item.Raw)
+			}
+			_ = payload.SetRaw("input.-1", `{"type":"function_call_output","call_id":"call_1","output":"green"}`)
+			execute(payload.Bytes())
+
+			body := ojson.ParseBytes(<-requests)
+			steps := body.Get("input").Array()
+			if len(steps) != 4 || steps[1].Get("type").String() != "thought" ||
+				steps[2].Get("type").String() != "function_call" || steps[2].Get("id").String() != "call_1" ||
+				steps[3].Get("type").String() != "function_result" || steps[3].Get("call_id").String() != "call_1" {
+				t.Fatalf("second request lost the expected order of thought, call and result: %s", body.Raw)
+			}
+			wantSignature := thoughtSignature
+			if tc.filter {
+				wantSignature = ""
+			}
+			if got := steps[1].Get("signature"); got.String() != wantSignature || got.Exists() == tc.filter {
+				t.Fatalf("replayed thought signature = %s, want %q", got.Raw, wantSignature)
+			}
+			if steps[1].Get("content").Exists() || body.Get("previous_interaction_id").Exists() {
+				t.Fatalf("expected a native thought step in stateless replay: %s", body.Raw)
+			}
+		})
+	}
+}
 
 func TestIssue5190StatelessTwoToolRounds(t *testing.T) {
 	for _, rule := range []string{"baseline", "override", "filter", "explicit"} {

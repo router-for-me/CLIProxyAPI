@@ -10,6 +10,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	interactionsresponses "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/interactions/responses"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -142,6 +143,9 @@ func SanitizeGeminiInteractionsUnsupportedInputIDsDoc(doc *ojson.Doc, allowVerte
 func TranslateGeminiInteractionsRequestBody(ctx context.Context, cfg *config.Config, model string, payload []byte, opts cliproxyexecutor.Options, stream, isCompat bool) ([]byte, error) {
 	if opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions {
 		return bytes.Clone(payload), nil
+	}
+	if opts.SourceFormat == sdktranslator.FormatOpenAIResponse {
+		ctx = interactionsresponses.WithGeminiThoughtReplay(ctx)
 	}
 	return TranslateRequestReturningError(ctx, opts.Headers, cfg, opts.SourceFormat, sdktranslator.FormatInteractions, model, payload, stream, isCompat)
 }
