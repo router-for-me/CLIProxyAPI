@@ -2,8 +2,9 @@ package config
 
 import (
 	"net/http"
-	"regexp"
 	"strings"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 // Antigravity guard defaults.

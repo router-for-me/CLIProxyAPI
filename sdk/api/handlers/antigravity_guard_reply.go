@@ -1,11 +1,11 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -23,62 +23,53 @@ const (
 	antigravityGuardCode    = "google_flagged_prompt"
 )
 
-// selectedAuthRecorder keeps the last credential the auth manager selected.
-type selectedAuthRecorder struct {
-	mu sync.Mutex
-	id string
+// selectedProviderRecorder keeps the provider of the last auth the auth
+// manager selected for a request.
+type selectedProviderRecorder struct {
+	mu       sync.Mutex
+	provider string
 }
 
-func (r *selectedAuthRecorder) set(id string) {
+func (r *selectedProviderRecorder) set(provider string) {
 	r.mu.Lock()
-	r.id = id
+	r.provider = provider
 	r.mu.Unlock()
 }
 
-func (r *selectedAuthRecorder) get() string {
+func (r *selectedProviderRecorder) get() string {
 	if r == nil {
 		return ""
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.id
+	return r.provider
 }
 
-// trackSelectedAuth registers a selected-auth callback in meta, chained before
-// any callback already present. The auth manager clones metadata, so the
-// callback is the way to learn which credential served the request.
-func trackSelectedAuth(meta map[string]any) *selectedAuthRecorder {
+// trackSelectedProvider registers a selected-provider callback in meta,
+// chained before any callback already present. The provider is captured at
+// selection time because the auth manager clones metadata and Home runtime
+// auths are released after a failed attempt.
+func trackSelectedProvider(meta map[string]any) *selectedProviderRecorder {
 	if meta == nil {
 		return nil
 	}
-	recorder := &selectedAuthRecorder{}
-	previous, _ := meta[coreexecutor.SelectedAuthCallbackMetadataKey].(func(string))
-	meta[coreexecutor.SelectedAuthCallbackMetadataKey] = func(authID string) {
-		recorder.set(authID)
+	recorder := &selectedProviderRecorder{}
+	previous, _ := meta[coreexecutor.SelectedAuthProviderCallbackMetadataKey].(func(string))
+	meta[coreexecutor.SelectedAuthProviderCallbackMetadataKey] = func(provider string) {
+		recorder.set(provider)
 		if previous != nil {
-			previous(authID)
+			previous(provider)
 		}
 	}
 	return recorder
 }
 
-// antigravityGuardReply returns the fixed guard reply when the credential that
+// antigravityGuardReply returns the fixed guard reply when the auth that
 // produced msg is an Antigravity one and msg is Google's content-filter 429.
 // Every other error is returned unchanged.
-func (h *BaseAPIHandler) antigravityGuardReply(entryProtocol string, selected *selectedAuthRecorder, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
-	if h == nil || h.AuthManager == nil || msg == nil || msg.Error == nil {
-		return msg
-	}
-	auth, ok := h.AuthManager.GetByID(selected.get())
-	if !ok || auth == nil {
-		return msg
-	}
-	return antigravityGuardReplyFor(entryProtocol, auth.Provider, msg)
-}
-
-func antigravityGuardReplyFor(entryProtocol, provider string, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
-	if msg.DirectResponse || msg.StatusCode != http.StatusTooManyRequests || !strings.EqualFold(provider, "antigravity") ||
-		!internalconfig.IsAntigravityContentFilter429(msg.Error.Error()) {
+func antigravityGuardReply(entryProtocol, provider string, msg *interfaces.ErrorMessage) *interfaces.ErrorMessage {
+	if msg == nil || msg.Error == nil || msg.DirectResponse || msg.StatusCode != http.StatusTooManyRequests ||
+		!strings.EqualFold(provider, "antigravity") || !internalconfig.IsAntigravityContentFilter429(msg.Error.Error()) {
 		return msg
 	}
 	return &interfaces.ErrorMessage{

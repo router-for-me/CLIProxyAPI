@@ -1,14 +1,12 @@
 # Bundled Antigravity guard plugin, installed into the plugins directory at startup.
 FROM golang:1.26-bookworm AS guard-plugin
 
-ARG GUARD_PLUGIN_REPO=https://github.com/zhyx111999/cpa-plugin-antigravity-coding-filter.git
-ARG GUARD_PLUGIN_REF=0a5791203b03c970618a355ab3f5eac2e2d8a293
+ARG GUARD_PLUGIN_REPO
+ARG GUARD_PLUGIN_REF
 
-WORKDIR /plugin
+COPY internal/bundledplugins/build-guard-plugin.sh /build-guard-plugin.sh
 
-RUN git init -q && git fetch -q --depth 1 "${GUARD_PLUGIN_REPO}" "${GUARD_PLUGIN_REF}" && git checkout -q FETCH_HEAD
-
-RUN CGO_ENABLED=1 go build -buildmode=c-shared -o /out/antigravity-coding-filter.so . && rm -f /out/*.h
+RUN bash /build-guard-plugin.sh /out
 
 FROM golang:1.26-bookworm AS builder
 

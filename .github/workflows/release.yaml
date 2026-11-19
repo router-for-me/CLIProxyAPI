@@ -146,6 +146,19 @@ jobs:
           restore-keys: |
             go-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-
             go-${{ runner.os }}-${{ runner.arch }}-
+      - name: Set up Windows ARM64 C compiler
+        if: ${{ matrix.target == 'windows-arm64' }}
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          install: mingw-w64-clang-aarch64-clang
+      - name: Use Windows ARM64 C compiler
+        if: ${{ matrix.target == 'windows-arm64' }}
+        shell: bash
+        run: |
+          echo '${{ steps.msys2.outputs.msys2-location }}\clangarm64\bin' >> "$GITHUB_PATH"
+          echo "CC=clang" >> "$GITHUB_ENV"
       - name: Generate Build Metadata
         shell: bash
         run: |
@@ -176,12 +189,13 @@ jobs:
           CGO_ENABLED=1 GOOS="$GOOS" GOARCH="$GOARCH" go build \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "$archive_dir/$binary_name" ./cmd/server/
+          bash internal/bundledplugins/build-guard-plugin.sh "$archive_dir/bundled-plugins/$GOOS/$GOARCH"
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
           if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
             powershell -NoProfile -Command "Compress-Archive -Path '${archive_dir}/*' -DestinationPath 'dist/${archive_name}' -Force"
           else
-            tar -C "$archive_dir" -czf "dist/$archive_name" "$binary_name" LICENSE README.md README_CN.md config.example.yaml
+            tar -C "$archive_dir" -czf "dist/$archive_name" "$binary_name" LICENSE README.md README_CN.md config.example.yaml bundled-plugins
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -315,10 +329,11 @@ jobs:
                   exit 1
                 fi
               fi
+              bash internal/bundledplugins/build-guard-plugin.sh "'"$archive_dir"'/bundled-plugins/linux/${GOARCH}"
             '
 
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml bundled-plugins
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -617,6 +632,12 @@ jobs:
           go build -buildvcs=false \
             -ldflags="-s -w -X main.Version=${RELEASE_VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
             -o "dist/${TARGET}/bin/cli-proxy-api" ./cmd/server/
+          CGO_ENABLED=1 \
+          GOOS=freebsd \
+          GOARCH="$TARGET_GOARCH" \
+          CGO_LDFLAGS="-fuse-ld=lld" \
+          CC="clang --target=${clang_target} --sysroot=${sysroot_dir}" \
+          bash internal/bundledplugins/build-guard-plugin.sh "dist/${TARGET}/bin/bundled-plugins/freebsd/${TARGET_GOARCH}"
       - name: Build FreeBSD no-plugin binary
         if: ${{ !matrix.cgo_enabled }}
         shell: bash
@@ -638,7 +659,12 @@ jobs:
           echo "Packaging ${archive_name}"
           cp "dist/${TARGET}/bin/cli-proxy-api" "$archive_dir/cli-proxy-api"
           cp LICENSE README.md README_CN.md config.example.yaml "$archive_dir/"
-          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml
+          plugin_files=()
+          if [[ -d "dist/${TARGET}/bin/bundled-plugins" ]]; then
+            cp -R "dist/${TARGET}/bin/bundled-plugins" "$archive_dir/"
+            plugin_files=(bundled-plugins)
+          fi
+          tar -C "$archive_dir" -czf "dist/$archive_name" cli-proxy-api LICENSE README.md README_CN.md config.example.yaml "${plugin_files[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
