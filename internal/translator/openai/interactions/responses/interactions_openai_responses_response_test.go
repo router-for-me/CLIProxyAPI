@@ -12,13 +12,19 @@ import (
 )
 
 func TestConvertInteractionsResponseToOpenAIResponsesNonStream(t *testing.T) {
-	raw := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`)
+	raw := []byte(`{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"text":"ok"}]}],"usage":{"total_input_tokens":7,"total_output_tokens":23,"total_thought_tokens":49}}`)
 	out := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", []byte(`{"model":"gpt-test"}`), nil, raw, nil)
 	if got := ojson.GetBytesNoCopy(out, "output.0.content.0.text").String(); got != "ok" {
 		t.Fatalf("response text = %q, want ok. Output: %s", got, string(out))
 	}
-	if got := ojson.GetBytesNoCopy(out, "usage.total_tokens").Int(); got != 3 {
-		t.Fatalf("usage.total_tokens = %d, want 3. Output: %s", got, string(out))
+	if got := ojson.GetBytesNoCopy(out, "usage.output_tokens").Int(); got != 72 {
+		t.Fatalf("usage.output_tokens = %d, want 72. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "usage.output_tokens_details.reasoning_tokens").Int(); got != 49 {
+		t.Fatalf("usage.output_tokens_details.reasoning_tokens = %d, want 49. Output: %s", got, string(out))
+	}
+	if got := ojson.GetBytesNoCopy(out, "usage.total_tokens").Int(); got != 79 {
+		t.Fatalf("usage.total_tokens = %d, want 79. Output: %s", got, string(out))
 	}
 }
 
@@ -124,6 +130,9 @@ data: [DONE]
 		t.Fatalf("response.created models = %q, want gpt-test", got)
 	}
 	completedPayload := findResponsesEventPayload(out, "response.completed")
+	if got := ojson.GetBytesNoCopy(completedPayload, "response.usage.output_tokens").Int(); got != 276 {
+		t.Fatalf("output_tokens = %d, want 276. Payload: %s", got, string(completedPayload))
+	}
 	if got := ojson.GetBytesNoCopy(completedPayload, "response.usage.total_tokens").Int(); got != 399 {
 		t.Fatalf("total_tokens = %d, want 399. Payload: %s", got, string(completedPayload))
 	}
@@ -540,6 +549,11 @@ func TestConvertOpenAIResponsesResponseToInteractionsNonStreamUsageDetails(t *te
 	if got := ojson.GetBytesNoCopy(out, "usage.cached_tokens").Int(); got != 5 {
 		t.Fatalf("usage.cached_tokens = %d, want 5. Output: %s", got, string(out))
 	}
+
+	roundTrip := ConvertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", nil, nil, out, nil)
+	if got := ojson.GetBytesNoCopy(roundTrip, "usage.output_tokens").Int(); got != 13 {
+		t.Fatalf("round-trip usage.output_tokens = %d, want 13. Output: %s", got, string(roundTrip))
+	}
 }
 
 func TestConvertOpenAIResponsesResponseToInteractionsStreamFunctionCallCallID(t *testing.T) {
@@ -668,8 +682,8 @@ func TestConvertInteractionsResponseToOpenAIResponsesStreamFinishMetadataUsage(t
 	if got := ojson.GetBytesNoCopy(payload, "response.usage.input_tokens").Int(); got != 2 {
 		t.Fatalf("input_tokens = %d, want 2. Payload: %s", got, string(payload))
 	}
-	if got := ojson.GetBytesNoCopy(payload, "response.usage.output_tokens").Int(); got != 6 {
-		t.Fatalf("output_tokens = %d, want 6. Payload: %s", got, string(payload))
+	if got := ojson.GetBytesNoCopy(payload, "response.usage.output_tokens").Int(); got != 9 {
+		t.Fatalf("output_tokens = %d, want 9. Payload: %s", got, string(payload))
 	}
 	if got := ojson.GetBytesNoCopy(payload, "response.usage.output_tokens_details.reasoning_tokens").Int(); got != 3 {
 		t.Fatalf("reasoning_tokens = %d, want 3. Payload: %s", got, string(payload))
