@@ -156,7 +156,7 @@ type Capabilities struct {
 	RequestInterceptorPatchBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
-	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	// ResponseInterceptor rewrites successful non-streaming HTTP responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
@@ -1394,7 +1394,7 @@ type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
 }
 
-// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+// ResponseInterceptor rewrites successful non-streaming responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
 }
@@ -1553,8 +1553,23 @@ type RequestCompletion struct {
 	Metadata       map[string]any
 }
 
+// ResponseInterceptRequest.Kind values identifying the intercepted response category.
+const (
+	// ResponseInterceptKindModelList identifies model-directory and model-detail catalog responses.
+	ResponseInterceptKindModelList = "model_list"
+	// ResponseInterceptKindExecution identifies non-streaming model execution responses.
+	ResponseInterceptKindExecution = "execution"
+	// ResponseInterceptKindCountTokens identifies non-streaming token-counting responses.
+	ResponseInterceptKindCountTokens = "count_tokens"
+)
+
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	// Kind identifies the response being intercepted ("model_list", "execution", or "count_tokens").
+	// Empty means unknown (older hosts); plugins must then fall back to their own detection.
+	// Kept as the first struct field without a JSON tag so plugins can read it from the leading
+	// bytes of the RPC frame without decoding a large response body.
+	Kind            string
 	RequestID       string
 	SourceFormat    string
 	Model           string
@@ -1566,7 +1581,10 @@ type ResponseInterceptRequest struct {
 	RequestBody     []byte
 	Body            []byte
 	StatusCode      int
-	Metadata        map[string]any
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only, JSON-like,
+	// and an open map: plugins must ignore keys they do not recognize, and the host may add
+	// keys in any release without a schema bump.
+	Metadata map[string]any
 }
 
 // ResponseInterceptResponse returns non-streaming response modifications.
@@ -1927,6 +1945,10 @@ type UsageDetail struct {
 	// TotalTokens is the total token count.
 	TotalTokens int64
 
+	// CacheCreation5mTokens is the optional 5-minute TTL cache creation token count.
+	CacheCreation5mTokens *int64
+	// CacheCreation1hTokens is the optional 1-hour TTL cache creation token count.
+	CacheCreation1hTokens *int64
 	// TextInputTokens is the optional text input token count.
 	TextInputTokens *int64
 	// ImageInputTokens is the optional image input token count.

@@ -1006,6 +1006,75 @@ func TestUsageAdapterPropagatesNativeKeyAndAccessProvider(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterDeliversClaudeStreamingAndNonStreamingCacheCreationTTL(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 2)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-claude-ttl",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-claude-ttl",
+		plugin:   plugin,
+	}
+
+	// Non-streaming Claude usage payload with 5m + 1h breakdown.
+	nonStreamDetail := helps.ParseClaudeUsage([]byte(`{
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 50,
+			"cache_creation_input_tokens": 1500,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 1000,
+				"ephemeral_1h_input_tokens": 500
+			}
+		}
+	}`))
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Stream:   false,
+		Detail:   nonStreamDetail,
+	})
+	recNonStream := <-plugin.captured
+	if recNonStream.Detail.CacheCreationTokens != 1500 {
+		t.Fatalf("non-stream CacheCreationTokens = %d, want 1500", recNonStream.Detail.CacheCreationTokens)
+	}
+	if recNonStream.Detail.CacheCreation5mTokens == nil || *recNonStream.Detail.CacheCreation5mTokens != 1000 {
+		t.Fatalf("non-stream CacheCreation5mTokens = %v, want 1000", recNonStream.Detail.CacheCreation5mTokens)
+	}
+	if recNonStream.Detail.CacheCreation1hTokens == nil || *recNonStream.Detail.CacheCreation1hTokens != 500 {
+		t.Fatalf("non-stream CacheCreation1hTokens = %v, want 500", recNonStream.Detail.CacheCreation1hTokens)
+	}
+
+	// Streaming Claude SSE events with 5m=0 and 1h=45045 preserved across message_start + message_delta.
+	var streamBuf helps.StreamUsageBuffer
+	streamBuf.ObserveClaudeStream([]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":16,"cache_creation_input_tokens":45045,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":45045},"output_tokens":4}}}`))
+	streamBuf.ObserveClaudeStream([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":24}}`))
+	streamDetail, ok := streamBuf.Detail()
+	if !ok {
+		t.Fatal("expected streaming Claude usage detail")
+	}
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Stream:   true,
+		Detail:   streamDetail,
+	})
+	recStream := <-plugin.captured
+	if recStream.Detail.CacheCreationTokens != 45045 {
+		t.Fatalf("stream CacheCreationTokens = %d, want 45045", recStream.Detail.CacheCreationTokens)
+	}
+	if recStream.Detail.CacheCreation5mTokens == nil || *recStream.Detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("stream CacheCreation5mTokens = %v, want explicit 0", recStream.Detail.CacheCreation5mTokens)
+	}
+	if recStream.Detail.CacheCreation1hTokens == nil || *recStream.Detail.CacheCreation1hTokens != 45045 {
+		t.Fatalf("stream CacheCreation1hTokens = %v, want 45045", recStream.Detail.CacheCreation1hTokens)
+	}
+}
+
 func TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth(t *testing.T) {
 	plugin := newTestUsageCapturePlugin("plugin-provider-responses")
 	registerTestUsagePlugin(t, "test-executor-adapter-responses-auth-usage", plugin)

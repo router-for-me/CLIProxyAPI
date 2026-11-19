@@ -42,6 +42,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 	_ = doc.Delete("previous_response_id")
+	helps.StripCodexSessionInstructionMarker(doc, from)
 	_ = doc.Delete("generate")
 	_ = doc.Delete("prompt_cache_retention")
 	_ = doc.Delete("safety_identifier")
