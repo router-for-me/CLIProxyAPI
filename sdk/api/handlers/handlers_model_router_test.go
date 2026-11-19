@@ -920,3 +920,39 @@ func TestResponseInterceptRequest_SetsKindForPluginExecutorExecuteAndCount(t *te
 		}
 	})
 }
+
+// TestApplyModelRouterSeesNativeModelAction guards router rules that must pick different
+// targets per native action: the stored request path is the wildcard models route, so the
+// action is the only discriminator the router gets.
+func TestApplyModelRouterSeesNativeModelAction(t *testing.T) {
+	for _, action := range []string{"embedContent", "batchEmbedContents", "decisions"} {
+		t.Run(action, func(t *testing.T) {
+			host := &handlerModelRouterTestHost{hasRouters: true}
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+			handler.SetModelRouterHost(host)
+
+			handler.applyModelRouter(context.Background(), "gemini", "gemini-embedding-001", []byte(`{}`), false,
+				modelExecutionOptions{Action: action, Path: "/v1beta/models/gemini-embedding-001:" + action})
+			if host.lastReq == nil {
+				t.Fatal("RouteModel was not called")
+			}
+			if got, _ := host.lastReq.Metadata[coreexecutor.RequestActionMetadataKey].(string); got != action {
+				t.Fatalf("router metadata action = %q, want %q", got, action)
+			}
+		})
+	}
+}
+
+func TestApplyModelRouterOmitsActionForChat(t *testing.T) {
+	host := &handlerModelRouterTestHost{hasRouters: true}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(host)
+
+	handler.applyModelRouter(context.Background(), "gemini", "gemini-2.5-pro", []byte(`{}`), false, modelExecutionOptions{})
+	if host.lastReq == nil {
+		t.Fatal("RouteModel was not called")
+	}
+	if _, exists := host.lastReq.Metadata[coreexecutor.RequestActionMetadataKey]; exists {
+		t.Fatal("chat requests must not carry a native action to router rules")
+	}
+}

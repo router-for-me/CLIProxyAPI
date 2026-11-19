@@ -449,6 +449,7 @@ func modelExecutionRequestFromPlugin(req pluginapi.HostModelExecutionRequest, sk
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
 		CallerScope:             strings.TrimSpace(req.CallerScope),
+		Action:                  strings.TrimSpace(req.Action),
 	}
 }
 
