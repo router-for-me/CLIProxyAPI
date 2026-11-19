@@ -295,6 +295,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		lifecycle.completeError(execCtx, interceptErr)
 		return nil, nil, interceptErr
 	}
+	req = reapplyRequestActionMetadata(req, execOptions.Action)
 	execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
 	if grant != nil {
 		execCtx = grant.prepare(execCtx, &req, originalRequestedModel)
@@ -396,6 +397,12 @@ func (h *BaseAPIHandler) preparePluginExecutorRequest(ctx context.Context, entry
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = originalRequestedModel
 	addAuthSelectionModelMetadata(reqMeta, execOptions.AuthSelectionModel)
 	addModelExecutionSourceMetadata(reqMeta, execOptions.InternalSource)
+	// Native model actions are carried in request metadata. Plugin executors see only the
+	// stored wildcard path, so the action must be forwarded to them as well, otherwise
+	// embedContent, batchEmbedContents, and decisions are indistinguishable.
+	if action := strings.TrimSpace(execOptions.Action); action != "" {
+		reqMeta[coreexecutor.RequestActionMetadataKey] = action
+	}
 	setReasoningEffortMetadata(reqMeta, entryProtocol, originalRequestedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
 	setGenerateMetadata(reqMeta, rawJSON)
@@ -408,6 +415,9 @@ func (h *BaseAPIHandler) preparePluginExecutorRequest(ctx context.Context, entry
 		originalRequest = ctxOriginal
 	}
 	req := coreexecutor.Request{Model: modelName, Payload: payload}
+	// Mirror the auth-execution path so plugin executors can read the same request
+	// metadata, including the native model action, from the request itself.
+	req.Metadata = reqMeta
 	opts := coreexecutor.Options{
 		Stream:                    stream,
 		Alt:                       alt,

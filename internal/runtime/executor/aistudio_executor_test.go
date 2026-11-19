@@ -1196,3 +1196,52 @@ func TestAIStudioExecutorDecisionsRejectsInvalidPayloadWithoutRelay(t *testing.T
 		}
 	}
 }
+
+// TestAIStudioExecutorDecisionsRelayRecordsTTFT guards the native relay path against
+// publishing a zero TTFT: the chat path starts timing before the relay call and marks
+// the first response byte, and the embedding/decisions path must do the same.
+func TestAIStudioExecutorDecisionsRelayRecordsTTFT(t *testing.T) {
+	const authID = "aistudio-decisions-ttft"
+	const upstreamBody = `{"answers":{},"usage":{"total_input_tokens":3,"total_output_tokens":0,"total_tokens":3}}`
+	relay, _, conn := newAIStudioDecisionsRelay(t, authID, http.StatusOK, upstreamBody)
+
+	clientDone := make(chan error, 1)
+	go func() {
+		var msg wsrelay.Message
+		if errRead := conn.ReadJSON(&msg); errRead != nil {
+			clientDone <- fmt.Errorf("read relay request: %w", errRead)
+			return
+		}
+		if errWrite := conn.WriteJSON(wsrelay.Message{
+			ID:   msg.ID,
+			Type: wsrelay.MessageTypeHTTPResp,
+			Payload: map[string]any{
+				"status":  float64(http.StatusOK),
+				"headers": map[string]any{"Content-Type": "application/json"},
+				"body":    upstreamBody,
+			},
+		}); errWrite != nil {
+			clientDone <- fmt.Errorf("write relay response: %w", errWrite)
+			return
+		}
+		clientDone <- nil
+	}()
+
+	plugin := &captureAIStudioUsagePlugin{records: make(chan usage.Record, 16)}
+	usage.RegisterPlugin(plugin)
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	if _, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+	record := waitForAIStudioUsageRecord(t, plugin.records, "gemini-decision-1")
+	if record.TTFT <= 0 {
+		t.Fatalf("TTFT = %v, want a recorded first-byte latency", record.TTFT)
+	}
+}
