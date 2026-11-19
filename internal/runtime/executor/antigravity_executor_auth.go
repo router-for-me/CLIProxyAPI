@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -11,13 +12,17 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	log "github.com/sirupsen/logrus"
 )
 
 const antigravityCredentialAcquisitionTimeout = 30 * time.Second
+
+var antigravityInitialBaseTransport = antigravityBaseTransport
 
 // Refresh refreshes the authentication credentials using the refresh token.
 func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -161,12 +166,12 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	if errReq != nil {
 		return nil, errReq
 	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+	// Leave User-Agent unset so net/http emits Go-http-client/2.0 on HTTP/2
+	// and Go-http-client/1.1 on HTTP/1.1, matching the negotiated wire protocol.
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient, cleanup := newAntigravityOAuthHTTPClient(ctx, e.cfg, auth, 0)
+	defer cleanup()
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "oauth_refresh").Do(httpReq)
 	if errDo != nil {
 		return nil, errDo
@@ -198,6 +203,65 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	}
 
 	return &tokenResp, nil
+}
+
+// newAntigravityOAuthHTTPClient creates a standard Go HTTP/2-capable client for
+// Antigravity OAuth token refresh on oauth2.googleapis.com, keeping HTTP/1.1
+// without ALPN scoped to Cloud Code PA endpoints. Any resolved *http.Transport
+// is cloned into an isolated per-refresh transport whose cleanup closes idle
+// connections so distinct credentials never share a TCP/TLS connection and
+// one-off refreshes do not retain idle sockets.
+func newAntigravityOAuthHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client, cleanup func()) {
+	cleanup = func() {}
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
+
+	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
+	var base *http.Transport
+	if client.Transport != nil {
+		transport, ok := client.Transport.(*http.Transport)
+		if !ok {
+			// A custom non-*http.Transport RoundTripper owns its own protocol behavior.
+			return client, cleanup
+		}
+		base = transport
+	}
+	if base == nil {
+		if antigravityBaseTransport != nil && antigravityBaseTransport != antigravityInitialBaseTransport {
+			base = antigravityBaseTransport
+		} else if defaultTransport, okDefault := http.DefaultTransport.(*http.Transport); okDefault && defaultTransport != nil {
+			base = defaultTransport
+		} else if http.DefaultTransport != nil && !okDefault {
+			// Preserve a custom non-*http.Transport installed on http.DefaultTransport.
+			client.Transport = nil
+			return client, cleanup
+		}
+	}
+
+	var owned *http.Transport
+	if base != nil {
+		owned = base.Clone()
+		owned.MaxIdleConnsPerHost = -1
+		if len(owned.TLSNextProto) > 0 {
+			if owned.TLSNextProto["h2"] != nil {
+				// Clear externally installed TLSNextProto handlers (such as x/net/http2.ConfigureTransport)
+				// whose closures capture a shared HTTP/2 connection pool, so net/http installs a fresh
+				// per-refresh HTTP/2 transport owned by this clone.
+				owned.TLSNextProto = nil
+				owned.ForceAttemptHTTP2 = true
+			} else {
+				// Keep HTTP/2 disabled while dropping any custom handler closures that could share pools.
+				owned.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+			}
+		}
+	} else {
+		owned = &http.Transport{
+			ForceAttemptHTTP2:   true,
+			MaxIdleConnsPerHost: -1,
+		}
+	}
+	client.Transport = owned
+	cleanup = owned.CloseIdleConnections
+	return client, cleanup
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
