@@ -1,0 +1,269 @@
+# Fork-only: keeps ArcticSlayy/CLIProxyAPI current with router-for-me/CLIProxyAPI,
+# with no local machine involved.
+#
+# Daily (and on demand) it merges upstream main into this fork's main, runs the
+# vet/build/test suite, and:
+#   - green             -> pushes the merge to main, closes any stale sync PR or issue
+#   - build/test red     -> pushes the merge to the bot-owned branch sync/upstream and opens
+#                          (or refreshes) ONE pull request with the log summary
+#   - merge conflict     -> pushes nothing and opens (or updates) ONE issue with the
+#                          conflicting files and the commands to resolve it by hand
+#   - nothing new        -> does nothing
+#
+# Token: the default GITHUB_TOKEN only; no secrets, no PAT. The repo setting
+# "Allow GitHub Actions to create and approve pull requests" must stay on.
+#
+# GITHUB_TOKEN cannot push changes to .github/workflows/**, so the fork owns that
+# directory: the merge keeps our copy of every workflow and ignores upstream's
+# changes there (upstream's release, Docker and PR-policy automation belongs to
+# their project, not to this fork).
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Leave empty to sync main. A branch name makes a scratch run with its own bot branch and issue (to test the workflow)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+# One sync at a time; a run in flight is never cancelled mid-push.
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  BASE_BRANCH: ${{ inputs.branch || 'main' }}
+  UPSTREAM_URL: https://github.com/router-for-me/CLIProxyAPI.git
+  # A scratch run (any branch input, even main: empty is the only production value)
+  # gets its own bot branch and issue, so it can never close or overwrite what the
+  # production run opened.
+  SYNC_BRANCH: ${{ inputs.branch == '' && 'sync/upstream' || format('sync/upstream-{0}', inputs.branch) }}
+  CONFLICT_ISSUE_TITLE: ${{ inputs.branch == '' && 'Upstream sync blocked by merge conflicts' || format('Upstream sync blocked by merge conflicts ({0})', inputs.branch) }}
+  GH_TOKEN: ${{ github.token }}
+  # Adding the upstream remote makes gh resolve the fork's parent; always target this repo.
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  sync:
+    if: github.repository != 'router-for-me/CLIProxyAPI'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        # Explicit bash runs with -eo pipefail, so `cmd | tee log` keeps cmd's exit code.
+        shell: bash
+    steps:
+      # A scratch branch must never be production's bot branch (or a ref spelling of it).
+      - name: Validate the branch input
+        if: inputs.branch != ''
+        env:
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          case "$BRANCH" in
+            refs/* | sync/* | -* | *..* | */ )
+              echo "Refusing branch input '$BRANCH': use a plain scratch branch name, not refs/*, sync/* or odd spellings." >&2
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || 'main' }}
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --no-tags upstream main
+          behind=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=9 upstream/main)" >> "$GITHUB_OUTPUT"
+          if [ "$behind" = 0 ]; then
+            echo "Nothing new upstream ($(git rev-parse --short=9 upstream/main))." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "$behind new upstream commit(s), upstream/main is $(git rev-parse --short=9 upstream/main)." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Merge upstream/main
+        id: merge
+        if: steps.fetch.outputs.behind != '0'
+        run: |
+          set +e
+          git merge --no-commit --no-ff upstream/main > "$RUNNER_TEMP/merge.log" 2>&1
+          # The fork owns .github/workflows: take our side whatever upstream did there.
+          git rm -rfq --cached .github/workflows 2>/dev/null
+          rm -rf .github/workflows
+          git checkout HEAD -- .github/workflows
+          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/conflicts.txt"
+          if [ -s "$RUNNER_TEMP/conflicts.txt" ]; then
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            echo "Merge conflicts:" | tee -a "$GITHUB_STEP_SUMMARY"
+            sed 's/^/- /' "$RUNNER_TEMP/conflicts.txt" | tee -a "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            exit 0
+          fi
+          echo "conflict=false" >> "$GITHUB_OUTPUT"
+          git commit -q -m "chore(sync): merge upstream/main (${{ steps.fetch.outputs.short }})"
+
+      - uses: actions/setup-go@v5
+        if: steps.merge.outputs.conflict == 'false'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install
+        id: install
+        if: steps.merge.outputs.conflict == 'false'
+        continue-on-error: true
+        run: go mod download 2>&1 | tee "$RUNNER_TEMP/install.log"
+
+      - name: Vet
+        id: typecheck
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: go vet ./... 2>&1 | tee "$RUNNER_TEMP/typecheck.log"
+
+      # Mirrors upstream's pr-test-build.yml: refresh the generated model catalogs,
+      # then compile the server binary.
+      - name: Build
+        id: build
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: |
+          bash .github/scripts/refresh-model-catalogs.sh
+          go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Test
+        id: test
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: go test -timeout 20m ./... 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: Publish the result
+        if: steps.fetch.outputs.behind != '0'
+        env:
+          CONFLICT: ${{ steps.merge.outputs.conflict }}
+          RESULTS: ${{ steps.install.outcome }} ${{ steps.typecheck.outcome }} ${{ steps.build.outcome }} ${{ steps.test.outcome }}
+          SHORT: ${{ steps.fetch.outputs.short }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -u
+          today=$(date -u +%F)
+
+          # Close what an earlier run opened once main has caught up.
+          close_stale() {
+            pr=$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
+            if [ -n "$pr" ]; then
+              gh pr close "$pr" --delete-branch --comment "Superseded: $1 (run $RUN_URL)."
+            fi
+            issue=$(gh issue list --state open --limit 100 --json number,title --jq 'map(select(.title == env.CONFLICT_ISSUE_TITLE))[0].number // empty')
+            if [ -n "$issue" ]; then
+              gh issue close "$issue" --comment "Resolved: $1 (run $RUN_URL)."
+            fi
+          }
+
+          tail_of() { [ -f "$RUNNER_TEMP/$1.log" ] && tail -n 60 "$RUNNER_TEMP/$1.log" || echo "(did not run)"; }
+
+          if [ "$CONFLICT" = true ]; then
+            {
+              echo "Merging \`upstream/main\` ($SHORT) into \`main\` conflicts in:"
+              echo
+              sed 's/^/- `/;s/$/`/' "$RUNNER_TEMP/conflicts.txt"
+              echo
+              echo "Nothing was pushed. Resolve locally, then push to \`main\`:"
+              echo
+              echo '```sh'
+              echo "git fetch upstream && git switch $BASE_BRANCH && git merge upstream/main"
+              echo '# resolve, run vet/build/tests, commit'
+              echo "git push origin $BASE_BRANCH"
+              echo '```'
+              echo
+              echo "Last checked $today UTC: $RUN_URL"
+              echo
+              echo "<details><summary>merge log</summary>"
+              echo
+              echo '```'
+              tail -n 60 "$RUNNER_TEMP/merge.log"
+              echo '```'
+              echo "</details>"
+            } > "$RUNNER_TEMP/body.md"
+            issue=$(gh issue list --state open --limit 100 --json number,title --jq 'map(select(.title == env.CONFLICT_ISSUE_TITLE))[0].number // empty')
+            if [ -n "$issue" ]; then
+              gh issue edit "$issue" --body-file "$RUNNER_TEMP/body.md"
+              echo "Updated conflict issue #$issue." | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              gh issue create --title "$CONFLICT_ISSUE_TITLE" --body-file "$RUNNER_TEMP/body.md"
+              echo "Opened a conflict issue." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
+
+          if ! echo "$RESULTS" | grep -qE 'failure|cancelled|skipped'; then
+            if git push origin "HEAD:$BASE_BRANCH"; then
+              echo "Pushed upstream $SHORT to $BASE_BRANCH." | tee -a "$GITHUB_STEP_SUMMARY"
+              close_stale "main now contains upstream $SHORT"
+              exit 0
+            fi
+            echo "Push to main was refused (main moved or is protected); falling back to a PR." | tee -a "$GITHUB_STEP_SUMMARY"
+            RESULTS="$RESULTS push-refused"
+          fi
+
+          # Red (or the push failed): park the merge on the bot-owned branch and open one PR.
+          {
+            echo "Merging \`upstream/main\` ($SHORT) into \`main\` did not pass, so it was **not** pushed to \`main\`."
+            echo
+            echo "| step | result |"
+            echo "|---|---|"
+            set -- $RESULTS
+            echo "| install | ${1:-} |"
+            echo "| vet | ${2:-} |"
+            echo "| build | ${3:-} |"
+            echo "| test | ${4:-} |"
+            echo
+            echo "Run: $RUN_URL (checked $today UTC). \`$SYNC_BRANCH\` is owned by this workflow and is rewritten when upstream moves."
+            for step in typecheck build test; do
+              echo
+              echo "<details><summary>$step log (tail)</summary>"
+              echo
+              echo '```'
+              tail_of "$step"
+              echo '```'
+              echo "</details>"
+            done
+          } > "$RUNNER_TEMP/body.md"
+
+          pr=$(gh pr list --head "$SYNC_BRANCH" --state open --json number --jq '.[0].number // empty')
+          git fetch --no-tags origin "$SYNC_BRANCH" 2>/dev/null || true
+          # The parked candidate is current only if it holds both today's upstream and today's base tip.
+          if [ -n "$pr" ] && git rev-parse -q --verify FETCH_HEAD >/dev/null && git merge-base --is-ancestor upstream/main FETCH_HEAD && git merge-base --is-ancestor HEAD^1 FETCH_HEAD; then
+            echo "Sync PR #$pr already covers upstream $SHORT and the current $BASE_BRANCH; nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git push --force origin "HEAD:refs/heads/$SYNC_BRANCH"
+          if [ -n "$pr" ]; then
+            gh pr edit "$pr" --title "chore(sync): merge upstream/main ($SHORT), checks failing" --body-file "$RUNNER_TEMP/body.md"
+            gh pr comment "$pr" --body "Refreshed for upstream $SHORT: $RUN_URL"
+            echo "Refreshed sync PR #$pr." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr create --base "$BASE_BRANCH" --head "$SYNC_BRANCH" --title "chore(sync): merge upstream/main ($SHORT), checks failing" --body-file "$RUNNER_TEMP/body.md"
+            echo "Opened a sync PR." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Red runs should be visible in the Actions list even though the PR was opened.
+      - name: Fail the run when checks did not pass
+        if: steps.fetch.outputs.behind != '0' && steps.merge.outputs.conflict == 'false' && (steps.install.outcome != 'success' || steps.typecheck.outcome != 'success' || steps.build.outcome != 'success' || steps.test.outcome != 'success')
+        run: |
+          echo "Vet/build/tests did not pass; the merge is parked on a PR, not on main." >&2
+          exit 1

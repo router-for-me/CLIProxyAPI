@@ -1,0 +1,48 @@
+# Fork-owned CI. Upstream's pr-test-build only compiles; this also vets and runs the
+# Go test suite, so a fork change is never merged (by a sync run or by hand) while red.
+#
+# Upstream's own PR-policy workflows are removed from this fork on purpose:
+#   agents-md-guard        closed any PR touching AGENTS.md
+#   translator-path-guard  blocked docs-only changes under internal/translator
+#   auto-retarget…         retargeted main-targeted PRs to upstream's dev branch
+#   release / docker-image only ran on upstream tags with upstream's DockerHub secrets
+name: fork-ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build server
+        run: |
+          bash .github/scripts/refresh-model-catalogs.sh
+          go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
+
+      - name: Test
+        run: go test -timeout 20m ./...
