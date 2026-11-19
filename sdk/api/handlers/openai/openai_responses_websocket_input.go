@@ -20,6 +20,9 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
+// Match Gorilla's default close reply deadline.
+const responsesWebsocketCloseReplyTimeout = time.Second
+
 // responsesLocalInterrupt cancels an in-flight HTTP turn. A websocket upstream
 // does not use it; that interrupt is written to the existing socket instead.
 // A claimed frame is never silently dropped: the forward loop consumes it, or
@@ -151,6 +154,9 @@ func (s *responsesLocalInterrupt) takeClaimed() []byte {
 // handled immediately so they are not queued behind an active response.
 // The bounded queue backpressures clients instead of retaining unlimited input.
 func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCauseFunc, conn *websocket.Conn, interrupt func([]byte) error, local *responsesLocalInterrupt, writer *responsesWebsocketWriter, timeline websocketTimelineAppender, epoch *atomic.Uint64) (<-chan cliproxyexecutor.WebsocketInput, <-chan struct{}) {
+	conn.SetCloseHandler(func(code int, _ string) error {
+		return conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, ""), time.Now().Add(responsesWebsocketCloseReplyTimeout))
+	})
 	input := make(chan cliproxyexecutor.WebsocketInput, 16)
 	done := make(chan struct{})
 	go func() {
@@ -158,12 +164,24 @@ func readResponsesWebsocketInput(ctx context.Context, cancel context.CancelCause
 		defer close(input)
 		for {
 			kind, payload, errRead := conn.ReadMessage()
+			dataMessage := kind == websocket.TextMessage || kind == websocket.BinaryMessage
 			if errRead != nil {
+				if dataMessage {
+					if writer != nil {
+						observer := writer.capture.Writer("request", kind)
+						if unfinished, ok := observer.(interface{ Abort() }); ok {
+							_, _ = observer.Write(payload)
+							unfinished.Abort()
+						}
+					}
+					// Only a close between data messages can finish the capture.
+					errRead = fmt.Errorf("incomplete downstream websocket message: %w", errRead)
+				}
 				cancel(errRead)
 				return
 			}
 			msgEpoch := epoch.Load()
-			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
+			if !dataMessage {
 				continue
 			}
 			if writer != nil {

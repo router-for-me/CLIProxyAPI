@@ -130,10 +130,12 @@ func RequestCaptureMiddleware(spool captureSink) gin.HandlerFunc {
 			r.Status = writer.Status()
 			r.ResponseType = boundedCaptureField(writer.Header().Get("Content-Type"), 256)
 			r.ResponseEncoding = boundedCaptureField(writer.Header().Get("Content-Encoding"), 64)
+			cleanWebsocketClose := false
 			if websocket {
 				if writer.hijacked {
 					r.Status, r.Reason = http.StatusSwitchingProtocols, "websocket-messages-finalized"
-					_, partial, _, reason := messages.Snapshot()
+					_, partial, closed, reason := messages.Snapshot()
+					cleanWebsocketClose = closed && !partial
 					if partial {
 						r.State, r.Reason = "partial", reason
 					}
@@ -144,7 +146,8 @@ func RequestCaptureMiddleware(spool captureSink) gin.HandlerFunc {
 			if !writer.hijacked && reader != nil && !reader.eof && (c.Request.ContentLength < 0 || reader.read < c.Request.ContentLength) {
 				r.State, r.Reason = "partial", "request-not-fully-consumed"
 			}
-			if c.Request.Context().Err() != nil {
+			// A recorded WebSocket close handshake can precede HTTP context cancellation.
+			if !cleanWebsocketClose && c.Request.Context().Err() != nil {
 				r.State, r.Reason = "partial", "connection-cancelled"
 			}
 			if writer.writeFailed {
