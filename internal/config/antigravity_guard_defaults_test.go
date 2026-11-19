@@ -1,9 +1,6 @@
 package config
 
-import (
-	"regexp"
-	"testing"
-)
+import "testing"
 
 func TestAntigravityGuardDefaultsApplyWithoutConfig(t *testing.T) {
 	cfg := mustParseGuardConfig(t, "config-version: 8\n")
@@ -50,13 +47,12 @@ oauth:
 }
 
 func TestAntigravityGuardPatternSeparatesContentFilterFromQuota(t *testing.T) {
-	pattern := regexp.MustCompile(antigravityContentFilter429Pattern)
 	contentFilter := "{\n  \"error\": {\n    \"code\": 429,\n    \"message\": \"Resource has been exhausted (e.g. check quota).\",\n    \"status\": \"RESOURCE_EXHAUSTED\"\n  }\n}\n"
 	quota := `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`
-	if !pattern.MatchString(contentFilter) {
+	if !IsAntigravityContentFilter429(contentFilter) {
 		t.Fatal("pattern does not match the signal-less 429")
 	}
-	if pattern.MatchString(quota) {
+	if IsAntigravityContentFilter429(quota) {
 		t.Fatal("pattern matches a quota 429 with details")
 	}
 }

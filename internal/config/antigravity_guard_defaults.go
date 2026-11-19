@@ -2,6 +2,7 @@ package config
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -29,6 +30,14 @@ const (
 	// after its status, i.e. one without details. Quota 429s carry details.
 	antigravityContentFilter429Pattern = `"status":\s*"RESOURCE_EXHAUSTED"\s*\}\s*\}\s*$`
 )
+
+var antigravityContentFilter429 = regexp.MustCompile(antigravityContentFilter429Pattern)
+
+// IsAntigravityContentFilter429 reports whether an upstream 429 body is the
+// signal-less content-filter rejection matched by the default stop rule.
+func IsAntigravityContentFilter429(body string) bool {
+	return antigravityContentFilter429.MatchString(body)
+}
 
 // applyAntigravityGuardLoadDefaults runs before YAML decoding, so an explicit
 // plugins.enabled value overrides it.
