@@ -695,4 +695,12 @@ func TestConvertCodexResponseToInteractions_RefusalStreamAndNonStream(t *testing
 			t.Fatalf("nonstream text = %q, want %q; body=%s", got, refusalText, out)
 		}
 	})
+
+	t.Run("empty_refusal_field_falls_back_to_text", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"","text":"I'm sorry, but I can't help with that request."}]}]}}`)
+		out := ConvertCodexResponseToInteractionsNonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "steps.0.content.0.text").String(); got != refusalText {
+			t.Fatalf("nonstream fallback text = %q, want %q; body=%s", got, refusalText, out)
+		}
+	})
 }

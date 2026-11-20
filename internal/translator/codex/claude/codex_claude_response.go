@@ -165,17 +165,20 @@ func ConvertCodexResponseToClaude(ctx context.Context, _ string, originalRequest
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 		}
 	case "response.output_text.delta", "response.refusal.delta":
-		params.HasTextDelta = true
+		deltaText := rootResult.Get("delta").String()
+		if deltaText != "" {
+			params.HasTextDelta = true
+		}
 		if params.CommentaryMessageOpen {
 			output = append(output, startCodexThinkingBlock(params)...)
-			output = append(output, appendCodexThinkingDelta(params, rootResult.Get("delta").String())...)
+			output = append(output, appendCodexThinkingDelta(params, deltaText)...)
 			break
 		}
 		output = append(output, finalizeCodexThinkingBlock(params)...)
 		output = append(output, startCodexTextBlock(params)...)
 		templateDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
 		_ = templateDoc.Set("index", params.BlockIndex)
-		_ = templateDoc.Set("delta.text", rootResult.Get("delta").String())
+		_ = templateDoc.Set("delta.text", deltaText)
 		template = templateDoc.Bytes()
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)

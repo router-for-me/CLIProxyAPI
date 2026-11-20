@@ -116,6 +116,79 @@ func TestResponsesStreamOutputTracker_UnkeyedReasoningDeltaDoesNotSuppressMessag
 	}
 }
 
+func TestResponsesStreamOutputTracker_UnkeyedItemDoneSuppressesDuplicate(t *testing.T) {
+	var tracker ResponsesStreamOutputTracker
+	tracker.Observe("response.output_item.done", []byte(`{"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}`))
+
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}`)
+	synth, _ := tracker.SynthesizeMissingOutputEvents(completed)
+	if len(synth) != 0 {
+		t.Fatalf("expected no synthesis after unkeyed message output_item.done, got %d: %q", len(synth), synth)
+	}
+}
+
+func TestResponsesStreamOutputTracker_IDBearingStreamDeduplicatesIDLessTerminalWithoutBlockingShiftedIDs(t *testing.T) {
+	t.Run("terminal_omits_id", func(t *testing.T) {
+		var tracker ResponsesStreamOutputTracker
+		tracker.Observe("response.output_item.added", []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message"}}`))
+		tracker.Observe("response.output_text.delta", []byte(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"hello"}`))
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}`)
+		synth, _ := tracker.SynthesizeMissingOutputEvents(completed)
+		if len(synth) != 0 {
+			t.Fatalf("expected no synthesis when terminal message omits id but matches streamed output_index, got %d: %q", len(synth), synth)
+		}
+	})
+
+	t.Run("shifted_index_with_distinct_id_still_synthesizes", func(t *testing.T) {
+		var tracker ResponsesStreamOutputTracker
+		tracker.Observe("response.output_text.delta", []byte(`{"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"delta":"hello"}`))
+
+		completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"hello"}]},{"id":"msg_2","type":"message","content":[{"type":"refusal","refusal":"Blocked."}]}]}}`)
+		synth, _ := tracker.SynthesizeMissingOutputEvents(completed)
+		if len(synth) != 6 {
+			t.Fatalf("expected 6 synthesized events for distinct msg_2 at shifted index 1, got %d: %q", len(synth), synth)
+		}
+		if gotID := ojson.GetBytesNoCopy(synth[0], "item.id").String(); gotID != "msg_2" {
+			t.Fatalf("synthesized item.id = %q, want msg_2", gotID)
+		}
+	})
+}
+
+func TestResponsesStreamOutputTracker_SkipsAlreadyAddedContentPart(t *testing.T) {
+	var tracker ResponsesStreamOutputTracker
+	tracker.Observe("response.output_item.added", []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message"}}`))
+	tracker.Observe("response.content_part.added", []byte(`{"type":"response.content_part.added","item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":""}}`))
+
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"id":"msg_1","type":"message","content":[{"type":"refusal","refusal":"Blocked."}]}]}}`)
+	synth, _ := tracker.SynthesizeMissingOutputEvents(completed)
+	wantTypes := []string{
+		"response.refusal.delta",
+		"response.refusal.done",
+		"response.content_part.done",
+		"response.output_item.done",
+	}
+	if len(synth) != len(wantTypes) {
+		t.Fatalf("synthesized count = %d, want %d; events=%q", len(synth), len(wantTypes), synth)
+	}
+	for i, wantType := range wantTypes {
+		if got := ojson.GetBytesNoCopy(synth[i], "type").String(); got != wantType {
+			t.Fatalf("synth[%d].type = %q, want %q", i, got, wantType)
+		}
+	}
+}
+
+func TestResponsesStreamOutputTracker_TypelessOutputItemDoneDoesNotSuppressMessage(t *testing.T) {
+	var tracker ResponsesStreamOutputTracker
+	tracker.Observe("response.output_item.done", []byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1"}}`))
+
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[{"id":"msg_1","type":"message","content":[{"type":"refusal","refusal":"Blocked."}]}]}}`)
+	synth, _ := tracker.SynthesizeMissingOutputEvents(completed)
+	if len(synth) == 0 {
+		t.Fatal("expected message synthesis when prior output_item.done lacked message item.type")
+	}
+}
+
 func TestHasMeaningfulCodexOutputDelta_RefusalDelta(t *testing.T) {
 	if !HasMeaningfulCodexOutputDelta([]byte(`{"type":"response.refusal.delta","delta":"No"}`)) {
 		t.Fatal("expected non-empty refusal delta to count as meaningful output delta")

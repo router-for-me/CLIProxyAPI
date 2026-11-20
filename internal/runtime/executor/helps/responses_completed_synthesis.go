@@ -7,17 +7,32 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
+type responsesPartIDKey struct {
+	itemID       string
+	contentIndex int64
+}
+
+type responsesPartIdxKey struct {
+	outputIndex  int64
+	contentIndex int64
+}
+
 // ResponsesStreamOutputTracker tracks streamed Responses output items and synthesizes
 // missing message streaming events before a terminal response.completed or
 // response.incomplete event when upstream omitted item-level SSE frames.
 type ResponsesStreamOutputTracker struct {
-	addedIDs        map[string]bool
-	seenIDs         map[string]bool
-	addedIndices    map[int64]bool
-	seenIndices     map[int64]bool
-	sawUnkeyedDelta bool
-	maxSeq          int64
-	hasSeq          bool
+	addedIDs                 map[string]bool
+	seenIDs                  map[string]bool
+	addedIndices             map[int64]bool
+	seenIndices              map[int64]bool
+	addedFallbackIndices     map[int64]bool
+	seenFallbackIndices      map[int64]bool
+	addedPartIDs             map[responsesPartIDKey]bool
+	addedPartIndices         map[responsesPartIdxKey]bool
+	addedPartFallbackIndices map[responsesPartIdxKey]bool
+	sawUnkeyedOutput         bool
+	maxSeq                   int64
+	hasSeq                   bool
 }
 
 func (t *ResponsesStreamOutputTracker) nextSeq() int64 {
@@ -37,12 +52,18 @@ func (t *ResponsesStreamOutputTracker) newEventDoc(eventType string) *ojson.Doc 
 	return doc
 }
 
-func markTrackerKey(idMap *map[string]bool, idxMap *map[int64]bool, itemID string, hasIdx bool, idx int64) bool {
+func markTrackerKey(idMap *map[string]bool, idxMap *map[int64]bool, fallbackIdxMap *map[int64]bool, itemID string, hasIdx bool, idx int64) bool {
 	if itemID != "" {
 		if *idMap == nil {
 			*idMap = make(map[string]bool)
 		}
 		(*idMap)[strings.Clone(itemID)] = true
+		if hasIdx {
+			if *fallbackIdxMap == nil {
+				*fallbackIdxMap = make(map[int64]bool)
+			}
+			(*fallbackIdxMap)[idx] = true
+		}
 		return true
 	}
 	if hasIdx {
@@ -53,6 +74,13 @@ func markTrackerKey(idMap *map[string]bool, idxMap *map[int64]bool, itemID strin
 		return true
 	}
 	return false
+}
+
+func matchesTrackerKey(idMap map[string]bool, idxMap map[int64]bool, fallbackIdxMap map[int64]bool, itemID string, idx int64) bool {
+	if itemID != "" {
+		return idMap[itemID] || idxMap[idx]
+	}
+	return idxMap[idx] || fallbackIdxMap[idx]
 }
 
 // Observe records streamed events so terminal synthesis skips items already streamed.
@@ -73,25 +101,54 @@ func (t *ResponsesStreamOutputTracker) Observe(eventType string, eventData []byt
 
 	switch eventType {
 	case "response.output_item.added":
-		if itemType := root.Get("item.type").String(); itemType != "" && itemType != "message" {
+		if root.Get("item.type").String() != "message" {
 			return
 		}
 		itemID := root.Get("item.id").String()
-		markTrackerKey(&t.addedIDs, &t.addedIndices, itemID, hasIdx, idx)
+		markTrackerKey(&t.addedIDs, &t.addedIndices, &t.addedFallbackIndices, itemID, hasIdx, idx)
+	case "response.content_part.added":
+		if partType := root.Get("part.type").String(); partType != "output_text" && partType != "refusal" {
+			return
+		}
+		cIdx := root.Get("content_index")
+		if !cIdx.Exists() || cIdx.Type != ojson.Number {
+			return
+		}
+		ci := cIdx.Int()
+		itemID := root.Get("item_id").String()
+		if itemID != "" {
+			if t.addedPartIDs == nil {
+				t.addedPartIDs = make(map[responsesPartIDKey]bool)
+			}
+			t.addedPartIDs[responsesPartIDKey{itemID: strings.Clone(itemID), contentIndex: ci}] = true
+			if hasIdx {
+				if t.addedPartFallbackIndices == nil {
+					t.addedPartFallbackIndices = make(map[responsesPartIdxKey]bool)
+				}
+				t.addedPartFallbackIndices[responsesPartIdxKey{outputIndex: idx, contentIndex: ci}] = true
+			}
+		} else if hasIdx {
+			if t.addedPartIndices == nil {
+				t.addedPartIndices = make(map[responsesPartIdxKey]bool)
+			}
+			t.addedPartIndices[responsesPartIdxKey{outputIndex: idx, contentIndex: ci}] = true
+		}
 	case "response.output_item.done":
-		if itemType := root.Get("item.type").String(); itemType != "" && itemType != "message" {
+		if root.Get("item.type").String() != "message" {
 			return
 		}
 		itemID := root.Get("item.id").String()
-		markTrackerKey(&t.seenIDs, &t.seenIndices, itemID, hasIdx, idx)
+		if !markTrackerKey(&t.seenIDs, &t.seenIndices, &t.seenFallbackIndices, itemID, hasIdx, idx) {
+			t.sawUnkeyedOutput = true
+		}
 	case "response.output_text.delta",
 		"response.refusal.delta":
 		if root.Get("delta").String() == "" {
 			return
 		}
 		itemID := root.Get("item_id").String()
-		if !markTrackerKey(&t.seenIDs, &t.seenIndices, itemID, hasIdx, idx) {
-			t.sawUnkeyedDelta = true
+		if !markTrackerKey(&t.seenIDs, &t.seenIndices, &t.seenFallbackIndices, itemID, hasIdx, idx) {
+			t.sawUnkeyedOutput = true
 		}
 	}
 }
@@ -115,10 +172,10 @@ func (t *ResponsesStreamOutputTracker) SynthesizeMissingOutputEvents(eventData [
 		}
 		idx := int64(i)
 		itemID := item.Get("id").String()
-		if (itemID != "" && t.seenIDs[itemID]) || t.seenIndices[idx] || t.sawUnkeyedDelta {
+		if t.sawUnkeyedOutput || matchesTrackerKey(t.seenIDs, t.seenIndices, t.seenFallbackIndices, itemID, idx) {
 			continue
 		}
-		alreadyAdded := (itemID != "" && t.addedIDs[itemID]) || t.addedIndices[idx]
+		alreadyAdded := matchesTrackerKey(t.addedIDs, t.addedIndices, t.addedFallbackIndices, itemID, idx)
 		if !alreadyAdded {
 			addedItem := ojson.NewDocString(item.Raw)
 			_ = addedItem.Set("status", "in_progress")
@@ -134,18 +191,24 @@ func (t *ResponsesStreamOutputTracker) SynthesizeMissingOutputEvents(eventData [
 			if partType != "output_text" && partType != "refusal" {
 				continue
 			}
-			partAdded := t.newEventDoc("response.content_part.added")
-			if itemID != "" {
-				_ = partAdded.Set("item_id", itemID)
+			partIdxKey := responsesPartIdxKey{outputIndex: idx, contentIndex: int64(ci)}
+			partAlreadyAdded := (itemID != "" && t.addedPartIDs[responsesPartIDKey{itemID: itemID, contentIndex: int64(ci)}]) ||
+				t.addedPartIndices[partIdxKey] ||
+				(itemID == "" && t.addedPartFallbackIndices[partIdxKey])
+			if !partAlreadyAdded {
+				partAdded := t.newEventDoc("response.content_part.added")
+				if itemID != "" {
+					_ = partAdded.Set("item_id", itemID)
+				}
+				_ = partAdded.Set("output_index", idx)
+				_ = partAdded.Set("content_index", ci)
+				if partType == "refusal" {
+					_ = partAdded.SetRawBytes("part", []byte(`{"type":"refusal","refusal":""}`))
+				} else {
+					_ = partAdded.SetRawBytes("part", []byte(`{"type":"output_text","text":"","annotations":[]}`))
+				}
+				synthesized = append(synthesized, partAdded.Bytes())
 			}
-			_ = partAdded.Set("output_index", idx)
-			_ = partAdded.Set("content_index", ci)
-			if partType == "refusal" {
-				_ = partAdded.SetRawBytes("part", []byte(`{"type":"refusal","refusal":""}`))
-			} else {
-				_ = partAdded.SetRawBytes("part", []byte(`{"type":"output_text","text":"","annotations":[]}`))
-			}
-			synthesized = append(synthesized, partAdded.Bytes())
 
 			var value string
 			if partType == "refusal" {

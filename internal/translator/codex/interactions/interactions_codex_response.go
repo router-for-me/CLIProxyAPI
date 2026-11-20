@@ -484,7 +484,7 @@ func codexContentText(content ojson.Result) string {
 		paths = []string{"refusal", "text", "content"}
 	}
 	for _, path := range paths {
-		if value := content.Get(path); value.Exists() && value.Type == ojson.String {
+		if value := content.Get(path); value.Exists() && value.Type == ojson.String && value.String() != "" {
 			return value.String()
 		}
 	}

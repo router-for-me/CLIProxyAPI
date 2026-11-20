@@ -179,11 +179,12 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	typeResult := rootResult.Get("type")
 	dataType := typeResult.String()
 	if dataType == "response.created" {
-		(*param).(*ConvertCliToOpenAIParams).ResponseID = strings.Clone(rootResult.Get("response.id").String())
-		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
-		(*param).(*ConvertCliToOpenAIParams).Model = strings.Clone(rootResult.Get("response.model").String())
-		if (*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID == nil {
-			(*param).(*ConvertCliToOpenAIParams).LastImageHashByItemID = make(map[string][32]byte)
+		p.ResponseID = strings.Clone(rootResult.Get("response.id").String())
+		p.CreatedAt = rootResult.Get("response.created_at").Int()
+		p.Model = strings.Clone(rootResult.Get("response.model").String())
+		p.HasMessageTextDelta = false
+		if p.LastImageHashByItemID == nil {
+			p.LastImageHashByItemID = make(map[string][32]byte)
 		}
 		return [][]byte{}
 	}

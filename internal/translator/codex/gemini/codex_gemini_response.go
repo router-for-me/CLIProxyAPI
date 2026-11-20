@@ -485,9 +485,9 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 								}
 							}
 							if text != "" {
-								part := []byte(`{"text":""}`)
-								part, _ = ojson.SetBytes(part, "text", text)
-								parts = append(parts, part)
+								partDoc := ojson.NewDocString(`{"text":""}`)
+								_ = partDoc.Set("text", text)
+								parts = append(parts, partDoc.Bytes())
 							}
 							return true
 						})
