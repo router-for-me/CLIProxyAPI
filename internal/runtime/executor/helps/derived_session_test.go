@@ -66,4 +66,55 @@ func TestDerivedSessionProviderMappingsRequireIdentity(t *testing.T) {
 	if got := DerivedAntigravitySessionID(nil); got != "" {
 		t.Fatalf("DerivedAntigravitySessionID() = %q, want empty", got)
 	}
+	if got := AntigravitySessionIDForAuth("auth-a", nil); got != "" {
+		t.Fatalf("AntigravitySessionIDForAuth() = %q, want empty", got)
+	}
+}
+
+func TestAntigravitySessionIDForAuth(t *testing.T) {
+	t.Parallel()
+
+	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
+
+	canonicalMeta := map[string]any{
+		cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude:sess-7706",
+		cliproxyexecutor.ExecutionSessionMetadataKey:   "exec-1",
+		cliproxyexecutor.DerivedSessionIDMetadataKey:   "ctx:v1:derived-1",
+	}
+	authAFirst := AntigravitySessionIDForAuth("auth-a", canonicalMeta)
+	if !negativeDecimal.MatchString(authAFirst) {
+		t.Fatalf("AntigravitySessionIDForAuth(auth-a) = %q, want negative decimal", authAFirst)
+	}
+	if repeated := AntigravitySessionIDForAuth("  auth-a  ", canonicalMeta); repeated != authAFirst {
+		t.Fatalf("AntigravitySessionIDForAuth not stable across whitespace-trimmed authID: first=%q repeated=%q", authAFirst, repeated)
+	}
+
+	authB := AntigravitySessionIDForAuth("auth-b", canonicalMeta)
+	if !negativeDecimal.MatchString(authB) {
+		t.Fatalf("AntigravitySessionIDForAuth(auth-b) = %q, want negative decimal", authB)
+	}
+	if authB == authAFirst {
+		t.Fatalf("different credentials produced identical Antigravity session ID: %q", authB)
+	}
+
+	// CanonicalSessionID must outrank ExecutionSession and DerivedSession even when placed in a later metadata map.
+	optsMeta := map[string]any{
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-1",
+	}
+	reqMeta := map[string]any{
+		cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude:sess-7706",
+	}
+	if got := AntigravitySessionIDForAuth("auth-a", optsMeta, reqMeta); got != authAFirst {
+		t.Fatalf("canonical session in req.Metadata did not outrank derived session in opts.Metadata: got=%q want=%q", got, authAFirst)
+	}
+
+	execMeta := map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "exec-1",
+		cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-1",
+	}
+	execID := AntigravitySessionIDForAuth("auth-a", execMeta)
+	derivedID := AntigravitySessionIDForAuth("auth-a", optsMeta)
+	if execID == "" || derivedID == "" || execID == authAFirst || execID == derivedID {
+		t.Fatalf("session kinds did not produce distinct non-empty IDs: canonical=%q exec=%q derived=%q", authAFirst, execID, derivedID)
+	}
 }

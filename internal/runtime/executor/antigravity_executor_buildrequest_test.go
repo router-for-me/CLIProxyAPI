@@ -10,6 +10,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -625,4 +626,110 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	if _, ok := mode["deprecated"]; ok {
 		t.Fatalf("deprecated should be removed from nested schema")
 	}
+}
+
+func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T) {
+	t.Parallel()
+
+	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
+	executor := NewAntigravityExecutor(&config.Config{})
+
+	captureSessionID := func(t *testing.T, authID, kind, model, userText string, metadata map[string]any) string {
+		t.Helper()
+		var capturedBody []byte
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			var errRead error
+			capturedBody, errRead = io.ReadAll(req.Body)
+			if errRead != nil {
+				return nil, errRead
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"captured"}}`)),
+			}, nil
+		}))
+		auth := &cliproxyauth.Auth{
+			ID: authID,
+			Metadata: map[string]any{
+				"access_token": "token",
+				"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+				"project_id":   "project-1",
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   model,
+			Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"` + userText + `"}]}]}`),
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+			Metadata:       metadata,
+		}
+		switch kind {
+		case "execute":
+			_, _ = executor.Execute(ctx, auth, req, opts)
+		case "stream":
+			_, _ = executor.ExecuteStream(ctx, auth, req, opts)
+		default:
+			t.Fatalf("unknown route kind %q", kind)
+		}
+		if len(capturedBody) == 0 {
+			t.Fatalf("expected upstream request body to be captured for auth=%s kind=%s model=%s", authID, kind, model)
+		}
+		sessionID := ojson.GetBytes(capturedBody, "request.sessionId").String()
+		if !negativeDecimal.MatchString(sessionID) {
+			t.Fatalf("request.sessionId = %q, want negative int63 decimal", sessionID)
+		}
+		return sessionID
+	}
+
+	t.Run("canonical session stays stable across models and turns on same credential and rotates on failover", func(t *testing.T) {
+		meta := map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude:sess-7706",
+		}
+		authAGemini := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", "first turn text", meta)
+		authAClaude := captureSessionID(t, "auth-a", "execute", "claude-sonnet-4-6", "different compacted turn text", meta)
+		authAStream := captureSessionID(t, "auth-a", "stream", "gemini-3.7-flash-high", "stream turn text", meta)
+		if authAGemini != authAClaude || authAGemini != authAStream {
+			t.Fatalf("same credential + canonical session produced unstable request.sessionId: gemini=%q claude=%q stream=%q", authAGemini, authAClaude, authAStream)
+		}
+
+		authBGemini := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "first turn text", meta)
+		authBClaude := captureSessionID(t, "auth-b", "execute", "claude-sonnet-4-6", "first turn text", meta)
+		authBStream := captureSessionID(t, "auth-b", "stream", "gemini-3.6-flash-high", "first turn text", meta)
+		if authBGemini == authAGemini {
+			t.Fatalf("failover credential auth-b reused auth-a request.sessionId %q", authBGemini)
+		}
+		if authBGemini != authBClaude || authBGemini != authBStream {
+			t.Fatalf("failover credential auth-b produced unstable request.sessionId across paths: gemini=%q claude=%q stream=%q", authBGemini, authBClaude, authBStream)
+		}
+	})
+
+	t.Run("derived session rotates across credential failover", func(t *testing.T) {
+		meta := map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:derived-7706",
+		}
+		authAFirst := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", "prompt", meta)
+		authASecond := captureSessionID(t, "auth-a", "stream", "claude-sonnet-4-6", "different prompt", meta)
+		if authAFirst != authASecond {
+			t.Fatalf("same credential + derived session changed: first=%q second=%q", authAFirst, authASecond)
+		}
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "prompt", meta)
+		if authB == authAFirst {
+			t.Fatalf("failover credential auth-b reused auth-a derived request.sessionId %q", authB)
+		}
+	})
+
+	t.Run("content fallback rotates across credential failover", func(t *testing.T) {
+		authAFirst := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", "shared first prompt", nil)
+		authASecond := captureSessionID(t, "auth-a", "stream", "gemini-3.7-flash-high", "shared first prompt", nil)
+		if authAFirst != authASecond {
+			t.Fatalf("same credential + content fallback changed: first=%q second=%q", authAFirst, authASecond)
+		}
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "shared first prompt", nil)
+		if authB == authAFirst {
+			t.Fatalf("failover credential auth-b reused auth-a content-fallback request.sessionId %q", authB)
+		}
+	})
 }
