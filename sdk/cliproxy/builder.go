@@ -50,6 +50,8 @@ type Builder struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	ownedProviderExecutors []ownedProviderExecutor
+
 	// cooldownStateStore overrides runtime cooldown persistence.
 	cooldownStateStore coreauth.CooldownStateStore
 
@@ -252,6 +254,10 @@ func (b *Builder) Build() (*Service, error) {
 	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
 		return nil, fmt.Errorf("cliproxy: validate credential weights: %w", errValidate)
 	}
+	ownedExecutors, errOwned := validateOwnedProviderExecutors(b.ownedProviderExecutors)
+	if errOwned != nil {
+		return nil, errOwned
+	}
 	b.cfg.NormalizePluginsConfig()
 	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
 		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
@@ -323,22 +329,23 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		pluginInterceptorHost: b.pluginInterceptorHost,
-		cfg:                   b.cfg.CloneForRuntime(),
-		configPath:            b.configPath,
-		tokenProvider:         tokenProvider,
-		apiKeyProvider:        apiKeyProvider,
-		watcherFactory:        watcherFactory,
-		hooks:                 b.hooks,
-		executorWrapper:       b.executorWrapper,
-		authManager:           authManager,
-		accessManager:         accessManager,
-		coreManager:           coreManager,
-		cooldownStateStore:    cooldownStateStore,
-		pluginHost:            pluginHost,
-		discoveryManager:      newDiscoveryAdvertiserManager(),
-		appliedRoutingState:   appliedRoutingState,
-		serverOptions:         append([]api.ServerOption(nil), b.serverOptions...),
+		pluginInterceptorHost:  b.pluginInterceptorHost,
+		cfg:                    b.cfg.CloneForRuntime(),
+		configPath:             b.configPath,
+		tokenProvider:          tokenProvider,
+		apiKeyProvider:         apiKeyProvider,
+		watcherFactory:         watcherFactory,
+		hooks:                  b.hooks,
+		executorWrapper:        b.executorWrapper,
+		authManager:            authManager,
+		accessManager:          accessManager,
+		coreManager:            coreManager,
+		ownedProviderExecutors: ownedExecutors,
+		cooldownStateStore:     cooldownStateStore,
+		pluginHost:             pluginHost,
+		discoveryManager:       newDiscoveryAdvertiserManager(),
+		appliedRoutingState:    appliedRoutingState,
+		serverOptions:          append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	service.proxyPoolPublisher = helps.RegisterProxyPoolPublisher()
 	helps.AdvanceProxyPoolGeneration(service.proxyPoolPublisher, service.cfg)
@@ -355,6 +362,9 @@ func (b *Builder) Build() (*Service, error) {
 			service.reloadConfigFromWatcher()
 		}),
 	)
+	for _, executor := range ownedExecutors {
+		coreManager.RegisterExecutor(executor)
+	}
 	return service, nil
 }
 
