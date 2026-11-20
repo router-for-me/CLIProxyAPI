@@ -162,6 +162,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	rewriteGeminiFunctionNamesDocAt(reqDoc, "", functionNameMap)
 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
+		ensureClaudeFunctionCallIDsDocAt(reqDoc, "")
 		SanitizeAntigravityClaudeGeminiRequestSignaturesDocAt(modelName, reqDoc, "")
 	} else {
 		signature.SanitizeGeminiRequestThoughtSignaturesDoc(reqDoc, "contents")
@@ -1163,4 +1164,167 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 	// Update the document with the new contents
 	_ = doc.SetRawBytes(contentsPath, translatorcommon.JoinRawArray(contentItems))
 	return true, nil
+}
+
+// ensureClaudeFunctionCallIDsDocAt synthesizes matching IDs for Gemini functionCall
+// and functionResponse parts when targeting Antigravity Claude models. Standard
+// Gemini clients may omit functionCall.id and functionResponse.id, which Vertex/Anthropic
+// rejects with "tool_use.id: Field required".
+func ensureClaudeFunctionCallIDsDocAt(doc *ojson.Doc, prefix string) bool {
+	if doc == nil {
+		return false
+	}
+	contentsPath := prefix + "contents"
+	contents := doc.Get(contentsPath)
+	if !contents.IsArray() {
+		return false
+	}
+
+	needsFix := false
+	usedIDs := make(map[string]struct{})
+	contents.ForEach(func(_, content ojson.Result) bool {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			return true
+		}
+		parts.ForEach(func(_, part ojson.Result) bool {
+			for _, field := range []string{"functionCall", "function_call", "functionResponse", "function_response"} {
+				obj := part.Get(field)
+				if !obj.Exists() || !obj.IsObject() {
+					continue
+				}
+				id := strings.TrimSpace(obj.Get("id").String())
+				if id == "" {
+					needsFix = true
+				} else {
+					usedIDs[id] = struct{}{}
+				}
+			}
+			return true
+		})
+		return true
+	})
+	if !needsFix {
+		return false
+	}
+
+	type pendingCall struct {
+		id   string
+		name string
+	}
+	pendingByName := make(map[string][]string)
+	var pendingAll []pendingCall
+	seq := 0
+	nextSyntheticID := func() string {
+		for {
+			seq++
+			candidate := fmt.Sprintf("call_%d", seq)
+			if _, exists := usedIDs[candidate]; !exists {
+				usedIDs[candidate] = struct{}{}
+				return candidate
+			}
+		}
+	}
+	removePendingID := func(id string) {
+		for i, item := range pendingAll {
+			if item.id == id {
+				pendingAll = append(pendingAll[:i], pendingAll[i+1:]...)
+				break
+			}
+		}
+		for name, ids := range pendingByName {
+			for i, existing := range ids {
+				if existing == id {
+					if len(ids) == 1 {
+						delete(pendingByName, name)
+					} else {
+						pendingByName[name] = append(ids[:i], ids[i+1:]...)
+					}
+					return
+				}
+			}
+		}
+	}
+	popPendingID := func(name string) string {
+		if ids := pendingByName[name]; len(ids) > 0 {
+			id := ids[0]
+			removePendingID(id)
+			return id
+		}
+		if len(pendingAll) > 0 {
+			id := pendingAll[0].id
+			removePendingID(id)
+			return id
+		}
+		return ""
+	}
+
+	changed := false
+	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
+	contents.ForEach(func(_, content ojson.Result) bool {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			contentItems = append(contentItems, []byte(content.Raw))
+			return true
+		}
+		contentJSON := []byte(content.Raw)
+		partsChanged := false
+		partItems := make([][]byte, 0, parts.Get("#").Int())
+		parts.ForEach(func(_, part ojson.Result) bool {
+			var partDoc *ojson.Doc
+			ensurePartDoc := func() *ojson.Doc {
+				if partDoc == nil {
+					partDoc = ojson.NewDocString(part.Raw)
+				}
+				return partDoc
+			}
+			for _, field := range []string{"functionCall", "function_call"} {
+				fc := part.Get(field)
+				if !fc.Exists() || !fc.IsObject() {
+					continue
+				}
+				name := fc.Get("name").String()
+				id := strings.TrimSpace(fc.Get("id").String())
+				if id == "" {
+					id = nextSyntheticID()
+					_ = ensurePartDoc().Set(field+".id", id)
+					partsChanged = true
+				}
+				pendingByName[name] = append(pendingByName[name], id)
+				pendingAll = append(pendingAll, pendingCall{id: id, name: name})
+			}
+			for _, field := range []string{"functionResponse", "function_response"} {
+				fr := part.Get(field)
+				if !fr.Exists() || !fr.IsObject() {
+					continue
+				}
+				name := fr.Get("name").String()
+				id := strings.TrimSpace(fr.Get("id").String())
+				if id != "" {
+					removePendingID(id)
+				} else if matchedID := popPendingID(name); matchedID != "" {
+					_ = ensurePartDoc().Set(field+".id", matchedID)
+					partsChanged = true
+				}
+			}
+			if partDoc != nil {
+				partItems = append(partItems, partDoc.Bytes())
+			} else {
+				partItems = append(partItems, []byte(part.Raw))
+			}
+			return true
+		})
+		if partsChanged {
+			contentJSON, _ = ojson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(partItems))
+			changed = true
+		}
+		contentItems = append(contentItems, contentJSON)
+		return true
+	})
+
+	if !changed {
+		return false
+	}
+	_ = doc.SetRawBytes(contentsPath, translatorcommon.JoinRawArray(contentItems))
+	return true
 }
