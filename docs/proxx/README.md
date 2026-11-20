@@ -1,7 +1,7 @@
 # proxx: fork guide
 
 `proxx` is a fork of [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI).
-It adds five features on top of upstream while staying cheap to sync:
+It adds six features on top of upstream while staying cheap to sync:
 
 1. **Model groups / auto model**: a virtual model (e.g. `auto`) that routes to the first
    available real model across any configured providers, skipping rate-limited ones.
@@ -17,6 +17,9 @@ It adds five features on top of upstream while staying cheap to sync:
 5. **Self-update**: check, download, verify (ed25519-signed `checksums.txt`) and restart in place when idle
    (same PID, same listening socket, automatic rollback), from the panel or on a schedule
    (`/v8/management/proxx/update`, `proxx.update.*`).
+6. **Decision models**: native passthrough for TypeSafe Jev (`POST /v1/systemone`) and the OpenAI
+   Decisions API (`POST /v1/decisions`) with key rotation, cooldowns, usage, cost and request logs
+   (`proxx.decisions.*`).
 
 Decisions live in [`decisions/`](decisions/) as numbered ADRs. Read them before changing a feature.
 
@@ -139,6 +142,7 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `internal/cmd/run.go` | `selfupdate.SetRestartTrigger(cancel)` after `signal.NotifyContext` (+ import) | self-update restarts through the normal graceful shutdown |
 | `internal/api/server.go` | `selfupdate.Track(...)` around the root handler; `selfupdate.Listen(addr)` instead of `net.Listen` (+ import) | in-flight counter (incl. hijacked WebSockets); inherit the socket across the exec |
 | `sdk/cliproxy/service_lifecycle.go` | `proxx.ShutdownContext(s.currentConfig())` instead of the 30s `context.WithTimeout` in `Run` | shutdown budget follows the drain (default 120s) + exit watchdog |
+| `internal/api/server_routes.go` | `s.registerProxxDecisionRoutes(v1)` in the `/v1` group | decision-model passthrough routes (ADR 0008) |
 | `internal/managementasset/updater.go` | `proxxPanelCompatible(data)` in `fetchLatestAsset` | skip panel releases that declare `proxx-min-backend-api` above our `api_level` |
 | `.github/workflows/release.yaml` | `--prerelease` for `-rc` tags (3 lines in `prepare-release`); checkout + setup-go + sign/verify/upload `checksums.txt.sig` in `publish-checksums` (all marked `# proxx:`) | signed releases for self-update; rc prereleases |
 | `config.example.yaml` | `# proxx: 0 (unset) drains for up to 120s` under `shutdown-timeout` | documentation only |
@@ -199,6 +203,13 @@ Filled in as features land (see the ADRs for design):
     `GET .../requests/:id`, `GET .../requests/:id/raw`, `DELETE .../requests/:id`, `DELETE .../requests`.
     Request logging itself is toggled with the existing `PUT /v8/management/config/observability/logs/request-log`
     (raw JSON `true`/`false`).
+- Decision models: ADR 0008
+  - `internal/proxx/decisions` (vendors, key pool with cooldowns, passthrough handler, usage records),
+    routes in `internal/api/server_routes_decisions_proxx.go`, built-in Jev price in
+    `internal/proxx/pricing/builtin.go`.
+  - Client API: `POST /v1/systemone` (TypeSafe), `POST /v1/decisions` (OpenAI); same client keys as `/v1`.
+  - Config: `proxx.decisions.typesafe|openai.{base-url,proxy-url,api-keys}` (read per request).
+  - E2E: `PROXX_E2E=1 go test ./test/proxx/decisions_e2e/ -run E2E -v -count=1` (mock upstreams, no keys).
 - Self-update: ADR 0007
   - `internal/proxx/selfupdate` (release check with ETag, ed25519 + sha256 verification, staging,
     in-flight tracker, listener gate and fd handoff, in-place exec, rollback state file, auto-apply window),
@@ -228,6 +239,7 @@ go test -tags proxxe2e -count=1 -v ./test/proxx/pricing_e2e/     # e2e: builds a
 PROXX_E2E=1 go test ./test/proxx/selfupdate_e2e/ -run TestE2ESelfUpdate -v -count=1 -timeout 30m  # e2e: self-update (also in CI: proxx-e2e.yml)
 PROXX_E2E=1 PROXX_E2E_LAUNCHD=1 go test ./test/proxx/selfupdate_e2e/ -run TestE2ELaunchd -v -count=1  # macOS: real launchd agent (temp label/port)
 PROXX_E2E=1 PROXX_E2E_INSTALL=1 go test ./test/proxx/install_e2e/ -v -count=1  # macOS: install.sh in a temp HOME with temp labels (downloads the latest release)
+PROXX_E2E=1 go test ./test/proxx/decisions_e2e/ -run E2E -v -count=1  # e2e: decision-model passthrough (mock TypeSafe + OpenAI)
 ```
 
 The e2e test builds `./cmd/server`, starts it with `--local-model` and a temp `config-version: 8`

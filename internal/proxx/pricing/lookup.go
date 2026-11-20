@@ -280,10 +280,16 @@ func buildProviderOrder(c *Catalog) []string {
 // lookup resolves the price for model served by provider: config entries, then catalog.
 func lookup(entries []configEntry, c *Catalog, provider, model string) (Match, bool) {
 	if e, ok := lookupConfig(entries, provider, model); ok {
-		base, _ := lookupCatalog(c, provider, model)
+		base, found := lookupCatalog(c, provider, model)
+		if !found {
+			base, _ = builtinPrice(provider, model)
+		}
 		return Match{Price: e.price.mergeOver(base), Source: SourceConfig, Override: e.override}, true
 	}
 	if price, ok := lookupCatalog(c, provider, model); ok {
+		return Match{Price: price, Source: SourceCatalog}, true
+	}
+	if price, ok := builtinPrice(provider, model); ok {
 		return Match{Price: price, Source: SourceCatalog}, true
 	}
 	return Match{}, false
