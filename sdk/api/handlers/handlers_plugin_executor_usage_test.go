@@ -752,11 +752,13 @@ func TestHandlerPluginExecutorSkipsOuterFailureWhenPluginCallsHostModelExecute(t
 
 type mockPluginUsageHost struct {
 	handlerDirectExecutorRouteHost
-	execResp     coreexecutor.Response
-	execErr      error
-	execFunc     func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
-	streamResult *coreexecutor.StreamResult
-	streamFunc   func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+	execResp          coreexecutor.Response
+	execAttribution   *pluginapi.UsageAttribution
+	execErr           error
+	execFunc          func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
+	streamResult      *coreexecutor.StreamResult
+	streamAttribution *pluginapi.UsageAttribution
+	streamFunc        func(context.Context, string, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
 }
 
 func (h *mockPluginUsageHost) ExecutePluginExecutor(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
@@ -772,6 +774,14 @@ func (h *mockPluginUsageHost) ExecutePluginExecutor(ctx context.Context, pluginI
 	return h.execResp, nil
 }
 
+func (h *mockPluginUsageHost) ExecutePluginExecutorWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, *pluginapi.UsageAttribution, error) {
+	resp, err := h.ExecutePluginExecutor(ctx, pluginID, req, opts)
+	if err != nil {
+		return coreexecutor.Response{}, nil, err
+	}
+	return resp, h.execAttribution, nil
+}
+
 func (h *mockPluginUsageHost) ExecutePluginExecutorStream(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	h.lastPluginID = pluginID
 	h.lastRequest = req
@@ -780,6 +790,14 @@ func (h *mockPluginUsageHost) ExecutePluginExecutorStream(ctx context.Context, p
 		return h.streamFunc(ctx, pluginID, req, opts)
 	}
 	return h.streamResult, nil
+}
+
+func (h *mockPluginUsageHost) ExecutePluginExecutorStreamWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, *pluginapi.UsageAttribution, error) {
+	streamResult, err := h.ExecutePluginExecutorStream(ctx, pluginID, req, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return streamResult, h.streamAttribution, nil
 }
 
 func advanceMonotonicClock() time.Duration {
@@ -930,5 +948,107 @@ func TestHandlerPluginExecutorPublishesFirstPacketFallbackTTFTStream(t *testing.
 	record := plugin.waitRecord(t)
 	if record.TTFT <= 0 {
 		t.Fatalf("record.TTFT = %v, want > 0 for first-packet fallback", record.TTFT)
+	}
+}
+
+func TestHandlerPluginExecutorPublishesAttributionNonStream(t *testing.T) {
+	targetPluginID := "custom-attr-nonstream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-attr-nonstream", plugin)
+
+	originalModel := "gpt-4o"
+	openAIResponseBody := []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
+
+	mockHost := &mockPluginUsageHost{
+		execResp: coreexecutor.Response{
+			Payload: openAIResponseBody,
+		},
+		execAttribution: &pluginapi.UsageAttribution{
+			AuthIndex: "idx-1",
+			AuthType:  "oauth",
+			Source:    "acct@example.com",
+		},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	ctx := usage.WithAPIKey(context.Background(), "sk-downstream-key")
+	_, _, errMsg := handler.ExecuteWithAuthManager(ctx, "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q}`, originalModel)), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() error = %+v", errMsg)
+	}
+
+	record := plugin.waitRecord(t)
+	if record.Provider != targetPluginID ||
+		record.ExecutorType != "plugin:"+targetPluginID ||
+		record.AuthIndex != "idx-1" ||
+		record.AuthType != "oauth" ||
+		record.Source != "acct@example.com" {
+		t.Fatalf("record attribution = %+v", record)
+	}
+}
+
+func TestHandlerPluginExecutorPublishesAttributionStreamAndFailureExecutorType(t *testing.T) {
+	targetPluginID := "custom-attr-stream-plugin"
+	plugin := newCapturePluginExecutorUsagePlugin(targetPluginID)
+	registerUsagePluginForTest(t, "test-plugin-executor-attr-stream", plugin)
+
+	originalModel := "gpt-4o"
+	mockHost := &mockPluginUsageHost{
+		streamAttribution: &pluginapi.UsageAttribution{
+			AuthIndex: "idx-stream",
+			AuthType:  "oauth",
+			Source:    "stream@example.com",
+		},
+		streamFunc: func(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			chunks := make(chan coreexecutor.StreamChunk, 2)
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")}
+			chunks <- coreexecutor.StreamChunk{Payload: []byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[],\"usage\":{\"prompt_tokens\":6,\"completion_tokens\":4,\"total_tokens\":10}}\n\n")}
+			close(chunks)
+			return &coreexecutor.StreamResult{
+				Chunks: chunks,
+			}, nil
+		},
+	}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: targetPluginID}, true
+	}
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q,"stream":true}`, originalModel)), "")
+	for range dataChan {
+	}
+	for err := range errChan {
+		if err != nil {
+			t.Fatalf("stream error = %+v", err)
+		}
+	}
+
+	record := plugin.waitRecord(t)
+	if record.Provider != targetPluginID ||
+		record.ExecutorType != "plugin:"+targetPluginID ||
+		record.AuthIndex != "idx-stream" ||
+		record.AuthType != "oauth" ||
+		record.Source != "stream@example.com" {
+		t.Fatalf("stream record attribution = %+v", record)
+	}
+
+	// Failure paths must still report plugin:<id> executorType.
+	mockHost.execErr = errors.New("upstream error")
+	_, _, failErr := handler.ExecuteWithAuthManager(context.Background(), "openai", originalModel, []byte(fmt.Sprintf(`{"model":%q}`, originalModel)), "")
+	if failErr == nil {
+		t.Fatal("expected error from ExecuteWithAuthManager")
+	}
+	failRecord := plugin.waitRecord(t)
+	if !failRecord.Failed || failRecord.ExecutorType != "plugin:"+targetPluginID {
+		t.Fatalf("failRecord = %+v, want Failed=true ExecutorType=%q", failRecord, "plugin:"+targetPluginID)
 	}
 }

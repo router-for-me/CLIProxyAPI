@@ -1,17 +1,18 @@
 package handlers
 
 import (
-	"encoding/json"
 	"maps"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"golang.org/x/net/context"
@@ -117,8 +118,29 @@ type requestLifecycleTracker struct {
 }
 
 func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceFormat, model, requestedModel string, stream bool, metadata map[string]any, skipPluginID string) *requestLifecycleTracker {
-	requestID := uuid.NewString()
+	var requestID string
+	if metadata != nil {
+		if existing, _ := metadata[coreexecutor.RequestIDMetadataKey].(string); strings.TrimSpace(existing) != "" {
+			requestID = strings.TrimSpace(existing)
+		}
+	}
+	if requestID == "" {
+		requestID = coreauth.ContinuitySessionRequestID(ctx)
+	}
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
 	traceID := logging.GetRequestID(ctx)
+	if metadata != nil {
+		if existing, _ := metadata[coreexecutor.RequestIDMetadataKey].(string); strings.TrimSpace(existing) == "" {
+			metadata[coreexecutor.RequestIDMetadataKey] = requestID
+		}
+		if traceID != "" {
+			if existing, _ := metadata[coreexecutor.TraceIDMetadataKey].(string); strings.TrimSpace(existing) == "" {
+				metadata[coreexecutor.TraceIDMetadataKey] = traceID
+			}
+		}
+	}
 	return &requestLifecycleTracker{
 		ctx:          ctx,
 		host:         h.interceptorHost(),
@@ -645,12 +667,13 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 	}
 }
 
-func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string, passthrough bool) ([]byte, http.Header) {
+func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, kind, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string, passthrough bool) ([]byte, http.Header) {
 	host := h.interceptorHost()
 	if host == nil {
 		return body, responseHeaders
 	}
 	resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+		Kind:            kind,
 		RequestID:       requestID,
 		SourceFormat:    handlerType,
 		Model:           normalizedModel,
@@ -753,6 +776,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		metadata := modelListInterceptorMetadata(c)
 		lifecycle = h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, metadata, "")
 		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+			Kind:            pluginapi.ResponseInterceptKindModelList,
 			RequestID:       lifecycle.requestID(),
 			SourceFormat:    sourceFormat,
 			Model:           "",

@@ -1,11 +1,11 @@
 package config
 
 import (
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/regexp"
 	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
@@ -157,7 +157,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			if name == alias {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)

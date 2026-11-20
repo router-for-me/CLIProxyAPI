@@ -533,3 +533,341 @@ func TestConvertGeminiRequestToOpenAI_DefaultsOmittedContentRoleToUser(t *testin
 		t.Fatalf("messages[3].role = %q, want tool; out=%s", got, string(out))
 	}
 }
+
+func TestConvertGeminiRequestToOpenAI_FunctionResponsePartsMedia(t *testing.T) {
+	t.Run("inlineData image and PDF alongside response relayed in user message", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "user", "parts": [{"text": "Read red.png and doc.pdf"}]},
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"response": {"result": "Loaded files"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+							{"inlineData": {"mimeType": "application/pdf", "data": "JVBERi0xLjQK"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("len(messages) = %d, want 4 (user, assistant, tool, user relay); out=%s", len(messages), string(out))
+		}
+		if messages[2].Get("role").String() != "tool" {
+			t.Fatalf("messages[2].role = %q, want tool; out=%s", messages[2].Get("role").String(), string(out))
+		}
+		relay := messages[3]
+		if relay.Get("role").String() != "user" {
+			t.Fatalf("messages[3].role = %q, want user; out=%s", relay.Get("role").String(), string(out))
+		}
+		parts := relay.Get("content").Array()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 relay parts (notice + image_url + file), got %d: %s", len(parts), relay.Get("content").Raw)
+		}
+		if parts[0].Get("type").String() != "text" || parts[0].Get("text").String() == "" {
+			t.Fatalf("parts[0] = %s, want non-empty relay notice text", parts[0].Raw)
+		}
+		if parts[1].Get("type").String() != "image_url" || parts[1].Get("image_url.url").String() != "data:image/png;base64,iVBORw0KGgo=" {
+			t.Fatalf("parts[1] = %s, want image_url data URL", parts[1].Raw)
+		}
+		if parts[2].Get("type").String() != "file" || parts[2].Get("file.file_data").String() != "data:application/pdf;base64,JVBERi0xLjQK" || parts[2].Get("file.filename").String() != "document.pdf" {
+			t.Fatalf("parts[2] = %s, want file part with PDF data URL", parts[2].Raw)
+		}
+	})
+
+	t.Run("media-only functionResponse sets placeholder on tool message and merges with trailing user text", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_image", "args": {}}}]},
+				{"role": "user", "parts": [
+					{"functionResponse": {
+						"name": "read_image",
+						"response": {},
+						"parts": [
+							{"fileData": {"mimeType": "image/jpeg", "fileUri": "https://example.com/a.jpg"}}
+						]
+					}},
+					{"text": "What color is it?"}
+				]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("len(messages) = %d, want 3 (assistant, tool, user); out=%s", len(messages), string(out))
+		}
+		if messages[1].Get("role").String() != "tool" || messages[1].Get("content").String() == "" || messages[1].Get("content").String() == "{}" {
+			t.Fatalf("messages[1] = %s, want non-empty placeholder tool content", messages[1].Raw)
+		}
+		parts := messages[2].Get("content").Array()
+		if len(parts) != 3 {
+			t.Fatalf("expected 3 parts in merged user message, got %d: %s", len(parts), messages[2].Get("content").Raw)
+		}
+		if parts[1].Get("type").String() != "image_url" || parts[1].Get("image_url.url").String() != "https://example.com/a.jpg" {
+			t.Fatalf("parts[1] = %s, want image_url", parts[1].Raw)
+		}
+		if parts[2].Get("type").String() != "text" || parts[2].Get("text").String() != "What color is it?" {
+			t.Fatalf("parts[2] = %s, want user text", parts[2].Raw)
+		}
+	})
+
+	t.Run("parallel tool calls across adjacent contents turns do not split tool messages with relay", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [
+					{"functionCall": {"name": "read_a", "id": "call_a", "args": {}}},
+					{"functionCall": {"name": "read_b", "id": "call_b", "args": {}}}
+				]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_a",
+						"id": "call_a",
+						"response": {"result": "a"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "QUFB"}}
+						]
+					}
+				}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_b",
+						"id": "call_b",
+						"response": {"result": "b"}
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("len(messages) = %d, want 4 (assistant, tool, tool, user relay); out=%s", len(messages), string(out))
+		}
+		if messages[0].Get("role").String() != "assistant" {
+			t.Fatalf("messages[0].role = %q, want assistant", messages[0].Get("role").String())
+		}
+		if messages[1].Get("role").String() != "tool" || messages[1].Get("tool_call_id").String() != "call_a" {
+			t.Fatalf("messages[1] = %s, want tool call_a", messages[1].Raw)
+		}
+		if messages[2].Get("role").String() != "tool" || messages[2].Get("tool_call_id").String() != "call_b" {
+			t.Fatalf("messages[2] = %s, want tool call_b before user relay; out=%s", messages[2].Raw, string(out))
+		}
+		if messages[3].Get("role").String() != "user" || messages[3].Get("content.1.image_url.url").String() != "data:image/png;base64,QUFB" {
+			t.Fatalf("messages[3] = %s, want user relay after all tool messages", messages[3].Raw)
+		}
+	})
+
+	t.Run("parallel tool calls with sibling text in first response turn keep all tool messages contiguous", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [
+					{"functionCall": {"name": "read_a", "id": "call_a", "args": {}}},
+					{"functionCall": {"name": "read_b", "id": "call_b", "args": {}}}
+				]},
+				{"role": "user", "parts": [
+					{"functionResponse": {
+						"name": "read_a",
+						"id": "call_a",
+						"response": {"result": "a"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "QUFB"}}
+						]
+					}},
+					{"text": "check"}
+				]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_b",
+						"id": "call_b",
+						"response": {"result": "b"}
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("len(messages) = %d, want 4 (assistant, tool, tool, user); out=%s", len(messages), string(out))
+		}
+		if messages[1].Get("role").String() != "tool" || messages[1].Get("tool_call_id").String() != "call_a" {
+			t.Fatalf("messages[1] = %s, want tool call_a", messages[1].Raw)
+		}
+		if messages[2].Get("role").String() != "tool" || messages[2].Get("tool_call_id").String() != "call_b" {
+			t.Fatalf("messages[2] = %s, want tool call_b before user message; out=%s", messages[2].Raw, string(out))
+		}
+		if messages[3].Get("role").String() != "user" {
+			t.Fatalf("messages[3] = %s, want user message after all tool messages", messages[3].Raw)
+		}
+		userParts := messages[3].Get("content").Array()
+		if len(userParts) != 3 || userParts[1].Get("type").String() != "image_url" || userParts[2].Get("text").String() != "check" {
+			t.Fatalf("messages[3].content = %s, want [notice, image_url, text 'check']", messages[3].Get("content").Raw)
+		}
+	})
+
+	t.Run("parallel tool responses tagged with model role keep tool messages contiguous before user relay", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [
+					{"functionCall": {"name": "read_a", "id": "call_a", "args": {}}},
+					{"functionCall": {"name": "read_b", "id": "call_b", "args": {}}}
+				]},
+				{"role": "model", "parts": [{
+					"functionResponse": {
+						"name": "read_a",
+						"id": "call_a",
+						"response": {"result": "a"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "QUFB"}}
+						]
+					}
+				}]},
+				{"role": "model", "parts": [{
+					"functionResponse": {
+						"name": "read_b",
+						"id": "call_b",
+						"response": {"result": "b"}
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("len(messages) = %d, want 4 (assistant, tool, tool, user relay); out=%s", len(messages), string(out))
+		}
+		if messages[1].Get("role").String() != "tool" || messages[1].Get("tool_call_id").String() != "call_a" {
+			t.Fatalf("messages[1] = %s, want tool call_a", messages[1].Raw)
+		}
+		if messages[2].Get("role").String() != "tool" || messages[2].Get("tool_call_id").String() != "call_b" {
+			t.Fatalf("messages[2] = %s, want tool call_b before user relay; out=%s", messages[2].Raw, string(out))
+		}
+		if messages[3].Get("role").String() != "user" || messages[3].Get("content.1.image_url.url").String() != "data:image/png;base64,QUFB" {
+			t.Fatalf("messages[3] = %s, want user relay after all tool messages", messages[3].Raw)
+		}
+		noticeText := messages[3].Get("content.0.text").String()
+		if !strings.Contains(noticeText, "read_a") || !strings.Contains(noticeText, "call_a") {
+			t.Fatalf("messages[3].content[0].text = %q, want attribution to read_a and call_a", noticeText)
+		}
+	})
+
+	t.Run("parallel tool calls with identical text and only one media attachment still preserve tool attribution", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [
+					{"functionCall": {"name": "inspect_a", "id": "call_1", "args": {}}},
+					{"functionCall": {"name": "inspect_b", "id": "call_2", "args": {}}}
+				]},
+				{"role": "user", "parts": [
+					{"functionResponse": {
+						"name": "inspect_a",
+						"id": "call_1",
+						"response": {"result": "ok"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "QUFB"}}
+						]
+					}},
+					{"functionResponse": {
+						"name": "inspect_b",
+						"id": "call_2",
+						"response": {"result": "ok"}
+					}}
+				]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("len(messages) = %d, want 4; out=%s", len(messages), string(out))
+		}
+		noticeText := messages[3].Get("content.0.text").String()
+		if !strings.Contains(noticeText, "inspect_a") || !strings.Contains(noticeText, "call_1") {
+			t.Fatalf("relay notice = %q, want attribution to inspect_a and call_1", noticeText)
+		}
+		if strings.Contains(noticeText, "inspect_b") || strings.Contains(noticeText, "call_2") {
+			t.Fatalf("relay notice = %q, must not misattribute inspect_b/call_2", noticeText)
+		}
+	})
+
+	t.Run("parallel tool media relay preserves per-tool attribution labels when multiple tools return media", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [
+					{"functionCall": {"name": "read_a", "id": "call_a", "args": {}}},
+					{"functionCall": {"name": "read_b", "id": "call_b", "args": {}}}
+				]},
+				{"role": "user", "parts": [
+					{"functionResponse": {
+						"name": "read_a",
+						"id": "call_a",
+						"response": {},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "QUFB"}},
+							{"inlineData": {"mimeType": "image/png", "data": "QkJC"}}
+						]
+					}},
+					{"functionResponse": {
+						"name": "read_b",
+						"id": "call_b",
+						"response": {},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "Q0ND"}}
+						]
+					}}
+				]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToOpenAI("gpt-5", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToOpenAI() error = %v", err)
+		}
+		messages := ojson.GetBytesNoCopy(out, "messages").Array()
+		if len(messages) != 4 {
+			t.Fatalf("len(messages) = %d, want 4; out=%s", len(messages), string(out))
+		}
+		relayParts := messages[3].Get("content").Array()
+		// Expected: [notice, "Tool read_a (call_a):", img1, img2, "Tool read_b (call_b):", img3]
+		if len(relayParts) != 6 {
+			t.Fatalf("len(relayParts) = %d, want 6 with per-tool attribution labels; content=%s", len(relayParts), messages[3].Get("content").Raw)
+		}
+		if relayParts[1].Get("type").String() != "text" || !strings.Contains(relayParts[1].Get("text").String(), "call_a") || !strings.Contains(relayParts[1].Get("text").String(), "read_a") {
+			t.Fatalf("relayParts[1] = %s, want label identifying read_a / call_a", relayParts[1].Raw)
+		}
+		if relayParts[2].Get("image_url.url").String() != "data:image/png;base64,QUFB" || relayParts[3].Get("image_url.url").String() != "data:image/png;base64,QkJC" {
+			t.Fatalf("relayParts[2..3] = %s, %s, want QUFB and QkJC under call_a", relayParts[2].Raw, relayParts[3].Raw)
+		}
+		if relayParts[4].Get("type").String() != "text" || !strings.Contains(relayParts[4].Get("text").String(), "call_b") || !strings.Contains(relayParts[4].Get("text").String(), "read_b") {
+			t.Fatalf("relayParts[4] = %s, want label identifying read_b / call_b", relayParts[4].Raw)
+		}
+		if relayParts[5].Get("image_url.url").String() != "data:image/png;base64,Q0ND" {
+			t.Fatalf("relayParts[5] = %s, want Q0ND under call_b", relayParts[5].Raw)
+		}
+	})
+}

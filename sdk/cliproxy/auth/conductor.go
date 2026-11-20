@@ -130,6 +130,13 @@ type PluginSchedulerAcrossPriorities interface {
 	SchedulerWantsAcrossPriorities() bool
 }
 
+// PluginSchedulerContinuity is an optional interface implemented by schedulers
+// that evaluate bounded pre-admission and pre-output-429 continuity for Codex requests.
+type PluginSchedulerContinuity interface {
+	HasSchedulerContinuity() bool
+	EvaluateSchedulerContinuity(context.Context, pluginapi.SchedulerContinuityRequest) (pluginapi.SchedulerContinuityResponse, bool, error)
+}
+
 type pluginSchedulerState interface {
 	HasScheduler() bool
 }
@@ -208,6 +215,8 @@ type Manager struct {
 	scheduler          *authScheduler
 	// pluginScheduler runs outside m.mu before falling back to native selection.
 	pluginScheduler PluginScheduler
+	// continuityClock overrides time.Now and timer waiting in unit tests.
+	continuityClock continuityClock
 	// homeRuntimeAuths retains legacy session auth lookups for non-execution callers.
 	homeRuntimeAuths map[string]map[string]*Auth
 	// homeRuntimeAuthOwners prevents a stale selection from clearing a replacement auth.

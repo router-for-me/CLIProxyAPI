@@ -1,10 +1,10 @@
 package interactions
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -25,10 +25,17 @@ func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	if stream || root.Get("stream").Bool() {
 		_ = outDoc.Set("stream", true)
 	}
-	copyInteractionsSystemToCodexDoc(outDoc, root)
 	hasToolChoice := copyInteractionsGenerationConfigToCodexDoc(outDoc, root)
 	signatureTargetModel := translatorcommon.ResolveCodexReplayTargetModel(modelName, inputRawJSON)
-	inputItems := translatorcommon.NewRawArrayItems(root.Get("input.#").Int())
+	systemText := interactionsCodexSystemText(root)
+	inputSize := root.Get("input.#").Int()
+	if systemText != "" {
+		inputSize++
+	}
+	inputItems := translatorcommon.NewRawArrayItems(inputSize)
+	if systemText != "" {
+		appendInteractionsTextToCodex(&inputItems, "developer", systemText)
+	}
 	errInput := appendInteractionsInputToCodex(&inputItems, root.Get("input"), signatureTargetModel)
 	translatorcommon.SetRawArrayItemsDoc(outDoc, "input", inputItems)
 	copyInteractionsToolsToCodexDoc(outDoc, root, hasToolChoice)
@@ -37,21 +44,19 @@ func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	return outDoc.Bytes(), errInput
 }
 
-func copyInteractionsSystemToCodexDoc(doc *ojson.Doc, root ojson.Result) {
+func interactionsCodexSystemText(root ojson.Result) string {
 	systemInstruction := root.Get("system_instruction")
 	if !systemInstruction.Exists() {
 		systemInstruction = root.Get("systemInstruction")
 	}
 	if !systemInstruction.Exists() {
-		return
+		return ""
 	}
 	if systemInstruction.Type == ojson.String {
-		_ = doc.Set("instructions", systemInstruction.String())
-		return
+		return systemInstruction.String()
 	}
 	if text := systemInstruction.Get("text"); text.Exists() && text.Type == ojson.String {
-		_ = doc.Set("instructions", text.String())
-		return
+		return text.String()
 	}
 	if parts := systemInstruction.Get("parts"); parts.Exists() && parts.IsArray() {
 		var builder strings.Builder
@@ -66,10 +71,9 @@ func copyInteractionsSystemToCodexDoc(doc *ojson.Doc, root ojson.Result) {
 			builder.WriteString(text)
 			return true
 		})
-		if builder.Len() > 0 {
-			_ = doc.Set("instructions", builder.String())
-		}
+		return builder.String()
 	}
+	return ""
 }
 
 func copyInteractionsGenerationConfigToCodexDoc(doc *ojson.Doc, root ojson.Result) bool {
