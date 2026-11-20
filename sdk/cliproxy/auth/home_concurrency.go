@@ -233,6 +233,14 @@ func decodeHomeDispatchError(raw []byte) error {
 		message = "home returned error"
 	}
 
+	if code == "scheduler_rejected" {
+		rejectCode := strings.TrimSpace(detail.Code)
+		if rejectCode == "" {
+			rejectCode = "auth_unavailable"
+		}
+		return wrapSchedulerRejectError(&Error{Code: rejectCode, Message: message})
+	}
+
 	result := &Error{Code: code, Message: message, Retryable: detail.Retryable, HTTPStatus: http.StatusBadGateway}
 	switch strings.ToLower(code) {
 	case "model_not_found":
