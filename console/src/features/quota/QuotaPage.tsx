@@ -202,8 +202,8 @@ export function QuotaPage() {
   const tabCounts = useMemo(() => buildTabCounts(entries), [entries]);
   // Only providers that are set up get a tab.
   const tabIds = useMemo(
-    () => TAB_IDS.filter((id) => id === 'all' || id === tab || tabCounts[id] > 0),
-    [tab, tabCounts]
+    () => TAB_IDS.filter((id) => id === 'all' || tabCounts[id] > 0),
+    [tabCounts]
   );
   // Account-level settings span every page and tab, so count over all entries.
   const codexCreditOverageCounts = useMemo(
@@ -253,6 +253,12 @@ export function QuotaPage() {
     setPage(1);
     writeQuotaUiState({ tab: next as QuotaTabId });
   }, []);
+
+  // A saved tab whose provider has no accounts left falls back to All once files load.
+  useEffect(() => {
+    if (loading || error || filesGeneration !== sessionGeneration) return;
+    if (tab !== 'all' && !tabCounts[tab]) handleTabChange('all');
+  }, [error, filesGeneration, handleTabChange, loading, sessionGeneration, tab, tabCounts]);
 
   const handleSortModeChange = useCallback((next: string) => {
     setSortMode(next as QuotaSortMode);

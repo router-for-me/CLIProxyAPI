@@ -215,7 +215,9 @@ export function ManualResets(props: ManualResetsProps) {
     (a, b) =>
       (countOf(b) ?? -1) - (countOf(a) ?? -1) || a.entry.file.name.localeCompare(b.entry.file.name)
   );
-  const available = rows.reduce((sum, row) => sum + (countOf(row) ?? 0), 0);
+  // The total covers only accounts whose resets could be read.
+  const read = rows.filter((row) => countOf(row) !== null);
+  const available = read.reduce((sum, row) => sum + (countOf(row) ?? 0), 0);
 
   return (
     <section className={styles.panel} aria-labelledby="manual-resets-title">
@@ -223,9 +225,11 @@ export function ManualResets(props: ManualResetsProps) {
         <h2 id="manual-resets-title" className={styles.title}>
           {t('ledger.resets_title')}
         </h2>
-        <span className={styles.summary}>
-          {t('ledger.resets_summary', { available, count: rows.length })}
-        </span>
+        {read.length > 0 ? (
+          <span className={styles.summary}>
+            {t('ledger.resets_summary', { available, count: read.length })}
+          </span>
+        ) : null}
       </header>
       <ul className={styles.rows}>
         {rows.map((row) =>
