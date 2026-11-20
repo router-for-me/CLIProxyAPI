@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -198,6 +199,19 @@ func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	return roundTripper
 }
 
+// requestNotSentError marks a failure that happened while establishing the
+// connection: no request byte reached the upstream, so a single-use refresh
+// token sent with that request was not consumed.
+type requestNotSentError struct{ error }
+
+func (e requestNotSentError) Unwrap() error { return e.error }
+
+// isRequestNotSent reports whether err was raised before the request was sent.
+func isRequestNotSent(err error) bool {
+	var notSent requestNotSentError
+	return errors.As(err, &notSent)
+}
+
 func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	var (
 		conn net.Conn
@@ -209,7 +223,7 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 		conn, err = t.dialer.Dial(network, addr)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("claude oauth tls: dial upstream: %w", err)
+		return nil, requestNotSentError{fmt.Errorf("claude oauth tls: dial upstream: %w", err)}
 	}
 
 	host, _, errSplit := net.SplitHostPort(addr)
@@ -217,14 +231,14 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 		if errClose := conn.Close(); errClose != nil {
 			log.Debugf("claude oauth tls: close failed connection: %v", errClose)
 		}
-		return nil, fmt.Errorf("claude oauth tls: split upstream address: %w", errSplit)
+		return nil, requestNotSentError{fmt.Errorf("claude oauth tls: split upstream address: %w", errSplit)}
 	}
 	tlsConn := tls.UClient(conn, newClaudeOAuthTLSConfig(host, t.sessionCache), tls.HelloCustom)
 	if errPreset := tlsConn.ApplyPreset(claudeOAuthTLSClientHelloSpec()); errPreset != nil {
 		if errClose := tlsConn.Close(); errClose != nil {
 			log.Debugf("claude oauth tls: close connection after preset failure: %v", errClose)
 		}
-		return nil, fmt.Errorf("claude oauth tls: apply ClientHello: %w", errPreset)
+		return nil, requestNotSentError{fmt.Errorf("claude oauth tls: apply ClientHello: %w", errPreset)}
 	}
 	handshakeCtx := ctx
 	if handshakeTimeout, _ := ctx.Value(claudeRefreshHandshakeTimeoutContextKey{}).(time.Duration); handshakeTimeout > 0 {
@@ -236,7 +250,7 @@ func (t *utlsRoundTripper) dialTLSContext(ctx context.Context, network, addr str
 		if errClose := tlsConn.Close(); errClose != nil {
 			log.Debugf("claude oauth tls: close connection after handshake failure: %v", errClose)
 		}
-		return nil, fmt.Errorf("claude oauth tls: handshake upstream: %w", errHandshake)
+		return nil, requestNotSentError{fmt.Errorf("claude oauth tls: handshake upstream: %w", errHandshake)}
 	}
 	return httpwire.NewOrderedRequestConn(tlsConn, claudeOAuthRequestHeaderOrder), nil
 }
