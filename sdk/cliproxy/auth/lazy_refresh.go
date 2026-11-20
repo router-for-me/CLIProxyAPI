@@ -222,7 +222,14 @@ func (l *authRefreshLock) clearLazyState() {
 
 func (l *authRefreshLock) recordLazyFailure(auth *Auth, err error) {
 	l.failure = SanitizeLazyRefreshError(auth, err)
-	l.retryAt = time.Now().Add(refreshFailureBackoff)
+	delay := refreshFailureBackoff
+	if hint := retryAfterFromError(l.failure); hint != nil {
+		delay = max(delay, *hint)
+	}
+	retryAt := time.Now().Add(delay)
+	if l.failureEpoch != auth.RegistrationEpoch || l.failureVersion != auth.CredentialVersion || l.retryAt.Before(retryAt) {
+		l.retryAt = retryAt
+	}
 	l.failureEpoch = auth.RegistrationEpoch
 	l.failureVersion = auth.CredentialVersion
 }

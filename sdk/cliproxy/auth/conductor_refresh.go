@@ -421,13 +421,50 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 }
 
 type authRefreshLock struct {
-	mu             sync.Mutex
+	gate           chan struct{}
+	waiters        atomic.Int32
 	lazyWork       atomic.Bool
 	pending        *pendingLazyRefresh
 	failure        error
 	retryAt        time.Time
 	failureEpoch   uint64
 	failureVersion uint64
+}
+
+// lockRefreshContext acquires the per-credential refresh lock while honoring ctx cancellation
+// whenever lock acquisition would block behind another holder.
+func (m *Manager) lockRefreshContext(ctx context.Context, id string) (*authRefreshLock, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{gate: make(chan struct{}, 1)})
+	lock, ok := lockValue.(*authRefreshLock)
+	if !ok || lock == nil || lock.gate == nil {
+		lock = &authRefreshLock{gate: make(chan struct{}, 1)}
+		m.refreshLocks.Store(id, lock)
+	}
+	select {
+	case lock.gate <- struct{}{}:
+	default:
+		lock.waiters.Add(1)
+		select {
+		case lock.gate <- struct{}{}:
+			lock.waiters.Add(-1)
+			if errCtx := ctx.Err(); errCtx != nil {
+				<-lock.gate
+				return nil, nil, errCtx
+			}
+		case <-ctx.Done():
+			lock.waiters.Add(-1)
+			return nil, nil, ctx.Err()
+		}
+	}
+	var once sync.Once
+	return lock, func() {
+		once.Do(func() {
+			<-lock.gate
+		})
+	}, nil
 }
 
 func authOuterAccessToken(auth *Auth) string {
@@ -1298,14 +1335,11 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
+	lock, releaseRefresh, errLock := m.lockRefreshContext(ctx, id)
+	if errLock != nil {
+		return nil, errLock
 	}
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
+	defer releaseRefresh()
 	defer func() { lock.lazyWork.Store(lock.pending != nil) }()
 
 	m.mu.RLock()
@@ -1377,9 +1411,6 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 		}
 		if !lazyRefreshEligible(auth) {
 			return nil, &Error{Code: "auth_unavailable", Message: "credential cannot refresh", HTTPStatus: http.StatusServiceUnavailable}
-		}
-		if lock.failure != nil && lock.failureEpoch == auth.RegistrationEpoch && lock.failureVersion == auth.CredentialVersion && time.Now().Before(lock.retryAt) {
-			return nil, lock.failure
 		}
 		if trigger.model != "" {
 			if blocked, _, _ := isAuthBlockedForModelForRequest(ctx, auth, m.selectionModelKeyForAuth(auth, trigger.model), time.Now()); blocked {
@@ -1492,6 +1523,10 @@ func (m *Manager) refreshAuthWithTrigger(ctx context.Context, id, failedAccessTo
 	if auth.UsesLazyRefresh() {
 		if store == nil || lazyPersistenceUnsupported(auth) {
 			return nil, &Error{Code: "lazy_refresh_not_persistable", Message: errLazyRefreshStoreRequired.Error(), HTTPStatus: http.StatusServiceUnavailable}
+		}
+		if !forceRefresh && lock.failure != nil && lock.failureEpoch == auth.RegistrationEpoch &&
+			lock.failureVersion == auth.CredentialVersion && time.Now().Before(lock.retryAt) {
+			return nil, lock.failure
 		}
 		if (!forceRefresh && !lazyRefreshEligible(auth)) || !canCallLazyRefresh(exec, auth) {
 			return nil, &Error{Code: "auth_unavailable", Message: "credential cannot refresh", HTTPStatus: http.StatusServiceUnavailable}

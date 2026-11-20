@@ -3,18 +3,23 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+	"unsafe"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -1095,8 +1100,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
-		var errPrepare error
-		auth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
+		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if hasUpstreamExecutionAttempt(errPrepare) {
@@ -1136,6 +1140,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
+		}
+		if preparedAuth != nil {
+			auth = preparedAuth
 		}
 		executor = executorForAuth(executor, auth)
 		var authErr error
@@ -1361,8 +1368,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
-		var errPrepare error
-		auth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
+		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if hasUpstreamExecutionAttempt(errPrepare) {
@@ -1402,6 +1408,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
+		}
+		if preparedAuth != nil {
+			auth = preparedAuth
 		}
 		executor = executorForAuth(executor, auth)
 		var authErr error
@@ -1783,11 +1792,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		var preparedAuth *Auth
 		var errPrepare error
 		if selection != nil {
-			auth, errPrepare = m.prepareHomeRequestAuth(execCtx, executor, selection)
+			preparedAuth, errPrepare = m.prepareHomeRequestAuth(execCtx, executor, selection)
 		} else {
-			auth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
+			preparedAuth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		}
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
@@ -1864,6 +1874,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 			}
 			continue
+		}
+		if preparedAuth != nil {
+			auth = preparedAuth
 		}
 		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		if selection != nil && !restoreExecutionModel {
@@ -2231,8 +2244,205 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 	}
 }
 
-type requestAuthPrepareLock struct {
-	mu sync.Mutex
+type homeAuthPrepareFlight struct {
+	done              chan struct{}
+	cancel            context.CancelFunc
+	waiters           int
+	base              *Auth
+	result            *Auth
+	err               error
+	upstreamAttempted bool
+}
+
+func homeAuthPrepareKey(ctx context.Context, auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	id := strings.TrimSpace(auth.ID)
+	if id == "" {
+		return ""
+	}
+	payload := struct {
+		ID                  string                       `json:"id"`
+		Index               string                       `json:"index,omitempty"`
+		RegistrationEpoch   uint64                       `json:"registration_epoch,omitempty"`
+		CredentialVersion   uint64                       `json:"credential_version,omitempty"`
+		Provider            string                       `json:"provider"`
+		Prefix              string                       `json:"prefix,omitempty"`
+		Label               string                       `json:"label,omitempty"`
+		FileName            string                       `json:"file_name,omitempty"`
+		ProxyURL            string                       `json:"proxy_url,omitempty"`
+		ProxyConnectionPool *ProxyConnectionPoolOverride `json:"proxy_connection_pool,omitempty"`
+		RequestProxyURL     string                       `json:"request_proxy_url,omitempty"`
+		Attributes          map[string]string            `json:"attributes,omitempty"`
+		Metadata            map[string]any               `json:"metadata,omitempty"`
+	}{
+		ID:                  id,
+		Index:               strings.TrimSpace(auth.Index),
+		RegistrationEpoch:   auth.RegistrationEpoch,
+		CredentialVersion:   auth.CredentialVersion,
+		Provider:            strings.ToLower(strings.TrimSpace(auth.Provider)),
+		Prefix:              strings.TrimSpace(auth.Prefix),
+		Label:               strings.TrimSpace(auth.Label),
+		FileName:            strings.TrimSpace(auth.FileName),
+		ProxyURL:            strings.TrimSpace(auth.ProxyURL),
+		ProxyConnectionPool: auth.ProxyConnectionPool,
+		RequestProxyURL:     strings.TrimSpace(cliproxyexecutor.RequestProxyURL(ctx)),
+		Attributes:          auth.Attributes,
+		Metadata:            auth.Metadata,
+	}
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return ""
+	}
+	sum := sha256.Sum256(encoded)
+	return id + "|" + hex.EncodeToString(sum[:])
+}
+
+func prepareProviderLabel(provider string) string {
+	label := strings.ToLower(strings.TrimSpace(provider))
+	if label == "" {
+		return "request"
+	}
+	return label
+}
+
+func sameOptionalInterface(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	if sameInterfaceHeader(a, b) {
+		return true
+	}
+	return sameReflectValue(addressableValue(reflect.ValueOf(a)), addressableValue(reflect.ValueOf(b)))
+}
+
+func sameInterfaceHeader(a, b any) bool {
+	// An empty interface value stores a two-word (type, data) header; matching headers
+	// guarantee the interface value was preserved verbatim (for example via Auth.Clone).
+	ha := *(*[2]uintptr)(unsafe.Pointer(&a))
+	hb := *(*[2]uintptr)(unsafe.Pointer(&b))
+	runtime.KeepAlive(a)
+	runtime.KeepAlive(b)
+	return ha == hb
+}
+
+func addressableValue(v reflect.Value) reflect.Value {
+	if !v.IsValid() || v.CanAddr() || !v.CanInterface() {
+		return v
+	}
+	copyVal := reflect.New(v.Type()).Elem()
+	copyVal.Set(v)
+	return copyVal
+}
+
+func funcInstancePointer(v reflect.Value) (uintptr, bool) {
+	if v.Kind() != reflect.Func {
+		return 0, false
+	}
+	if v.IsNil() {
+		return 0, true
+	}
+	if v.CanAddr() {
+		return *(*uintptr)(v.Addr().UnsafePointer()), true
+	}
+	if v.CanInterface() {
+		copyVal := reflect.New(v.Type()).Elem()
+		copyVal.Set(v)
+		return *(*uintptr)(copyVal.Addr().UnsafePointer()), true
+	}
+	return 0, false
+}
+
+func sameReflectValue(va, vb reflect.Value) bool {
+	if !va.IsValid() || !vb.IsValid() {
+		return !va.IsValid() && !vb.IsValid()
+	}
+	if va.Type() != vb.Type() {
+		return false
+	}
+	switch va.Kind() {
+	case reflect.Bool:
+		return va.Bool() == vb.Bool()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return va.Int() == vb.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return va.Uint() == vb.Uint()
+	case reflect.Float32, reflect.Float64:
+		return va.Float() == vb.Float()
+	case reflect.Complex64, reflect.Complex128:
+		return va.Complex() == vb.Complex()
+	case reflect.String:
+		return va.String() == vb.String()
+	case reflect.Pointer, reflect.Chan, reflect.UnsafePointer:
+		return va.Pointer() == vb.Pointer()
+	case reflect.Func:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() && vb.IsNil()
+		}
+		pa, okA := funcInstancePointer(va)
+		pb, okB := funcInstancePointer(vb)
+		return okA && okB && pa == pb
+	case reflect.Map:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() && vb.IsNil()
+		}
+		return va.Pointer() == vb.Pointer()
+	case reflect.Slice:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() && vb.IsNil()
+		}
+		return va.Pointer() == vb.Pointer() && va.Len() == vb.Len() && va.Cap() == vb.Cap()
+	case reflect.Interface:
+		if va.IsNil() || vb.IsNil() {
+			return va.IsNil() && vb.IsNil()
+		}
+		if va.CanAddr() && vb.CanAddr() {
+			ha := *(*[2]uintptr)(va.Addr().UnsafePointer())
+			hb := *(*[2]uintptr)(vb.Addr().UnsafePointer())
+			if ha == hb {
+				return true
+			}
+		}
+		return sameReflectValue(addressableValue(va.Elem()), addressableValue(vb.Elem()))
+	case reflect.Struct:
+		for i := 0; i < va.NumField(); i++ {
+			if !sameReflectValue(va.Field(i), vb.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Array:
+		for i := 0; i < va.Len(); i++ {
+			if !sameReflectValue(va.Index(i), vb.Index(i)) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeHomePreparedSnapshot(base, current, prepared *Auth) *Auth {
+	if current == nil {
+		return prepared.Clone()
+	}
+	if prepared == nil {
+		return current.Clone()
+	}
+	merged := MergePreparedAuth(base, current.Clone(), prepared.Clone())
+	if merged == nil {
+		return nil
+	}
+	// Preserve caller-owned Storage/Runtime unless preparation actually replaced them.
+	if base != nil && sameOptionalInterface(prepared.Storage, base.Storage) {
+		merged.Storage = current.Storage
+	}
+	if base != nil && sameOptionalInterface(prepared.Runtime, base.Runtime) {
+		merged.Runtime = current.Runtime
+	}
+	return merged
 }
 
 // prepareHomeRequestAuth prepares a dispatch auth without reading or updating local auth state.
@@ -2256,13 +2466,19 @@ func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor Provider
 	if !ok || preparer == nil || !preparer.ShouldPrepareRequestAuth(auth) {
 		return auth, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errCtx := ctx.Err(); errCtx != nil {
+		return auth, errCtx
+	}
 
-	prepare := func() (*Auth, error) {
+	prepareDirect := func(callCtx context.Context) (*Auth, error) {
 		target := auth.Clone()
 		if !preparer.ShouldPrepareRequestAuth(target) {
 			return target, nil
 		}
-		updated, errPrepare := preparer.PrepareRequestAuth(ctx, target)
+		updated, errPrepare := preparer.PrepareRequestAuth(callCtx, target)
 		if errPrepare != nil {
 			return auth, errPrepare
 		}
@@ -2272,18 +2488,96 @@ func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor Provider
 		return updated, nil
 	}
 
-	id := strings.TrimSpace(auth.ID)
-	if id == "" {
-		return prepare()
+	key := homeAuthPrepareKey(ctx, auth)
+	if key == "" {
+		return prepareDirect(ctx)
 	}
-	lockValue, _ := m.requestPrepareLocks.LoadOrStore(id, &requestAuthPrepareLock{})
-	lock, ok := lockValue.(*requestAuthPrepareLock)
-	if !ok || lock == nil {
-		return prepare()
+
+	m.homePrepareMu.Lock()
+	if m.homePrepareFlights == nil {
+		m.homePrepareFlights = make(map[string]*homeAuthPrepareFlight)
 	}
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
-	return prepare()
+	flight, exists := m.homePrepareFlights[key]
+	if exists && flight != nil {
+		flight.waiters++
+		m.homePrepareMu.Unlock()
+	} else {
+		flightCtx, cancelFlight := context.WithCancel(context.WithoutCancel(ctx))
+		flightCtx = cliproxyexecutor.WithUpstreamAttemptTracker(flightCtx)
+		// Clone once before starting the goroutine so the caller's auth cannot race.
+		baseSnapshot := auth.Clone()
+		snapshot := baseSnapshot.Clone()
+		flight = &homeAuthPrepareFlight{
+			done:    make(chan struct{}),
+			cancel:  cancelFlight,
+			waiters: 1,
+			base:    baseSnapshot,
+		}
+		m.homePrepareFlights[key] = flight
+		m.homePrepareMu.Unlock()
+
+		authID := strings.TrimSpace(snapshot.ID)
+		providerLabel := prepareProviderLabel(snapshot.Provider)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					// Avoid logging or returning panic values that may embed credential material.
+					log.Errorf("home request auth preparation panicked for provider=%s auth_id=%s", providerLabel, authID)
+					flight.result = nil
+					flight.err = fmt.Errorf("prepare %s auth: unexpected panic during home preparation", providerLabel)
+				}
+				cancelFlight()
+				m.homePrepareMu.Lock()
+				if m.homePrepareFlights[key] == flight {
+					delete(m.homePrepareFlights, key)
+				}
+				m.homePrepareMu.Unlock()
+				close(flight.done)
+			}()
+
+			if !preparer.ShouldPrepareRequestAuth(snapshot) {
+				flight.result = snapshot
+				return
+			}
+			updated, errPrepare := preparer.PrepareRequestAuth(flightCtx, snapshot)
+			flight.upstreamAttempted = cliproxyexecutor.UpstreamAttempted(flightCtx)
+			if errPrepare != nil {
+				flight.err = errPrepare
+				return
+			}
+			if updated == nil {
+				flight.result = snapshot
+				return
+			}
+			flight.result = updated
+		}()
+	}
+
+	select {
+	case <-flight.done:
+		if flight.upstreamAttempted {
+			cliproxyexecutor.MarkUpstreamAttempt(ctx)
+		}
+		if flight.err != nil {
+			return auth, flight.err
+		}
+		if flight.result == nil {
+			return auth.Clone(), nil
+		}
+		return mergeHomePreparedSnapshot(flight.base, auth, flight.result), nil
+	case <-ctx.Done():
+		m.homePrepareMu.Lock()
+		flight.waiters--
+		shouldCancel := flight.waiters == 0
+		if shouldCancel && m.homePrepareFlights[key] == flight {
+			delete(m.homePrepareFlights, key)
+		}
+		m.homePrepareMu.Unlock()
+		if shouldCancel {
+			flight.cancel()
+		}
+		return auth, ctx.Err()
+	}
 }
 
 func (m *Manager) prepareSelectedRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth, model string) (*Auth, error) {
@@ -2318,27 +2612,21 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 		return preparer.PrepareRequestAuth(ctx, auth.Clone())
 	}
 
-	var prepareMu *sync.Mutex
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
-		// Meta also mints on 401 recovery. Serialize both paths per credential.
-		lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-		prepareMu = &lockValue.(*authRefreshLock).mu
-	} else {
-		lockValue, _ := m.requestPrepareLocks.LoadOrStore(id, &requestAuthPrepareLock{})
-		prepareMu = &lockValue.(*requestAuthPrepareLock).mu
+	_, releaseRefresh, errLock := m.lockRefreshContext(ctx, id)
+	if errLock != nil {
+		return nil, errLock
 	}
-	prepareMu.Lock()
-	defer prepareMu.Unlock()
+	defer releaseRefresh()
 
-	target := auth.Clone()
 	m.mu.RLock()
 	current := m.auths[id]
+	var target *Auth
 	if current != nil {
 		target = current.Clone()
 	}
 	m.mu.RUnlock()
-	if current == nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
-		return nil, fmt.Errorf("prepare meta auth: credential no longer registered")
+	if target == nil {
+		return nil, fmt.Errorf("prepare %s auth: credential no longer registered", prepareProviderLabel(auth.Provider))
 	}
 
 	if !preparer.ShouldPrepareRequestAuth(target) {
@@ -2364,7 +2652,7 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
 		return nil, fmt.Errorf("prepare meta auth: credential removed during mint")
 	}
-	return target, nil
+	return nil, fmt.Errorf("prepare %s auth: credential removed during preparation", prepareProviderLabel(auth.Provider))
 }
 
 func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {

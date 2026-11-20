@@ -436,13 +436,14 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		m.mu.Unlock()
 		return nil, false, false, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
 	}
-	if mode == updateModeRefresh && (base.UsesLazyRefresh() || auth.UsesLazyRefresh() || existing.UsesLazyRefresh()) && base != nil && !refreshIdentityMatches(base, existing) {
+	lazyRotation := mode == updateModeRefresh && (base.UsesLazyRefresh() || auth.UsesLazyRefresh() || existing.UsesLazyRefresh())
+	if lazyRotation && base != nil && !refreshIdentityMatches(base, existing) {
 		m.mu.Unlock()
 		return nil, false, false, fmt.Errorf("credential provider changed during refresh")
 	}
 	// Do not let an in-flight refresh overwrite credentials committed after its snapshot.
 	if mode == updateModeRefresh && base != nil && (existing.CredentialVersion != base.CredentialVersion || CredentialsChanged(base, existing)) {
-		if auth.CodexRefreshPatch == nil || !auth.CodexRefreshPatch.CanApplyTo(existing.Metadata) {
+		if lazyRotation || auth.CodexRefreshPatch == nil || !auth.CodexRefreshPatch.CanApplyTo(existing.Metadata) {
 			current := existing.Clone()
 			m.mu.Unlock()
 			// Discarded stale refresh: committed=false so callers do not
@@ -497,6 +498,8 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	credChanged := CredentialsChanged(existing, auth)
 	if credChanged {
 		auth.CredentialVersion = max(auth.CredentialVersion, existingVersion) + 1
+	} else if existing.UsesLazyRefresh() || auth.UsesLazyRefresh() {
+		auth.CredentialVersion = existingVersion + 1
 	} else {
 		auth.CredentialVersion = existingVersion
 	}
@@ -695,7 +698,6 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 	existingBeforeSave := existing.Clone()
 	refreshPatchBeforeSave := auth.CodexRefreshPatch
 	persistMetaMint := (mode == updateModePrepare || mode == updateModeRefresh) && strings.EqualFold(strings.TrimSpace(auth.Provider), "meta")
-	lazyRotation := mode == updateModeRefresh && (auth.UsesLazyRefresh() || base.UsesLazyRefresh() || existing.UsesLazyRefresh())
 	if errPersist := m.persistLockedWithStoreRequirement(ctx, auth, lazyRotation); errPersist != nil {
 		if lazyRotation {
 			m.mu.Unlock()
