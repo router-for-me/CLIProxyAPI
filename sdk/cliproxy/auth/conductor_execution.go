@@ -860,12 +860,26 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		req.Payload = resp.Body
 		opts.OriginalRequest = resp.Body
 	}
-	if path := strings.TrimSpace(resp.Path); path != "" {
-		if opts.Metadata == nil {
-			opts.Metadata = make(map[string]any, 1)
-		} else {
-			opts.Metadata = maps.Clone(opts.Metadata)
+	metadataCloned := false
+	ensureWritableMetadata := func(allocate bool, hint int) {
+		if metadataCloned {
+			if opts.Metadata == nil && allocate {
+				opts.Metadata = make(map[string]any, hint)
+			}
+			return
 		}
+		if opts.Metadata == nil {
+			if allocate {
+				opts.Metadata = make(map[string]any, hint)
+				metadataCloned = true
+			}
+			return
+		}
+		opts.Metadata = maps.Clone(opts.Metadata)
+		metadataCloned = true
+	}
+	if path := strings.TrimSpace(resp.Path); path != "" {
+		ensureWritableMetadata(true, 1)
 		opts.Metadata[cliproxyexecutor.RequestPathMetadataKey] = path
 	}
 	if resp.Terminate {
@@ -886,9 +900,7 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		}
 		info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, evalPayload, opts.Metadata)
 		if ok && info.SessionID != "" {
-			if opts.Metadata == nil {
-				opts.Metadata = make(map[string]any, 2)
-			}
+			ensureWritableMetadata(true, 2)
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
 			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
 				opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
@@ -896,15 +908,14 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 				delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 			}
 		} else {
+			ensureWritableMetadata(false, 0)
 			delete(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
 			delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 			delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 		}
 	} else if len(resp.Headers) > 0 {
 		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, opts.Metadata); ok && info.SessionID != "" {
-			if opts.Metadata == nil {
-				opts.Metadata = make(map[string]any, 2)
-			}
+			ensureWritableMetadata(true, 2)
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
 			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
 				opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
@@ -1162,6 +1173,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					auth = refreshed
+					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
@@ -1403,6 +1415,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					auth = refreshed
+					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					execCtx = m.newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
