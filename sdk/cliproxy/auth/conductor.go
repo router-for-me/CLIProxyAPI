@@ -39,6 +39,11 @@ type APIKeyConfigExecutor interface {
 	ForAPIKey(source internalconfig.PayloadFilterSource) ProviderExecutor
 }
 
+// KeyPayloadConfigExecutor binds a configured keyless entry without changing OAuth scope.
+type KeyPayloadConfigExecutor interface {
+	WithKeyPayloadFilters(source internalconfig.PayloadFilterSource) ProviderExecutor
+}
+
 // RequestAuthPreparer lets an executor update missing auth metadata immediately
 // before a request. Manager serializes and persists returned updates.
 type RequestAuthPreparer interface {

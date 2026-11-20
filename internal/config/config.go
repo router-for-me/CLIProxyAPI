@@ -160,7 +160,7 @@ type Config struct {
 	InteractionsKey []GeminiKey `yaml:"interactions-api-key" json:"interactions-api-key" payload-protocols:"gemini,interactions"`
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
-	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key" payload-protocols:"codex,openai-response"`
+	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key" payload-protocols:"codex,openai-response,openai"`
 
 	// XAIKey defines xAI API key configurations using the same structure as Codex API keys.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key" payload-protocols:"codex,openai-response,openai"`
@@ -201,7 +201,7 @@ type Config struct {
 
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
-	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key" payload-protocols:"gemini,interactions"`
+	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key" payload-protocols:"gemini,interactions,openai"`
 
 	// OAuthExcludedModels defines per-provider global model exclusions applied to OAuth/file-backed auth entries.
 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`

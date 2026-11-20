@@ -38,6 +38,7 @@ type keyPayloadRequestFixture struct {
 	reply       string
 	streamReply string
 	alt         string
+	requestPath string
 	executor    cliproxyauth.ProviderExecutor
 	collection  string
 	counter     func(tokenizer.Codec, []byte) (int64, error)
@@ -153,8 +154,8 @@ func captureKeyPayloadFinal(t *testing.T, cfg *config.Config, fixture keyPayload
 		"claude":               {"/v1/messages", "/v1/messages/count_tokens"},
 		"gemini":               {"/v1beta/models/" + baseModel + ":generateContent", "/v1beta/models/" + baseModel + ":streamGenerateContent", "/v1beta/models/" + baseModel + ":countTokens"},
 		"interactions":         {"/v1beta/interactions", "/v1beta/models/" + baseModel + ":countTokens"},
-		"vertex":               {"/v1/publishers/google/models/" + baseModel + ":generateContent", "/v1/publishers/google/models/" + baseModel + ":streamGenerateContent", "/v1/publishers/google/models/" + baseModel + ":countTokens", "/v1beta1/interactions"},
-		"codex":                {"/responses", "/responses/compact"},
+		"vertex":               {"/v1/publishers/google/models/" + baseModel + ":generateContent", "/v1/publishers/google/models/" + baseModel + ":streamGenerateContent", "/v1/publishers/google/models/" + baseModel + ":countTokens", "/v1beta1/interactions", "/v1/projects/proxy-test/locations/global/endpoints/openapi/chat/completions"},
+		"codex":                {"/responses", "/responses/compact", "/images/generations"},
 		"xai":                  {"/responses", "/responses/compact", "/images/generations", "/videos/generations", "/tts"},
 		"meta":                 {"/responses"},
 		"openai-compatibility": {"/chat/completions", "/responses/compact"},
@@ -189,7 +190,7 @@ func captureKeyPayloadFinal(t *testing.T, cfg *config.Config, fixture keyPayload
 	}
 	registry.GetGlobalRegistry().RegisterClient(auth.ID, fixture.executor.Identifier(), []*registry.ModelInfo{{ID: thinking.ParseSuffix(fixture.model).ModelName, Thinking: &registry.ThinkingSupport{Min: 1, Max: 8192, ZeroAllowed: true, DynamicAllowed: true}}})
 	defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	opts := cliproxyexecutor.Options{SourceFormat: fixture.source, OriginalRequest: []byte(fixture.payload), Alt: fixture.alt, Headers: http.Header{"X-Filter": {"yes"}}}
+	opts := cliproxyexecutor.Options{SourceFormat: fixture.source, OriginalRequest: []byte(fixture.payload), Alt: fixture.alt, Headers: http.Header{"X-Filter": {"yes"}}, Metadata: map[string]any{cliproxyexecutor.RequestPathMetadataKey: fixture.requestPath}}
 	if err := invoke(ctx, manager, []string{fixture.executor.Identifier()}, cliproxyexecutor.Request{Model: fixture.model, Payload: []byte(fixture.payload)}, opts); err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +300,70 @@ func TestKeyPayloadProviderFinalRequests(t *testing.T) {
 		if !reflect.DeepEqual(cfg, before) {
 			t.Fatal("request matrix changed authoritative configuration")
 		}
+	}
+}
+
+// TestKeyPayloadReviewedRoutes captures configured OpenAI filters on the reviewed routes.
+func TestKeyPayloadReviewedRoutes(t *testing.T) {
+	const chat = `{"messages":[{"role":"user","content":"hello"}],"top_p":0.5}`
+	const chatReply = `{"id":"chatcmpl-fixture","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	const gatewayKey = "syntheticGatewayKey123"
+	const authority = "https://synthetic.invalid"
+	for _, tc := range []struct {
+		fixture                        keyPayloadRequestFixture
+		baseURL, key, keyFields, param string
+		newExecutor                    func(*config.Config) cliproxyauth.ProviderExecutor
+	}{
+		{fixture: keyPayloadRequestFixture{family: "openai-compatibility", model: "gpt-5.4", source: sdktranslator.FormatOpenAI, payload: chat, reply: chatReply},
+			baseURL: authority, param: "top_p", newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor {
+				return NewOpenAICompatExecutor(util.OpenAICompatibleProviderKey("gateway"), cfg)
+			}},
+		{fixture: keyPayloadRequestFixture{family: "codex", model: "gpt-image-2", source: sdktranslator.FromString(codexOpenAIImageSourceFormat), requestPath: codexImagesGenerationsPath,
+			payload: `{"model":"gpt-image-2","prompt":"fixture","n":2}`, reply: `{"created":1,"data":[{"b64_json":"AA=="}]}`},
+			baseURL: authority, key: gatewayKey, param: "n", newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor { return NewCodexExecutor(cfg) }},
+		{fixture: keyPayloadRequestFixture{family: "vertex", model: "deepseek-ai/deepseek-v4.1-flash-maas", source: sdktranslator.FormatOpenAI, payload: chat, reply: chatReply},
+			baseURL: authority + "/v1/projects/proxy-test/locations/global/endpoints/openapi", key: gatewayKey, keyFields: "openapi: true, ", param: "top_p",
+			newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor { return NewGeminiVertexExecutor(cfg) }},
+	} {
+		t.Run(tc.fixture.family, func(t *testing.T) {
+			// Give authenticated entries distinct keys so Vertex retains both after normalization.
+			controlKey := tc.key
+			if tc.key != "" {
+				controlKey = "syntheticControlKey123"
+			}
+
+			// Parse the actual destination selector before synthesizing the target and control entries.
+			raw := fmt.Sprintf("config-version: 8\napi-keys:\n  %s:\n    - name: gateway\n      base-url: %s\n      keys:\n        - {%sapi-key: %q, payload: {filter: [{models: [{name: '*', protocol: openai}], params: [%s]}]}}\n        - {%sapi-key: %q}\n",
+				tc.fixture.family, tc.baseURL, tc.keyFields, tc.key, tc.param, tc.keyFields, controlKey)
+			cfg, err := config.ParseConfigBytes([]byte(raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, IDGenerator: synthesizer.NewStableIDGenerator()})
+			if err != nil || len(auths) != 2 {
+				t.Fatalf("expected selected and control entries, got %d: %v", len(auths), err)
+			}
+			if tc.key == "" && auths[0].AuthKind() != "" {
+				t.Fatal("keyless fixture acquired a credential kind")
+			}
+			tc.fixture.executor = tc.newExecutor(cfg)
+			selected := captureKeyPayloadFinal(t, cfg, tc.fixture, auths[0], runKeyPayloadMessage)
+			control := captureKeyPayloadFinal(t, cfg, tc.fixture, auths[1], runKeyPayloadMessage)
+			var filtered, expected map[string]any
+			if err := json.Unmarshal(control, &expected); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(selected, &filtered); err != nil {
+				t.Fatal(err)
+			}
+			if _, present := expected[tc.param]; !present {
+				t.Fatalf("control did not send %s: %s", tc.param, control)
+			}
+			delete(expected, tc.param)
+			if !reflect.DeepEqual(filtered, expected) {
+				t.Fatalf("selected key did not remove only %s: selected=%s control=%s", tc.param, selected, control)
+			}
+		})
 	}
 }
 
