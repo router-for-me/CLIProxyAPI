@@ -465,6 +465,48 @@ debug: true
 	if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
 		t.Fatalf("expected no warnings for purely known configuration, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
 	}
+
+	// Silent normalization collects sections without emitting warnings until explicitly flushed.
+	hook.Reset()
+	hookBuf.Reset()
+	silentOut, silentChanged, commented, errSilent := NormalizeConfigLayoutSilent(raw, true)
+	if errSilent != nil || !silentChanged {
+		t.Fatalf("NormalizeConfigLayoutSilent() changed=%v err=%v", silentChanged, errSilent)
+	}
+	if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
+		t.Fatalf("expected no warnings during silent normalization, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+	}
+	if len(commented) != 2 || !strings.Contains(string(silentOut), "# some-obsolete-legacy-block:") {
+		t.Fatalf("unexpected silent normalization output: commented=%v out=%s", commented, string(silentOut))
+	}
+	WarnUnrecognizedV8Sections(commented)
+	if !strings.Contains(hookBuf.String(), "HOOK: some-obsolete-legacy-block") || !strings.Contains(hookBuf.String(), "HOOK: another-legacy-key") {
+		t.Fatalf("expected WarnUnrecognizedV8Sections to flush collected warnings, got: %s", hookBuf.String())
+	}
+
+	// SaveConfigPreserveComments must not emit migration warnings when writing fails.
+	if os.Geteuid() != 0 {
+		hook.Reset()
+		hookBuf.Reset()
+		roPath := filepath.Join(t.TempDir(), "readonly-config.yaml")
+		if errWriteRO := os.WriteFile(roPath, raw, 0o600); errWriteRO != nil {
+			t.Fatal(errWriteRO)
+		}
+		roCfg, errLoadRO := LoadConfig(roPath)
+		if errLoadRO != nil {
+			t.Fatal(errLoadRO)
+		}
+		if errChmod := os.Chmod(roPath, 0o400); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		t.Cleanup(func() { _ = os.Chmod(roPath, 0o600) })
+		if errSaveRO := SaveConfigPreserveComments(roPath, roCfg, true); errSaveRO == nil {
+			t.Fatal("expected SaveConfigPreserveComments to fail on read-only file")
+		}
+		if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
+			t.Fatalf("expected no migration warnings when SaveConfigPreserveComments fails to write, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+		}
+	}
 }
 
 func TestV8MigrationConcurrentOutputSwitch(t *testing.T) {

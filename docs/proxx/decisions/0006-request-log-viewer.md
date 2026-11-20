@@ -126,6 +126,14 @@ Detail:
   - Section headers are recognized only as exact known names, at file start or after a blank line, in
     the logger's write order, and never inside the final `RESPONSE` section. A response body with
     header-like lines therefore does not split the file.
+  - The final `RESPONSE` section has two layouts, and both are parsed (old files stay on disk):
+    - legacy (up to upstream v8.0.73): `Status: N`, header lines, a blank line, the body;
+    - v2 (upstream v8.0.79+): `Status: N`, optional `Error: <diagnostic>` lines, a blank line,
+      `Headers:`, header lines or `<none>`, a blank line, `Body:`, the body. A websocket transcript
+      may have a section with only `Error:` lines.
+    - v2 is recognized when the first blank line comes before any header line and the next line is
+      exactly `Headers:`. v2 `Error:` lines (local read, dial and stream errors that upstream no longer
+      writes into `API RESPONSE n`) are returned as `response.errors`, omitted when empty.
 - Usage join:
   - The named usage plugin `proxx-request-logs` keeps the last 20000 requests in memory, keyed by
     the full `record.TraceID`.
@@ -162,7 +170,7 @@ Detail:
 - Joined usage (provider, served upstream model, tokens summed over attempts, cost) is in memory only.
   After a restart, older rows fall back to file-derived fields, and their cost is null.
 - `q` scans file contents, so on a large directory a search with a rare term reads many files.
-- Websocket transcripts have no request body or final `RESPONSE`, so `requested_model` is empty and
+- Websocket transcripts have no request body and at most a diagnostics-only `RESPONSE`, so `requested_model` is empty and
   `status` is 0. The timelines are returned raw.
 - The unnumbered error-path `API RESPONSE` is dropped when numbered responses exist (it duplicates them).
 - Upstream `Error:` lines that follow a response body inside an `API RESPONSE n` section stay in

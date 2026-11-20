@@ -1,9 +1,10 @@
 package pricing
 
 import (
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/MoeForge/moego/regexp"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )

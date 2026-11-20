@@ -1912,6 +1912,9 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 				ResponseInterceptor: responseInterceptorFunc{
 					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						if req.Kind != pluginapi.ResponseInterceptKindExecution {
+							t.Fatalf("first response interceptor Kind = %q, want %q", req.Kind, pluginapi.ResponseInterceptKindExecution)
+						}
 						return pluginapi.ResponseInterceptResponse{
 							Headers: http.Header{"X-Response": []string{"high"}},
 							Body:    append(req.Body, []byte("|high")...),
@@ -1935,6 +1938,9 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 				ResponseInterceptor: responseInterceptorFunc{
 					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						if req.Kind != pluginapi.ResponseInterceptKindExecution {
+							t.Fatalf("second response interceptor Kind = %q, want %q", req.Kind, pluginapi.ResponseInterceptKindExecution)
+						}
 						if string(req.Body) != "body|high" {
 							t.Fatalf("second response interceptor body = %q, want body|high", req.Body)
 						}
@@ -1974,6 +1980,7 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 	)
 
 	nonStream := host.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+		Kind:            pluginapi.ResponseInterceptKindExecution,
 		SourceFormat:    "openai",
 		Model:           "normalized",
 		RequestedModel:  "requested",
@@ -3249,6 +3256,76 @@ func TestUsageAdapterPropagatesModalityTokenDetails(t *testing.T) {
 		got.CachedTextTokens != nil || got.CachedImageTokens != nil || got.CachedAudioTokens != nil ||
 		got.ImageOutputTokens != nil || got.AudioOutputTokens != nil {
 		t.Fatalf("expected absent modality counters to remain nil, got %+v", got)
+	}
+}
+
+func TestUsageAdapterPropagatesCacheCreationTTLDetails(t *testing.T) {
+	var gotRecord pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+		gotRecord = record
+	})
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-cache-ttl-details",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-cache-ttl-details",
+		plugin:   plugin,
+	}
+
+	cache5m := int64(1000)
+	cache1h := int64(500)
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: coreusage.Detail{
+			InputTokens:           100,
+			OutputTokens:          50,
+			CacheCreationTokens:   1500,
+			TotalTokens:           1650,
+			CacheCreation5mTokens: &cache5m,
+			CacheCreation1hTokens: &cache1h,
+		},
+	})
+
+	// Mutate caller-owned source values after HandleUsage to verify independent pointer copies.
+	cache5m = 999
+	cache1h = 999
+
+	got := gotRecord.Detail
+	if got.CacheCreationTokens != 1500 {
+		t.Fatalf("CacheCreationTokens = %d, want 1500", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || got.CacheCreation5mTokens == &cache5m || *got.CacheCreation5mTokens != 1000 {
+		t.Fatalf("CacheCreation5mTokens = %v, want independent pointer to 1000", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || got.CacheCreation1hTokens == &cache1h || *got.CacheCreation1hTokens != 500 {
+		t.Fatalf("CacheCreation1hTokens = %v, want independent pointer to 500", got.CacheCreation1hTokens)
+	}
+
+	// Verify explicit zero remains distinct from absent (nil).
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: coreusage.Detail{
+			CacheCreationTokens:   45045,
+			CacheCreation5mTokens: coreusage.Int64Ptr(0),
+			CacheCreation1hTokens: nil,
+		},
+	})
+	got = gotRecord.Detail
+	if got.CacheCreationTokens != 45045 {
+		t.Fatalf("CacheCreationTokens = %d, want 45045", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 0 {
+		t.Fatalf("CacheCreation5mTokens = %v, want explicit 0", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens != nil {
+		t.Fatalf("CacheCreation1hTokens = %v, want nil", got.CacheCreation1hTokens)
 	}
 }
 

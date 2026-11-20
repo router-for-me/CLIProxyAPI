@@ -133,7 +133,7 @@ upgrades included.
   - The installer waits up to ~135s for the old process to exit.
 
 ### Panel/backend compatibility
-- The status includes `api_level` (`selfupdate.APILevel`, currently 1).
+- The status includes `api_level` (`selfupdate.APILevel`, currently 2; 2 = upstream v8.0.79 payload replace rules and request-log `response.errors`).
 - A panel release can declare a line `proxx-min-backend-api: N` in its release body, at the start of a line,
   optionally inside an HTML comment: `<!-- proxx-min-backend-api: 2 -->`.
 - When N is greater than the backend's level, the panel updater (`internal/managementasset`) skips that

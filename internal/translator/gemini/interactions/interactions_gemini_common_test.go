@@ -111,6 +111,10 @@ func TestConvertInteractionsResponseToGeminiStreamFunctionCall(t *testing.T) {
 	if got := ojson.GetBytesNoCopy(delta[0], "candidates.0.content.parts.0.thoughtSignature").String(); got != "sig_1" {
 		t.Fatalf("thoughtSignature = %q, want sig_1. Payload: %s", got, string(delta[0]))
 	}
+	stopped := ConvertInteractionsResponseToGemini(context.Background(), "gemini-3.1-flash-lite", nil, nil, []byte(`data: {"event_type":"step.stop","index":0}`), &param)
+	if len(stopped) != 0 {
+		t.Fatalf("step.stop after arguments_delta emitted a duplicate chunk: %s", stopped)
+	}
 	completed := ConvertInteractionsResponseToGemini(context.Background(), "gemini-3.1-flash-lite", nil, nil, []byte(`data: {"interaction":{"id":"i1","status":"requires_action","usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5,"total_thought_tokens":1,"total_cached_tokens":4},"service_tier":"standard","model":"gemini-3.1-flash-lite"},"event_type":"interaction.completed"}`), &param)
 	if len(completed) != 1 {
 		t.Fatalf("completed output count = %d, want 1", len(completed))
@@ -134,6 +138,188 @@ func TestConvertInteractionsResponseToGeminiStreamFunctionCall(t *testing.T) {
 data: [DONE]`), &param)
 	if len(done) != 0 {
 		t.Fatalf("done output count = %d, want 0", len(done))
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiStreamFragmentedArguments(t *testing.T) {
+	const startLookup = `{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","signature":"sig_1","arguments":{}}}`
+	const stopLookup = `{"event_type":"step.stop","index":0}`
+	type functionCall struct{ id, name, args, signature string }
+	for _, tt := range []struct {
+		name   string
+		events []string
+		want   []functionCall
+	}{
+		{
+			name: "split JSON object",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"\"example\"}"}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"example"}`, "sig_1"}},
+		},
+		{
+			name: "single delta emits the equivalent call",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"example\"}"}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"example"}`, "sig_1"}},
+		},
+		{
+			name: "interleaved calls preserve whitespace inside strings",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.start","index":1,"step":{"type":"function_call","call_id":"call_2","name":"search","signature":"sig_2","arguments":{}}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"New "}}`,
+				`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"exa"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":" "}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":" York\"}"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":" "}}`,
+				stopLookup,
+				`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"mple\"}"}}`,
+				`{"event_type":"step.stop","index":1}`,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"New   York"}`, "sig_1"}, {"call_2", "search", `{"q":"example"}`, "sig_2"}},
+		},
+		{
+			name: "complete arguments before late function name",
+			events: []string{
+				`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","signature":"sig_1","arguments":{}}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"example\"}"}}`,
+				`{"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":{}}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"example"}`, "sig_1"}},
+		},
+		{
+			name: "nested objects and escaped quotes across fragments",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"items\":[{\"n\":1}"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":",{\"n\":2}"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"],\"q\":\"left\\"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"\"}right\"}"}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"items":[{"n":1},{"n":2}],"q":"left\"}right"}`, "sig_1"}},
+		},
+		{
+			name: "truncated arguments do not become an empty call",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":"}}`,
+				stopLookup,
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			var calls []functionCall
+			for _, event := range tt.events {
+				for _, chunk := range ConvertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, []byte("data: "+event), &param) {
+					for _, part := range ojson.GetBytesNoCopy(chunk, "candidates.0.content.parts").Array() {
+						if call := part.Get("functionCall"); call.Exists() {
+							calls = append(calls, functionCall{call.Get("id").String(), call.Get("name").String(), call.Get("args").Raw, part.Get("thoughtSignature").String()})
+						}
+					}
+				}
+			}
+			if len(calls) != len(tt.want) {
+				t.Fatalf("got %d function calls (%+v), want %d (%+v)", len(calls), calls, len(tt.want), tt.want)
+			}
+			for i, want := range tt.want {
+				if calls[i] != want {
+					t.Errorf("function call %d = %+v, want %+v", i, calls[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiStreamArgumentBufferLimit(t *testing.T) {
+	var param any
+	send := func(payload []byte) [][]byte {
+		return ConvertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, payload, &param)
+	}
+	send([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":{}}}`))
+	send([]byte(`{"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call_2","name":"lookup","arguments":{}}}`))
+	send([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\""}}`))
+	send([]byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"q\":\""}}`))
+	padding := strings.Repeat("x", 1<<20)
+	delta0 := []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"` + padding + `"}}`)
+	delta1 := []byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"` + padding + `"}}`)
+	for range 30 {
+		if chunks := send(delta0); len(chunks) != 0 {
+			t.Fatal("incomplete call emitted before step 0 closed")
+		}
+	}
+	for range 25 {
+		if chunks := send(delta1); len(chunks) != 0 {
+			t.Fatal("incomplete call emitted before step 1 closed")
+		}
+	}
+	if chunks := send([]byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"\"}"}}`)); len(chunks) != 0 {
+		t.Fatal("call that exceeded the shared argument budget was emitted")
+	}
+	if chunks := send([]byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{}"}}`)); len(chunks) != 0 {
+		t.Fatal("later arguments restarted a rejected call")
+	}
+	send(delta0) // This fragment only fits if step 1's buffer was released.
+	if chunks := send([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"\"}"}}`)); len(chunks) != 1 {
+		t.Fatalf("call within budget emitted %d chunks, want 1", len(chunks))
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiStreamCompleteFunctionCall(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args string
+	}{
+		{name: "with arguments", args: `{"q":"example"}`},
+		{name: "empty arguments", args: `{}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			send := func(payload string) [][]byte {
+				return ConvertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, []byte("data: "+payload), &param)
+			}
+			if started := send(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":` + tt.args + `}}`); len(started) != 0 {
+				t.Fatalf("step.start output = %s, want no chunks before the step closes", started)
+			}
+			const stop = `{"event_type":"step.stop","index":0}`
+			stopped := send(stop)
+			if len(stopped) != 1 {
+				t.Fatalf("step.stop output count = %d, want one functionCall chunk", len(stopped))
+			}
+			parts := ojson.GetBytesNoCopy(stopped[0], "candidates.0.content.parts").Array()
+			if len(parts) != 1 {
+				t.Fatalf("step.stop parts = %d, want 1: %s", len(parts), stopped[0])
+			}
+			call := parts[0].Get("functionCall")
+			if id, name, args := call.Get("id").String(), call.Get("name").String(), call.Get("args").Raw; id != "call_1" || name != "lookup" || args != tt.args {
+				t.Fatalf("functionCall = %s, want id call_1, name lookup, and args %s", call.Raw, tt.args)
+			}
+			if duplicate := send(stop); len(duplicate) != 0 {
+				t.Fatalf("repeated step.stop emitted a duplicate chunk: %s", duplicate)
+			}
+			completed := send(`{"event_type":"interaction.completed","interaction":{"status":"requires_action"}}`)
+			if len(completed) != 1 {
+				t.Fatalf("interaction.completed output count = %d, want one STOP chunk", len(completed))
+			}
+			candidate := ojson.GetBytesNoCopy(completed[0], "candidates.0")
+			if got := candidate.Get("finishReason").String(); got != "STOP" {
+				t.Fatalf("finishReason = %q, want STOP", got)
+			}
+			for _, part := range candidate.Get("content.parts").Array() {
+				if part.Get("functionCall").Exists() {
+					t.Fatalf("interaction.completed emitted a duplicate functionCall: %s", completed[0])
+				}
+			}
+		})
 	}
 }
 
@@ -1615,4 +1801,135 @@ func TestConvertGeminiRequestToInteractions_GoogleSearchAndBuiltinToolOptions(t 
 	if !tools[2].Get("sandbox").Bool() {
 		t.Fatalf("tools[2].sandbox = false, want true; tool=%s", tools[2].Raw)
 	}
+}
+
+func TestConvertGeminiRequestToInteractions_FunctionResponsePartsMedia(t *testing.T) {
+	t.Run("inlineData image and PDF alongside response result", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "id": "call_1", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"id": "call_1",
+						"response": {"result": "Loaded files"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+							{"inlineData": {"mimeType": "application/pdf", "data": "JVBERi0xLjQK"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		step := ojson.GetBytesNoCopy(out, "input.1")
+		if got := step.Get("type").String(); got != "function_result" {
+			t.Fatalf("input.1.type = %q, want function_result; out=%s", got, string(out))
+		}
+		result := step.Get("result")
+		if !result.IsArray() {
+			t.Fatalf("expected function_result.result to be array, got %s; out=%s", result.Raw, string(out))
+		}
+		items := result.Array()
+		if len(items) != 3 {
+			t.Fatalf("expected 3 items (text + image + document), got %d: %s", len(items), result.Raw)
+		}
+		if items[0].Get("type").String() != "text" || items[0].Get("text").String() != "Loaded files" {
+			t.Fatalf("items[0] = %s, want text 'Loaded files'", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "image" || items[1].Get("mime_type").String() != "image/png" || items[1].Get("data").String() != "iVBORw0KGgo=" {
+			t.Fatalf("items[1] = %s, want image/png item", items[1].Raw)
+		}
+		if items[2].Get("type").String() != "document" || items[2].Get("mime_type").String() != "application/pdf" || items[2].Get("data").String() != "JVBERi0xLjQK" {
+			t.Fatalf("items[2] = %s, want application/pdf document item", items[2].Raw)
+		}
+	})
+
+	t.Run("fileData audio URI with empty response", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "fetch_audio", "id": "call_2", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "fetch_audio",
+						"id": "call_2",
+						"response": {},
+						"parts": [
+							{"fileData": {"mimeType": "audio/wav", "fileUri": "https://example.com/a.wav"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		items := ojson.GetBytesNoCopy(out, "input.1.result").Array()
+		if len(items) != 1 {
+			t.Fatalf("expected 1 audio item (no empty text item), got %d; out=%s", len(items), string(out))
+		}
+		if items[0].Get("type").String() != "audio" || items[0].Get("mime_type").String() != "audio/wav" || items[0].Get("uri").String() != "https://example.com/a.wav" {
+			t.Fatalf("items[0] = %s, want audio uri item", items[0].Raw)
+		}
+	})
+
+	t.Run("preserves sibling response fields alongside result and nested parts", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.5-flash",
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "id": "call_3", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"id": "call_3",
+						"response": {"result": "partial", "error": "second file failed"},
+						"parts": [
+							{"text": "extra note"},
+							{"inline_data": {"mime_type": "image/png", "data": "iVBORw0KGgo="}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToInteractions("gemini-3.5-flash", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToInteractions() error = %v", err)
+		}
+		items := ojson.GetBytesNoCopy(out, "input.1.result").Array()
+		if len(items) != 3 {
+			t.Fatalf("expected 3 items, got %d; out=%s", len(items), string(out))
+		}
+		if items[0].Get("type").String() != "text" || !strings.Contains(items[0].Get("text").String(), "second file failed") {
+			t.Fatalf("items[0] = %s, want text preserving error field", items[0].Raw)
+		}
+		if items[1].Get("type").String() != "text" || items[1].Get("text").String() != "extra note" {
+			t.Fatalf("items[1] = %s, want nested text 'extra note'", items[1].Raw)
+		}
+		if items[2].Get("type").String() != "image" || items[2].Get("mime_type").String() != "image/png" {
+			t.Fatalf("items[2] = %s, want image/png item", items[2].Raw)
+		}
+	})
+
+	t.Run("streaming response delta preserves functionResponse.parts", func(t *testing.T) {
+		var param any
+		chunk := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionResponse":{"name":"read_files","id":"call_4","response":{"result":"Loaded"},"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}]}}]}}]}`)
+		events := ConvertGeminiResponseToInteractionsStream(context.Background(), "gemini-3.5-flash", nil, nil, chunk, &param)
+		delta := findStepDeltaPayloadByType(events, "function_result")
+		if len(delta) == 0 {
+			t.Fatalf("expected function_result step.delta event, got %d events", len(events))
+		}
+		items := ojson.GetBytesNoCopy(delta, "delta.result").Array()
+		if len(items) != 2 || items[0].Get("text").String() != "Loaded" || items[1].Get("type").String() != "image" {
+			t.Fatalf("delta.result = %s, want [text, image]", ojson.GetBytesNoCopy(delta, "delta.result").Raw)
+		}
+	})
 }

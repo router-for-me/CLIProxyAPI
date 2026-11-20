@@ -314,10 +314,12 @@ func TestCodexExecutorPreservesPartialNon2xxBodyAndReadErrorWhenRequestLogDisabl
 				t.Fatalf("deferred API response = %#v, want logging.DeferredAPIResponse", value)
 			}
 			rendered := string(deferred.RenderAPIResponse())
+			if strings.Contains(rendered, "Error: unexpected EOF") {
+				t.Fatalf("local read error polluted upstream response:\n%s", rendered)
+			}
 			for _, want := range []string{
 				"Status: 502",
 				`{"error":{"message":"partial codex 502`,
-				"Error: unexpected EOF",
 			} {
 				if !strings.Contains(rendered, want) {
 					t.Fatalf("deferred API response missing %q:\n%s", want, rendered)

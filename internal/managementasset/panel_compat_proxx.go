@@ -2,8 +2,9 @@ package managementasset
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
+
+	"github.com/MoeForge/moego/regexp"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/proxx/selfupdate"

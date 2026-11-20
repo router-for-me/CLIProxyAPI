@@ -229,12 +229,30 @@ func (h *delegatedInterceptorHost) ExecutePluginExecutor(ctx context.Context, pl
 	return h.pluginHost.ExecutePluginExecutor(ctx, pluginID, req, opts)
 }
 
+// ExecutePluginExecutorWithAttribution delegates direct plugin-executor
+// dispatch and returns optional plugin usage attribution.
+func (h *delegatedInterceptorHost) ExecutePluginExecutorWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, *pluginapi.UsageAttribution, error) {
+	if h.pluginHost == nil {
+		return coreexecutor.Response{}, nil, fmt.Errorf("plugin executor host is unavailable")
+	}
+	return h.pluginHost.ExecutePluginExecutorWithAttribution(ctx, pluginID, req, opts)
+}
+
 // ExecutePluginExecutorStream delegates streaming plugin-executor dispatch.
 func (h *delegatedInterceptorHost) ExecutePluginExecutorStream(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	if h.pluginHost == nil {
 		return nil, fmt.Errorf("plugin executor host is unavailable")
 	}
 	return h.pluginHost.ExecutePluginExecutorStream(ctx, pluginID, req, opts)
+}
+
+// ExecutePluginExecutorStreamWithAttribution delegates streaming plugin-executor
+// dispatch and returns optional plugin usage attribution.
+func (h *delegatedInterceptorHost) ExecutePluginExecutorStreamWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, *pluginapi.UsageAttribution, error) {
+	if h.pluginHost == nil {
+		return nil, nil, fmt.Errorf("plugin executor host is unavailable")
+	}
+	return h.pluginHost.ExecutePluginExecutorStreamWithAttribution(ctx, pluginID, req, opts)
 }
 
 // CountPluginExecutor delegates token counting to the internal plugin host.

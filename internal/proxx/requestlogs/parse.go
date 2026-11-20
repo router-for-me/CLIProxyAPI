@@ -7,9 +7,10 @@ import (
 	"bufio"
 	"bytes"
 	"io"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 // BodyLimit is the per-field cap for bodies returned by the detail endpoint (2 MB).
@@ -301,6 +302,16 @@ func (a *apiError) line(l []byte, cut bool) {
 	a.text.addLine(l, cut)
 }
 
+// respPhase tracks where the parser is inside the final RESPONSE section before the body.
+type respPhase int
+
+const (
+	respPhaseStatus         respPhase = iota // status, diagnostics or legacy header lines
+	respPhaseAfterBlank                      // first blank line seen with no header lines yet
+	respPhaseV2Headers                       // inside the v2 "Headers:" block
+	respPhaseV2AfterHeaders                  // blank line after the v2 headers, before "Body:"
+)
+
 // parsedFile is the structured content of a request log file.
 type parsedFile struct {
 	valid            bool
@@ -318,6 +329,8 @@ type parsedFile struct {
 	apiErrors        []*apiError
 	respStatus       int
 	respHeaders      headerList
+	respErrors       []string
+	respPhase        respPhase
 	respBody         capBuf
 	respInBody       bool
 	respSeen         bool
@@ -436,6 +449,14 @@ func parseLog(r io.Reader, opts parseOptions) (*parsedFile, error) {
 	return p, nil
 }
 
+// The final RESPONSE section has two layouts:
+//
+//	legacy (<= v8.0.73): Status: N / header lines / blank / body
+//	v2 (upstream v8.0.79+): Status: N / Error: diagnostic lines / blank / "Headers:" / header lines
+//	or "<none>" / blank / "Body:" / body (a websocket transcript may have only Error lines)
+//
+// v2 is recognized when the first blank line comes before any header line and the next line is
+// exactly "Headers:"; any other line there starts a legacy body.
 func (p *parsedFile) respLine(line []byte, cut bool) {
 	if p.respInBody {
 		p.respBody.addLine(line, cut)
@@ -445,11 +466,36 @@ func (p *parsedFile) respLine(line []byte, cut bool) {
 		return
 	}
 	s := string(line)
-	if s == "" {
-		p.respInBody = true
-		if p.onRespHeadersEnd != nil {
-			p.onRespHeadersEnd(p.respHeaders)
+	switch p.respPhase {
+	case respPhaseAfterBlank:
+		if s == "Headers:" && !cut {
+			p.respPhase = respPhaseV2Headers
+			return
 		}
+		p.startRespBody()
+		p.respLine(line, cut)
+		return
+	case respPhaseV2Headers:
+		switch {
+		case s == "":
+			p.respPhase = respPhaseV2AfterHeaders
+		case s != "<none>":
+			p.respHeaders.add(s)
+		}
+		return
+	case respPhaseV2AfterHeaders:
+		p.startRespBody()
+		if s != "Body:" || cut {
+			p.respLine(line, cut)
+		}
+		return
+	}
+	if s == "" {
+		if len(p.respHeaders) == 0 {
+			p.respPhase = respPhaseAfterBlank
+			return
+		}
+		p.startRespBody()
 		return
 	}
 	if k, v := kv(s); k == "Status" && p.respStatus == 0 && len(p.respHeaders) == 0 {
@@ -458,7 +504,18 @@ func (p *parsedFile) respLine(line []byte, cut bool) {
 			return
 		}
 	}
+	if msg, ok := strings.CutPrefix(s, "Error: "); ok && len(p.respHeaders) == 0 {
+		p.respErrors = append(p.respErrors, msg)
+		return
+	}
 	p.respHeaders.add(s)
+}
+
+func (p *parsedFile) startRespBody() {
+	p.respInBody = true
+	if p.onRespHeadersEnd != nil {
+		p.onRespHeadersEnd(p.respHeaders)
+	}
 }
 
 // attemptStatus returns the HTTP status of the last upstream attempt, if any.

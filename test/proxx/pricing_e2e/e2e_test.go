@@ -9,7 +9,6 @@ package pricinge2e
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -24,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 )

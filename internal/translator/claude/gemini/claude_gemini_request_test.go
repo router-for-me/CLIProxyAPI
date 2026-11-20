@@ -430,3 +430,308 @@ func TestConvertGeminiRequestToClaude_SanitizesToolNamesAndProvidesFallbackSchem
 		t.Fatalf("tool_choice.name = %q, want mcp_server_get_data. Output: %s", toolChoiceName, result)
 	}
 }
+
+func TestConvertGeminiRequestToClaude_FunctionResponsePartsMedia(t *testing.T) {
+	t.Run("inlineData image and PDF alongside response result", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "user", "parts": [{"text": "Read red.png and doc.pdf"}]},
+				{"role": "model", "parts": [{"functionCall": {"name": "read_files", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_files",
+						"response": {"result": "Loaded files"},
+						"parts": [
+							{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+							{"inlineData": {"mimeType": "application/pdf", "data": "JVBERi0xLjQK"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude() error = %v", err)
+		}
+		toolResult := ojson.GetBytesNoCopy(out, "messages.2.content.0")
+		if got := toolResult.Get("type").String(); got != "tool_result" {
+			t.Fatalf("messages.2.content.0.type = %q, want tool_result; out=%s", got, out)
+		}
+		content := toolResult.Get("content")
+		if !content.IsArray() {
+			t.Fatalf("expected tool_result.content to be array, got %s; out=%s", content.Raw, out)
+		}
+		blocks := content.Array()
+		if len(blocks) != 3 {
+			t.Fatalf("expected 3 blocks (text + image + document), got %d: %s", len(blocks), content.Raw)
+		}
+		if blocks[0].Get("type").String() != "text" || blocks[0].Get("text").String() != "Loaded files" {
+			t.Fatalf("blocks[0] = %s, want text 'Loaded files'", blocks[0].Raw)
+		}
+		if blocks[1].Get("type").String() != "image" || blocks[1].Get("source.type").String() != "base64" || blocks[1].Get("source.media_type").String() != "image/png" || blocks[1].Get("source.data").String() != "iVBORw0KGgo=" {
+			t.Fatalf("blocks[1] = %s, want base64 image/png block", blocks[1].Raw)
+		}
+		if blocks[2].Get("type").String() != "document" || blocks[2].Get("source.type").String() != "base64" || blocks[2].Get("source.media_type").String() != "application/pdf" || blocks[2].Get("source.data").String() != "JVBERi0xLjQK" {
+			t.Fatalf("blocks[2] = %s, want base64 application/pdf document block", blocks[2].Raw)
+		}
+	})
+
+	t.Run("fileData image URL with empty response", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "fetch_image", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "fetch_image",
+						"response": {},
+						"parts": [
+							{"fileData": {"mimeType": "image/jpeg", "fileUri": "https://example.com/a.jpg"}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude() error = %v", err)
+		}
+		blocks := ojson.GetBytesNoCopy(out, "messages.1.content.0.content").Array()
+		if len(blocks) != 1 {
+			t.Fatalf("expected 1 image block (no empty text block), got %d; out=%s", len(blocks), out)
+		}
+		if blocks[0].Get("type").String() != "image" || blocks[0].Get("source.type").String() != "url" || blocks[0].Get("source.url").String() != "https://example.com/a.jpg" {
+			t.Fatalf("blocks[0] = %s, want url image block", blocks[0].Raw)
+		}
+	})
+
+	t.Run("unsupported media-only functionResponse beside sendable text still refuses request", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_audio", "id": "call_1", "args": {}}}]},
+				{"role": "user", "parts": [
+					{"functionResponse": {
+						"name": "read_audio",
+						"response": {},
+						"parts": [
+							{"inline_data": {"mime_type": "audio/wav", "data": "UklGRg=="}}
+						]
+					}},
+					{"text": "continue"}
+				]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+		if err == nil {
+			t.Fatalf("expected error for unsupported audio-only functionResponse, got nil; out=%s", out)
+		}
+		if err.Error() != "unsupported content part: inlineData" {
+			t.Fatalf("err = %q, want %q", err.Error(), "unsupported content part: inlineData")
+		}
+	})
+
+	t.Run("snake_case function_response with mixed text and extra response fields", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [{"function_call": {"name": "read_files", "id": "call_2", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"function_response": {
+						"name": "read_files",
+						"id": "call_2",
+						"response": {"result": "partial", "error": "second missing"},
+						"parts": [
+							{"text": "caption"},
+							{"inline_data": {"mime_type": "image/png", "data": "iVBORw0KGgo="}}
+						]
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude() error = %v", err)
+		}
+		blocks := ojson.GetBytesNoCopy(out, "messages.1.content.0.content").Array()
+		if len(blocks) != 3 {
+			t.Fatalf("expected 3 blocks, got %d; out=%s", len(blocks), out)
+		}
+		if blocks[0].Get("type").String() != "text" || !strings.Contains(blocks[0].Get("text").String(), "second missing") {
+			t.Fatalf("blocks[0] = %s, want full response JSON preserving error field", blocks[0].Raw)
+		}
+		if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != "caption" {
+			t.Fatalf("blocks[1] = %s, want nested text 'caption'", blocks[1].Raw)
+		}
+		if blocks[2].Get("type").String() != "image" || blocks[2].Get("source.media_type").String() != "image/png" {
+			t.Fatalf("blocks[2] = %s, want image/png block", blocks[2].Raw)
+		}
+	})
+
+	t.Run("whitespace-formatted empty response and whitespace text still refuse unsupported audio", func(t *testing.T) {
+		for _, resp := range []string{`{ }`, `{"result": "   "}`} {
+			inputJSON := []byte(`{
+				"contents": [
+					{"role": "model", "parts": [{"functionCall": {"name": "read_audio", "id": "call_1", "args": {}}}]},
+					{"role": "user", "parts": [
+						{"functionResponse": {
+							"name": "read_audio",
+							"response": ` + resp + `,
+							"parts": [
+								{"text": "   "},
+								{"inlineData": {"mimeType": "audio/wav", "data": "UklGRg=="}}
+							]
+						}},
+						{"text": "continue"}
+					]}
+				]
+			}`)
+
+			out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+			if err == nil || err.Error() != "unsupported content part: inlineData" {
+				t.Fatalf("resp=%s: err = %v, want unsupported content part: inlineData; out=%s", resp, err, out)
+			}
+		}
+	})
+
+	t.Run("fallback preserves sibling response fields when no nested blocks exist", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"contents": [
+				{"role": "model", "parts": [{"functionCall": {"name": "read_file", "id": "call_3", "args": {}}}]},
+				{"role": "user", "parts": [{
+					"functionResponse": {
+						"name": "read_file",
+						"response": {"result": "", "error": "failed"}
+					}
+				}]}
+			]
+		}`)
+
+		out, err := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, false)
+		if err != nil {
+			t.Fatalf("ConvertGeminiRequestToClaude() error = %v", err)
+		}
+		got := ojson.GetBytesNoCopy(out, "messages.1.content.0.content").String()
+		if !strings.Contains(got, `"error"`) || !strings.Contains(got, `"failed"`) {
+			t.Fatalf("tool_result.content = %q, want full response JSON preserving error field", got)
+		}
+	})
+}
+
+func TestConvertGeminiRequestToClaude_PreservesPropertyNamedTypeAndSchemaValues(t *testing.T) {
+	for _, schemaField := range []string{"parameters", "parametersJsonSchema"} {
+		t.Run(schemaField, func(t *testing.T) {
+			inputJSON := []byte(`{
+				"contents": [{"role": "user", "parts": [{"text": "Reply with exactly hi."}]}],
+				"tools": [{
+					"functionDeclarations": [{
+						"name": "inspect_schedule",
+						"description": "Inspect a sample schedule.",
+						"` + schemaField + `": {
+							"type": "OBJECT",
+							"properties": {
+								"schedule": {
+									"type": "OBJECT",
+									"properties": {
+										"type": {
+											"type": "STRING",
+											"enum": ["interval", "once"]
+										}
+									}
+								},
+								"kind_only": {
+									"type": "OBJECT",
+									"properties": {
+										"type": {
+											"enum": ["alpha", "beta"],
+											"description": "Kind without nested type keyword"
+										}
+									}
+								},
+								"flag": {
+									"properties": {
+										"type": true
+									}
+								},
+								"tags": {
+									"type": "ARRAY",
+									"items": false
+								},
+								"tuple_items": {
+									"type": "ARRAY",
+									"items": [true, {"type": "STRING"}]
+								},
+								"nullable_count": {
+									"type": ["integer", "null"]
+								},
+								"metadata": {
+									"type": "OBJECT",
+									"default": {"type": "KeepCase"},
+									"example": {"type": "AlsoKeepCase"}
+								}
+							}
+						}
+					}]
+				}]
+			}`)
+
+			out, errConvert := ConvertGeminiRequestToClaude("claude-sonnet-4-6", inputJSON, true)
+			if errConvert != nil {
+				t.Fatalf("ConvertGeminiRequestToClaude() error = %v", errConvert)
+			}
+
+			schema := ojson.GetBytesNoCopy(out, "tools.0.input_schema")
+			if !schema.IsObject() {
+				t.Fatalf("tools.0.input_schema = %s, want object", schema.Raw)
+			}
+			if got := schema.Get("type").String(); got != "object" {
+				t.Fatalf("input_schema.type = %q, want object", got)
+			}
+			if got := schema.Get("properties.schedule.type").String(); got != "object" {
+				t.Fatalf("properties.schedule.type = %q, want object", got)
+			}
+
+			nestedTypeProp := schema.Get("properties.schedule.properties.type")
+			if !nestedTypeProp.IsObject() {
+				t.Fatalf("properties.schedule.properties.type = %s (type=%v), want object; out=%s", nestedTypeProp.Raw, nestedTypeProp.Type, out)
+			}
+			if got := nestedTypeProp.Get("type").String(); got != "string" {
+				t.Fatalf("properties.schedule.properties.type.type = %q, want string", got)
+			}
+			if enumArr := nestedTypeProp.Get("enum").Array(); len(enumArr) != 2 || enumArr[0].String() != "interval" || enumArr[1].String() != "once" {
+				t.Fatalf("properties.schedule.properties.type.enum = %s, want [\"interval\",\"once\"]", nestedTypeProp.Get("enum").Raw)
+			}
+
+			boolProp := schema.Get("properties.flag.properties.type")
+			if boolProp.Type != ojson.True {
+				t.Fatalf("properties.flag.properties.type = %s (type=%v), want boolean true", boolProp.Raw, boolProp.Type)
+			}
+			kindOnlyType := schema.Get("properties.kind_only.properties.type")
+			if !kindOnlyType.IsObject() || kindOnlyType.Get("description").String() != "Kind without nested type keyword" {
+				t.Fatalf("properties.kind_only.properties.type = %s, want object with description preserved", kindOnlyType.Raw)
+			}
+			if itemsBool := schema.Get("properties.tags.items"); itemsBool.Type != ojson.False {
+				t.Fatalf("properties.tags.items = %s (type=%v), want boolean false", itemsBool.Raw, itemsBool.Type)
+			}
+			if tupleBool := schema.Get("properties.tuple_items.items.0"); tupleBool.Type != ojson.True {
+				t.Fatalf("properties.tuple_items.items.0 = %s (type=%v), want boolean true", tupleBool.Raw, tupleBool.Type)
+			}
+			if tupleElemType := schema.Get("properties.tuple_items.items.1.type").String(); tupleElemType != "string" {
+				t.Fatalf("properties.tuple_items.items.1.type = %q, want string", tupleElemType)
+			}
+
+			arrayType := schema.Get("properties.nullable_count.type")
+			if !arrayType.IsArray() || len(arrayType.Array()) != 2 || arrayType.Array()[0].String() != "integer" || arrayType.Array()[1].String() != "null" {
+				t.Fatalf("properties.nullable_count.type = %s (type=%v), want [\"integer\",\"null\"]", arrayType.Raw, arrayType.Type)
+			}
+
+			if defType := schema.Get("properties.metadata.default.type").String(); defType != "KeepCase" {
+				t.Fatalf("properties.metadata.default.type = %q, want KeepCase", defType)
+			}
+			if exType := schema.Get("properties.metadata.example.type").String(); exType != "AlsoKeepCase" {
+				t.Fatalf("properties.metadata.example.type = %q, want AlsoKeepCase", exType)
+			}
+		})
+	}
+}

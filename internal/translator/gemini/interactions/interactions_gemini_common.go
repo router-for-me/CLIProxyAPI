@@ -3,11 +3,11 @@ package interactions
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -88,7 +88,7 @@ func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 				}
 				return true
 			}
-			if fr := part.Get("functionResponse"); fr.Exists() {
+			if fr := translatorcommon.GeminiPartFunctionResponse(part); fr.Exists() {
 				for _, step := range geminiPartToInteractionsSteps(part) {
 					if len(step) > 0 {
 						inputItems = append(inputItems, step)
@@ -1826,14 +1826,12 @@ func appendGeminiPartToInteractionsStream(out [][]byte, st *StreamState, part oj
 		out = append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
 		return appendInteractionsStepStop(out, st)
 	}
-	if fr := part.Get("functionResponse"); fr.Exists() {
+	if fr := translatorcommon.GeminiPartFunctionResponse(part); fr.Exists() {
 		out = ensureInteractionsStep(out, st, "function_result", fr)
 		deltaDoc := ojson.NewDocString(`{"index":0,"delta":{"type":"function_result","name":"","result":{}},"event_type":"step.delta"}`)
 		_ = deltaDoc.Set("index", st.ActiveStepIndex)
 		_ = deltaDoc.Set("delta.name", fr.Get("name").String())
-		if response := fr.Get("response"); response.Exists() {
-			_ = deltaDoc.SetRaw("delta.result", response.Raw)
-		}
+		setInteractionsResultFromGeminiFunctionResponse(deltaDoc, "delta.result", fr)
 		out = append(out, translatorcommon.SSEEventData("step.delta", deltaDoc.Bytes()))
 		return appendInteractionsStepStop(out, st)
 	}
@@ -1893,7 +1891,7 @@ func geminiPartToInteractionsSteps(part ojson.Result) [][]byte {
 		steps = append(steps, stepDoc.Bytes())
 		return steps
 	}
-	if fr := part.Get("functionResponse"); fr.Exists() {
+	if fr := translatorcommon.GeminiPartFunctionResponse(part); fr.Exists() {
 		stepDoc := ojson.NewDocString(`{"type":"function_result","name":"","result":{}}`)
 		_ = stepDoc.Set("name", fr.Get("name").String())
 		if id := fr.Get("id"); id.Exists() {
@@ -1901,9 +1899,7 @@ func geminiPartToInteractionsSteps(part ojson.Result) [][]byte {
 		} else if callID := fr.Get("call_id"); callID.Exists() {
 			_ = stepDoc.Set("call_id", callID.String())
 		}
-		if response := fr.Get("response"); response.Exists() {
-			_ = stepDoc.SetRaw("result", response.Raw)
-		}
+		setInteractionsResultFromGeminiFunctionResponse(stepDoc, "result", fr)
 		return [][]byte{stepDoc.Bytes()}
 	}
 	if text := part.Get("text"); text.Exists() {
@@ -1970,6 +1966,84 @@ func geminiThoughtStepJSON(sig, text string) []byte {
 		translatorcommon.SetRawArrayItemsDoc(stepDoc, "content", [][]byte{item})
 	}
 	return stepDoc.Bytes()
+}
+
+func isEmptyGeminiInteractionsResponseObject(v ojson.Result) bool {
+	if !v.Exists() {
+		return true
+	}
+	if v.IsObject() {
+		empty := true
+		v.ForEach(func(_, _ ojson.Result) bool {
+			empty = false
+			return false
+		})
+		return empty
+	}
+	return strings.TrimSpace(v.Raw) == ""
+}
+
+func geminiInteractionsResponseHasOnlyResultKey(response ojson.Result) bool {
+	if !response.IsObject() {
+		return false
+	}
+	hasResult := false
+	onlyResult := true
+	response.ForEach(func(key, _ ojson.Result) bool {
+		if key.String() == "result" {
+			hasResult = true
+			return true
+		}
+		onlyResult = false
+		return false
+	})
+	return hasResult && onlyResult
+}
+
+func interactionsTextContentItem(text string) []byte {
+	textDoc := ojson.NewDocString(`{"type":"text","text":""}`)
+	_ = textDoc.Set("text", text)
+	return textDoc.Bytes()
+}
+
+func setInteractionsResultFromGeminiFunctionResponse(doc *ojson.Doc, path string, fr ojson.Result) {
+	var nestedItems [][]byte
+	if frParts := fr.Get("parts"); frParts.Exists() && frParts.IsArray() {
+		frParts.ForEach(func(_, nested ojson.Result) bool {
+			if text := nested.Get("text"); text.Exists() && text.String() == "" {
+				return true
+			}
+			if item := geminiPartToInteractionsContent(nested); len(item) > 0 {
+				nestedItems = append(nestedItems, item)
+			}
+			return true
+		})
+	}
+
+	response := fr.Get("response")
+	if len(nestedItems) > 0 {
+		items := make([][]byte, 0, len(nestedItems)+1)
+		if !isEmptyGeminiInteractionsResponseObject(response) {
+			if res := response.Get("result"); res.Exists() && geminiInteractionsResponseHasOnlyResultKey(response) {
+				if res.Type == ojson.String {
+					if strings.TrimSpace(res.String()) != "" {
+						items = append(items, interactionsTextContentItem(res.String()))
+					}
+				} else if raw := strings.TrimSpace(res.Raw); raw != "" {
+					items = append(items, interactionsTextContentItem(raw))
+				}
+			} else {
+				items = append(items, interactionsTextContentItem(response.Raw))
+			}
+		}
+		items = append(items, nestedItems...)
+		_ = doc.SetRawBytes(path, translatorcommon.JoinRawArray(items))
+		return
+	}
+
+	if response.Exists() {
+		_ = doc.SetRaw(path, response.Raw)
+	}
 }
 
 func geminiPartToInteractionsStep(part ojson.Result) []byte {

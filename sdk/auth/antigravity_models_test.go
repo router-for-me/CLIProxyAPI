@@ -2,9 +2,15 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -243,6 +249,366 @@ func TestFetchAntigravityAvailableModels(t *testing.T) {
 		}
 		if status != AntigravityProbeStatusTransientError {
 			t.Fatalf("expected transient error for 302 without redirect, got %v", status)
+		}
+	})
+}
+
+func TestFetchAntigravityAvailableModels_EnforcesHTTP11WithoutALPN(t *testing.T) {
+	var mu sync.Mutex
+	var clientHelloProtos []string
+	var requestProto string
+	var tlsVersion uint16
+	var negotiatedProtocol string
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestProto = r.Proto
+		if r.TLS != nil {
+			tlsVersion = r.TLS.Version
+			negotiatedProtocol = r.TLS.NegotiatedProtocol
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			mu.Lock()
+			clientHelloProtos = append([]string(nil), hello.SupportedProtos...)
+			mu.Unlock()
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	var proxyConnCount int
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		targetConn, errDial := net.Dial("tcp", r.Host)
+		if errDial != nil {
+			http.Error(w, errDial.Error(), http.StatusBadGateway)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			if errClose := targetConn.Close(); errClose != nil {
+				t.Logf("close target conn error: %v", errClose)
+			}
+			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+			return
+		}
+		clientConn, bufRW, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			if errClose := targetConn.Close(); errClose != nil {
+				t.Logf("close target conn error: %v", errClose)
+			}
+			return
+		}
+		mu.Lock()
+		proxyConnCount++
+		mu.Unlock()
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			if errClose := clientConn.Close(); errClose != nil {
+				t.Logf("close client conn error: %v", errClose)
+			}
+			if errClose := targetConn.Close(); errClose != nil {
+				t.Logf("close target conn error: %v", errClose)
+			}
+			return
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(targetConn, bufRW)
+			if tcpConn, okTCP := targetConn.(*net.TCPConn); okTCP {
+				_ = tcpConn.CloseWrite()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(clientConn, targetConn)
+			if tcpConn, okTCP := clientConn.(*net.TCPConn); okTCP {
+				_ = tcpConn.CloseWrite()
+			}
+		}()
+		wg.Wait()
+		if errClose := targetConn.Close(); errClose != nil {
+			t.Logf("close target conn error: %v", errClose)
+		}
+		if errClose := clientConn.Close(); errClose != nil {
+			t.Logf("close client conn error: %v", errClose)
+		}
+	}))
+	defer proxyServer.Close()
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(server.Certificate())
+
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = origDefault
+	})
+
+	baseDefault, ok := origDefault.(*http.Transport)
+	if !ok || baseDefault == nil {
+		t.Fatal("expected http.DefaultTransport to be *http.Transport")
+	}
+	baseTransport := baseDefault.Clone()
+	baseTransport.TLSClientConfig = &tls.Config{
+		RootCAs:    certPool,
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+	http.DefaultTransport = baseTransport
+
+	cases := []struct {
+		name      string
+		proxyURL  string
+		wantProxy int
+	}{
+		{name: "empty proxy inherits default transport", proxyURL: "", wantProxy: 0},
+		{name: "direct proxy", proxyURL: "direct", wantProxy: 0},
+		{name: "http connect proxy", proxyURL: proxyServer.URL, wantProxy: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			clientHelloProtos = nil
+			requestProto = ""
+			tlsVersion = 0
+			negotiatedProtocol = ""
+			proxyConnCount = 0
+			mu.Unlock()
+
+			hints, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+				BaseURLs:    []string{server.URL},
+				ProxyURL:    tc.proxyURL,
+				AccessToken: "test-token",
+				ProjectID:   "aicode-consumers",
+			})
+			if status != AntigravityProbeStatusSuccess {
+				t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+			}
+			if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+				t.Fatalf("missing gemini-3-flash in hints: %+v", hints)
+			}
+
+			mu.Lock()
+			gotHelloProtos := slices.Clone(clientHelloProtos)
+			gotProto := requestProto
+			gotTLSVersion := tlsVersion
+			gotNegotiated := negotiatedProtocol
+			gotProxyCount := proxyConnCount
+			mu.Unlock()
+
+			if len(gotHelloProtos) != 0 {
+				t.Fatalf("ClientHello ALPN = %v, want no ALPN extension", gotHelloProtos)
+			}
+			if gotProto != "HTTP/1.1" {
+				t.Fatalf("request protocol = %q, want HTTP/1.1", gotProto)
+			}
+			if gotTLSVersion != tls.VersionTLS13 {
+				t.Fatalf("TLS version = %#x, want TLS 1.3", gotTLSVersion)
+			}
+			if gotNegotiated != "" {
+				t.Fatalf("negotiated ALPN = %q, want empty", gotNegotiated)
+			}
+			if gotProxyCount != tc.wantProxy {
+				t.Fatalf("proxy CONNECT count = %d, want %d", gotProxyCount, tc.wantProxy)
+			}
+			if !slices.Equal(baseTransport.TLSClientConfig.NextProtos, []string{"h2", "http/1.1"}) {
+				t.Fatalf("default transport TLSClientConfig.NextProtos mutated: %v", baseTransport.TLSClientConfig.NextProtos)
+			}
+		})
+	}
+}
+
+type stubRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f stubRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestFetchAntigravityAvailableModels_PreservesCustomDefaultRoundTripper(t *testing.T) {
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = origDefault
+	})
+
+	called := false
+	http.DefaultTransport = stubRoundTripper(func(r *http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"models":{"gemini-3-flash":{}}}`)),
+			Request:    r,
+		}, nil
+	})
+
+	hints, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+		BaseURLs:    []string{"https://custom-roundtripper.invalid"},
+		AccessToken: "test-token",
+	})
+	if !called {
+		t.Fatal("expected custom http.DefaultTransport RoundTripper to be called")
+	}
+	if status != AntigravityProbeStatusSuccess {
+		t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+	}
+	if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+		t.Fatalf("missing gemini-3-flash in hints: %+v", hints)
+	}
+}
+
+func TestNewAntigravityProbeTransport_HTTP11AndNoALPN(t *testing.T) {
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = origDefault
+	})
+
+	t.Run("handles typed-nil DefaultTransport", func(t *testing.T) {
+		var typedNil *http.Transport
+		http.DefaultTransport = typedNil
+
+		tr, errTr := newAntigravityProbeTransport("")
+		if errTr != nil {
+			t.Fatalf("unexpected error: %v", errTr)
+		}
+		if tr == nil {
+			t.Fatal("expected non-nil fallback *http.Transport")
+		}
+		if tr.ForceAttemptHTTP2 {
+			t.Fatal("ForceAttemptHTTP2 = true, want false")
+		}
+		if tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+			t.Fatalf("TLSNextProto = %#v, want non-nil empty map", tr.TLSNextProto)
+		}
+		if tr.TLSClientConfig == nil || len(tr.TLSClientConfig.NextProtos) != 0 {
+			t.Fatalf("TLSClientConfig = %#v, want non-nil config with empty NextProtos", tr.TLSClientConfig)
+		}
+	})
+
+	t.Run("configures all proxy modes", func(t *testing.T) {
+		http.DefaultTransport = origDefault
+		for _, proxyURL := range []string{
+			"",
+			"direct",
+			"http://127.0.0.1:8080",
+			"https://127.0.0.1:8443",
+			"socks5://127.0.0.1:1080",
+			"socks5h://127.0.0.1:1080",
+		} {
+			tr, errTr := newAntigravityProbeTransport(proxyURL)
+			if errTr != nil {
+				t.Fatalf("proxy %q unexpected error: %v", proxyURL, errTr)
+			}
+			if tr == nil {
+				t.Fatalf("proxy %q returned nil transport", proxyURL)
+			}
+			if tr.Protocols != nil {
+				t.Fatalf("proxy %q Protocols = %v, want nil", proxyURL, tr.Protocols)
+			}
+			if tr.ForceAttemptHTTP2 {
+				t.Fatalf("proxy %q ForceAttemptHTTP2 = true, want false", proxyURL)
+			}
+			if tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+				t.Fatalf("proxy %q TLSNextProto = %#v, want non-nil empty map", proxyURL, tr.TLSNextProto)
+			}
+			if tr.TLSClientConfig == nil || len(tr.TLSClientConfig.NextProtos) != 0 {
+				t.Fatalf("proxy %q TLSClientConfig = %#v, want non-nil config with empty NextProtos", proxyURL, tr.TLSClientConfig)
+			}
+			tr.CloseIdleConnections()
+		}
+	})
+
+	t.Run("strips explicit DefaultTransport Protocols HTTP/2 over real TLS", func(t *testing.T) {
+		var mu sync.Mutex
+		var clientHelloProtos []string
+		var requestProto string
+		var negotiatedProtocol string
+
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			requestProto = r.Proto
+			if r.TLS != nil {
+				negotiatedProtocol = r.TLS.NegotiatedProtocol
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+		}))
+		server.EnableHTTP2 = true
+		server.TLS = &tls.Config{
+			MinVersion: tls.VersionTLS13,
+			MaxVersion: tls.VersionTLS13,
+			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				mu.Lock()
+				clientHelloProtos = append([]string(nil), hello.SupportedProtos...)
+				mu.Unlock()
+				return nil, nil
+			},
+		}
+		server.StartTLS()
+		defer server.Close()
+
+		certPool := x509.NewCertPool()
+		certPool.AddCert(server.Certificate())
+
+		baseDefault, ok := origDefault.(*http.Transport)
+		if !ok || baseDefault == nil {
+			t.Fatal("expected http.DefaultTransport to be *http.Transport")
+		}
+		explicitProtocols := &http.Protocols{}
+		explicitProtocols.SetHTTP1(true)
+		explicitProtocols.SetHTTP2(true)
+
+		baseTransport := baseDefault.Clone()
+		baseTransport.Protocols = explicitProtocols
+		baseTransport.TLSClientConfig = &tls.Config{
+			RootCAs: certPool,
+		}
+		http.DefaultTransport = baseTransport
+
+		hints, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+			BaseURLs:    []string{server.URL},
+			AccessToken: "test-token",
+			ProjectID:   "aicode-consumers",
+		})
+		if status != AntigravityProbeStatusSuccess {
+			t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+		}
+		if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+			t.Fatalf("missing gemini-3-flash in hints: %+v", hints)
+		}
+
+		mu.Lock()
+		gotHelloProtos := slices.Clone(clientHelloProtos)
+		gotProto := requestProto
+		gotNegotiated := negotiatedProtocol
+		mu.Unlock()
+
+		if len(gotHelloProtos) != 0 {
+			t.Fatalf("ClientHello ALPN = %v, want no ALPN extension", gotHelloProtos)
+		}
+		if gotProto != "HTTP/1.1" {
+			t.Fatalf("request protocol = %q, want HTTP/1.1", gotProto)
+		}
+		if gotNegotiated != "" {
+			t.Fatalf("negotiated ALPN = %q, want empty", gotNegotiated)
+		}
+		if baseTransport.Protocols == nil || !baseTransport.Protocols.HTTP2() {
+			t.Fatalf("default transport Protocols mutated: %v", baseTransport.Protocols)
 		}
 	})
 }

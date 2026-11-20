@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"

@@ -22,7 +22,7 @@ var (
 
 // APILevel is the backend API level reported to the management panel. Bump it when the panel needs
 // a backend feature that older backends lack; panel releases declare `proxx-min-backend-api: N`.
-const APILevel = 1
+const APILevel = 2
 
 func releaseURL() string {
 	return apiBaseURL + "/repos/" + repo + "/" + releasePath

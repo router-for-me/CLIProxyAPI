@@ -1,0 +1,63 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/chat/completions
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-11-20T15:54:49.684399+05:30
+
+
+=== HEADERS ===
+User-Agent: Go-http-client/1.1
+Content-Length: 82
+Authorization: Bearer te...ey
+Content-Type: application/json
+Accept-Encoding: gzip
+
+
+=== REQUEST BODY ===
+{"messages":[{"content":"delta-bad","role":"user"}],"model":"m400","stream":false}
+
+
+=== API REQUEST 1 ===
+Timestamp: 2026-11-20T15:54:49.684623+05:30
+Upstream URL: http://127.0.0.1:55738/p400/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-p400, auth_id=openai-compatibility:p400:a37753c91e46, label=p400, type=api_key value=mock...p400
+
+Headers:
+Authorization: Bearer mock...p400
+Content-Type: application/json
+User-Agent: Go-http-client/1.1
+
+Body:
+{"messages":[{"content":"delta-bad","role":"user"}],"model":"up-400","stream":false}
+
+
+=== API RESPONSE 1 ===
+Timestamp: 2026-11-20T15:54:49.684928+05:30
+
+Status: 400
+Headers:
+Content-Length: 76
+Content-Type: application/json
+Date: Fri, 20 Nov 2026 10:24:49 GMT
+
+Body:
+{"error":{"message":"invalid parameter foo","type":"invalid_request_error"}}
+
+
+=== RESPONSE ===
+Status: 400
+
+Headers:
+X-Cpa-Trace-Id: 20261120155449-5b6e373e615c047e-01a1f87c-c814-760e-8ec5-59f0358e6913
+Vary: Accept-Encoding
+Content-Type: application/json
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta
+Access-Control-Expose-Headers: X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, ETag, X-Request-Id, OpenAI-Request-Id
+
+Body:
+{"error":{"message":"invalid parameter foo","type":"invalid_request_error"}}

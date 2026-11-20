@@ -2,8 +2,6 @@ package management
 
 import (
 	"context"
-	"encoding/json"
-	"github.com/MoeForge/moego/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"

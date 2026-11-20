@@ -2,9 +2,9 @@ package common
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
