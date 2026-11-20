@@ -72,39 +72,53 @@ func PrepareGeminiEmbeddingDoc(payload []byte, baseModel, action string) (*ojson
 		// body form must use the Google-native "models/<id>" resource name.
 		SetStringIfDifferentDoc(doc, "model", "models/"+baseModel)
 	case GeminiBatchEmbedContentsAction:
-		// Batch entries carry their own model fields and the upstream service validates
-		// them per entry, while the path model is not used for that check. Entries that
-		// already name a model (including mixed-model batches) are left untouched; only
-		// missing/empty/null entries inherit the path model so callers do not have to
-		// repeat it. Order and per-entry intent are preserved.
+		// Upstream requires requests[].model per entry and ignores the model's value when
+		// computing embeddings (the path model decides), but it does enforce the
+		// "models/<id>" resource-name format: a missing model or a bare identifier is
+		// rejected with a format error. Missing entries therefore inherit the path model,
+		// and bare identifiers are normalized to the resource-name form. Entries that are
+		// already resource names (including aliases and mixed-model batches) are left
+		// untouched, and order is preserved.
 		requests := doc.Get("requests")
 		if !requests.IsArray() {
 			return nil, fmt.Errorf("batchEmbedContents requires a requests array")
 		}
+		resourceName := "models/" + strings.TrimPrefix(strings.TrimSpace(baseModel), "models/")
 		seen := false
-		var modelLessEntries []int
-		index := 0
+		var desired []string
 		requests.ForEach(func(_, entry ojson.Result) bool {
 			seen = true
-			position := index
-			index++
 			if !entry.IsObject() {
+				desired = append(desired, "")
 				return true
 			}
-			model := entry.Get("model")
-			if model.Type == ojson.String && strings.TrimSpace(model.String()) != "" {
-				return true
+			current := ""
+			if model := entry.Get("model"); model.Type == ojson.String {
+				current = strings.TrimSpace(model.String())
 			}
-			modelLessEntries = append(modelLessEntries, position)
+			switch {
+			case current == "":
+				desired = append(desired, resourceName)
+			case strings.HasPrefix(current, "models/"):
+				// Already the accepted shape; the value does not change the result.
+				desired = append(desired, "")
+			case strings.Contains(current, "/"):
+				// Some other resource form: leave it for upstream to report.
+				desired = append(desired, "")
+			default:
+				desired = append(desired, "models/"+current)
+			}
 			return true
 		})
 		if !seen {
 			return nil, fmt.Errorf("batchEmbedContents requires at least one request")
 		}
 		// Mutate only after the read pass: Set invalidates results obtained from doc.
-		resourceName := "models/" + strings.TrimPrefix(strings.TrimSpace(baseModel), "models/")
-		for _, position := range modelLessEntries {
-			if errSet := doc.Set("requests."+strconv.Itoa(position)+".model", resourceName); errSet != nil {
+		for position, value := range desired {
+			if value == "" {
+				continue
+			}
+			if errSet := doc.Set("requests."+strconv.Itoa(position)+".model", value); errSet != nil {
 				return nil, fmt.Errorf("batchEmbedContents entry %d: set model: %w", position, errSet)
 			}
 		}
