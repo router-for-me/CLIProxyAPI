@@ -30,8 +30,10 @@ var claudeOAuthRefreshHeaderOrder = []string{
 }
 
 // claudeOAuthInspectHeaderOrder is the order the native client emits for the
-// authenticated Axios GET lookups on the OAuth control plane, covering both the
-// account profile and the claude_cli roles companion request.
+// authenticated Axios GET lookups on the OAuth control plane: the account
+// profile, the claude_cli roles companion request, and the usage poll. Headers
+// a request adds beyond this list (the usage poll's anthropic-beta) follow the
+// listed ones in their original relative order.
 var claudeOAuthInspectHeaderOrder = []string{
 	"Accept",
 	"Content-Type",
@@ -48,6 +50,7 @@ var claudeOAuthInspectHeaderOrder = []string{
 var claudeOAuthInspectTargets = []string{
 	"/api/oauth/profile",
 	"/api/oauth/claude_cli/roles",
+	"/api/oauth/usage",
 }
 
 func claudeOAuthRequestHeaderOrder(method, requestTarget string) []string {
