@@ -96,7 +96,10 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errExecute, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
-					return cliproxyexecutor.Response{}, errExecute
+					if preferredUpstreamErr != nil && isHomeRetryRoundExhausted(errExecute) {
+						errExecute = preferredExecutionAttemptError(errExecute, preferredUpstreamErr)
+					}
+					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
 				}
 				exceeded, errWait := m.waitForContinuityBoundedCooldown(ctx, waitSession, wait, maxWait)
 				if errWait != nil {
@@ -313,6 +316,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					delete(meta, cliproxyexecutor.ParentSessionIDMetadataKey)
 				}
 				execOpts.Metadata = meta
+			} else {
+				payload := execOpts.OriginalRequest
+				if len(payload) == 0 {
+					payload = execReq.Payload
+				}
+				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
@@ -386,7 +395,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, CompletedResponse: errExecute == nil && !countTokens && !response.Incomplete && isCompletedExecutionPayload(response.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, preparedAuth, execOpts.Headers), RefreshToken: authRefreshToken(preparedAuth), CredentialVersion: preparedAuth.CredentialVersion, RegistrationEpoch: preparedAuth.RegistrationEpoch}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
@@ -426,7 +435,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				continue
 			}
-			if isRequestInvalidError(errExecute) {
+			if isRequestInvalidError(errExecute) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
