@@ -6,6 +6,7 @@ package codex
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -51,26 +52,44 @@ func NewCodexAuth(cfg *config.Config) *CodexAuth {
 // NewCodexAuthWithProxyURL creates a new CodexAuth service instance.
 // proxyURL takes precedence over cfg.ProxyURL when non-empty.
 func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
-	effectiveProxyURL := strings.TrimSpace(proxyURL)
-	var sdkCfg config.SDKConfig
 	agentNameHint := SIWCAgentNameHint
-	if cfg != nil {
-		sdkCfg = cfg.SDKConfig
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = strings.TrimSpace(cfg.ProxyURL)
-		}
-		agentNameHint = cfg.Codex.EffectiveSignInWithChatGPTIdentifier()
-	}
-	sdkCfg.ProxyURL = effectiveProxyURL
 	var journal RefreshJournal
-	if cfg != nil && strings.TrimSpace(cfg.AuthDir) != "" {
-		journal = &FileRefreshJournal{Dir: cfg.AuthDir}
+	if cfg != nil {
+		agentNameHint = cfg.Codex.EffectiveSignInWithChatGPTIdentifier()
+		if strings.TrimSpace(cfg.AuthDir) != "" {
+			journal = &FileRefreshJournal{Dir: cfg.AuthDir}
+		}
 	}
 	return &CodexAuth{
-		httpClient:        util.SetProxy(&sdkCfg, &http.Client{}),
+		httpClient:        NewOAuthHTTPClient(cfg, proxyURL),
 		siwcAgentNameHint: agentNameHint,
 		refreshJournal:    journal,
 	}
+}
+
+func NewOAuthHTTPClient(cfg *config.Config, proxyURL string) *http.Client {
+	if strings.TrimSpace(proxyURL) == "" && cfg != nil {
+		proxyURL = cfg.ProxyURL
+	}
+	client := util.SetProxy(&config.SDKConfig{ProxyURL: proxyURL}, &http.Client{})
+	if cfg == nil || !cfg.Codex.OAuthDisableMLKEM {
+		return client
+	}
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if transport, ok := base.(*http.Transport); ok {
+		t := transport.Clone()
+		if t.TLSClientConfig == nil {
+			t.TLSClientConfig = &tls.Config{}
+		}
+		if len(t.TLSClientConfig.CurvePreferences) == 0 {
+			t.TLSClientConfig.CurvePreferences = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521}
+		}
+		client.Transport = t
+	}
+	return client
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).

@@ -2,8 +2,12 @@ package codex
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +27,65 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestNewCodexAuthDoesNotSetRequestTimeout(t *testing.T) {
 	if got := NewCodexAuth(nil).httpClient.Timeout; got != 0 {
 		t.Fatalf("HTTP client timeout = %s, want zero", got)
+	}
+}
+
+func TestOAuthDisableMLKEM(t *testing.T) {
+	cfg, err := config.ParseConfigBytes([]byte("oauth:\n  providers:\n    codex:\n      oauth-disable-mlkem: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			for _, group := range hello.SupportedCurves {
+				switch group {
+				case tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521:
+				default:
+					return nil, errors.New("unsupported key exchange group")
+				}
+			}
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	auth := NewCodexAuth(cfg)
+	transport, ok := auth.httpClient.Transport.(*http.Transport)
+	if !ok || transport == http.DefaultTransport || transport.TLSClientConfig == nil {
+		t.Fatal("expected a private OAuth transport with TLS settings")
+	}
+	transport.TLSClientConfig.RootCAs = server.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	resp, err := auth.httpClient.Get(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+	if resp.StatusCode != http.StatusNoContent || resp.TLS.Version != tls.VersionTLS13 {
+		t.Fatalf("unexpected response: HTTP %d, TLS %s", resp.StatusCode, tls.VersionName(resp.TLS.Version))
+	}
+	if len(resp.TLS.VerifiedChains) == 0 {
+		t.Fatal("expected the OAuth client to verify the server certificate")
+	}
+}
+
+func TestOAuthMLKEMUsesDefaultTransportUnlessDisabled(t *testing.T) {
+	cfg := &config.Config{}
+	if transport := NewCodexAuth(cfg).httpClient.Transport; transport != nil {
+		t.Fatalf("unset option should inherit the default transport, got %T", transport)
+	}
+	cfg.Codex.OAuthDisableMLKEM = true
+	cfg.ProxyURL = "http://global.example.com:8080"
+	client := NewOAuthHTTPClient(cfg, "direct")
+	transport := client.Transport.(*http.Transport)
+	if transport.Proxy != nil || !slices.Contains(transport.TLSClientConfig.CurvePreferences, tls.X25519) {
+		t.Fatal("expected direct OAuth transport with classical key exchange")
 	}
 }
 
