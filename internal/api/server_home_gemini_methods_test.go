@@ -84,3 +84,29 @@ func TestFormatHomeGeminiModelResolvesAliasEntries(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatHomeGeminiModelGatesNativeMethodsByProvider keeps the catalog honest: the static
+// fallback knows Gemini and AI Studio, and Vertex answers 501 for these actions, so an entry
+// that only routes through Vertex must not advertise them.
+func TestFormatHomeGeminiModelGatesNativeMethodsByProvider(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		providers []string
+		want      string
+	}{
+		{name: "gemini route", providers: []string{"gemini"}, want: "embedContent"},
+		{name: "aistudio route", providers: []string{"aistudio"}, want: "embedContent"},
+		{name: "interactions route", providers: []string{"gemini-interactions"}, want: "embedContent"},
+		{name: "vertex only", providers: []string{"vertex"}, want: "generateContent"},
+		{name: "vertex and gemini", providers: []string{"gemini", "vertex"}, want: "generateContent"},
+		{name: "no provider info", providers: nil, want: "embedContent"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			model := formatHomeGeminiModel(homeModelEntry{id: "gemini-embedding-001", providers: tt.providers})
+			methods := model["supportedGenerationMethods"].([]string)
+			if len(methods) == 0 || methods[0] != tt.want {
+				t.Fatalf("methods = %v, want first method %q", methods, tt.want)
+			}
+		})
+	}
+}
