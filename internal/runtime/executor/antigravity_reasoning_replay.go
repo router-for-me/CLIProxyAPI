@@ -292,13 +292,47 @@ func antigravityClaudeReplaySystemLane(payload []byte) string {
 	if errUnmarshal := json.Unmarshal([]byte(system.Raw), &value); errUnmarshal != nil {
 		return ""
 	}
-	value = antigravityClaudeReplayNormalizeSystem(value)
+	switch typed := value.(type) {
+	case string:
+		if util.IsClaudeCodeAttributionSystemText(typed) {
+			return ""
+		}
+	case []any:
+		filtered := make([]any, 0, len(typed))
+		removed := false
+		for _, child := range typed {
+			if antigravityClaudeReplayIsAttributionBlock(child) {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, antigravityClaudeReplayNormalizeSystem(child))
+		}
+		if removed && len(filtered) == 0 {
+			return ""
+		}
+		value = filtered
+	default:
+		value = antigravityClaudeReplayNormalizeSystem(value)
+	}
 	normalized, errMarshal := json.Marshal(value)
 	if errMarshal != nil {
 		return ""
 	}
 	sum := sha256.Sum256(normalized)
 	return fmt.Sprintf("%x", sum[:16])
+}
+
+func antigravityClaudeReplayIsAttributionBlock(value any) bool {
+	block, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	blockType, okType := block["type"].(string)
+	if !okType || blockType != "text" {
+		return false
+	}
+	text, okText := block["text"].(string)
+	return okText && util.IsClaudeCodeAttributionSystemText(text)
 }
 
 func antigravityClaudeReplayNormalizeSystem(value any) any {

@@ -593,7 +593,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	bootstrapEligible := func(err error) bool {
-		if httptransport.IsOutcomeUnknown(err) || coreauth.IsContinuityTerminatedError(err) {
+		if httptransport.IsOutcomeUnknown(err) ||
+			coreauth.IsContinuityTerminatedError(err) ||
+			coreauth.IsRequestStopError(err) ||
+			coreauth.IsTOSViolationError(err) {
+			return false
+		}
+		if coreauth.IsAntigravityValidationRequiredError(err) && !coreauth.IsRequestScopedContinueError(err) {
 			return false
 		}
 		status := statusFromError(err)

@@ -589,7 +589,7 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCa
 	}
 	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
 		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, requestID, skipPluginID)
-		if capture != nil {
+		if capture != nil && !resp.Terminate {
 			capture.record(req, resp)
 		}
 		return resp
@@ -661,6 +661,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Body:            resp.Body,
 		ClearHeaders:    resp.ClearHeaders,
 		Terminate:       resp.Terminate,
+		TerminateScope:  resp.TerminateScope,
 		StatusCode:      normalizedTerminationStatus(resp.StatusCode),
 		ResponseHeaders: resp.ResponseHeaders,
 		ResponseBody:    resp.ResponseBody,

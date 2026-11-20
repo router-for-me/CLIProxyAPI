@@ -550,8 +550,10 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 		}
 		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, timeout)
 	} else {
-		// Optional post-refresh work follows its lifecycle without adding a timer.
-		refreshCtx, cancelRefresh = context.WithCancel(lifecycle)
+		// Optional post-refresh work still follows the caller's lifecycle, but a
+		// stalled upstream must not leak the goroutine or wedge state.task, so it
+		// runs under the bounded warm-hint budget instead of an unbounded cancel.
+		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, antigravityCreditsHintRefreshTimeout)
 	}
 	task := &antigravityCreditsRefreshTask{
 		state:     state,
