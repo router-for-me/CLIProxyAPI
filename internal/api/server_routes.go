@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
@@ -309,60 +310,34 @@ func (s *Server) codexAlphaSearchSelectionModel(ctx context.Context, c *gin.Cont
 	return model, nil
 }
 
-func sanitizeCodexAlphaSearchBody(body []byte) []byte {
-	var payload map[string]json.RawMessage
-	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil || payload == nil {
+// finalizeCodexAlphaSearchBody removes Responses-only fields, then applies the selected key's filter.
+func finalizeCodexAlphaSearchBody(body []byte, credential *auth.Auth, upstreamModel, requestedModel string, headers http.Header) []byte {
+	if !json.Valid(body) || !ojson.ParseBytes(body).IsObject() {
 		return body
 	}
 
-	removed := false
+	doc := ojson.NewDoc(body)
 	for _, field := range []string{"prompt_cache_key", "prompt_cache_retention"} {
-		if _, exists := payload[field]; exists {
-			delete(payload, field)
-			removed = true
-		}
+		_ = doc.Delete(field)
 	}
-	if !removed {
-		return body
-	}
-
-	sanitizedBody, errMarshal := json.Marshal(payload)
-	if errMarshal != nil {
-		return body
-	}
-	return sanitizedBody
+	rewriteCodexAlphaSearchModelDoc(doc, upstreamModel)
+	helps.ApplyKeyPayloadFiltersDoc(doc, credential, helps.PayloadFilterTarget{
+		Model:          doc.Get("model").String(),
+		RequestedModel: requestedModel,
+		Protocol:       "codex",
+		FromProtocol:   codexAlphaSearchSourceFormat,
+		Headers:        headers,
+	})
+	return doc.Bytes()
 }
 
-// rewriteCodexAlphaSearchModel replaces the top-level model field with the
-// credential-resolved upstream model before the request is forwarded.
-func rewriteCodexAlphaSearchModel(body []byte, upstreamModel string) []byte {
+// rewriteCodexAlphaSearchModelDoc replaces the model only when the client supplied one.
+func rewriteCodexAlphaSearchModelDoc(doc *ojson.Doc, upstreamModel string) {
 	upstreamModel = strings.TrimSpace(upstreamModel)
-	if upstreamModel == "" {
-		return body
+	if upstreamModel == "" || !doc.Get("model").Exists() {
+		return
 	}
-
-	var payload map[string]json.RawMessage
-	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil || payload == nil {
-		return body
-	}
-	if _, exists := payload["model"]; !exists {
-		return body
-	}
-
-	modelJSON, errMarshalModel := json.Marshal(upstreamModel)
-	if errMarshalModel != nil {
-		return body
-	}
-	if string(payload["model"]) == string(modelJSON) {
-		return body
-	}
-
-	payload["model"] = modelJSON
-	rewrittenBody, errMarshal := json.Marshal(payload)
-	if errMarshal != nil {
-		return body
-	}
-	return rewrittenBody
+	helps.SetStringIfDifferentDoc(doc, "model", upstreamModel)
 }
 
 func homeSelectionAttemptContext(ctx context.Context, selection *auth.HomeDispatchSelection) (context.Context, func(), error) {
@@ -392,7 +367,6 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 		Model string `json:"model"`
 	}
 	_ = json.Unmarshal(body, &routing)
-	upstreamRequestBody := sanitizeCodexAlphaSearchBody(body)
 
 	selectionHeaders := c.Request.Header.Clone()
 	if sessionID := strings.TrimSpace(routing.ID); sessionID != "" {
@@ -480,7 +454,7 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 			headers.Set("Chatgpt-Account-Id", accountID)
 		}
 		upstreamURL := "https://chatgpt.com/backend-api/codex/alpha/search"
-		requestBody := upstreamRequestBody
+		var upstreamModel string
 		// API-key Alpha Search reuses normal credential-aware model resolution so
 		// CPA routing prefixes and model aliases are not forwarded upstream.
 		if current.AuthKind() == auth.AuthKindAPIKey {
@@ -492,10 +466,9 @@ func (s *Server) codexAlphaSearch(c *gin.Context) {
 				return nil, errMissingBaseURL
 			}
 			upstreamURL = strings.TrimRight(baseURL, "/") + "/alpha/search"
-			if upstreamModel := s.handlers.AuthManager.ResolveExecutionModel(current, routeModel); upstreamModel != "" {
-				requestBody = rewriteCodexAlphaSearchModel(upstreamRequestBody, upstreamModel)
-			}
+			upstreamModel = s.handlers.AuthManager.ResolveExecutionModel(current, routeModel)
 		}
+		requestBody := finalizeCodexAlphaSearchBody(body, current, upstreamModel, routing.Model, c.Request.Header)
 		req, errRequest := s.handlers.AuthManager.NewHttpRequest(ctx, current, http.MethodPost, upstreamURL, requestBody, headers)
 		if errRequest != nil {
 			return nil, errRequest

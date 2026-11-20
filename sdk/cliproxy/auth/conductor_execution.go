@@ -1116,10 +1116,7 @@ func executorForAuth(executor ProviderExecutor, auth *Auth) (ProviderExecutor, e
 	if kind == AuthKindOAuth {
 		return executor, nil
 	}
-	var source internalconfig.PayloadFilterSource
-	if auth.AuthSourceKind() == AuthSourceConfig {
-		source = auth.ConfigKey
-	}
+	source := auth.ConfiguredKeyPayloadSource()
 	hasFilters := len(internalconfig.PayloadFiltersFor(source)) != 0
 	if kind != AuthKindAPIKey && !hasFilters {
 		return executor, nil
