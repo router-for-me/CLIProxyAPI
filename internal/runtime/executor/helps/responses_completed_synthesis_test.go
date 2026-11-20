@@ -189,6 +189,84 @@ func TestResponsesStreamOutputTracker_TypelessOutputItemDoneDoesNotSuppressMessa
 	}
 }
 
+func TestResponsesStreamOutputTracker_SynthesizesIncompleteAndMultipartMessage(t *testing.T) {
+	t.Run("response_incomplete", func(t *testing.T) {
+		var tracker ResponsesStreamOutputTracker
+		tracker.Observe("response.created", []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_inc","output":[]}}`))
+
+		incomplete := []byte(`{"type":"response.incomplete","sequence_number":1,"response":{"id":"resp_inc","status":"incomplete","incomplete_details":{"reason":"content_filter"},"output":[{"id":"msg_inc","type":"message","role":"assistant","status":"incomplete","content":[{"type":"refusal","refusal":"Blocked."}]}]}}`)
+		synth, updatedIncomplete := tracker.SynthesizeMissingOutputEvents(incomplete)
+		wantTypes := []string{
+			"response.output_item.added",
+			"response.content_part.added",
+			"response.refusal.delta",
+			"response.refusal.done",
+			"response.content_part.done",
+			"response.output_item.done",
+		}
+		if len(synth) != len(wantTypes) {
+			t.Fatalf("synthesized count = %d, want %d; events=%q", len(synth), len(wantTypes), synth)
+		}
+		var lastSeq int64
+		for i, wantType := range wantTypes {
+			if got := ojson.GetBytesNoCopy(synth[i], "type").String(); got != wantType {
+				t.Fatalf("synth[%d].type = %q, want %q", i, got, wantType)
+			}
+			seq := ojson.GetBytesNoCopy(synth[i], "sequence_number").Int()
+			if seq <= lastSeq {
+				t.Fatalf("synth[%d].sequence_number = %d, want > %d", i, seq, lastSeq)
+			}
+			lastSeq = seq
+		}
+		if gotSeq := ojson.GetBytesNoCopy(updatedIncomplete, "sequence_number").Int(); gotSeq <= lastSeq {
+			t.Fatalf("incomplete sequence_number = %d, want > %d", gotSeq, lastSeq)
+		}
+	})
+
+	t.Run("multipart_output_text_and_refusal", func(t *testing.T) {
+		var tracker ResponsesStreamOutputTracker
+		tracker.Observe("response.created", []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_multi","output":[]}}`))
+
+		completed := []byte(`{"type":"response.completed","sequence_number":1,"response":{"id":"resp_multi","status":"completed","output":[{"id":"msg_multi","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"First part."},{"type":"refusal","refusal":"Second part refused."}]}]}}`)
+		synth, updatedCompleted := tracker.SynthesizeMissingOutputEvents(completed)
+		wantTypes := []string{
+			"response.output_item.added",
+			"response.content_part.added",
+			"response.output_text.delta",
+			"response.output_text.done",
+			"response.content_part.done",
+			"response.content_part.added",
+			"response.refusal.delta",
+			"response.refusal.done",
+			"response.content_part.done",
+			"response.output_item.done",
+		}
+		if len(synth) != len(wantTypes) {
+			t.Fatalf("synthesized count = %d, want %d; events=%q", len(synth), len(wantTypes), synth)
+		}
+		var lastSeq int64
+		for i, wantType := range wantTypes {
+			if got := ojson.GetBytesNoCopy(synth[i], "type").String(); got != wantType {
+				t.Fatalf("synth[%d].type = %q, want %q", i, got, wantType)
+			}
+			seq := ojson.GetBytesNoCopy(synth[i], "sequence_number").Int()
+			if seq <= lastSeq {
+				t.Fatalf("synth[%d].sequence_number = %d, want > %d", i, seq, lastSeq)
+			}
+			lastSeq = seq
+		}
+		if ci := ojson.GetBytesNoCopy(synth[2], "content_index").Int(); ci != 0 {
+			t.Fatalf("first part content_index = %d, want 0", ci)
+		}
+		if ci := ojson.GetBytesNoCopy(synth[6], "content_index").Int(); ci != 1 {
+			t.Fatalf("second part content_index = %d, want 1", ci)
+		}
+		if gotSeq := ojson.GetBytesNoCopy(updatedCompleted, "sequence_number").Int(); gotSeq <= lastSeq {
+			t.Fatalf("completed sequence_number = %d, want > %d", gotSeq, lastSeq)
+		}
+	})
+}
+
 func TestHasMeaningfulCodexOutputDelta_RefusalDelta(t *testing.T) {
 	if !HasMeaningfulCodexOutputDelta([]byte(`{"type":"response.refusal.delta","delta":"No"}`)) {
 		t.Fatal("expected non-empty refusal delta to count as meaningful output delta")

@@ -696,6 +696,27 @@ func TestConvertCodexResponseToInteractions_RefusalStreamAndNonStream(t *testing
 		}
 	})
 
+	t.Run("empty_refusal_delta_does_not_suppress_done_fallback", func(t *testing.T) {
+		var param any
+		events := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":""}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		var combined strings.Builder
+		for _, ev := range events {
+			for _, out := range ConvertCodexResponseToInteractions(ctx, "muse-ember-1.0", nil, nil, ev, &param) {
+				combined.Write(out)
+			}
+		}
+		got := combined.String()
+		if count := strings.Count(got, refusalText); count != 1 {
+			t.Fatalf("empty-delta fallback refusal count = %d, want 1:\n%s", count, got)
+		}
+	})
+
 	t.Run("empty_refusal_field_falls_back_to_text", func(t *testing.T) {
 		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"","text":"I'm sorry, but I can't help with that request."}]}]}}`)
 		out := ConvertCodexResponseToInteractionsNonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
