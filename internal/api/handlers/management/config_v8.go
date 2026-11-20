@@ -38,7 +38,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusPreconditionFailed, gin.H{"error": "precondition_failed"})
 		return
 	}
-	data, _, err := config.NormalizeConfigLayout(raw, true)
+	data, _, commentedSections, err := config.NormalizeConfigLayoutSilent(raw, true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
@@ -139,6 +139,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		if c.Request.Method == http.MethodPatch {
 			mergeConfigV8Patch(dst, update.Content[0])
 		} else {
+			if len(parts) == 0 {
+				doc.HeadComment = update.HeadComment
+				doc.FootComment = update.FootComment
+			}
 			if dst.Kind == yaml.ScalarNode && update.Content[0].Kind == yaml.ScalarNode {
 				update.Content[0].HeadComment = dst.HeadComment
 				update.Content[0].LineComment = dst.LineComment
@@ -186,7 +190,8 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
-	data, _, err = config.NormalizeConfigLayout(data, true)
+	var finalCommented []config.ArchivedV8Section
+	data, _, finalCommented, err = config.NormalizeConfigLayoutSilent(data, true)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
@@ -198,6 +203,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
 		return
 	}
+	// Emit migration warnings only after the migrated document is persisted
+	// and only for sections whose archived comment block is in the written document.
+	config.WarnUnrecognizedV8Sections(config.FilterArchivedV8Sections(data, commentedSections))
+	config.WarnUnrecognizedV8Sections(finalCommented)
 	// Runtime-only ownership state is never sourced from an uploaded YAML document.
 	next.Home = h.cfg.Home
 	// WriteConfig may normalize the bytes, so report the version actually on
