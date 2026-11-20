@@ -26,7 +26,11 @@ const (
 	antigravityCapabilityCacheTTL    = registry.ModelsRefreshInterval
 	antigravityCapabilityRetryBase   = time.Minute
 	antigravityCapabilityRetryMax    = 30 * time.Minute
+	antigravityAuthErrorRetryBase    = 5 * time.Minute
+	antigravityForbiddenRetryBase    = 5 * time.Minute
+	antigravityForbiddenRetryMax     = 60 * time.Minute
 	antigravityRefreshScanInterval   = time.Minute
+	antigravityFailureMaxCount       = uint8(5)
 )
 
 type antigravityProbeStatus = sdkauth.AntigravityProbeStatus
@@ -35,6 +39,7 @@ const (
 	antigravityProbeStatusSuccess        = sdkauth.AntigravityProbeStatusSuccess
 	antigravityProbeStatusAuthError      = sdkauth.AntigravityProbeStatusAuthError
 	antigravityProbeStatusTransientError = sdkauth.AntigravityProbeStatusTransientError
+	antigravityProbeStatusForbidden      = sdkauth.AntigravityProbeStatusForbidden
 )
 
 type antigravityCapabilityCacheEntry struct {
@@ -58,16 +63,55 @@ type antigravityFailureState struct {
 }
 
 func nextAntigravityFailure(previous antigravityFailureState, now time.Time, randomInt64N func(int64) int64) antigravityFailureState {
+	// Five failures reach the capped window: 2, 4, 8, 16, 30 minutes.
+	return nextAntigravityFailureWithPolicy(previous, now, antigravityCapabilityRetryBase, antigravityCapabilityRetryMax, randomInt64N)
+}
+
+func nextAntigravityAuthErrorFailure(previous antigravityFailureState, now time.Time, randomInt64N func(int64) int64) antigravityFailureState {
+	// Three failures reach the capped window: 10, 20, 30 minutes while keeping token-scoped recovery on refresh.
+	return nextAntigravityFailureWithPolicy(previous, now, antigravityAuthErrorRetryBase, antigravityCapabilityRetryMax, randomInt64N)
+}
+
+func nextAntigravityForbiddenFailure(previous antigravityFailureState, now time.Time, randomInt64N func(int64) int64) antigravityFailureState {
+	// Four failures reach the capped window: 10, 20, 40, 60 minutes (equal jitter 30-60 minutes at cap).
+	return nextAntigravityFailureWithPolicy(previous, now, antigravityForbiddenRetryBase, antigravityForbiddenRetryMax, randomInt64N)
+}
+
+func nextAntigravityFailureWithPolicy(previous antigravityFailureState, now time.Time, base, maxWindow time.Duration, randomInt64N func(int64) int64) antigravityFailureState {
 	if now.Sub(previous.lastFailure) > 2*antigravityCapabilityCacheTTL {
 		previous.failures = 0
 	}
-	// Five failures reach the capped window: 2, 4, 8, 16, 30 minutes.
-	failures := min(previous.failures, 4) + 1
-	window := min(2*antigravityCapabilityRetryBase<<(failures-1), antigravityCapabilityRetryMax)
-	// Equal jitter retains a minimum delay, including at the cap (15-30 minutes).
+	// Advance consecutive failure count independently of when a shorter-ramp policy hits
+	// its window cap so mixed 401 -> 5xx sequences on the same token preserve full 5xx backoff.
+	failures := min(previous.failures, antigravityFailureMaxCount-1) + 1
+	window := min(2*base, maxWindow)
+	for step := uint8(1); step < failures && window < maxWindow; step++ {
+		if window > maxWindow/2 {
+			window = maxWindow
+			break
+		}
+		window *= 2
+	}
+	// Equal jitter retains a minimum delay, including at the cap.
 	half := window / 2
 	delay := half + time.Duration(randomInt64N(int64(half)+1))
 	return antigravityFailureState{failures: failures, lastFailure: now, nextRetry: now.Add(delay)}
+}
+
+func isAntigravityAuthDisabled(auth *coreauth.Auth) bool {
+	return auth != nil && (auth.Disabled || auth.Status == coreauth.StatusDisabled)
+}
+
+func antigravityTokenFailureKey(cacheKey, accessToken string) string {
+	return cacheKey + fmt.Sprintf("/%x", sha256.Sum256([]byte(accessToken)))
+}
+
+func antigravityFailureNextRetryLocked(cacheKey, tokenFailureKey string) time.Time {
+	nextRetry := antigravityAuthFailureCache[tokenFailureKey].nextRetry
+	if routeRetry := antigravityAuthFailureCache[cacheKey].nextRetry; routeRetry.After(nextRetry) {
+		nextRetry = routeRetry
+	}
+	return nextRetry
 }
 
 var (
@@ -112,7 +156,7 @@ func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy, user
 }
 
 func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCapabilityHints {
-	if auth == nil {
+	if auth == nil || isAntigravityAuthDisabled(auth) {
 		return antigravityModelCapabilityHints{}
 	}
 	endpoint := antigravityModelBaseURLs(auth)[0]
@@ -152,14 +196,14 @@ func seedAntigravityCapabilityCacheLocked(cacheKey string, persisted antigravity
 }
 
 func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint string) (antigravityModelCapabilityHints, bool) {
-	if auth == nil {
+	if auth == nil || isAntigravityAuthDisabled(auth) {
 		return antigravityModelCapabilityHints{}, false
 	}
 	var current *coreauth.Auth
 	if s != nil && s.coreManager != nil && auth.ID != "" {
 		var exists bool
 		current, exists = s.coreManager.GetByID(auth.ID)
-		if !exists || current == nil || current.Disabled || current.RegistrationEpoch != auth.RegistrationEpoch {
+		if !exists || current == nil || isAntigravityAuthDisabled(current) || current.RegistrationEpoch != auth.RegistrationEpoch {
 			return antigravityModelCapabilityHints{}, false
 		}
 	}
@@ -174,7 +218,7 @@ func (s *Service) persistedAntigravityHintsForAuth(auth *coreauth.Auth, endpoint
 }
 
 func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *coreauth.Auth, expectedKey, endpoint string, hints antigravityModelCapabilityHints) bool {
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || isAntigravityAuthDisabled(auth) || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 {
 		return false
 	}
 	if ctx == nil {
@@ -193,7 +237,7 @@ func (s *Service) persistAntigravityCapabilityHints(ctx context.Context, auth *c
 	project, _ := auth.Metadata["project_id"].(string)
 	value := buildPersistedAntigravityCapabilityHintsValue(project, endpoint, hints)
 	persisted, preempted := s.coreManager.PersistMetadataEntry(ctx, auth.ID, auth.RegistrationEpoch, antigravityPersistedHintsMetaKey, value, func(existing *coreauth.Auth) bool {
-		if existing == nil || existing.Disabled || existing.Provider != auth.Provider || existing.RegistrationEpoch != auth.RegistrationEpoch || s.antigravityCapabilityKey(existing) != expectedKey {
+		if existing == nil || isAntigravityAuthDisabled(existing) || existing.Provider != auth.Provider || existing.RegistrationEpoch != auth.RegistrationEpoch || s.antigravityCapabilityKey(existing) != expectedKey {
 			return false
 		}
 		antigravityCapabilityMu.RLock()
@@ -241,7 +285,7 @@ func (s *Service) fetchAntigravityModelCapabilityHintsForAuth(ctx context.Contex
 // Return the key captured with the HTTP User-Agent so publication cannot label a
 // result with a version resolved before or after the actual probe snapshot.
 func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth *coreauth.Auth) (string, antigravityModelCapabilityHints) {
-	if auth == nil || auth.Metadata == nil || s.antigravityHomeEnabled() {
+	if auth == nil || auth.Metadata == nil || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() {
 		return "", antigravityModelCapabilityHints{}
 	}
 	if ctx == nil {
@@ -255,7 +299,9 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 	if accessToken == "" || ctx.Err() != nil {
 		return cacheKey, s.cachedAntigravityHintsForKey(auth, baseURLs[0], cacheKey)
 	}
-	failureKey := cacheKey + fmt.Sprintf("/%x", sha256.Sum256([]byte(accessToken)))
+	// Keep singleflight and transient/401 failure keys token-scoped, while 403 forbidden
+	// failures use cacheKey so routine access_token rotation does not reset backoff.
+	flightKey := antigravityTokenFailureKey(cacheKey, accessToken)
 	lookup := func() (antigravityModelCapabilityHints, bool) {
 		persisted, hasPersisted := s.persistedAntigravityHintsForAuth(auth, baseURLs[0])
 		antigravityCapabilityMu.Lock()
@@ -270,18 +316,18 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			entry.lastUsed = now
 			antigravityCapabilityCache[cacheKey] = entry
 		}
-		return entry.hints.clone(), now.Before(entry.expiresAt) || now.Before(antigravityAuthFailureCache[failureKey].nextRetry)
+		return entry.hints.clone(), now.Before(entry.expiresAt) || now.Before(antigravityFailureNextRetryLocked(cacheKey, flightKey))
 	}
 	if hints, cached := lookup(); cached {
 		return cacheKey, hints
 	}
 	// The initiating caller owns the shared HTTP operation. Followers may cancel
 	// their own wait without canceling that operation or blocking a refresh worker.
-	resultCh := antigravityCapabilityGroup.DoChan(failureKey, func() (any, error) {
+	resultCh := antigravityCapabilityGroup.DoChan(flightKey, func() (any, error) {
 		if hints, cached := lookup(); cached {
 			return hints, nil
 		}
-		ctx, finish, active := s.beginAntigravityAccountProbe(ctx, auth, cacheKey, failureKey, accessToken)
+		ctx, finish, active := s.beginAntigravityAccountProbe(ctx, auth, cacheKey, flightKey, accessToken)
 		if !active {
 			return s.cachedAntigravityHintsForKey(auth, baseURLs[0], cacheKey), nil
 		}
@@ -330,12 +376,22 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			hints.revision = revision
 			current.hints, current.expiresAt, current.lastUsed = hints.clone(), now.Add(antigravityCapabilityCacheTTL), now
 			antigravityCapabilityCache[cacheKey] = current
-			delete(antigravityAuthFailureCache, failureKey)
+			delete(antigravityAuthFailureCache, flightKey)
+			delete(antigravityAuthFailureCache, cacheKey)
 			return hints, nil
 		}
-		// Missing models (including legacy capability-only responses) are not a
-		// successful catalog. Preserve last success and increase the jittered backoff.
-		antigravityAuthFailureCache[failureKey] = nextAntigravityFailure(antigravityAuthFailureCache[failureKey], now, rand.Int64N)
+		switch status {
+		case antigravityProbeStatusForbidden:
+			// 403 forbidden failures persist across routine access_token rotation via cacheKey.
+			antigravityAuthFailureCache[cacheKey] = nextAntigravityForbiddenFailure(antigravityAuthFailureCache[cacheKey], now, rand.Int64N)
+		case antigravityProbeStatusAuthError:
+			// 401 unauthorized failures back off longer for the same token while retrying immediately on token refresh.
+			antigravityAuthFailureCache[flightKey] = nextAntigravityAuthErrorFailure(antigravityAuthFailureCache[flightKey], now, rand.Int64N)
+		default:
+			// Missing models (including legacy capability-only responses) and transient errors
+			// are not a successful catalog. Preserve last success and increase the jittered backoff.
+			antigravityAuthFailureCache[flightKey] = nextAntigravityFailure(antigravityAuthFailureCache[flightKey], now, rand.Int64N)
+		}
 		retained := current.hints.clone()
 		if status == antigravityProbeStatusSuccess && len(hints.WebSearchModelIDs) > 0 {
 			retained.WebSearchModelIDs = hints.WebSearchModelIDs
@@ -547,7 +603,7 @@ func antigravityAuthModelSettingsEqual(a, b *coreauth.Auth) bool {
 }
 
 func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth.Auth, providerKey string, hints antigravityModelCapabilityHints, expectedKey string, expectedEpoch, expectedRegEpoch uint64) {
-	if ctx.Err() != nil || s.antigravityHomeEnabled() || s.antigravityCapabilityKey(auth) != expectedKey {
+	if ctx.Err() != nil || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() || s.antigravityCapabilityKey(auth) != expectedKey {
 		return
 	}
 	if hints.ModelIDs == nil && len(hints.WebSearchModelIDs) == 0 {
@@ -555,7 +611,7 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 	}
 	if s.coreManager != nil {
 		current, exists := s.coreManager.GetByID(auth.ID)
-		if !exists || current == nil || current.Disabled || current.Provider != auth.Provider || current.RegistrationEpoch != expectedEpoch || !antigravityAuthModelSettingsEqual(current, auth) || s.antigravityCapabilityKey(current) != expectedKey {
+		if !exists || current == nil || isAntigravityAuthDisabled(current) || current.Provider != auth.Provider || current.RegistrationEpoch != expectedEpoch || !antigravityAuthModelSettingsEqual(current, auth) || s.antigravityCapabilityKey(current) != expectedKey {
 			return
 		}
 	}
@@ -616,19 +672,19 @@ func (s *Service) refreshAntigravityModels(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, "antigravity") {
+		if auth == nil || isAntigravityAuthDisabled(auth) || !strings.EqualFold(auth.Provider, "antigravity") {
 			continue
 		}
 		snapshot := auth.Clone()
 		key := s.antigravityCapabilityKey(snapshot)
 		token, _ := snapshot.Metadata["access_token"].(string)
-		failureKey := key + fmt.Sprintf("/%x", sha256.Sum256([]byte(strings.TrimSpace(token))))
+		failureKey := antigravityTokenFailureKey(key, strings.TrimSpace(token))
 		epoch := GlobalModelRegistry().ClientRegistrationEpoch(snapshot.ID)
 		antigravityCapabilityMu.RLock()
 		entry := antigravityCapabilityCache[key]
 		registered := entry.appliedRevision == entry.hints.revision && entry.appliedEpoch == epoch
 		persisted := s.coreManager == nil || entry.hints.ModelIDs == nil || entry.persistedRevision == entry.hints.revision
-		fresh := (antigravityNowFunc().Before(entry.expiresAt) && registered && persisted) || antigravityNowFunc().Before(antigravityAuthFailureCache[failureKey].nextRetry)
+		fresh := (antigravityNowFunc().Before(entry.expiresAt) && registered && persisted) || antigravityNowFunc().Before(antigravityFailureNextRetryLocked(key, failureKey))
 		antigravityCapabilityMu.RUnlock()
 		if fresh {
 			continue
@@ -651,14 +707,14 @@ func (s *Service) nextAntigravityModelRefreshDelay() time.Duration {
 		return antigravityRefreshScanInterval
 	}
 	for _, auth := range s.coreManager.List() {
-		if auth == nil || auth.Disabled || !strings.EqualFold(auth.Provider, "antigravity") {
+		if auth == nil || isAntigravityAuthDisabled(auth) || !strings.EqualFold(auth.Provider, "antigravity") {
 			continue
 		}
 		key := s.antigravityCapabilityKey(auth)
 		token, _ := auth.Metadata["access_token"].(string)
-		failureKey := key + fmt.Sprintf("/%x", sha256.Sum256([]byte(strings.TrimSpace(token))))
+		failureKey := antigravityTokenFailureKey(key, strings.TrimSpace(token))
 		antigravityCapabilityMu.RLock()
-		retry := antigravityAuthFailureCache[failureKey].nextRetry
+		retry := antigravityFailureNextRetryLocked(key, failureKey)
 		expiry := antigravityCapabilityCache[key].expiresAt
 		antigravityCapabilityMu.RUnlock()
 		for _, deadline := range []time.Time{retry, expiry} {

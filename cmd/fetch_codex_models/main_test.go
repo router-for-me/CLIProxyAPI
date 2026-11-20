@@ -142,4 +142,126 @@ func TestEnsureBaselineModel(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("skips hidden non-API first model and clones first visible API-supported model as gpt-5.5", func(t *testing.T) {
+		raw := []byte(`{"models":[
+			{"slug":"gpt-6-chat-thinking","display_name":"GPT-6 Chat Thinking","visibility":"hide","supported_in_api":false,"minimal_client_version":"0.144.0","service_tiers":[]},
+			{"slug":"gpt-reserve","display_name":"GPT-Reserve","visibility":"hide","supported_in_api":true,"minimal_client_version":"0.144.0","service_tiers":[{"id":"priority"}]},
+			{"slug":"gpt-6.2-sol","display_name":"GPT-6.2-Sol","visibility":"list","supported_in_api":true,"minimal_client_version":"0.166.0","service_tiers":[{"id":"priority"},{"id":"ultrafast"}],"tool_mode":"code_mode_only","use_responses_lite":true,"supports_reasoning_effort_updates":true}
+		]}`)
+		out, count, errEnsure := ensureBaselineModel(raw)
+		if errEnsure != nil {
+			t.Fatalf("ensureBaselineModel: %v", errEnsure)
+		}
+		if count != 4 {
+			t.Fatalf("count = %d, want 4", count)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.slug").String(); got != "gpt-5.5" {
+			t.Fatalf("models[3].slug = %q, want gpt-5.5", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.display_name").String(); got != "GPT-6.2-Sol" {
+			t.Fatalf("models[3].display_name = %q, want GPT-6.2-Sol", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.supported_in_api"); got.Type != ojson.True {
+			t.Fatalf("models[3].supported_in_api = %v (%s), want true", got.Value(), got.Type)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.service_tiers.0.id").String(); got != "priority" {
+			t.Fatalf("models[3].service_tiers[0].id = %q, want priority", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.visibility").String(); got != "list" {
+			t.Fatalf("models[3].visibility = %q, want list", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.minimal_client_version").String(); got != "0.124.0" {
+			t.Fatalf("models[3].minimal_client_version = %q, want 0.124.0", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.minimal_client_version").String(); got != "0.166.0" {
+			t.Fatalf("models[2].minimal_client_version = %q, want 0.166.0", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.tool_mode"); got.Type != ojson.String || got.Str != "direct" {
+			t.Fatalf("models[3].tool_mode = %v (%s), want string \"direct\"", got.Value(), got.Type)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.use_responses_lite"); got.Type != ojson.False {
+			t.Fatalf("models[3].use_responses_lite = %v (%s), want false", got.Value(), got.Type)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.3.supports_reasoning_effort_updates"); got.Type != ojson.False {
+			t.Fatalf("models[3].supports_reasoning_effort_updates = %v (%s), want false", got.Value(), got.Type)
+		}
+	})
+
+	t.Run("prefers visible API-supported model with priority service tier when earlier candidate lacks it", func(t *testing.T) {
+		raw := []byte(`{"models":[
+			{"slug":"gpt-6.2-plain","display_name":"GPT-6.2-Plain","visibility":"list","supported_in_api":true,"minimal_client_version":"0.166.0","service_tiers":[]},
+			{"slug":"gpt-6.2-fast","display_name":"GPT-6.2-Fast","visibility":"list","supported_in_api":true,"minimal_client_version":"0.166.0","service_tiers":[{"id":"priority"}]}
+		]}`)
+		out, count, errEnsure := ensureBaselineModel(raw)
+		if errEnsure != nil {
+			t.Fatalf("ensureBaselineModel: %v", errEnsure)
+		}
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.display_name").String(); got != "GPT-6.2-Fast" {
+			t.Fatalf("models[2].display_name = %q, want GPT-6.2-Fast", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.service_tiers.0.id").String(); got != "priority" {
+			t.Fatalf("models[2].service_tiers[0].id = %q, want priority", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.minimal_client_version").String(); got != "0.124.0" {
+			t.Fatalf("models[2].minimal_client_version = %q, want 0.124.0", got)
+		}
+	})
+
+	t.Run("falls back to first visible API-supported model when no candidate has priority service tier", func(t *testing.T) {
+		raw := []byte(`{"models":[
+			{"slug":"gpt-hidden-exp","display_name":"Hidden Exp","visibility":"hide","supported_in_api":false,"service_tiers":[]},
+			{"slug":"gpt-6.2-plain","display_name":"GPT-6.2-Plain","visibility":"list","supported_in_api":true,"service_tiers":[]}
+		]}`)
+		out, count, errEnsure := ensureBaselineModel(raw)
+		if errEnsure != nil {
+			t.Fatalf("ensureBaselineModel: %v", errEnsure)
+		}
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.display_name").String(); got != "GPT-6.2-Plain" {
+			t.Fatalf("models[2].display_name = %q, want GPT-6.2-Plain", got)
+		}
+	})
+
+	t.Run("falls back to first visible model when supported_in_api is omitted", func(t *testing.T) {
+		raw := []byte(`{"models":[
+			{"slug":"gpt-hidden","display_name":"Hidden","visibility":"hide"},
+			{"slug":"gpt-visible","display_name":"Visible","visibility":"list"}
+		]}`)
+		out, count, errEnsure := ensureBaselineModel(raw)
+		if errEnsure != nil {
+			t.Fatalf("ensureBaselineModel: %v", errEnsure)
+		}
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.display_name").String(); got != "Visible" {
+			t.Fatalf("models[2].display_name = %q, want Visible", got)
+		}
+	})
+
+	t.Run("falls back to first API-supported model when all models are hidden", func(t *testing.T) {
+		raw := []byte(`{"models":[
+			{"slug":"gpt-hidden-exp","display_name":"Hidden Exp","visibility":"hide","supported_in_api":false},
+			{"slug":"gpt-hidden-api","display_name":"Hidden API","visibility":"hide","supported_in_api":true}
+		]}`)
+		out, count, errEnsure := ensureBaselineModel(raw)
+		if errEnsure != nil {
+			t.Fatalf("ensureBaselineModel: %v", errEnsure)
+		}
+		if count != 3 {
+			t.Fatalf("count = %d, want 3", count)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.display_name").String(); got != "Hidden API" {
+			t.Fatalf("models[2].display_name = %q, want Hidden API", got)
+		}
+		if got := ojson.GetBytesNoCopy(out, "models.2.visibility").String(); got != "list" {
+			t.Fatalf("models[2].visibility = %q, want list", got)
+		}
+	})
 }

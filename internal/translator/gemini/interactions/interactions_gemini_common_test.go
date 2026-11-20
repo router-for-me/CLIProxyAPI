@@ -111,6 +111,10 @@ func TestConvertInteractionsResponseToGeminiStreamFunctionCall(t *testing.T) {
 	if got := ojson.GetBytesNoCopy(delta[0], "candidates.0.content.parts.0.thoughtSignature").String(); got != "sig_1" {
 		t.Fatalf("thoughtSignature = %q, want sig_1. Payload: %s", got, string(delta[0]))
 	}
+	stopped := ConvertInteractionsResponseToGemini(context.Background(), "gemini-3.1-flash-lite", nil, nil, []byte(`data: {"event_type":"step.stop","index":0}`), &param)
+	if len(stopped) != 0 {
+		t.Fatalf("step.stop after arguments_delta emitted a duplicate chunk: %s", stopped)
+	}
 	completed := ConvertInteractionsResponseToGemini(context.Background(), "gemini-3.1-flash-lite", nil, nil, []byte(`data: {"interaction":{"id":"i1","status":"requires_action","usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5,"total_thought_tokens":1,"total_cached_tokens":4},"service_tier":"standard","model":"gemini-3.1-flash-lite"},"event_type":"interaction.completed"}`), &param)
 	if len(completed) != 1 {
 		t.Fatalf("completed output count = %d, want 1", len(completed))
@@ -134,6 +138,188 @@ func TestConvertInteractionsResponseToGeminiStreamFunctionCall(t *testing.T) {
 data: [DONE]`), &param)
 	if len(done) != 0 {
 		t.Fatalf("done output count = %d, want 0", len(done))
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiStreamFragmentedArguments(t *testing.T) {
+	const startLookup = `{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","signature":"sig_1","arguments":{}}}`
+	const stopLookup = `{"event_type":"step.stop","index":0}`
+	type functionCall struct{ id, name, args, signature string }
+	for _, tt := range []struct {
+		name   string
+		events []string
+		want   []functionCall
+	}{
+		{
+			name: "split JSON object",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"\"example\"}"}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"example"}`, "sig_1"}},
+		},
+		{
+			name: "single delta emits the equivalent call",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"example\"}"}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"example"}`, "sig_1"}},
+		},
+		{
+			name: "interleaved calls preserve whitespace inside strings",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.start","index":1,"step":{"type":"function_call","call_id":"call_2","name":"search","signature":"sig_2","arguments":{}}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"New "}}`,
+				`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"exa"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":" "}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":" York\"}"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":" "}}`,
+				stopLookup,
+				`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"mple\"}"}}`,
+				`{"event_type":"step.stop","index":1}`,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"New   York"}`, "sig_1"}, {"call_2", "search", `{"q":"example"}`, "sig_2"}},
+		},
+		{
+			name: "complete arguments before late function name",
+			events: []string{
+				`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","signature":"sig_1","arguments":{}}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"example\"}"}}`,
+				`{"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":{}}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"q":"example"}`, "sig_1"}},
+		},
+		{
+			name: "nested objects and escaped quotes across fragments",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"items\":[{\"n\":1}"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":",{\"n\":2}"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"],\"q\":\"left\\"}}`,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"\"}right\"}"}}`,
+				stopLookup,
+			},
+			want: []functionCall{{"call_1", "lookup", `{"items":[{"n":1},{"n":2}],"q":"left\"}right"}`, "sig_1"}},
+		},
+		{
+			name: "truncated arguments do not become an empty call",
+			events: []string{
+				startLookup,
+				`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":"}}`,
+				stopLookup,
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			var calls []functionCall
+			for _, event := range tt.events {
+				for _, chunk := range ConvertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, []byte("data: "+event), &param) {
+					for _, part := range ojson.GetBytesNoCopy(chunk, "candidates.0.content.parts").Array() {
+						if call := part.Get("functionCall"); call.Exists() {
+							calls = append(calls, functionCall{call.Get("id").String(), call.Get("name").String(), call.Get("args").Raw, part.Get("thoughtSignature").String()})
+						}
+					}
+				}
+			}
+			if len(calls) != len(tt.want) {
+				t.Fatalf("got %d function calls (%+v), want %d (%+v)", len(calls), calls, len(tt.want), tt.want)
+			}
+			for i, want := range tt.want {
+				if calls[i] != want {
+					t.Errorf("function call %d = %+v, want %+v", i, calls[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiStreamArgumentBufferLimit(t *testing.T) {
+	var param any
+	send := func(payload []byte) [][]byte {
+		return ConvertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, payload, &param)
+	}
+	send([]byte(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":{}}}`))
+	send([]byte(`{"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call_2","name":"lookup","arguments":{}}}`))
+	send([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\""}}`))
+	send([]byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"q\":\""}}`))
+	padding := strings.Repeat("x", 1<<20)
+	delta0 := []byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"` + padding + `"}}`)
+	delta1 := []byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"` + padding + `"}}`)
+	for range 30 {
+		if chunks := send(delta0); len(chunks) != 0 {
+			t.Fatal("incomplete call emitted before step 0 closed")
+		}
+	}
+	for range 25 {
+		if chunks := send(delta1); len(chunks) != 0 {
+			t.Fatal("incomplete call emitted before step 1 closed")
+		}
+	}
+	if chunks := send([]byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"\"}"}}`)); len(chunks) != 0 {
+		t.Fatal("call that exceeded the shared argument budget was emitted")
+	}
+	if chunks := send([]byte(`{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{}"}}`)); len(chunks) != 0 {
+		t.Fatal("later arguments restarted a rejected call")
+	}
+	send(delta0) // This fragment only fits if step 1's buffer was released.
+	if chunks := send([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"\"}"}}`)); len(chunks) != 1 {
+		t.Fatalf("call within budget emitted %d chunks, want 1", len(chunks))
+	}
+}
+
+func TestConvertInteractionsResponseToGeminiStreamCompleteFunctionCall(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args string
+	}{
+		{name: "with arguments", args: `{"q":"example"}`},
+		{name: "empty arguments", args: `{}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			send := func(payload string) [][]byte {
+				return ConvertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, []byte("data: "+payload), &param)
+			}
+			if started := send(`{"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":` + tt.args + `}}`); len(started) != 0 {
+				t.Fatalf("step.start output = %s, want no chunks before the step closes", started)
+			}
+			const stop = `{"event_type":"step.stop","index":0}`
+			stopped := send(stop)
+			if len(stopped) != 1 {
+				t.Fatalf("step.stop output count = %d, want one functionCall chunk", len(stopped))
+			}
+			parts := ojson.GetBytesNoCopy(stopped[0], "candidates.0.content.parts").Array()
+			if len(parts) != 1 {
+				t.Fatalf("step.stop parts = %d, want 1: %s", len(parts), stopped[0])
+			}
+			call := parts[0].Get("functionCall")
+			if id, name, args := call.Get("id").String(), call.Get("name").String(), call.Get("args").Raw; id != "call_1" || name != "lookup" || args != tt.args {
+				t.Fatalf("functionCall = %s, want id call_1, name lookup, and args %s", call.Raw, tt.args)
+			}
+			if duplicate := send(stop); len(duplicate) != 0 {
+				t.Fatalf("repeated step.stop emitted a duplicate chunk: %s", duplicate)
+			}
+			completed := send(`{"event_type":"interaction.completed","interaction":{"status":"requires_action"}}`)
+			if len(completed) != 1 {
+				t.Fatalf("interaction.completed output count = %d, want one STOP chunk", len(completed))
+			}
+			candidate := ojson.GetBytesNoCopy(completed[0], "candidates.0")
+			if got := candidate.Get("finishReason").String(); got != "STOP" {
+				t.Fatalf("finishReason = %q, want STOP", got)
+			}
+			for _, part := range candidate.Get("content.parts").Array() {
+				if part.Get("functionCall").Exists() {
+					t.Fatalf("interaction.completed emitted a duplicate functionCall: %s", completed[0])
+				}
+			}
+		})
 	}
 }
 
