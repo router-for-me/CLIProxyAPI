@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -55,6 +56,22 @@ func decodeAuthBody(body []byte, encoding string, limit int64) ([]byte, error) {
 				return nil, errReadAll
 			}
 			body = out
+		case "gzip", "x-gzip":
+			gzReader, errNewReader := gzip.NewReader(bytes.NewReader(body))
+			if errNewReader != nil {
+				return nil, errNewReader
+			}
+			out, errReadAll := io.ReadAll(io.LimitReader(gzReader, limit+1))
+			if errClose := gzReader.Close(); errClose != nil && errReadAll == nil {
+				errReadAll = errClose
+			}
+			if int64(len(out)) > limit {
+				return nil, errAuthBodyTooLarge
+			}
+			if errReadAll != nil {
+				return nil, errReadAll
+			}
+			body = out
 		default:
 			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
 		}
@@ -74,6 +91,7 @@ func handlerDecodesBody(r *http.Request) bool {
 	switch r.URL.Path {
 	case "/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/responses/compact",
 		"/backend-api/codex/responses", "/backend-api/codex/responses/compact",
+		"/v1/messages", "/v1/messages/count_tokens",
 		"/v1/images/generations", "/v1/audio/speech", "/v1/tts",
 		"/v1/videos", "/v1/videos/generations", "/v1/videos/edits", "/v1/videos/extensions":
 		return true

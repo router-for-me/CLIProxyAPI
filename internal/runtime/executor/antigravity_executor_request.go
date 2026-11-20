@@ -64,7 +64,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	if errProject != nil {
 		return nil, nil, errProject
 	}
-	geminiToAntigravityDoc(doc, modelName, projectID, derivedSessionIDs...)
+	geminiToAntigravityDocForAuth(doc, modelName, projectID, antigravityAuthID(auth), derivedSessionIDs...)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
@@ -721,7 +721,18 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string, der
 	return doc.Bytes()
 }
 
+func antigravityAuthID(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.ID)
+}
+
 func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string, derivedSessionIDs ...string) {
+	geminiToAntigravityDocForAuth(doc, modelName, projectID, "", derivedSessionIDs...)
+}
+
+func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID string, authID string, derivedSessionIDs ...string) {
 	if doc == nil {
 		return
 	}
@@ -754,7 +765,7 @@ func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string, 
 			sessionID = strings.TrimSpace(derivedSessionIDs[0])
 		}
 		if sessionID == "" {
-			sessionID = generateStableSessionIDDoc(doc)
+			sessionID = generateStableSessionIDDocForAuth(doc, authID)
 		}
 		_ = doc.Set("request.sessionId", sessionID)
 	}
@@ -790,6 +801,10 @@ func generateStableSessionID(payload []byte) string {
 }
 
 func generateStableSessionIDDoc(doc *ojson.Doc) string {
+	return generateStableSessionIDDocForAuth(doc, "")
+}
+
+func generateStableSessionIDDocForAuth(doc *ojson.Doc, authID string) string {
 	if doc == nil {
 		return generateSessionID()
 	}
@@ -797,14 +812,19 @@ func generateStableSessionIDDoc(doc *ojson.Doc) string {
 	if !contents.IsArray() {
 		contents = doc.Get("contents")
 	}
-	return generateStableSessionIDFromContents(contents)
+	return generateStableSessionIDFromContentsForAuth(contents, authID)
 }
 
 func generateStableSessionIDFromContents(contents ojson.Result) string {
+	return generateStableSessionIDFromContentsForAuth(contents, "")
+}
+
+func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID string) string {
 	if !contents.IsArray() {
 		return generateSessionID()
 	}
 
+	authID = strings.TrimSpace(authID)
 	stableID := ""
 	contents.ForEach(func(_, content ojson.Result) bool {
 		if content.Get("role").String() != "user" {
@@ -814,7 +834,13 @@ func generateStableSessionIDFromContents(contents ojson.Result) string {
 		if text == "" {
 			return true
 		}
-		hash := sha256.Sum256([]byte(text))
+		var hashInput []byte
+		if authID != "" {
+			hashInput = []byte("cli-proxy-api:antigravity:content-session\x00" + authID + "\x00" + text)
+		} else {
+			hashInput = []byte(text)
+		}
+		hash := sha256.Sum256(hashInput)
 		value := int64(binary.BigEndian.Uint64(hash[:8])) & 0x7FFFFFFFFFFFFFFF
 		stableID = "-" + strconv.FormatInt(value, 10)
 		return false
