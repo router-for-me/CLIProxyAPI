@@ -1109,21 +1109,39 @@ func deleteRequestHeaderFold(headers http.Header, key string) {
 
 // executorForAuth binds a selected key without changing the registered provider.
 func executorForAuth(executor ProviderExecutor, auth *Auth) (ProviderExecutor, error) {
-	if auth == nil || auth.AuthKind() != AuthKindAPIKey {
+	if auth == nil {
+		return executor, nil
+	}
+	kind := auth.AuthKind()
+	if kind == AuthKindOAuth {
 		return executor, nil
 	}
 	var source internalconfig.PayloadFilterSource
-	if IsConfigAPIKeyAuth(auth) {
+	if auth.AuthSourceKind() == AuthSourceConfig {
 		source = auth.ConfigKey
 	}
-	scoped, ok := executor.(APIKeyConfigExecutor)
-	if !ok {
-		if len(internalconfig.PayloadFiltersFor(source)) != 0 {
-			return nil, &Error{Code: "payload_policy_unsupported", Message: "selected key payload filters require a key-scoping provider"}
-		}
+	hasFilters := len(internalconfig.PayloadFiltersFor(source)) != 0
+	if kind != AuthKindAPIKey && !hasFilters {
 		return executor, nil
 	}
-	bound := scoped.ForAPIKey(source)
+
+	// Bind payload filters independently of credential kind when no key is required.
+	var bind func(internalconfig.PayloadFilterSource) ProviderExecutor
+	if kind == AuthKindAPIKey {
+		scoped, ok := executor.(APIKeyConfigExecutor)
+		if ok {
+			bind = scoped.ForAPIKey
+		}
+	} else if scoped, ok := executor.(KeyPayloadConfigExecutor); ok {
+		bind = scoped.WithKeyPayloadFilters
+	}
+	if bind == nil && !hasFilters {
+		return executor, nil
+	}
+	if bind == nil {
+		return nil, &Error{Code: "payload_policy_unsupported", Message: "selected key payload filters require a key-scoping provider"}
+	}
+	bound := bind(source)
 	if bound == nil {
 		return nil, &Error{Code: "payload_policy_unsupported", Message: "provider could not bind selected key payload filters"}
 	}

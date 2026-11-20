@@ -85,3 +85,59 @@ func (e XAIAutoExecutor) ForAPIKey(source config.PayloadFilterSource) cliproxyau
 	}
 	return &e
 }
+
+// WithKeyPayloadFilters copies the Codex config while preserving OAuth settings.
+func (e CodexExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.WithKeyPayloadFilters(source)
+	return &e
+}
+
+// WithKeyPayloadFilters copies the Gemini config while preserving OAuth settings.
+func (e GeminiExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.WithKeyPayloadFilters(source)
+	return &e
+}
+
+// WithKeyPayloadFilters copies the Vertex config while preserving OAuth settings.
+func (e GeminiVertexExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.WithKeyPayloadFilters(source)
+	return &e
+}
+
+// WithKeyPayloadFilters copies the compatibility config while preserving OAuth settings.
+func (e OpenAICompatExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.WithKeyPayloadFilters(source)
+	return &e
+}
+
+// WithKeyPayloadFilters copies the xAI config while preserving OAuth settings.
+func (e XAIExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.cfg = e.cfg.WithKeyPayloadFilters(source)
+	return &e
+}
+
+// WithKeyPayloadFilters binds Codex filters without replacing the WebSocket session store.
+func (e CodexWebsocketsExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.CodexExecutor = e.CodexExecutor.WithKeyPayloadFilters(source).(*CodexExecutor)
+	return &e
+}
+
+// WithKeyPayloadFilters binds xAI filters without replacing the WebSocket session store.
+func (e XAIWebsocketsExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.XAIExecutor = e.XAIExecutor.WithKeyPayloadFilters(source).(*XAIExecutor)
+	return &e
+}
+
+// WithKeyPayloadFilters binds the same Codex policy for both transports.
+func (e CodexAutoExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.httpExec = e.httpExec.WithKeyPayloadFilters(source).(*CodexExecutor)
+	e.wsExec = e.wsExec.WithKeyPayloadFilters(source).(*CodexWebsocketsExecutor)
+	return &e
+}
+
+// WithKeyPayloadFilters binds the same xAI policy for both transports.
+func (e XAIAutoExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) cliproxyauth.ProviderExecutor {
+	e.httpExec = e.httpExec.WithKeyPayloadFilters(source).(*XAIExecutor)
+	e.wsExec = e.wsExec.WithKeyPayloadFilters(source).(*XAIWebsocketsExecutor)
+	return &e
+}

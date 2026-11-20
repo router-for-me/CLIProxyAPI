@@ -90,6 +90,19 @@ func (e pluginRefreshCompatExecutor) ForAPIKey(source config.PayloadFilterSource
 	return &e
 }
 
+// WithKeyPayloadFilters binds the inner executor while preserving refresh delegation.
+func (e pluginRefreshCompatExecutor) WithKeyPayloadFilters(source config.PayloadFilterSource) coreauth.ProviderExecutor {
+	scoped, ok := e.inner.(coreauth.KeyPayloadConfigExecutor)
+	if !ok {
+		return nil
+	}
+	e.inner = scoped.WithKeyPayloadFilters(source)
+	if e.inner == nil {
+		return nil
+	}
+	return &e
+}
+
 func (e *pluginRefreshCompatExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if e == nil || e.inner == nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("plugin refresh compat executor is unavailable")

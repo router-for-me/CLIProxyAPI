@@ -28,16 +28,21 @@ func (cfg *Config) ForAPIKey() *Config {
 
 // ForConfiguredKey combines static-key scoping with the selected owner's filters.
 func (cfg *Config) ForConfiguredKey(source PayloadFilterSource) *Config {
-	scoped := cfg.ForAPIKey()
-	if scoped == nil || len(PayloadFiltersFor(source)) == 0 {
-		return scoped
+	return cfg.ForAPIKey().WithKeyPayloadFilters(source)
+}
+
+// WithKeyPayloadFilters adds a selected key's filters without changing OAuth scope.
+func (cfg *Config) WithKeyPayloadFilters(source PayloadFilterSource) *Config {
+	filters := PayloadFiltersFor(source)
+	if cfg == nil || len(filters) == 0 {
+		return cfg
 	}
 
 	// Allocate independent storage so appending local rules cannot change shared capacity.
-	view := *scoped
-	view.Payload.Filter = make([]PayloadFilterRule, len(scoped.Payload.Filter)+len(PayloadFiltersFor(source)))
-	copy(view.Payload.Filter, scoped.Payload.Filter)
-	copy(view.Payload.Filter[len(scoped.Payload.Filter):], PayloadFiltersFor(source))
+	view := *cfg
+	view.Payload.Filter = make([]PayloadFilterRule, len(cfg.Payload.Filter)+len(filters))
+	copy(view.Payload.Filter, cfg.Payload.Filter)
+	copy(view.Payload.Filter[len(cfg.Payload.Filter):], filters)
 	return &view
 }
 

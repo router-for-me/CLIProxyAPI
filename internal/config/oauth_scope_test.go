@@ -20,6 +20,10 @@ func TestKeyPayloadConfiguredView(t *testing.T) {
 	before := cfg.CloneForRuntime()
 	keyBefore := key.PayloadFilters()[0].Models[0].Match[0]["mode"]
 	first, second := cfg.ForConfiguredKey(key), cfg.ForConfiguredKey(key)
+	keyless := cfg.WithKeyPayloadFilters(key)
+	if !keyless.WebsocketAuth || !reflect.DeepEqual(keyless.OAuthOnlyFields, cfg.OAuthOnlyFields) || !reflect.DeepEqual(keyless.Payload.Filter, first.Payload.Filter) {
+		t.Fatal("keyless policy changed OAuth scope or filter composition")
+	}
 	if first == cfg || first == second || first.WebsocketAuth || len(first.Payload.Filter) != len(cfg.Payload.Filter)+len(key.PayloadFilters()) {
 		t.Fatal("selected view lost scoping, isolation or filter composition")
 	}
