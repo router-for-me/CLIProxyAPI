@@ -40,6 +40,17 @@ func newStreamBootstrapError(err error, headers http.Header) error {
 	upstreamAttempt := hasUpstreamExecutionAttempt(err)
 	provider := upstreamAttemptProviderFromError(err)
 	err = unwrapUpstreamExecutionAttempt(err)
+	if existing, ok := err.(*streamBootstrapError); ok && existing != nil {
+		// Already wrapped: refresh the captured headers when the caller
+		// supplies a newer set, but never nest another wrapper.
+		if headers != nil {
+			existing.headers = cloneHTTPHeader(headers)
+		}
+		if upstreamAttempt {
+			return markUpstreamExecutionAttemptWithProvider(existing, provider)
+		}
+		return existing
+	}
 	bootstrapErr := &streamBootstrapError{
 		cause:   err,
 		headers: cloneHTTPHeader(headers),
@@ -69,6 +80,51 @@ func (e *streamBootstrapError) Headers() http.Header {
 		return nil
 	}
 	return cloneHTTPHeader(e.headers)
+}
+
+// streamHeaderError attaches upstream response headers to an error that must be
+// returned directly (for example a request-fault bootstrap failure) without
+// becoming a streamBootstrapError. It exposes Headers() so the error path can
+// forward upstream diagnostic headers, while Unwrap preserves the original
+// error classification and status.
+type streamHeaderError struct {
+	cause   error
+	headers http.Header
+}
+
+func (e *streamHeaderError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *streamHeaderError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *streamHeaderError) Headers() http.Header {
+	if e == nil {
+		return nil
+	}
+	return cloneHTTPHeader(e.headers)
+}
+
+func newStreamHeaderError(err error, headers http.Header) error {
+	if err == nil {
+		return nil
+	}
+	if headers == nil {
+		return err
+	}
+	if existing, ok := err.(*streamHeaderError); ok && existing != nil {
+		existing.headers = cloneHTTPHeader(headers)
+		return existing
+	}
+	return &streamHeaderError{cause: err, headers: cloneHTTPHeader(headers)}
 }
 
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
@@ -639,7 +695,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				}
 				lastErr = bootstrapErr
 				if result.CredentialScope {
-					currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					currentErr := bootstrapErr
 					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 				}
 				continue
@@ -655,7 +711,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 				discardStreamChunks(streamResult.Chunks)
-				return nil, bootstrapErr
+				return nil, newStreamHeaderError(bootstrapErr, streamResult.Headers)
 			}
 			if idx < len(execModels)-1 {
 				rerr := resultErrorFromError(bootstrapErr)
@@ -671,7 +727,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
 				if result.CredentialScope {
-					currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+					currentErr := bootstrapErr
 					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 				}
 				continue
@@ -687,7 +743,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 			discardStreamChunks(streamResult.Chunks)
-			currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
+			currentErr := bootstrapErr
 			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 		}
 
