@@ -708,15 +708,23 @@ func mergeHeaders(current, updates http.Header, clear []string) http.Header {
 		out = make(http.Header)
 	}
 	for _, key := range clear {
-		out.Del(key)
+		deleteHeaderCaseInsensitive(out, key)
 	}
 	for key, values := range updates {
-		out.Del(key)
+		deleteHeaderCaseInsensitive(out, key)
 		for _, value := range values {
 			out.Add(key, value)
 		}
 	}
 	return out
+}
+
+func deleteHeaderCaseInsensitive(headers http.Header, key string) {
+	for existing := range headers {
+		if strings.EqualFold(existing, key) {
+			delete(headers, existing)
+		}
+	}
 }
 
 func cloneByteSlices(in [][]byte) [][]byte {

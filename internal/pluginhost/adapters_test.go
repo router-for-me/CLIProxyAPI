@@ -1753,6 +1753,34 @@ func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
 	}
 }
 
+func TestInterceptRequestAfterAuthReplacesDifferentHeaderCasing(t *testing.T) {
+	host := newHostWithRecords(capabilityRecord{
+		id: "after",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				return pluginapi.RequestInterceptResponse{
+					Headers:      http.Header{"X-Session-ID": []string{"new"}},
+					ClearHeaders: []string{"X-Remove"},
+				}, nil
+			}),
+		}},
+	})
+
+	got := host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Headers: http.Header{
+			"x-session-id": []string{"old"},
+			"x-remove":     []string{"stale"},
+		},
+	})
+
+	if len(got.Headers) != 1 {
+		t.Fatalf("headers = %#v, want one logical X-Session-ID header", got.Headers)
+	}
+	if values := got.Headers.Values("X-Session-ID"); len(values) != 1 || values[0] != "new" {
+		t.Fatalf("X-Session-ID values = %#v, want [new]", values)
+	}
+}
+
 func TestInterceptRequestPropagatesPath_Issue6196(t *testing.T) {
 	host := newHostWithRecords(capabilityRecord{
 		id: "path-rewriter",
