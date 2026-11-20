@@ -230,7 +230,7 @@ func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
 		},
 	}
 
-	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrela
 		},
 	}
 
-	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderC
 		},
 	}
 
-	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestApplyRequestAfterAuthInterceptor_OverridesPath_Issue6196(t *testing.T) 
 		},
 	}
 
-	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai-compatibility", req, opts, "gpt-image-2.5")
+	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, nil, "openai-compatibility", req, opts, "gpt-image-2.5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -295,6 +295,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"kimi-ai",
 		"kimi.ai",
 		"xai",
+		"copilot",
 		"devin",
 		"meta",
 		"openai-compatibility",
@@ -404,6 +405,14 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			}
 		}
 		s.registerExecutor(executor.NewXAIAutoExecutor(cfg))
+	case "copilot":
+		if existing, found := s.ownedExecutor("copilot"); found {
+			if previous, ok := existing.(*executor.CopilotExecutor); ok {
+				s.registerExecutor(previous.WithConfig(cfg))
+				return
+			}
+		}
+		s.registerExecutor(executor.NewCopilotExecutor(cfg))
 	case "devin":
 		s.registerExecutor(executor.NewDevinExecutor(cfg))
 	case "meta":

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -195,6 +196,12 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
+		}
+		models = applyExcludedModels(models, excluded)
+	case "copilot":
+		raw, _ := a.Metadata[copilot.CatalogKey].(string)
+		for _, route := range copilot.ReadCatalog(raw, time.Now()).Routes() {
+			models = append(models, route.Info)
 		}
 		models = applyExcludedModels(models, excluded)
 	case "devin":

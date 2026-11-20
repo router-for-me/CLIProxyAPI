@@ -137,13 +137,19 @@ func translateRequestPairWithAPIKeyModelCompatibility(ctx context.Context, heade
 // and the working payload's error for a content part the target cannot
 // represent. A baseline failure alone is ignored.
 func TranslateRequestPairWithAPIKeyModelCompatibilityAndUpdateIntent(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, originalPayload, requestPayload []byte, stream, isCompat bool) (original, working []byte, updatesChanged bool, err error) {
-	original, updatesChanged, err = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, originalPayload, stream, isCompat)
+	return translateRequestPair(originalPayload, requestPayload, func(payload []byte) ([]byte, bool, error) {
+		return TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, payload, stream, isCompat)
+	})
+}
+
+func translateRequestPair(originalPayload, requestPayload []byte, translate func([]byte) ([]byte, bool, error)) (original, working []byte, updatesChanged bool, err error) {
+	original, updatesChanged, err = translate(originalPayload)
 	if sameByteSlice(originalPayload, requestPayload) {
 		// A single translation serves both payloads, so its error is the working error.
 		return original, append([]byte(nil), original...), updatesChanged, err
 	}
 	// Only the working payload is sent upstream, so only its error counts.
-	working, updatesChanged, err = TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntent(ctx, headers, cfg, from, to, model, requestPayload, stream, isCompat)
+	working, updatesChanged, err = translate(requestPayload)
 	return original, working, updatesChanged, err
 }
 

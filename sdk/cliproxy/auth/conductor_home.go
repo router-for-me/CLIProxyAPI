@@ -1934,7 +1934,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 			execReq.Model = upstreamModel
 			execOpts := creditsOpts
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(creditsCtx, c.executor, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(creditsCtx, c.executor, c.auth, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				if isCredentialTerminatedError(errIntercept) {
 					recordRequestRefusedAuth(ctx, c.auth.ID)
