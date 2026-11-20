@@ -860,12 +860,26 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		req.Payload = resp.Body
 		opts.OriginalRequest = resp.Body
 	}
-	if path := strings.TrimSpace(resp.Path); path != "" {
-		if opts.Metadata == nil {
-			opts.Metadata = make(map[string]any, 1)
-		} else {
-			opts.Metadata = maps.Clone(opts.Metadata)
+	metadataCloned := false
+	ensureWritableMetadata := func(allocate bool, hint int) {
+		if metadataCloned {
+			if opts.Metadata == nil && allocate {
+				opts.Metadata = make(map[string]any, hint)
+			}
+			return
 		}
+		if opts.Metadata == nil {
+			if allocate {
+				opts.Metadata = make(map[string]any, hint)
+				metadataCloned = true
+			}
+			return
+		}
+		opts.Metadata = maps.Clone(opts.Metadata)
+		metadataCloned = true
+	}
+	if path := strings.TrimSpace(resp.Path); path != "" {
+		ensureWritableMetadata(true, 1)
 		opts.Metadata[cliproxyexecutor.RequestPathMetadataKey] = path
 	}
 	if resp.Terminate {
@@ -886,9 +900,7 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		}
 		info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, evalPayload, opts.Metadata)
 		if ok && info.SessionID != "" {
-			if opts.Metadata == nil {
-				opts.Metadata = make(map[string]any, 2)
-			}
+			ensureWritableMetadata(true, 2)
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
 			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
 				opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
@@ -896,15 +908,14 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 				delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 			}
 		} else {
+			ensureWritableMetadata(false, 0)
 			delete(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
 			delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 			delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 		}
 	} else if len(resp.Headers) > 0 {
 		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, opts.Metadata); ok && info.SessionID != "" {
-			if opts.Metadata == nil {
-				opts.Metadata = make(map[string]any, 2)
-			}
+			ensureWritableMetadata(true, 2)
 			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
 			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
 				opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
@@ -1087,16 +1098,41 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
+			if errCtx := execCtx.Err(); errCtx != nil {
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
+			}
+			if isAuthFreshnessError(errPrepare) {
+				lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+				continue
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, AccessToken: authAccessTokenForRequest(execCtx, auth, pickOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
-			if !isAuthFreshnessError(errPrepare) {
-				m.MarkResult(execCtx, result)
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
+			m.MarkResult(execCtx, result)
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
@@ -1155,11 +1191,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					upstreamErr = errExec
 				}
 				if errCtx := execCtx.Err(); errCtx != nil {
+					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					auth = refreshed
+					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
@@ -1174,6 +1212,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
+							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
@@ -1325,16 +1364,41 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var errPrepare error
 		auth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
+			if errCtx := execCtx.Err(); errCtx != nil {
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
+			}
+			if isAuthFreshnessError(errPrepare) {
+				lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+				continue
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true, AccessToken: authAccessTokenForRequest(execCtx, auth, pickOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
-			if !isAuthFreshnessError(errPrepare) {
-				m.MarkResult(execCtx, result)
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
+			m.MarkResult(execCtx, result)
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
@@ -1393,11 +1457,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					upstreamErr = errExec
 				}
 				if errCtx := execCtx.Err(); errCtx != nil {
+					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					auth = refreshed
+					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
 					execCtx = m.newUpstreamAttemptContext(execCtx)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
@@ -1412,6 +1478,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
+							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
@@ -1723,6 +1790,17 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		}
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
+			if errCtx := execCtx.Err(); errCtx != nil {
+				if selection != nil {
+					releaseAttempt()
+					selection.End("attempt_canceled")
+				}
+				return nil, errCtx
+			}
 			if selection != nil {
 				excludeAuth := shouldExcludeHomeAuthAfterStreamError(execCtx, auth, errPrepare)
 				if homeSameAuthRetries[auth.ID] > 0 {
@@ -1738,17 +1816,43 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 					return nil, errCancel
 				}
+				if isAuthFreshnessError(errPrepare) {
+					lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+					continue
+				}
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, AccessToken: authAccessTokenForRequest(execCtx, auth, pickOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
 			if selection != nil {
 				m.reportHomeResult(execCtx, result, auth)
 				releaseAttempt()
-			} else if !isAuthFreshnessError(errPrepare) {
+			} else {
 				m.MarkResult(execCtx, result)
+			}
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				if selection != nil {
+					selection.End("request_stopped")
+				}
+				return nil, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				if selection != nil {
+					selection.End("request_invalid")
+				}
+				return nil, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			if homeMode {

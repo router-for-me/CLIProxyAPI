@@ -35,6 +35,7 @@ const (
 	AntigravityProbeStatusSuccess AntigravityProbeStatus = iota
 	AntigravityProbeStatusAuthError
 	AntigravityProbeStatusTransientError
+	AntigravityProbeStatusForbidden
 )
 
 // AntigravityModelCapabilityHints holds normalized per-account model IDs and web-search capability IDs.
@@ -119,8 +120,11 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 			log.Debug("antigravity model fetch: response close failed")
 		}
 	}()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusAuthError
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusForbidden
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError

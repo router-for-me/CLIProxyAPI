@@ -96,7 +96,10 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errExecute, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
-					return cliproxyexecutor.Response{}, errExecute
+					if preferredUpstreamErr != nil && isHomeRetryRoundExhausted(errExecute) {
+						errExecute = preferredExecutionAttemptError(errExecute, preferredUpstreamErr)
+					}
+					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExecute)
 				}
 				exceeded, errWait := m.waitForContinuityBoundedCooldown(ctx, waitSession, wait, maxWait)
 				if errWait != nil {
@@ -272,12 +275,40 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
+			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseAttempt()
+				selection.End("attempt_canceled")
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
-			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}, auth)
+			result := Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
+			m.reportHomeResult(execCtx, result, auth)
 			releaseAttempt()
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				selection.End("request_invalid")
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
@@ -308,6 +339,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					delete(meta, cliproxyexecutor.ParentSessionIDMetadataKey)
 				}
 				execOpts.Metadata = meta
+			} else {
+				payload := execOpts.OriginalRequest
+				if len(payload) == 0 {
+					payload = execReq.Payload
+				}
+				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
 			var errIntercept error
 			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
@@ -365,6 +402,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			response, errExecute = execute()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
+			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseAttempt()
+				selection.End("attempt_canceled")
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			if countTokens {
 				if _, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
 					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint, extractErrorBody(errExecute))
@@ -376,7 +418,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
-			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
+			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, CompletedResponse: errExecute == nil && !countTokens && !response.Incomplete && isCompletedExecutionPayload(response.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, preparedAuth, execOpts.Headers), RefreshToken: authRefreshToken(preparedAuth), CredentialVersion: preparedAuth.CredentialVersion, RegistrationEpoch: preparedAuth.RegistrationEpoch}
 			if errExecute == nil {
 				m.reportHomeResult(execCtx, result, preparedAuth)
 				releaseAttempt()
@@ -394,6 +436,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.requestScopedErrorConfig(execCtx))
 			applyRequestScopedActionToResult(action, okAction, &result)
+			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseAttempt()
+				selection.End("attempt_canceled")
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
 			lastErr = keepPreferredCandidateError(lastErr, errExecute)
@@ -411,7 +458,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				continue
 			}
-			if isRequestInvalidError(errExecute) {
+			if isRequestInvalidError(errExecute) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
@@ -452,7 +499,14 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 		if releaseAttempt != nil {
 			releaseAttempt()
 		}
+		if selection != nil {
+			selection.End("empty_stream")
+		}
 		return result
+	}
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -466,7 +520,8 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 		forward := true
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
+				discardStreamChunks(result.Chunks)
 				return
 			case chunk, ok := <-result.Chunks:
 				if !ok {
@@ -476,7 +531,8 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 					continue
 				}
 				select {
-				case <-ctx.Done():
+				case <-done:
+					discardStreamChunks(result.Chunks)
 					return
 				case out <- chunk:
 				}
