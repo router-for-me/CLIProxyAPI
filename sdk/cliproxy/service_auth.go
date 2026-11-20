@@ -99,6 +99,11 @@ func (s *Service) handleAuthUpdate(ctx context.Context, update watcher.AuthUpdat
 }
 
 func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthUpdate) {
+	defer func(received []watcher.AuthUpdate) {
+		for _, update := range received {
+			update.MarkApplied()
+		}
+	}(updates)
 	if s == nil {
 		return
 	}
