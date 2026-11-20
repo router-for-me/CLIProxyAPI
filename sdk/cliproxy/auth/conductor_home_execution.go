@@ -467,7 +467,14 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 		if releaseAttempt != nil {
 			releaseAttempt()
 		}
+		if selection != nil {
+			selection.End("empty_stream")
+		}
 		return result
+	}
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -481,7 +488,8 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 		forward := true
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
+				discardStreamChunks(result.Chunks)
 				return
 			case chunk, ok := <-result.Chunks:
 				if !ok {
@@ -491,7 +499,8 @@ func wrapHomeStream(ctx context.Context, result *cliproxyexecutor.StreamResult, 
 					continue
 				}
 				select {
-				case <-ctx.Done():
+				case <-done:
+					discardStreamChunks(result.Chunks)
 					return
 				case out <- chunk:
 				}
