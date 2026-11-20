@@ -16,6 +16,15 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
+// PayloadFilterTarget describes the finalized request used to match filters.
+type PayloadFilterTarget struct {
+	Model          string
+	RequestedModel string
+	Protocol       string
+	FromProtocol   string
+	Headers        http.Header
+}
+
 var payloadConfigEvaluations atomic.Int64
 
 // PayloadConfigEvaluationCount returns the cumulative number of payload rule
@@ -385,32 +394,14 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 					mutated = true
 				}
 			}
-			// Apply filter rules: remove matching paths from payload.
-			for i := range rules.Filter {
-				rule := &rules.Filter[i]
-				if !payloadModelRulesMatchDoc(rule.Models, protocol, fromProtocol, headers, doc, root, candidates) {
-					continue
+			// Track selected deletions before reconciling the automatic image tool.
+			applyPayloadFiltersDoc(doc, rules.Filter, root, candidates, protocol, fromProtocol, headers, func(path string, existed bool) {
+				if existed {
+					mutated = true
+					noteRuleDelete(path)
 				}
-				for _, path := range rule.Params {
-					fullPath := buildPayloadPath(root, path)
-					if fullPath == "" {
-						continue
-					}
-					resolvedPaths := resolvePayloadRulePathsDoc(doc, fullPath)
-					for idx := len(resolvedPaths) - 1; idx >= 0; idx-- {
-						resolvedPath := resolvedPaths[idx]
-						existed := doc.Get(resolvedPath).Exists()
-						if errDel := doc.Delete(resolvedPath); errDel != nil {
-							continue
-						}
-						if existed {
-							mutated = true
-							noteRuleDelete(resolvedPath)
-						}
-						markTouched(resolvedPath)
-					}
-				}
-			}
+				markTouched(path)
+			})
 			// Codex compatibility (#7270/#7384): reconcile only untouched automatic
 			// image tools against the configured reasoning and route. Preserve explicit
 			// tool edits and selection, and never evaluate payload rules a second time.
@@ -424,6 +415,39 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 		}
 	}
 	return touched, mutated
+}
+
+// ApplyKeyPayloadFiltersDoc applies only the selected key's filters to a direct request.
+func ApplyKeyPayloadFiltersDoc(doc *ojson.Doc, credential *cliproxyauth.Auth, target PayloadFilterTarget) {
+	filters := config.PayloadFiltersFor(credential.ConfiguredKeyPayloadSource())
+	if len(filters) == 0 {
+		return
+	}
+	models := payloadModelCandidates(target.Model, target.RequestedModel)
+	applyPayloadFiltersDoc(doc, filters, "", models, target.Protocol, target.FromProtocol, target.Headers, nil)
+}
+
+// applyPayloadFiltersDoc deletes matching paths in rule order and tracks successful deletions.
+func applyPayloadFiltersDoc(doc *ojson.Doc, filters []config.PayloadFilterRule, root string, models []string, protocol, fromProtocol string, headers http.Header, track func(string, bool)) {
+	for _, rule := range filters {
+		if !payloadModelRulesMatchDoc(rule.Models, protocol, fromProtocol, headers, doc, root, models) {
+			continue
+		}
+		for _, path := range rule.Params {
+			fullPath := buildPayloadPath(root, path)
+			if fullPath == "" {
+				continue
+			}
+			resolvedPaths := resolvePayloadRulePathsDoc(doc, fullPath)
+			for idx := len(resolvedPaths) - 1; idx >= 0; idx-- {
+				resolvedPath := resolvedPaths[idx]
+				existed := doc.Get(resolvedPath).Exists()
+				if errDel := doc.Delete(resolvedPath); errDel == nil && track != nil {
+					track(resolvedPath, existed)
+				}
+			}
+		}
+	}
 }
 
 func findLastImageGenerationToolIndexDoc(doc *ojson.Doc, toolsPath string) int {
