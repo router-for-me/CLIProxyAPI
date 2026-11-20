@@ -1282,6 +1282,12 @@ func homeGeminiModelGenerationMethods(entry homeModelEntry) []string {
 	if methods := registry.NativeModelGenerationMethods(entry.generationMethods); len(methods) > 0 {
 		return methods
 	}
+	// The static fallback only knows Gemini and AI Studio support these actions. If every
+	// recorded Home route belongs to another provider (Vertex answers 501 for native
+	// actions), advertising them would promise a call that cannot execute.
+	if !homeEntrySupportsNativeActions(entry) {
+		return []string{"generateContent"}
+	}
 	// Home entries may be aliases, so probe the alias ID, the canonical model name, and the
 	// metadata model ID before giving up on the local static catalog.
 	for _, candidate := range []string{entry.id, entry.modelName, entry.metadataModelID} {
@@ -1300,6 +1306,19 @@ func homeGeminiModelGenerationMethods(entry homeModelEntry) []string {
 		}
 	}
 	return []string{"generateContent"}
+}
+
+// homeEntrySupportsNativeActions reports whether every recorded Home provider can serve
+// native Gemini actions. An entry without provider information is left to the caller.
+func homeEntrySupportsNativeActions(entry homeModelEntry) bool {
+	for _, provider := range entry.providers {
+		switch strings.ToLower(strings.TrimSpace(provider)) {
+		case "", "gemini", "gemini-interactions", "aistudio":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func homeGeminiModelMatches(entry homeModelEntry, action string) bool {

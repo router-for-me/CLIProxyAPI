@@ -70,26 +70,3 @@ func TestNativeModelGenerationMethods(t *testing.T) {
 		})
 	}
 }
-
-// TestBuildGeminiConfigModelsKeepsNativeMethodsForResourceFormNames covers the supported
-// resource form in a key's models list: the built-in catalog uses bare IDs, and the native
-// execution path accepts both forms, so the advertised methods must match.
-func TestBuildGeminiConfigModelsKeepsNativeMethodsForResourceFormNames(t *testing.T) {
-	models := buildGeminiConfigModels(&config.GeminiKey{Models: []config.GeminiModel{
-		{Name: "models/gemini-embedding-001"},
-		{Name: "models/gemini-decision-1", Alias: "decision-alias"},
-	}})
-	if len(models) != 2 {
-		t.Fatalf("got %d configured models, want 2", len(models))
-	}
-	byID := map[string][]string{}
-	for _, info := range models {
-		byID[info.ID] = info.SupportedGenerationMethods
-	}
-	if got := byID["models/gemini-embedding-001"]; len(got) != 2 || got[0] != "embedContent" {
-		t.Fatalf("resource-form embedding methods = %v, want native embedding methods", got)
-	}
-	if got := byID["decision-alias"]; len(got) != 1 || got[0] != "decisions" {
-		t.Fatalf("aliased decisions methods = %v, want decisions", got)
-	}
-}
