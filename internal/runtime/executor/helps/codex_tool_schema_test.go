@@ -1422,3 +1422,61 @@ func TestNormalizeCodexToolSchemas_StripsOutOfRangeInt64Bounds(t *testing.T) {
 		t.Errorf("expected NormalizeCodexToolSchemas to be idempotent")
 	}
 }
+
+func TestNormalizeCodexToolSchemas_StripsUniqueItems(t *testing.T) {
+	input := []byte(`{
+		"model": "gpt-6.2-astra",
+		"tools": [{
+			"type": "function",
+			"name": "ask_user",
+			"description": "Ask the user a structured question.",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"question": {"type": "string"},
+					"options": {
+						"type": "array",
+						"items": {"type": "string"},
+						"uniqueItems": true
+					},
+					"uniqueItems": {
+						"type": "boolean"
+					},
+					"user_data": {
+						"type": "object",
+						"default": {"uniqueItems": true},
+						"enum": [{"uniqueItems": false}]
+					}
+				},
+				"required": ["question"]
+			}
+		}]
+	}`)
+
+	out := NormalizeCodexToolSchemas(input)
+	params := ojson.GetBytes(out, "tools.0.parameters")
+
+	if params.Get("properties.options.uniqueItems").Exists() {
+		t.Errorf("expected properties.options.uniqueItems to be removed, got %s", params.Get("properties.options").Raw)
+	}
+	if got := params.Get("properties.options.type").String(); got != "array" {
+		t.Errorf("expected properties.options.type == 'array', got %q", got)
+	}
+	if got := params.Get("properties.options.items.type").String(); got != "string" {
+		t.Errorf("expected properties.options.items.type == 'string', got %q", got)
+	}
+	if got := params.Get("properties.uniqueItems.type").String(); got != "boolean" {
+		t.Errorf("expected literal property 'uniqueItems' preserved, got %q", got)
+	}
+	if params.Get("properties.user_data.default.uniqueItems").Type != ojson.True {
+		t.Errorf("expected user_data.default.uniqueItems preserved, got %s", params.Get("properties.user_data.default").Raw)
+	}
+	if params.Get("properties.user_data.enum.0.uniqueItems").Type != ojson.False {
+		t.Errorf("expected user_data.enum.0.uniqueItems preserved, got %s", params.Get("properties.user_data.enum").Raw)
+	}
+
+	outAgain := NormalizeCodexToolSchemas(out)
+	if string(outAgain) != string(out) {
+		t.Errorf("expected NormalizeCodexToolSchemas to be idempotent")
+	}
+}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -38,6 +39,7 @@ type ClaudeExecutor struct {
 	// constructors allocate it so copies made per request reuse one store.
 	oauthToolAliases *claudeOAuthToolAliasStore
 	threadBetas      *helps.ClaudeThreadBetaStore
+	advisorOwners    *helps.ClaudeAdvisorOwnerStore
 }
 
 type claudeOAuthCancellationError struct {
@@ -396,7 +398,51 @@ func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload,
 }
 
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor {
-	return &ClaudeExecutor{cfg: cfg, oauthToolAliases: &claudeOAuthToolAliasStore{}, threadBetas: &helps.ClaudeThreadBetaStore{}}
+	return &ClaudeExecutor{
+		cfg:              cfg,
+		oauthToolAliases: &claudeOAuthToolAliasStore{},
+		threadBetas:      &helps.ClaudeThreadBetaStore{},
+		advisorOwners:    helps.NewClaudeAdvisorOwnerStore(),
+	}
+}
+
+func (e *ClaudeExecutor) claudeAdvisorOwnerStore() *helps.ClaudeAdvisorOwnerStore {
+	claudeOAuthToolAliasStoreInitMu.Lock()
+	defer claudeOAuthToolAliasStoreInitMu.Unlock()
+	if e.advisorOwners == nil {
+		e.advisorOwners = helps.NewClaudeAdvisorOwnerStore()
+	}
+	return e.advisorOwners
+}
+
+func claudeAdvisorCredentialOwner(auth *cliproxyauth.Auth, apiKey string) string {
+	if identity := claudeDiagnosticsCredentialIdentity(auth); identity != "" {
+		return identity
+	}
+	if key := strings.TrimSpace(apiKey); key != "" {
+		return "key:" + kvstore.HashKeyPart(key)
+	}
+	return ""
+}
+
+func (e *ClaudeExecutor) stripForeignClaudeAdvisorBlocksDoc(ctx context.Context, auth *cliproxyauth.Auth, apiKey string, doc *ojson.Doc) *helps.ClaudeAdvisorRequestState {
+	if e == nil || doc == nil {
+		return nil
+	}
+	owner := claudeAdvisorCredentialOwner(auth, apiKey)
+	if owner == "" {
+		return nil
+	}
+	scope := e.upstreamRequestLogProvider()
+	state, stripped := e.claudeAdvisorOwnerStore().StripForeignAdvisorBlocksDoc(ctx, doc, scope, owner)
+	if stripped > 0 {
+		helps.LogWithRequestID(ctx).WithFields(log.Fields{
+			"component":       "advisor_sanitizer",
+			"executor":        scope,
+			"stripped_blocks": stripped,
+		}).Debug("claude executor: stripped foreign advisor blocks before upstream")
+	}
+	return state
 }
 
 func (e *ClaudeExecutor) prepareClaudeThreadBetas(ctx context.Context, request *http.Request, auth *cliproxyauth.Auth, body []byte, extraBetas []string, payloadBetasConfigured bool, incomingHeaders http.Header, uncloak bool, metadataSets ...map[string]any) (*helps.ClaudeThreadBetaRequest, error) {

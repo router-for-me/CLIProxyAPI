@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/MoeForge/moego/base64"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestGenerateStateMatchesNativeClaudeCode(t *testing.T) {
@@ -46,5 +47,63 @@ func TestGenerateAuthURLUsesNativeClaudeCodeScopes(t *testing.T) {
 	}
 	if returnedState != state || parsed.Query().Get("state") != state {
 		t.Error("authorization URL did not preserve the supplied state")
+	}
+}
+
+func TestGenerateAuthURLRespectsOAuthIncludeCreateAPIKeyConfig(t *testing.T) {
+	state := strings.Repeat("Ab9-_", 8) + "AbA"
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		wantScope string
+	}{
+		{
+			name:      "nil config defaults to native scope",
+			cfg:       nil,
+			wantScope: claudeOAuthAuthorizeScope,
+		},
+		{
+			name:      "unset pointer defaults to native scope",
+			cfg:       &config.Config{},
+			wantScope: claudeOAuthAuthorizeScope,
+		},
+		{
+			name: "explicit true includes org:create_api_key",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{
+					OAuthIncludeCreateAPIKey: new(true),
+				},
+			},
+			wantScope: claudeOAuthAuthorizeScope,
+		},
+		{
+			name: "explicit false omits org:create_api_key",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{
+					OAuthIncludeCreateAPIKey: new(false),
+				},
+			},
+			wantScope: ClaudeOAuthScope,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			auth := NewClaudeAuth(tt.cfg)
+			authURL, returnedState, errGenerate := auth.GenerateAuthURL(state, &PKCECodes{CodeChallenge: "challenge"})
+			if errGenerate != nil {
+				t.Fatalf("GenerateAuthURL() error = %v", errGenerate)
+			}
+			parsed, errParse := url.Parse(authURL)
+			if errParse != nil {
+				t.Fatalf("parse authorization URL: %v", errParse)
+			}
+			if got := parsed.Query().Get("scope"); got != tt.wantScope {
+				t.Errorf("authorization scope = %q, want %q", got, tt.wantScope)
+			}
+			if returnedState != state || parsed.Query().Get("state") != state {
+				t.Error("authorization URL did not preserve the supplied state")
+			}
+		})
 	}
 }

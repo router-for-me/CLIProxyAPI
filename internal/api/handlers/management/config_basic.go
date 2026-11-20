@@ -103,11 +103,12 @@ func WriteConfig(path string, data []byte) error {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return err
 	}
+	var commented []config.ArchivedV8Section
 	if len(doc.Content) > 0 && config.IsV8ConfigLayout(doc.Content[0]) {
-		var err error
-		data, _, err = config.NormalizeConfigLayout(data, true)
-		if err != nil {
-			return err
+		var errNorm error
+		data, _, commented, errNorm = config.NormalizeConfigLayoutSilent(data, true)
+		if errNorm != nil {
+			return errNorm
 		}
 	}
 	data = config.NormalizeCommentIndentation(data)
@@ -123,7 +124,11 @@ func WriteConfig(path string, data []byte) error {
 		_ = f.Close()
 		return errSync
 	}
-	return f.Close()
+	if errClose := f.Close(); errClose != nil {
+		return errClose
+	}
+	config.WarnUnrecognizedV8Sections(commented)
+	return nil
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {
