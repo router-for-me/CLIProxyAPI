@@ -283,16 +283,17 @@ func TestGhostParentElimination(t *testing.T) {
 }
 
 func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrelatedHeaderChange(t *testing.T) {
-	bodyWithSession := []byte(`{"session_id":"important-session"}`)
+	bodyWithSession := []byte(`{"session_id":"important-session","parent_session_id":"important-parent"}`)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
 		Payload: nil, // Translated or omitted payload
 	}
 	opts := cliproxyexecutor.Options{
 		OriginalRequest: bodyWithSession,
-		Headers:         make(http.Header),
+		Headers:         http.Header{"X-Client-Request-Id": []string{"request-one"}},
 		Metadata: map[string]any{
 			cliproxyexecutor.CanonicalSessionIDMetadataKey: "session:important-session",
+			cliproxyexecutor.ParentSessionIDMetadataKey:    "session:important-parent",
 		},
 		RequestAfterAuthInterceptor: func(ctx context.Context, req cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
 			return cliproxyexecutor.RequestAfterAuthInterceptResponse{
@@ -310,6 +311,13 @@ func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrela
 	canonical, ok := finalOpts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
 	if !ok || canonical != "session:important-session" {
 		t.Fatalf("canonical session = %q (ok=%v), want session:important-session", canonical, ok)
+	}
+	if got := finalOpts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey]; got != "session:important-parent" {
+		t.Fatalf("parent session = %v, want session:important-parent", got)
+	}
+	synced := internallogging.GetClientRequestMetadata(syncMetadataSessionToContext(context.Background(), finalOpts.Metadata))
+	if synced.SessionID != "session:important-session" || synced.ParentSessionID != "session:important-parent" {
+		t.Fatalf("context hierarchy changed after unrelated header edit: %+v", synced)
 	}
 }
 

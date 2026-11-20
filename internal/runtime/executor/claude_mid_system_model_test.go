@@ -216,18 +216,22 @@ func TestClaudeExecutor_PayloadOverrideDoesNotClaimMatchingCallerTurn(t *testing
 // not. CPA must not rerun placement; read-only validation rejects the final
 // incompatible pairing instead of silently rewriting the configured body.
 func TestClaudeExecutor_PayloadOverrideDoesNotRerunSystemPlacement(t *testing.T) {
+	// OAuth relocates caller guidance; API-key cloaking keeps it top-level.
+	auth := midSystemAuth()
+	auth.Attributes["api_key"] = "sk-ant-oat-system-placement"
+	auth.Metadata = map[string]any{"account_uuid": "11111111-2222-4333-8444-555555555555"}
 	for _, test := range []struct {
 		name string
 		send func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error
 	}{
 		{name: "execute", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
-			_, err := ex.Execute(ctx, midSystemAuth(), cliproxyexecutor.Request{
+			_, err := ex.Execute(ctx, auth, cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 			return err
 		}},
 		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
-			result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
+			result, err := ex.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 			if err != nil {

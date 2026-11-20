@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"hash/fnv"
 	"maps"
@@ -1734,14 +1735,14 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
 				bind(auth.ID, true)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), auth.ID, provider, model)
 				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 			}
 		}
 		if s.rebindOnNever {
 			bind(cachedAuthID, false)
 			errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
-			entry.Infof("session-affinity: cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, errBound.Code, provider, model)
+			entry.Infof("session-affinity: cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", sessionAffinityLogID(primaryID), cachedAuthID, errBound.Code, provider, model)
 			return nil, errBound
 		}
 		if err != nil {
@@ -1757,11 +1758,11 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
 			bind(cachedAuthID, false)
-			entry.Infof("session-affinity: cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
+			entry.Infof("session-affinity: cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), cachedAuthID, auth.ID, provider, model)
 			return auth, nil
 		}
 		bind(auth.ID, true)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), auth.ID, provider, model)
 		return auth, nil
 	}
 
@@ -1781,7 +1782,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				if auth.ID == parentAuthID {
 					bind(auth.ID, true)
-					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), sessionAffinityLogID(fallbackID), auth.ID, provider, model)
 					return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 				}
 			}
@@ -1795,9 +1796,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
 						if isFork {
-							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), sessionAffinityLogID(fallbackID), auth.ID, provider, model)
 						} else {
-							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), sessionAffinityLogID(fallbackID), auth.ID, provider, model)
 						}
 						return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 					}
@@ -1806,7 +1807,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if !isSubagent && !isFork && s.rebindOnNever {
 				bind(cachedAuthID, false)
 				errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
-				entry.Infof("session-affinity: fallback cache hit but bound auth unavailable, refusing failover | session=%s fallback=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, errBound.Code, provider, model)
+				entry.Infof("session-affinity: fallback cache hit but bound auth unavailable, refusing failover | session=%s fallback=%s bound_auth=%s code=%s provider=%s model=%s", sessionAffinityLogID(primaryID), sessionAffinityLogID(fallbackID), cachedAuthID, errBound.Code, provider, model)
 				return nil, errBound
 			}
 			if !isSubagent && !isFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
@@ -1818,7 +1819,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					return nil, nil
 				}
 				bind(cachedAuthID, false)
-				entry.Infof("session-affinity: fallback cache hit but auth transiently unavailable, failover without rebinding | session=%s fallback=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, auth.ID, provider, model)
+				entry.Infof("session-affinity: fallback cache hit but auth transiently unavailable, failover without rebinding | session=%s fallback=%s bound_auth=%s failover_auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), sessionAffinityLogID(fallbackID), cachedAuthID, auth.ID, provider, model)
 				return auth, nil
 			}
 		}
@@ -1836,9 +1837,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	}
 	bind(auth.ID, true)
 	if isFork && fallbackID != "" {
-		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), sessionAffinityLogID(fallbackID), auth.ID, provider, model)
 	} else {
-		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", sessionAffinityLogID(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
 }
@@ -1900,21 +1901,21 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 					delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 					opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "fork"
 				}
-				entry.Infof("session-affinity: LCP fork hit | session=%s parent=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), truncateSessionID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
+				entry.Infof("session-affinity: LCP fork hit | session=%s parent=%s prefix=%d auth=%s provider=%s model=%s", sessionAffinityLogID(match.SessionID), sessionAffinityLogID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
 			} else if match.IsCompaction {
 				if opts.Metadata != nil {
 					opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
 					delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 					opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
 				}
-				entry.Infof("session-affinity: LCP compaction hit | session=%s parent=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), truncateSessionID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
+				entry.Infof("session-affinity: LCP compaction hit | session=%s parent=%s prefix=%d auth=%s provider=%s model=%s", sessionAffinityLogID(match.SessionID), sessionAffinityLogID(match.ParentSessionID), match.PrefixLength, auth.ID, provider, model)
 			} else {
 				if opts.Metadata != nil {
 					delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 					delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 					delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
 				}
-				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
+				entry.Infof("session-affinity: LCP cache hit | session=%s prefix=%d auth=%s provider=%s model=%s", sessionAffinityLogID(match.SessionID), match.PrefixLength, auth.ID, provider, model)
 			}
 			picked, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, reservation)
 			return picked, true, errPick
@@ -1944,7 +1945,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				}
 			}
 			errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, match.AuthID, now)
-			entry.Infof("session-affinity: LCP cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.AuthID, errBound.Code, provider, model)
+			entry.Infof("session-affinity: LCP cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", sessionAffinityLogID(match.SessionID), match.AuthID, errBound.Code, provider, model)
 			return nil, true, errBound
 		}
 		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
@@ -1990,28 +1991,28 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 				delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 				delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
 			}
-			entry.Infof("session-affinity: LCP cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), preservedAuthID, auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", sessionAffinityLogID(bindRes.SessionID), preservedAuthID, auth.ID, provider, model)
 		} else if bindRes.IsFork {
 			if opts.Metadata != nil {
 				opts.Metadata[cliproxyexecutor.IsForkMetadataKey] = true
 				delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 				opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "fork"
 			}
-			entry.Infof("session-affinity: LCP fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), truncateSessionID(bindRes.ParentSessionID), auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", sessionAffinityLogID(bindRes.SessionID), sessionAffinityLogID(bindRes.ParentSessionID), auth.ID, provider, model)
 		} else if bindRes.IsCompaction {
 			if opts.Metadata != nil {
 				opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
 				delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 				opts.Metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
 			}
-			entry.Infof("session-affinity: LCP compaction bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), truncateSessionID(bindRes.ParentSessionID), auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP compaction bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", sessionAffinityLogID(bindRes.SessionID), sessionAffinityLogID(bindRes.ParentSessionID), auth.ID, provider, model)
 		} else {
 			if opts.Metadata != nil {
 				delete(opts.Metadata, cliproxyexecutor.IsForkMetadataKey)
 				delete(opts.Metadata, cliproxyexecutor.IsCompactionMetadataKey)
 				delete(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
 			}
-			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(bindRes.SessionID), auth.ID, provider, model)
+			entry.Infof("session-affinity: LCP cache miss, new binding | session=%s auth=%s provider=%s model=%s", sessionAffinityLogID(bindRes.SessionID), auth.ID, provider, model)
 		}
 	}
 	return auth, true, nil
@@ -2105,12 +2106,12 @@ func selectorLogEntry(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-// truncateSessionID shortens session ID for logging (first 8 chars + "...")
-func truncateSessionID(id string) string {
-	if len(id) <= 20 {
-		return id
+func sessionAffinityLogID(id string) string {
+	if id == "" {
+		return ""
 	}
-	return id[:8] + "..."
+	digest := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("%x", digest[:12])
 }
 
 // Stop releases resources held by the selector.
