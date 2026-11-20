@@ -1,8 +1,28 @@
 package home
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+// SchedulerContext contains only transport-safe request identity, never policy overrides.
+type SchedulerContext struct {
+	Stream             bool   `json:"stream,omitempty"`
+	RequestID          string `json:"request_id,omitempty"`
+	TraceID            string `json:"trace_id,omitempty"`
+	ExecutionSessionID string `json:"execution_session_id,omitempty"`
+	RequestedModel     string `json:"requested_model,omitempty"`
+}
+
+type schedulerContextKey struct{}
+
+// WithSchedulerContext carries request-scoped scheduling inputs through legacy dispatcher interfaces.
+func WithSchedulerContext(ctx context.Context, input SchedulerContext) context.Context {
+	return context.WithValue(ctx, schedulerContextKey{}, input)
+}
 
 type authDispatchRequest struct {
+	SchedulerContext    *SchedulerContext `json:"scheduler_context,omitempty"`
 	Type                string            `json:"type"`
 	Model               string            `json:"model"`
 	Count               int               `json:"count"`

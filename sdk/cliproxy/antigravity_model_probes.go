@@ -29,7 +29,7 @@ type antigravityHintPersistRequest struct {
 // one worker per account. Repeated updates replace a single queued successor,
 // rather than accumulating singleflight followers while an upstream is stalled.
 func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string) {
-	if s == nil || auth == nil || auth.ID == "" || auth.Disabled || s.antigravityHomeEnabled() {
+	if s == nil || auth == nil || auth.ID == "" || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() {
 		return
 	}
 	if ctx == nil {
@@ -225,7 +225,7 @@ func (s *Service) antigravityAccountProbeCurrent(probe *antigravityAccountProbe)
 // joining this same map, so deletion cannot slip between validation and tracking.
 // Empty authID invalidates stale probes across all accounts after config changes.
 func (s *Service) queueAntigravityHintPersistence(ctx context.Context, auth *coreauth.Auth, expectedKey, endpoint string, hints antigravityModelCapabilityHints) {
-	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || auth.Disabled || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 || s.antigravityHomeEnabled() {
+	if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" || isAntigravityAuthDisabled(auth) || expectedKey == "" || hints.ModelIDs == nil || hints.revision == 0 || s.antigravityHomeEnabled() {
 		return
 	}
 	if ctx == nil {
