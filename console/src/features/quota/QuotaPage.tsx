@@ -90,7 +90,7 @@ export function QuotaPage() {
   const [files, setFiles] = useState<AuthFileItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<QuotaTabId>(() => readQuotaUiState()?.tab ?? 'all');
+  const [savedTab, setTab] = useState<QuotaTabId>(() => readQuotaUiState()?.tab ?? 'all');
   const [sortMode, setSortMode] = useState<QuotaSortMode>(
     () => readQuotaUiState()?.sortMode ?? 'default'
   );
@@ -205,6 +205,10 @@ export function QuotaPage() {
     () => TAB_IDS.filter((id) => id === 'all' || tabCounts[id] > 0),
     [tabCounts]
   );
+  // A saved tab whose provider has no accounts left shows All once files load.
+  const filesLoaded = !loading && !error && filesGeneration === sessionGeneration;
+  const tab: QuotaTabId =
+    filesLoaded && savedTab !== 'all' && !tabCounts[savedTab] ? 'all' : savedTab;
   // Account-level settings span every page and tab, so count over all entries.
   const codexCreditOverageCounts = useMemo(
     () =>
@@ -254,11 +258,10 @@ export function QuotaPage() {
     writeQuotaUiState({ tab: next as QuotaTabId });
   }, []);
 
-  // A saved tab whose provider has no accounts left falls back to All once files load.
+  // Persist that fallback, so the empty tab is not restored later.
   useEffect(() => {
-    if (loading || error || filesGeneration !== sessionGeneration) return;
-    if (tab !== 'all' && !tabCounts[tab]) handleTabChange('all');
-  }, [error, filesGeneration, handleTabChange, loading, sessionGeneration, tab, tabCounts]);
+    if (tab !== savedTab) handleTabChange(tab);
+  }, [handleTabChange, savedTab, tab]);
 
   const handleSortModeChange = useCallback((next: string) => {
     setSortMode(next as QuotaSortMode);
