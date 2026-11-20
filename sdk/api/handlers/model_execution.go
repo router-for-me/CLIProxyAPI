@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -159,6 +160,14 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
 	}
+	// Native model actions (embeddings, decisions) are non-streaming: streaming would run
+	// the chat path and silently drop the action, so reject it instead of guessing.
+	if action := strings.TrimSpace(req.Action); action != "" {
+		return ModelExecutionStream{}, &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("native model action %q is not supported on streaming host execution", action),
+		}
+	}
 	if errProxy := validateModelExecutionProxy(req.ProxyURL); errProxy != nil {
 		return ModelExecutionStream{}, errProxy
 	}
@@ -176,7 +185,6 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		ProxyURL:                strings.TrimSpace(req.ProxyURL),
 		Path:                    strings.TrimSpace(req.Path),
 		CallerScope:             strings.TrimSpace(req.CallerScope),
-		Action:                  strings.TrimSpace(req.Action),
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {

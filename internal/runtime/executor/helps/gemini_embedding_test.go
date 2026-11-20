@@ -259,3 +259,38 @@ func TestPrepareGeminiEmbeddingDocNormalizesBareBatchEntryModels(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeGeminiModelResourceName covers the resource-name form that configured aliases
+// and router targets may produce: keeping the prefix would build models/models/<id>.
+func TestNormalizeGeminiModelResourceName(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"gemini-embedding-001", "gemini-embedding-001"},
+		{"models/gemini-embedding-001", "gemini-embedding-001"},
+		{"  models/gemini-embedding-002  ", "gemini-embedding-002"},
+		{"", ""},
+	} {
+		if got := NormalizeGeminiModelResourceName(tt.in); got != tt.want {
+			t.Fatalf("NormalizeGeminiModelResourceName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestPrepareGeminiEmbeddingDocAcceptResourceFormModel guards the payload side of the same
+// problem: a resource-form model must not produce models/models/<id>.
+func TestPrepareGeminiEmbeddingDocAcceptResourceFormModel(t *testing.T) {
+	doc, err := PrepareGeminiEmbeddingDoc([]byte(`{"content":{"parts":[{"text":"hi"}]}}`), "models/gemini-embedding-001", GeminiEmbedContentAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() error = %v", err)
+	}
+	if got := ojson.GetBytes(doc.Bytes(), "model").String(); got != "models/gemini-embedding-001" {
+		t.Fatalf("model = %q, want models/gemini-embedding-001", got)
+	}
+
+	batch, err := PrepareGeminiEmbeddingDoc([]byte(`{"requests":[{"content":{"parts":[{"text":"hi"}]}}]}`), "models/gemini-embedding-001", GeminiBatchEmbedContentsAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() batch error = %v", err)
+	}
+	if got := ojson.GetBytes(batch.Bytes(), "requests.0.model").String(); got != "models/gemini-embedding-001" {
+		t.Fatalf("requests[0].model = %q, want models/gemini-embedding-001", got)
+	}
+}
