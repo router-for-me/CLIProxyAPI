@@ -2,9 +2,11 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -732,4 +734,129 @@ func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T
 			t.Fatalf("failover credential auth-b reused auth-a content-fallback request.sessionId %q", authB)
 		}
 	})
+}
+
+// TestAntigravityPrepareRequestAuth_DiscoveryTransportErrorIsNotClientFault
+// verifies that a project-discovery failure without an upstream HTTP status
+// (for example a proxy connect error) is reported as a transient transport
+// problem rather than an invalid-request 400, so the conductor does not halt
+// credential rotation on a request that could succeed on another credential.
+func TestAntigravityPrepareRequestAuth_DiscoveryTransportErrorIsNotClientFault(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		"access_token": "token",
+		"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("proxy connect: connection refused")
+	}))
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail on transport error")
+	}
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok {
+		t.Fatalf("error should expose StatusCode(), got %T (%v)", err, err)
+	}
+	if got := status.StatusCode(); got == http.StatusBadRequest {
+		t.Fatalf("status code = %d, transport failure must not masquerade as invalid-request 400", got)
+	}
+}
+
+// TestAntigravityPrepareRequestAuth_MissingRefreshTokenIsNotUpstreamAttempt
+// verifies that a credential missing a refresh token fails as a local
+// preparation error and does not mark an upstream attempt, so it cannot
+// outrank a genuine upstream rejection recorded earlier in the round.
+func TestAntigravityPrepareRequestAuth_MissingRefreshTokenIsNotUpstreamAttempt(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		// access_token present but already expired and no refresh_token: the
+		// credential fails locally before any HTTP request is issued.
+		"access_token": "expired-token",
+		"expired":      time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := cliproxyexecutor.WithUpstreamAttemptTracker(context.Background())
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail without refresh token")
+	}
+	if cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatalf("missing refresh token must not mark an upstream attempt")
+	}
+}
+
+// TestAntigravityPrepareRequestAuth_OAuthRefreshFailureMarksUpstreamAttempt
+// verifies that a genuine upstream rejection during OAuth token refresh (e.g.
+// a 403 from the token endpoint) marks the request's upstream-attempt tracker,
+// so the conductor can attribute it as a real upstream error that outranks
+// later local credential-preparation failures.
+func TestAntigravityPrepareRequestAuth_OAuthRefreshFailureMarksUpstreamAttempt(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		// expired access token + refresh token: forces the OAuth refresh path,
+		// which performs a real upstream HTTP call that fails with 403.
+		"access_token":  "expired-token",
+		"refresh_token": "refresh-token",
+		"expired":       time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+	}}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"access_denied"}`)),
+		}, nil
+	}))
+	ctx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+
+	_, err := executor.PrepareRequestAuth(ctx, auth)
+	if err == nil {
+		t.Fatalf("PrepareRequestAuth should fail on upstream 403 during refresh")
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctx) {
+		t.Fatalf("upstream refresh 403 should mark the upstream attempt tracker")
+	}
+}
+
+// TestAntigravityPrepareRequestAuth_SharedRefreshFailureMarksEachTracker
+// verifies that when concurrent requests share one singleflight OAuth refresh
+// that fails upstream, EACH request's own upstream-attempt tracker is marked —
+// not only the tracker of the request that led the flight.
+func TestAntigravityPrepareRequestAuth_SharedRefreshFailureMarksEachTracker(t *testing.T) {
+	executor := &AntigravityExecutor{}
+	newAuth := func() *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "shared-refresh-token",
+			"expired":       time.Now().Add(-1 * time.Hour).Format(time.RFC3339),
+		}}
+	}
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		// Slow enough that both callers join the same singleflight refresh.
+		time.Sleep(50 * time.Millisecond)
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":"access_denied"}`)),
+		}, nil
+	})
+	newCtx := func() context.Context {
+		c := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+		return cliproxyexecutor.WithUpstreamAttemptTracker(c)
+	}
+
+	ctxA, ctxB := newCtx(), newCtx()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = executor.PrepareRequestAuth(ctxA, newAuth()) }()
+	go func() { defer wg.Done(); _, _ = executor.PrepareRequestAuth(ctxB, newAuth()) }()
+	wg.Wait()
+
+	if !cliproxyexecutor.UpstreamAttempted(ctxA) {
+		t.Fatalf("request A tracker was not marked on shared upstream refresh failure")
+	}
+	if !cliproxyexecutor.UpstreamAttempted(ctxB) {
+		t.Fatalf("request B tracker was not marked on shared upstream refresh failure")
+	}
 }

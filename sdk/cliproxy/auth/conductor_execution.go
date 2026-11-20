@@ -1098,6 +1098,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
@@ -1109,7 +1113,23 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				stateModel = canonicalModelKey(routeModel)
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, AccessToken: authAccessTokenForRequest(execCtx, auth, pickOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
 			m.MarkResult(execCtx, result)
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
 		}
@@ -1340,6 +1360,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		var errPrepare error
 		auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
@@ -1351,7 +1375,23 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				stateModel = canonicalModelKey(routeModel)
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, SkipQuotaObservation: true, AccessToken: authAccessTokenForRequest(execCtx, auth, pickOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
 			m.MarkResult(execCtx, result)
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			continue
 		}
@@ -1742,6 +1782,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			auth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				if selection != nil {
 					releaseAttempt()
@@ -1770,11 +1814,33 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				stateModel = canonicalModelKey(routeModel)
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: pickOpts, AccessToken: authAccessTokenForRequest(execCtx, auth, pickOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch}
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
 			if selection != nil {
 				m.reportHomeResult(execCtx, result, auth)
 				releaseAttempt()
 			} else {
 				m.MarkResult(execCtx, result)
+			}
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				if selection != nil {
+					selection.End("request_stopped")
+				}
+				return nil, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				if selection != nil {
+					selection.End("request_invalid")
+				}
+				return nil, errPrepare
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
 			if homeMode {

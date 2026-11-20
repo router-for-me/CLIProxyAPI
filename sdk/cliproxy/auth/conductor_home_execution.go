@@ -275,6 +275,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
+			if hasUpstreamExecutionAttempt(errPrepare) {
+				upstreamErr = errPrepare
+			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -284,8 +288,27 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
-			m.reportHomeResult(execCtx, Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}, auth)
+			result := Result{AuthID: auth.ID, Provider: selection.Provider, Model: stateModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(errPrepare), Options: opts}
+			if ra := retryAfterFromError(errPrepare); ra != nil {
+				result.RetryAfter = ra
+			}
+			if isCredentialScopedError(errPrepare) {
+				result.CredentialScope = true
+			}
+			action, okAction := matchRequestScopedErrorAction(auth, errPrepare, m.requestScopedErrorConfig(execCtx))
+			applyRequestScopedActionToResult(action, okAction, &result)
+			m.reportHomeResult(execCtx, result, auth)
 			releaseAttempt()
+			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestScopedStop(action, okAction) {
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
+			}
+			if !okAction && isRequestInvalidError(errPrepare) {
+				selection.End("request_invalid")
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}

@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	log "github.com/sirupsen/logrus"
 )
@@ -32,7 +33,7 @@ func (e *AntigravityExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Au
 	if auth == nil {
 		return auth, nil
 	}
-	updated, errRefresh := e.refreshToken(ctx, auth.Clone())
+	updated, errRefresh := e.refreshToken(ctx, auth.Clone(), ctx)
 	if errRefresh != nil {
 		return nil, errRefresh
 	}
@@ -62,10 +63,10 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 
 	projectID, errProject := e.fetchAntigravityProjectID(ctx, updated, token)
 	if errProject != nil {
-		return nil, missingAntigravityProjectIDError(errProject)
+		return nil, prepareAntigravityProjectIDError(errProject)
 	}
 	if projectID == "" {
-		return nil, missingAntigravityProjectIDError(nil)
+		return nil, prepareAntigravityProjectIDError(nil)
 	}
 	if updated.Metadata == nil {
 		updated.Metadata = make(map[string]any)
@@ -102,14 +103,14 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 		return token, refreshed, nil
 	}
 
-	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone())
+	updated, errRefresh := e.refreshToken(refreshCtx, auth.Clone(), ctx)
 	if errRefresh != nil {
 		return "", nil, errRefresh
 	}
 	return metaStringValue(updated.Metadata, "access_token"), updated, nil
 }
 
-func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth, requestCtx context.Context) (*cliproxyauth.Auth, error) {
 	if auth == nil {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
 	}
@@ -129,6 +130,12 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		return e.refreshTokenSingleFlight(refreshCtx, auth, refreshToken)
 	})
 	if errRefresh != nil {
+		// Any error returned by the shared flight came from the real OAuth HTTP
+		// call inside the closure (local missing-credential checks return above,
+		// before the group call). Attribute it as an upstream attempt on THIS
+		// request's tracker so concurrent callers sharing the flight each record
+		// the upstream failure on their own tracker, not just the leader's.
+		cliproxyexecutor.MarkUpstreamAttempt(requestCtx)
 		return auth, errRefresh
 	}
 	tokenResp, ok := result.(*antigravityTokenRefreshData)
@@ -188,7 +195,9 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(ctx context.Context, auth
 	}
 
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		// Token refresh failures are credential-scoped: the credential cannot be
+		// used for any model until it recovers.
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes), credentialScoped: true}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
 			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
 				sErr.retryAfter = retryAfter
@@ -307,6 +316,7 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 	tracedClient := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "project_discovery")
 	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(acquisitionCtx, token, tracedClient)
 	if errFetch != nil {
+		cliproxyexecutor.MarkUpstreamAttempt(ctx)
 		return "", errFetch
 	}
 	return strings.TrimSpace(projectID), nil
@@ -353,6 +363,29 @@ func missingAntigravityProjectIDError(cause error) statusErr {
 		}
 	}
 	return statusErr{code: statusCode, msg: msg, retryAfter: retryAfter}
+}
+
+// prepareAntigravityProjectIDError wraps a project-discovery failure during
+// PrepareRequestAuth. A real upstream HTTP status is preserved verbatim so
+// genuine 400/403/429 responses keep their classification; a cause with no
+// HTTP status (transport/proxy failure, or no project_id resolved without an
+// upstream response) is reported as a transient transport problem rather than
+// an invalid-request 400, so credential rotation is not halted prematurely.
+// The failure is credential-scoped because the credential cannot serve any
+// model until discovery succeeds.
+func prepareAntigravityProjectIDError(cause error) statusErr {
+	base := missingAntigravityProjectIDError(cause)
+	base.credentialScoped = true
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	hasUpstreamStatus := cause != nil && errors.As(cause, &sc) && sc != nil && sc.StatusCode() > 0
+	if !hasUpstreamStatus {
+		base.code = http.StatusServiceUnavailable
+		base.transientTransport = true
+	}
+	return base
 }
 
 func metaStringValue(metadata map[string]any, key string) string {
