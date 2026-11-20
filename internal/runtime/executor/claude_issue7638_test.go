@@ -560,7 +560,7 @@ func TestClaudeIssue7638_ForAPIKeyAndWithConfigShareAdvisorOwnerStore(t *testing
 
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
 	base := NewClaudeExecutor(&config.Config{})
-	copyA := base.ForAPIKey().(*ClaudeExecutor)
+	copyA := base.ForAPIKey(nil).(*ClaudeExecutor)
 	copyB := base.WithConfig(&config.Config{})
 	authA := claudeIssue7638OAuthAuth("cred-share-a", "sk-ant-oat-sha1", "11111111-1111-4111-8111-111111111115")
 	authB := claudeIssue7638OAuthAuth("cred-share-b", "sk-ant-oat-shb1", "22222222-2222-4222-8222-222222222226")

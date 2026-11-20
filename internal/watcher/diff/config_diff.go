@@ -2,8 +2,10 @@ package diff
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -595,6 +597,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	// Report individual key policies without including rule contents.
+	oldFilters, newFilters := oldCfg.KeyPayloadFilters(), newCfg.KeyPayloadFilters()
+	paths := maps.Clone(oldFilters)
+	maps.Copy(paths, newFilters)
+	for _, path := range slices.Sorted(maps.Keys(paths)) {
+		changes = appendPayloadRuleChanges(changes, path, oldFilters[path], newFilters[path])
+	}
 	return changes
 }
 
@@ -607,20 +616,20 @@ func trimStrings(in []string) []string {
 }
 
 func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {
-	changes = appendPayloadRuleChanges(changes, "default", oldPayload.Default, newPayload.Default)
-	changes = appendPayloadRuleChanges(changes, "default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
-	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
-	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
-	changes = appendPayloadRuleChanges(changes, "replace", oldPayload.Replace, newPayload.Replace)
-	changes = appendPayloadRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	changes = appendPayloadRuleChanges(changes, "payload.default", oldPayload.Default, newPayload.Default)
+	changes = appendPayloadRuleChanges(changes, "payload.default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
+	changes = appendPayloadRuleChanges(changes, "payload.override", oldPayload.Override, newPayload.Override)
+	changes = appendPayloadRuleChanges(changes, "payload.override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
+	changes = appendPayloadRuleChanges(changes, "payload.replace", oldPayload.Replace, newPayload.Replace)
+	changes = appendPayloadRuleChanges(changes, "payload.filter", oldPayload.Filter, newPayload.Filter)
 	return changes
 }
 
-func appendPayloadRuleChanges[T any](changes []string, section string, oldRules, newRules []T) []string {
+func appendPayloadRuleChanges[T any](changes []string, path string, oldRules, newRules []T) []string {
 	if reflect.DeepEqual(oldRules, newRules) {
 		return changes
 	}
-	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
+	return append(changes, fmt.Sprintf("%s: updated (%d -> %d rules)", path, len(oldRules), len(newRules)))
 }
 
 func appendConnectionPoolChanges(changes []string, prefix string, oldPool, newPool *config.ProxyConnectionPoolConfig) []string {

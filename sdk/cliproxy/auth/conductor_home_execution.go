@@ -368,7 +368,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
 			}
-			executor := executorForAuth(selection.Executor, preparedAuth)
+			executor, errBind := executorForAuth(selection.Executor, preparedAuth)
+			if errBind != nil {
+				releaseAttempt()
+				selection.End("payload_policy_unsupported")
+				return cliproxyexecutor.Response{}, errBind
+			}
 			execute := func() (cliproxyexecutor.Response, error) {
 				if countTokens {
 					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)

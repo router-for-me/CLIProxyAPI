@@ -9,6 +9,42 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestKeyPayloadConfiguredView(t *testing.T) {
+	cfg := &Config{}
+	cfg.WebsocketAuth = true
+	cfg.OAuthOnlyFields = map[string]bool{"ws-auth": true}
+	cfg.Payload.Filter = make([]PayloadFilterRule, 1, 4)
+	cfg.Payload.Filter[0] = PayloadFilterRule{Models: []PayloadModelRule{{Name: "*", Headers: map[string]string{"X-Filter": "yes"}}}, Params: []string{"global"}}
+	cfg.Payload.Filter[:cap(cfg.Payload.Filter)][1] = PayloadFilterRule{Params: []string{"spare-capacity-sentinel"}}
+	key := &ClaudeKey{KeyPayloadPolicy: KeyPayloadPolicy{Payload: &KeyPayloadConfig{Filter: []PayloadFilterRule{{Models: []PayloadModelRule{{Name: "claude-*", Match: []map[string]any{{"mode": "test"}}}}, Params: []string{"system.0"}}}}}}
+	before := cfg.CloneForRuntime()
+	keyBefore := key.PayloadFilters()[0].Models[0].Match[0]["mode"]
+	first, second := cfg.ForConfiguredKey(key), cfg.ForConfiguredKey(key)
+	keyless := cfg.WithKeyPayloadFilters(key)
+	if !keyless.WebsocketAuth || !reflect.DeepEqual(keyless.OAuthOnlyFields, cfg.OAuthOnlyFields) || !reflect.DeepEqual(keyless.Payload.Filter, first.Payload.Filter) {
+		t.Fatal("keyless policy changed OAuth scope or filter composition")
+	}
+	if first == cfg || first == second || first.WebsocketAuth || len(first.Payload.Filter) != len(cfg.Payload.Filter)+len(key.PayloadFilters()) {
+		t.Fatal("selected view lost scoping, isolation or filter composition")
+	}
+	if !reflect.DeepEqual(first.Payload.Filter[:len(cfg.Payload.Filter)], cfg.Payload.Filter) || !reflect.DeepEqual(first.Payload.Filter[len(cfg.Payload.Filter):], key.PayloadFilters()) {
+		t.Fatal("global filters must precede local filters")
+	}
+	first.Payload.Filter[0] = PayloadFilterRule{Params: []string{"request-local"}}
+	if !reflect.DeepEqual(second.Payload.Filter[0], cfg.Payload.Filter[0]) || !reflect.DeepEqual(cfg, before) || cfg.Payload.Filter[:cap(cfg.Payload.Filter)][1].Params[0] != "spare-capacity-sentinel" || key.PayloadFilters()[0].Models[0].Match[0]["mode"] != keyBefore {
+		t.Fatal("view composition changed shared slices or nested rule data")
+	}
+	for _, source := range []PayloadFilterSource{nil, &ClaudeKey{}, &CodexKey{KeyPayloadPolicy: KeyPayloadPolicy{Payload: &KeyPayloadConfig{}}}} {
+		if !reflect.DeepEqual(cfg.ForConfiguredKey(source), cfg.ForAPIKey()) {
+			t.Fatal("absent/empty policy changed static-key scoping")
+		}
+	}
+	var absent *Config
+	if absent.ForConfiguredKey(key) != nil {
+		t.Fatal("nil configuration gained a view")
+	}
+}
+
 func TestV8OAuthScopeSurvivesSnapshotsAndSaves(t *testing.T) {
 	raw := []byte(`codex: {stream-bootstrap-buffering: true}
 oauth:

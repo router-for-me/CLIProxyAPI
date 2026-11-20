@@ -35,6 +35,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	runtimehelps "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
@@ -1390,11 +1391,82 @@ func TestCodexAlphaSearchOptInAPIKeyResolvesModelAlias(t *testing.T) {
 	}
 }
 
+// TestCodexAlphaSearchAppliesSelectedKeyFilters captures the post-rewrite body for both keys.
+func TestCodexAlphaSearchAppliesSelectedKeyFilters(t *testing.T) {
+	const raw = `config-version: 8
+api-keys:
+  codex:
+    - base-url: https://strict.example.com/v1
+      models: [{name: gpt-5.6-sol, alias: sol-alias}]
+      keys:
+        - api-key: syntheticStrictKey123
+          alpha-search: true
+          payload:
+            filter:
+              - models:
+                  - name: gpt-5.6-sol
+                    protocol: codex
+                    from-protocol: codex-alpha-search
+                    headers: {X-Filter: 'yes'}
+                    match: [{model: gpt-5.6-sol}]
+                    not-exist: [prompt_cache_key]
+                params: ['commands.search_query.#(q=="drop")']
+    - base-url: https://control.example.com/v1
+      models: [{name: gpt-5.6-sol, alias: sol-alias}]
+      keys: [{api-key: syntheticControlKey123, alpha-search: true}]
+`
+	cfg, err := proxyconfig.ParseConfigBytes([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, IDGenerator: synthesizer.NewStableIDGenerator()})
+	if err != nil || len(credentials) != 2 {
+		t.Fatalf("expected filtered and control credentials, got %d: %v", len(credentials), err)
+	}
+	cfg.APIKeys = []string{"test-key"}
+
+	for index, tc := range []struct {
+		name    string
+		queries string
+	}{{name: "filtered", queries: `[{"q":"keep"}]`}, {name: "control", queries: `[{"q":"drop"},{"q":"keep"}]`}} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServerWithConfig(t, cfg)
+			capture := &codexSearchCaptureExecutor{}
+			manager := server.handlers.AuthManager
+			manager.SetConfig(cfg)
+			manager.RegisterExecutor(capture)
+			credential := credentials[index]
+			if _, errRegister := manager.Register(t.Context(), credential); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(credential.ID, "codex", []*registry.ModelInfo{{ID: "sol-alias"}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(credential.ID) })
+
+			payload := `{"model":"sol-alias","prompt_cache_key":"remove before matching","commands":{"search_query":[{"q":"drop"},{"q":"keep"}]}}`
+			req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(payload))
+			req.Header.Set("Authorization", "Bearer test-key")
+			req.Header.Set("X-Filter", "yes")
+			response := httptest.NewRecorder()
+			server.engine.ServeHTTP(response, req)
+			if response.Code != http.StatusOK || capture.request == nil {
+				t.Fatalf("request was not forwarded: status=%d body=%s", response.Code, response.Body)
+			}
+			if got := ojson.GetBytes(capture.body, "commands.search_query").Raw; got != tc.queries {
+				t.Fatalf("upstream search queries = %s, want %s; body=%s", got, tc.queries, capture.body)
+			}
+			if model := ojson.GetBytes(capture.body, "model").String(); model != "gpt-5.6-sol" || ojson.GetBytes(capture.body, "prompt_cache_key").Exists() {
+				t.Fatalf("upstream request was not normalized before filtering: %s", capture.body)
+			}
+		})
+	}
+}
+
 func TestRewriteCodexAlphaSearchModel(t *testing.T) {
 	original := []byte(`{"id":"search-1","model":"vendor/gpt-5.6-sol","commands":{"search_query":[{"q":"golang"}]}}`)
-	rewritten := rewriteCodexAlphaSearchModel(original, "gpt-5.6-sol")
+	doc := ojson.NewDoc(original)
+	rewriteCodexAlphaSearchModelDoc(doc, "gpt-5.6-sol")
 	var payload map[string]json.RawMessage
-	if errUnmarshal := json.Unmarshal(rewritten, &payload); errUnmarshal != nil {
+	if errUnmarshal := json.Unmarshal(doc.Bytes(), &payload); errUnmarshal != nil {
 		t.Fatalf("unmarshal rewritten body: %v", errUnmarshal)
 	}
 	var model string
@@ -1407,7 +1479,9 @@ func TestRewriteCodexAlphaSearchModel(t *testing.T) {
 	if _, exists := payload["commands"]; !exists {
 		t.Fatal("commands field was dropped")
 	}
-	if string(rewriteCodexAlphaSearchModel([]byte(`{"query":"x"}`), "gpt-5.6-sol")) != `{"query":"x"}` {
+	doc = ojson.NewDocString(`{"query":"x"}`)
+	rewriteCodexAlphaSearchModelDoc(doc, "gpt-5.6-sol")
+	if doc.String() != `{"query":"x"}` {
 		t.Fatal("body without model should remain unchanged")
 	}
 }

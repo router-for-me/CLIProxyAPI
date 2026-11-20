@@ -599,7 +599,13 @@ func (w *Watcher) stopDispatch() {
 }
 
 func authEqual(a, b *coreauth.Auth) bool {
-	if a != nil && b != nil && a.HasFileSnapshot() && b.HasFileSnapshot() && !a.SameFileSnapshot(b) {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if (len(config.PayloadFiltersFor(a.ConfigKey)) != 0 || len(config.PayloadFiltersFor(b.ConfigKey)) != 0) && !reflect.DeepEqual(config.PayloadFiltersFor(a.ConfigKey), config.PayloadFiltersFor(b.ConfigKey)) {
+		return false
+	}
+	if a.HasFileSnapshot() && b.HasFileSnapshot() && !a.SameFileSnapshot(b) {
 		return false
 	}
 	return reflect.DeepEqual(normalizeAuth(a), normalizeAuth(b))
@@ -611,6 +617,7 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	}
 	clone := a.Clone()
 	clone.ClearFileSnapshot()
+	clone.ConfigKey = nil
 	clone.CreatedAt = time.Time{}
 	clone.UpdatedAt = time.Time{}
 	clone.LastRefreshedAt = time.Time{}

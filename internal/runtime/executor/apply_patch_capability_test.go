@@ -21,7 +21,7 @@ func TestApplyPatchActualExecutors(t *testing.T) {
 			t.Errorf("%T (%s) does not advertise actual support", exec, exec.Identifier())
 		}
 		if scoped, okScoped := exec.(coreauth.APIKeyConfigExecutor); okScoped {
-			bound := scoped.ForAPIKey()
+			bound := scoped.ForAPIKey(nil)
 			if bound.Identifier() != exec.Identifier() || !bound.(coreauth.ApplyPatchSupport).SupportsApplyPatch() {
 				t.Errorf("%T ForAPIKey lost the actual executor contract", exec)
 			}

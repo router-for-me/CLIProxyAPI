@@ -278,6 +278,10 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	source := expandConfigAliases(node)
+	if errValidate := validateKeyPayloads(source); errValidate != nil {
+		return errValidate
+	}
 	decoded := legacyConfig(*cfg)
 	if err = root.Decode(&decoded); err != nil {
 		return err
@@ -288,7 +292,6 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	*cfg = Config(decoded)
 	cfg.SyncServerResponseCompression()
 	cfg.OAuthOnlyFields = nil
-	source := expandConfigAliases(node)
 	for _, path := range v8Paths {
 		if strings.HasPrefix(path.current, "oauth.providers.") && yamlPath(source, path.current) != nil {
 			if cfg.OAuthOnlyFields == nil {
@@ -408,6 +411,9 @@ func expandV8Groups(groups *yaml.Node, provider string) (*yaml.Node, error) {
 			return nil, fmt.Errorf("api-keys.%s[%d].keys must be a list", provider, index)
 		}
 		if err := validateWeightSequenceNode(keys, "api-keys."+provider+".keys"); err != nil {
+			return nil, err
+		}
+		if err := validateKeyPayloadGroup(group, fmt.Sprintf("api-keys.%s[%d]", provider, index), provider); err != nil {
 			return nil, err
 		}
 		if provider == "openai-compatibility" {
@@ -1075,6 +1081,9 @@ func ValidateV8Config(data []byte) error {
 				return fmt.Errorf("unknown API-key provider %s", groups.Content[i].Value)
 			}
 		}
+	}
+	if errValidate := validateKeyPayloads(root); errValidate != nil {
+		return errValidate
 	}
 	deleteYAMLPath(flat, "config-version")
 	// Empty struct containers are valid replacements. Only strip known structural

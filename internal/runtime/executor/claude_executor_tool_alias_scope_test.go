@@ -20,8 +20,8 @@ func TestClaudeOAuthToolAliasStoreIsSharedAcrossForAPIKeyCopies(t *testing.T) {
 	}
 	for name, registered := range cases {
 		t.Run(name, func(t *testing.T) {
-			first := claudeExecutorForAliasTest(t, registered.ForAPIKey())
-			second := claudeExecutorForAliasTest(t, registered.ForAPIKey())
+			first := claudeExecutorForAliasTest(t, registered.ForAPIKey(nil))
+			second := claudeExecutorForAliasTest(t, registered.ForAPIKey(nil))
 			if first == second {
 				t.Fatal("ForAPIKey returned the same executor; test needs two scoped copies")
 			}

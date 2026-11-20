@@ -181,6 +181,79 @@ func (*homeErrorPriorityDispatcher) RPopAuth(_ context.Context, _ string, _ stri
 
 func (*homeErrorPriorityDispatcher) AbortAmbiguousDispatch() {}
 
+func TestKeyPayloadOwnerLifecycle(t *testing.T) {
+	key := &internalconfig.ClaudeKey{APIKey: "ownerSecretOnly123", KeyPayloadPolicy: internalconfig.KeyPayloadPolicy{Payload: &internalconfig.KeyPayloadConfig{Filter: []internalconfig.PayloadFilterRule{{Params: []string{"owner_only_path"}}}}}}
+	auth := &Auth{ID: "key-payload-owner", Provider: "claude", Status: StatusActive, ConfigKey: key, Attributes: map[string]string{"api_key": "syntheticAuthKey123", "source": "config:claude[fixture]", "auth_kind": "apikey"}}
+	if auth.Clone().ConfigKey != key {
+		t.Fatal("Auth.Clone replaced the exact immutable owner")
+	}
+	encoded, err := json.Marshal(auth)
+	if err != nil || strings.Contains(string(encoded), "ownerSecretOnly123") || strings.Contains(string(encoded), "owner_only_path") {
+		t.Fatalf("owner leaked through auth serialization: %v", err)
+	}
+	manager := NewManager(nil, nil, nil)
+	registered, err := manager.Register(context.Background(), auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := registered.Clone()
+	replacement.ConfigKey = nil
+	updated, err := manager.Update(context.Background(), replacement)
+	if err != nil || updated.ConfigKey != key {
+		t.Fatalf("replacement lost the current owner: %v", err)
+	}
+	newKey := &internalconfig.ClaudeKey{APIKey: "newOwnerSecret123"}
+	replacement = updated.Clone()
+	replacement.ConfigKey = newKey
+	current, err := manager.Update(context.Background(), replacement)
+	if err != nil || current.ConfigKey != newKey {
+		t.Fatalf("configuration replacement did not install its new owner: %v", err)
+	}
+	for _, merge := range []func(*Auth, *Auth, *Auth) *Auth{MergePreparedAuth, MergeRefreshedAuth} {
+		candidate := updated.Clone()
+		candidate.ConfigKey = key
+		if got := merge(updated, current, candidate); got.ConfigKey != newKey {
+			t.Fatal("stale preparation/refresh replaced the current owner")
+		}
+	}
+}
+
+func TestKeyPayloadUnsupportedBinding(t *testing.T) {
+	provider := &requestPrepareExecutor{}
+	key := &internalconfig.GeminiKey{KeyPayloadPolicy: internalconfig.KeyPayloadPolicy{Payload: &internalconfig.KeyPayloadConfig{Filter: []internalconfig.PayloadFilterRule{{Params: []string{"x"}}}}}}
+	auth := &Auth{ID: t.Name(), Provider: provider.Identifier(), ConfigKey: key, Attributes: map[string]string{"api_key": "syntheticAuthKey123", "source": "config:fixture", "auth_kind": "apikey"}}
+	if bound, err := executorForAuth(provider, auth); err == nil || bound != nil {
+		t.Fatal("nonempty policy reached a provider without binding support")
+	}
+
+	// Verify operator checks reject unsupported policies before contacting the provider.
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(provider)
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := manager.VerifyInference(context.Background(), auth.ID, "test-model")
+	var bindingErr *Error
+	if !errors.As(err, &bindingErr) || bindingErr.Code != "payload_policy_unsupported" {
+		t.Fatalf("verification error = %v, want payload_policy_unsupported", err)
+	}
+	if verified == nil {
+		t.Fatal("verification returned no credential for the rejected payload policy")
+	}
+	if verified.ID != auth.ID || verified.InferenceVerified || provider.executeCalls.Load() != 0 {
+		t.Fatalf("verification result: id=%q verified=%t provider calls=%d; want id=%q verified=false provider calls=0", verified.ID, verified.InferenceVerified, provider.executeCalls.Load(), auth.ID)
+	}
+	for _, control := range []*Auth{
+		{Attributes: map[string]string{"api_key": "syntheticAuthKey123", "source": "config:fixture", "auth_kind": "apikey"}},
+		{ConfigKey: key, Attributes: map[string]string{"auth_kind": "oauth"}},
+		{ConfigKey: key, FileName: "synthetic-file.json", Attributes: map[string]string{"api_key": "syntheticAuthKey123", "auth_kind": "apikey"}},
+	} {
+		if bound, err := executorForAuth(provider, control); err != nil || bound != provider {
+			t.Fatalf("nonlocal/no-policy control changed binding: %v", err)
+		}
+	}
+}
+
 func TestHomeModelErrorOutranksLaterRefreshPreparationError(t *testing.T) {
 	paths := []struct {
 		name string

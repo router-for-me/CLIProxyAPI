@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -88,6 +89,8 @@ type Auth struct {
 	// credential. Nil means no pooling, which is the default. Pools are per
 	// credential, so an override here never shares connections with another auth.
 	ProxyConnectionPool *ProxyConnectionPoolOverride `json:"proxy_connection_pool,omitempty"`
+	// ConfigKey references the immutable key definition that produced this credential.
+	ConfigKey internalconfig.PayloadFilterSource `json:"-" yaml:"-"`
 	// Attributes stores provider specific metadata needed by executors (immutable configuration).
 	Attributes map[string]string `json:"attributes,omitempty"`
 	// Metadata stores runtime mutable provider state (e.g. tokens, cookies).

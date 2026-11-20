@@ -419,6 +419,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		m.mu.Unlock()
 		return nil, false, false, nil
 	}
+	// Retain the selected configuration owner when an update carries only credential state.
+	if auth.ConfigKey == nil {
+		auth.ConfigKey = existing.ConfigKey
+	}
 	if m.authEpochs == nil {
 		m.authEpochs = make(map[string]uint64)
 	}
