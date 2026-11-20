@@ -3,10 +3,11 @@ package requestlogs
 import (
 	"io"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/regexp"
 
 	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
@@ -163,6 +164,7 @@ type Attempt struct {
 type Response struct {
 	Status        int                 `json:"status"`
 	Headers       map[string][]string `json:"headers"`
+	Errors        []string            `json:"errors,omitempty"`
 	Body          string              `json:"body"`
 	BodyTruncated bool                `json:"body_truncated"`
 	SSEEvents     []SSEEvent          `json:"sse_events"`
@@ -230,6 +232,7 @@ func readDetail(path string) (*Detail, error) {
 		Response: Response{
 			Status:        p.respStatus,
 			Headers:       headerMap(p.respHeaders),
+			Errors:        p.respErrors,
 			Body:          p.respBody.String(),
 			BodyTruncated: p.respBody.truncated,
 		},

@@ -7,12 +7,13 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MoeForge/moego/regexp"
 
 	"github.com/MoeForge/moego/base64"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"

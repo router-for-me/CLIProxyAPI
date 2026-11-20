@@ -120,6 +120,72 @@ func TestParseErrorFile(t *testing.T) {
 	}
 }
 
+// The *-v2.log fixtures were written by the upstream logger after v8.0.79, whose final RESPONSE
+// section is "Status / [Error: ...] / blank / Headers: / ... / blank / Body: / ...".
+func TestParseResponseLayoutV2(t *testing.T) {
+	ns := mustMeta(t, "openai-nonstream-v2.log")
+	if ns.status != 200 || ns.stream || ns.requestID == "" || i64(ns.tokens.in) != 3 || i64(ns.tokens.out) != 4 {
+		t.Fatalf("non-stream meta = %+v tokens %d/%d", ns, i64(ns.tokens.in), i64(ns.tokens.out))
+	}
+	d := mustDetail(t, filepath.Join("testdata", "openai-nonstream-v2.log"))
+	if d.Response.Status != 200 || d.Response.Headers["Content-Type"][0] != "application/json" ||
+		!strings.HasPrefix(d.Response.Body, `{"id":"chatcmpl-1"`) || strings.HasSuffix(d.Response.Body, "\n") || len(d.Response.Errors) != 0 {
+		t.Fatalf("non-stream response = %+v", d.Response)
+	}
+	if _, ok := d.Response.Headers["Headers:"]; ok {
+		t.Fatal("layout marker parsed as a header")
+	}
+
+	st := mustMeta(t, "openai-stream-v2.log")
+	if !st.stream || st.status != 200 || i64(st.tokens.in) != 5 || i64(st.tokens.out) != 6 {
+		t.Fatalf("stream meta = %+v tokens %d/%d", st, i64(st.tokens.in), i64(st.tokens.out))
+	}
+	sd := mustDetail(t, filepath.Join("testdata", "openai-stream-v2.log"))
+	if len(sd.Response.SSEEvents) != 5 || sd.Response.SSEEvents[4].Data != "[DONE]" ||
+		sd.Response.Assembled == nil || sd.Response.Assembled.Text != "streamed hello from up-ok" {
+		t.Fatalf("stream response = %+v", sd.Response)
+	}
+
+	fo := mustMeta(t, "failover-v2.log")
+	if fo.attempts != 2 || fo.servedHeader != "model-ok" || fo.requestedModel != "auto" || fo.authProvider != "openai-compatible-pok" {
+		t.Fatalf("failover meta = %+v", fo)
+	}
+
+	er := mustMeta(t, "error-400-v2.log")
+	ed := mustDetail(t, filepath.Join("testdata", "error-400-v2.log"))
+	if er.status != 400 || ed.Response.Status != 400 || !strings.HasPrefix(ed.Response.Body, `{"error":`) {
+		t.Fatalf("error meta = %+v response = %+v", er, ed.Response)
+	}
+}
+
+func TestResponseLayoutV2Diagnostics(t *testing.T) {
+	head := "=== REQUEST INFO ===\nURL: /v1/responses\nMethod: POST\n\n\n=== REQUEST BODY ===\n{\"model\":\"m\"}\n\n\n"
+	path := writeTemp(t, t.TempDir(), "d.log", head+"=== RESPONSE ===\nStatus: 502\nError: dial tcp: refused\n\nHeaders:\n<none>\n\nBody:\n")
+	d := mustDetail(t, path)
+	if d.Response.Status != 502 || len(d.Response.Headers) != 0 || d.Response.Body != "" ||
+		len(d.Response.Errors) != 1 || d.Response.Errors[0] != "dial tcp: refused" {
+		t.Fatalf("response = %+v", d.Response)
+	}
+
+	// Websocket transcripts get a diagnostics-only section: no status, headers or body.
+	path = writeTemp(t, t.TempDir(), "ws.log", head+"=== RESPONSE ===\nError: stream reset\n")
+	d = mustDetail(t, path)
+	if d.Response.Status != 0 || len(d.Response.Headers) != 0 || d.Response.Body != "" ||
+		len(d.Response.Errors) != 1 || d.Response.Errors[0] != "stream reset" {
+		t.Fatalf("diagnostic-only response = %+v", d.Response)
+	}
+}
+
+func TestLegacyResponseBodyStartingWithHeadersMarker(t *testing.T) {
+	// Old layout: headers come before the blank line, so a body line "Headers:" stays body.
+	body := "Headers:\nnot: a header"
+	path := writeTemp(t, t.TempDir(), "l.log", logFile(`{"model":"m"}`, "text/plain", body, ""))
+	d := mustDetail(t, path)
+	if d.Response.Body != body || d.Response.Headers["Content-Type"][0] != "text/plain" {
+		t.Fatalf("response = %+v", d.Response)
+	}
+}
+
 // logFile renders a minimal request log in the request logger's format.
 func logFile(reqBody, contentType, respBody string, extra string) string {
 	var b strings.Builder

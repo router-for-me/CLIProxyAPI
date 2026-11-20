@@ -1,0 +1,85 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /v1/chat/completions
+Method: POST
+Downstream Transport: http
+Upstream Transport: http
+Timestamp: 2026-11-20T15:54:49.679369+05:30
+
+
+=== HEADERS ===
+User-Agent: Go-http-client/1.1
+Content-Length: 87
+Authorization: Bearer te...ey
+Content-Type: application/json
+Accept-Encoding: gzip
+
+
+=== REQUEST BODY ===
+{"messages":[{"content":"beta-stream","role":"user"}],"model":"model-ok","stream":true}
+
+
+=== API REQUEST 1 ===
+Timestamp: 2026-11-20T15:54:49.679656+05:30
+Upstream URL: http://127.0.0.1:55738/pok/v1/chat/completions
+HTTP Method: POST
+Auth: provider=openai-compatible-pok, auth_id=openai-compatibility:pok:a39c3e333321, label=pok, type=api_key value=mock...-pok
+
+Headers:
+Accept: text/event-stream
+Authorization: Bearer mock...-pok
+Cache-Control: no-cache
+Content-Type: application/json
+User-Agent: Go-http-client/1.1
+
+Body:
+{"messages":[{"content":"beta-stream","role":"user"}],"model":"up-ok","stream":true,"stream_options":{"include_usage":true}}
+
+
+=== API RESPONSE 1 ===
+Timestamp: 2026-11-20T15:54:49.680076+05:30
+
+Status: 200
+Headers:
+Content-Type: text/event-stream
+Date: Fri, 20 Nov 2026 10:24:49 GMT
+
+Body:
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[{"index":0,"delta":{"content":"hello from up-ok"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}
+
+data: [DONE]
+
+
+=== RESPONSE ===
+Status: 200
+
+Headers:
+Access-Control-Expose-Headers: X-CPA-TRACE-ID, X-CPA-VERSION, X-CPA-COMMIT, X-CPA-BUILD-DATE, X-CPA-SUPPORT-PLUGIN, X-CPA-HOME-VERSION, X-CPA-HOME-BUILD-DATE, X-SERVER-VERSION, X-SERVER-BUILD-DATE, Location, Retry-After, ETag, X-Request-Id, OpenAI-Request-Id
+Content-Encoding: gzip
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Api-Key, X-Goog-Api-Key, Anthropic-Version, Anthropic-Beta
+Cache-Control: no-cache
+X-Cpa-Trace-Id: 20261120155449-c1d91097b8dca34d-01a1f87c-c80f-7599-91b2-3070efaa0149
+Access-Control-Allow-Origin: *
+Content-Type: text/event-stream
+Connection: keep-alive
+Vary: Accept-Encoding
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+
+Body:
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[{"index":0,"delta":{"role":"assistant","content":"streamed "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[{"index":0,"delta":{"content":"hello from up-ok"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"up-ok","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}
+
+data: [DONE]
+
+
