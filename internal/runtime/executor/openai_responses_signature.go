@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -226,16 +227,7 @@ func isNativeMetaUpstreamURL(rawURL string) bool {
 }
 
 func isOpenRouterUpstreamURL(rawURL string) bool {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return false
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
-	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
+	return util.IsOpenRouterURL(rawURL)
 }
 
 func stripRouterSuffix(rawSignature, suffix string) string {
