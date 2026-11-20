@@ -127,8 +127,11 @@ func isAIAPIPath(path string) bool {
 }
 
 // GinLogrusRecovery returns a Gin middleware handler that recovers from panics and logs
-// them using logrus. When a panic occurs, it captures the panic value, stack trace,
-// and request path, then returns a 500 Internal Server Error response to the client.
+// them using logrus. When a panic occurs, it logs the panic value's type, the stack trace
+// and the request path, then returns a 500 Internal Server Error response to the client.
+// The panic value itself is not logged: it can carry request or credential material
+// (for example an upstream API key or prompt text), and Go stack traces never
+// serialize local values, so the type and stack are enough to locate the fault.
 //
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for panic recovery
@@ -140,9 +143,9 @@ func GinLogrusRecovery() gin.HandlerFunc {
 		}
 
 		log.WithFields(log.Fields{
-			"panic": recovered,
-			"stack": string(debug.Stack()),
-			"path":  c.Request.URL.Path,
+			"panic_type": fmt.Sprintf("%T", recovered),
+			"stack":      string(debug.Stack()),
+			"path":       c.Request.URL.Path,
 		}).Error("recovered from panic")
 
 		c.AbortWithStatus(http.StatusInternalServerError)

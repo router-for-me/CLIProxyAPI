@@ -2,6 +2,7 @@ package logging
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -275,5 +276,43 @@ func TestGinLogrusLoggerHealthProbeStatus(t *testing.T) {
 				t.Errorf("access log present = %v, want %v", got, tc.wantLog)
 			}
 		})
+	}
+}
+
+func TestGinLogrusRecoveryDoesNotLogPanicValue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	hook := logtest.NewGlobal()
+	defer hook.Reset()
+
+	const secret = "sk-test-secret-must-not-be-logged"
+	engine := gin.New()
+	engine.Use(GinLogrusRecovery())
+	engine.GET("/panic", func(c *gin.Context) {
+		panic(errors.New("upstream rejected key " + secret))
+	})
+
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/panic", nil))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", recorder.Code)
+	}
+
+	entry := hook.LastEntry()
+	if entry == nil {
+		t.Fatal("expected a recovery log entry")
+	}
+	if _, ok := entry.Data["panic"]; ok {
+		t.Fatalf("panic value must not be logged: %v", entry.Data)
+	}
+	if got := entry.Data["panic_type"]; got != "*errors.errorString" {
+		t.Fatalf("panic_type = %v, want *errors.errorString", got)
+	}
+	for key, value := range entry.Data {
+		if strings.Contains(fmt.Sprint(value), secret) {
+			t.Fatalf("log field %q leaked the panic value", key)
+		}
+	}
+	if strings.Contains(entry.Message, secret) {
+		t.Fatal("log message leaked the panic value")
 	}
 }
