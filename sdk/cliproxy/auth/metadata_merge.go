@@ -115,6 +115,11 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 		finalDisabled = updatedDisabled
 	}
 
+	// The refresh produced usable access, so a stored renewal failure is resolved.
+	refreshRestoredAccess := (updated.Status == StatusActive || updated.Status == "") &&
+		(!merged.RequiresSignIn || merged.HasValidAccessToken(time.Now())) &&
+		(merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken)
+
 	if finalDisabled {
 		merged.Disabled = true
 		merged.Status = StatusDisabled
@@ -142,7 +147,16 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 			merged.Unavailable = current.Unavailable
 			merged.Status = current.Status
 			merged.StatusMessage = current.StatusMessage
-		} else if (updated.Status == StatusActive || updated.Status == "") && (!merged.RequiresSignIn || merged.HasValidAccessToken(time.Now())) && (merged.RejectedAccessToken == "" || authAccessToken(merged) != merged.RejectedAccessToken) {
+			if refreshRestoredAccess && current.RefreshError != nil && current.LastError != nil &&
+				current.LastError.Message == current.RefreshError.Message {
+				// The stored message and error describe the renewal failure this
+				// refresh resolved (e.g. "token expired"); only the cooldown remains.
+				merged.StatusMessage = ""
+				if merged.Quota.Exceeded {
+					merged.StatusMessage = merged.Quota.Reason
+				}
+			}
+		} else if refreshRestoredAccess {
 			// Successful refresh clears previous auth error and restores active
 			merged.Status = StatusActive
 			merged.Unavailable = false
