@@ -154,7 +154,7 @@ func ConvertCodexResponseToClaude(ctx context.Context, _ string, originalRequest
 		// Intentionally does not close the thinking block: it stays open until
 		// output_item.done delivers the reasoning item's final encrypted_content.
 	case "response.content_part.added":
-		if rootResult.Get("part.type").String() == "output_text" {
+		if pt := rootResult.Get("part.type").String(); pt == "output_text" || pt == "refusal" {
 			if params.CommentaryMessageOpen {
 				output = append(output, startCodexThinkingBlock(params)...)
 			} else {
@@ -164,23 +164,26 @@ func ConvertCodexResponseToClaude(ctx context.Context, _ string, originalRequest
 		} else {
 			output = append(output, finalizeCodexThinkingBlock(params)...)
 		}
-	case "response.output_text.delta":
-		params.HasTextDelta = true
+	case "response.output_text.delta", "response.refusal.delta":
+		deltaText := rootResult.Get("delta").String()
+		if deltaText != "" {
+			params.HasTextDelta = true
+		}
 		if params.CommentaryMessageOpen {
 			output = append(output, startCodexThinkingBlock(params)...)
-			output = append(output, appendCodexThinkingDelta(params, rootResult.Get("delta").String())...)
+			output = append(output, appendCodexThinkingDelta(params, deltaText)...)
 			break
 		}
 		output = append(output, finalizeCodexThinkingBlock(params)...)
 		output = append(output, startCodexTextBlock(params)...)
 		templateDoc := ojson.NewDocString(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}`)
 		_ = templateDoc.Set("index", params.BlockIndex)
-		_ = templateDoc.Set("delta.text", rootResult.Get("delta").String())
+		_ = templateDoc.Set("delta.text", deltaText)
 		template = templateDoc.Bytes()
 
 		output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 	case "response.content_part.done":
-		if rootResult.Get("part.type").String() == "output_text" {
+		if pt := rootResult.Get("part.type").String(); pt == "output_text" || pt == "refusal" {
 			if params.CommentaryMessageOpen {
 				output = append(output, finalizeCodexCommentaryBlock(params)...)
 			} else {
@@ -271,11 +274,15 @@ func ConvertCodexResponseToClaude(ctx context.Context, _ string, originalRequest
 			}
 			var textBuilder strings.Builder
 			contentResult.ForEach(func(_, part ojson.Result) bool {
-				if part.Get("type").String() != "output_text" {
-					return true
-				}
-				if txt := part.Get("text").String(); txt != "" {
-					textBuilder.WriteString(txt)
+				switch part.Get("type").String() {
+				case "output_text":
+					textBuilder.WriteString(part.Get("text").String())
+				case "refusal":
+					if txt := part.Get("refusal").String(); txt != "" {
+						textBuilder.WriteString(txt)
+					} else {
+						textBuilder.WriteString(part.Get("text").String())
+					}
 				}
 				return true
 			})
@@ -500,13 +507,20 @@ func ConvertCodexResponseToClaudeNonStream(ctx context.Context, _ string, origin
 				if content := item.Get("content"); content.Exists() {
 					if content.IsArray() {
 						content.ForEach(func(_, part ojson.Result) bool {
-							if part.Get("type").String() == "output_text" {
-								text := part.Get("text").String()
-								if text != "" {
-									contentBlocks = append(contentBlocks, codexMessageTextBlock(blockType, text))
-									if blockType == "thinking" && translatorcommon.VisibleCodexCommentary(ctx) {
-										contentBlocks = append(contentBlocks, codexMessageTextBlock("text", text))
-									}
+							partType := part.Get("type").String()
+							if partType != "output_text" && partType != "refusal" {
+								return true
+							}
+							text := part.Get("text").String()
+							if partType == "refusal" {
+								if refusal := part.Get("refusal").String(); refusal != "" {
+									text = refusal
+								}
+							}
+							if text != "" {
+								contentBlocks = append(contentBlocks, codexMessageTextBlock(blockType, text))
+								if blockType == "thinking" && translatorcommon.VisibleCodexCommentary(ctx) {
+									contentBlocks = append(contentBlocks, codexMessageTextBlock("text", text))
 								}
 							}
 							return true

@@ -589,7 +589,7 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(capture *requestAfterAuthCa
 	}
 	return func(ctx context.Context, req coreexecutor.RequestAfterAuthInterceptRequest) coreexecutor.RequestAfterAuthInterceptResponse {
 		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, requestID, skipPluginID)
-		if capture != nil {
+		if capture != nil && !resp.Terminate {
 			capture.record(req, resp)
 		}
 		return resp
@@ -661,18 +661,20 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(ctx context.Context, 
 		Body:            resp.Body,
 		ClearHeaders:    resp.ClearHeaders,
 		Terminate:       resp.Terminate,
+		TerminateScope:  resp.TerminateScope,
 		StatusCode:      normalizedTerminationStatus(resp.StatusCode),
 		ResponseHeaders: resp.ResponseHeaders,
 		ResponseBody:    resp.ResponseBody,
 	}
 }
 
-func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string, passthrough bool) ([]byte, http.Header) {
+func (h *BaseAPIHandler) applyResponseInterceptors(ctx context.Context, kind, requestID, handlerType, normalizedModel, requestedModel string, opts coreexecutor.Options, rawResponseHeaders, responseHeaders http.Header, originalRequest, requestBody, body []byte, statusCode int, skipPluginID string, passthrough bool) ([]byte, http.Header) {
 	host := h.interceptorHost()
 	if host == nil {
 		return body, responseHeaders
 	}
 	resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+		Kind:            kind,
 		RequestID:       requestID,
 		SourceFormat:    handlerType,
 		Model:           normalizedModel,
@@ -775,6 +777,7 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		metadata := modelListInterceptorMetadata(c)
 		lifecycle = h.newRequestLifecycleTracker(ctx, sourceFormat, "", "", false, metadata, "")
 		resp := interceptResponse(ctx, host, pluginapi.ResponseInterceptRequest{
+			Kind:            pluginapi.ResponseInterceptKindModelList,
 			RequestID:       lifecycle.requestID(),
 			SourceFormat:    sourceFormat,
 			Model:           "",
