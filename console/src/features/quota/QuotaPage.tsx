@@ -240,7 +240,11 @@ export function QuotaPage() {
     pageItems: cardPageItems,
     currentPage,
     totalPages,
-  } = useMemo(() => paginate(sortedEntries, page, QUOTA_PAGE_SIZE), [sortedEntries, page]);
+  } = useMemo(
+    // The tab fallback lands on the first page, as a tab change does.
+    () => paginate(sortedEntries, tab === savedTab ? page : 1, QUOTA_PAGE_SIZE),
+    [sortedEntries, tab, savedTab, page]
+  );
   // The ledger shows every credential at once; card views stay paginated.
   const pageItems = isLedger ? sortedEntries : cardPageItems;
   const ledgerEntries = useMemo(
