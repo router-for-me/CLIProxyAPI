@@ -7,7 +7,6 @@ package groupse2e
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +20,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const (

@@ -1,11 +1,12 @@
 package usagestats
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/MoeForge/moego/json"
 )
 
 const snapshotVersion = 1
