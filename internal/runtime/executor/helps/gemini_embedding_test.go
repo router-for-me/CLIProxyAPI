@@ -237,3 +237,25 @@ func TestPrepareGeminiEmbeddingDocBatchFillIsFinalBarrierSafe(t *testing.T) {
 		t.Errorf("requests[1].model = %q, want default fill kept", got)
 	}
 }
+
+// TestPrepareGeminiEmbeddingDocNormalizesBareBatchEntryModels covers the resource-name
+// format upstream enforces per batch entry: a bare identifier (accepted by embedContent)
+// is rejected with "unexpected model name format", so it is normalized here.
+func TestPrepareGeminiEmbeddingDocNormalizesBareBatchEntryModels(t *testing.T) {
+	raw := `{"requests":[{"model":"gemini-embedding-001","content":{"parts":[{"text":"a"}]}},{"model":"models/gemini-embedding-2","content":{"parts":[{"text":"b"}]}},{"model":"publishers/google/models/x","content":{"parts":[{"text":"c"}]}},{"content":{"parts":[{"text":"d"}]}}]}`
+	doc, err := PrepareGeminiEmbeddingDoc([]byte(raw), "gemini-embedding-001", GeminiBatchEmbedContentsAction)
+	if err != nil {
+		t.Fatalf("PrepareGeminiEmbeddingDoc() error = %v", err)
+	}
+	for i, want := range []string{
+		"models/gemini-embedding-001", // bare id normalized
+		"models/gemini-embedding-2",   // already a resource name, untouched
+		"publishers/google/models/x",  // other resource form, left for upstream
+		"models/gemini-embedding-001", // missing entry inherits the path model
+	} {
+		got := ojson.GetBytes(doc.Bytes(), "requests."+strconv.Itoa(i)+".model").String()
+		if got != want {
+			t.Fatalf("requests[%d].model = %q, want %q", i, got, want)
+		}
+	}
+}
