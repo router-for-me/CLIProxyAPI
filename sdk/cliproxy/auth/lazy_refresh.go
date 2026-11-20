@@ -37,11 +37,37 @@ func accessExpiryBlocksSelection(ctx context.Context, auth *Auth, now time.Time,
 }
 
 func lazyRefreshDueForRequest(ctx context.Context, a *Auth, now time.Time) bool {
-	if !a.UsesLazyRefresh() {
+	return a.UsesLazyRefresh() && lazyAccessTokenDue(ctx, a, now, a.RefreshPolicy.ExpiryMarginSeconds)
+}
+
+func homeLazyRefreshDue(ctx context.Context, auth *Auth, headers ...http.Header) bool {
+	if auth == nil {
 		return false
 	}
-	expiry, known := a.AccessTokenExpirationTimeForRequest(ctx)
-	return authAccessTokenForRequest(ctx, a) == "" || known && !expiry.After(now.Add(time.Duration(a.RefreshPolicy.ExpiryMarginSeconds)*time.Second))
+	var margin int64
+	if auth.RefreshPolicy != nil {
+		if !auth.UsesLazyRefresh() {
+			return false
+		}
+		margin = auth.RefreshPolicy.ExpiryMarginSeconds
+	} else {
+		stored, _ := auth.Metadata["host_refresh_policy"].(map[string]any)
+		if stored["mode"] != pluginapi.AuthRefreshLazy {
+			return false
+		}
+		seconds, _ := parseIntAny(stored["expiry_margin_seconds"])
+		margin = int64(seconds)
+	}
+	if margin < 0 || margin > 3600 {
+		margin = 0
+	}
+	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, headers...))
+	return lazyAccessTokenDue(ctx, auth, time.Now(), margin)
+}
+
+func lazyAccessTokenDue(ctx context.Context, auth *Auth, now time.Time, marginSeconds int64) bool {
+	expiry, known := auth.AccessTokenExpirationTimeForRequest(ctx)
+	return authAccessTokenForRequest(ctx, auth) == "" || known && !expiry.After(now.Add(time.Duration(marginSeconds)*time.Second))
 }
 
 func hasValidAccessTokenForRequest(ctx context.Context, auth *Auth, now time.Time) bool {
@@ -116,6 +142,15 @@ func (m *Manager) EnsureAuthFreshForOperation(ctx context.Context, auth *Auth, c
 
 func (m *Manager) ensureAuthFresh(ctx context.Context, auth *Auth, model string, clientHeaders ...http.Header) (*Auth, bool, error) {
 	if m == nil || auth == nil {
+		return auth, false, nil
+	}
+	if ctx != nil && ctx.Value(homeAttemptContextKey{}) != nil {
+		if homeLazyRefreshDue(ctx, auth, clientHeaders...) {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return auth, true, errCtx
+			}
+			return auth, true, &authFreshnessError{&Error{Code: "auth_unavailable", Message: "Home credential is not fresh", HTTPStatus: http.StatusServiceUnavailable}}
+		}
 		return auth, false, nil
 	}
 	m.mu.RLock()

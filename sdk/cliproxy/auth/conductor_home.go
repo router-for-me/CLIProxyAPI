@@ -1011,11 +1011,39 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 }
 
 func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (*HomeDispatchSelection, error) {
-	if m == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
-	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	var stale map[string]struct{}
+	for {
+		selection, errDispatch := m.dispatchHomeSelection(ctx, model, opts)
+		if errDispatch != nil {
+			return nil, errDispatch
+		}
+		auth := selection.CloneAuth()
+		if !homeLazyRefreshDue(ctx, auth, opts.Headers) {
+			return selection, nil
+		}
+		if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "lazy_credential_not_fresh"); errEnd != nil {
+			return nil, errEnd
+		}
+		if errCtx := ctx.Err(); errCtx != nil {
+			return nil, errCtx
+		}
+		if _, repeated := stale[auth.ID]; repeated || pinnedAuthIDFromMetadata(opts.Metadata) != "" {
+			return nil, &Error{Code: "auth_not_found", Message: "Home did not provide a fresh credential", HTTPStatus: http.StatusServiceUnavailable}
+		}
+		if stale == nil {
+			stale = make(map[string]struct{})
+		}
+		stale[auth.ID] = struct{}{}
+		opts = withHomeExcludedAuthIDs(withHomeAuthCount(opts, homeAuthCountFromMetadata(opts.Metadata)+1), stale)
+	}
+}
+
+func (m *Manager) dispatchHomeSelection(ctx context.Context, model string, opts cliproxyexecutor.Options) (*HomeDispatchSelection, error) {
+	if m == nil {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 
 	requestedModel := strings.TrimSpace(model)

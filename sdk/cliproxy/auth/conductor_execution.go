@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -77,9 +78,17 @@ func upstreamAttemptProviderFromContext(ctx context.Context) string {
 	return strings.TrimSpace(provider)
 }
 
+// upstreamAttemptSeq allocates a process-unique identifier for every
+// upstream execution attempt marker so error wrappers rebuilt during
+// annotation can still be traced back to the same physical attempt.
+var upstreamAttemptSeq atomic.Uint64
+
 type upstreamExecutionAttemptError struct {
 	cause    error
 	provider string
+	// attemptID identifies the physical upstream attempt this error was
+	// raised for; it is preserved when bookkeeping wrappers are rebuilt.
+	attemptID uint64
 }
 
 func (e *upstreamExecutionAttemptError) Error() string {
@@ -125,7 +134,26 @@ func markUpstreamExecutionAttemptWithProvider(err error, provider string) error 
 		}
 		return err
 	}
-	return &upstreamExecutionAttemptError{cause: err, provider: provider}
+	return markUpstreamExecutionAttemptWithProviderAndID(err, provider, upstreamAttemptSeq.Add(1))
+}
+
+// markUpstreamExecutionAttemptWithProviderAndID tags err with the caller's
+// attempt identity, reusing id when the error already carries a marker.
+func markUpstreamExecutionAttemptWithProviderAndID(err error, provider string, id uint64) error {
+	if err == nil {
+		return nil
+	}
+	provider = strings.TrimSpace(provider)
+	if existingProvider := upstreamAttemptProviderFromError(err); existingProvider != "" || hasUpstreamExecutionAttempt(err) {
+		if provider != "" && existingProvider == "" {
+			var marked *upstreamExecutionAttemptError
+			if errors.As(err, &marked) && marked != nil {
+				marked.provider = provider
+			}
+		}
+		return err
+	}
+	return &upstreamExecutionAttemptError{cause: err, provider: provider, attemptID: id}
 }
 
 func markUpstreamExecutionAttemptFromContext(ctx context.Context, err error) error {
@@ -1021,18 +1049,68 @@ func syncPreferredUpstreamError(upstreamErr *error, errExec error) {
 	}
 	// A stream bootstrap wrapper built from an earlier attempt already
 	// carries the response headers needed to hand that failure back as an
-	// error stream; keep that earlier failure preferred. When the wrapper
-	// was built from this same attempt, annotate that wrapper in place
-	// instead of replacing it (error values are compared by identity only
-	// through reflect here because dynamic types may be uncomparable).
+	// error stream; keep that earlier failure preferred. Only a hint
+	// raised for the very same upstream attempt may annotate that wrapper
+	// in place; a hint from a different credential attempt must not mutate
+	// an earlier bootstrap, even when both attempts surfaced an equal
+	// error value.
 	var bootstrap *streamBootstrapError
 	if errors.As(*upstreamErr, &bootstrap) && bootstrap != nil {
-		if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 {
+		if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 &&
+			upstreamErrorMatchesBootstrap(errExec, bootstrap) {
 			bootstrap.cause = withTrustedRetryAfter(bootstrap.cause, hint)
 		}
 		return
 	}
 	*upstreamErr = errExec
+}
+
+// upstreamErrorMatchesBootstrap reports whether err belongs to the same
+// upstream attempt that produced bootstrap. Attempt markers carry a
+// process-unique id that survives annotation rebuilds, so a hint refreshed
+// for the same attempt matches while a different credential attempt is
+// rejected even when both surfaced the very same error value. The id is
+// read from the innermost source the attempt owns: a nested bootstrap
+// wrapper's recorded id first, then the outer attempt marker. Only when
+// neither side carries an attempt id (for example tests that bypass the
+// marking helpers) does the check fall back to cause identity.
+func upstreamErrorMatchesBootstrap(err error, bootstrap *streamBootstrapError) bool {
+	if err == nil || bootstrap == nil {
+		return false
+	}
+	execAttemptID := uint64(0)
+	var execBootstrap *streamBootstrapError
+	if errors.As(err, &execBootstrap) && execBootstrap != nil {
+		execAttemptID = execBootstrap.attemptID
+	}
+	if execAttemptID == 0 {
+		var marked *upstreamExecutionAttemptError
+		if errors.As(err, &marked) && marked != nil {
+			execAttemptID = marked.attemptID
+		}
+	}
+	if execAttemptID != 0 && bootstrap.attemptID != 0 {
+		return execAttemptID == bootstrap.attemptID
+	}
+	return sameInterfaceHeader(unwrapBootstrapSyncError(err), bootstrap.cause)
+}
+
+// unwrapBootstrapSyncError peels the wrappers syncPreferredUpstreamError
+// deals with so the underlying failure can be compared by identity.
+func unwrapBootstrapSyncError(err error) error {
+	for err != nil {
+		switch wrapped := err.(type) {
+		case *upstreamExecutionAttemptError:
+			err = wrapped.cause
+		case *trustedRetryAfterError:
+			err = wrapped.cause
+		case *streamBootstrapError:
+			err = wrapped.cause
+		default:
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
@@ -1083,8 +1161,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
-		publishSelectedAuthMetadata(opts.Metadata, auth)
-
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
@@ -1100,6 +1176,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		publishSelectedAuthMetadata(opts.Metadata, auth)
 		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
@@ -1351,8 +1428,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, routeModel)
-		publishSelectedAuthMetadata(opts.Metadata, auth)
-
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		if rt := m.roundTripperFor(auth); rt != nil {
@@ -1368,6 +1443,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		publishSelectedAuthMetadata(opts.Metadata, auth)
 		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
@@ -1737,8 +1813,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errRuntimeAuth
 			}
 		}
-		publishSelectedAuthMetadata(opts.Metadata, auth)
-
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
 		releaseAttempt := func() {}
@@ -1792,6 +1866,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		publishSelectedAuthMetadata(opts.Metadata, auth)
 		var preparedAuth *Auth
 		var errPrepare error
 		if selection != nil {
@@ -3091,7 +3166,7 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
 	}
-	fresh, errFresh := m.EnsureAuthFresh(ctx, auth, req.Header)
+	fresh, errFresh := m.EnsureAuthFresh(req.Context(), auth, req.Header)
 	if errFresh != nil {
 		return errFresh
 	}
@@ -3148,7 +3223,11 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
-	fresh, errFresh := m.EnsureAuthFresh(ctx, auth, req.Header)
+	freshnessCtx := ctx
+	if freshnessCtx == nil {
+		freshnessCtx = req.Context()
+	}
+	fresh, errFresh := m.EnsureAuthFresh(freshnessCtx, auth, req.Header)
 	if errFresh != nil {
 		return nil, errFresh
 	}
