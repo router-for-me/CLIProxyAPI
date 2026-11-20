@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,6 +85,14 @@ func (w *Watcher) reloadConfigIfChanged() {
 		return
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
+	// Hashing replaces only the effective key: a YAML anchor, merge source or
+	// comment keeps the plaintext, and the hashed key no longer shows it. The load
+	// can write the hash and still fail later validation, so remember the values
+	// before loading; the reload after a fix must not mirror the plaintext.
+	hasPlaintextKey := config.HasPlaintextSecretKey(data)
+	if hasPlaintextKey {
+		w.rememberPlaintextSecrets(config.PlaintextManagementSecrets(data))
+	}
 	// Load the bytes that were hashed: a save that truncates and rewrites the file
 	// between two reads would otherwise apply an empty config.
 	if w.reloadConfigData(data) {
@@ -101,11 +110,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 		// it. Reload that write without waiting for its file event and mirror then;
 		// mirroring now could publish the plaintext to a remote store. If the file
 		// could not be written, the reload finds it unchanged and stops.
-		if config.HasPlaintextSecretKey(data) {
-			// Hashing replaces only the effective key: a YAML anchor or merge source
-			// keeps the plaintext, and the hashed key no longer shows it, so remember
-			// the values for the reload of the write-back.
-			w.plaintextSecrets = append(w.plaintextSecrets, config.PlaintextManagementSecrets(data)...)
+		if hasPlaintextKey {
 			log.Info("config holds a plaintext management secret, not mirroring it until it is hashed")
 			w.scheduleConfigReload()
 			return
@@ -116,6 +121,16 @@ func (w *Watcher) reloadConfigIfChanged() {
 		}
 		w.plaintextSecrets = nil
 		w.persistConfigAsync(data)
+	}
+}
+
+// rememberPlaintextSecrets adds secrets not yet held, so repeated failed reloads
+// of the same file do not grow the list. Callers hold configApplyMu.
+func (w *Watcher) rememberPlaintextSecrets(secrets []string) {
+	for _, secret := range secrets {
+		if !slices.Contains(w.plaintextSecrets, secret) {
+			w.plaintextSecrets = append(w.plaintextSecrets, secret)
+		}
 	}
 }
 

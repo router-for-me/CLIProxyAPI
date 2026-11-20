@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -2322,6 +2323,65 @@ func TestReloadConfigDoesNotMirrorPlaintextKeptByReferences(t *testing.T) {
 				t.Fatal("the config was not mirrored once the plaintext was gone")
 			}
 		})
+	}
+}
+
+// The load writes the hashed key back before later validation (the plugins
+// directory, for one) can fail. The reload after a fix then sees only the hash,
+// so the plaintext still held in a comment must have been remembered before the
+// failed load, or that reload mirrors it.
+func TestReloadConfigRemembersPlaintextWhenLoadFailsAfterWriteBack(t *testing.T) {
+	const secret = "plain-commented-secret"
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	initial := "remote-management:\n  secret-key: " + secret + " # " + secret + "\nauth-dir: " + authDir + "\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalPersist := runConfigPersist
+	originalLoad := loadConfigDataFunc
+	t.Cleanup(func() {
+		runConfigPersist = originalPersist
+		loadConfigDataFunc = originalLoad
+	})
+	runConfigPersist = func(persist func()) { persist() }
+	loads := 0
+	loadConfigDataFunc = func(path string, data []byte) (*config.Config, error) {
+		loads++
+		cfg, errLoad := originalLoad(path, data)
+		if loads == 1 && errLoad == nil {
+			return nil, errors.New("plugins directory cannot be resolved")
+		}
+		return cfg, errLoad
+	}
+	persister := &recordingConfigPersister{path: configPath, mirrored: make(chan []byte, 4)}
+	w := &Watcher{configPath: configPath, authDir: authDir, storePersister: persister}
+	t.Cleanup(w.stopConfigReloadTimer)
+
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	saved, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if config.HasPlaintextSecretKey(saved) || !strings.Contains(string(saved), secret) {
+		t.Fatalf("want the failed load to have hashed the key and kept the comment, got %q", saved)
+	}
+
+	// The fix of the failing setting changes the file and lets the load succeed.
+	if err := os.WriteFile(configPath, append(saved, []byte("port: 8318\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	select {
+	case mirrored := <-persister.mirrored:
+		t.Fatalf("mirrored a plaintext secret after a failed load: %q", mirrored)
+	default:
 	}
 }
 
