@@ -297,6 +297,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"xai",
 		"devin",
 		"meta",
+		"gemini-app",
 		"openai-compatibility",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
@@ -408,6 +409,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.registerExecutor(executor.NewDevinExecutor(cfg))
 	case "meta":
 		s.registerExecutor(executor.NewMetaExecutor(cfg))
+	case "gemini-app":
+		s.registerExecutor(executor.NewGeminiAppExecutor(cfg, s.coreManager))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
