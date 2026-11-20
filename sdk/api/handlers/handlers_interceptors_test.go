@@ -1836,3 +1836,83 @@ func TestApplyRequestInterceptors_ReadOnlyInterceptorDoesNotReallocatePayload_Is
 		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated opts.OriginalRequest when interceptor did not mutate body")
 	}
 }
+
+func TestResponseInterceptRequest_SetsKindAcrossAuthManagerAndModelListPaths(t *testing.T) {
+	t.Run("auth_manager_execution", func(t *testing.T) {
+		model := "handler-interceptor-kind-exec"
+		executor := &interceptorCaptureExecutor{}
+		handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+		var capturedReq pluginapi.ResponseInterceptRequest
+		handler.SetPluginHost(&handlerInterceptorTestHost{
+			interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				capturedReq = req
+				return pluginapi.ResponseInterceptResponse{}
+			},
+		})
+
+		body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+		if errMsg != nil || string(body) != "ok" {
+			t.Fatalf("ExecuteWithAuthManager() body = %q, error = %#v", body, errMsg)
+		}
+		if capturedReq.Kind != pluginapi.ResponseInterceptKindExecution {
+			t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindExecution)
+		}
+	})
+
+	t.Run("auth_manager_count_tokens", func(t *testing.T) {
+		model := "handler-interceptor-kind-count"
+		executor := &interceptorCaptureExecutor{}
+		handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+		var capturedReq pluginapi.ResponseInterceptRequest
+		handler.SetPluginHost(&handlerInterceptorTestHost{
+			interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				capturedReq = req
+				return pluginapi.ResponseInterceptResponse{}
+			},
+		})
+
+		body, _, errMsg := handler.ExecuteCountWithAuthManager(context.Background(), "claude", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+		if errMsg != nil || string(body) != "0" {
+			t.Fatalf("ExecuteCountWithAuthManager() body = %q, error = %#v", body, errMsg)
+		}
+		if capturedReq.Kind != pluginapi.ResponseInterceptKindCountTokens {
+			t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindCountTokens)
+		}
+	})
+
+	t.Run("model_list_with_populated_metadata", func(t *testing.T) {
+		handler := &BaseAPIHandler{}
+		var capturedReq pluginapi.ResponseInterceptRequest
+		handler.SetPluginHost(&handlerInterceptorTestHost{
+			interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				capturedReq = req
+				return pluginapi.ResponseInterceptResponse{}
+			},
+		})
+
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req = req.WithContext(logging.WithRequestID(req.Context(), "trace-7655"))
+		ctx.Request = req
+		ctx.Set("userApiKey", "caller-principal-7655")
+		ctx.Set("accessProvider", "plugin-frontend-auth")
+		ctx.Set("accessMetadata", map[string]string{"tier": "restricted"})
+
+		handler.WriteModelListResponse(ctx, "openai", gin.H{
+			"object": "list",
+			"data":   []map[string]any{{"id": "gpt-5"}},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		reqID, okReqID := capturedReq.Metadata[coreexecutor.RequestIDMetadataKey].(string)
+		traceID, okTraceID := capturedReq.Metadata[coreexecutor.TraceIDMetadataKey].(string)
+		if !okReqID || reqID == "" || reqID != capturedReq.RequestID || !okTraceID || traceID != "trace-7655" {
+			t.Fatalf("expected lifecycle request_id (%q) and trace_id in metadata, got %#v", capturedReq.RequestID, capturedReq.Metadata)
+		}
+		if capturedReq.Kind != pluginapi.ResponseInterceptKindModelList {
+			t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindModelList)
+		}
+	})
+}
