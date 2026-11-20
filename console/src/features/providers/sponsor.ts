@@ -13,15 +13,6 @@ export const APIKEY_FUN_ANTHROPIC_BASE_URL = APIKEY_FUN_STANDARD_BASE_URL;
 export const APIKEY_FUN_GEMINI_BASE_URL = APIKEY_FUN_STANDARD_BASE_URL;
 export const APIKEY_FUN_USAGE_PATH = '/v1/usage';
 
-/** 双 11 充值赠送活动：赠送比例与推广链接。 */
-export const APIKEY_FUN_DOUBLE11_URL = 'https://apikey.fan/activities/double11-2026?aff=AKCPA';
-export const APIKEY_FUN_DOUBLE11_BONUS_PERCENT = '11.11';
-/** 活动卡片在北京时间 2026-11-12 00:00 后自动下线，避免过期宣传残留。 */
-export const APIKEY_FUN_DOUBLE11_ENDS_AT = Date.parse('2026-11-12T00:00:00+08:00');
-
-export const isApiKeyFunDouble11Active = (now: number = Date.now()): boolean =>
-  now < APIKEY_FUN_DOUBLE11_ENDS_AT;
-
 export const APIKEY_FUN_BASE_URL_OPTIONS = [
   {
     id: 'standard',
@@ -198,8 +189,3 @@ export const buildApiKeyFunRaw = (config: Config | null | undefined): SponsorPro
     .filter((item) => isApiKeyFunCodexProvider(item.config)),
   gemini: [],
 });
-
-export const hasApiKeyFunConfig = (config: Config | null | undefined): boolean => {
-  const raw = buildApiKeyFunRaw(config);
-  return raw.openai.length > 0 || raw.claude.length > 0 || raw.codex.length > 0;
-};

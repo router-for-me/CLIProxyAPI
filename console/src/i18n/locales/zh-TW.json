@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "儀表板",
-    "quick_start": "快速開始",
     "ai_providers": "AI 供應商",
     "auth_files": "驗證檔案",
     "oauth": "OAuth 登入",
@@ -123,7 +122,6 @@
   },
   "nav_meta": {
     "dashboard": "運行總覽",
-    "quick_start": "APIKEY.FUN 快速設定",
     "ai_providers": "上游模型路由",
     "auth_files": "Auth 檔案與憑證",
     "oauth": "OAuth 授權登入",
@@ -135,13 +133,15 @@
     "system_info": "運行與診斷資訊"
   },
   "dashboard": {
-    "hero_verdict_good": "運行平穩",
-    "hero_verdict_warning": "略有波動",
-    "hero_verdict_critical": "需要留意",
-    "hero_verdict_idle": "靜候流量",
-    "hero_verdict_offline": "等待連接",
-    "hero_verdict_connecting": "正在連接",
-    "hero_period": "。",
+    "reliability_title": "可靠性",
+    "reliability_summary": "最近 {{window}} 內 {{rate}}% 的請求成功",
+    "reliability_none": "尚無請求",
+    "reliability_healthy": "健康",
+    "reliability_healthy_range": "95% 以上",
+    "reliability_degraded": "降級",
+    "reliability_degraded_range": "80% 至 94%",
+    "reliability_failing": "故障",
+    "reliability_failing_range": "低於 80%",
     "hero_requests_label": "已處理請求",
     "hero_live": "即時",
     "hero_window_meta": "滾動視窗 {{window}} · 每桶 10 分鐘",
@@ -155,21 +155,18 @@
     "stat_provider_keys_hint": "所有品牌已設定的 API Key 總數",
     "stat_models": "模型",
     "stat_models_hint": "透過代理端點提供的模型",
-    "traffic_eyebrow": "即時流量",
-    "traffic_title": "以 10 分鐘為粒度的吞吐",
+    "traffic_title": "吞吐",
     "traffic_table": "資料表",
     "traffic_table_window": "時間區間",
     "traffic_chart_summary": "最近 {{minutes}} 分鐘共 {{total}} 次請求：成功 {{success}} 次，失敗 {{failed}} 次。",
     "traffic_unavailable": "尚無流量資料",
     "traffic_unavailable_hint": "代理處理第一個請求後便會出現計數。",
-    "fleet_eyebrow": "供應商",
-    "fleet_title": "所有供應商並列比較",
+    "fleet_title": "供應商",
     "fleet_empty": "尚未記錄到供應商流量。",
     "fleet_credentials": "憑證 {{value}} 個",
     "fleet_spark_label": "{{provider}} 請求量",
     "fleet_requests": "次請求",
     "provider_unknown": "未歸類",
-    "health_eyebrow": "健康度",
     "health_title": "憑證狀態",
     "health_active": "可用",
     "health_unavailable": "不可用",
@@ -177,8 +174,7 @@
     "health_by_type": "按供應商",
     "health_empty": "找不到憑證檔案。",
     "health_link": "開啟認證檔案",
-    "runtime_eyebrow": "執行階段",
-    "runtime_title": "執行設定總覽",
+    "runtime_title": "執行設定",
     "runtime_routing": "路由策略",
     "runtime_retry": "請求重試",
     "runtime_management_keys": "管理金鑰",
@@ -191,8 +187,6 @@
     "runtime_ws_auth": "WebSocket 驗證",
     "runtime_model_prefix": "模型前綴",
     "runtime_link": "編輯設定",
-    "cta_eyebrow": "下一步",
-    "cta_title": "接下來前往",
     "window_m": "{{minutes}} 分鐘",
     "window_h": "{{hours}} 小時",
     "window_hm": "{{hours}} 小時 {{minutes}} 分"
@@ -2117,8 +2111,8 @@
     },
     "categories": {
       "title": "提供商",
-      "quickFill": "快速接入",
-      "activeCount": "{{active}}/{{total}} 活躍"
+      "activeCount": "{{active}}/{{total}} 活躍",
+      "add": "新增供應商"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2220,14 +2214,6 @@
         "openai": "OpenAI 相容",
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
-      },
-      "double11": {
-        "badge": "雙 11 限時",
-        "title": "{{provider}} 雙 11 儲值狂歡",
-        "description": "活動期間在 {{provider}} 儲值，額外贈送儲值金額 {{percent}}% 的額度，先到先得。",
-        "bonus": "儲值加贈",
-        "cta": "立即參與",
-        "ctaAria": "立即參與 {{provider}} 雙 11 儲值活動（在新分頁開啟）"
       }
     },
     "status": {
@@ -2523,12 +2509,9 @@
     "cache_read": "讀取 {{tokens}}",
     "cache_write": "寫入 {{tokens}}",
     "cache_hint": "此帳號近 1 小時從提示快取讀取的輸入 token。寫入多、讀取少表示對話在切換帳號。",
-    "runway_title": "本週重置",
-    "runway_caption": "每個標記是一個帳號，位於其每週重置時間，填充量為剩餘額度。代理從左側開始使用。",
-    "runway_now": "現在",
-    "runway_unseen": "未觀測",
-    "runway_left_of": "剩餘，共 {{capacity}}%",
-    "runway_marker": "{{name}}：剩餘 {{percent}}%，{{when}}重置",
-    "runway_marker_unseen": "{{name}}：剩餘 {{percent}}%，尚未觀測到重置時間"
+    "resets_title": "手動重置",
+    "resets_summary_one": "{{count}} 個帳號共 {{available}} 次可用",
+    "resets_summary_other": "{{count}} 個帳號共 {{available}} 次可用",
+    "resets_expires": "{{dates}} 到期"
   }
 }

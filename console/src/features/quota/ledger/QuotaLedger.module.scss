@@ -1,4 +1,4 @@
-/* Ledger view: the runway over dense per-account rows. */
+/* Ledger view: manual resets over dense per-account rows. */
 
 .ledger {
   display: flex;
@@ -189,17 +189,6 @@
 .resetAbsolute + .reset::before {
   content: '·';
   margin: 0 6px;
-}
-
-.creditCount {
-  font-size: 14px;
-  color: var(--text-secondary);
-
-  strong {
-    color: var(--text-primary);
-    font-size: 15px;
-    margin-right: 4px;
-  }
 }
 
 .message,

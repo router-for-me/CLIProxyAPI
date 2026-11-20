@@ -42,18 +42,9 @@ export interface LedgerRow {
   weeklyResetAtMs: number | null;
   planType: string | null;
   renewsAt: string | number | null;
-  resetCredits: { available: number; nextExpiresAt: string | null } | null;
+  /** Codex manual resets: how many are banked and when each expires, soonest first. */
+  resetCredits: { available: number; expiresAt: string[] } | null;
   nextUp: boolean;
-}
-
-export interface LedgerSummary {
-  provider: LedgerProvider;
-  credentialCount: number;
-  primaryLabelKey: string | null;
-  /** Sum of remaining percent across loaded credentials. */
-  remainingTotal: number | null;
-  /** 100 per loaded credential. */
-  capacity: number;
 }
 
 interface WindowLike {
@@ -168,7 +159,7 @@ export function buildLedgerRows(
         renewsAt: quota.subscriptionActiveUntil ?? null,
         resetCredits:
           provider === 'codex' && typeof available === 'number'
-            ? { available, nextExpiresAt: credits[0] ?? null }
+            ? { available, expiresAt: credits }
             : null,
         nextUp: false,
       };
@@ -195,32 +186,6 @@ export function buildLedgerRows(
   );
   if (next) next.nextUp = true;
   return rows;
-}
-
-/** What a row has left of its weekly quota: the tighter of its weekly windows. */
-export function weeklyRemaining(row: LedgerRow): number | null {
-  const known = row.meters
-    .filter((meter) => meter.id !== 'five-hour' && meter.remaining !== null)
-    .map((meter) => meter.remaining as number);
-  return known.length ? Math.min(...known) : null;
-}
-
-/** Aggregate a provider's rows into the summary card at the top of the ledger. */
-export function buildLedgerSummary(provider: LedgerProvider, rows: LedgerRow[]): LedgerSummary {
-  const loaded = rows.filter((row) => row.primary !== null);
-  const primaryLabelKey = loaded[0]?.primary?.labelKey ?? null;
-  const known = loaded.filter((row) => row.primary?.remaining !== null);
-  const remainingTotal = known.length
-    ? known.reduce((sum, row) => sum + (row.primary?.remaining ?? 0), 0)
-    : null;
-
-  return {
-    provider,
-    credentialCount: rows.length,
-    primaryLabelKey,
-    remainingTotal,
-    capacity: known.length * 100,
-  };
 }
 
 /** Auth file name prefix before the email: `claude-`, `claude-<hash>-`, `codex-<id>-`. */

@@ -1,14 +1,6 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import {
-  IconBot,
-  IconFileText,
-  IconSidebarConfig,
-  IconSidebarLogs,
-  IconSidebarQuota,
-  IconSidebarSystem,
-} from '@/components/ui/icons';
 import { InfoTip } from '@/components/ui/Tooltip';
 import { useAuthStore } from '@/stores';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
@@ -24,7 +16,7 @@ import styles from './dashboard.module.scss';
 
 const DASH = '—';
 
-/** KPI 卡左上角色签：有语义色调的卡用状态色，其余保持中性 */
+/** Status colours for the reliability tiers. */
 const TILE_ACCENTS: Record<MeterTone, string> = {
   good: 'var(--viz-success)',
   warning: 'var(--amber-color)',
@@ -52,7 +44,6 @@ export function DashboardPage() {
   const trafficRef = useRevealOnScroll<HTMLElement>();
   const fleetRef = useRevealOnScroll<HTMLElement>();
   const detailRef = useRevealGroup<HTMLElement>();
-  const ctaRef = useRevealGroup<HTMLElement>();
 
   const animatedTotal = useCountUp(traffic.total, connected);
 
@@ -84,27 +75,32 @@ export function DashboardPage() {
   const unknownProviderLabel = t('dashboard.provider_unknown');
   const successRateTone = toneForSuccessRate(traffic.successRate);
 
-  /** 标题是算出来的判词，不是写死的口号；句尾句号充当状态灯 */
-  const verdict = useMemo(() => {
-    if (!connected) {
-      return connectionStatus === 'connecting'
-        ? { key: 'hero_verdict_connecting', accent: 'var(--amber-color)' }
-        : { key: 'hero_verdict_offline', accent: 'var(--text-quaternary)' };
-    }
-    if (traffic.total === 0 || traffic.successRate === null) {
-      return { key: 'hero_verdict_idle', accent: 'var(--text-quaternary)' };
-    }
-    const keyByTone: Record<MeterTone, string> = {
-      good: 'hero_verdict_good',
-      warning: 'hero_verdict_warning',
-      critical: 'hero_verdict_critical',
-      idle: 'hero_verdict_idle',
-    };
-    return { key: keyByTone[successRateTone], accent: TILE_ACCENTS[successRateTone] };
-  }, [connected, connectionStatus, traffic.total, traffic.successRate, successRateTone]);
-
-  /* 句号状态灯只在「有活着的流量」时呼吸；离线/静默时保持安静 */
-  const heroAlive = connected && traffic.total > 0;
+  /* Reliability tiers share their cut-offs with toneForSuccessRate. */
+  const reliabilityTiers: Array<{ tone: MeterTone; label: string; range: string }> = [
+    {
+      tone: 'good',
+      label: t('dashboard.reliability_healthy'),
+      range: t('dashboard.reliability_healthy_range'),
+    },
+    {
+      tone: 'warning',
+      label: t('dashboard.reliability_degraded'),
+      range: t('dashboard.reliability_degraded_range'),
+    },
+    {
+      tone: 'critical',
+      label: t('dashboard.reliability_failing'),
+      range: t('dashboard.reliability_failing_range'),
+    },
+  ];
+  const reliabilitySummary =
+    traffic.successRate === null
+      ? t('dashboard.reliability_none')
+      : t('dashboard.reliability_summary', {
+          // Round down so the shown rate never crosses into a better tier.
+          rate: Math.floor(traffic.successRate),
+          window: windowLabel,
+        });
 
   const connectionLabel = t(
     connectionStatus === 'connected'
@@ -179,39 +175,6 @@ export function DashboardPage() {
       ]
     : [];
 
-  const ctaCards = [
-    {
-      to: '/ai-providers',
-      icon: <IconBot size={20} />,
-      title: t('nav.ai_providers'),
-    },
-    {
-      to: '/auth-files',
-      icon: <IconFileText size={20} />,
-      title: t('nav.auth_files'),
-    },
-    {
-      to: '/config',
-      icon: <IconSidebarConfig size={20} />,
-      title: t('nav.config_management'),
-    },
-    {
-      to: '/quota',
-      icon: <IconSidebarQuota size={20} />,
-      title: t('nav.quota_management'),
-    },
-    {
-      to: '/logs',
-      icon: <IconSidebarLogs size={20} />,
-      title: t('nav.logs'),
-    },
-    {
-      to: '/system',
-      icon: <IconSidebarSystem size={20} />,
-      title: t('nav.system_info'),
-    },
-  ];
-
   return (
     <div className={styles.page}>
       <div className={styles.ambient} aria-hidden="true">
@@ -223,17 +186,34 @@ export function DashboardPage() {
       <section className={styles.hero} ref={heroRef}>
         <div className={styles.heroCopy}>
           <h1 className={styles.heroTitle} data-reveal>
-            {t(`dashboard.${verdict.key}`)}
-            <span
-              className={`${styles.heroPeriod} ${heroAlive ? styles.heroPeriodLive : ''}`}
-              style={{ color: verdict.accent }}
-            >
-              {t('dashboard.hero_period')}
-            </span>
+            {t('nav.dashboard')}
           </h1>
           <p className={styles.heroMeta} data-reveal>
             {heroMetaLine}
           </p>
+          <div className={styles.reliability} data-reveal>
+            <p className={styles.reliabilityLine}>
+              <span className={styles.reliabilityTitle}>{t('dashboard.reliability_title')}</span>
+              <span>{reliabilitySummary}</span>
+            </p>
+            <ul className={styles.reliabilityTiers}>
+              {reliabilityTiers.map((tier) => {
+                const active = tier.tone === successRateTone;
+                return (
+                  <li
+                    key={tier.tone}
+                    className={`${styles.reliabilityTier} ${active ? styles.reliabilityTierActive : ''}`}
+                    style={{ '--tier-color': TILE_ACCENTS[tier.tone] } as React.CSSProperties}
+                    aria-current={active ? 'true' : undefined}
+                  >
+                    <span className={styles.reliabilityBar} aria-hidden="true" />
+                    <span className={styles.reliabilityName}>{tier.label}</span>
+                    <span className={styles.reliabilityRange}>{tier.range}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
           <div className={styles.heroActions} data-reveal>
             <Link to="/ai-providers" className={styles.primaryAction}>
               {t('dashboard.cta_manage_providers')}
@@ -304,16 +284,7 @@ export function DashboardPage() {
       {/* ---------- KPI ---------- */}
       <section className={styles.statsRow} ref={statsRef} aria-label={t('dashboard.stats_aria')}>
         {statTiles.map((tile) => (
-          <article
-            key={tile.key}
-            className={styles.statTile}
-            data-reveal
-            style={
-              {
-                '--tile-accent': tile.tone ? TILE_ACCENTS[tile.tone] : 'var(--border-hover)',
-              } as React.CSSProperties
-            }
-          >
+          <article key={tile.key} className={styles.statTile} data-reveal>
             <div className={styles.statLabelRow}>
               <span className={styles.statLabel}>{tile.label}</span>
               {tile.info && <InfoTip content={tile.info} label={tile.label} />}
@@ -334,7 +305,6 @@ export function DashboardPage() {
       {/* ---------- Traffic ---------- */}
       <section className={styles.section} ref={trafficRef}>
         <header className={styles.sectionHead}>
-          <span className={styles.eyebrow}>{t('dashboard.traffic_eyebrow')}</span>
           <h2 className={styles.sectionTitle}>{t('dashboard.traffic_title')}</h2>
         </header>
         <div className={styles.panel}>
@@ -345,7 +315,6 @@ export function DashboardPage() {
       {/* ---------- Provider fleet ---------- */}
       <section className={styles.section} ref={fleetRef}>
         <header className={styles.sectionHead}>
-          <span className={styles.eyebrow}>{t('dashboard.fleet_eyebrow')}</span>
           <h2 className={styles.sectionTitle}>{t('dashboard.fleet_title')}</h2>
         </header>
         <div className={styles.panel}>
@@ -398,7 +367,6 @@ export function DashboardPage() {
       <section className={styles.detailGrid} ref={detailRef}>
         <div className={styles.panel} data-reveal>
           <header className={styles.panelHead}>
-            <span className={styles.eyebrow}>{t('dashboard.health_eyebrow')}</span>
             <h2 className={styles.panelTitle}>{t('dashboard.health_title')}</h2>
           </header>
           {!credentials || credentials.total === 0 ? (
@@ -471,7 +439,6 @@ export function DashboardPage() {
 
         <div className={styles.panel} data-reveal>
           <header className={styles.panelHead}>
-            <span className={styles.eyebrow}>{t('dashboard.runtime_eyebrow')}</span>
             <h2 className={styles.panelTitle}>{t('dashboard.runtime_title')}</h2>
           </header>
           <dl className={styles.specList}>
@@ -503,25 +470,6 @@ export function DashboardPage() {
               →
             </span>
           </Link>
-        </div>
-      </section>
-
-      {/* ---------- CTA ---------- */}
-      <section className={styles.section} ref={ctaRef}>
-        <header className={styles.sectionHead} data-reveal>
-          <span className={styles.eyebrow}>{t('dashboard.cta_eyebrow')}</span>
-          <h2 className={styles.sectionTitle}>{t('dashboard.cta_title')}</h2>
-        </header>
-        <div className={styles.ctaGrid}>
-          {ctaCards.map((card) => (
-            <Link key={card.to} to={card.to} className={styles.ctaCard} data-reveal>
-              <span className={styles.ctaIcon}>{card.icon}</span>
-              <span className={styles.ctaTitle}>{card.title}</span>
-              <span className={styles.ctaArrow} aria-hidden="true">
-                →
-              </span>
-            </Link>
-          ))}
         </div>
       </section>
     </div>

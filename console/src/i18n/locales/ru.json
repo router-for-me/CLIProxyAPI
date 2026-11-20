@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "Панель",
-    "quick_start": "Быстрый старт",
     "ai_providers": "Поставщики AI",
     "auth_files": "Файлы аутентификации",
     "oauth": "OAuth вход",
@@ -122,7 +121,6 @@
   },
   "nav_meta": {
     "dashboard": "Обзор работы",
-    "quick_start": "Настройка APIKEY.FUN",
     "ai_providers": "Маршрутизация моделей",
     "auth_files": "Файлы и учётные данные",
     "oauth": "Авторизация OAuth",
@@ -134,13 +132,15 @@
     "system_info": "Состояние и диагностика"
   },
   "dashboard": {
-    "hero_verdict_good": "Всё стабильно",
-    "hero_verdict_warning": "Небольшие сбои",
-    "hero_verdict_critical": "Требует внимания",
-    "hero_verdict_idle": "Пока тихо",
-    "hero_verdict_offline": "Ожидает подключения",
-    "hero_verdict_connecting": "Подключение",
-    "hero_period": ".",
+    "reliability_title": "Надёжность",
+    "reliability_summary": "{{rate}}% запросов успешны за последние {{window}}",
+    "reliability_none": "Запросов пока нет",
+    "reliability_healthy": "Норма",
+    "reliability_healthy_range": "95% и выше",
+    "reliability_degraded": "Снижена",
+    "reliability_degraded_range": "80–94%",
+    "reliability_failing": "Сбой",
+    "reliability_failing_range": "Ниже 80%",
     "hero_requests_label": "Обработано запросов",
     "hero_live": "Live",
     "hero_window_meta": "Скользящее окно {{window}} · интервалы по 10 минут",
@@ -154,21 +154,18 @@
     "stat_provider_keys_hint": "Всего настроенных API-ключей по всем брендам",
     "stat_models": "Модели",
     "stat_models_hint": "Доступны через эндпоинт прокси",
-    "traffic_eyebrow": "Живой трафик",
-    "traffic_title": "Пропускная способность по 10 минут",
+    "traffic_title": "Пропускная способность",
     "traffic_table": "Таблица данных",
     "traffic_table_window": "Интервал",
     "traffic_chart_summary": "{{total}} запросов за последние {{minutes}} минут: успешно {{success}}, с ошибкой {{failed}}.",
     "traffic_unavailable": "Данных о трафике пока нет",
     "traffic_unavailable_hint": "Счётчики появятся после первого обработанного запроса.",
-    "fleet_eyebrow": "Провайдеры",
-    "fleet_title": "Все провайдеры рядом",
+    "fleet_title": "Провайдеры",
     "fleet_empty": "Трафик провайдеров пока не зафиксирован.",
     "fleet_credentials": "Учётных данных: {{value}}",
     "fleet_spark_label": "Объём запросов {{provider}}",
     "fleet_requests": "запросов",
     "provider_unknown": "Без привязки",
-    "health_eyebrow": "Состояние",
     "health_title": "Статус учётных данных",
     "health_active": "Активны",
     "health_unavailable": "Недоступны",
@@ -176,8 +173,7 @@
     "health_by_type": "По провайдерам",
     "health_empty": "Файлы учётных данных не найдены.",
     "health_link": "Открыть файлы авторизации",
-    "runtime_eyebrow": "Среда",
-    "runtime_title": "Конфигурация целиком",
+    "runtime_title": "Конфигурация",
     "runtime_routing": "Стратегия маршрутизации",
     "runtime_retry": "Повторы запросов",
     "runtime_management_keys": "Ключи управления",
@@ -190,8 +186,6 @@
     "runtime_ws_auth": "Авторизация WebSocket",
     "runtime_model_prefix": "Префикс модели",
     "runtime_link": "Изменить конфигурацию",
-    "cta_eyebrow": "Далее",
-    "cta_title": "Куда двигаться дальше",
     "window_m": "{{minutes}} мин",
     "window_h": "{{hours}} ч",
     "window_hm": "{{hours}} ч {{minutes}} мин"
@@ -2100,8 +2094,8 @@
     },
     "categories": {
       "title": "Провайдеры",
-      "quickFill": "Быстрое заполнение",
-      "activeCount": "{{active}}/{{total}} активных"
+      "activeCount": "{{active}}/{{total}} активных",
+      "add": "Добавить провайдера"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2203,14 +2197,6 @@
         "openai": "OpenAI-compatible",
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
-      },
-      "double11": {
-        "badge": "Акция 11.11 · Ограничено",
-        "title": "{{provider}}: бонус к пополнению на 11.11",
-        "description": "Пополните баланс {{provider}} во время акции и получите дополнительно {{percent}}% от суммы пополнения.",
-        "bonus": "Бонус к пополнению",
-        "cta": "Участвовать",
-        "ctaAria": "Участвовать в акции 11.11 от {{provider}} (откроется в новой вкладке)"
       }
     },
     "status": {
@@ -2506,12 +2492,11 @@
     "cache_read": "прочитано {{tokens}}",
     "cache_write": "записано {{tokens}}",
     "cache_hint": "Входные токены, которые этот аккаунт взял из кэша промптов за последний час. Много записей и мало чтений — значит, диалоги переключаются между аккаунтами.",
-    "runway_title": "Сбросы на этой неделе",
-    "runway_caption": "Каждая метка — аккаунт: стоит у своего недельного сброса и заполнена остатком квоты. Прокси расходует слева направо.",
-    "runway_now": "Сейчас",
-    "runway_unseen": "Нет данных",
-    "runway_left_of": "осталось из {{capacity}}%",
-    "runway_marker": "{{name}}: осталось {{percent}}%, сброс {{when}}",
-    "runway_marker_unseen": "{{name}}: осталось {{percent}}%, время сброса ещё не известно"
+    "resets_title": "Ручные сбросы",
+    "resets_summary_one": "{{available}} доступно на {{count}} аккаунте",
+    "resets_summary_other": "{{available}} доступно на {{count}} аккаунтах",
+    "resets_summary_few": "{{available}} доступно на {{count}} аккаунтах",
+    "resets_summary_many": "{{available}} доступно на {{count}} аккаунтах",
+    "resets_expires": "Истекают {{dates}}"
   }
 }

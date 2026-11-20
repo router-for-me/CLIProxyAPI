@@ -1,6 +1,6 @@
 /**
- * Ledger view of the quota page: the reset runway over one dense row per
- * credential, ordered the way papa-proxy's reset-first routing spends them.
+ * Ledger view of the quota page: manual resets per account over one dense row
+ * per credential, ordered the way papa-proxy's reset-first routing spends them.
  */
 
 import { useMemo, type ReactNode } from 'react';
@@ -22,13 +22,12 @@ import { codexPlanLabel } from '../providers/codex/planLabel';
 import {
   LEDGER_PROVIDERS,
   buildLedgerRows,
-  buildLedgerSummary,
   maskCredentialName,
   type LedgerMeter,
   type LedgerProvider,
   type LedgerRow,
 } from './ledgerModel';
-import { QuotaRunway } from './QuotaRunway';
+import { ManualResets } from './ManualResets';
 import { useCacheStats } from './useCacheStats';
 import styles from './QuotaLedger.module.scss';
 
@@ -97,30 +96,6 @@ function MeterCell({ meter, now, t }: { meter: LedgerMeter; now: number; t: TFun
         now={now}
         empty={t('ledger.no_reset_pending')}
       />
-    </div>
-  );
-}
-
-function ResetCreditsCell({ row, now, t }: { row: LedgerRow; now: number; t: TFunction }) {
-  const credits = row.resetCredits;
-  if (!credits) return null;
-  const expiresMs = resolveResetMs([credits.nextExpiresAt]);
-  return (
-    <div className={styles.meter}>
-      <div className={styles.meterHead}>
-        <span>{t('codex_quota.reset_credits_label')}</span>
-      </div>
-      <div className={styles.creditCount}>
-        <strong>{credits.available}</strong> {t('ledger.available')}
-      </div>
-      {credits.nextExpiresAt && (
-        <span className={styles.reset}>
-          <span className={styles.resetAbsolute}>
-            {t('codex_quota.reset_credit_number', { index: 1 })}
-          </span>
-          <ResetLine atMs={expiresMs} label="" now={now} />
-        </span>
-      )}
     </div>
   );
 }
@@ -202,7 +177,6 @@ function LedgerRowView({
   const name = props.showEmails ? entry.file.name : maskCredentialName(entry.file.name);
   const busy = row.status === 'loading';
   const canAct = props.canUseActions && !entry.file.disabled && !busy;
-  const resetting = props.resettingName === entry.file.name;
 
   let body: ReactNode;
   if (row.status === 'success') {
@@ -212,7 +186,6 @@ function LedgerRowView({
         {row.meters.map((meter) => (
           <MeterCell key={meter.id} meter={meter} now={now} t={t} />
         ))}
-        <ResetCreditsCell row={row} now={now} t={t} />
       </>
     );
   } else if (row.status === 'error') {
@@ -241,17 +214,6 @@ function LedgerRowView({
       </div>
       <div className={styles.meters}>{body}</div>
       <div className={styles.actions}>
-        {entry.type === 'codex' && props.canReset(entry) && (
-          <button
-            type="button"
-            className={styles.action}
-            disabled={!canAct || resetting}
-            onClick={() => props.onReset(entry)}
-          >
-            <IconRefreshCw size={13} className={resetting ? styles.spinning : undefined} />
-            {t('codex_quota.reset_button')}
-          </button>
-        )}
         <button
           type="button"
           className={styles.action}
@@ -280,7 +242,7 @@ export function QuotaLedger(props: QuotaLedgerProps) {
     () =>
       LEDGER_PROVIDERS.map((provider: LedgerProvider) => {
         const rows = buildLedgerRows(provider, entries, quotaFor, now);
-        return { provider, rows, summary: buildLedgerSummary(provider, rows) };
+        return { provider, rows };
       }).filter((group) => group.rows.length > 0),
     [entries, quotaFor, now]
   );
@@ -289,11 +251,16 @@ export function QuotaLedger(props: QuotaLedgerProps) {
 
   return (
     <section className={styles.ledger} aria-label={t('ledger.title')}>
-      <QuotaRunway
-        lanes={groups}
-        now={now}
-        showEmails={props.showEmails}
+      <ManualResets
+        rows={groups.flatMap((group) => group.rows)}
+        quotaFor={quotaFor}
         resolvedTheme={props.resolvedTheme}
+        showEmails={props.showEmails}
+        canUseActions={props.canUseActions}
+        resettingName={props.resettingName}
+        canReset={props.canReset}
+        onReset={props.onReset}
+        onRefresh={props.onRefresh}
       />
       {groups.map((group) => (
         <div key={group.provider} className={styles.group}>

@@ -19,7 +19,6 @@ interface SheetProps {
   open: boolean;
   onClose: () => void;
   size?: SheetSize;
-  eyebrow?: ReactNode;
   title?: ReactNode;
   description?: ReactNode;
   footer?: ReactNode;
@@ -45,7 +44,6 @@ export function Sheet({
   open,
   onClose,
   size = 'md',
-  eyebrow,
   title,
   description,
   footer,
@@ -233,9 +231,8 @@ export function Sheet({
         >
           <IconX size={18} />
         </button>
-        {(eyebrow || title || description) && (
+        {(title || description) && (
           <div className={styles.header}>
-            {eyebrow ? <div className={styles.eyebrow}>{eyebrow}</div> : null}
             {title ? (
               <h2 id={titleId} className={styles.title}>
                 {title}

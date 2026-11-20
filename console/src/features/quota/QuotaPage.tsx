@@ -90,7 +90,7 @@ export function QuotaPage() {
   const [files, setFiles] = useState<AuthFileItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<QuotaTabId>(() => readQuotaUiState()?.tab ?? 'all');
+  const [savedTab, setTab] = useState<QuotaTabId>(() => readQuotaUiState()?.tab ?? 'all');
   const [sortMode, setSortMode] = useState<QuotaSortMode>(
     () => readQuotaUiState()?.sortMode ?? 'default'
   );
@@ -200,6 +200,15 @@ export function QuotaPage() {
 
   const entries = useMemo(() => classifyQuotaFiles(files), [files]);
   const tabCounts = useMemo(() => buildTabCounts(entries), [entries]);
+  // Only providers that are set up get a tab.
+  const tabIds = useMemo(
+    () => TAB_IDS.filter((id) => id === 'all' || tabCounts[id] > 0),
+    [tabCounts]
+  );
+  // A saved tab whose provider has no accounts left shows All once files load.
+  const filesLoaded = !loading && !error && filesGeneration === sessionGeneration;
+  const tab: QuotaTabId =
+    filesLoaded && savedTab !== 'all' && !tabCounts[savedTab] ? 'all' : savedTab;
   // Account-level settings span every page and tab, so count over all entries.
   const codexCreditOverageCounts = useMemo(
     () =>
@@ -231,7 +240,11 @@ export function QuotaPage() {
     pageItems: cardPageItems,
     currentPage,
     totalPages,
-  } = useMemo(() => paginate(sortedEntries, page, QUOTA_PAGE_SIZE), [sortedEntries, page]);
+  } = useMemo(
+    // The tab fallback lands on the first page, as a tab change does.
+    () => paginate(sortedEntries, tab === savedTab ? page : 1, QUOTA_PAGE_SIZE),
+    [sortedEntries, tab, savedTab, page]
+  );
   // The ledger shows every credential at once; card views stay paginated.
   const pageItems = isLedger ? sortedEntries : cardPageItems;
   const ledgerEntries = useMemo(
@@ -248,6 +261,11 @@ export function QuotaPage() {
     setPage(1);
     writeQuotaUiState({ tab: next as QuotaTabId });
   }, []);
+
+  // Persist that fallback, so the empty tab is not restored later.
+  useEffect(() => {
+    if (tab !== savedTab) handleTabChange(tab);
+  }, [handleTabChange, savedTab, tab]);
 
   const handleSortModeChange = useCallback((next: string) => {
     setSortMode(next as QuotaSortMode);
@@ -450,7 +468,7 @@ export function QuotaPage() {
         {/* 提供商导航与搜索工具栏分层，避免不同控件争夺视觉焦点。 */}
         <div className={styles.tabsRow} data-reveal>
           <ProviderTabs
-            types={TAB_IDS}
+            types={tabIds}
             counts={tabCounts}
             active={tab}
             resolvedTheme={resolvedTheme}

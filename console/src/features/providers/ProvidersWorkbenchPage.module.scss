@@ -21,19 +21,6 @@
   }
 }
 
-.layoutSingle {
-  @media (min-width: 1280px) {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.quickStartStack {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 0;
-}
-
 .modelCatalogSlot {
   margin-top: 4px;
 }

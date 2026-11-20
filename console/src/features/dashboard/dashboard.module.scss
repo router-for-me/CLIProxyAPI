@@ -104,31 +104,14 @@
   min-width: 0;
 }
 
-/* 判词标题：文案来自实时状态，短，所以敢放大 */
 .heroTitle {
   margin: 0;
-  font-size: clamp(44px, 6.2vw, 80px);
-  line-height: 1.05;
-  font-weight: 700;
-  letter-spacing: -0.035em;
+  font-size: 32px;
+  line-height: 40px;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+  font-variation-settings: 'CASL' 0.6;
   color: var(--text-primary);
-  text-wrap: balance;
-}
-
-/* 句号即状态灯，颜色由 TSX 按语义色注入 */
-.heroPeriod {
-  display: inline;
-  margin-inline-start: clamp(4px, 0.08em, 7px);
-  letter-spacing: 0;
-}
-
-/* 有活流量时状态灯极缓呼吸（仅 opacity，inline 元素安全） */
-.heroPeriodLive {
-  animation: periodBreath 3.2s ease-in-out 1.8s infinite;
-
-  @media (prefers-reduced-motion: reduce) {
-    animation: none;
-  }
 }
 
 .heroMeta {
@@ -237,6 +220,75 @@
   }
 }
 
+/* Reliability: the success rate read against the three tiers it can fall in. */
+.reliability {
+  display: flex;
+  flex-direction: column;
+  gap: $spacing-md;
+  width: 100%;
+  max-width: 520px;
+  margin: 28px 0 32px;
+}
+
+.reliabilityLine {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 2px;
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+
+.reliabilityTitle {
+  font-weight: 650;
+  color: var(--text-primary);
+}
+
+.reliabilityTiers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  gap: 12px;
+}
+
+.reliabilityTier {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.reliabilityBar {
+  height: 6px;
+  margin-bottom: 6px;
+  border-radius: $radius-full;
+  background: var(--border-color);
+
+  .reliabilityTierActive & {
+    background: var(--tier-color);
+  }
+}
+
+.reliabilityName {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+
+  .reliabilityTierActive & {
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+}
+
+.reliabilityRange {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
 /* Hero 数字仪表卡 —— 悬浮在脉搏线之上的玻璃面板 */
 .heroPanel {
   --glass-blur: 14px;
@@ -270,8 +322,6 @@
   @include font-mono;
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
@@ -286,8 +336,6 @@
   @include font-mono;
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
   color: var(--success-badge-text);
 }
 
@@ -399,16 +447,6 @@
   background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
   transition: border-color $transition-fast;
 
-  /* 左上角色签：语义色调由 --tile-accent 注入 */
-  &::before {
-    content: '';
-    width: 28px;
-    height: 3px;
-    margin-bottom: 2px;
-    border-radius: $radius-full;
-    background: var(--tile-accent, var(--border-hover));
-  }
-
   /* 卡片不可点击，因此不抬升不投影——悬停只轻描边框辅助聚焦 */
   @media (hover: hover) and (pointer: fine) {
     &:hover {
@@ -465,30 +503,10 @@
   gap: 6px;
 }
 
-/* 终端光标前缀是全页的结构记号 */
-.eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  @include font-mono;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-
-  &::before {
-    content: '▍';
-    color: var(--viz-success);
-    font-size: 12px;
-    line-height: 1;
-  }
-}
-
 .sectionTitle {
   margin: 0;
-  font-size: clamp(22px, 2.6vw, 30px);
-  line-height: 1.18;
+  font-size: 20px;
+  line-height: 28px;
   font-weight: 650;
   letter-spacing: -0.02em;
   color: var(--text-primary);
@@ -734,8 +752,6 @@
 .typeBreakdownLabel {
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
@@ -847,117 +863,6 @@
 
   b {
     color: var(--text-tertiary);
-  }
-}
-
-/* ---------- CTA ---------- */
-
-.ctaGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: $spacing-md;
-
-  @media (max-width: 900px) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @include mobile {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-/* 整卡只有图标 + 标题：横排成一行，箭头收在行尾 */
-.ctaCard {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: $spacing-md;
-  padding: $spacing-md $spacing-lg;
-  border-radius: 14px;
-  border: 1px solid var(--border-color);
-  background: color-mix(in srgb, var(--bg-primary) 76%, transparent);
-  text-decoration: none;
-  overflow: hidden;
-  transition:
-    transform var(--dur-press) var(--ease-out-strong),
-    border-color $transition-fast,
-    box-shadow var(--dur-hover) var(--ease-out-strong);
-
-  @media (hover: hover) and (pointer: fine) {
-    &:hover {
-      transform: translateY(-2px);
-      border-color: var(--border-hover);
-      box-shadow: 0 14px 30px rgb(0 0 0 / 0.12);
-
-      .ctaArrow {
-        transform: translateX(3px);
-        opacity: 1;
-      }
-    }
-  }
-
-  /* 整卡可点：按下回缩，面积大所以比按钮更含蓄 */
-  &:active {
-    transform: translateY(0) scale(0.98);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    transition: none;
-
-    &:active {
-      transform: none;
-    }
-
-    @media (hover: hover) and (pointer: fine) {
-      &:hover {
-        transform: none;
-
-        .ctaArrow {
-          transform: none;
-        }
-      }
-    }
-  }
-}
-
-.ctaIcon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: $radius-md;
-  border: 1px solid var(--border-color);
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
-  color: var(--text-primary);
-}
-
-.ctaTitle {
-  flex: 1;
-  min-width: 0;
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--text-primary);
-}
-
-.ctaArrow {
-  flex-shrink: 0;
-  font-size: 15px;
-  color: var(--text-tertiary);
-  opacity: 0.55;
-  transition:
-    transform var(--dur-hover) var(--ease-out-strong),
-    opacity var(--dur-hover) var(--ease-out-strong);
-}
-
-@keyframes periodBreath {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.45;
   }
 }
 

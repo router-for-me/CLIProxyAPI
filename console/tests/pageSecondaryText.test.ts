@@ -53,24 +53,20 @@ describe('dashboard', () => {
     for (const tile of tiles) expect(tile).toMatch(/<\/strong><\/article>$/);
   });
 
-  test('section headers are eyebrow + title, call-to-action cards are icon + title', async () => {
+  test('section headers are the title alone; the hero names the reliability tiers', async () => {
     await i18n.changeLanguage('en');
     const html = stripSvg(renderPage(DashboardPage));
-    for (const title of ['traffic_title', 'fleet_title', 'cta_title']) {
+    for (const title of ['traffic_title', 'fleet_title', 'health_title', 'runtime_title']) {
       expect(html).toMatch(
-        new RegExp(
-          `<header[^>]*><span>[^<]*</span><h2>${i18n.t(`dashboard.${title}`)}</h2></header>`
-        )
+        new RegExp(`<header[^>]*><h2>${i18n.t(`dashboard.${title}`)}</h2></header>`)
       );
     }
-    const ctas = sectionFrom(html, i18n.t('dashboard.cta_title')).match(/<a\b[\s\S]*?<\/a>/g) ?? [];
-    expect(ctas).toHaveLength(6);
-    for (const card of ctas) {
-      expect(card).toMatch(
-        /^<a[^>]*><span><svg\/><\/span><span>[^<]+<\/span><span aria-hidden="true">→<\/span><\/a>$/
+    expect(html).toContain(`<h1 data-reveal="true">${i18n.t('nav.dashboard')}</h1>`);
+    for (const tier of ['healthy', 'degraded', 'failing']) {
+      expect(html).toContain(
+        `<span>${i18n.t(`dashboard.reliability_${tier}`)}</span><span>${i18n.t(`dashboard.reliability_${tier}_range`)}</span>`
       );
     }
-    expect(ctas[3]).toContain(`>${i18n.t('nav.quota_management')}</span>`);
     expect(read('src/features/dashboard/DashboardPage.tsx')).not.toContain('description:');
   });
 });

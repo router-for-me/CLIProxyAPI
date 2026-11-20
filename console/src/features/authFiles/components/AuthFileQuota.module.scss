@@ -278,8 +278,6 @@ button.quotaMessageAction {
   @include font-mono;
   font-size: $quota-font-size;
   font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
@@ -298,8 +296,6 @@ button.quotaMessageAction {
   @include font-mono;
   font-size: $quota-font-size;
   font-weight: 600;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
