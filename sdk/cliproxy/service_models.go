@@ -936,7 +936,15 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 		if resolved := modelconfig.ResolveModelInfo(name, modelType, model.GetThinking()); resolved.Thinking != nil {
 			info.Thinking = resolved.Thinking
 		}
-		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil {
+		staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel)
+		if staticInfo == nil {
+			// Gemini configuration may name the model in its resource form while the built-in
+			// catalog uses bare IDs, and the native execution path accepts both.
+			if trimmed := strings.TrimPrefix(name, "models/"); trimmed != name {
+				staticInfo = registry.LookupStaticModelInfoByChannel(trimmed, metadataChannel)
+			}
+		}
+		if staticInfo != nil {
 			if staticInfo.NativeCapabilities != nil {
 				info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
 			}
