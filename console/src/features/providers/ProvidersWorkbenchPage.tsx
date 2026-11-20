@@ -137,8 +137,11 @@ export function ProvidersWorkbenchPage() {
     []
   );
 
+  // A provider picked in this visit stays open even before it has a key.
+  const [picked, setPicked] = useState<ProviderBrand | null>(null);
   const setActiveBrand = useCallback(
     (brand: ProviderBrand) => {
+      setPicked(brand);
       persistUiState((prev) =>
         prev.activeBrand === brand ? prev : { ...prev, activeBrand: brand }
       );
@@ -147,13 +150,18 @@ export function ProvidersWorkbenchPage() {
   );
 
   const allGroups = useMemo(() => workbench.snapshot?.groups ?? [], [workbench.snapshot]);
-  const groups = useMemo(() => allGroups.filter((group) => group.id !== 'apikeyFun'), [allGroups]);
+  // APIKEY.FUN is listed only once it holds keys; it no longer has its own page.
+  const groups = useMemo(
+    () => allGroups.filter((group) => group.id !== 'apikeyFun' || group.resources.length > 0),
+    [allGroups]
+  );
   // Open on a provider that is set up; the rest wait behind "Add provider".
-  const firstVisibleBrand =
-    groups.find((group) => group.resources.length > 0)?.id ?? groups[0]?.id ?? 'gemini';
-  const activeBrand = groups.some((group) => group.id === uiState.activeBrand)
-    ? uiState.activeBrand
-    : firstVisibleBrand;
+  const firstSetUp = groups.find((group) => group.resources.length > 0)?.id;
+  const stored = groups.find((group) => group.id === uiState.activeBrand);
+  const activeBrand =
+    stored && (stored.resources.length > 0 || stored.id === picked || !firstSetUp)
+      ? stored.id
+      : (firstSetUp ?? groups[0]?.id ?? 'gemini');
   const activeFilterState = getProviderFilterState(uiState, activeBrand);
   const filter = activeFilterState.filter;
   const providerSortBy = activeFilterState.sortBy;

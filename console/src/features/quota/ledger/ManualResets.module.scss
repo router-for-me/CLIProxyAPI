@@ -131,6 +131,13 @@
   color: var(--text-secondary);
 }
 
+.note {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--viz-failure);
+}
+
 .actionSlot {
   flex-shrink: 0;
   display: flex;

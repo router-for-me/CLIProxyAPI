@@ -34,6 +34,8 @@ interface ResetInfo {
   count: number | null;
   /** Expiry of each banked reset, soonest first. */
   expires: number[];
+  /** Why the count could not be read, shown in place of the expiry. */
+  note?: string;
 }
 
 interface Action {
@@ -43,9 +45,6 @@ interface Action {
 }
 
 const UNREAD: ResetInfo = { count: null, expires: [] };
-
-const sameInfo = (a: ResetInfo | undefined, b: ResetInfo) =>
-  a !== undefined && a.count === b.count && a.expires.join() === b.expires.join();
 
 function codexInfo(row: LedgerRow): ResetInfo {
   if (!row.resetCredits) return UNREAD;
@@ -95,10 +94,11 @@ function ResetRowView({
           <strong className={info.count ? undefined : styles.countNone}>{info.count ?? '–'}</strong>
           <span>{t('ledger.available')}</span>
         </span>
-        <span className={styles.expires}>
-          {info.count && dates.length > 0
-            ? t('ledger.resets_expires', { dates: dates.join(', ') })
-            : ''}
+        <span className={info.note ? styles.note : styles.expires}>
+          {info.note ??
+            (info.count && dates.length > 0
+              ? t('ledger.resets_expires', { dates: dates.join(', ') })
+              : '')}
         </span>
         <span className={styles.actionSlot}>
           {action ? (
@@ -143,7 +143,7 @@ function ClaudeResetRow({
 }: {
   row: LedgerRow;
   props: ManualResetsProps;
-  onRead: (key: string, info: ResetInfo) => void;
+  onRead: (key: string, count: number | null) => void;
 }) {
   const { t } = useTranslation();
   const { entry } = row;
@@ -159,14 +159,17 @@ function ClaudeResetRow({
     .map((grant) => parseIsoToMs(grant.endsAt))
     .filter((ms): ms is number => ms !== null)
     .sort((a, b) => a - b);
-  const info: ResetInfo = { count: reset.count, expires };
+  const info: ResetInfo = {
+    count: reset.count,
+    expires,
+    note: reset.message ? t(`claude_reset.${reset.message}`) : undefined,
+  };
   const count = reset.count;
-  const expiresKey = expires.join();
 
-  // The panel sorts and totals every account, so it keeps what each row read.
+  // The panel sorts and totals every account, so it keeps each row's count.
   useEffect(() => {
-    onRead(row.key, { count, expires: expiresKey ? expiresKey.split(',').map(Number) : [] });
-  }, [onRead, row.key, count, expiresKey]);
+    onRead(row.key, count);
+  }, [onRead, row.key, count]);
 
   const retry = reset.buttonLabel === 'retry';
   const action =
@@ -200,20 +203,19 @@ function ClaudeResetRow({
 
 export function ManualResets(props: ManualResetsProps) {
   const { t } = useTranslation();
-  const [claudeReads, setClaudeReads] = useState<Record<string, ResetInfo>>({});
-  const onRead = useCallback((key: string, info: ResetInfo) => {
-    setClaudeReads((prev) => (sameInfo(prev[key], info) ? prev : { ...prev, [key]: info }));
+  const [claudeCounts, setClaudeCounts] = useState<Record<string, number | null>>({});
+  const onRead = useCallback((key: string, count: number | null) => {
+    setClaudeCounts((prev) => (prev[key] === count ? prev : { ...prev, [key]: count }));
   }, []);
 
-  const infoFor = (row: LedgerRow) =>
-    row.entry.type === 'codex' ? codexInfo(row) : (claudeReads[row.key] ?? UNREAD);
+  const countOf = (row: LedgerRow) =>
+    row.entry.type === 'codex' ? codexInfo(row).count : (claudeCounts[row.key] ?? null);
   // Most resets first, so the accounts worth spending from lead.
   const rows = [...props.rows].sort(
     (a, b) =>
-      (infoFor(b).count ?? -1) - (infoFor(a).count ?? -1) ||
-      a.entry.file.name.localeCompare(b.entry.file.name)
+      (countOf(b) ?? -1) - (countOf(a) ?? -1) || a.entry.file.name.localeCompare(b.entry.file.name)
   );
-  const available = rows.reduce((sum, row) => sum + (infoFor(row).count ?? 0), 0);
+  const available = rows.reduce((sum, row) => sum + (countOf(row) ?? 0), 0);
 
   return (
     <section className={styles.panel} aria-labelledby="manual-resets-title">

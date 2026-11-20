@@ -22,7 +22,6 @@ import { codexPlanLabel } from '../providers/codex/planLabel';
 import {
   LEDGER_PROVIDERS,
   buildLedgerRows,
-  buildLedgerSummary,
   maskCredentialName,
   type LedgerMeter,
   type LedgerProvider,
@@ -243,7 +242,7 @@ export function QuotaLedger(props: QuotaLedgerProps) {
     () =>
       LEDGER_PROVIDERS.map((provider: LedgerProvider) => {
         const rows = buildLedgerRows(provider, entries, quotaFor, now);
-        return { provider, rows, summary: buildLedgerSummary(provider, rows) };
+        return { provider, rows };
       }).filter((group) => group.rows.length > 0),
     [entries, quotaFor, now]
   );

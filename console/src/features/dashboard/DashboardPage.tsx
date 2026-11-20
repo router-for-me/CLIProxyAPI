@@ -97,7 +97,8 @@ export function DashboardPage() {
     traffic.successRate === null
       ? t('dashboard.reliability_none')
       : t('dashboard.reliability_summary', {
-          rate: Math.round(traffic.successRate),
+          // Round down so the shown rate never crosses into a better tier.
+          rate: Math.floor(traffic.successRate),
           window: windowLabel,
         });
 

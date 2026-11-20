@@ -14,11 +14,12 @@ interface ProviderCategoryListProps {
 export function ProviderCategoryList({ groups, activeBrand, onSelect }: ProviderCategoryListProps) {
   const { t } = useTranslation();
 
-  const [adding, setAdding] = useState(false);
+  // null follows the list: open while nothing is set up or an unset provider is selected.
+  const [adding, setAdding] = useState<boolean | null>(null);
   // Only providers that are set up are listed; the rest wait behind "Add provider".
   const setUp = groups.filter((g) => g.resources.length > 0);
   const notSetUp = groups.filter((g) => g.resources.length === 0);
-  const addOpen = adding || setUp.length === 0 || notSetUp.some((g) => g.id === activeBrand);
+  const addOpen = adding ?? (setUp.length === 0 || notSetUp.some((g) => g.id === activeBrand));
 
   const renderGroups = (items: ProviderGroup[], withCounts: boolean) => (
     <div className={styles.list}>
@@ -88,18 +89,7 @@ export function ProviderCategoryList({ groups, activeBrand, onSelect }: Provider
                 ) : null}
               </span>
             </span>
-            {withCounts ? (
-              <span
-                className={[
-                  styles.badge,
-                  total === 0 ? (group.id === 'kimi' ? styles.badgeKimi : styles.badgeAmber) : '',
-                ]
-                  .filter(Boolean)
-                  .join(' ')}
-              >
-                {total}
-              </span>
-            ) : null}
+            {withCounts ? <span className={styles.badge}>{total}</span> : null}
           </button>
         );
       })}

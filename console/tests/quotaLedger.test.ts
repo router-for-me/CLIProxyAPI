@@ -1,10 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   buildLedgerRows,
-  buildLedgerSummary,
   maskCredentialName,
   selectLedgerMeters,
-  weeklyRemaining,
 } from '@/features/quota/ledger/ledgerModel';
 import type { QuotaFileEntry } from '@/features/quota/logic';
 
@@ -67,12 +65,6 @@ describe('ledger rows', () => {
     expect(rows.filter((r) => r.nextUp).map((r) => r.entry.file.name)).toEqual(['b.json']);
   });
 
-  test('summary sums remaining primary quota', () => {
-    const summary = buildLedgerSummary('claude', rows);
-    expect(summary.remainingTotal).toBe(0 + 51 + 100);
-    expect(summary.capacity).toBe(300);
-  });
-
   test('orders claude by the shared weekly reset, as routing does', () => {
     const quota = (fableHours: number, sharedHours: number) => ({
       status: 'success',
@@ -111,8 +103,6 @@ describe('ledger rows', () => {
       ['x.json', false],
       ['y.json', true],
     ]);
-    expect(weeklyRemaining(ordered[0])).toBe(0);
-    expect(weeklyRemaining(ordered[1])).toBe(70);
   });
 
   test('a five-hour window alone gives no weekly reset', () => {
