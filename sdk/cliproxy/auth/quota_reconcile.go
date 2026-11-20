@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"time"
 )
 
@@ -37,8 +38,21 @@ func CanReconcileClaudeQuota(a *Auth, now time.Time) bool {
 }
 
 func quotaOnlyError(err *Error) bool {
-	return err == nil || (err.HTTPStatus == 429 &&
-		(err.Code == ErrorCodeCredentialQuota || err.Code == "rate_limit_error"))
+	if err == nil {
+		return true
+	}
+	// Older persisted failures may lack the newer request-scoped classification.
+	// Subscription usage cannot establish that a separate paid balance recovered.
+	message := strings.ToLower(err.Message)
+	for _, marker := range []string{"usage credits", "credit balance", "extra usage", "billing", "payment"} {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	// The stock Claude statusErr supplies HTTP status and CredentialScope but
+	// can legitimately leave Error.Code empty. Retain core billing/auth checks.
+	return isQuotaCooldownResultError(err) && !isRequestScopedResultError(err) &&
+		(err.Code == "" || err.Code == ErrorCodeCredentialQuota || err.Code == "rate_limit_error")
 }
 
 func reconcilableModelState(s *ModelState, now time.Time, depth int) bool {

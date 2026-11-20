@@ -68,6 +68,8 @@ func TestReconcileClaudeQuotaFailClosed(t *testing.T) {
 		"api-key":           func(a *Auth) { delete(a.Metadata, "access_token") },
 		"wrong-provider":    func(a *Auth) { a.Provider = "codex" },
 		"overload":          func(a *Auth) { a.LastError = &Error{HTTPStatus: 503} },
+		"request-scoped":    func(a *Auth) { a.LastError.Code = ErrorCodeRequestScoped },
+		"paid-credit":       func(a *Auth) { a.LastError.Message = "credit balance is too low" },
 		"transient-429":     func(a *Auth) { a.LastError.Code = ErrorCodeTransientRateLimit },
 		"independent-retry": func(a *Auth) { a.credentialRetryAfter = time.Now().Add(time.Hour) },
 		"model-404":         func(a *Auth) { a.ModelStates["claude-test"].LastError = &Error{HTTPStatus: 404} },
@@ -134,6 +136,32 @@ func TestQuotaReconcileEvidenceFreshness(t *testing.T) {
 		if quotaReconcileMatches(a, a.Clone(), started, now) {
 			t.Fatal("stale or future evidence accepted")
 		}
+	}
+}
+
+func TestReconcileClaudeQuotaStockMarkResult(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	a := reconcileFixture()
+	a.Status, a.Unavailable, a.NextRetryAfter = StatusActive, false, time.Time{}
+	a.Quota, a.LastError, a.ModelStates = QuotaState{}, nil, nil
+	if _, err := m.Register(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	retry := time.Hour
+	m.MarkResult(context.Background(), Result{
+		AuthID: a.ID, Provider: "claude", Model: "claude-test",
+		Success: false, CredentialScope: true, RetryAfter: &retry,
+		Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"rate_limit_error","message":"Weekly rate limit exceeded"}}`},
+	})
+	before, _ := m.GetByID(a.ID)
+	if !CanReconcileClaudeQuota(before, time.Now()) {
+		t.Fatal("stock credential-scoped 429 was not a reconciliation candidate")
+	}
+	got, _, err := m.ReconcileClaudeQuota(context.Background(), a.ID, func(context.Context, *Auth) (bool, error) {
+		return true, nil
+	})
+	if err != nil || got == nil || got.Quota.Exceeded {
+		t.Fatalf("stock cooldown was not reconciled: updated=%v err=%v", got != nil, err)
 	}
 }
 
