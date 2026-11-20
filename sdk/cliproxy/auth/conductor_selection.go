@@ -875,7 +875,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
 	unauthorizedCount := 0
-	var earliest time.Time
+	var earliest, earliestNonQuota time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
@@ -889,6 +889,9 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
+		}
+		if reason == blockReasonOther && next.After(now) && (earliestNonQuota.IsZero() || next.Before(earliestNonQuota)) {
+			earliestNonQuota = next
 		}
 		if hasUnauthorizedAuthFailure(candidate) {
 			unauthorizedCount++
@@ -925,6 +928,9 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 				Retryable:  false,
 				HTTPStatus: http.StatusServiceUnavailable,
 			}, terminalCause)
+		}
+		if cooldownCount > 0 {
+			return nil, newPartialQuotaUnavailableError(earliestNonQuota, now, lastCandidateErr)
 		}
 		return nil, newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 	}
