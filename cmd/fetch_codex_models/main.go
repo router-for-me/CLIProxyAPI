@@ -41,14 +41,16 @@ import (
 )
 
 const (
-	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
-	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.169.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.169.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	defaultCodexOriginator   = "codex_cli_rs"
-	accessTokenRefreshLeeway = 30 * time.Second
-	baselineModelSlug        = "gpt-5.5"
-	baselineModelVisibility  = "list"
+	codexModelsBaseURL           = "https://chatgpt.com/backend-api/codex"
+	codexModelsPath              = "/models"
+	defaultClientVersion         = "0.169.0"
+	defaultCodexUserAgent        = "codex_cli_rs/0.169.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultCodexOriginator       = "codex_cli_rs"
+	accessTokenRefreshLeeway     = 30 * time.Second
+	baselineModelSlug            = "gpt-5.5"
+	baselineModelVisibility      = "list"
+	baselineMinimalClientVersion = "0.124.0"
+	baselinePriorityServiceTier  = "priority"
 )
 
 func init() {
@@ -341,11 +343,12 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 
 	count := len(payload.Models)
 	if !foundBaseline {
-		cloneDoc := ojson.NewDoc(payload.Models[0])
+		templateRaw := selectBaselineTemplateModel(payload.Models)
+		cloneDoc := ojson.NewDoc(templateRaw)
 		if errSet := cloneDoc.Set("slug", baselineModelSlug); errSet != nil {
 			return nil, 0, fmt.Errorf("failed to set %s slug on cloned model: %w", baselineModelSlug, errSet)
 		}
-		visResult := ojson.GetBytesNoCopy(payload.Models[0], "visibility")
+		visResult := ojson.GetBytesNoCopy(templateRaw, "visibility")
 		if visResult.Type != ojson.String || visResult.Str != baselineModelVisibility {
 			if errSet := cloneDoc.Set("visibility", baselineModelVisibility); errSet != nil {
 				return nil, 0, fmt.Errorf("failed to set %s visibility on cloned model: %w", baselineModelSlug, errSet)
@@ -355,6 +358,7 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 			path  string
 			value any
 		}{
+			{path: "minimal_client_version", value: baselineMinimalClientVersion},
 			{path: "tool_mode", value: "direct"},
 			{path: "use_responses_lite", value: false},
 			{path: "supports_reasoning_effort_updates", value: false},
@@ -374,6 +378,55 @@ func ensureBaselineModel(raw []byte) ([]byte, int, error) {
 	}
 
 	return raw, count, nil
+}
+
+// selectBaselineTemplateModel chooses the best source model to clone when
+// synthesizing the gpt-5.5 baseline entry, prioritizing visibility ("list"),
+// API support (supported_in_api), and the "priority" service tier in that
+// order. If no candidate advertises "priority", it falls back to the highest
+// scoring visible/API-supported model (and finally models[0]).
+func selectBaselineTemplateModel(models []json.RawMessage) json.RawMessage {
+	best := models[0]
+	bestScore := -1
+	for _, modelRaw := range models {
+		score := 0
+		visResult := ojson.GetBytesNoCopy(modelRaw, "visibility")
+		if visResult.Type == ojson.String && strings.TrimSpace(visResult.Str) == baselineModelVisibility {
+			score += 4
+		}
+		apiResult := ojson.GetBytesNoCopy(modelRaw, "supported_in_api")
+		if apiResult.Type == ojson.True {
+			score += 2
+		}
+		if hasPriorityServiceTier(modelRaw) {
+			score++
+		}
+		if score > bestScore {
+			best = modelRaw
+			bestScore = score
+			if bestScore == 7 {
+				return best
+			}
+		}
+	}
+	return best
+}
+
+func hasPriorityServiceTier(modelRaw json.RawMessage) bool {
+	tiers := ojson.GetBytesNoCopy(modelRaw, "service_tiers")
+	if !tiers.IsArray() {
+		return false
+	}
+	found := false
+	tiers.ForEach(func(_, tier ojson.Result) bool {
+		id := tier.Get("id")
+		if id.Type == ojson.String && strings.TrimSpace(id.Str) == baselinePriorityServiceTier {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func codexModelsURL(clientVersion string) (string, error) {
