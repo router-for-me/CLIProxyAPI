@@ -1,7 +1,6 @@
 package management
 
 import (
-	"context"
 	"errors"
 	"io"
 	"math"
@@ -13,6 +12,7 @@ import (
 	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 const claudeUsageRecoveryURL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
@@ -21,12 +21,16 @@ type quotaUsageRetryError struct{ after string }
 
 func (e *quotaUsageRetryError) Error() string { return "usage retry required" }
 
-// ReconcileClaudeQuota is opt-in through the management API. Unlike the manual
+// ReconcileQuota is opt-in through the management API. Unlike the manual
 // reset endpoint it requires fresh provider recovery evidence and an atomic
 // unchanged-state check. It never redeems credits or calls a messages endpoint.
-func (h *Handler) ReconcileClaudeQuota(c *gin.Context) {
+func (h *Handler) ReconcileQuota(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+	if h.quotaReconcileHomeEnabled() {
+		c.JSON(http.StatusConflict, gin.H{"status": "unsupported_mode"})
 		return
 	}
 	var req struct {
@@ -38,10 +42,20 @@ func (h *Handler) ReconcileClaudeQuota(c *gin.Context) {
 	}
 	auth := h.authByIndex(strings.TrimSpace(req.AuthIndex))
 	if auth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+		c.JSON(http.StatusOK, gin.H{"status": "credential_missing"})
 		return
 	}
-	updated, models, err := h.authManager.ReconcileClaudeQuota(c.Request.Context(), auth.ID, h.claudeQuotaRecovered)
+	verify := h.quotaRecoveryAdapter(auth.Provider)
+	if verify == nil {
+		c.JSON(http.StatusOK, gin.H{"status": "unsupported_provider"})
+		return
+	}
+	token, _ := auth.Metadata["access_token"].(string)
+	if _, knownExpiry := auth.AccessTokenExpirationTime(); token == "" || !knownExpiry {
+		c.JSON(http.StatusOK, gin.H{"status": "unsupported_credential"})
+		return
+	}
+	updated, models, err := h.authManager.ReconcileQuota(c.Request.Context(), auth.ID, verify)
 	if errors.Is(err, coreauth.ErrQuotaReconcileChanged) {
 		c.JSON(http.StatusConflict, gin.H{"status": "state_changed"})
 		return
@@ -62,57 +76,44 @@ func (h *Handler) ReconcileClaudeQuota(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "reconciled", "auth_index": updated.EnsureIndex(), "models": models})
 }
 
-func (h *Handler) claudeQuotaRecovered(ctx context.Context, auth *coreauth.Auth) (bool, error) {
-	token, _ := auth.Metadata["access_token"].(string)
-	if token == "" {
-		return false, errors.New("missing access token")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, claudeUsageRecoveryURL, nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Cache-Control", "no-cache")
-	cfg := h.configSnapshot()
-	if cfg != nil && strings.TrimSpace(cfg.ClaudeHeaderDefaults.UserAgent) != "" {
-		req.Header.Set("User-Agent", cfg.ClaudeHeaderDefaults.UserAgent)
-	}
-	client := h.claudeQuotaClient
+// fetchQuotaRecovery uses only requests constructed by audited provider adapters.
+// No user-controlled endpoint or callback URL is accepted by the API.
+func (h *Handler) fetchQuotaRecovery(req *http.Request, auth *coreauth.Auth) ([]byte, error) {
+	client := h.quotaRecoveryClient
 	if client == nil {
-		transportHandler := &Handler{cfg: cfg}
-		httpClient := &http.Client{
-			Transport:     transportHandler.apiCallTransport(auth, ""),
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		httpClient, errClient := h.quotaRecoveryHTTPClient(req.Context(), auth)
+		if errClient != nil {
+			return nil, errClient
 		}
 		defer httpClient.CloseIdleConnections()
 		client = httpClient
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, errors.New("usage request failed")
+	resp, errDo := client.Do(req)
+	if errDo != nil {
+		return nil, errors.New("usage request failed")
 	}
-	defer func() { _ = resp.Body.Close() }()
-	// Retry-After, stale/cache-served responses and any rejection fail closed.
-	if after := strings.TrimSpace(resp.Header.Get("Retry-After")); after != "" {
-		seconds, numberErr := strconv.ParseUint(after, 10, 63)
-		date, dateErr := http.ParseTime(after)
-		if (numberErr == nil && seconds > 0) || (dateErr == nil && date.After(time.Now())) {
-			return false, &quotaUsageRetryError{after: after}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Warn("quota reconciliation: response close failed")
 		}
-		return false, errors.New("usage evidence unavailable")
+	}()
+	if after := strings.TrimSpace(resp.Header.Get("Retry-After")); after != "" {
+		seconds, errNumber := strconv.ParseUint(after, 10, 63)
+		date, errDate := http.ParseTime(after)
+		if (errNumber == nil && seconds > 0) || (errDate == nil && date.After(time.Now())) {
+			return nil, &quotaUsageRetryError{after: after}
+		}
+		return nil, errors.New("usage evidence unavailable")
 	}
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("Retry-After") != "" ||
-		(resp.Header.Get("Age") != "" && resp.Header.Get("Age") != "0") {
-		return false, errors.New("usage evidence unavailable")
+	if resp.StatusCode != http.StatusOK || (resp.Header.Get("Age") != "" && resp.Header.Get("Age") != "0") {
+		return nil, errors.New("usage evidence unavailable")
 	}
 	const maxBody = 512 * 1024
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
-	if err != nil || len(body) > maxBody {
-		return false, errors.New("invalid usage response")
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if errRead != nil || len(body) > maxBody {
+		return nil, errors.New("invalid usage response")
 	}
-	return claudeUsageProvesRecovery(body), nil
+	return body, nil
 }
 
 // The aggregate reset-credit flag alone is NOT quota evidence: at_limit=false
@@ -124,7 +125,8 @@ func claudeUsageProvesRecovery(body []byte) bool {
 		return false
 	}
 	cedar, ok := root["cedar_ember"].(map[string]any)
-	if !ok || cedar["at_limit"] != false {
+	if !ok || !onlyKeys(cedar, "eligible", "ineligible_reason", "at_limit", "exhausted", "grants",
+		"next_grant_id", "weekly_resets_at", "cooldown_until", "event_props", "paused_held") || cedar["at_limit"] != false {
 		return false
 	}
 	if v, exists := cedar["cooldown_until"]; !exists || v != nil {
@@ -148,8 +150,11 @@ func claudeUsageProvesRecovery(body []byte) bool {
 		case "cedar_ember", "limits", "member_dashboard_available", "seven_day_breakdown", "weekly_scoped_shares":
 			continue
 		}
+		if !knownClaudeWindow(key) {
+			return false
+		}
 		window, ok := value.(map[string]any)
-		if !ok || !belowLimit(window["utilization"]) || window["locked_reason"] != nil {
+		if !ok || !onlyKeys(window, "utilization", "resets_at", "limit_dollars", "used_dollars", "remaining_dollars", "locked_reason") || !belowLimit(window["utilization"]) || window["locked_reason"] != nil {
 			return false
 		}
 		windows++
@@ -160,7 +165,8 @@ func claudeUsageProvesRecovery(body []byte) bool {
 	}
 	for _, raw := range limits {
 		limit, ok := raw.(map[string]any)
-		if !ok || limit["severity"] != "normal" || !belowLimit(limit["percent"]) {
+		if !ok || !onlyKeys(limit, "kind", "group", "percent", "severity", "resets_at", "scope", "is_active") ||
+			limit["severity"] != "normal" || !belowLimit(limit["percent"]) {
 			return false
 		}
 	}
@@ -170,4 +176,29 @@ func claudeUsageProvesRecovery(body []byte) bool {
 func belowLimit(v any) bool {
 	n, ok := v.(float64)
 	return ok && !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 && n < 100
+}
+
+func knownClaudeWindow(key string) bool {
+	switch key {
+	case "five_hour", "seven_day", "seven_day_oauth_apps", "seven_day_opus", "seven_day_sonnet", "seven_day_cowork", "seven_day_omelette":
+		return true
+	default:
+		return false
+	}
+}
+
+func onlyKeys(value map[string]any, allowed ...string) bool {
+	for key := range value {
+		found := false
+		for _, known := range allowed {
+			if key == known {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

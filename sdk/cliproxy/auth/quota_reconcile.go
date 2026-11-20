@@ -11,10 +11,10 @@ import (
 // ErrQuotaReconcileChanged means provider evidence must not clear the current state.
 var ErrQuotaReconcileChanged = errors.New("quota reconciliation state changed or evidence expired")
 
-// CanReconcileClaudeQuota deliberately excludes mixed failures: ResetQuota is an
+// CanReconcileQuota deliberately excludes mixed failures: ResetQuota is an
 // account-wide operation, so a usage check must not erase an unrelated block.
-func CanReconcileClaudeQuota(a *Auth, now time.Time) bool {
-	if a == nil || a.Provider != "claude" || a.Disabled || a.Status == StatusDisabled ||
+func CanReconcileQuota(a *Auth, now time.Time) bool {
+	if a == nil || strings.TrimSpace(a.Provider) == "" || a.Disabled || a.Status == StatusDisabled ||
 		a.RequiresSignIn || a.RefreshError != nil || hasUnauthorizedAuthFailure(a) ||
 		a.RejectedAccessToken != "" || a.RejectedRefreshToken != "" ||
 		a.RejectedSIWCAccessToken != "" || a.RejectedSIWCRefreshToken != "" {
@@ -22,17 +22,29 @@ func CanReconcileClaudeQuota(a *Auth, now time.Time) bool {
 	}
 	token, _ := a.Metadata["access_token"].(string)
 	exp, known := a.AccessTokenExpirationTime()
-	if token == "" || !known || !exp.After(now.Add(time.Minute)) ||
-		!a.Quota.Exceeded || a.Quota.Reason != "credential_quota" ||
-		!a.Quota.NextRecoverAt.After(now) || a.nonQuotaCooldownUntil.After(now) ||
-		a.credentialRetryAfter.After(now) || a.NextRetryAfter.After(a.Quota.NextRecoverAt) ||
-		a.forceCooldownUntil.After(a.Quota.NextRecoverAt) || !quotaOnlyError(a.LastError) {
+	if token == "" || !known || !exp.After(now.Add(time.Minute)) {
 		return false
+	}
+	if a.nonQuotaCooldownUntil.After(now) || a.credentialRetryAfter.After(now) || !quotaOnlyError(a.LastError) {
+		return false
+	}
+	latest := time.Time{}
+	if a.Quota.Exceeded {
+		if a.Quota.Reason != "quota" && a.Quota.Reason != "credential_quota" {
+			return false
+		}
+		latest = a.Quota.NextRecoverAt
 	}
 	for _, state := range a.ModelStates {
 		if !reconcilableModelState(state, now, 0) {
 			return false
 		}
+		if state != nil && state.Quota.Exceeded && state.Quota.NextRecoverAt.After(latest) {
+			latest = state.Quota.NextRecoverAt
+		}
+	}
+	if !latest.After(now) || a.NextRetryAfter.After(latest) || a.forceCooldownUntil.After(latest) {
+		return false
 	}
 	return true
 }
@@ -51,8 +63,7 @@ func quotaOnlyError(err *Error) bool {
 	}
 	// The stock Claude statusErr supplies HTTP status and CredentialScope but
 	// can legitimately leave Error.Code empty. Retain core billing/auth checks.
-	return isQuotaCooldownResultError(err) && !isRequestScopedResultError(err) &&
-		(err.Code == "" || err.Code == ErrorCodeCredentialQuota || err.Code == "rate_limit_error")
+	return isQuotaCooldownResultError(err) && !isRequestScopedResultError(err)
 }
 
 func reconcilableModelState(s *ModelState, now time.Time, depth int) bool {
@@ -71,16 +82,16 @@ func reconcilableModelState(s *ModelState, now time.Time, depth int) bool {
 	return reconcilableModelState(s.credentialQuotaShadow, now, depth+1)
 }
 
-// ReconcileClaudeQuota performs no inference. verify must check the same
+// ReconcileQuota performs no inference. verify must check the same
 // credential's non-spending provider usage, not redeem a reset or refresh a grant.
 // No manager/mutation lock is held during provider I/O.
-func (m *Manager) ReconcileClaudeQuota(ctx context.Context, id string, verify func(context.Context, *Auth) (bool, error)) (*Auth, []string, error) {
-	if m == nil || verify == nil {
+func (m *Manager) ReconcileQuota(ctx context.Context, id string, verify func(context.Context, *Auth) (bool, error)) (*Auth, []string, error) {
+	if m == nil || verify == nil || m.HomeEnabled() {
 		return nil, nil, nil
 	}
 	before, ok := m.GetByID(id)
 	started := time.Now()
-	if !ok || !CanReconcileClaudeQuota(before, started) {
+	if !ok || !CanReconcileQuota(before, started) {
 		return nil, nil, nil
 	}
 	// Do not give a callback the comparison snapshot itself.
@@ -88,15 +99,15 @@ func (m *Manager) ReconcileClaudeQuota(ctx context.Context, id string, verify fu
 	if err != nil || !recovered {
 		return nil, nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+	if errCtx := ctx.Err(); errCtx != nil {
+		return nil, nil, errCtx
 	}
 	return m.resetQuota(ctx, id, before, started)
 }
 
 func quotaReconcileMatches(current, expected *Auth, started, now time.Time) bool {
 	if started.IsZero() || now.Before(started) || now.Sub(started) > time.Minute ||
-		!CanReconcileClaudeQuota(current, now) {
+		!CanReconcileQuota(current, now) {
 		return false
 	}
 	// Includes registration epoch, credential version, generation, tokens,

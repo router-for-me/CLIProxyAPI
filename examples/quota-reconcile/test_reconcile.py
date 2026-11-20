@@ -5,7 +5,12 @@ import tempfile
 from pathlib import Path
 import threading
 import unittest
+from unittest.mock import Mock, patch
+import http.client
 import reconcile
+
+
+CAPABILITY = {"version":1,"mode":"local","unsupported_policy":"preserve_cooldown"}
 
 
 class ReconciliationTests(unittest.TestCase):
@@ -13,16 +18,42 @@ class ReconciliationTests(unittest.TestCase):
         return {"auth_index": "synthetic-index", "provider": "claude", "disabled": False,
                 "quota_blocked": True, "cooldowns": [{"scope": "credential", "reason": "credential_quota"}]}
 
-    def test_only_quota_blocked_claude_candidates(self):
+    def test_only_quota_blocked_candidates(self):
         valid = self.row()
         rows = [valid, copy.deepcopy(valid)]
-        for field, value in (("disabled", True), ("provider", "codex"),
-                             ("quota_blocked", False), ("requires_sign_in", True),
+        for field, value in (("disabled", True), ("provider", None),
+                             ("cooldowns", []), ("requires_sign_in", True),
                              ("cooldowns", [{"scope": "model", "reason": "auth"}])):
             row = self.row()
             row[field] = value
             rows.append(row)
         self.assertEqual(reconcile.candidates({"files": rows}), ["synthetic-index"])
+
+    def test_all_providers_and_model_scoped_quotas(self):
+        rows = []
+        for provider in ("claude", "codex", "antigravity", "kimi", "xai", "custom"):
+            row = self.row()
+            row.update(provider=provider, auth_index=provider, quota_blocked=False,
+                       cooldowns=[{"scope":"model", "reason":"quota"}])
+            rows.append(row)
+        self.assertEqual(reconcile.candidates({"files": rows}), [r["auth_index"] for r in rows])
+
+    def test_home_rejected_without_reading_inventory(self):
+        class HomeClient:
+            def call(_, path, body=None):
+                self.assertEqual(path, "routing/cooldown/reconcile")
+                return dict(CAPABILITY, mode="home_unsupported")
+        with self.assertRaises(reconcile.UnsupportedBackend):
+            reconcile.run_once(HomeClient())
+
+    def test_connect_only_timeout(self):
+        for base, cls in ((http.client.HTTPConnection, reconcile.ConnectOnlyHTTPConnection),
+                          (http.client.HTTPSConnection, reconcile.ConnectOnlyHTTPSConnection)):
+            conn = cls("localhost", timeout=45)
+            conn.sock = Mock()
+            with patch.object(base, "connect"):
+                conn.connect()
+            conn.sock.settimeout.assert_called_once_with(None)
 
     def test_unknown_inventory_fails_closed(self):
         for data in ({}, {"files": None}, {"files": ["bad"]}, []):
@@ -35,6 +66,8 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(reconcile.retry_seconds(None), 0)
         class FailingClient:
             def call(_, path, body=None):
+                if path == "routing/cooldown/reconcile" and body is None:
+                    return CAPABILITY
                 if path == "credentials":
                     return {"files": [self.row()]}
                 raise reconcile.ManagementError("rate limited", retry_after=7200)
@@ -57,6 +90,7 @@ class ReconciliationTests(unittest.TestCase):
         requests = []
         row = self.row()
         status = [200]
+        capability_status = [200]
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_):
@@ -64,9 +98,10 @@ class ReconciliationTests(unittest.TestCase):
 
             def do_GET(self):
                 requests.append(("GET", self.path))
-                self.send_response(200)
+                capability = self.path.endswith("/reconcile")
+                self.send_response(capability_status[0] if capability else 200)
                 self.end_headers()
-                self.wfile.write(json.dumps({"files": [row]}).encode())
+                self.wfile.write(json.dumps(CAPABILITY if capability else {"files": [row]}).encode())
 
             def do_POST(self):
                 requests.append(("POST", self.path))
@@ -89,6 +124,8 @@ class ReconciliationTests(unittest.TestCase):
                 status[0] = code
                 self.assertEqual(reconcile.run_once(client)["failed"], 1)
             status[0] = 404
+            self.assertEqual(reconcile.run_once(client)["credential_missing"], 1)
+            capability_status[0] = 404
             with self.assertRaises(reconcile.UnsupportedBackend):
                 reconcile.run_once(client)
             self.assertTrue(all(path in (

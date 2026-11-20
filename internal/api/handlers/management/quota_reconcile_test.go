@@ -29,25 +29,27 @@ func TestClaudeUsageProvesRecovery(t *testing.T) {
 		t.Fatal("recovered fixture rejected")
 	}
 	for name, edit := range map[string]func(map[string]any){
-		"missing-cedar":        func(v map[string]any) { delete(v, "cedar_ember") },
-		"reset-flag-not-quota": func(v map[string]any) { v["seven_day"].(map[string]any)["utilization"] = float64(100) },
-		"missing-utilization":  func(v map[string]any) { delete(v["seven_day"].(map[string]any), "utilization") },
-		"negative-utilization": func(v map[string]any) { v["seven_day"].(map[string]any)["utilization"] = float64(-1) },
-		"string-utilization":   func(v map[string]any) { v["seven_day"].(map[string]any)["utilization"] = "0" },
-		"all-null-windows":     func(v map[string]any) { v["seven_day"] = nil },
-		"missing-window":       func(v map[string]any) { delete(v, "five_hour") },
-		"scoped-limit":         func(v map[string]any) { v["seven_day_opus"] = map[string]any{"utilization": 100.0} },
-		"locked":               func(v map[string]any) { v["seven_day"].(map[string]any)["locked_reason"] = "organization" },
-		"cedar-at-limit":       func(v map[string]any) { v["cedar_ember"].(map[string]any)["at_limit"] = true },
-		"missing-cooldown":     func(v map[string]any) { delete(v["cedar_ember"].(map[string]any), "cooldown_until") },
-		"provider-deadline":    func(v map[string]any) { v["cedar_ember"].(map[string]any)["cooldown_until"] = "later" },
-		"exhausted":            func(v map[string]any) { v["cedar_ember"].(map[string]any)["exhausted"] = []any{"weekly"} },
-		"missing-exhausted":    func(v map[string]any) { delete(v["cedar_ember"].(map[string]any), "exhausted") },
-		"missing-limits":       func(v map[string]any) { delete(v, "limits") },
-		"empty-limits":         func(v map[string]any) { v["limits"] = []any{} },
-		"critical-limit":       func(v map[string]any) { v["limits"] = []any{map[string]any{"severity": "critical", "percent": 0.0}} },
-		"full-limit":           func(v map[string]any) { v["limits"] = []any{map[string]any{"severity": "normal", "percent": 100.0}} },
-		"unknown-schema":       func(v map[string]any) { v["new_restriction"] = map[string]any{"blocked": true} },
+		"missing-cedar":             func(v map[string]any) { delete(v, "cedar_ember") },
+		"reset-flag-not-quota":      func(v map[string]any) { v["seven_day"].(map[string]any)["utilization"] = float64(100) },
+		"missing-utilization":       func(v map[string]any) { delete(v["seven_day"].(map[string]any), "utilization") },
+		"negative-utilization":      func(v map[string]any) { v["seven_day"].(map[string]any)["utilization"] = float64(-1) },
+		"string-utilization":        func(v map[string]any) { v["seven_day"].(map[string]any)["utilization"] = "0" },
+		"all-null-windows":          func(v map[string]any) { v["seven_day"] = nil },
+		"missing-window":            func(v map[string]any) { delete(v, "five_hour") },
+		"scoped-limit":              func(v map[string]any) { v["seven_day_opus"] = map[string]any{"utilization": 100.0} },
+		"locked":                    func(v map[string]any) { v["seven_day"].(map[string]any)["locked_reason"] = "organization" },
+		"cedar-at-limit":            func(v map[string]any) { v["cedar_ember"].(map[string]any)["at_limit"] = true },
+		"missing-cooldown":          func(v map[string]any) { delete(v["cedar_ember"].(map[string]any), "cooldown_until") },
+		"provider-deadline":         func(v map[string]any) { v["cedar_ember"].(map[string]any)["cooldown_until"] = "later" },
+		"exhausted":                 func(v map[string]any) { v["cedar_ember"].(map[string]any)["exhausted"] = []any{"weekly"} },
+		"missing-exhausted":         func(v map[string]any) { delete(v["cedar_ember"].(map[string]any), "exhausted") },
+		"missing-limits":            func(v map[string]any) { delete(v, "limits") },
+		"empty-limits":              func(v map[string]any) { v["limits"] = []any{} },
+		"critical-limit":            func(v map[string]any) { v["limits"] = []any{map[string]any{"severity": "critical", "percent": 0.0}} },
+		"full-limit":                func(v map[string]any) { v["limits"] = []any{map[string]any{"severity": "normal", "percent": 100.0}} },
+		"unknown-schema":            func(v map[string]any) { v["new_restriction"] = map[string]any{"blocked": true} },
+		"unknown-low-usage-blocker": func(v map[string]any) { v["new_restriction"] = map[string]any{"utilization": 1.0, "blocked": true} },
+		"known-window-new-blocker":  func(v map[string]any) { v["seven_day"].(map[string]any)["blocked"] = true },
 	} {
 		t.Run(name, func(t *testing.T) {
 			var v map[string]any
@@ -75,7 +77,7 @@ func (f quotaRecoveryDoer) Do(r *http.Request) (*http.Response, error) { return 
 func TestClaudeQuotaRecoveryTransportFailClosed(t *testing.T) {
 	auth := &coreauth.Auth{Metadata: map[string]any{"access_token": "synthetic"}}
 	for _, status := range []int{200, 302, 401, 403, 429, 500} {
-		h := &Handler{claudeQuotaClient: quotaRecoveryDoer(func(r *http.Request) (*http.Response, error) {
+		h := &Handler{quotaRecoveryClient: quotaRecoveryDoer(func(r *http.Request) (*http.Response, error) {
 			if r.Method != "GET" || r.URL.String() != claudeUsageRecoveryURL ||
 				r.Header.Get("Authorization") != "Bearer synthetic" || r.Body != nil {
 				t.Fatal("request changed account, spent credits, or called inference")
@@ -89,7 +91,7 @@ func TestClaudeQuotaRecoveryTransportFailClosed(t *testing.T) {
 	}
 	for _, kind := range []string{"network", "retry-after", "age", "oversized"} {
 		t.Run(kind, func(t *testing.T) {
-			h := &Handler{claudeQuotaClient: quotaRecoveryDoer(func(*http.Request) (*http.Response, error) {
+			h := &Handler{quotaRecoveryClient: quotaRecoveryDoer(func(*http.Request) (*http.Response, error) {
 				if kind == "network" {
 					return nil, errors.New("secret transport detail")
 				}
@@ -111,7 +113,7 @@ func TestClaudeQuotaRecoveryTransportFailClosed(t *testing.T) {
 	}
 }
 
-func TestReconcileClaudeQuotaHandlerLoopback(t *testing.T) {
+func TestReconcileQuotaHandlerLoopback(t *testing.T) {
 	until := time.Now().Add(time.Hour)
 	manager := coreauth.NewManager(nil, nil, nil)
 	a := &coreauth.Auth{
@@ -135,14 +137,14 @@ func TestReconcileClaudeQuotaHandlerLoopback(t *testing.T) {
 		_, _ = io.WriteString(w, recoveredUsageFixture)
 	}))
 	defer provider.Close()
-	h.claudeQuotaClient = quotaRecoveryDoer(func(r *http.Request) (*http.Response, error) {
+	h.quotaRecoveryClient = quotaRecoveryDoer(func(r *http.Request) (*http.Response, error) {
 		// Test-only redirection; the production endpoint is fixed and disallows redirects.
 		local, _ := http.NewRequestWithContext(r.Context(), "GET", provider.URL+r.URL.RequestURI(), nil)
 		local.Header = r.Header.Clone()
 		return provider.Client().Do(local)
 	})
 	router := gin.New()
-	router.POST("/reconcile", h.ReconcileClaudeQuota)
+	router.POST("/reconcile", h.ReconcileQuota)
 	request := func(index string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("POST", "/reconcile", strings.NewReader(`{"auth_index":"`+index+`"}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -150,7 +152,7 @@ func TestReconcileClaudeQuotaHandlerLoopback(t *testing.T) {
 		router.ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := request(a.ID); rec.Code != 404 {
+	if rec := request(a.ID); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"status":"credential_missing"`) {
 		t.Fatal("accepted a file ID instead of auth_index")
 	}
 	index := a.EnsureIndex()

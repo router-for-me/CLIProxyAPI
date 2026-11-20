@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
@@ -28,7 +29,7 @@ func reconcileFixture() *Auth {
 	}
 }
 
-func TestReconcileClaudeQuotaSuccessAndNoInference(t *testing.T) {
+func TestReconcileQuotaSuccessAndNoInference(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	a := reconcileFixture()
 	reg := registry.GetGlobalRegistry()
@@ -40,7 +41,7 @@ func TestReconcileClaudeQuotaSuccessAndNoInference(t *testing.T) {
 	reg.SetModelQuotaExceeded(a.ID, "claude-test")
 	reg.SuspendClientModel(a.ID, "claude-test", "quota")
 	calls := 0
-	updated, _, err := m.ReconcileClaudeQuota(context.Background(), a.ID, func(_ context.Context, snapshot *Auth) (bool, error) {
+	updated, _, err := m.ReconcileQuota(context.Background(), a.ID, func(_ context.Context, snapshot *Auth) (bool, error) {
 		calls++
 		if snapshot.Metadata["access_token"] != "synthetic" {
 			t.Fatal("wrong credential snapshot")
@@ -59,14 +60,14 @@ func TestReconcileClaudeQuotaSuccessAndNoInference(t *testing.T) {
 	}
 }
 
-func TestReconcileClaudeQuotaFailClosed(t *testing.T) {
+func TestReconcileQuotaFailClosed(t *testing.T) {
 	for name, mutate := range map[string]func(*Auth){
 		"disabled":          func(a *Auth) { a.Disabled = true },
 		"auth":              func(a *Auth) { a.RequiresSignIn = true },
 		"expired":           func(a *Auth) { a.Metadata["expired"] = time.Now().Add(-time.Hour).Format(time.RFC3339) },
 		"unknown-expiry":    func(a *Auth) { delete(a.Metadata, "expired") },
 		"api-key":           func(a *Auth) { delete(a.Metadata, "access_token") },
-		"wrong-provider":    func(a *Auth) { a.Provider = "codex" },
+		"wrong-provider":    func(a *Auth) { a.Provider = "" },
 		"overload":          func(a *Auth) { a.LastError = &Error{HTTPStatus: 503} },
 		"request-scoped":    func(a *Auth) { a.LastError.Code = ErrorCodeRequestScoped },
 		"paid-credit":       func(a *Auth) { a.LastError.Message = "credit balance is too low" },
@@ -81,14 +82,14 @@ func TestReconcileClaudeQuotaFailClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			a := reconcileFixture()
 			mutate(a)
-			if CanReconcileClaudeQuota(a, time.Now()) {
+			if CanReconcileQuota(a, time.Now()) {
 				t.Fatal("unsafe candidate accepted")
 			}
 		})
 	}
 }
 
-func TestReconcileClaudeQuotaRejectsConcurrentChange(t *testing.T) {
+func TestReconcileQuotaRejectsConcurrentChange(t *testing.T) {
 	for name, mutate := range map[string]func(*Auth){
 		"new-same-deadline-error": func(a *Auth) { a.Generation++ },
 		"replacement":             func(a *Auth) { a.RegistrationEpoch++ },
@@ -105,7 +106,7 @@ func TestReconcileClaudeQuotaRejectsConcurrentChange(t *testing.T) {
 			entered, resume := make(chan struct{}), make(chan struct{})
 			done := make(chan error, 1)
 			go func() {
-				_, _, err := m.ReconcileClaudeQuota(context.Background(), a.ID, func(context.Context, *Auth) (bool, error) {
+				_, _, err := m.ReconcileQuota(context.Background(), a.ID, func(context.Context, *Auth) (bool, error) {
 					close(entered)
 					<-resume
 					return true, nil
@@ -139,7 +140,54 @@ func TestQuotaReconcileEvidenceFreshness(t *testing.T) {
 	}
 }
 
-func TestReconcileClaudeQuotaStockMarkResult(t *testing.T) {
+func TestReconcileQuotaProviderNeutralModelOnly(t *testing.T) {
+	for _, provider := range []string{"claude", "codex", "antigravity", "kimi", "xai", "custom"} {
+		t.Run(provider, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			a := reconcileFixture()
+			a.Provider = provider
+			a.Quota = QuotaState{}
+			a.LastError = nil
+			a.ModelStates["claude-test"].LastError.Code = ""
+			if _, errRegister := manager.Register(context.Background(), a); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			// Core is provider-neutral. Only the management adapter decides
+			// whether authoritative non-spending evidence exists.
+			got, _, err := manager.ReconcileQuota(context.Background(), a.ID, func(_ context.Context, snapshot *Auth) (bool, error) {
+				return snapshot.Provider == provider, nil
+			})
+			if err != nil || got == nil || got.ModelStates["claude-test"].Quota.Exceeded {
+				t.Fatalf("model-only recovery failed for %s: %v", provider, err)
+			}
+		})
+	}
+}
+
+func TestReconcileQuotaRejectsHomeSwitchDuringProbe(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	a := reconcileFixture()
+	_, _ = manager.Register(context.Background(), a)
+	var afterModeSwitch *Auth
+	got, _, err := manager.ReconcileQuota(context.Background(), a.ID, func(context.Context, *Auth) (bool, error) {
+		cfg := &config.Config{}
+		cfg.Home.Enabled = true
+		manager.SetConfig(cfg)
+		afterModeSwitch, _ = manager.GetByID(a.ID)
+		return true, nil
+	})
+	if got != nil || !errors.Is(err, ErrQuotaReconcileChanged) {
+		t.Fatal("Home change did not abort local reset")
+	}
+	after, _ := manager.GetByID(a.ID)
+	// SetConfig itself discards local cooldowns when handing authority to Home.
+	// The reconciler must make no additional changes after that transition.
+	if !reflect.DeepEqual(after, afterModeSwitch) {
+		t.Fatal("reconciler changed Home-owned state")
+	}
+}
+
+func TestReconcileQuotaStockMarkResult(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	a := reconcileFixture()
 	a.Status, a.Unavailable, a.NextRetryAfter = StatusActive, false, time.Time{}
@@ -154,10 +202,10 @@ func TestReconcileClaudeQuotaStockMarkResult(t *testing.T) {
 		Error: &Error{HTTPStatus: 429, Message: `{"error":{"type":"rate_limit_error","message":"Weekly rate limit exceeded"}}`},
 	})
 	before, _ := m.GetByID(a.ID)
-	if !CanReconcileClaudeQuota(before, time.Now()) {
+	if !CanReconcileQuota(before, time.Now()) {
 		t.Fatal("stock credential-scoped 429 was not a reconciliation candidate")
 	}
-	got, _, err := m.ReconcileClaudeQuota(context.Background(), a.ID, func(context.Context, *Auth) (bool, error) {
+	got, _, err := m.ReconcileQuota(context.Background(), a.ID, func(context.Context, *Auth) (bool, error) {
 		return true, nil
 	})
 	if err != nil || got == nil || got.Quota.Exceeded {
@@ -165,7 +213,7 @@ func TestReconcileClaudeQuotaStockMarkResult(t *testing.T) {
 	}
 }
 
-func TestReconcileClaudeQuotaNoRecoveryOrCancellation(t *testing.T) {
+func TestReconcileQuotaNoRecoveryOrCancellation(t *testing.T) {
 	for _, mode := range []string{"limited", "error", "cancelled"} {
 		t.Run(mode, func(t *testing.T) {
 			m := NewManager(nil, nil, nil)
@@ -174,7 +222,7 @@ func TestReconcileClaudeQuotaNoRecoveryOrCancellation(t *testing.T) {
 			before, _ := m.GetByID(a.ID)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			got, _, _ := m.ReconcileClaudeQuota(ctx, a.ID, func(context.Context, *Auth) (bool, error) {
+			got, _, _ := m.ReconcileQuota(ctx, a.ID, func(context.Context, *Auth) (bool, error) {
 				switch mode {
 				case "limited":
 					return false, nil

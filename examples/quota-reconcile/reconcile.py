@@ -3,6 +3,7 @@
 import argparse
 import email.utils
 import fcntl
+import http.client
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,30 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+class ConnectOnlyHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        super().connect()
+        if self.sock:
+            self.sock.settimeout(None)
+
+
+class ConnectOnlyHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        super().connect()
+        if self.sock:
+            self.sock.settimeout(None)
+
+
+class ConnectOnlyHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(ConnectOnlyHTTPConnection, req)
+
+
+class ConnectOnlyHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(ConnectOnlyHTTPSConnection, req, context=self._context)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -51,7 +76,7 @@ class Client:
         self.origin, self.key = origin.rstrip("/"), key
         # Do not send management credentials through ambient proxies or redirects.
         self.opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), NoRedirect())
+            urllib.request.ProxyHandler({}), NoRedirect(), ConnectOnlyHTTPHandler(), ConnectOnlyHTTPSHandler())
 
     def call(self, path, body=None):
         data = None if body is None else json.dumps(body).encode()
@@ -68,10 +93,12 @@ class Client:
             after = retry_seconds(exc.headers.get("Retry-After"))
             exc.close()
             # The safe endpoint must exist. Never fall back to unconditional reset.
-            if path.endswith("/reconcile") and exc.code in (404, 405):
+            if path.endswith("/reconcile") and body is None and exc.code in (404, 405):
                 raise UnsupportedBackend("backend lacks guarded reconciliation") from None
             if exc.code == 409:
                 return {"status": "state_changed"}
+            if exc.code == 404 and body is not None:
+                return {"status": "credential_missing"}
             raise ManagementError("management request failed", retry_after=after) from None
         except (OSError, ValueError):
             raise ManagementError("management request failed") from None
@@ -85,15 +112,13 @@ def candidates(document):
         if not isinstance(row, dict):
             raise ManagementError("invalid credential row")
         index = row.get("auth_index")
-        if (row.get("provider") != "claude" or row.get("disabled") is not False
-                or row.get("requires_sign_in") is True or row.get("quota_blocked") is not True
+        if (not isinstance(row.get("provider"), str) or row.get("disabled") is not False
+                or row.get("requires_sign_in") is True
                 or not isinstance(index, str) or not index or index in seen):
             continue
         cooldowns = row.get("cooldowns")
         if (not isinstance(cooldowns, list) or not cooldowns
                 or not all(isinstance(c, dict) and c.get("reason") in ("quota", "credential_quota")
-                           for c in cooldowns)
-                or not any(c.get("scope") == "credential" and c.get("reason") == "credential_quota"
                            for c in cooldowns)):
             continue
         seen.add(index)
@@ -102,15 +127,20 @@ def candidates(document):
 
 
 def run_once(client):
+    capability = client.call("routing/cooldown/reconcile")
+    if (not isinstance(capability, dict) or capability.get("version") != 1
+            or capability.get("mode") != "local"
+            or capability.get("unsupported_policy") != "preserve_cooldown"):
+        raise UnsupportedBackend("backend mode or recovery capability unsupported")
     counts = {"checked": 0, "reconciled": 0, "unchanged": 0, "state_changed": 0, "failed": 0,
-              "retry_after_seconds": 0}
+              "retry_after_seconds": 0, "unsupported_provider": 0, "unsupported_credential": 0, "credential_missing": 0}
     # Serial calls: no overlap, no retry storm, and no healthy-account probing.
     for index in candidates(client.call("credentials")):
         counts["checked"] += 1
         try:
             result = client.call("routing/cooldown/reconcile", {"auth_index": index})
             status = result.get("status") if isinstance(result, dict) else None
-            if status not in ("reconciled", "unchanged", "state_changed"):
+            if status not in ("reconciled", "unchanged", "state_changed", "unsupported_provider", "unsupported_credential", "credential_missing"):
                 raise ManagementError("unrecognized reconciliation result")
             counts[status] += 1
         except UnsupportedBackend:
@@ -118,6 +148,10 @@ def run_once(client):
         except ManagementError as exc:
             counts["failed"] += 1
             counts["retry_after_seconds"] = max(counts["retry_after_seconds"], exc.retry_after)
+            if exc.retry_after:
+                # The deadline may be shared by a provider or proxy IP. Do not
+                # probe other accounts until it expires.
+                break
     return counts
 
 
@@ -151,17 +185,20 @@ def main():
         except BlockingIOError:
             return 0
         failures = 0
+        previous_unsupported = None
         while True:
             delay = args.interval
             try:
                 client = Client(args.origin, read_key(args.key_file))
                 counts = run_once(client)
-                if counts["reconciled"] or counts["failed"] or args.once:
+                unsupported = counts["unsupported_provider"] + counts["unsupported_credential"]
+                if counts["reconciled"] or counts["failed"] or args.once or (unsupported and unsupported != previous_unsupported):
                     print(json.dumps(counts), flush=True)
+                previous_unsupported = unsupported
                 failures = min(failures + 1, 4) if counts["failed"] else 0
                 delay = max(delay, counts["retry_after_seconds"])
             except UnsupportedBackend:
-                print("guarded reconciliation unavailable; upgrade required", flush=True)
+                print("guarded reconciliation unavailable or Home-authoritative; no local reset attempted", flush=True)
                 return 2
             except (ManagementError, OSError, ValueError) as exc:
                 print("reconciliation unavailable; no unconditional reset attempted", flush=True)

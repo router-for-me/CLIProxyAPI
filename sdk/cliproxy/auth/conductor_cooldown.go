@@ -1122,7 +1122,7 @@ func (m *Manager) resetQuota(ctx context.Context, authID string, expected *Auth,
 	if expected != nil {
 		now = time.Now()
 	}
-	if expected != nil && (ctx.Err() != nil || !quotaReconcileMatches(auth, expected, checkedAt, now)) {
+	if expected != nil && (m.HomeEnabled() || ctx.Err() != nil || !quotaReconcileMatches(auth, expected, checkedAt, now)) {
 		m.mu.Unlock()
 		return nil, nil, ErrQuotaReconcileChanged
 	}
