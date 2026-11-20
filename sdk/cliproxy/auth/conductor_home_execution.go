@@ -272,6 +272,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
+			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseAttempt()
+				selection.End("attempt_canceled")
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
@@ -365,6 +370,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			response, errExecute = execute()
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
+			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseAttempt()
+				selection.End("attempt_canceled")
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			if countTokens {
 				if _, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
 					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint, extractErrorBody(errExecute))
@@ -394,6 +404,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			action, okAction := matchRequestScopedErrorAction(preparedAuth, errExecute, m.requestScopedErrorConfig(execCtx))
 			applyRequestScopedActionToResult(action, okAction, &result)
+			if errCtx := execCtx.Err(); errCtx != nil {
+				releaseAttempt()
+				selection.End("attempt_canceled")
+				return cliproxyexecutor.Response{}, errCtx
+			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
 			lastErr = keepPreferredCandidateError(lastErr, errExecute)
