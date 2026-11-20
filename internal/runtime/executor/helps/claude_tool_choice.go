@@ -9,9 +9,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-// claudeFableForcedToolChoiceModel matches Claude Fable 5.1 and 5.2, which
-// reject forced tool use like Claude 5.5. Fable 5 accepts it.
-var claudeFableForcedToolChoiceModel = regexp.MustCompile(`^claude-fable-5-[12](?:-[0-9a-z]+)*(?:\[[^\[\]]+\])?$`)
+// claudeFableForcedToolChoiceModel matches Claude Fable 5.1 and 5.2 (dashed or
+// dotted version), which reject forced tool use like Claude 5.5. Fable 5
+// accepts it.
+var claudeFableForcedToolChoiceModel = regexp.MustCompile(`^claude-fable-5[-.][12](?:-[0-9a-z]+)*(?:\[[^\[\]]+\])?$`)
 
 // NormalizeClaudeToolChoice downgrades forced tool use on Claude 5.5 and
 // Fable 5.1 and 5.2 to auto.
