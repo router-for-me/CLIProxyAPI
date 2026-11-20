@@ -1156,6 +1156,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					upstreamErr = errExec
 				}
 				if errCtx := execCtx.Err(); errCtx != nil {
+					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
@@ -1175,6 +1176,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
+							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
@@ -1395,6 +1397,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					upstreamErr = errExec
 				}
 				if errCtx := execCtx.Err(); errCtx != nil {
+					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
@@ -1414,6 +1417,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
+							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 							return cliproxyexecutor.Response{}, errCtx
 						}
 					}
