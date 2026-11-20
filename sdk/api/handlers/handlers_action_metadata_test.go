@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // TestPluginExecutorRequestCarriesModelAction guards native model actions
@@ -88,5 +90,32 @@ func TestParsePluginExecutorActionResponseUsageWithoutAction(t *testing.T) {
 	detail := parsePluginExecutorActionResponseUsage("gemini", "", payload)
 	if detail.InputTokens != 5 || detail.OutputTokens != 2 {
 		t.Fatalf("usage = %+v, want 5/2", detail)
+	}
+}
+
+// TestExecuteModelStreamRejectsNativeAction guards the streaming host callback: native
+// actions are non-streaming, and streaming them would silently run the chat path.
+func TestExecuteModelStreamRejectsNativeAction(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	for _, action := range []string{helps.GeminiEmbedContentAction, helps.GeminiBatchEmbedContentsAction, helps.GeminiDecisionsAction} {
+		t.Run(action, func(t *testing.T) {
+			_, errMsg := handler.ExecuteModelStream(context.Background(), ModelExecutionRequest{
+				EntryProtocol: "gemini",
+				ExitProtocol:  "gemini",
+				Model:         "gemini-embedding-001",
+				Stream:        true,
+				Body:          []byte(`{}`),
+				Action:        action,
+			})
+			if errMsg == nil {
+				t.Fatal("ExecuteModelStream() error = nil, want native actions rejected")
+			}
+			if errMsg.StatusCode != 400 {
+				t.Fatalf("status = %d, want 400", errMsg.StatusCode)
+			}
+			if !strings.Contains(errMsg.Error.Error(), action) {
+				t.Fatalf("error = %v, want it to name the action %q", errMsg.Error, action)
+			}
+		})
 	}
 }

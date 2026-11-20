@@ -1119,7 +1119,7 @@ func (e *GeminiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 // applies. Payload rules run once, after native preparation, as the final
 // semantic barrier.
 func (e *GeminiExecutor) executeEmbedding(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, action string) (resp cliproxyexecutor.Response, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.NormalizeGeminiModelResourceName(thinking.ParseSuffix(req.Model).ModelName)
 	doc, errPrepare := helps.PrepareGeminiEmbeddingDoc(req.Payload, baseModel, action)
 	if errPrepare != nil {
 		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}
@@ -1134,7 +1134,7 @@ func (e *GeminiExecutor) executeEmbedding(ctx context.Context, auth *cliproxyaut
 // endpoint, so the upstream URL carries no models/<id> segment. The response is
 // returned unchanged, and its usage uses the snake_case top-level "usage" shape.
 func (e *GeminiExecutor) executeDecisions(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	baseModel := helps.NormalizeGeminiModelResourceName(thinking.ParseSuffix(req.Model).ModelName)
 	doc, errPrepare := helps.PrepareGeminiDecisionsDoc(req.Payload, baseModel)
 	if errPrepare != nil {
 		return resp, statusErr{code: http.StatusBadRequest, msg: errPrepare.Error()}

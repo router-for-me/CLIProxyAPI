@@ -133,12 +133,12 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	// Native embedding actions must bypass chat translation and its content,
 	// thinking, and replay normalization.
 	if action := helps.GeminiEmbeddingAction(req); action != "" {
-		return e.executeEmbedding(ctx, auth, req, opts, baseModel, action)
+		return e.executeEmbedding(ctx, auth, req, opts, helps.NormalizeGeminiModelResourceName(baseModel), action)
 	}
 	// The Decisions API is native, non-streaming, and names its model in the body,
 	// so it must bypass chat translation as well.
 	if helps.GeminiDecisionAction(req) != "" {
-		return e.executeDecisions(ctx, auth, req, opts, baseModel)
+		return e.executeDecisions(ctx, auth, req, opts, helps.NormalizeGeminiModelResourceName(baseModel))
 	}
 	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)

@@ -41,6 +41,14 @@ func IsGeminiEmbeddingAction(action string) bool {
 	}
 }
 
+// NormalizeGeminiModelResourceName removes one leading "models/" resource prefix from a
+// model identifier. Native endpoints take the bare ID in both URL and payload, so a config
+// alias or router target expressed as a resource name must not produce models/models/<id>.
+func NormalizeGeminiModelResourceName(model string) string {
+	model = strings.TrimSpace(model)
+	return strings.TrimPrefix(model, "models/")
+}
+
 // PrepareGeminiEmbeddingDoc builds the native upstream payload for an embedding action.
 //
 // Embedding requests are not chat requests: this helper must never inject
@@ -70,7 +78,7 @@ func PrepareGeminiEmbeddingDoc(payload []byte, baseModel, action string) (*ojson
 	case GeminiEmbedContentAction:
 		// embedContent identifies the model in both the path and the body, and the
 		// body form must use the Google-native "models/<id>" resource name.
-		SetStringIfDifferentDoc(doc, "model", "models/"+baseModel)
+		SetStringIfDifferentDoc(doc, "model", "models/"+NormalizeGeminiModelResourceName(baseModel))
 	case GeminiBatchEmbedContentsAction:
 		// Upstream requires requests[].model per entry and ignores the model's value when
 		// computing embeddings (the path model decides), but it does enforce the
@@ -83,7 +91,7 @@ func PrepareGeminiEmbeddingDoc(payload []byte, baseModel, action string) (*ojson
 		if !requests.IsArray() {
 			return nil, fmt.Errorf("batchEmbedContents requires a requests array")
 		}
-		resourceName := "models/" + strings.TrimPrefix(strings.TrimSpace(baseModel), "models/")
+		resourceName := "models/" + NormalizeGeminiModelResourceName(baseModel)
 		seen := false
 		var desired []string
 		requests.ForEach(func(_, entry ojson.Result) bool {
