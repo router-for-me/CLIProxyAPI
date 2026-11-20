@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "대시보드",
-    "quick_start": "빠른 시작",
     "ai_providers": "AI 공급자",
     "auth_files": "인증 파일",
     "oauth": "OAuth 로그인",
@@ -123,7 +122,6 @@
   },
   "nav_meta": {
     "dashboard": "운영 개요",
-    "quick_start": "APIKEY.FUN 설정",
     "ai_providers": "업스트림 모델 라우팅",
     "auth_files": "인증 파일 및 자격 증명",
     "oauth": "OAuth 권한 부여",
@@ -135,13 +133,15 @@
     "system_info": "런타임 및 진단"
   },
   "dashboard": {
-    "hero_verdict_good": "모든 시스템 정상",
-    "hero_verdict_warning": "다소 불안정",
-    "hero_verdict_critical": "주의 필요",
-    "hero_verdict_idle": "현재 유휴 상태",
-    "hero_verdict_offline": "연결 대기 중",
-    "hero_verdict_connecting": "연결 중",
-    "hero_period": ".",
+    "reliability_title": "안정성",
+    "reliability_summary": "최근 {{window}} 동안 요청의 {{rate}}%가 성공했습니다",
+    "reliability_none": "아직 요청이 없습니다",
+    "reliability_healthy": "정상",
+    "reliability_healthy_range": "95% 이상",
+    "reliability_degraded": "저하",
+    "reliability_degraded_range": "80~94%",
+    "reliability_failing": "장애",
+    "reliability_failing_range": "80% 미만",
     "hero_requests_label": "처리된 요청",
     "hero_live": "실시간",
     "hero_window_meta": "롤링 {{window}} 윈도우 · 10분 단위 버킷",
@@ -155,21 +155,18 @@
     "stat_provider_keys_hint": "모든 브랜드에 설정된 API 키",
     "stat_models": "모델",
     "stat_models_hint": "프록시 엔드포인트를 통해 제공됨",
-    "traffic_eyebrow": "실시간 트래픽",
-    "traffic_title": "10분 단위 처리량",
+    "traffic_title": "처리량",
     "traffic_table": "데이터 테이블",
     "traffic_table_window": "시간 구간",
     "traffic_chart_summary": "최근 {{minutes}}분 동안 총 {{total}}건의 요청: 성공 {{success}}건, 실패 {{failed}}건.",
     "traffic_unavailable": "아직 기록된 트래픽이 없습니다",
     "traffic_unavailable_hint": "프록시가 첫 번째 요청을 처리하면 카운터가 표시됩니다.",
-    "fleet_eyebrow": "공급자",
-    "fleet_title": "모든 공급자 비교",
+    "fleet_title": "공급자",
     "fleet_empty": "아직 기록된 공급자 트래픽이 없습니다.",
     "fleet_credentials": "자격 증명: {{value}}",
     "fleet_spark_label": "{{provider}} 요청량",
     "fleet_requests": "건의 요청",
     "provider_unknown": "미분류",
-    "health_eyebrow": "건전성",
     "health_title": "자격 증명 상태",
     "health_active": "활성",
     "health_unavailable": "사용 불가",
@@ -177,8 +174,7 @@
     "health_by_type": "공급자별",
     "health_empty": "자격 증명 파일을 찾을 수 없습니다.",
     "health_link": "인증 파일 열기",
-    "runtime_eyebrow": "런타임",
-    "runtime_title": "설정 한눈에 보기",
+    "runtime_title": "설정",
     "runtime_routing": "라우팅 전략",
     "runtime_retry": "요청 재시도",
     "runtime_management_keys": "관리 키",
@@ -191,8 +187,6 @@
     "runtime_ws_auth": "WebSocket 인증",
     "runtime_model_prefix": "모델 접두사",
     "runtime_link": "설정 편집",
-    "cta_eyebrow": "다음",
-    "cta_title": "다음 작업 안내",
     "window_m": "{{minutes}}분",
     "window_h": "{{hours}}시간",
     "window_hm": "{{hours}}시간 {{minutes}}분"
@@ -2096,8 +2090,8 @@
     },
     "categories": {
       "title": "공급자",
-      "quickFill": "빠른 입력",
-      "activeCount": "활성 {{active}}/{{total}}"
+      "activeCount": "활성 {{active}}/{{total}}",
+      "add": "공급자 추가"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2199,14 +2193,6 @@
         "openai": "OpenAI 호환",
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
-      },
-      "double11": {
-        "badge": "11.11 한정 이벤트",
-        "title": "{{provider}} 11.11 충전 보너스",
-        "description": "이벤트 기간 동안 {{provider}}에서 충전하면 충전 금액의 {{percent}}%를 추가 크레딧으로 드립니다.",
-        "bonus": "충전 보너스",
-        "cta": "지금 참여하기",
-        "ctaAria": "지금 참여하기: {{provider}} 11.11 충전 이벤트 (새 탭에서 열림)"
       }
     },
     "status": {
@@ -2502,12 +2488,9 @@
     "cache_read": "{{tokens}} 읽음",
     "cache_write": "{{tokens}} 기록",
     "cache_hint": "지난 1시간 동안 이 계정이 프롬프트 캐시에서 읽은 입력 토큰입니다. 기록이 많고 읽기가 적으면 스레드가 계정을 오가고 있다는 뜻입니다.",
-    "runway_title": "이번 주 초기화",
-    "runway_caption": "각 표시는 계정이며, 주간 초기화 시점에 놓이고 남은 할당량만큼 채워집니다. 프록시는 왼쪽부터 사용합니다.",
-    "runway_now": "지금",
-    "runway_unseen": "미확인",
-    "runway_left_of": "남음 / {{capacity}}%",
-    "runway_marker": "{{name}}: {{percent}}% 남음, {{when}} 초기화",
-    "runway_marker_unseen": "{{name}}: {{percent}}% 남음, 초기화 시점 미확인"
+    "resets_title": "수동 초기화",
+    "resets_summary_one": "{{count}}개 계정에서 {{available}}회 사용 가능",
+    "resets_summary_other": "{{count}}개 계정에서 {{available}}회 사용 가능",
+    "resets_expires": "{{dates}} 만료"
   }
 }

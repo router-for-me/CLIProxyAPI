@@ -22,8 +22,6 @@
   margin: 4px 8px 8px;
   font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
   color: var(--muted-foreground);
 }
 
@@ -184,4 +182,46 @@
   background: color-mix(in srgb, #1783ff 14%, var(--bg-primary));
   border-color: color-mix(in srgb, #1783ff 48%, var(--border-color));
   color: color-mix(in srgb, #1783ff 82%, var(--text-primary));
+}
+
+.addToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: none;
+  border-top: 1px solid var(--border-color);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: color $transition-fast;
+
+  span {
+    flex: 1;
+  }
+
+  &:hover {
+    color: var(--text-primary);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+  }
+}
+
+.addChevron {
+  flex-shrink: 0;
+  transition: transform $transition-fast;
+}
+
+.addChevronOpen {
+  transform: rotate(180deg);
 }

@@ -58,7 +58,6 @@ interface SponsorProviderFormProps {
   mode: 'create' | 'edit';
   mutating: boolean;
   formId: string;
-  variant?: 'quickStart';
   onSubmit: (input: ProviderEntryFormInput) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
 }
@@ -752,7 +751,6 @@ export function SponsorProviderForm({
   mode,
   mutating,
   formId,
-  variant,
   onSubmit,
   onDirtyChange,
 }: SponsorProviderFormProps) {
@@ -858,9 +856,6 @@ export function SponsorProviderForm({
     }
   };
 
-  const formClassName = [styles.form, variant === 'quickStart' ? styles.quickStartForm : '']
-    .filter(Boolean)
-    .join(' ');
   const aggregationConflict =
     mode === 'edit'
       ? getSponsorAggregationConflict(getSponsorRaw(resource, definition.brand))
@@ -868,14 +863,14 @@ export function SponsorProviderForm({
 
   if (aggregationConflict) {
     return (
-      <form id={formId} className={formClassName} onSubmit={(event) => event.preventDefault()}>
+      <form id={formId} className={styles.form} onSubmit={(event) => event.preventDefault()}>
         <div className={styles.errorBox}>{t('providersPage.sponsor.aggregationConflict')}</div>
       </form>
     );
   }
 
   return (
-    <form id={formId} className={formClassName} onSubmit={handleSubmit} noValidate>
+    <form id={formId} className={styles.form} onSubmit={handleSubmit} noValidate>
       <div className={styles.section}>
         <h3 className={styles.sectionTitle}>{t('providersPage.sponsor.groupedKeysTitle')}</h3>
         {entries.map((entry, index) => (

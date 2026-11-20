@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "Bảng điều khiển",
-    "quick_start": "Bắt đầu nhanh",
     "ai_providers": "AI Provider",
     "auth_files": "File xác thực",
     "oauth": "Đăng nhập OAuth",
@@ -123,7 +122,6 @@
   },
   "nav_meta": {
     "dashboard": "Tổng quan vận hành",
-    "quick_start": "Thiết lập APIKEY.FUN",
     "ai_providers": "Định tuyến model upstream",
     "auth_files": "File xác thực & credential",
     "oauth": "Ủy quyền OAuth",
@@ -135,13 +133,15 @@
     "system_info": "Runtime & chẩn đoán"
   },
   "dashboard": {
-    "hero_verdict_good": "Mọi hệ thống ổn định",
-    "hero_verdict_warning": "Có chút trục trặc nhỏ",
-    "hero_verdict_critical": "Cần chú ý",
-    "hero_verdict_idle": "Tạm thời yên tĩnh",
-    "hero_verdict_offline": "Đang chờ kết nối",
-    "hero_verdict_connecting": "Đang kết nối",
-    "hero_period": ".",
+    "reliability_title": "Độ tin cậy",
+    "reliability_summary": "{{rate}}% yêu cầu thành công trong {{window}} qua",
+    "reliability_none": "Chưa có yêu cầu nào",
+    "reliability_healthy": "Ổn định",
+    "reliability_healthy_range": "Từ 95% trở lên",
+    "reliability_degraded": "Suy giảm",
+    "reliability_degraded_range": "80 đến 94%",
+    "reliability_failing": "Lỗi",
+    "reliability_failing_range": "Dưới 80%",
     "hero_requests_label": "Yêu cầu đã xử lý",
     "hero_live": "Trực tiếp",
     "hero_window_meta": "Cửa sổ trượt {{window}} · bucket 10 phút",
@@ -155,21 +155,18 @@
     "stat_provider_keys_hint": "API key được cấu hình trên tất cả các thương hiệu",
     "stat_models": "Model",
     "stat_models_hint": "Được phục vụ qua proxy endpoint",
-    "traffic_eyebrow": "Lưu lượng trực tiếp",
-    "traffic_title": "Thông lượng, từng khoảng mười phút",
+    "traffic_title": "Thông lượng",
     "traffic_table": "Bảng dữ liệu",
     "traffic_table_window": "Cửa sổ",
     "traffic_chart_summary": "{{total}} yêu cầu trong {{minutes}} phút vừa qua: {{success}} thành công, {{failed}} thất bại.",
     "traffic_unavailable": "Chưa có lưu lượng nào được ghi nhận",
     "traffic_unavailable_hint": "Bộ đếm sẽ xuất hiện khi proxy phục vụ yêu cầu đầu tiên.",
-    "fleet_eyebrow": "Toàn cảnh",
-    "fleet_title": "Mọi provider, đặt cạnh nhau",
+    "fleet_title": "Provider",
     "fleet_empty": "Chưa có lưu lượng provider nào được ghi nhận.",
     "fleet_credentials": "Credential: {{value}}",
     "fleet_spark_label": "Lưu lượng yêu cầu của {{provider}}",
     "fleet_requests": "yêu cầu",
     "provider_unknown": "Chưa xác định",
-    "health_eyebrow": "Sức khỏe",
     "health_title": "Trạng thái credential",
     "health_active": "Đang hoạt động",
     "health_unavailable": "Không khả dụng",
@@ -177,8 +174,7 @@
     "health_by_type": "Theo provider",
     "health_empty": "Chưa tìm thấy file credential nào.",
     "health_link": "Mở file xác thực",
-    "runtime_eyebrow": "Runtime",
-    "runtime_title": "Tổng quan cấu hình",
+    "runtime_title": "Cấu hình",
     "runtime_routing": "Chiến lược định tuyến",
     "runtime_retry": "Thử lại yêu cầu",
     "runtime_management_keys": "Key quản lý",
@@ -191,8 +187,6 @@
     "runtime_ws_auth": "Xác thực WebSocket",
     "runtime_model_prefix": "Tiền tố model",
     "runtime_link": "Chỉnh sửa cấu hình",
-    "cta_eyebrow": "Tiếp theo",
-    "cta_title": "Nên đi đâu từ đây",
     "window_m": "{{minutes}}p",
     "window_h": "{{hours}}g",
     "window_hm": "{{hours}}g {{minutes}}p"
@@ -1968,8 +1962,8 @@
     },
     "categories": {
       "title": "Provider",
-      "quickFill": "Điền nhanh",
-      "activeCount": "{{active}}/{{total}} đang hoạt động"
+      "activeCount": "{{active}}/{{total}} đang hoạt động",
+      "add": "Thêm provider"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2075,15 +2069,7 @@
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
       },
-      "kimiPromo": "Người dùng mới nạp tiền lần đầu thành công sẽ được tặng hạn mức API trị giá 10% số tiền nạp, tối đa ¥1000. Ưu đãi kết thúc vào ngày 30 tháng 9.",
-      "double11": {
-        "badge": "Ưu đãi 11.11 · Có hạn",
-        "title": "{{provider}} khuyến mãi nạp tiền 11.11",
-        "description": "Nạp tiền vào {{provider}} trong thời gian sự kiện để được tặng thêm {{percent}}% giá trị nạp.",
-        "bonus": "Tặng thêm khi nạp",
-        "cta": "Tham gia ngay",
-        "ctaAria": "Tham gia ngay sự kiện nạp tiền 11.11 của {{provider}} (mở trong thẻ mới)"
-      }
+      "kimiPromo": "Người dùng mới nạp tiền lần đầu thành công sẽ được tặng hạn mức API trị giá 10% số tiền nạp, tối đa ¥1000. Ưu đãi kết thúc vào ngày 30 tháng 9."
     },
     "status": {
       "active": "Đang hoạt động",
@@ -2508,12 +2494,9 @@
     "cache_read": "đọc {{tokens}}",
     "cache_write": "ghi {{tokens}}",
     "cache_hint": "Token đầu vào tài khoản này lấy từ bộ nhớ đệm prompt trong giờ qua. Ghi nhiều, đọc ít nghĩa là các luồng đang đổi tài khoản.",
-    "runway_title": "Đặt lại tuần này",
-    "runway_caption": "Mỗi dấu là một tài khoản, đặt tại lần đặt lại hằng tuần và tô theo hạn mức còn lại. Proxy dùng từ bên trái.",
-    "runway_now": "Bây giờ",
-    "runway_unseen": "Chưa thấy",
-    "runway_left_of": "còn lại trên {{capacity}}%",
-    "runway_marker": "{{name}}: còn {{percent}}%, đặt lại {{when}}",
-    "runway_marker_unseen": "{{name}}: còn {{percent}}%, chưa thấy thời điểm đặt lại"
+    "resets_title": "Đặt lại thủ công",
+    "resets_summary_one": "{{available}} lượt khả dụng trên {{count}} tài khoản",
+    "resets_summary_other": "{{available}} lượt khả dụng trên {{count}} tài khoản",
+    "resets_expires": "Hết hạn {{dates}}"
   }
 }

@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { IconChevronDown, IconPlus } from '@/components/ui/icons';
 import { PROVIDER_LOGOS } from '../brandLogos';
 import type { ProviderBrand, ProviderGroup } from '../types';
 import styles from './ProviderCategoryList.module.scss';
@@ -9,22 +11,16 @@ interface ProviderCategoryListProps {
   onSelect: (brand: ProviderBrand) => void;
 }
 
-const QUICK_FILL_BRAND_ORDER: readonly ProviderBrand[] = ['fennoAI', 'qiniuCloud', 'aiCodeMirror'];
-
-const QUICK_FILL_BRANDS: ReadonlySet<ProviderBrand> = new Set(QUICK_FILL_BRAND_ORDER);
-
 export function ProviderCategoryList({ groups, activeBrand, onSelect }: ProviderCategoryListProps) {
   const { t } = useTranslation();
 
-  const quickFillGroups = groups
-    .filter((g) => QUICK_FILL_BRANDS.has(g.id))
-    .sort(
-      (left, right) =>
-        QUICK_FILL_BRAND_ORDER.indexOf(left.id) - QUICK_FILL_BRAND_ORDER.indexOf(right.id)
-    );
-  const providerGroups = groups.filter((g) => !QUICK_FILL_BRANDS.has(g.id));
+  const [adding, setAdding] = useState(false);
+  // Only providers that are set up are listed; the rest wait behind "Add provider".
+  const setUp = groups.filter((g) => g.resources.length > 0);
+  const notSetUp = groups.filter((g) => g.resources.length === 0);
+  const addOpen = adding || setUp.length === 0 || notSetUp.some((g) => g.id === activeBrand);
 
-  const renderGroups = (items: ProviderGroup[]) => (
+  const renderGroups = (items: ProviderGroup[], withCounts: boolean) => (
     <div className={styles.list}>
       {items.map((group) => {
         const active = group.id === activeBrand;
@@ -82,24 +78,28 @@ export function ProviderCategoryList({ groups, activeBrand, onSelect }: Provider
                 <span className={styles.itemTitle}>
                   {t(`providersPage.providerNames.${group.id}`)}
                 </span>
-                <span className={styles.itemSubtitle}>
-                  {t('providersPage.categories.activeCount', {
-                    active: activeCount,
-                    total,
-                  })}
-                </span>
+                {withCounts ? (
+                  <span className={styles.itemSubtitle}>
+                    {t('providersPage.categories.activeCount', {
+                      active: activeCount,
+                      total,
+                    })}
+                  </span>
+                ) : null}
               </span>
             </span>
-            <span
-              className={[
-                styles.badge,
-                total === 0 ? (group.id === 'kimi' ? styles.badgeKimi : styles.badgeAmber) : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-            >
-              {total}
-            </span>
+            {withCounts ? (
+              <span
+                className={[
+                  styles.badge,
+                  total === 0 ? (group.id === 'kimi' ? styles.badgeKimi : styles.badgeAmber) : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                {total}
+              </span>
+            ) : null}
           </button>
         );
       })}
@@ -110,14 +110,26 @@ export function ProviderCategoryList({ groups, activeBrand, onSelect }: Provider
     <div className={styles.stack}>
       <aside className={styles.aside}>
         <p className={styles.eyebrow}>{t('providersPage.categories.title')}</p>
-        {renderGroups(providerGroups)}
+        {renderGroups(setUp, true)}
+        {notSetUp.length > 0 ? (
+          <>
+            <button
+              type="button"
+              className={styles.addToggle}
+              aria-expanded={addOpen}
+              onClick={() => setAdding(!addOpen)}
+            >
+              <IconPlus size={16} />
+              <span>{t('providersPage.categories.add')}</span>
+              <IconChevronDown
+                size={16}
+                className={`${styles.addChevron} ${addOpen ? styles.addChevronOpen : ''}`}
+              />
+            </button>
+            {addOpen ? renderGroups(notSetUp, false) : null}
+          </>
+        ) : null}
       </aside>
-      {quickFillGroups.length > 0 && (
-        <aside className={styles.aside}>
-          <p className={styles.eyebrow}>{t('providersPage.categories.quickFill')}</p>
-          {renderGroups(quickFillGroups)}
-        </aside>
-      )}
     </div>
   );
 }

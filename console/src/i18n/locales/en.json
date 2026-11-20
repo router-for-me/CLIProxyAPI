@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "Dashboard",
-    "quick_start": "Quick Start",
     "ai_providers": "AI Providers",
     "auth_files": "Auth Files",
     "oauth": "OAuth Login",
@@ -123,7 +122,6 @@
   },
   "nav_meta": {
     "dashboard": "Operations overview",
-    "quick_start": "APIKEY.FUN setup",
     "ai_providers": "Upstream model routing",
     "auth_files": "Auth files & credentials",
     "oauth": "OAuth authorization",
@@ -135,13 +133,15 @@
     "system_info": "Runtime & diagnostics"
   },
   "dashboard": {
-    "hero_verdict_good": "All systems steady",
-    "hero_verdict_warning": "Minor turbulence",
-    "hero_verdict_critical": "Needs attention",
-    "hero_verdict_idle": "Quiet for now",
-    "hero_verdict_offline": "Waiting to connect",
-    "hero_verdict_connecting": "Connecting",
-    "hero_period": ".",
+    "reliability_title": "Reliability",
+    "reliability_summary": "{{rate}}% of requests succeeded in the last {{window}}",
+    "reliability_none": "No requests yet",
+    "reliability_healthy": "Healthy",
+    "reliability_healthy_range": "95% and up",
+    "reliability_degraded": "Degraded",
+    "reliability_degraded_range": "80 to 94%",
+    "reliability_failing": "Failing",
+    "reliability_failing_range": "Below 80%",
     "hero_requests_label": "Requests handled",
     "hero_live": "Live",
     "hero_window_meta": "Rolling {{window}} window · 10-minute buckets",
@@ -155,21 +155,18 @@
     "stat_provider_keys_hint": "API keys configured across all brands",
     "stat_models": "Models",
     "stat_models_hint": "Served through the proxy endpoint",
-    "traffic_eyebrow": "Live traffic",
-    "traffic_title": "Throughput, ten minutes at a time",
+    "traffic_title": "Throughput",
     "traffic_table": "Data table",
     "traffic_table_window": "Window",
     "traffic_chart_summary": "{{total}} requests over the last {{minutes}} minutes: {{success}} succeeded, {{failed}} failed.",
     "traffic_unavailable": "No traffic recorded yet",
     "traffic_unavailable_hint": "Counters appear once the proxy has served its first request.",
-    "fleet_eyebrow": "Fleet",
-    "fleet_title": "Every provider, side by side",
+    "fleet_title": "Providers",
     "fleet_empty": "No provider traffic recorded yet.",
     "fleet_credentials": "Credentials: {{value}}",
     "fleet_spark_label": "{{provider}} request volume",
     "fleet_requests": "requests",
     "provider_unknown": "Unattributed",
-    "health_eyebrow": "Health",
     "health_title": "Credential status",
     "health_active": "Active",
     "health_unavailable": "Unavailable",
@@ -177,8 +174,7 @@
     "health_by_type": "By provider",
     "health_empty": "No credential files found.",
     "health_link": "Open auth files",
-    "runtime_eyebrow": "Runtime",
-    "runtime_title": "Configuration at a glance",
+    "runtime_title": "Configuration",
     "runtime_routing": "Routing strategy",
     "runtime_retry": "Request retry",
     "runtime_management_keys": "Management keys",
@@ -191,8 +187,6 @@
     "runtime_ws_auth": "WebSocket auth",
     "runtime_model_prefix": "Model prefix",
     "runtime_link": "Edit configuration",
-    "cta_eyebrow": "Next",
-    "cta_title": "Where to go from here",
     "window_m": "{{minutes}}m",
     "window_h": "{{hours}}h",
     "window_hm": "{{hours}}h {{minutes}}m"
@@ -2096,8 +2090,8 @@
     },
     "categories": {
       "title": "Providers",
-      "quickFill": "Quick Fill",
-      "activeCount": "{{active}}/{{total}} active"
+      "activeCount": "{{active}}/{{total}} active",
+      "add": "Add provider"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2199,14 +2193,6 @@
         "openai": "OpenAI Compatible",
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
-      },
-      "double11": {
-        "badge": "Double 11 · Limited time",
-        "title": "{{provider}} Double 11 Top-up Bonus",
-        "description": "Top up on {{provider}} during the event and get an extra {{percent}}% of your top-up as bonus credit.",
-        "bonus": "Top-up bonus",
-        "cta": "Join now",
-        "ctaAria": "Join now: {{provider}} Double 11 top-up event (opens in a new tab)"
       }
     },
     "status": {
@@ -2502,12 +2488,9 @@
     "cache_read": "{{tokens}} read",
     "cache_write": "{{tokens}} written",
     "cache_hint": "Input tokens this account served from prompt cache in the last hour. Lots of writes and few reads means threads are switching accounts.",
-    "runway_title": "Resets this week",
-    "runway_caption": "Each mark is an account, placed at its weekly reset and filled by what it has left. The proxy spends from the left.",
-    "runway_now": "Now",
-    "runway_unseen": "Unseen",
-    "runway_left_of": "left of {{capacity}}%",
-    "runway_marker": "{{name}}: {{percent}}% left, resets {{when}}",
-    "runway_marker_unseen": "{{name}}: {{percent}}% left, reset not seen yet"
+    "resets_title": "Manual resets",
+    "resets_summary_one": "{{available}} available across {{count}} account",
+    "resets_summary_other": "{{available}} available across {{count}} accounts",
+    "resets_expires": "Expires {{dates}}"
   }
 }

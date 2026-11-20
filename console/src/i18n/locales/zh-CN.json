@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "仪表盘",
-    "quick_start": "快速开始",
     "ai_providers": "AI 提供商",
     "auth_files": "认证文件",
     "oauth": "OAuth 登录",
@@ -123,7 +122,6 @@
   },
   "nav_meta": {
     "dashboard": "运行总览",
-    "quick_start": "快速配置",
     "ai_providers": "上游模型路由",
     "auth_files": "Auth 文件与凭证",
     "oauth": "OAuth 授权登录",
@@ -135,13 +133,15 @@
     "system_info": "运行与诊断信息"
   },
   "dashboard": {
-    "hero_verdict_good": "运行平稳",
-    "hero_verdict_warning": "略有波动",
-    "hero_verdict_critical": "需要留意",
-    "hero_verdict_idle": "静候流量",
-    "hero_verdict_offline": "等待连接",
-    "hero_verdict_connecting": "正在连接",
-    "hero_period": "。",
+    "reliability_title": "可靠性",
+    "reliability_summary": "最近 {{window}} 内 {{rate}}% 的请求成功",
+    "reliability_none": "暂无请求",
+    "reliability_healthy": "健康",
+    "reliability_healthy_range": "95% 及以上",
+    "reliability_degraded": "降级",
+    "reliability_degraded_range": "80% 至 94%",
+    "reliability_failing": "故障",
+    "reliability_failing_range": "低于 80%",
     "hero_requests_label": "已处理请求",
     "hero_live": "实时",
     "hero_window_meta": "滚动窗口 {{window}} · 每桶 10 分钟",
@@ -155,21 +155,18 @@
     "stat_provider_keys_hint": "所有品牌已配置的 API Key 总数",
     "stat_models": "模型",
     "stat_models_hint": "通过代理端点暴露的模型",
-    "traffic_eyebrow": "实时流量",
-    "traffic_title": "以 10 分钟为粒度的吞吐",
+    "traffic_title": "吞吐",
     "traffic_table": "数据表",
     "traffic_table_window": "时间段",
     "traffic_chart_summary": "最近 {{minutes}} 分钟共 {{total}} 次请求：成功 {{success}} 次，失败 {{failed}} 次。",
     "traffic_unavailable": "暂无流量数据",
     "traffic_unavailable_hint": "代理处理首个请求后即会出现计数。",
-    "fleet_eyebrow": "供应商",
-    "fleet_title": "所有供应商横向对比",
+    "fleet_title": "供应商",
     "fleet_empty": "暂未记录到供应商流量。",
     "fleet_credentials": "凭证 {{value}} 个",
     "fleet_spark_label": "{{provider}} 请求量",
     "fleet_requests": "次请求",
     "provider_unknown": "未归类",
-    "health_eyebrow": "健康度",
     "health_title": "凭证状态",
     "health_active": "可用",
     "health_unavailable": "不可用",
@@ -177,8 +174,7 @@
     "health_by_type": "按供应商",
     "health_empty": "未找到凭证文件。",
     "health_link": "打开认证文件",
-    "runtime_eyebrow": "运行时",
-    "runtime_title": "运行配置一览",
+    "runtime_title": "运行配置",
     "runtime_routing": "路由策略",
     "runtime_retry": "请求重试",
     "runtime_management_keys": "管理密钥",
@@ -191,8 +187,6 @@
     "runtime_ws_auth": "WebSocket 鉴权",
     "runtime_model_prefix": "模型前缀",
     "runtime_link": "编辑配置",
-    "cta_eyebrow": "下一步",
-    "cta_title": "接下来去哪里",
     "window_m": "{{minutes}} 分钟",
     "window_h": "{{hours}} 小时",
     "window_hm": "{{hours}} 小时 {{minutes}} 分"
@@ -2089,8 +2083,8 @@
     },
     "categories": {
       "title": "提供商",
-      "quickFill": "快速接入",
-      "activeCount": "{{active}}/{{total}} 活跃"
+      "activeCount": "{{active}}/{{total}} 活跃",
+      "add": "添加供应商"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2192,14 +2186,6 @@
         "openai": "OpenAI 兼容",
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
-      },
-      "double11": {
-        "badge": "双 11 限时",
-        "title": "{{provider}} 双 11 充值狂欢",
-        "description": "活动期间在 {{provider}} 充值，额外赠送充值金额 {{percent}}% 的额度，先到先得。",
-        "bonus": "充值加赠",
-        "cta": "立即参与",
-        "ctaAria": "立即参与 {{provider}} 双 11 充值活动（在新标签页打开）"
       }
     },
     "status": {
@@ -2495,12 +2481,9 @@
     "cache_read": "读取 {{tokens}}",
     "cache_write": "写入 {{tokens}}",
     "cache_hint": "此账号近 1 小时从提示缓存读取的输入 token。写入多、读取少说明对话在切换账号。",
-    "runway_title": "本周重置",
-    "runway_caption": "每个标记是一个账号，位于其每周重置时间，填充量为剩余额度。代理从左侧开始使用。",
-    "runway_now": "现在",
-    "runway_unseen": "未观测",
-    "runway_left_of": "剩余，共 {{capacity}}%",
-    "runway_marker": "{{name}}：剩余 {{percent}}%，{{when}}重置",
-    "runway_marker_unseen": "{{name}}：剩余 {{percent}}%，尚未观测到重置时间"
+    "resets_title": "手动重置",
+    "resets_summary_one": "{{count}} 个账号共 {{available}} 次可用",
+    "resets_summary_other": "{{count}} 个账号共 {{available}} 次可用",
+    "resets_expires": "{{dates}} 到期"
   }
 }

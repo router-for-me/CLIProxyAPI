@@ -103,7 +103,6 @@
   },
   "nav": {
     "dashboard": "Pano",
-    "quick_start": "Hızlı Başlangıç",
     "ai_providers": "AI Sağlayıcıları",
     "auth_files": "Kimlik Dosyaları",
     "oauth": "OAuth Girişi",
@@ -123,7 +122,6 @@
   },
   "nav_meta": {
     "dashboard": "İşletim Özeti",
-    "quick_start": "APIKEY.FUN Kurulumu",
     "ai_providers": "Yukarı Akış Model Yönlendirmesi",
     "auth_files": "Kimlik Dosyaları ve Kimlik Bilgileri",
     "oauth": "OAuth Yetkilendirmesi",
@@ -135,13 +133,15 @@
     "system_info": "Çalışma Zamanı ve Tanılama"
   },
   "dashboard": {
-    "hero_verdict_good": "Tüm Sistemler Dengede",
-    "hero_verdict_warning": "Küçük Dalgalanma",
-    "hero_verdict_critical": "İlgi Gerekiyor",
-    "hero_verdict_idle": "Şimdilik Sessiz",
-    "hero_verdict_offline": "Bağlantı Bekleniyor",
-    "hero_verdict_connecting": "Bağlanıyor",
-    "hero_period": ".",
+    "reliability_title": "Güvenilirlik",
+    "reliability_summary": "Son {{window}} içinde isteklerin %{{rate}} kadarı başarılı oldu",
+    "reliability_none": "Henüz istek yok",
+    "reliability_healthy": "Sağlıklı",
+    "reliability_healthy_range": "%95 ve üzeri",
+    "reliability_degraded": "Düşük",
+    "reliability_degraded_range": "%80–94",
+    "reliability_failing": "Başarısız",
+    "reliability_failing_range": "%80 altı",
     "hero_requests_label": "Karşılanan İstekler",
     "hero_live": "Canlı",
     "hero_window_meta": "Kayan {{window}} Penceresi · 10 Dakikalık Dilimler",
@@ -155,21 +155,18 @@
     "stat_provider_keys_hint": "Tüm Markalarda Yapılandırılmış API Anahtarları",
     "stat_models": "Modeller",
     "stat_models_hint": "Proxy Uç Noktası Üzerinden Sunuluyor",
-    "traffic_eyebrow": "Canlı Trafik",
-    "traffic_title": "Verim, On Dakikada Bir",
+    "traffic_title": "Verim",
     "traffic_table": "Veri Tablosu",
     "traffic_table_window": "Pencere",
     "traffic_chart_summary": "Son {{minutes}} Dakikada {{total}} İstek: {{success}} Başarılı, {{failed}} Başarısız.",
     "traffic_unavailable": "Henüz Trafik Kaydı Yok",
     "traffic_unavailable_hint": "Sayaçlar, Proxy İlk İsteği Karşılayınca Görünür.",
-    "fleet_eyebrow": "Filo",
-    "fleet_title": "Her Sağlayıcı, Yan Yana",
+    "fleet_title": "Sağlayıcılar",
     "fleet_empty": "Henüz Sağlayıcı Trafiği Kaydı Yok.",
     "fleet_credentials": "Kimlik Bilgileri: {{value}}",
     "fleet_spark_label": "{{provider}} İstek Hacmi",
     "fleet_requests": "İstek",
     "provider_unknown": "Atanmamış",
-    "health_eyebrow": "Sağlık",
     "health_title": "Kimlik Bilgisi Durumu",
     "health_active": "Aktif",
     "health_unavailable": "Kullanılamaz",
@@ -177,8 +174,7 @@
     "health_by_type": "Sağlayıcıya Göre",
     "health_empty": "Kimlik Dosyası Bulunamadı.",
     "health_link": "Kimlik Dosyalarını Aç",
-    "runtime_eyebrow": "Çalışma Zamanı",
-    "runtime_title": "Yapılandırmaya Bir Bakış",
+    "runtime_title": "Yapılandırma",
     "runtime_routing": "Yönlendirme Stratejisi",
     "runtime_retry": "İstek Yeniden Denemesi",
     "runtime_management_keys": "Yönetim Anahtarları",
@@ -191,8 +187,6 @@
     "runtime_ws_auth": "WebSocket Kimlik Doğrulaması",
     "runtime_model_prefix": "Model Öneki",
     "runtime_link": "Yapılandırmayı Düzenle",
-    "cta_eyebrow": "Sonraki",
-    "cta_title": "Buradan Nereye",
     "window_m": "{{minutes}} dk",
     "window_h": "{{hours}} sa",
     "window_hm": "{{hours}} sa {{minutes}} dk"
@@ -2096,8 +2090,8 @@
     },
     "categories": {
       "title": "Sağlayıcılar",
-      "quickFill": "Hızlı Doldur",
-      "activeCount": "{{active}} / {{total}} Aktif"
+      "activeCount": "{{active}} / {{total}} Aktif",
+      "add": "Sağlayıcı ekle"
     },
     "providerNames": {
       "aiCodeMirror": "AIcodemirror",
@@ -2199,14 +2193,6 @@
         "openai": "OpenAI Uyumlu",
         "gemini": "Gemini",
         "codexResponses": "Codex API (Responses)"
-      },
-      "double11": {
-        "badge": "11.11 · Sınırlı süre",
-        "title": "{{provider}} 11.11 Yükleme Bonusu",
-        "description": "Kampanya süresince {{provider}} hesabınıza yükleme yapın, yükleme tutarının %{{percent}} kadarını ek kredi olarak kazanın.",
-        "bonus": "Yükleme bonusu",
-        "cta": "Hemen katıl",
-        "ctaAria": "Hemen katıl: {{provider}} 11.11 yükleme kampanyası (yeni sekmede açılır)"
       }
     },
     "status": {
@@ -2502,12 +2488,9 @@
     "cache_read": "{{tokens}} okundu",
     "cache_write": "{{tokens}} yazıldı",
     "cache_hint": "Bu hesabın son bir saatte istem önbelleğinden okuduğu giriş tokenları. Çok yazma ve az okuma, konuşmaların hesap değiştirdiği anlamına gelir.",
-    "runway_title": "Bu haftaki sıfırlamalar",
-    "runway_caption": "Her işaret bir hesaptır; haftalık sıfırlama anına yerleşir ve kalan kotası kadar dolar. Proxy soldan başlayarak kullanır.",
-    "runway_now": "Şimdi",
-    "runway_unseen": "Görülmedi",
-    "runway_left_of": "kaldı, toplam {{capacity}}%",
-    "runway_marker": "{{name}}: %{{percent}} kaldı, {{when}} sıfırlanır",
-    "runway_marker_unseen": "{{name}}: %{{percent}} kaldı, sıfırlama henüz görülmedi"
+    "resets_title": "Manuel sıfırlamalar",
+    "resets_summary_one": "{{count}} hesapta {{available}} kullanılabilir",
+    "resets_summary_other": "{{count}} hesapta {{available}} kullanılabilir",
+    "resets_expires": "Bitiş: {{dates}}"
   }
 }

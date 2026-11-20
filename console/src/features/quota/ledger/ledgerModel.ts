@@ -42,7 +42,8 @@ export interface LedgerRow {
   weeklyResetAtMs: number | null;
   planType: string | null;
   renewsAt: string | number | null;
-  resetCredits: { available: number; nextExpiresAt: string | null } | null;
+  /** Codex manual resets: how many are banked and when each expires, soonest first. */
+  resetCredits: { available: number; expiresAt: string[] } | null;
   nextUp: boolean;
 }
 
@@ -168,7 +169,7 @@ export function buildLedgerRows(
         renewsAt: quota.subscriptionActiveUntil ?? null,
         resetCredits:
           provider === 'codex' && typeof available === 'number'
-            ? { available, nextExpiresAt: credits[0] ?? null }
+            ? { available, expiresAt: credits }
             : null,
         nextUp: false,
       };
