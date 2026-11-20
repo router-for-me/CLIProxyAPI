@@ -351,6 +351,19 @@ func streamPayloadCompletionFlags(payload []byte) (completed, incomplete bool) {
 	return completed, incomplete
 }
 
+// anthropicStopReasonFlags classifies an Anthropic stop_reason value with the
+// same allow/deny semantics for both streaming message_delta events and
+// non-streaming message payloads.
+func anthropicStopReasonFlags(stopReason string) (completed, incomplete bool) {
+	switch strings.ToLower(strings.TrimSpace(stopReason)) {
+	case "max_tokens", "stopsequencemaxtokens", "refusal", "model_context_window_exceeded", "pause_turn":
+		return false, true
+	case "end_turn", "stop_sequence", "tool_use":
+		return true, false
+	}
+	return false, false
+}
+
 func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 	var obj map[string]any
 	if err := json.Unmarshal(rawJSON, &obj); err != nil || len(obj) == 0 {
@@ -386,10 +399,11 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 	case "message_delta":
 		if deltaObj, ok := obj["delta"].(map[string]any); ok {
 			if sr, okSR := deltaObj["stop_reason"].(string); okSR {
-				switch strings.ToLower(strings.TrimSpace(sr)) {
-				case "max_tokens", "StopSequenceMaxTokens":
+				deltaCompleted, deltaIncomplete := anthropicStopReasonFlags(sr)
+				if deltaIncomplete {
 					incomplete = true
-				case "end_turn", "stop_sequence", "tool_use":
+				}
+				if deltaCompleted {
 					completed = true
 				}
 			}
@@ -470,8 +484,14 @@ func isCompletedExecutionPayload(payload []byte) bool {
 		return true
 	}
 	if objType, _ := obj["type"].(string); strings.TrimSpace(objType) == "message" {
-		if stopReason, ok := obj["stop_reason"].(string); ok && strings.TrimSpace(stopReason) != "" {
-			return true
+		if stopReason, ok := obj["stop_reason"].(string); ok {
+			msgCompleted, msgIncomplete := anthropicStopReasonFlags(stopReason)
+			if msgIncomplete {
+				return false
+			}
+			if msgCompleted {
+				return true
+			}
 		}
 	}
 	if output, ok := obj["output"].([]any); ok && len(output) > 0 && status == "" {
