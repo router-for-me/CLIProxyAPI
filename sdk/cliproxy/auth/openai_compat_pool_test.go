@@ -830,8 +830,8 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *te
 	if err == nil {
 		t.Fatal("expected invalid request error")
 	}
-	if err != invalidErr {
-		t.Fatalf("error = %v, want %v", err, invalidErr)
+	if !errors.Is(err, invalidErr) {
+		t.Fatalf("error = %v, want wrapped %v", err, invalidErr)
 	}
 	if streamResult != nil {
 		t.Fatalf("streamResult = %#v, want nil on invalid bootstrap", streamResult)

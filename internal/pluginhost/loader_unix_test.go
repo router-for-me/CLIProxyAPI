@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -457,22 +458,230 @@ func TestUnixPluginLoaderDoesNotCacheSigkillDuringProbe(t *testing.T) {
 	}
 }
 
+func splitCCCommand(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty compiler command")
+	}
+	if _, errLookup := exec.LookPath(trimmed); errLookup == nil {
+		return []string{trimmed}, nil
+	}
+	var args []string
+	var cur strings.Builder
+	inToken := false
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i < len(trimmed); i++ {
+		c := trimmed[i]
+		if escaped {
+			cur.WriteByte(c)
+			escaped = false
+			inToken = true
+			continue
+		}
+		if inSingle {
+			if c == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(c)
+			}
+			inToken = true
+			continue
+		}
+		if inDouble {
+			if c == '"' {
+				inDouble = false
+			} else if c == '\\' {
+				escaped = true
+			} else {
+				cur.WriteByte(c)
+			}
+			inToken = true
+			continue
+		}
+		switch c {
+		case '\\':
+			escaped = true
+			inToken = true
+		case '\'':
+			inSingle = true
+			inToken = true
+		case '"':
+			inDouble = true
+			inToken = true
+		case ' ', '\t', '\n', '\r':
+			if inToken {
+				args = append(args, cur.String())
+				cur.Reset()
+				inToken = false
+			}
+		default:
+			cur.WriteByte(c)
+			inToken = true
+		}
+	}
+	if escaped || inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote or escape in CC command %q", raw)
+	}
+	if inToken {
+		args = append(args, cur.String())
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("empty compiler command %q", raw)
+	}
+	return args, nil
+}
+
+func runCPreprocessor(t *testing.T, ccFields []string, defineFlag, objDir, unitPath string) []byte {
+	t.Helper()
+	args := make([]string, 0, len(ccFields)-1+5)
+	args = append(args, ccFields[1:]...)
+	args = append(args, "-E", defineFlag, "-I", objDir, unitPath)
+	cmd := exec.Command(ccFields[0], args...)
+	out, errRun := cmd.CombinedOutput()
+	if errRun != nil {
+		t.Fatalf("%s %v error = %v\n%s", ccFields[0], args, errRun, out)
+	}
+	return out
+}
+
+func TestUnixReloadTestPluginConstructorsNotDuplicatedByCgo(t *testing.T) {
+	goTool, errGo := exec.LookPath("go")
+	if errGo != nil {
+		t.Skipf("go toolchain unavailable: %v", errGo)
+	}
+	mainPath, errAbs := filepath.Abs(filepath.Join("testdata", "loader_unix_reload_plugin", "main.go"))
+	if errAbs != nil {
+		t.Fatalf("Abs(main.go) error = %v", errAbs)
+	}
+	ccCmd := exec.Command(goTool, "env", "CC")
+	ccOut, errCC := ccOutAndTrim(ccCmd)
+	if errCC != nil {
+		t.Fatalf("go env CC error = %v", errCC)
+	}
+	ccFields, errSplit := splitCCCommand(ccOut)
+	if errSplit != nil {
+		t.Fatalf("splitCCCommand(%q) error = %v", ccOut, errSplit)
+	}
+
+	for _, version := range []int{4, 5, 6, 7} {
+		version := version
+		t.Run(fmt.Sprintf("PLUGIN_VERSION_%d", version), func(t *testing.T) {
+			objDir := t.TempDir()
+			defineFlag := fmt.Sprintf("-DPLUGIN_VERSION=%d", version)
+			cgoCmd := exec.Command(goTool, "tool", "cgo", "-objdir", objDir, "--", defineFlag, mainPath)
+			if output, errCgo := cgoCmd.CombinedOutput(); errCgo != nil {
+				t.Fatalf("go tool cgo (%s) error = %v\n%s", defineFlag, errCgo, output)
+			}
+
+			exportHeader, errHeader := os.ReadFile(filepath.Join(objDir, "_cgo_export.h"))
+			if errHeader != nil {
+				t.Fatalf("ReadFile(_cgo_export.h) error = %v", errHeader)
+			}
+			if strings.Contains(string(exportHeader), "__attribute__((constructor))") {
+				t.Fatalf("_cgo_export.h contains __attribute__((constructor)) for %s; cgo duplicates constructors into both _cgo_export.c and main.cgo2.c", defineFlag)
+			}
+
+			for _, unit := range []string{"_cgo_export.c", "main.cgo2.c"} {
+				ppOut := runCPreprocessor(t, ccFields, defineFlag, objDir, filepath.Join(objDir, unit))
+				if strings.Contains(string(ppOut), "__attribute__((constructor))") {
+					t.Fatalf("preprocessed %s contains __attribute__((constructor)) for %s; side-effecting constructors must live in a separate .c file", unit, defineFlag)
+				}
+			}
+		})
+	}
+}
+
+func ccOutAndTrim(cmd *exec.Cmd) (string, error) {
+	out, errRun := cmd.Output()
+	if errRun != nil {
+		return "", errRun
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func parseGrandchildPIDs(raw string) ([]int, error) {
+	lines := strings.Fields(raw)
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("grandchild pid file is empty")
+	}
+	pids := make([]int, 0, len(lines))
+	for _, line := range lines {
+		pid, errParse := strconv.Atoi(line)
+		if errParse != nil || pid <= 0 {
+			return nil, fmt.Errorf("invalid grandchild pid %q: %w", line, errParse)
+		}
+		pids = append(pids, pid)
+	}
+	return pids, nil
+}
+
+func cleanupGrandchildPIDs(t *testing.T, pidFile, lockFile string, requireRecorded bool) {
+	t.Helper()
+	raw, errRead := os.ReadFile(pidFile)
+	if errRead != nil {
+		if !requireRecorded && errors.Is(errRead, os.ErrNotExist) {
+			return
+		}
+		t.Errorf("ReadFile(%s) cleanup error = %v", pidFile, errRead)
+		return
+	}
+	pids, errParse := parseGrandchildPIDs(string(raw))
+	if errParse != nil {
+		t.Errorf("parseGrandchildPIDs(%s) cleanup error = %v", pidFile, errParse)
+		return
+	}
+	for _, pid := range pids {
+		if errKill := syscall.Kill(pid, syscall.SIGKILL); errKill != nil && !errors.Is(errKill, syscall.ESRCH) {
+			t.Errorf("SIGKILL grandchild pid %d failed: %v", pid, errKill)
+		}
+	}
+
+	// Verify that every grandchild process has actually exited and closed its
+	// open file descriptors (releasing LOCK_SH), even if PID 1 does not reap
+	// zombies promptly inside a container.
+	lockF, errOpen := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0o600)
+	if errOpen != nil {
+		t.Errorf("OpenFile(%s) cleanup error = %v", lockFile, errOpen)
+		return
+	}
+	defer func() {
+		if errClose := lockF.Close(); errClose != nil {
+			t.Errorf("Close(%s) cleanup error = %v", lockFile, errClose)
+		}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		errFlock := syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if errFlock == nil {
+			return
+		}
+		if !errors.Is(errFlock, syscall.EWOULDBLOCK) && !errors.Is(errFlock, syscall.EAGAIN) {
+			t.Errorf("Flock(%s, LOCK_EX|LOCK_NB) cleanup error = %v", lockFile, errFlock)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("grandchild process still holds lock %s after SIGKILL", lockFile)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func TestUnixPluginProbeDoesNotBlockOnInheritedStdioGrandchild(t *testing.T) {
 	dir := t.TempDir()
 	pluginPath := filepath.Join(dir, "grandchild"+testPluginLibraryExtension())
 	buildReloadTestPlugin(t, 7, pluginPath)
 
 	pidFile := filepath.Join(dir, "grandchild.pid")
+	lockFile := filepath.Join(dir, "grandchild.lock")
 	t.Setenv("CLIPROXY_TEST_GRANDCHILD_PID_FILE", pidFile)
+	t.Setenv("CLIPROXY_TEST_GRANDCHILD_LOCK_FILE", lockFile)
+	probeAttempted := false
 	t.Cleanup(func() {
-		raw, errRead := os.ReadFile(pidFile)
-		if errRead != nil {
-			return
-		}
-		pid, errParse := strconv.Atoi(strings.TrimSpace(string(raw)))
-		if errParse == nil && pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
+		cleanupGrandchildPIDs(t, pidFile, lockFile, probeAttempted)
 	})
 
 	file := pluginFile{ID: "grandchild", Path: pluginPath, Version: "7"}
@@ -486,6 +695,7 @@ func TestUnixPluginProbeDoesNotBlockOnInheritedStdioGrandchild(t *testing.T) {
 	cacheKey := filepath.Base(loadPath)
 	probedPluginShadows.Delete(cacheKey)
 
+	probeAttempted = true
 	if errProbe := probePluginLibrary(file.Path, loadPath); errProbe != nil {
 		t.Fatalf("probePluginLibrary() error = %v, want nil without blocking on grandchild stdio", errProbe)
 	}
@@ -493,9 +703,12 @@ func TestUnixPluginProbeDoesNotBlockOnInheritedStdioGrandchild(t *testing.T) {
 	if errRead != nil {
 		t.Fatalf("ReadFile(%s) error = %v, want grandchild pid recorded", pidFile, errRead)
 	}
-	pid, errParse := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if errParse != nil || pid <= 0 {
-		t.Fatalf("grandchild pid = %q (%v), want positive pid", string(raw), errParse)
+	pids, errParse := parseGrandchildPIDs(string(raw))
+	if errParse != nil {
+		t.Fatalf("parseGrandchildPIDs(%q) error = %v, want positive pids", string(raw), errParse)
+	}
+	if len(pids) != 1 {
+		t.Fatalf("grandchild pid count = %d (%v), want exactly 1 (constructor must run once)", len(pids), pids)
 	}
 }
 

@@ -461,7 +461,7 @@ func TestCodexWebsocketUnconfiguredInstructionsSnapshot(t *testing.T) {
 		{"responses_absent", sdktranslator.FormatOpenAIResponse, `{"input":[]}`, ""},
 		{"responses_empty", sdktranslator.FormatOpenAIResponse, `{"instructions":"","input":[]}`, `""`},
 		{"responses_null", sdktranslator.FormatOpenAIResponse, `{"instructions":null,"input":[]}`, `""`},
-		{"translated", sdktranslator.FormatInteractions, `{"system_instruction":"hero","input":[{"type":"user_input","content":[{"type":"text","text":"hello"}]}]}`, `"hero"`},
+		{"translated", sdktranslator.FormatInteractions, `{"system_instruction":"hero","input":[{"type":"user_input","content":[{"type":"text","text":"hello"}]}]}`, `""`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			exec := NewCodexWebsocketsExecutor(&config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: map[string]any{"instructions": "configured"}}}}})

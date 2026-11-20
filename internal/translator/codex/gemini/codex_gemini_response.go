@@ -263,6 +263,9 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		_ = templateDoc.Set("modelVersion", rootResult.Get("response.model").String())
 		_ = templateDoc.Set("responseId", rootResult.Get("response.id").String())
 		params.ResponseID = strings.Clone(rootResult.Get("response.id").String())
+	} else if typeStr == "response.output_item.added" && rootResult.Get("item.type").String() == "message" {
+		params.HasOutputTextDelta = false
+		return [][]byte{}
 	} else if typeStr == "response.output_item.added" && rootResult.Get("item.type").String() == "reasoning" {
 		params.HasReasoningDelta = false
 		if params.PendingThoughtSignature != "" {
@@ -290,11 +293,14 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		part, _ = ojson.SetBytes(part, "text", rootResult.Get("delta").String())
 		emittedParts = append(emittedParts, part)
 		translatorcommon.SetRawArrayItemsDoc(templateDoc, "candidates.0.content.parts", emittedParts)
-	} else if typeStr == "response.output_text.delta" { // Handle regular text content delta
-		params.HasOutputTextDelta = true
+	} else if typeStr == "response.output_text.delta" || typeStr == "response.refusal.delta" { // Handle regular text or refusal content delta
+		deltaText := rootResult.Get("delta").String()
+		if deltaText != "" {
+			params.HasOutputTextDelta = true
+		}
 		partDoc := ojson.NewDocString(`{"text":""}`)
-		_ = partDoc.Set("text", rootResult.Get("delta").String())
-		if rootResult.Get("delta").String() != "" {
+		_ = partDoc.Set("text", deltaText)
+		if deltaText != "" {
 			// An empty text part may be discarded by clients; never spend the
 			// only signature copy on one.
 			attachPendingThoughtSignatureDoc(partDoc)
@@ -302,7 +308,13 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		translatorcommon.SetRawArrayItemsDoc(templateDoc, "candidates.0.content.parts", [][]byte{partDoc.Bytes()})
 	} else if typeStr == "response.output_item.done" { // Fallback: emit final message text when no delta chunks were received
 		itemResult := rootResult.Get("item")
-		if itemResult.Get("type").String() != "message" || params.HasOutputTextDelta {
+		if itemResult.Get("type").String() != "message" {
+			return [][]byte{}
+		}
+		defer func() {
+			params.HasOutputTextDelta = false
+		}()
+		if params.HasOutputTextDelta {
 			return [][]byte{}
 		}
 		contentResult := itemResult.Get("content")
@@ -311,10 +323,16 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		}
 		wroteText := false
 		contentResult.ForEach(func(_, partResult ojson.Result) bool {
-			if partResult.Get("type").String() != "output_text" {
-				return true
+			var text string
+			switch partResult.Get("type").String() {
+			case "output_text":
+				text = partResult.Get("text").String()
+			case "refusal":
+				text = partResult.Get("refusal").String()
+				if text == "" {
+					text = partResult.Get("text").String()
+				}
 			}
-			text := partResult.Get("text").String()
 			if text == "" {
 				return true
 			}
@@ -326,7 +344,6 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			return true
 		})
 		if wroteText {
-			params.HasOutputTextDelta = true
 			return flushStorageOutputs(templateDoc.Bytes())
 		}
 		return [][]byte{}
@@ -457,12 +474,20 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 					// Add regular text content
 					if content := value.Get("content"); content.Exists() && content.IsArray() {
 						content.ForEach(func(_, contentItem ojson.Result) bool {
-							if contentItem.Get("type").String() == "output_text" {
-								if text := contentItem.Get("text"); text.Exists() {
-									part := []byte(`{"text":""}`)
-									part, _ = ojson.SetBytes(part, "text", text.String())
-									parts = append(parts, part)
+							var text string
+							switch contentItem.Get("type").String() {
+							case "output_text":
+								text = contentItem.Get("text").String()
+							case "refusal":
+								text = contentItem.Get("refusal").String()
+								if text == "" {
+									text = contentItem.Get("text").String()
 								}
+							}
+							if text != "" {
+								partDoc := ojson.NewDocString(`{"text":""}`)
+								_ = partDoc.Set("text", text)
+								parts = append(parts, partDoc.Bytes())
 							}
 							return true
 						})

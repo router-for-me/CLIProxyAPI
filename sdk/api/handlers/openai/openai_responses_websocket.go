@@ -1029,6 +1029,11 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			var cliCancel handlers.APIHandlerCancelFunc
 			cliCtx, cliCancel = h.GetContextWithCancel(h, c, turnExecutionParent)
 			cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
+			if !nativeWebsocketPassthrough && !ojson.GetBytesNoCopy(payload, "instructions").Exists() {
+				if inherited := ojson.GetBytesNoCopy(requestJSON, "instructions"); inherited.Exists() {
+					cliCtx = cliproxyexecutor.WithInheritedWebsocketInstructions(cliCtx, strings.Clone(inherited.Raw))
+				}
+			}
 			cliCtx = cliproxyexecutor.WithLocalWebsocketTurnTracker(cliCtx)
 			cliCtx = cliproxyexecutor.WithWebsocketInputEpoch(cliCtx, &inputEpoch, msgEpoch)
 			if duplexInput != nil {
