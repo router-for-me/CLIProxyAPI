@@ -2,6 +2,7 @@ package decisions
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"mime/multipart"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
@@ -224,6 +226,61 @@ func TestHandlerPassthroughAndFailover(t *testing.T) {
 		if k == first429 {
 			t.Fatalf("cooling key reused: %v", up.keys)
 		}
+	}
+}
+
+func TestHandlerKeepsProxxCORSAndVary(t *testing.T) {
+	withClock(t)
+	up := newUpstream(t, "/decisions")
+	up.headers[http.StatusOK] = http.Header{
+		"Access-Control-Allow-Origin":      {"*"},
+		"Access-Control-Allow-Credentials": {"true"},
+		"Vary":                             {"origin"},
+	}
+	h := newHarness(t, OpenAI, config.ProxxDecisionsVendor{BaseURL: up.srv.URL, APIKeys: []string{"sk-1"}})
+	// Stand-in for proxx's CORS/gzip middleware, which sets these before the handler runs.
+	h.engine = gin.New()
+	h.engine.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Vary", "Accept-Encoding")
+		c.Header("X-Request-Id", "proxx")
+	})
+	h.engine.POST(OpenAI.Route, NewHandler(OpenAI, func() *config.Config {
+		cfg := &config.Config{}
+		cfg.Proxx.Decisions.OpenAI = config.ProxxDecisionsVendor{BaseURL: up.srv.URL, APIKeys: []string{"sk-1"}}
+		return cfg
+	}))
+	rec := h.do("/v1/decisions", "application/json", []byte(`{"model":"gpt-6-luna"}`), nil)
+	got := rec.Header()
+	if rec.Code != http.StatusOK || len(got.Values("Access-Control-Allow-Origin")) != 1 || got.Get("Access-Control-Allow-Credentials") != "" ||
+		len(got.Values("Vary")) != 1 || got.Get("Vary") != "Accept-Encoding" || len(got.Values("X-Request-Id")) != 1 || got.Get("X-Request-Id") != "req_123" {
+		t.Fatalf("headers = %v", got)
+	}
+}
+
+// The TypeSafe SDK zstd-compresses bodies of 1 KB or more and sends Content-Encoding: zstd.
+func TestHandlerForwardsCompressedBodyWithItsEncoding(t *testing.T) {
+	withClock(t)
+	up := newUpstream(t, "/v1/systemone")
+	h := newHarness(t, TypeSafe, config.ProxxDecisionsVendor{BaseURL: up.srv.URL, APIKeys: []string{"k"}})
+	enc, _ := zstd.NewWriter(nil)
+	compressed := enc.EncodeAll([]byte(jevBody), nil)
+	_ = enc.Close()
+	rec := h.do("/v1/systemone", "application/json", compressed, map[string]string{"Content-Encoding": "zstd"})
+	if rec.Code != http.StatusOK || !bytes.Equal(up.bodies[0], compressed) || up.reqHdrs[0].Get("Content-Encoding") != "zstd" {
+		t.Fatalf("zstd: %d same=%v encoding=%q", rec.Code, bytes.Equal(up.bodies[0], compressed), up.reqHdrs[0].Get("Content-Encoding"))
+	}
+	if h.records[0].Alias != "jev-latest" {
+		t.Fatalf("alias from compressed body = %q", h.records[0].Alias)
+	}
+
+	var gz bytes.Buffer
+	zw := gzip.NewWriter(&gz)
+	_, _ = zw.Write([]byte(jevBody))
+	_ = zw.Close()
+	if rec := h.do("/v1/systemone", "application/json", gz.Bytes(), map[string]string{"Content-Encoding": "gzip"}); rec.Code != http.StatusOK ||
+		up.reqHdrs[1].Get("Content-Encoding") != "gzip" || h.records[1].Alias != "jev-latest" {
+		t.Fatalf("gzip: %d encoding=%q alias=%q", rec.Code, up.reqHdrs[1].Get("Content-Encoding"), h.records[1].Alias)
 	}
 }
 

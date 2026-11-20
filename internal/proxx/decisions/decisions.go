@@ -4,6 +4,7 @@ package decisions
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -233,14 +235,20 @@ func httpClient(proxyURL string) *http.Client {
 	return c
 }
 
-// skippedResponseHeaders are never copied to the client.
+// skippedResponseHeaders are never copied to the client. Vary and Access-Control-* belong to
+// proxx's own response (its CORS and compression middleware set them).
 var skippedResponseHeaders = map[string]bool{
 	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true,
 	"Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
-	"Content-Length": true, "Content-Encoding": true, "Set-Cookie": true,
+	"Content-Length": true, "Content-Encoding": true, "Set-Cookie": true, "Vary": true,
 }
 
-func (v *Vendor) upstreamHeaders(client http.Header, contentType, key string) http.Header {
+func skipResponseHeader(name string) bool {
+	canonical := http.CanonicalHeaderKey(name)
+	return skippedResponseHeaders[canonical] || strings.HasPrefix(canonical, "Access-Control-")
+}
+
+func (v *Vendor) upstreamHeaders(client http.Header, contentType, contentEncoding, key string) http.Header {
 	h := make(http.Header)
 	for name, values := range client {
 		canonical := http.CanonicalHeaderKey(name)
@@ -250,6 +258,10 @@ func (v *Vendor) upstreamHeaders(client http.Header, contentType, key string) ht
 		h[canonical] = append([]string(nil), values...)
 	}
 	h.Set("Content-Type", contentType)
+	if contentEncoding != "" {
+		// The body is forwarded as received, so its encoding must travel with it.
+		h.Set("Content-Encoding", contentEncoding)
+	}
 	h.Set("Accept", "application/json")
 	h.Set("Authorization", "Bearer "+key)
 	return h
@@ -298,6 +310,37 @@ func retryAfter(h http.Header) time.Duration {
 	return d
 }
 
+// decodeBody returns the plain request body for reading the model and for request logs. Only
+// identity, gzip and zstd (the TypeSafe SDK's request compression) are understood.
+func decodeBody(encoding string, body []byte) ([]byte, bool) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "", "identity":
+		return body, true
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, false
+		}
+		plain, err := io.ReadAll(io.LimitReader(zr, maxBodyBytes+1))
+		if err != nil || int64(len(plain)) > maxBodyBytes {
+			return nil, false
+		}
+		return plain, true
+	case "zstd":
+		dec, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(uint64(maxBodyBytes)), zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return nil, false
+		}
+		defer dec.Close()
+		plain, err := dec.DecodeAll(body, nil)
+		if err != nil || int64(len(plain)) > maxBodyBytes {
+			return nil, false
+		}
+		return plain, true
+	}
+	return nil, false
+}
+
 type upstreamResult struct {
 	status int
 	header http.Header
@@ -336,7 +379,11 @@ func NewHandler(v *Vendor, cfg func() *config.Config) gin.HandlerFunc {
 		if contentType == "" {
 			contentType = "application/json"
 		}
-		alias := requestModel(contentType, body)
+		contentEncoding := strings.TrimSpace(c.GetHeader("Content-Encoding"))
+		alias, logBody := "", body
+		if plain, ok := decodeBody(contentEncoding, body); ok {
+			alias, logBody = requestModel(contentType, plain), plain
+		}
 
 		order, earliest := pools.order(v.Name, keys)
 		if len(order) == 0 {
@@ -365,7 +412,7 @@ func NewHandler(v *Vendor, cfg func() *config.Config) gin.HandlerFunc {
 		var lastErr error
 		for _, idx := range order {
 			key := keys[idx]
-			res, errAttempt := v.attempt(ctx, current, client, upstreamURL, contentType, body, key, idx, alias, c.Request.Header)
+			res, errAttempt := v.attempt(ctx, current, client, upstreamURL, contentType, contentEncoding, body, logBody, key, idx, alias, c.Request.Header)
 			if errAttempt != nil {
 				if ctx.Err() != nil {
 					return
@@ -399,13 +446,13 @@ func NewHandler(v *Vendor, cfg func() *config.Config) gin.HandlerFunc {
 }
 
 func writeResult(c *gin.Context, res *upstreamResult) {
+	out := c.Writer.Header()
 	for name, values := range res.header {
-		if skippedResponseHeaders[http.CanonicalHeaderKey(name)] {
+		if skipResponseHeader(name) {
 			continue
 		}
-		for _, value := range values {
-			c.Writer.Header().Add(name, value)
-		}
+		// Upstream values replace any value proxx middleware set for the same header.
+		out[http.CanonicalHeaderKey(name)] = append([]string(nil), values...)
 	}
 	c.Status(res.status)
 	if _, err := c.Writer.Write(res.body); err != nil {
@@ -414,9 +461,9 @@ func writeResult(c *gin.Context, res *upstreamResult) {
 }
 
 // attempt performs one upstream call, logs it and publishes its usage record.
-func (v *Vendor) attempt(ctx context.Context, cfg *config.Config, client *http.Client, upstreamURL, contentType string,
-	body []byte, key string, idx int, alias string, clientHeaders http.Header) (*upstreamResult, error) {
-	headers := v.upstreamHeaders(clientHeaders, contentType, key)
+func (v *Vendor) attempt(ctx context.Context, cfg *config.Config, client *http.Client, upstreamURL, contentType, contentEncoding string,
+	body, logBody []byte, key string, idx int, alias string, clientHeaders http.Header) (*upstreamResult, error) {
+	headers := v.upstreamHeaders(clientHeaders, contentType, contentEncoding, key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -427,7 +474,7 @@ func (v *Vendor) attempt(ctx context.Context, cfg *config.Config, client *http.C
 		URL:       upstreamURL,
 		Method:    http.MethodPost,
 		Headers:   headers.Clone(),
-		Body:      body,
+		Body:      logBody,
 		Provider:  v.Provider,
 		AuthID:    authID,
 		AuthLabel: fmt.Sprintf("%s#%d", v.Name, idx+1),

@@ -32,11 +32,21 @@ other routes), so the vendors' own SDKs work by pointing their base URL at proxx
 - The request body and `Content-Type` are forwarded byte for byte (JSON or multipart). There is no
   translation, so user payload rules (`payload.*`) are deliberately not applied: the AGENTS.md "payload
   rules are the final barrier" rule covers executor request building, and these routes build no payload.
-  A test pins this. Bodies over 64 MB are rejected with 413 (never truncated). The client's
+  A test pins this. Bodies over 64 MB are rejected with 413 (never truncated).
+- The client's `Content-Encoding` is forwarded with the body. The official TypeSafe Python SDK
+  zstd-compresses bodies of 1 KB or more by default. proxx decodes identity, gzip and zstd bodies only to
+  read `model` for usage and to write a readable body to request logs.
+- Verified with the official SDKs (2026-11-20): `typesafe-sdk` 0.7.5 (`TypeSafeClient(base_url=<proxx root>)`;
+  it appends `/v1/systemone` itself), including a compressed request, and `openai` 3.57.0
+  (`OpenAI(base_url=<proxx>/v1).decisions.create(...)`). Neither SDK calls `/v1/models` on its own;
+  `TypeSafeClient.models.list()` would hit proxx's OpenAI-format `/v1/models` and is not supported. The client's
   `Authorization` / `X-Api-Key` is dropped and replaced with an upstream key. Vendor feature headers
   (`TypeSafe-*`, `OpenAI-*` except `OpenAI-Organization`/`OpenAI-Project`) are forwarded.
 - The upstream status, body and headers are returned unchanged, minus hop-by-hop headers,
-  `Content-Length`, `Content-Encoding` and `Set-Cookie`.
+  `Content-Length`, `Content-Encoding`, `Set-Cookie`, `Vary` and `Access-Control-*`. proxx's own CORS and
+  compression middleware own those last two for its clients (the real OpenAI API sends
+  `Access-Control-Allow-Origin: *` and `Vary`, and TypeSafe sends `Access-Control-Allow-Credentials`,
+  which would otherwise be duplicated or conflict). Other upstream values replace any value proxx set.
 - Keys: `proxx.decisions.<vendor>.api-keys`, used round-robin per vendor.
   - 429: the key cools down for `Retry-After` (default 60s, capped at 1h) and the next key is tried.
   - 401/403: the key cools down for 10 minutes and the next key is tried.
