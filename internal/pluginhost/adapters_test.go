@@ -1912,6 +1912,9 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 				ResponseInterceptor: responseInterceptorFunc{
 					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						if req.Kind != pluginapi.ResponseInterceptKindExecution {
+							t.Fatalf("first response interceptor Kind = %q, want %q", req.Kind, pluginapi.ResponseInterceptKindExecution)
+						}
 						return pluginapi.ResponseInterceptResponse{
 							Headers: http.Header{"X-Response": []string{"high"}},
 							Body:    append(req.Body, []byte("|high")...),
@@ -1935,6 +1938,9 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
 				ResponseInterceptor: responseInterceptorFunc{
 					interceptResponse: func(ctx context.Context, req pluginapi.ResponseInterceptRequest) (pluginapi.ResponseInterceptResponse, error) {
+						if req.Kind != pluginapi.ResponseInterceptKindExecution {
+							t.Fatalf("second response interceptor Kind = %q, want %q", req.Kind, pluginapi.ResponseInterceptKindExecution)
+						}
 						if string(req.Body) != "body|high" {
 							t.Fatalf("second response interceptor body = %q, want body|high", req.Body)
 						}
@@ -1974,6 +1980,7 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 	)
 
 	nonStream := host.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+		Kind:            pluginapi.ResponseInterceptKindExecution,
 		SourceFormat:    "openai",
 		Model:           "normalized",
 		RequestedModel:  "requested",

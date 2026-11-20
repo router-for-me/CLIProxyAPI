@@ -57,6 +57,11 @@ func (e requestStopError) IsRequestStop() bool {
 	return true
 }
 
+// IsRequestStopError reports whether err signals an explicit request-scoped stop.
+func IsRequestStopError(err error) bool {
+	return isRequestStopError(err)
+}
+
 func isRequestStopError(err error) bool {
 	if err == nil {
 		return false
@@ -379,6 +384,9 @@ func applyRequestScopedActionToResult(action string, okAction bool, result *Resu
 	if !okAction || result == nil || result.Error == nil {
 		return
 	}
+	if isTOSViolationResultError(result.Error) {
+		return
+	}
 	if action == RequestScopedActionStop || action == RequestScopedActionContinue {
 		result.Error.Code = ErrorCodeRequestScoped
 	} else if action == RequestScopedActionStopAndCooldown || action == RequestScopedActionContinueAndCooldown {
@@ -396,6 +404,37 @@ func (m *Manager) ApplyRequestScopedErrorResult(ctx context.Context, auth *Auth,
 	action, okAction := matchRequestScopedErrorAction(auth, err, cfg)
 	applyRequestScopedActionToResult(action, okAction, result)
 	return action, okAction
+}
+
+type requestScopedContinueError struct {
+	error
+}
+
+func (e requestScopedContinueError) Unwrap() error {
+	return e.error
+}
+
+func (e requestScopedContinueError) IsRequestScopedContinue() bool {
+	return true
+}
+
+// IsRequestScopedContinueError reports whether err matched a request-scoped continue rule.
+func IsRequestScopedContinueError(err error) bool {
+	if err == nil {
+		return false
+	}
+	type continueChecker interface {
+		IsRequestScopedContinue() bool
+	}
+	var cc continueChecker
+	return errors.As(err, &cc) && cc != nil && cc.IsRequestScopedContinue()
+}
+
+func wrapRequestScopedContinueError(err error) error {
+	if err == nil || IsRequestScopedContinueError(err) {
+		return err
+	}
+	return requestScopedContinueError{error: err}
 }
 
 func isRequestScopedStop(action string, okAction bool) bool {
