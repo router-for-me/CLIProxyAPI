@@ -302,6 +302,92 @@ func TestKeyPayloadProviderFinalRequests(t *testing.T) {
 	}
 }
 
+// TestKeyPayloadCodexToolSearchPool captures the issue 5266 rule on two gateways serving one alias.
+func TestKeyPayloadCodexToolSearchPool(t *testing.T) {
+	cfg, err := config.ParseConfigBytes([]byte(`config-version: 8
+api-keys:
+  codex:
+    - base-url: https://strict.invalid
+      keys:
+        - api-key: syntheticStrictKey123
+          payload:
+            filter:
+              - models:
+                  - name: "gpt-5.6-*-codex"
+                    protocol: "codex"
+                params:
+                  - "tools.#(type==\"tool_search\")"
+    - base-url: https://compatible.invalid
+      keys:
+        - api-key: syntheticCompatibleKey123
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, IDGenerator: synthesizer.NewStableIDGenerator()})
+	if err != nil || len(auths) != 2 {
+		t.Fatalf("expected two Codex credentials, got %d: %v", len(auths), err)
+	}
+
+	// Fail the first attempt so both gateways receive the same client request regardless of selection order.
+	const model = "gpt-5.6-terra-codex"
+	captured := make(map[string][]byte)
+	transport := claudeFingerprintRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		host := req.URL.Host
+		if (host != "strict.invalid" && host != "compatible.invalid") || req.URL.Path != "/responses" || captured[host] != nil {
+			return nil, fmt.Errorf("unexpected capture at %s", req.URL.Redacted())
+		}
+		body, errRead := io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		captured[host] = body
+		if len(captured) == 1 {
+			return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"try next gateway"}}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: " + `{"type":"response.completed","response":{"id":"fixture","object":"response","status":"completed","output":[]}}` + "\n\n"))}, nil
+	})
+	ctx, provider := keyPayloadTestContext(t, context.Background(), cfg, nil, transport)
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	manager.SetRoundTripperProvider(provider)
+	manager.SetRetryConfig(0, 0, len(auths))
+	manager.RegisterExecutor(NewCodexExecutor(cfg))
+	for _, auth := range auths {
+		if _, err := manager.Register(ctx, auth); err != nil {
+			t.Fatal(err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		defer registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	}
+	const payload = `{"input":[{"role":"user","content":"hello"}],"tools":[{"type":"tool_search","description":"Find tools","parameters":{"type":"object","properties":{}}},{"type":"function","name":"lookup","defer_loading":true,"parameters":{"type":"object","properties":{}}}]}`
+	if err := runKeyPayloadMessage(ctx, manager, []string{"codex"}, cliproxyexecutor.Request{Model: model, Payload: []byte(payload)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare complete tool declarations, without using the deletion query as the test oracle.
+	strict, compatible := captured["strict.invalid"], captured["compatible.invalid"]
+	if ojson.GetBytes(strict, "model").String() != model || ojson.GetBytes(compatible, "model").String() != model {
+		t.Fatalf("expected both upstream requests to carry %s", model)
+	}
+	var retained []ojson.Result
+	searchCount := 0
+	for _, tool := range ojson.GetBytes(compatible, "tools").Array() {
+		if tool.Get("type").String() == "tool_search" {
+			searchCount++
+			if tool.Get("description").String() != "Find tools" || !tool.Get("parameters").IsObject() {
+				t.Fatal("compatible gateway lost the tool_search declaration")
+			}
+		} else {
+			retained = append(retained, tool)
+		}
+	}
+	strictTools := ojson.GetBytes(strict, "tools").Array()
+	if searchCount != 1 || !ojson.GetBytes(compatible, `tools.#(name=="lookup").defer_loading`).Bool() || !slices.EqualFunc(strictTools, retained, func(a, b ojson.Result) bool { return a.Raw == b.Raw }) {
+		t.Fatalf("expected only tool_search to differ: strict=%s compatible=%s", ojson.GetBytes(strict, "tools").Raw, ojson.GetBytes(compatible, "tools").Raw)
+	}
+}
+
 // runKeyPayloadCount adapts the manager count contract to the capture harness.
 func runKeyPayloadCount(ctx context.Context, manager *cliproxyauth.Manager, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) error {
 	_, err := manager.ExecuteCount(ctx, providers, req, opts)
