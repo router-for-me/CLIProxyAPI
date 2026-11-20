@@ -442,6 +442,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
+			if stopsCredentialFailover(errExecute, action, okAction) {
+				releaseAttempt()
+				selection.End("request_terminated")
+				return cliproxyexecutor.Response{}, errExecute
+			}
 			roundTiming.Observe(errExecute)
 			lastErr = keepPreferredCandidateError(lastErr, errExecute)
 			if okAction {
