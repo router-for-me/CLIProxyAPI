@@ -94,6 +94,7 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		"GET /v8/management/credentials", "POST /v8/management/credentials", "POST /v8/management/credentials/verify",
 		"GET /v8/management/oauth/auth-url", "POST /v8/management/oauth/auth-url", "POST /v8/management/oauth/import", "POST /v8/management/oauth/callback",
 		"POST /v8/management/routing/cooldown/reset",
+		"POST /v8/management/routing/cooldown/reconcile",
 		"POST /v8/management/routing/model-definitions/refresh",
 		"POST /v8/management/models/refresh",
 		"GET /v8/management/plugins/:id/quota", "POST /v8/management/plugins/:id/quota", "DELETE /v8/management/plugins/:id/quota",
@@ -102,6 +103,13 @@ func TestManagementV8IndependentContract(t *testing.T) {
 		if !routes[route] {
 			t.Errorf("missing route %s", route)
 		}
+	}
+	unauthenticated := httptest.NewRequest(http.MethodPost, "/v8/management/routing/cooldown/reconcile", strings.NewReader(`{"auth_index":"test"}`))
+	unauthenticated.RemoteAddr = "127.0.0.1:1234"
+	unauthenticatedResponse := httptest.NewRecorder()
+	s.engine.ServeHTTP(unauthenticatedResponse, unauthenticated)
+	if unauthenticatedResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("reconciliation endpoint bypassed management authentication: %d", unauthenticatedResponse.Code)
 	}
 	request := func(method, url, body string, status int) string {
 		t.Helper()
