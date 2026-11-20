@@ -6,7 +6,7 @@
 set -euo pipefail
 
 repo="${GUARD_PLUGIN_REPO:-https://github.com/zhyx111999/cpa-plugin-antigravity-coding-filter}"
-ref="${GUARD_PLUGIN_REF:-0a5791203b03c970618a355ab3f5eac2e2d8a293}"
+ref="${GUARD_PLUGIN_REF:-7b229dddf09a8f3244fb86ac26da4ee70fb1d926}"
 out_dir="${1:?usage: build-guard-plugin.sh <output-dir>}"
 
 case "$(go env GOOS)" in
