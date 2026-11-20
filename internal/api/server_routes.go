@@ -93,6 +93,7 @@ func (s *Server) setupRoutes() {
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
 		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/live", s.codexLiveHandler.Handle)
+		s.registerProxxDecisionRoutes(v1) // proxx: decision-model passthrough (ADR 0008)
 		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
 	}
 

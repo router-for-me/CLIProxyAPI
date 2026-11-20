@@ -1468,6 +1468,14 @@ plugins:
 #     interval-hours: 24
 #     auto-apply: false          # true: download, verify and restart in place at the next idle moment
 #     window: ""                 # "HH:MM-HH:MM" local time for auto-apply (may wrap midnight); "" = any time
+#   decisions:                   # decision-model passthrough (ADR 0008); client keys from access.api-keys apply
+#     typesafe:                  # POST /v1/systemone -> TypeSafe Jev (jev-latest, jev-1.14.0, ...)
+#       base-url: ""             # default https://api.typesafe.ai
+#       proxy-url: ""            # default: the global proxy-url
+#       api-keys: ["ts-..."]     # round-robin; 429 cools a key for Retry-After, 401/403 for 10 minutes
+#     openai:                    # POST /v1/decisions -> OpenAI Decisions API (gpt-6-luna)
+#       base-url: ""             # default https://api.openai.com/v1
+#       api-keys: ["sk-..."]
 
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only

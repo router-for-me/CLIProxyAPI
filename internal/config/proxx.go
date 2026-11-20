@@ -19,6 +19,26 @@ type ProxxConfig struct {
 
 	// Update configures the self-updater (ADR 0007).
 	Update ProxxUpdateConfig `yaml:"update,omitempty" json:"update,omitempty"`
+
+	// Decisions configures the decision-model passthrough routes (ADR 0008).
+	Decisions ProxxDecisionsConfig `yaml:"decisions,omitempty" json:"decisions,omitempty"`
+}
+
+// ProxxDecisionsConfig holds the upstream keys for the decision-model passthrough routes
+// (POST /v1/systemone → TypeSafe, POST /v1/decisions → OpenAI).
+type ProxxDecisionsConfig struct {
+	TypeSafe ProxxDecisionsVendor `yaml:"typesafe,omitempty" json:"typesafe,omitempty"`
+	OpenAI   ProxxDecisionsVendor `yaml:"openai,omitempty" json:"openai,omitempty"`
+}
+
+// ProxxDecisionsVendor is one decision-model vendor's upstream settings.
+type ProxxDecisionsVendor struct {
+	// BaseURL overrides the vendor default (https://api.typesafe.ai, https://api.openai.com/v1).
+	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	// ProxyURL overrides the global proxy-url for this vendor.
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+	// APIKeys are used round-robin; a key that is rate limited or rejected cools down.
+	APIKeys []string `yaml:"api-keys,omitempty" json:"api-keys,omitempty"`
 }
 
 // DefaultProxxRequestLogsMaxTotalSizeMB is the request log retention cap when unset (10 GB).
