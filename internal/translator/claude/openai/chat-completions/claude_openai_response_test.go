@@ -442,6 +442,33 @@ func TestConvertClaudeResponseToOpenAI_StreamToolCallIndexIsZeroBased(t *testing
 	}
 }
 
+// A Claude tool_use block cut off before content_block_stop must emit no tool_calls chunks.
+// Downstream SDKs flush pending tool calls on stream close, so any partial or empty chunk here
+// would let them execute a tool with truncated arguments.
+func TestConvertClaudeResponseToOpenAI_StreamTruncatedToolUseEmitsNoToolCalls(t *testing.T) {
+	events := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_trunc","model":"claude-opus-4-6","usage":{"input_tokens":10,"output_tokens":1}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_cut","name":"write_file"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\": \"main.go\", "}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"content\": \"package ma"}}`),
+		// Stream ends here: no content_block_stop, no message_delta, no message_stop.
+	}
+
+	var param any
+	var toolCallChunks int
+	for _, ev := range events {
+		for _, chunk := range ConvertClaudeResponseToOpenAI(context.Background(), "claude-opus-4-6", nil, nil, ev, &param) {
+			if ojson.GetBytesNoCopy(chunk, "choices.0.delta.tool_calls").Exists() {
+				toolCallChunks++
+			}
+		}
+	}
+
+	if toolCallChunks != 0 {
+		t.Fatalf("truncated tool_use stream emitted %d tool_calls chunks, want 0", toolCallChunks)
+	}
+}
+
 func TestConvertClaudeResponseToOpenAI_StreamEmitsTrailingUsageChunkWithCacheDetails(t *testing.T) {
 	ctx := context.Background()
 	var param any
