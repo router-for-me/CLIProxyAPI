@@ -303,27 +303,32 @@ func TestKeyPayloadProviderFinalRequests(t *testing.T) {
 	}
 }
 
-// TestKeyPayloadReviewedRoutes captures configured OpenAI filters on the reviewed routes.
+// TestKeyPayloadReviewedRoutes captures configured filters on the reviewed routes.
 func TestKeyPayloadReviewedRoutes(t *testing.T) {
 	const chat = `{"messages":[{"role":"user","content":"hello"}],"top_p":0.5}`
 	const chatReply = `{"id":"chatcmpl-fixture","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
 	const gatewayKey = "syntheticGatewayKey123"
 	const authority = "https://synthetic.invalid"
 	for _, tc := range []struct {
-		fixture                        keyPayloadRequestFixture
-		baseURL, key, keyFields, param string
-		newExecutor                    func(*config.Config) cliproxyauth.ProviderExecutor
+		fixture                                     keyPayloadRequestFixture
+		baseURL, key, keyFields, param, keylessKind string
+		newExecutor                                 func(*config.Config) cliproxyauth.ProviderExecutor
 	}{
-		{fixture: keyPayloadRequestFixture{family: "openai-compatibility", model: "gpt-5.4", source: sdktranslator.FormatOpenAI, payload: chat, reply: chatReply},
+		{fixture: keyPayloadRequestFixture{family: "openai-compatibility", destination: "openai", model: "gpt-5.4", source: sdktranslator.FormatOpenAI, payload: chat, reply: chatReply},
 			baseURL: authority, param: "top_p", newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor {
 				return NewOpenAICompatExecutor(util.OpenAICompatibleProviderKey("gateway"), cfg)
 			}},
-		{fixture: keyPayloadRequestFixture{family: "codex", model: "gpt-image-2", source: sdktranslator.FromString(codexOpenAIImageSourceFormat), requestPath: codexImagesGenerationsPath,
+		{fixture: keyPayloadRequestFixture{family: "codex", destination: "openai", model: "gpt-image-2", source: sdktranslator.FromString(codexOpenAIImageSourceFormat), requestPath: codexImagesGenerationsPath,
 			payload: `{"model":"gpt-image-2","prompt":"fixture","n":2}`, reply: `{"created":1,"data":[{"b64_json":"AA=="}]}`},
 			baseURL: authority, key: gatewayKey, param: "n", newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor { return NewCodexExecutor(cfg) }},
-		{fixture: keyPayloadRequestFixture{family: "vertex", model: "deepseek-ai/deepseek-v4.1-flash-maas", source: sdktranslator.FormatOpenAI, payload: chat, reply: chatReply},
+		{fixture: keyPayloadRequestFixture{family: "vertex", destination: "openai", model: "deepseek-ai/deepseek-v4.1-flash-maas", source: sdktranslator.FormatOpenAI, payload: chat, reply: chatReply},
 			baseURL: authority + "/v1/projects/proxy-test/locations/global/endpoints/openapi", key: gatewayKey, keyFields: "openapi: true, ", param: "top_p",
 			newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor { return NewGeminiVertexExecutor(cfg) }},
+		{fixture: keyPayloadRequestFixture{family: "claude", destination: "claude", model: "claude-sonnet-4-5", source: sdktranslator.FormatClaude,
+			payload: `{"max_tokens":64,"system":"filter fixture","messages":[{"role":"user","content":"hello"}]}`,
+			reply:   `{"id":"msg_fixture","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`},
+			baseURL: authority, param: "system", keylessKind: cliproxyauth.AuthKindAPIKey,
+			newExecutor: func(cfg *config.Config) cliproxyauth.ProviderExecutor { return NewClaudeExecutor(cfg) }},
 	} {
 		t.Run(tc.fixture.family, func(t *testing.T) {
 			// Give authenticated entries distinct keys so Vertex retains both after normalization.
@@ -333,8 +338,8 @@ func TestKeyPayloadReviewedRoutes(t *testing.T) {
 			}
 
 			// Parse the actual destination selector before synthesizing the target and control entries.
-			raw := fmt.Sprintf("config-version: 8\napi-keys:\n  %s:\n    - name: gateway\n      base-url: %s\n      keys:\n        - {%sapi-key: %q, payload: {filter: [{models: [{name: '*', protocol: openai}], params: [%s]}]}}\n        - {%sapi-key: %q}\n",
-				tc.fixture.family, tc.baseURL, tc.keyFields, tc.key, tc.param, tc.keyFields, controlKey)
+			raw := fmt.Sprintf("config-version: 8\napi-keys:\n  %s:\n    - name: gateway\n      base-url: %s\n      keys:\n        - {%sapi-key: %q, payload: {filter: [{models: [{name: '*', protocol: %s}], params: [%s]}]}}\n        - {%sapi-key: %q}\n",
+				tc.fixture.family, tc.baseURL, tc.keyFields, tc.key, tc.fixture.destination, tc.param, tc.keyFields, controlKey)
 			cfg, err := config.ParseConfigBytes([]byte(raw))
 			if err != nil {
 				t.Fatal(err)
@@ -343,8 +348,15 @@ func TestKeyPayloadReviewedRoutes(t *testing.T) {
 			if err != nil || len(auths) != 2 {
 				t.Fatalf("expected selected and control entries, got %d: %v", len(auths), err)
 			}
-			if tc.key == "" && auths[0].AuthKind() != "" {
-				t.Fatal("keyless fixture acquired a credential kind")
+			if tc.key == "" {
+				for _, auth := range auths {
+					if auth.Attributes[cliproxyauth.AttributeAPIKey] != "" {
+						t.Fatal("keyless fixture acquired a key")
+					}
+					if kind := auth.AuthKind(); kind != tc.keylessKind {
+						t.Fatalf("keyless fixture kind = %q, want %q", kind, tc.keylessKind)
+					}
+				}
 			}
 			tc.fixture.executor = tc.newExecutor(cfg)
 			selected := captureKeyPayloadFinal(t, cfg, tc.fixture, auths[0], runKeyPayloadMessage)
