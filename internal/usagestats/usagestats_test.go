@@ -331,7 +331,7 @@ func TestBuiltInPricesCoverCurrentModels(t *testing.T) {
 	if errTable != nil {
 		t.Fatalf("new price table: %v", errTable)
 	}
-	for _, model := range []string{"claude-fable-5-2", "claude-opus-4-5-20251101", "gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-astra", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh"} {
+	for _, model := range []string{"claude-fable-5-2", "claude-opus-4-5-20251101", "gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-astra", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "gemini-4-neon-xhigh"} {
 		if price, ok := table.Lookup(model); !ok || price.Input <= 0 || price.Output <= 0 {
 			t.Errorf("Lookup(%q) = %+v, %v; want a positive price", model, price, ok)
 		}

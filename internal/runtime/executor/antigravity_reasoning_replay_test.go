@@ -1246,6 +1246,109 @@ func TestAntigravityReasoningReplaySeparatesClaudeSessionTitleFromResumedTranscr
 	}
 }
 
+func TestAntigravityReasoningReplayIgnoresClaudeCodeAttributionSystemBlock(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model = "gemini-4-neon"
+		sig1  = "claude-attribution-signature-one-123456"
+	)
+	headers := http.Header{"X-Claude-Code-Session-Id": []string{"claude-attribution-session"}}
+
+	turn1Original := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli; cch=11111; cc_prompt_id=prompt-1;"},{"type":"text","text":"You are Claude Code."}],"thinking":{"type":"enabled"}}`)
+	turn1Doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"first prompt"}]}]}`)
+	scope1, replayReq1, _, errPrepare1 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn1Original},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: turn1Original, SourceFormat: sdktranslator.FormatClaude},
+		turn1Doc,
+	)
+	if errPrepare1 != nil {
+		t.Fatal(errPrepare1)
+	}
+	accumulator1 := newAntigravityReasoningReplayAccumulator(scope1, replayReq1)
+	accumulator1.observeResponsePayload([]byte(`{"candidates":[{"content":{"parts":[{"text":"first reply"},{"text":"","thoughtSignature":"` + sig1 + `"}]},"finishReason":"STOP"}]}`))
+	accumulator1.Commit(context.Background())
+
+	// Next prompt updates per-request cch and cc_prompt_id in the attribution system block.
+	turn2Original := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]},{"role":"assistant","content":[{"type":"text","text":"first reply"}]},{"role":"user","content":[{"type":"text","text":"second prompt"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli; cch=22222; cc_prompt_id=prompt-2;"},{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}],"thinking":{"type":"enabled"}}`)
+	turn2Doc := ojson.NewDocString(`{"contents":[{"role":"user","parts":[{"text":"first prompt"}]},{"role":"model","parts":[{"text":"first reply"}]},{"role":"user","parts":[{"text":"second prompt"}]}]}`)
+	scope2, _, changed2, errPrepare2 := prepareGeminiTopLevelReasoningReplayPayloadDoc(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: turn2Original},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: turn2Original, SourceFormat: sdktranslator.FormatClaude},
+		turn2Doc,
+	)
+	if errPrepare2 != nil {
+		t.Fatal(errPrepare2)
+	}
+	if scope2.sessionKey != scope1.sessionKey {
+		t.Fatalf("replay scope changed across attribution block updates: turn1=%q turn2=%q", scope1.sessionKey, scope2.sessionKey)
+	}
+	if !changed2 {
+		t.Fatalf("expected turn2 replay to restore cached text thoughtSignature, body=%s", turn2Doc.String())
+	}
+	if got := turn2Doc.Get("contents.1.parts.0.thoughtSignature").String(); got != sig1 {
+		t.Fatalf("replayed text thoughtSignature = %q, want %q; body=%s", got, sig1, turn2Doc.String())
+	}
+
+	// A request without the attribution block must share the same lane as requests with it.
+	strippedOriginal := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]}],"system":[{"type":"text","text":"You are Claude Code."}]}`)
+	strippedScope := antigravityReasoningReplayScopeFromRequest(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: strippedOriginal},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: strippedOriginal, SourceFormat: sdktranslator.FormatClaude},
+		nil,
+	)
+	if strippedScope.sessionKey != scope1.sessionKey {
+		t.Fatalf("scope without attribution block = %q, want %q", strippedScope.sessionKey, scope1.sessionKey)
+	}
+
+	// Auxiliary requests with different non-attribution system prompts must remain separated.
+	titleOriginal := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"first prompt"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli; cch=33333; cc_prompt_id=prompt-3;"},{"type":"text","text":"Generate a concise title that summarizes this session."}]}`)
+	titleScope := antigravityReasoningReplayScopeFromRequest(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: titleOriginal},
+		cliproxyexecutor.Options{Headers: headers, OriginalRequest: titleOriginal, SourceFormat: sdktranslator.FormatClaude},
+		nil,
+	)
+	if titleScope.sessionKey == scope1.sessionKey {
+		t.Fatalf("auxiliary title scope collided with main scope: %q", titleScope.sessionKey)
+	}
+}
+
+func TestAntigravityClaudeReplaySystemLaneAttributionEdgeCases(t *testing.T) {
+	stringOnly := []byte(`{"system":"x-anthropic-billing-header: cc_version=2.1.321; cch=11111;"}`)
+	if lane := antigravityClaudeReplaySystemLane(stringOnly); lane != "" {
+		t.Fatalf("attribution-only string system lane = %q, want empty", lane)
+	}
+
+	arrayOnly := []byte(`{"system":[{"type":"text","text":"  x-anthropic-billing-header: cc_version=2.1.321; cch=11111;"}]}`)
+	if lane := antigravityClaudeReplaySystemLane(arrayOnly); lane != "" {
+		t.Fatalf("attribution-only array system lane = %q, want empty", lane)
+	}
+
+	plainString := []byte(`{"system":"You are Claude Code."}`)
+	if lane := antigravityClaudeReplaySystemLane(plainString); lane == "" {
+		t.Fatal("non-attribution string system lane = empty, want non-empty hash")
+	}
+
+	withAttrA := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cch=aaaaa; cc_prompt_id=p1;"},{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}]}`)
+	withAttrB := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321; cch=bbbbb; cc_prompt_id=p2;"},{"type":"text","text":"You are Claude Code."}]}`)
+	withoutAttr := []byte(`{"system":[{"type":"text","text":"You are Claude Code."}]}`)
+	laneA := antigravityClaudeReplaySystemLane(withAttrA)
+	laneB := antigravityClaudeReplaySystemLane(withAttrB)
+	lanePlain := antigravityClaudeReplaySystemLane(withoutAttr)
+	if laneA == "" || laneA != laneB || laneA != lanePlain {
+		t.Fatalf("lanes diverged: withAttrA=%q withAttrB=%q withoutAttr=%q", laneA, laneB, lanePlain)
+	}
+}
+
 func TestAntigravityReasoningReplayScopeSeparatesClaudeAgents(t *testing.T) {
 	opts := cliproxyexecutor.Options{Headers: http.Header{
 		"X-Claude-Code-Session-Id": []string{"claude-session"},

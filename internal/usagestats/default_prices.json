@@ -338,6 +338,11 @@
       "output": 7.5,
       "cache_read": 0.075
     },
+    "gemini-4-neon": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_read": 0.15
+    },
     "gemini-flash-latest": {
       "input": 0.75,
       "output": 3.75,
