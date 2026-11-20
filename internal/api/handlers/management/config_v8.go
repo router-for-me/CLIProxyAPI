@@ -25,7 +25,7 @@ const ConfigV8ContextKey = "management.config-v8"
 // detect that another writer saved after its read (412) instead of silently
 // overwriting the change. Without If-Match, writes stay unconditional.
 func (h *Handler) ConfigV8(c *gin.Context) {
-	pluginDefaults := h.pluginConfigFieldDefaults(c)
+	pluginDefaults := h.pluginConfigReadDefaults(c)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	raw, err := os.ReadFile(h.configFilePath)
