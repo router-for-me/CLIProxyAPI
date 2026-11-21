@@ -1028,6 +1028,7 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	if hasUnauthorizedAuthFailure(auth) {
 		return false
 	}
+	isDisabled := auth.Disabled || auth.Status == StatusDisabled
 	changed := false
 	auth.forceCooldownUntil = time.Time{}
 	auth.quotaForceCooldownUntil = time.Time{}
@@ -1035,7 +1036,14 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 	auth.credentialRetryAfter = time.Time{}
 	auth.nonQuotaCooldownUntil = time.Time{}
 	auth.cooldownRecordedSeq = 0
-	if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+	if isDisabled {
+		if !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
+			auth.NextRetryAfter = time.Time{}
+			applyCooldownFields(&auth.Quota, QuotaState{})
+			auth.UpdatedAt = now
+			changed = true
+		}
+	} else if auth.Unavailable || !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded || !auth.Quota.NextRecoverAt.IsZero() {
 		auth.Unavailable = false
 		auth.NextRetryAfter = time.Time{}
 		applyCooldownFields(&auth.Quota, QuotaState{})
@@ -1050,7 +1058,16 @@ func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
 		state.quotaForceCooldownUntil = time.Time{}
 		state.nonQuotaCooldownUntil = time.Time{}
 		state.cooldownRecordedSeq = 0
-		if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
+		if state.Status == StatusDisabled {
+			if !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
+				state.NextRetryAfter = time.Time{}
+				applyCooldownFields(&state.Quota, QuotaState{})
+				state.credentialQuotaShadow = nil
+				state.credentialQuotaPropagated = false
+				state.UpdatedAt = now
+				changed = true
+			}
+		} else if state.Unavailable || !state.NextRetryAfter.IsZero() || state.Quota.Exceeded || !state.Quota.NextRecoverAt.IsZero() || state.credentialQuotaShadow != nil || state.credentialQuotaPropagated {
 			state.Unavailable = false
 			state.NextRetryAfter = time.Time{}
 			applyCooldownFields(&state.Quota, QuotaState{})
@@ -1640,12 +1657,18 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			!auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) &&
 			auth.cooldownRecordedSeq > 0 && result.ExecutionSeq <= auth.cooldownRecordedSeq
 
+		isDisabled := auth.Disabled || auth.Status == StatusDisabled
 		if result.Success {
-			if result.CompletedResponse && !result.SkipQuotaObservation && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
+			if result.CompletedResponse && !result.SkipQuotaObservation && !isDisabled && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
 				auth.InferenceVerified = true
 				auth.LastInferenceVerifiedAt = now
 			}
-			if wasTerminalUnauthorized {
+			if isDisabled {
+				// A disabled credential (operator action or terminal TOS) stays
+				// unavailable until explicitly re-enabled; a late in-flight success
+				// must not reset model states or flip availability back to active.
+				auth.Unavailable = true
+			} else if wasTerminalUnauthorized {
 				if modelKey != "" {
 					state := ensureModelState(auth, modelKey)
 					modelState = state
@@ -1661,12 +1684,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				resetModelState(state, now)
 				auth.credentialRetryAfter = time.Time{}
 				updateAggregatedAvailability(auth, now)
-				if !auth.Disabled && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
+				if !auth.Disabled && auth.Status != StatusDisabled && !hasModelError(auth, now) && !effectiveAuthForceUntil(auth).After(now) {
 					auth.LastError = nil
 					auth.StatusMessage = ""
 					auth.Status = StatusActive
 				}
-			} else if !auth.Disabled {
+			} else {
 				clearAuthStateOnSuccess(auth, now)
 			}
 		} else {
@@ -1977,7 +2000,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						}
 					}
 
-					if disableCooling && state.NextRetryAfter.IsZero() && state.Quota.NextRecoverAt.IsZero() {
+					if disableCooling && !isTOSViolationResultError(result.Error) && state.NextRetryAfter.IsZero() && state.Quota.NextRecoverAt.IsZero() {
 						state.Unavailable = false
 						state.Quota.Exceeded = false
 					}
@@ -2197,7 +2220,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								auth.credentialRetryAfter = ownAuthRetryDeadline
 							}
 						}
-						if isolatedModelAgg && !isCloudflareChallengeResultError(result.Error) {
+						if isolatedModelAgg && !isCloudflareChallengeResultError(result.Error) && !isTOSViolationResultError(result.Error) {
 							savedModelAggQuota.Signals = mergeQuotaObservation(auth.Quota, savedModelAggQuota).Signals
 							applyCooldownFields(&auth.Quota, savedModelAggQuota)
 							updateAggregatedAvailability(auth, now)
@@ -2220,7 +2243,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
 			auth.NextRetryAfter = time.Time{}
-		} else if auth.Status == StatusDisabled {
+		} else if auth.Disabled || auth.Status == StatusDisabled {
 			// A terminal TOS_VIOLATION already deactivated the credential inside
 			// applyAuthFailureState; preserve that state instead of overwriting
 			// it with a generic error status.
@@ -2708,6 +2731,12 @@ func updateAggregatedAvailability(auth *Auth, now time.Time) {
 	if auth == nil {
 		return
 	}
+	// A disabled credential (operator action or terminal TOS suspension) stays
+	// unavailable regardless of sibling model states.
+	if auth.Disabled || auth.Status == StatusDisabled {
+		auth.Unavailable = true
+		return
+	}
 	// A terminal unauthorized credential stays blocked until its tokens change.
 	// Model-level results must not make it selectable again.
 	if hasUnauthorizedAuthFailure(auth) {
@@ -2931,6 +2960,10 @@ func propagateCredentialQuotaToModelStatesLocked(auth *Auth, exclude *ModelState
 
 func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	if auth == nil {
+		return
+	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		auth.Unavailable = true
 		return
 	}
 	if hasUnauthorizedAuthFailure(auth) {
