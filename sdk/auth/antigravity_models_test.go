@@ -35,6 +35,24 @@ func TestNormalizeAntigravityModelID(t *testing.T) {
 	}
 }
 
+func TestNewAntigravityProbeClient(t *testing.T) {
+	client, errClient := NewAntigravityProbeClient("")
+	if errClient != nil {
+		t.Fatal(errClient)
+	}
+	defer client.CloseIdleConnections()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.ForceAttemptHTTP2 || transport.TLSClientConfig == nil || len(transport.TLSClientConfig.NextProtos) != 0 {
+		t.Fatal("probe client lost native HTTP/1.1 no-ALPN policy")
+	}
+	if client.Timeout != 0 {
+		t.Fatal("probe client sets a post-connect timeout")
+	}
+	if client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
+		t.Fatal("probe follows redirects")
+	}
+}
+
 func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 	t.Run("valid payload with models and web search", func(t *testing.T) {
 		body := []byte(`{"models":{"gemini-3-flash":{"displayName":"Gemini 3 Flash"},"claude-sonnet-5-5-medium":{"displayName":"Claude Sonnet 5.5"}},"webSearchModelIds":["gemini-3-flash"]}`)

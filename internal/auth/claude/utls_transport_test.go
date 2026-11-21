@@ -170,6 +170,9 @@ func TestClaudeOAuthRequestHeaderOrderMatchesNative220Capture(t *testing.T) {
 	if got := claudeOAuthRequestHeaderOrder("GET", "/api/oauth/profile"); !reflect.DeepEqual(got, wantProfile) {
 		t.Fatalf("profile header order = %v, want %v", got, wantProfile)
 	}
+	if got := claudeOAuthRequestHeaderOrder("GET", "/api/oauth/usage?cedar_ember=1&skip_spend=1"); !reflect.DeepEqual(got, wantProfile) {
+		t.Fatalf("usage header order = %v, want %v", got, wantProfile)
+	}
 	// The claude_cli roles companion lookup uses the same authenticated Axios GET shape.
 	if got := claudeOAuthRequestHeaderOrder("GET", "/api/oauth/claude_cli/roles"); !reflect.DeepEqual(got, wantProfile) {
 		t.Fatalf("roles header order = %v, want %v", got, wantProfile)

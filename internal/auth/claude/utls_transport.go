@@ -47,6 +47,7 @@ var claudeOAuthInspectHeaderOrder = []string{
 // use claudeOAuthInspectHeaderOrder.
 var claudeOAuthInspectTargets = []string{
 	"/api/oauth/profile",
+	"/api/oauth/usage",
 	"/api/oauth/claude_cli/roles",
 }
 

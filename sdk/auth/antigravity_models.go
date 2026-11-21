@@ -162,6 +162,23 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	return hints, AntigravityProbeStatusSuccess
 }
 
+// NewAntigravityProbeClient constructs the native HTTP/1.1, no-ALPN control-plane
+// transport for read-only model/quota probes. It does not obtain/refresh tokens.
+// The caller owns response bodies and should close idle connections afterward.
+func NewAntigravityProbeClient(proxyURL string) (*http.Client, error) {
+	transport, errTransport := newAntigravityProbeTransport(proxyURL)
+	if errTransport != nil {
+		return nil, errTransport
+	}
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	if transport != nil {
+		client.Transport = transport
+	}
+	return client, nil
+}
+
 func newAntigravityProbeTransport(proxyURL string) (*http.Transport, error) {
 	transport, mode, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(proxyURL))
 	if errProxy != nil {

@@ -23,3 +23,8 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+      - name: Test guarded quota reconciliation without provider requests
+        run: |
+          go test -race ./sdk/cliproxy/auth ./internal/api/handlers/management -run 'Reconcile|UsageProvesRecovery|QuotaRecovery' -count=1
+          go test ./internal/auth/claude ./sdk/auth -run 'ClaudeOAuthRequestHeaderOrder|NewAntigravityProbeClient' -count=1
+          python3 -m unittest discover -s examples/quota-reconcile -v
