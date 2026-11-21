@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -638,7 +639,14 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	}
 	baseURL := antigravityLoadCodeAssistBaseURL(auth)
 	endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
+	reqCtx := ctx
+	if reqCtx != nil {
+		// Credits balance refreshes are credential-scoped background probes;
+		// explicitly clearing the session ID prevents custom header expansion
+		// from touching a caller's pooled *gin.Context or leaking session IDs.
+		reqCtx = util.WithSessionID(reqCtx, "")
+	}
+	httpReq, errReq := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
 	if errReq != nil {
 		log.Debugf("antigravity executor: create loadCodeAssist request error: %v", errReq)
 		return
@@ -646,6 +654,10 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", userAgent)
+	if host := resolveHost(baseURL); host != "" {
+		httpReq.Host = host
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes, http.Header{})
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "credits_query").Do(httpReq)
@@ -659,22 +671,8 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, antigravityLoadCodeAssistMaxResponseBytes+1))
-	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
-		return
-	}
-	if len(bodyBytes) > antigravityLoadCodeAssistMaxResponseBytes {
-		log.Debugf("antigravity executor: loadCodeAssist response exceeded %d bytes", antigravityLoadCodeAssistMaxResponseBytes)
-		return
-	}
-	if !ojson.ValidBytes(bodyBytes) {
-		log.Debugf("antigravity executor: loadCodeAssist returned invalid JSON")
-		return
-	}
-
 	authID := strings.TrimSpace(auth.ID)
-	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
+	runIfCurrentTask := func(fn func()) {
 		if task != nil {
 			state := task.state
 			state.mu.Lock()
@@ -687,13 +685,38 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		if ctx.Err() != nil {
 			return
 		}
-		if balance != nil {
-			storeAntigravityCreditsBalanceBestEffort(authID, *balance)
+		fn()
+	}
+
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, antigravityLoadCodeAssistMaxResponseBytes+1))
+	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		if errRead == nil && httpResp.StatusCode == http.StatusForbidden && len(bodyBytes) <= antigravityLoadCodeAssistMaxResponseBytes {
+			runIfCurrentTask(func() {
+				e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+			})
 		}
-		cliproxyauth.SetAntigravityCreditsHint(authID, hint)
-		if balance != nil && hint.Available {
-			clearAntigravityCreditsPermanentlyDisabled(auth)
-		}
+		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
+		return
+	}
+	if len(bodyBytes) > antigravityLoadCodeAssistMaxResponseBytes {
+		log.Debugf("antigravity executor: loadCodeAssist response exceeded %d bytes", antigravityLoadCodeAssistMaxResponseBytes)
+		return
+	}
+	if !ojson.ValidBytes(bodyBytes) {
+		log.Debugf("antigravity executor: loadCodeAssist returned invalid JSON")
+		return
+	}
+
+	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
+		runIfCurrentTask(func() {
+			if balance != nil {
+				storeAntigravityCreditsBalanceBestEffort(authID, *balance)
+			}
+			cliproxyauth.SetAntigravityCreditsHint(authID, hint)
+			if balance != nil && hint.Available {
+				clearAntigravityCreditsPermanentlyDisabled(auth)
+			}
+		})
 	}
 	paidTierID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(bodyBytes, "paidTier.id").String()))
 
