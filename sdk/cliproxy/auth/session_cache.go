@@ -37,6 +37,7 @@ type SessionCache struct {
 	maxEntries       int
 	ttl              time.Duration
 	stopCh           chan struct{}
+	stopped          bool
 	stopOnce         sync.Once
 	sessionGroups    map[string]map[string]struct{}
 	bindingSequence  uint64
@@ -94,6 +95,10 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 		return "", false
 	}
 	c.mu.RLock()
+	if c.stopped {
+		c.mu.RUnlock()
+		return "", false
+	}
 	now := time.Now()
 	entry, ok := c.entries[sessionID]
 	if ok && now.Before(entry.expiresAt) {
@@ -107,6 +112,9 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return "", false
+	}
 	c.ensureInitializedLocked()
 	entry, ok = c.entries[sessionID]
 	if !ok {
@@ -127,6 +135,9 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return "", false
+	}
 	c.ensureInitializedLocked()
 	entry, ok := c.entries[sessionID]
 	if !ok {
@@ -169,6 +180,9 @@ func (c *SessionCache) setAliases(authID string, binding sessionBinding, session
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
 	c.ensureInitializedLocked()
 	now := time.Now()
 
@@ -383,6 +397,9 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
 	c.ensureInitializedLocked()
 	now := time.Now()
 	entry, ok := c.entries[sessionID]
@@ -401,6 +418,9 @@ func (c *SessionCache) CompareAndDelete(sessionID, expectedAuthID string) bool {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return false
+	}
 	c.ensureInitializedLocked()
 	entry, ok := c.entries[sessionID]
 	if !ok || entry.authID != expectedAuthID {
@@ -428,6 +448,9 @@ func (c *SessionCache) Invalidate(sessionID string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
 	c.ensureInitializedLocked()
 	entry, ok := c.entries[sessionID]
 	if !ok {
@@ -454,6 +477,9 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
 	c.ensureInitializedLocked()
 	for _, group := range c.groups {
 		if group.authID == authID {
@@ -462,14 +488,22 @@ func (c *SessionCache) InvalidateAuth(authID string) {
 	}
 }
 
-// Stop terminates the background cleanup goroutine.
+// Stop terminates the background cleanup goroutine and releases all bindings.
+// After Stop every accessor and mutator is a no-op so post-shutdown writes
+// cannot resurrect bindings (Stop is terminal and guarded by stopOnce).
 func (c *SessionCache) Stop() {
 	if c == nil {
 		return
 	}
 	c.stopOnce.Do(func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.stopped = true
 		if c.stopCh != nil {
 			close(c.stopCh)
+		}
+		for _, group := range c.groups {
+			c.removeAliasGroupLocked(group)
 		}
 	})
 }
@@ -505,6 +539,9 @@ func (c *SessionCache) cleanup() {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
 	c.ensureInitializedLocked()
 	for _, group := range c.groups {
 		if !now.Before(group.expiresAt) {
