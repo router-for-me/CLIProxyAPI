@@ -849,13 +849,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 							}
 						}
 					} else {
-						// Standard auth route:
-						if pinnedAuthID != "" {
-							if pinnedAuthID == observedCompaction.authID {
-								observedCompactionSupported = true
-								observedCompactionReplayAuthID = observedCompaction.authID
-							}
-						} else if compactionAuth, homeRuntime, ok := sessionAuthByIDWithSource(observedCompaction.authID); ok && compactionAuth != nil {
+						// A standard-route observation is fresh evidence about the credential that
+						// produced the compaction. It must outrank a stale transport affinity.
+						if compactionAuth, homeRuntime, ok := sessionAuthByIDWithSource(observedCompaction.authID); ok && compactionAuth != nil {
 							if homeRuntime {
 								if compactionAuth.Status == coreauth.StatusActive {
 									observedCompactionSupported = true
@@ -996,11 +992,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		modelName := strings.Clone(ojson.GetBytesNoCopy(requestJSON, "model").String())
 		executionAuthID := ""
-		if !routeOverridesModelResolution {
-			executionAuthID = pinnedAuthID
-		}
-		if executionAuthID == "" {
+		observedReplayExecuted := observedCompactionSupported &&
+			observedCompactionReplayAuthID != "" &&
+			inputContainsFullTranscript(ojson.GetBytesNoCopy(requestJSON, "input"))
+		if observedReplayExecuted {
+			// Compaction checkpoints are credential-bound. Use the credential that
+			// produced (or will replay) the checkpoint, even when a stale websocket
+			// affinity remains. A provider-route override already resolves to the
+			// same target checked above, so this does not leak across routes.
 			executionAuthID = observedCompactionReplayAuthID
+		} else if !routeOverridesModelResolution {
+			executionAuthID = pinnedAuthID
 		}
 
 		var excludedAuthIDs []string
