@@ -34,7 +34,7 @@ a single file by id, and that's all. Nothing bounds the total size.
 
 | Method | Path | Result |
 |---|---|---|
-| GET | `/v8/management/proxx/requests` | `{items:[Row], next_cursor, request_log_enabled, total_size_bytes, max_total_size_bytes (0 = unlimited), log_dir}` |
+| GET | `/v8/management/proxx/requests` | `{items:[Row], next_cursor, models, providers, request_log_enabled, total_size_bytes, max_total_size_bytes (0 = unlimited), log_dir}` |
 | GET | `/v8/management/proxx/requests/:id` | `{row, client, attempts, response, websocket_timeline, api_websocket_timeline, raw_size_bytes}` |
 | GET | `/v8/management/proxx/requests/:id/raw` | the file as `text/plain` |
 | DELETE | `/v8/management/proxx/requests/:id` | `{removed: 1}` |
@@ -45,10 +45,16 @@ List query parameters:
 - `limit`: default 50, max 500.
 - `cursor`: opaque.
 - `status`: `2xx`, `4xx`, `5xx` or `error`. Any other value returns 400.
-- `model`: case-insensitive match on the requested or the served model.
+- `model`: case-insensitive match on the requested model, the served model or the model group.
 - `provider`: case-insensitive match.
 - `q`: case-insensitive substring search over the whole file.
 - `since` / `until`: unix milliseconds, inclusive.
+
+`models` / `providers` (first page only, i.e. no `cursor`): the sorted distinct models (group,
+requested, served) and providers of every request log in the `since`/`until` window, ignoring the
+other filters and paging. The viewer's filter dropdowns use them, so a model that was only logged
+further down the list (e.g. one Jev call among thousands of chat requests) can be picked without
+scrolling to it first. Later pages return them as null.
 
 Results are newest first.
 

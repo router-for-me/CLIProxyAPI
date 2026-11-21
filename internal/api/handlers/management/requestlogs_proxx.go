@@ -41,6 +41,8 @@ func proxxQueryInt64(c *gin.Context, key string) (int64, bool) {
 // ListProxxRequestLogs lists request log files newest first.
 // Query: limit (default 50, max 500), cursor, status (2xx|4xx|5xx|error), model, provider,
 // q (case-insensitive substring over the whole file), since/until (unix ms).
+// The first page (no cursor) also returns models/providers: every distinct value in the
+// since/until window, for the viewer's filter dropdowns.
 func (h *Handler) ListProxxRequestLogs(c *gin.Context) {
 	limit := proxxRequestLogsDefaultLimit
 	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
@@ -91,6 +93,8 @@ func (h *Handler) ListProxxRequestLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"items":                items,
 		"next_cursor":          page.NextCursor,
+		"models":               page.Models,
+		"providers":            page.Providers,
 		"request_log_enabled":  st.Enabled,
 		"total_size_bytes":     st.TotalBytes,
 		"max_total_size_bytes": st.MaxTotalBytes,
