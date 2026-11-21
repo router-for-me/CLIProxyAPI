@@ -2,6 +2,17 @@
 
 A lost refresh response does not establish whether the provider consumed the refresh token. CLIProxyAPI records a claim **before** sending a Codex or local SIWC refresh request. Failures proven to occur before any request bytes can be written (request creation, DNS resolution, TCP/proxy dial, HTTP proxy `CONNECT`, and origin TLS handshake prior to connection handoff) release the pending claim so the grant can be retried later; on macOS, maintenance wakes lacking interactive power capabilities also defer renewal before claiming. Ambiguous post-connection transport failures, unreadable or invalid successful responses, and HTTP responses without a qualified no-effect contract keep the claim and stop replay. A 429 or 5xx status alone is not such a contract. Redirects cannot replay refresh POSTs.
 
+## TLS handshake resets during sign-in or refresh
+
+If the connection to `auth.openai.com` resets during the TLS handshake and succeeds with `GODEBUG=tlsmlkem=0`, enable classical key exchange for Codex OAuth in `config.yaml`. The setting applies to sign-in and token refresh. The client still verifies the server certificate and can negotiate TLS 1.3. By default, Go also offers hybrid post-quantum key exchange.
+
+```yaml
+oauth:
+  providers:
+    codex:
+      oauth-disable-mlkem: true
+```
+
 ## Recovery
 
 - An unresolved outcome is reported as `refresh_outcome_unknown`, with its failure stage. An unexpired access token remains usable; the refresh grant requires recovery.
