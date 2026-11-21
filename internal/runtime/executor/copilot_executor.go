@@ -47,19 +47,28 @@ type copilotAttemptRoute struct {
 	expiresAt time.Time
 }
 
-func (*CopilotExecutor) PlanRequestRoute(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+func (e *CopilotExecutor) PlanRequestRoute(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
 	if auth == nil {
 		return opts
 	}
-	model := thinking.ParseSuffix(req.Model).ModelName
-	catalog := auth.ActiveCopilotCatalog(time.Now())
-	route, _ := catalog.Route(strings.TrimPrefix(model, copilot.ModelPrefix))
 	opts.Metadata = maps.Clone(opts.Metadata)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any, 1)
 	}
-	opts.Metadata[copilotRouteKey] = copilotAttemptRoute{catalog: catalog, route: route, expiresAt: catalog.ExpiresAt()}
+	opts.Metadata[copilotRouteKey] = e.resolveRoute(auth, req, time.Now())
 	return opts
+}
+
+func (e *CopilotExecutor) resolveRoute(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, now time.Time) copilotAttemptRoute {
+	model := strings.TrimPrefix(thinking.ParseSuffix(req.Model).ModelName, copilot.ModelPrefix)
+	if e.cfg != nil && e.cfg.Home.Enabled {
+		info, _ := cliproxyauth.ResolvedModelInfo(req)
+		route, _ := copilot.HomeRoute(model, info)
+		return copilotAttemptRoute{route: route}
+	}
+	catalog := auth.ActiveCopilotCatalog(now)
+	route, _ := catalog.Route(model)
+	return copilotAttemptRoute{catalog: catalog, route: route, expiresAt: catalog.ExpiresAt()}
 }
 
 func (*CopilotExecutor) RequestToFormat(_ cliproxyexecutor.Request, opts cliproxyexecutor.Options) sdktranslator.Format {
@@ -147,16 +156,15 @@ func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, 
 	if auth == nil {
 		return copilotPreparedRequest{}, statusErr{code: http.StatusUnauthorized, msg: "copilot: missing auth record"}
 	}
-	model := thinking.ParseSuffix(req.Model).ModelName
 	now := time.Now()
-	catalog := auth.ActiveCopilotCatalog(now)
 	// Re-resolve against the current allowlist even when the account snapshot is unchanged.
-	route, _ := catalog.Route(strings.TrimPrefix(model, copilot.ModelPrefix))
+	resolved := e.resolveRoute(auth, req, now)
+	route := resolved.route
 	if plan, planned := opts.Metadata[copilotRouteKey].(copilotAttemptRoute); planned {
 		if plan.route.Endpoint != route.Endpoint {
 			return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: model route changed after refresh"}
 		}
-		if plan.catalog == catalog && !plan.expiresAt.IsZero() && !now.Before(plan.expiresAt) {
+		if plan.catalog == resolved.catalog && !plan.expiresAt.IsZero() && !now.Before(plan.expiresAt) {
 			return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: expired model route"}
 		}
 	}

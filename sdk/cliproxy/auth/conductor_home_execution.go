@@ -350,6 +350,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
+			if !restoreExecutionModel {
+				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
+			}
 			var errIntercept error
 			execReq, execOpts, errIntercept = prepareRequestAfterAuth(execCtx, selection.Executor, preparedAuth, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
@@ -360,10 +364,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				releaseAttempt()
 				selection.End("request_intercepted")
 				return cliproxyexecutor.Response{}, errIntercept
-			}
-			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
-			if !restoreExecutionModel {
-				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()

@@ -106,9 +106,8 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
-	s.startCopilotCatalogRefresh(ctx)
-
 	if !homeEnabled {
+		s.startCopilotCatalogRefresh(ctx)
 		tokenResult, err := s.tokenProvider.Load(ctx, cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err

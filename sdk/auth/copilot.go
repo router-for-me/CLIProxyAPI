@@ -41,6 +41,11 @@ func (CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 			log.Warn("Could not open browser; visit the Copilot device URL manually")
 		}
 	}
+	return CompleteCopilotDeviceLogin(ctx, client, device)
+}
+
+// CompleteCopilotDeviceLogin exchanges an authorized GitHub device code for a Copilot credential.
+func CompleteCopilotDeviceLogin(ctx context.Context, client *http.Client, device copilot.DeviceCode) (*coreauth.Auth, error) {
 	githubToken, err := copilot.PollDeviceFlow(ctx, client, device)
 	if err != nil {
 		return nil, err
