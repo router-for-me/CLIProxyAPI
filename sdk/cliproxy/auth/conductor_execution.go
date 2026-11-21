@@ -186,32 +186,77 @@ func unwrapUpstreamExecutionAttempt(err error) error {
 }
 
 func unwrapExecutionBoundaryError(err error) error {
+	unwrapped, _ := unwrapExecutionBoundaryErrorChanged(err)
+	return unwrapped
+}
+
+func unwrapExecutionBoundaryErrorChanged(err error) (error, bool) {
+	changed := false
 	for err != nil {
 		switch wrapped := err.(type) {
 		case requestStopError:
 			err = wrapped.error
+			changed = true
 		case schedulerRejectError:
 			err = wrapped.error
+			changed = true
 		case *roundEndedBySchedulerRejectError:
 			if wrapped == nil || wrapped.cause == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.cause
+			changed = true
 		case *upstreamExecutionAttemptError:
 			if wrapped == nil || wrapped.cause == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.cause
+			changed = true
 		case *credentialTerminatedError:
 			if wrapped == nil || wrapped.terminal == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.terminal
+			changed = true
+		case requestScopedContinueError:
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.error)
+			if !innerChanged {
+				return err, changed
+			}
+			return requestScopedContinueError{error: inner}, true
+		case *streamHeaderError:
+			if wrapped == nil {
+				return nil, changed
+			}
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.cause)
+			if !innerChanged {
+				return err, changed
+			}
+			return newStreamHeaderError(inner, wrapped.headers), true
+		case *streamBootstrapError:
+			if wrapped == nil {
+				return nil, changed
+			}
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.cause)
+			if !innerChanged {
+				return err, changed
+			}
+			copied := *wrapped
+			copied.cause = inner
+			return &copied, true
 		default:
-			return err
+			return err, changed
 		}
 	}
-	return nil
+	return nil, changed
+}
+
+func unwrapStoppedStreamError(err error) error {
+	unwrapped := unwrapExecutionBoundaryError(err)
+	if bootstrap, ok := unwrapped.(*streamBootstrapError); ok && bootstrap != nil {
+		return newStreamHeaderError(bootstrap.cause, bootstrap.headers)
+	}
+	return unwrapped
 }
 
 func roundPickFailureError(lastErr, upstreamErr, errPick error) error {
@@ -347,7 +392,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			continuitySession.priorAttemptSeen = true
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isTerminalRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isCredentialTerminatedError(errExec) {
@@ -442,7 +487,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
-				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) {
+				if isTerminalRequestStopError(errCredits) {
 					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errCredits)
 				}
 				errCredits = unwrapExecutionBoundaryError(errCredits)
@@ -503,7 +548,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errExec == nil {
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isTerminalRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isCredentialTerminatedError(errExec) {
@@ -622,6 +667,12 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			continuitySession.priorAttemptSeen = true
 			return result, nil
 		}
+		if isTerminalRequestStopError(errStream) {
+			// Keep stopped/terminated bootstrap failures as direct errors carrying
+			// upstream headers via streamHeaderError rather than streamErrorResult so
+			// outer bootstrap retries cannot replay an explicitly stopped request.
+			return nil, unwrapStoppedStreamError(errStream)
+		}
 		if !m.HomeEnabled() {
 			observeSelectionCooldownDeadline(&selectionCooldownDeadline, errStream, time.Now())
 		}
@@ -637,7 +688,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
 					errOut := unwrapExecutionBoundaryError(errStream)
-					if pinnedThread && !isRequestStopError(errStream) {
+					if pinnedThread {
 						errOut = claudeThreadReplayError(errOut)
 					}
 					return nil, errOut
@@ -656,9 +707,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		retryRoundPending = false
 		retryRoundWaited = false
-		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
-			return nil, unwrapExecutionBoundaryError(errStream)
-		}
 		if isCredentialTerminatedError(errStream) {
 			if preferredUpstreamErr == nil {
 				return nil, unwrapExecutionBoundaryError(errStream)
@@ -765,9 +813,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
-				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) ||
+				if isTerminalRequestStopError(errCredits) ||
 					isTOSViolationError(errCredits) || isAntigravityValidationRequiredError(errCredits) {
-					return nil, unwrapExecutionBoundaryError(errCredits)
+					return nil, unwrapStoppedStreamError(errCredits)
 				}
 				errCredits = unwrapExecutionBoundaryError(errCredits)
 				if pinnedThread {
@@ -1077,6 +1125,9 @@ func syncPreferredUpstreamError(upstreamErr *error, errExec error) {
 			if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 {
 				bootstrap.cause = withTrustedRetryAfter(bootstrap.cause, hint)
 			}
+			if IsRequestScopedContinueError(errExec) {
+				bootstrap.cause = wrapRequestScopedContinueError(bootstrap.cause)
+			}
 			return
 		}
 		// A synthetic empty_stream wrapper must not mask a later real upstream
@@ -1113,7 +1164,10 @@ func isDirectStreamTerminalError(err error) bool {
 	if errors.As(err, &headerErr) && headerErr != nil {
 		return true
 	}
-	return isRequestInvalidError(err) || isTOSViolationError(err) || isRequestTerminatedError(err) || isRequestStopError(err)
+	if isTerminalRequestStopError(err) || isTOSViolationError(err) {
+		return true
+	}
+	return !IsRequestScopedContinueError(err) && isRequestInvalidError(err)
 }
 
 // upstreamErrorMatchesBootstrap reports whether err belongs to the same
@@ -1157,6 +1211,8 @@ func unwrapBootstrapSyncError(err error) error {
 			err = wrapped.cause
 		case *streamBootstrapError:
 			err = wrapped.cause
+		case requestScopedContinueError:
+			err = wrapped.error
 		default:
 			return err
 		}
@@ -1374,6 +1430,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.requestScopedErrorConfig(execCtx))
 				applyRequestScopedActionToResult(action, okAction, &result)
+				if okAction && !isRequestStopError(errExec) && !isRequestScopedStop(action, okAction) {
+					errExec = wrapRequestScopedContinueError(errExec)
+				}
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
@@ -1384,6 +1443,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					syncPreferredUpstreamError(&upstreamErr, errExec)
 				} else if preRefreshExecErr != nil {
 					syncPreferredUpstreamError(&upstreamErr, preRefreshExecErr)
+				}
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1652,6 +1714,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// explicit 501 / unsupported-capability error. Record the failure
 				// for hooks and metrics without suspending a model that remains
 				// usable through the messages endpoint.
+				if okAction && !isRequestStopError(errExec) && !isRequestScopedStop(action, okAction) {
+					errExec = wrapRequestScopedContinueError(errExec)
+				}
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
@@ -1665,6 +1730,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					syncPreferredUpstreamError(&upstreamErr, errExec)
 				} else if preRefreshExecErr != nil {
 					syncPreferredUpstreamError(&upstreamErr, preRefreshExecErr)
+				}
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -2004,14 +2072,23 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(execCtx, result)
 			}
 			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			if okAction && !isRequestStopError(errPrepare) && !isRequestScopedStop(action, okAction) {
+				errPrepare = wrapRequestScopedContinueError(errPrepare)
+			}
 			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestStopError(errPrepare) {
+				if selection != nil {
+					selection.End("request_stopped")
+				}
+				return nil, errPrepare
+			}
 			if isRequestScopedStop(action, okAction) {
 				if selection != nil {
 					selection.End("request_stopped")
 				}
 				return nil, wrapRequestStopError(errPrepare)
 			}
-			if !okAction && isRequestInvalidError(errPrepare) {
+			if isTerminalRequestStopError(errPrepare) || (!okAction && isRequestInvalidError(errPrepare)) {
 				if selection != nil {
 					selection.End("request_invalid")
 				}
@@ -2100,17 +2177,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				continue
 			}
 			syncPreferredUpstreamError(&upstreamErr, errStream)
-			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
-			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
-			if stoppedByRule || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
+			if isTerminalRequestStopError(errStream) || isTOSViolationError(errStream) || (!IsRequestScopedContinueError(errStream) && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
 				// Only redispatch needs a release acknowledgement. Preserve the final
 				// response even when Home cannot acknowledge the released admission.
 				if selection != nil {
 					releaseAttempt()
 					selection.End("request_stopped")
-				}
-				if stoppedByRule {
-					return nil, wrapRequestStopError(errStream)
 				}
 				return nil, errStream
 			}
@@ -2133,16 +2205,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
-			}
-			if okAction {
-				lastErr = keepPreferredCandidateError(lastErr, errStream)
-				if homeMode {
-					roundTiming.Observe(errStream)
-				}
-				if homeMode {
-					homeAuthCount++
-				}
-				continue
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errStream)
 			if homeMode {
