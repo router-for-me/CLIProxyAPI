@@ -1462,3 +1462,66 @@ func TestConvertGeminiRequestToAntigravity_NormalizesParametersNumericConstraint
 		t.Errorf("default = %s (type %v), want string \"1\"", got.Raw, got.Type)
 	}
 }
+
+func TestConvertGeminiRequestToAntigravity_ClaudeSynthesizesMissingFunctionCallIDs(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "check files"}]},
+			{"role": "model", "parts": [
+				{"text": "I will check."},
+				{"functionCall": {"name": "run_command", "args": {"cmd": "ls"}}},
+				{"functionCall": {"name": "run_command", "args": {"cmd": "pwd"}}}
+			]},
+			{"role": "user", "parts": [
+				{"functionResponse": {"name": "run_command", "response": {"result": "a"}}},
+				{"functionResponse": {"name": "run_command", "response": {"result": "b"}}}
+			]}
+		]
+	}`)
+
+	output, err := ConvertGeminiRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	callID0 := ojson.GetBytesNoCopy(output, "request.contents.1.parts.1.functionCall.id").String()
+	callID1 := ojson.GetBytesNoCopy(output, "request.contents.1.parts.2.functionCall.id").String()
+	respID0 := ojson.GetBytesNoCopy(output, "request.contents.2.parts.0.functionResponse.id").String()
+	respID1 := ojson.GetBytesNoCopy(output, "request.contents.2.parts.1.functionResponse.id").String()
+
+	if callID0 == "" || callID1 == "" {
+		t.Fatalf("expected non-empty synthetic functionCall IDs, got %q and %q; output=%s", callID0, callID1, output)
+	}
+	if callID0 == callID1 {
+		t.Fatalf("expected distinct synthetic functionCall IDs, got %q and %q", callID0, callID1)
+	}
+	if respID0 != callID0 || respID1 != callID1 {
+		t.Fatalf("expected functionResponse IDs (%q, %q) to match functionCall IDs (%q, %q)", respID0, respID1, callID0, callID1)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ClaudePreservesExistingFunctionCallIDs(t *testing.T) {
+	inputJSON := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "check"}]},
+			{"role": "model", "parts": [
+				{"functionCall": {"id": "toolu_existing_1", "name": "ping", "args": {}}}
+			]},
+			{"role": "user", "parts": [
+				{"functionResponse": {"id": "toolu_existing_1", "name": "ping", "response": {"result": "pong"}}}
+			]}
+		]
+	}`)
+
+	output, err := ConvertGeminiRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionCall.id").String(); got != "toolu_existing_1" {
+		t.Fatalf("functionCall.id = %q, want toolu_existing_1", got)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.contents.2.parts.0.functionResponse.id").String(); got != "toolu_existing_1" {
+		t.Fatalf("functionResponse.id = %q, want toolu_existing_1", got)
+	}
+}
