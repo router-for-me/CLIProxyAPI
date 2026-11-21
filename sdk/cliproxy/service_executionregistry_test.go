@@ -3025,6 +3025,9 @@ func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 		return true
 	}
 	client, _ := newHomePluginTaskTestClient(t, nil, 0)
+	// The worker publishes client as home.Current(); the subscriber that owns
+	// it in production would detach it, so clear it here.
+	t.Cleanup(func() { home.ClearCurrentIf(client) })
 	queue := newHomeConfigWorkQueue()
 	queue.enqueue([]byte("routing:\n  strategy: fill-first\n"))
 	ready := make(chan struct{})
