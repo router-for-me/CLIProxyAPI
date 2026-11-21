@@ -162,6 +162,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	tried := make(map[string]struct{})
 	for authID := range requestRefusedAuthsFromContext(ctx) {
 		tried[authID] = struct{}{}
@@ -181,6 +182,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
 		pickOpts := withHomeRetryRound(opts, retryRound)
 		pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
@@ -347,7 +349,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = prepareRequestAfterAuth(execCtx, selection.Executor, preparedAuth, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				if isCredentialTerminatedError(errIntercept) {
 					refusedErr = errIntercept

@@ -63,6 +63,11 @@ func TranslateStreamWithClaudeInputTokens(
 		rawJSON,
 		param,
 	)
+	return state.FinalizeTranslatedUsage(ctx, responseFormat, chunks, param)
+}
+
+// FinalizeTranslatedUsage adds protocol usage details to native or provider-local translations.
+func (state *ClaudeInputTokenState) FinalizeTranslatedUsage(ctx context.Context, responseFormat sdktranslator.Format, chunks [][]byte, param *any) [][]byte {
 	if param != nil && ApplyPatchTranslationError(*param) != nil {
 		return chunks
 	}

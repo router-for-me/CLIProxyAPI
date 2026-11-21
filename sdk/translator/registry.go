@@ -12,10 +12,11 @@ import (
 
 // Registry manages translation functions across schemas.
 type Registry struct {
-	mu        sync.RWMutex
-	requests  map[Format]map[Format]RequestEnvelopeTransform
-	responses map[Format]map[Format]ResponseTransform
-	hooks     PluginHooks
+	mu              sync.RWMutex
+	requests        map[Format]map[Format]RequestEnvelopeTransform
+	responses       map[Format]map[Format]ResponseTransform
+	hooks           PluginHooks
+	useDefaultHooks bool
 }
 
 // NewRegistry constructs an empty translator registry.
@@ -24,6 +25,25 @@ func NewRegistry() *Registry {
 		requests:  make(map[Format]map[Format]RequestEnvelopeTransform),
 		responses: make(map[Format]map[Format]ResponseTransform),
 	}
+}
+
+// NewRegistryWithDefaultPluginHooks creates a private transform table that uses
+// the live default plugin hooks without advertising its formats to other callers.
+func NewRegistryWithDefaultPluginHooks() *Registry {
+	r := NewRegistry()
+	r.useDefaultHooks = true
+	return r
+}
+
+// The caller holds r.mu. Only a private registry can delegate to the default
+// one, so the locks are always acquired in that order.
+func (r *Registry) pluginHooksLocked() PluginHooks {
+	if r.useDefaultHooks {
+		defaultRegistry.mu.RLock()
+		defer defaultRegistry.mu.RUnlock()
+		return defaultRegistry.hooks
+	}
+	return r.hooks
 }
 
 // Register stores request/response transforms between two formats.
@@ -85,6 +105,7 @@ func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.useDefaultHooks = false
 	r.hooks = hooks
 }
 
@@ -92,7 +113,7 @@ func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 func (r *Registry) HasPluginHooks() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.hooks != nil
+	return r.pluginHooksLocked() != nil
 }
 
 // TranslateRequest converts a payload between schemas, returning the original payload
@@ -120,7 +141,7 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	if byTarget, ok := r.requests[from]; ok {
 		fn = byTarget[to]
 	}
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	if fn != nil {
@@ -267,7 +288,7 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 	if byTarget, ok := r.responses[to]; ok {
 		stream = byTarget[from].Stream
 	}
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	body := rawJSON
@@ -307,7 +328,7 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 	if byTarget, ok := r.responses[to]; ok {
 		fn = byTarget[from]
 	}
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	body := rawJSON
@@ -359,7 +380,7 @@ func (r *Registry) NormalizeRequest(ctx context.Context, from, to Format, model 
 		ctx = context.Background()
 	}
 	r.mu.RLock()
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	if hooks != nil {
