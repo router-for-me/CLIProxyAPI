@@ -192,7 +192,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes, httpResp.Header)
 		return resp, err
 	}
 
@@ -440,7 +440,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes, httpResp.Header)
 		return resp, err
 	}
 
@@ -500,7 +500,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("antigravity executor: close response body error: %v", errClose)
 				}
-				err = newAntigravityStatusErr(tosCode, payload)
+				err = newAntigravityStatusErr(tosCode, payload, httpResp.Header)
 				helps.RecordAPIResponseError(ctx, e.cfg, err)
 				reporter.PublishFailure(ctx, err)
 				return resp, err
