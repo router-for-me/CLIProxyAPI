@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -221,6 +222,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.authEpochs[auth.ID] = auth.RegistrationEpoch
 	}
 	m.authEpochs[auth.ID]++
+	if auth.RegistrationEpoch != 0 {
+		auth.CopilotCatalog = nil
+	}
 	auth.RegistrationEpoch = m.authEpochs[auth.ID]
 	if existing, exists := m.auths[auth.ID]; exists && existing != nil {
 		auth.CredentialVersion = max(auth.CredentialVersion, existing.CredentialVersion) + 1
@@ -498,6 +502,19 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	if existing.CopilotCatalog != nil || auth.CopilotCatalog != nil {
+		// An unversioned file reload or stale clone cannot replace newer discovery.
+		// A different account or upstream must discover its own permissions.
+		switch {
+		case existing.Provider != auth.Provider || auth.Disabled || auth.Status == StatusDisabled ||
+			authMetadataString(existing, "base_url") != authMetadataString(auth, "base_url") ||
+			authMetadataString(existing, "account_id") != authMetadataString(auth, "account_id") ||
+			authRefreshToken(existing) != authRefreshToken(auth):
+			auth.CopilotCatalog = copilot.UnavailableCatalog
+		case auth.CopilotCatalog == nil || auth.Generation < existing.Generation || isFileSnapshot:
+			auth.CopilotCatalog = existing.CopilotCatalog
+		}
+	}
 	if auth.Generation <= existing.Generation {
 		auth.Generation = existing.Generation + 1
 	} else {
@@ -958,6 +975,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		if len(auth.ModelStates) > 0 {
 			updateAggregatedAvailability(auth, now)
 		}
+		auth.CopilotCatalog = nil
 		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 		auth.Generation = 1

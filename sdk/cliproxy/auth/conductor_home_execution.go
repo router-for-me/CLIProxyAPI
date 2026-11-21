@@ -253,10 +253,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
 		})
 		execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), selection.Provider)
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		// Home owns credential availability; execute its dispatch without local state filtering.
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {

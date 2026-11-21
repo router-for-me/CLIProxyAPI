@@ -21,6 +21,7 @@ import (
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -70,6 +71,8 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
+	// CopilotCatalog holds this account's discovered routes in memory only.
+	CopilotCatalog *copilot.Catalog `json:"-"`
 	// CodexRefreshPatch carries an immutable pending credential update, never configuration.
 	CodexRefreshPatch *codex.CredentialRefreshPatch `json:"-"`
 	// Label is an optional human readable label for logging.
@@ -492,6 +495,22 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 	}
 
 	return out
+}
+
+// ActiveCopilotCatalog selects the account snapshot or the pre-discovery catalog.
+// A known empty, expired or revoked account directory never reopens preset routes.
+func (a *Auth) ActiveCopilotCatalog(now time.Time) *copilot.Catalog {
+	if a == nil || a.Disabled || a.Status == StatusDisabled {
+		return nil
+	}
+	if a.CopilotCatalog != nil {
+		return a.CopilotCatalog.Active(now)
+	}
+	base, _ := a.Metadata["base_url"].(string)
+	if !copilot.TrustedAPI(base) || !a.HasValidAccessToken(now) || a.RejectedAccessToken != "" && a.RejectedAccessToken == authAccessToken(a) {
+		return nil
+	}
+	return copilot.PresetCatalog
 }
 
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.

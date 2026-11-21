@@ -42,24 +42,23 @@ func (e CopilotExecutor) WithConfig(cfg *config.Config) *CopilotExecutor {
 func (*CopilotExecutor) Identifier() string { return copilot.Provider }
 
 type copilotAttemptRoute struct {
-	authID, catalog, model string
-	route                  copilot.Route
-	expiresAt              time.Time
+	catalog   *copilot.Catalog
+	route     copilot.Route
+	expiresAt time.Time
 }
 
 func (*CopilotExecutor) PlanRequestRoute(auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) cliproxyexecutor.Options {
 	if auth == nil {
 		return opts
 	}
-	raw, _ := auth.Metadata[copilot.CatalogKey].(string)
 	model := thinking.ParseSuffix(req.Model).ModelName
-	catalog := copilot.ReadCatalog(raw, time.Now())
+	catalog := auth.ActiveCopilotCatalog(time.Now())
 	route, _ := catalog.Route(strings.TrimPrefix(model, copilot.ModelPrefix))
 	opts.Metadata = maps.Clone(opts.Metadata)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any, 1)
 	}
-	opts.Metadata[copilotRouteKey] = copilotAttemptRoute{authID: auth.ID, catalog: raw, model: model, route: route, expiresAt: catalog.FetchedAt.Add(copilot.CatalogMaxAge)}
+	opts.Metadata[copilotRouteKey] = copilotAttemptRoute{catalog: catalog, route: route, expiresAt: catalog.ExpiresAt()}
 	return opts
 }
 
@@ -92,8 +91,8 @@ func (e *CopilotExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) 
 	updated.Metadata["expired"] = time.Unix(token.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	// Directory discovery runs in the service-owned Copilot queue, never in
 	// the shared credential refresh workers. An origin change revokes old routes.
-	if previousBase != base {
-		delete(updated.Metadata, copilot.CatalogKey)
+	if previousBase != base && updated.CopilotCatalog != nil {
+		updated.CopilotCatalog = copilot.UnavailableCatalog
 	}
 	return updated, nil
 }
@@ -149,19 +148,19 @@ func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, 
 		return copilotPreparedRequest{}, statusErr{code: http.StatusUnauthorized, msg: "copilot: missing auth record"}
 	}
 	model := thinking.ParseSuffix(req.Model).ModelName
-	plan, planned := opts.Metadata[copilotRouteKey].(copilotAttemptRoute)
-	raw, _ := auth.Metadata[copilot.CatalogKey].(string)
-	if !planned || plan.authID != auth.ID || plan.model != model || plan.catalog != raw {
-		previous := plan
-		plan, _ = e.PlanRequestRoute(auth, req, opts).Metadata[copilotRouteKey].(copilotAttemptRoute)
-		if planned && previous.route.Endpoint != plan.route.Endpoint {
-			// A token refresh may change availability. Never send an intercepted
-			// request to a different protocol without a new execution attempt.
+	now := time.Now()
+	catalog := auth.ActiveCopilotCatalog(now)
+	// Re-resolve against the current allowlist even when the account snapshot is unchanged.
+	route, _ := catalog.Route(strings.TrimPrefix(model, copilot.ModelPrefix))
+	if plan, planned := opts.Metadata[copilotRouteKey].(copilotAttemptRoute); planned {
+		if plan.route.Endpoint != route.Endpoint {
 			return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: model route changed after refresh"}
 		}
+		if plan.catalog == catalog && !plan.expiresAt.IsZero() && !now.Before(plan.expiresAt) {
+			return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: expired model route"}
+		}
 	}
-	route := plan.route
-	if route.Format == "" || !time.Now().Before(plan.expiresAt) {
+	if route.Format == "" {
 		return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: no supported endpoint for this model and account"}
 	}
 	baseModel := route.Info.ID

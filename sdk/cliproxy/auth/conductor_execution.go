@@ -1287,10 +1287,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -1591,10 +1588,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -2022,10 +2016,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errBind
 			}
 		}
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		if homeMode {
 			clearSchedulerSelectionID(opts.Metadata)
@@ -3353,6 +3344,15 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 // roundTripperContextKey is an unexported context key type to avoid collisions.
 type roundTripperContextKey struct{}
 
+// WithAuthTransport applies the same per-account transport to inference and model discovery.
+func (m *Manager) WithAuthTransport(ctx context.Context, auth *Auth) context.Context {
+	if rt := m.roundTripperFor(auth); rt != nil {
+		ctx = context.WithValue(ctx, roundTripperContextKey{}, rt)
+		return context.WithValue(ctx, "cliproxy.roundtripper", rt)
+	}
+	return ctx
+}
+
 // roundTripperFor retrieves an HTTP RoundTripper for the given auth if a provider is registered.
 func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
 	m.mu.RLock()
@@ -4068,10 +4068,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if errCtx := baseCtx.Err(); errCtx != nil {
 		return auth, errCtx
 	}
-	if rt := m.roundTripperFor(auth); rt != nil {
-		baseCtx = context.WithValue(baseCtx, roundTripperContextKey{}, rt)
-		baseCtx = context.WithValue(baseCtx, "cliproxy.roundtripper", rt)
-	}
+	baseCtx = m.WithAuthTransport(baseCtx, auth)
 	execCtx := syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 	executionSeq := m.nextExecutionSeq()
 

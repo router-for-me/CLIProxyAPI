@@ -13,8 +13,8 @@ func TestCopilotCatalogDoesNotDriveSharedCredentialRefresh(t *testing.T) {
 	setRefreshLeadFactory(t, copilot.Provider, func() *time.Duration { return &lead })
 	a := &Auth{ID: "account", Provider: copilot.Provider, LastRefreshedAt: start, Metadata: map[string]any{"expired": start.Add(24 * time.Hour).Format(time.RFC3339)}}
 	m := &Manager{}
-	for _, catalog := range []string{"", `{"fetched_at":"2020-01-01T00:00:00Z","data":[]}`} {
-		a.Metadata[copilot.CatalogKey] = catalog
+	for _, catalog := range []*copilot.Catalog{nil, copilot.NewCatalog(nil, start.Add(-24*time.Hour))} {
+		a.CopilotCatalog = catalog
 		next, scheduled := nextRefreshCheckAt(start, a, time.Second)
 		want := start.Add(24*time.Hour - lead)
 		if !scheduled || !next.Equal(want) || m.shouldRefresh(a, start) {

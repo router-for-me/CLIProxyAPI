@@ -199,14 +199,13 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			}
 		}
 		models = applyExcludedModels(models, excluded)
-	case copilot.Provider:
-		raw, _ := a.Metadata[copilot.CatalogKey].(string)
-		for _, route := range copilot.ReadCatalog(raw, time.Now()).Routes() {
+	case "copilot":
+		for _, route := range a.ActiveCopilotCatalog(time.Now()).Routes() {
 			id := route.Info.ID
 			models = append(models, copilotPublicModel(route.Info, id, id))
 		}
 		// Native and plugin IDs share the same public namespace before exclusions and aliases.
-		models = appendDistinctModels(models, copilotPublicPluginModels(s.pluginModelsForProvider(provider)))
+		models = appendDistinctModels(models, s.copilotPublicPluginModels(a, s.pluginModelsForProvider(provider)))
 		models = applyExcludedModels(models, excluded)
 	case "devin":
 		models = registry.GetDevinModels()
@@ -680,8 +679,18 @@ func copilotPublicModel(model *ModelInfo, nativeID, routeID string) *ModelInfo {
 	return &clone
 }
 
-func copilotPublicPluginModels(models []*ModelInfo) []*ModelInfo {
+func (s *Service) copilotPluginExecutes() bool {
+	if s.pluginHost == nil || s.coreManager == nil {
+		return false
+	}
+	exec, _ := s.coreManager.Executor(copilot.Provider)
+	return s.pluginHost.OwnsExecutor(exec)
+}
+
+func (s *Service) copilotPublicPluginModels(auth *coreauth.Auth, models []*ModelInfo) []*ModelInfo {
 	var out []*ModelInfo
+	catalog := auth.ActiveCopilotCatalog(time.Now())
+	pluginExecutes := s.copilotPluginExecutes()
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -690,7 +699,9 @@ func copilotPublicPluginModels(models []*ModelInfo) []*ModelInfo {
 		// Keep exact route suffixes public, but use the base as the native ID.
 		routeID := strings.TrimPrefix(strings.TrimSpace(model.ID), copilot.ModelPrefix)
 		if nativeID := strings.TrimSpace(thinking.ParseSuffix(routeID).ModelName); nativeID != "" {
-			out = append(out, copilotPublicModel(model, nativeID, routeID))
+			if _, available := catalog.Route(nativeID); pluginExecutes || available {
+				out = append(out, copilotPublicModel(model, nativeID, routeID))
+			}
 		}
 	}
 	return out

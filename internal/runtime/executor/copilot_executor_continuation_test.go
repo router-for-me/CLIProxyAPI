@@ -21,8 +21,8 @@ import (
 
 func TestCopilotPlannedRouteCannotOutliveCatalog(t *testing.T) {
 	e := NewCopilotExecutor(nil)
-	a := copilotTestAuth(t, "account", "m", copilot.Chat)
-	req := x.Request{Model: "m", Payload: []byte(`{"messages":[]}`)}
+	a := copilotTestAuth(t, "account", "claude-opus-5", copilot.Chat)
+	req := x.Request{Model: "claude-opus-5", Payload: []byte(`{"messages":[]}`)}
 	opts := e.PlanRequestRoute(a, req, x.Options{SourceFormat: tr.FormatOpenAI})
 	plan := opts.Metadata[copilotRouteKey].(copilotAttemptRoute)
 	plan.expiresAt = time.Unix(1, 0)
@@ -38,9 +38,9 @@ func TestCopilotIncrementalResponseRequiresStatefulRoute(t *testing.T) {
 	e := NewCopilotExecutor(nil)
 	opts := x.Options{SourceFormat: tr.FormatOpenAIResponse}
 	for _, endpoint := range []string{copilot.Chat, copilot.Messages, copilot.Responses} {
-		a := copilotTestAuth(t, "account", "m", endpoint)
+		a := copilotTestAuth(t, "account", "claude-opus-5", endpoint)
 		for _, input := range []string{`"another question"`, `[{"type":"function_call_output","call_id":"a","output":"result"}]`} {
-			req := x.Request{Model: "m", Payload: []byte(`{"previous_response_id":"resp1","input":` + input + `}`)}
+			req := x.Request{Model: "claude-opus-5", Payload: []byte(`{"previous_response_id":"resp1","input":` + input + `}`)}
 			for _, mode := range [][2]bool{{false, false}, {true, false}, {false, true}} {
 				p, err := e.prepare(context.Background(), a, req, opts, mode[0], mode[1])
 				var status statusErr

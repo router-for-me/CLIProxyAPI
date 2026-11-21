@@ -1910,10 +1910,7 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		}
 		attempted[c.auth.ID] = struct{}{}
 		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
+		creditsCtx = m.WithAuthTransport(creditsCtx, c.auth)
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
@@ -2034,10 +2031,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		}
 		attempted[c.auth.ID] = struct{}{}
 		creditsCtx := WithAntigravityCredits(ctx)
-		if rt := m.roundTripperFor(c.auth); rt != nil {
-			creditsCtx = context.WithValue(creditsCtx, roundTripperContextKey{}, rt)
-			creditsCtx = context.WithValue(creditsCtx, "cliproxy.roundtripper", rt)
-		}
+		creditsCtx = m.WithAuthTransport(creditsCtx, c.auth)
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)

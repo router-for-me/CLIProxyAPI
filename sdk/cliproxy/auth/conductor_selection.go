@@ -2056,6 +2056,19 @@ func (m *Manager) List() []*Auth {
 	return list
 }
 
+// IDsByProvider returns matching credential IDs without cloning unrelated auth state.
+func (m *Manager) IDsByProvider(provider string) []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var ids []string
+	for id, auth := range m.auths {
+		if auth.Provider == provider {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // GetByID retrieves an auth entry by its ID.
 func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if id == "" {
