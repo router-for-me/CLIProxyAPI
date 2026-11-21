@@ -451,4 +451,13 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		proxyURL = cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+	sdkAuth.StartAntigravityVersionUpdaterWithProxyProvider(ctx, s.antigravityVersionProxyURL)
+}
+
+func (s *Service) antigravityVersionProxyURL() string {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.ProxyURL
 }
