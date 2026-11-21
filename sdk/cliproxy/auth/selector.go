@@ -1629,16 +1629,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if errContext := ctx.Err(); errContext != nil {
 		return nil, errContext
 	}
-	if quota := soonestSelector(s.fallback); quota != nil {
-		ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, opts.Headers))
-		usable := make([]*Auth, 0, len(auths))
-		for _, a := range auths {
-			if a != nil && (IsCodexUseSIWCForRequest(ctx, a, opts.Headers) || quota.blockedUntil(a, routingQuotaModel(ctx, a, model), time.Now()).IsZero()) {
-				usable = append(usable, a)
-			}
-		}
-		auths = usable
-	}
+	ctx, auths = soonestResetAffinityCandidates(ctx, s.fallback, auths, model, opts.Headers)
 	var reservation *weightedReservation
 	// Local bindings complete inside Pick; failed selections release speculative credit.
 	defer func() { reservation.finish(selected != nil && errPick == nil) }()
