@@ -35,6 +35,9 @@ Every job starts at once. None waits on another.
   package exactly once. After running, it proves it ran exactly its own part.
 - A package slower than 20s is split by top-level test name. The last part uses `-skip` with the
   names of the other parts, so a test added since the timings were recorded still runs.
+- A single test slower than 20s is split by its subtests (`-run '^X$/^(subs)$'`). Its remainder runs
+  `-run '^X$' -skip '^X$/^(subs)$'`, so a new subtest still runs. Each shard prints the plan digest;
+  every shard of one run shows the same digest.
 
 ## Selection (PRs, with a merge queue only)
 

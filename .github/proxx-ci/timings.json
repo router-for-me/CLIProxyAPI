@@ -122,6 +122,7 @@
   "github.com/router-for-me/CLIProxyAPI/v8/cmd/server": {
    "TestPersistSeededConfigHashesSecretBeforePersisting": 1.64,
    "TestPersistSeededConfigRefusesConfigThatKeepsPlaintextSecret": 0.82,
+   "TestPersistSeededConfigRefusesConfigThatKeepsPlaintextSecret/anchored_secret": 0.82,
    "TestServerInterruptExitsSuccessfully": 1.23
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/api": {
@@ -130,10 +131,16 @@
    "TestManagementV8PluginOperationMigratesConfiguration": 0.8,
    "TestManagementV8PluginsExposesRuntimePriorityOnlyOnV8": 1.02,
    "TestManagementV8RoutesShareAccessControl": 4.05,
+   "TestManagementV8RoutesShareAccessControl/authorized": 0.69,
+   "TestManagementV8RoutesShareAccessControl/disabled": 1.1,
+   "TestManagementV8RoutesShareAccessControl/home": 0.99,
+   "TestManagementV8RoutesShareAccessControl/missing_key": 1.27,
    "TestServerMaxRequestBodyBytesRejectsContentLengthAndChunkedBodies": 1.92,
+   "TestServerMaxRequestBodyBytesRejectsContentLengthAndChunkedBodies/v8_management_chunked_body_exceeding_limit_returns_413": 1.74,
    "TestServerStop_ShutdownTimeoutFallsBackToClose": 1.02,
    "TestServerStop_ShutdownTimeoutTighterParentCtx": 0.51,
-   "TestServerWebsocketTunnel_TLSWithoutALPNClosesRawTransport": 1.03
+   "TestServerWebsocketTunnel_TLSWithoutALPNClosesRawTransport": 1.03,
+   "TestServerWebsocketTunnel_TLSWithoutALPNClosesRawTransport/saturated_WebSocket_close": 1.01
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management": {
    "TestAuthenticateManagementKey_ReusesVerifiedSecretWithinOneHourTTL": 2.47,
@@ -145,10 +152,14 @@
    "TestRequestCodexTokenCompletionKeepsConcurrentSessionPending": 0.52,
    "TestRequestCodexTokenLoginDoesNotRaceConfigV8Save": 0.54,
    "TestRequestCodexToken_PlanTypeSavedToAuthFile": 1.01,
+   "TestRequestCodexToken_PlanTypeSavedToAuthFile/missing_plan_type_defaults_to_free_in_auth_file": 0.51,
+   "TestRequestCodexToken_PlanTypeSavedToAuthFile/specified_plan_type_preserved_in_auth_file": 0.51,
    "TestStartOAuthV8AntigravityAndPluginSessionProxyAndRestartPersistence": 0.52,
    "TestStartOAuthV8AntigravityProjectDiscoveryProxyFailureFailsSession": 0.51,
    "TestStartOAuthV8ParallelSessionsWithDifferentProxiesOutOfOrderCallbacks": 1.01,
    "TestStartOAuthV8ProxyFailuresDoNotFallbackDirectAndRedactCredentials": 1.05,
+   "TestStartOAuthV8ProxyFailuresDoNotFallbackDirectAndRedactCredentials/proxy_auth_rejected": 0.52,
+   "TestStartOAuthV8ProxyFailuresDoNotFallbackDirectAndRedactCredentials/proxy_connection_dropped": 0.51,
    "TestStartOAuthV8SessionScopedProxyAndPersistence": 0.51,
    "TestStartOAuthV8WithoutProxyPreservesDefaultBehaviorAndPersistedProxyRefresh": 0.52,
    "TestTargetedOAuthReloginAntigravityRejectsMismatchedAccountAndUpdatesMatchingTarget": 1.02,
@@ -161,10 +172,13 @@
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex": {
    "TestRefreshJournalSurvivesProcessRestart": 1.36,
-   "TestRefreshTokensReleasesClaimAfterPreSendFailures": 1.18
+   "TestRefreshTokensReleasesClaimAfterPreSendFailures": 1.18,
+   "TestRefreshTokensReleasesClaimAfterPreSendFailures/proxy_connect_401_is_retryable_and_releases_claim": 1.06
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta": {
-   "TestMetaAuth_WaitForAuthorization": 3.01
+   "TestMetaAuth_WaitForAuthorization": 3.01,
+   "TestMetaAuth_WaitForAuthorization/mint_failure_falls_back_gracefully_to_dca_token": 1,
+   "TestMetaAuth_WaitForAuthorization/successful_authorization_and_minting": 2
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live": {
    "TestPionMediaRelayBridgesAudioAndDataChannel": 0.52
@@ -175,20 +189,37 @@
   "github.com/router-for-me/CLIProxyAPI/v8/internal/config": {
    "TestPayloadReplaceSavePreservesEmptyReplacements": 1.86,
    "TestPrepareConfigFileForUploadDropsConflictingLegacySecret": 1.99,
+   "TestPrepareConfigFileForUploadDropsConflictingLegacySecret/duplicated_plaintext": 1.95,
    "TestPrepareConfigFileForUploadHashesPlaintextSecret": 2.84,
+   "TestPrepareConfigFileForUploadHashesPlaintextSecret/legacy_layout": 1.37,
+   "TestPrepareConfigFileForUploadHashesPlaintextSecret/v8_layout": 1.47,
    "TestPrepareConfigFileForUploadIgnoresKeysSpelledLikeSecret": 1.84,
+   "TestPrepareConfigFileForUploadIgnoresKeysSpelledLikeSecret/v8_secret_spelled_like_its_section": 1.83,
    "TestPrepareConfigFileForUploadIgnoresYAMLNullBesideStringNullSecret": 1.5,
    "TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences": 10.56,
+   "TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences/anchored_legacy_beside_plaintext_v8": 2.45,
+   "TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences/mapping_anchor": 1.67,
+   "TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences/merge_key": 2.48,
+   "TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences/scalar_anchor": 1.76,
+   "TestPrepareConfigFileForUploadRefusesPlaintextKeptByReferences/shared_anchor": 2.17,
    "TestPrepareConfigFileForUploadReportsSecretItCannotHash": 1.03,
+   "TestPrepareConfigFileForUploadReportsSecretItCannotHash/read-only_file": 1.03,
    "TestV8ExampleLoadsAndRoundTrips": 0.91,
    "TestV8MigrationPreservesEmptyLegacyContainers": 0.75,
    "TestV8SecretHashResolvesReferences": 6.83,
+   "TestV8SecretHashResolvesReferences/legacy_alias": 1.44,
+   "TestV8SecretHashResolvesReferences/v8_alias": 1.18,
+   "TestV8SecretHashResolvesReferences/v8_merge": 0.99,
+   "TestV8SecretHashResolvesReferences/v8_root_merge": 0.99,
+   "TestV8SecretHashResolvesReferences/v8_scalar_alias": 1.02,
+   "TestV8SecretHashResolvesReferences/v8_wins_legacy": 1.21,
    "TestV8SecretHashUsesNewPath": 1.15
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/discovery": {
    "TestAdvertiserAndBrowser_Integration": 6.54,
    "TestAdvertiser_IdempotenceAndShutdown": 0.76,
-   "TestBrowseFlushAtCapacityPreservesReplacement": 0.53
+   "TestBrowseFlushAtCapacityPreservesReplacement": 0.53,
+   "TestBrowseFlushAtCapacityPreservesReplacement/records": 0.52
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/home": {
    "TestClusterBalanceBlockedRPCDoesNotDelayHeartbeatExpiry": 0.83
@@ -208,7 +239,8 @@
    "TestUnixPluginProbeDoesNotBlockOnInheritedStdioGrandchild": 1.67,
    "TestUnixPluginProbeStoredHostCallbackAndLargeStderrSubprocess": 1.37,
    "TestUnixPluginReloadAfterShutdownUsesReplacedFile": 1.54,
-   "TestUnixReloadTestPluginConstructorsNotDuplicatedByCgo": 1.82
+   "TestUnixReloadTestPluginConstructorsNotDuplicatedByCgo": 1.82,
+   "TestUnixReloadTestPluginConstructorsNotDuplicatedByCgo/PLUGIN_VERSION_7": 0.54
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor": {
    "TestAntigravityReplayMergeRandomizedDifferential": 5.23,
@@ -216,11 +248,18 @@
    "TestApplyPatchNamedLateIdentityActualTransports": 0.59,
    "TestClaudeExecutorManagerRetriesSilentTLSHandshakeThroughConnectProxy": 4.04,
    "TestClaudeThreadCallerProfileSurvivesMissingCache": 30.89,
+   "TestClaudeThreadCallerProfileSurvivesMissingCache/body_eviction": 7.96,
+   "TestClaudeThreadCallerProfileSurvivesMissingCache/body_only_eviction": 7.13,
+   "TestClaudeThreadCallerProfileSurvivesMissingCache/derived_eviction": 7.65,
+   "TestClaudeThreadCallerProfileSurvivesMissingCache/eviction": 7.92,
    "TestCodexExecutorPreSendRefreshFailureRecoversOnLaterAttempt": 3.6,
    "TestExecutorPayloadSingleDocPipelinesByteConsistency": 1.47,
+   "TestExecutorPayloadSingleDocPipelinesByteConsistency/gemini_and_aistudio_doc_pipeline_matches_byte_pipeline": 1.47,
    "TestGeminiVertexDropsTrailingReasoningTurn": 1.68,
    "TestGeminiVertexExecutorPromptFeedbackBlockWithoutCandidatesReturnsError": 1.08,
+   "TestGeminiVertexExecutorPromptFeedbackBlockWithoutCandidatesReturnsError/service_account": 1.07,
    "TestGeminiVertexExecutor_AliasedHydrogenPreservesNativeThinkingLevelWhenShadowed": 1.16,
+   "TestGeminiVertexExecutor_AliasedHydrogenPreservesNativeThinkingLevelWhenShadowed/shadowed_by_user_defined_model_xhigh": 0.81,
    "TestGeminiVertexTrailingReasoningDropPrecedesPayloadRules": 0.51,
    "TestIssue6258ExecutorResponsesSplitUsage": 0.69,
    "TestIssue7513_GeminiVertexAIStudioZeroOutputAbnormalFinishReturns502BeforeBootstrap": 1.95,
@@ -243,7 +282,10 @@
    "TestEnsureRepositoryReconcilesRemoteAuthChangesAroundLocalConfig": 0.63,
    "TestEnsureRepositoryReconcilesRemoteConfigChangesAroundLocalAuth": 0.51,
    "TestGitTokenStoreCorruptionRecoveryPreservesOnlyNonConflictingLocalChanges": 0.85,
+   "TestGitTokenStoreCorruptionRecoveryPreservesOnlyNonConflictingLocalChanges/non-conflicting_change": 0.51,
    "TestGitTokenStoreCorruptionRecoveryUsesLatestRemoteAuthTree": 1.4,
+   "TestGitTokenStoreCorruptionRecoveryUsesLatestRemoteAuthTree/deletion": 0.87,
+   "TestGitTokenStoreCorruptionRecoveryUsesLatestRemoteAuthTree/modification": 0.53,
    "TestGitTokenStorePersistConfigDropsUnrelatedStagedDeletions": 0.63,
    "TestGitTokenStorePersistConfigPreservesRemoteOnlyAuthAfterDivergence": 0.61,
    "TestGitTokenStoreRejectsStaleForcePush": 0.64,
@@ -252,8 +294,12 @@
    "TestObjectRefreshJournalHonorsEnvironmentProxy": 1.17,
    "TestObjectTokenStoreSeedHashesPlaintextManagementSecret": 2.2,
    "TestObjectTokenStoreSeedRefusesConfigThatKeepsPlaintextSecret": 5.01,
+   "TestObjectTokenStoreSeedRefusesConfigThatKeepsPlaintextSecret/anchored_legacy_secret_beside_v8_secret": 2.12,
+   "TestObjectTokenStoreSeedRefusesConfigThatKeepsPlaintextSecret/anchored_secret": 2.89,
    "TestPostgresStoreSeedHashesPlaintextManagementSecret": 1.78,
-   "TestPostgresStoreSeedRefusesConfigThatKeepsPlaintextSecret": 4.25
+   "TestPostgresStoreSeedRefusesConfigThatKeepsPlaintextSecret": 4.25,
+   "TestPostgresStoreSeedRefusesConfigThatKeepsPlaintextSecret/anchored_legacy_secret_beside_v8_secret": 2.17,
+   "TestPostgresStoreSeedRefusesConfigThatKeepsPlaintextSecret/anchored_secret": 2.08
   },
   "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/gemini": {
    "TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload": 1.72
@@ -271,6 +317,7 @@
   "github.com/router-for-me/CLIProxyAPI/v8/internal/wstunnel": {
    "TestHubLimits_BinaryPayloadAndTransportBoundaries": 8.45,
    "TestPeerControl_OversizedMessagesUseWriterCloseWithoutFiniteDeadlines": 1.92,
+   "TestPeerControl_OversizedMessagesUseWriterCloseWithoutFiniteDeadlines/binary": 1.89,
    "TestPeerControl_ProtocolErrorInterruptsActiveWriteImmediately": 0.53
   },
   "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers": {
@@ -279,6 +326,8 @@
   "github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai": {
    "TestResponsesWebsocketPingsBeforeUpstreamStreamIsReady": 2.01,
    "TestResponsesWebsocketToolCacheScansDoNotCopyLargePayloads": 3.91,
+   "TestResponsesWebsocketToolCacheScansDoNotCopyLargePayloads/request": 1.77,
+   "TestResponsesWebsocketToolCacheScansDoNotCopyLargePayloads/response": 1.41,
    "TestResponsesWebsocketToolCacheTurnDoesNotRetainRequestBackingStorage": 0.88
   },
   "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth": {
@@ -298,14 +347,25 @@
   },
   "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth": {
    "TestIssue7431_DynamicPoolBoundsAndReservationLifecycle": 1.54,
+   "TestIssue7431_DynamicPoolBoundsAndReservationLifecycle/large-weighted-pool-preserves-progress-across-scheduler-rebuild": 1.51,
    "TestIssue7431_LargeWeightedPoolEdgeCases": 1.04,
+   "TestIssue7431_LargeWeightedPoolEdgeCases/priority-buckets-isolated-and-forget-auth-prunes-dynamic-pool": 1.03,
    "TestIssue7431_LargeWeightedPoolRotatesAcrossTransientExclusionsAndCooldowns": 189.62,
+   "TestIssue7431_LargeWeightedPoolRotatesAcrossTransientExclusionsAndCooldowns/scheduler-fast-path": 92.96,
+   "TestIssue7431_LargeWeightedPoolRotatesAcrossTransientExclusionsAndCooldowns/session-affinity-legacy": 96.66,
    "TestIssue7431_SameLayerForceCooldownAndPersistenceAndEpochRaces": 3.1,
+   "TestIssue7431_SameLayerForceCooldownAndPersistenceAndEpochRaces/delayed-forget-after-remove-does-not-wipe-reregistered-auth": 0.64,
+   "TestIssue7431_SameLayerForceCooldownAndPersistenceAndEpochRaces/http-bound-large-pool-keeps-credits-when-last-websocket-peer-excluded": 1.01,
+   "TestIssue7431_SameLayerForceCooldownAndPersistenceAndEpochRaces/mixed-transport-large-websocket-pool-keeps-credits-when-http-peer-excluded": 1.07,
    "TestManagerWeightedOverloadStickyAndPinnedSessions": 1.01,
    "TestManagerWeightedPriorityPoolIsolation": 0.85,
    "TestPublishedAuthSnapshotRace": 6.13,
+   "TestPublishedAuthSnapshotRace/Update": 1.99,
+   "TestPublishedAuthSnapshotRace/UpdatePreparedAuth": 2.01,
+   "TestPublishedAuthSnapshotRace/UpdateRefreshedAuth": 2.05,
    "TestWeightedOverloadFeasibleSustainedTraffic": 1.28,
    "TestWeightedOverloadMultipleBusyBindings": 1.16,
+   "TestWeightedOverloadMultipleBusyBindings/10": 0.79,
    "TestWeightedOverloadRecoveryAfterStickyTrafficStops": 0.76,
    "TestWeightedOverloadSustainedStickyTrafficDoesNotStarveOthers": 2.47,
    "TestWeightedSessionAffinityPoolIsolation": 4.11

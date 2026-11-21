@@ -20,6 +20,7 @@ import hashlib
 import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -167,15 +168,45 @@ def plan(shards, timings, packages, target):
     items = []
     for p in packages:
         cost = pk_t.get(p, default)
-        tests = ts_t.get(p, {})
+        recorded = ts_t.get(p, {})
+        tests = {n: t for n, t in recorded.items() if "/" not in n}
         if cost > target and len(tests) > 1:
+            # A single test longer than target is split by its subtests when their times are known.
+            # Its parts run -run '^X$/^(subs)$'; one remainder runs -run '^X$' -skip '^X$/^(subs)$',
+            # so a subtest added later still runs.
+            subsplit = []
+            for name, t in sorted(tests.items()):
+                subs = {n.split("/", 1)[1]: v for n, v in recorded.items()
+                        if n.startswith(name + "/") and "/" not in n[len(name) + 1:]}
+                if t <= target or len(subs) < 2:
+                    continue
+                parts = []
+                for sub, st in sorted(subs.items(), key=lambda kv: (-kv[1], kv[0])):
+                    b = next((b for b in parts if b[0] + st <= target), None)
+                    if b is None:
+                        b = [0.0, []]
+                        parts.append(b)
+                    b[0] += st
+                    b[1].append(sub)
+                named_subs = sorted(x for _, xs in parts for x in xs)
+                for st, xs in parts:
+                    items.append({"package": p, "test": name, "subs": sorted(xs), "cost": st + PACKAGE_OVERHEAD})
+                items.append({"package": p, "test": name, "skipsubs": named_subs,
+                              "cost": max(t - sum(subs.values()), 0.0) + PACKAGE_OVERHEAD})
+                subsplit.append(name)
+                cost -= t
+                del tests[name]
             # First fit decreasing over tests that matter (>= 1s); small and unknown tests stay
             # in the -skip remainder. A test longer than target gets a part of its own.
-            buckets, rest = [], cost - sum(tests.values())
+            buckets, rest = [], max(cost - sum(tests.values()), 0.0)
+            unprocessed = sum(tests.values())
             for name, t in sorted(tests.items(), key=lambda kv: (-kv[1], kv[0])):
-                if t < 1.0 or sum(tests.values()) - sum(b[0] for b in buckets) <= target:
+                # Everything not yet given a part ends up in the remainder; stop once that fits.
+                if t < 1.0 or rest + unprocessed <= target:
                     rest += t
+                    unprocessed -= t
                     continue
+                unprocessed -= t
                 b = next((b for b in buckets if b[0] + t <= target), None)
                 if b is None:
                     b = [0.0, []]
@@ -183,17 +214,18 @@ def plan(shards, timings, packages, target):
                 b[0] += t
                 b[1].append(name)
             rest = max(rest, 0.0)
-            if not buckets:
+            if not buckets and not subsplit:
                 items.append({"package": p, "cost": cost + PACKAGE_OVERHEAD})
                 continue
             named = sorted(n for _, ns in buckets for n in ns)
             for t, ns in buckets:
                 items.append({"package": p, "run": sorted(ns), "cost": t + PACKAGE_OVERHEAD})
-            items.append({"package": p, "skip": named, "cost": rest + PACKAGE_OVERHEAD})
+            items.append({"package": p, "skip": sorted(named + subsplit), "cost": rest + PACKAGE_OVERHEAD})
         else:
             items.append({"package": p, "cost": cost + PACKAGE_OVERHEAD})
     out = [[0.0, []] for _ in range(shards)]
-    for it in sorted(items, key=lambda x: (-x["cost"], x["package"], x.get("run", [""])[:1])):
+    for it in sorted(items, key=lambda x: (-x["cost"], x["package"], x.get("test", ""),
+                                           (x.get("run") or x.get("subs") or [""])[:1])):
         s = min(range(shards), key=lambda i: (out[i][0], i))
         out[s][0] += it["cost"]
         out[s][1].append(it)
@@ -215,18 +247,25 @@ def prove_cover(packages, shard_items):
         sys.exit(f"plan does not cover the selection: missing={sorted(missing)} extra={sorted(extra)}")
     for p, its in seen.items():
         if len(its) == 1:
-            if "run" in its[0] or "skip" in its[0]:
+            if set(its[0]) - {"package", "cost"}:
                 sys.exit(f"plan: lone partial item for {p}")
             continue
         runs = [n for it in its if "run" in it for n in it["run"]]
         skips = [it for it in its if "skip" in it]
-        whole = [it for it in its if "run" not in it and "skip" not in it]
-        if whole or len(skips) != 1 or len(runs) != len(set(runs)) or sorted(runs) != skips[0]["skip"]:
+        whole = [it for it in its if not set(it) - {"package", "cost"}]
+        split_tests = sorted({it["test"] for it in its if "test" in it})
+        if (whole or len(skips) != 1 or len(runs) != len(set(runs)) or set(runs) & set(split_tests)
+                or sorted(runs + split_tests) != skips[0]["skip"]):
             sys.exit(f"plan: split of {p} is not an exact partition")
+        for x in split_tests:
+            subs = [n for it in its if it.get("test") == x and "subs" in it for n in it["subs"]]
+            rest = [it for it in its if it.get("test") == x and "skipsubs" in it]
+            if len(rest) != 1 or len(subs) != len(set(subs)) or sorted(subs) != rest[0]["skipsubs"]:
+                sys.exit(f"plan: subtest split of {p} {x} is not an exact partition")
 
 
 def anchored(names):
-    return "^(" + "|".join(names) + ")$"
+    return "^(" + "|".join(re.escape(n) for n in names) + ")$"
 
 
 def run_shard(shards, index, timings, packages, target, race, out_path):
@@ -236,7 +275,7 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
     print(f"shard {index + 1}/{shards}: {len(mine)} items, planned {full[index]['cost']}s "
           f"(all shards: {[s['cost'] for s in full]}), plan {digest}", flush=True)
     flags = ["-count=1", "-shuffle=on", "-json"] + (["-race"] if race else [])
-    whole = [it["package"] for it in mine if "run" not in it and "skip" not in it]
+    whole = [it["package"] for it in mine if not set(it) - {"package", "cost"}]
     cmds = []  # (label, command, plan item or None)
     if whole:
         cmds.append(("whole", ["go", "test", *flags, *whole], None))
@@ -246,11 +285,19 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
         elif "skip" in it:
             extra = ["-skip", anchored(it["skip"])] if it["skip"] else []
             cmds.append((it["package"], ["go", "test", *flags, *extra, it["package"]], it))
+        elif "subs" in it:
+            cmds.append((f"{it['package']} {it['test']}", ["go", "test", *flags, "-run",
+                         anchored([it["test"]]) + "/" + anchored(it["subs"]), it["package"]], it))
+        elif "skipsubs" in it:
+            cmds.append((f"{it['package']} {it['test']} (rest)", ["go", "test", *flags,
+                         "-run", anchored([it["test"]]),
+                         "-skip", anchored([it["test"]]) + "/" + anchored(it["skipsubs"]), it["package"]], it))
     ran, failed, ok = set(), [], True
     logs = {}  # (package, test) -> output lines, printed only when that test fails
     with open(out_path, "w") as out:
         for label, cmd, item in cmds:
             tests_ran = {}  # per invocation, so a -run part and the -skip part of one package stay apart
+            subs_ran = set()  # "X/sub" one level deep, for subtest parts
             start = time.time()
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
             for line in p.stdout:
@@ -264,6 +311,8 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
                     ran.add(pkg)
                 if act in ("pass", "fail", "skip") and test and "/" not in test:
                     tests_ran.setdefault(pkg, set()).add(test)
+                if act in ("pass", "fail", "skip") and test and test.count("/") == 1:
+                    subs_ran.add(test)
                 if act == "output":
                     logs.setdefault((pkg, test), []).append(e.get("Output", ""))
                 if act == "fail":
@@ -288,6 +337,18 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
                 if "skip" in item and got & set(item["skip"]):
                     failed.append(f"{item['package']}: -skip part ran skipped tests {sorted(got & set(item['skip']))}")
                     ok = False
+                if "test" in item:
+                    x = item["test"]
+                    mine_subs = {n.split("/", 1)[1] for n in subs_ran if n.startswith(x + "/")}
+                    if not got <= {x}:
+                        failed.append(f"{item['package']} {x}: subtest part ran other tests {sorted(got - {x})}")
+                        ok = False
+                    if "subs" in item and not mine_subs <= set(item["subs"]):
+                        failed.append(f"{item['package']} {x}: ran unplanned subtests {sorted(mine_subs - set(item['subs']))}")
+                        ok = False
+                    if "skipsubs" in item and mine_subs & set(item["skipsubs"]):
+                        failed.append(f"{item['package']} {x}: rest part ran skipped subtests {sorted(mine_subs & set(item['skipsubs']))}")
+                        ok = False
     planned = {it["package"] for it in mine}
     if ran != planned:
         failed.append(f"shard ran {sorted(ran ^ planned)} outside its plan (or never ran them)")
@@ -316,7 +377,7 @@ def merge_timings(files):
                 p, t = e.get("Package"), e.get("Test")
                 if t is None:
                     pk[p] = pk.get(p, 0.0) + e.get("Elapsed", 0.0)
-                elif "/" not in t:
+                elif t.count("/") <= 1:
                     ts.setdefault(p, {})[t] = e.get("Elapsed", 0.0)
     return {"packages": {k: round(v, 2) for k, v in sorted(pk.items())},
             # Only tests worth naming in a split; the planner charges the rest to the -skip part.
