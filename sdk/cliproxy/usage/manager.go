@@ -635,58 +635,154 @@ type queueItem struct {
 	record Record
 }
 
-// Manager maintains a queue of usage records and delivers them to registered plugins.
-type Manager struct {
-	once     sync.Once
-	stopOnce sync.Once
-	cancel   context.CancelFunc
+// DefaultQueueCapacity is used when NewManager receives a nonpositive capacity
+// and by the zero-value Manager. Capacity counts queued records, excluding the
+// single record currently being dispatched.
+const DefaultQueueCapacity = 512
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+// DeliveryStats is a consistent, lifetime snapshot. Accepted, Delivered, Failed,
+// Unhandled and rejection counters count records; PluginPanics counts callbacks.
+// Accepted = Delivered + Failed + Unhandled + Queued + InFlight.
+// Delivered means every callback in the dispatch snapshot returned normally. It
+// does not acknowledge durable storage. Stopped means dispatch has finished;
+// rejections, Failed and Unhandled still prevent complete delivery coverage.
+type DeliveryStats struct {
+	Accepted       uint64
+	RejectedFull   uint64
+	RejectedClosed uint64
+	Delivered      uint64
+	Failed         uint64
+	Unhandled      uint64
+	PluginPanics   uint64
+	Capacity       int
+	Queued         int
+	InFlight       int
+	Closed         bool
+	Stopped        bool
+}
+
+// Manager maintains a bounded queue and delivers records serially to plugins.
+// A manager has one lifetime; Start cannot reopen it after Stop or Shutdown.
+type Manager struct {
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   []queueItem
+	head    int
+	queued  int
+	started bool
+	closed  bool
+	done    chan struct{}
+	stats   DeliveryStats
 
 	pluginsMu sync.RWMutex
 	plugins   []Plugin
 	named     map[string]int
 }
 
-// NewManager constructs a manager with a buffered queue.
+// NewManager constructs a manager with a fixed queue capacity. Nonpositive
+// capacities use DefaultQueueCapacity. A full queue rejects new records.
 func NewManager(buffer int) *Manager {
-	m := &Manager{}
-	m.cond = sync.NewCond(&m.mu)
+	if buffer <= 0 {
+		buffer = DefaultQueueCapacity
+	}
+	m := &Manager{queue: make([]queueItem, buffer)}
+	m.initLocked()
 	return m
 }
 
-// Start launches the background dispatcher. Calling Start multiple times is safe.
-func (m *Manager) Start(ctx context.Context) {
+// initLocked also supports the zero-value Manager. The caller holds m.mu or
+// owns a manager that has not been published to other goroutines.
+func (m *Manager) initLocked() {
+	if m.cond == nil {
+		m.cond = sync.NewCond(&m.mu)
+		m.done = make(chan struct{})
+		if m.queue == nil {
+			m.queue = make([]queueItem, DefaultQueueCapacity)
+		}
+	}
+}
+
+// Start launches the dispatcher once. As before, ctx does not cancel delivery;
+// call Stop or Shutdown to close admission. Publication also starts dispatch.
+func (m *Manager) Start(_ context.Context) {
 	if m == nil {
 		return
 	}
-	m.once.Do(func() {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
-	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.initLocked()
+	if !m.started && !m.closed {
+		m.started = true
+		go m.run()
+	}
 }
 
-// Stop stops the dispatcher and drains the queue.
+// Stop closes admission and begins draining accepted records without waiting.
+// Use Shutdown to wait for dispatch to finish with a caller-provided context.
 func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
-		m.mu.Lock()
-		m.closed = true
-		m.mu.Unlock()
-		m.cond.Broadcast()
-	})
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.initLocked()
+	if m.closed {
+		return
+	}
+	m.closed = true
+	if !m.started {
+		m.stats.Stopped = true
+		close(m.done)
+	}
+	m.cond.Broadcast()
+}
+
+// Shutdown closes admission and waits for all accepted records to finish
+// dispatch. It is safe to call concurrently or after an earlier timeout.
+// A nil context uses context.Background and has no deadline.
+// A context error means dispatch may still be active; records are not discarded.
+// Plugins are called synchronously and cannot be forcibly interrupted. A plugin
+// that never returns can retain the single worker, but Shutdown creates no
+// waiting goroutine. Do not call Shutdown synchronously from a usage callback.
+// A nil error means dispatch ended, not that delivery coverage is complete;
+// inspect Stats for rejections, plugin failures and records without plugins.
+func (m *Manager) Shutdown(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.Stop()
+	m.mu.Lock()
+	done := m.done
+	m.mu.Unlock()
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Stats returns counters and queue state from the same instant.
+func (m *Manager) Stats() DeliveryStats {
+	if m == nil {
+		return DeliveryStats{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.initLocked()
+	stats := m.stats
+	stats.Capacity = len(m.queue)
+	stats.Queued = m.queued
+	stats.Closed = m.closed
+	return stats
 }
 
 // Register appends a plugin to the delivery list.
@@ -723,11 +819,18 @@ func (m *Manager) RegisterNamed(name string, plugin Plugin) {
 	m.pluginsMu.Unlock()
 }
 
-// Publish enqueues a usage record for processing. If no plugin is registered
-// the record will be discarded downstream.
+// Publish attempts to enqueue a usage record. It preserves the legacy void API;
+// use TryPublish for admission feedback and Stats for all rejection counts.
 func (m *Manager) Publish(ctx context.Context, record Record) {
+	m.TryPublish(ctx, record)
+}
+
+// TryPublish enqueues without waiting for a plugin or free queue space. False
+// means the manager is nil, closed or full. A cancelled request context does not
+// reject usage: the original context is still passed to each plugin as before.
+func (m *Manager) TryPublish(ctx context.Context, record Record) bool {
 	if m == nil {
-		return
+		return false
 	}
 	if strings.TrimSpace(record.RequestID) == "" {
 		if reqID := ExecutionRequestIDFromContext(ctx); reqID != "" {
@@ -772,56 +875,85 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	// ensure worker is running even if Start was not called explicitly
 	m.Start(context.Background())
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.closed {
-		m.mu.Unlock()
-		return
+		m.stats.RejectedClosed++
+		return false
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
-	m.mu.Unlock()
+	if m.queued == len(m.queue) {
+		m.stats.RejectedFull++
+		return false
+	}
+	index := (m.head + m.queued) % len(m.queue)
+	m.queue[index] = queueItem{ctx: ctx, record: record}
+	m.queued++
+	m.stats.Accepted++
 	m.cond.Signal()
+	return true
 }
 
-func (m *Manager) run(ctx context.Context) {
+func (m *Manager) run() {
 	for {
 		m.mu.Lock()
-		for !m.closed && len(m.queue) == 0 {
+		for !m.closed && m.queued == 0 {
 			m.cond.Wait()
 		}
-		if len(m.queue) == 0 && m.closed {
+		if m.queued == 0 && m.closed {
+			m.stats.Stopped = true
+			close(m.done)
 			m.mu.Unlock()
 			return
 		}
-		item := m.queue[0]
-		m.queue[0] = queueItem{}
-		m.queue = m.queue[1:]
+		item := m.queue[m.head]
+		m.queue[m.head] = queueItem{}
+		m.head = (m.head + 1) % len(m.queue)
+		m.queued--
+		m.stats.InFlight = 1
 		m.mu.Unlock()
-		m.dispatch(item)
+		plugins, panics := m.dispatch(item)
+		item = queueItem{}
+		m.mu.Lock()
+		m.stats.InFlight = 0
+		m.stats.PluginPanics += panics
+		switch {
+		case panics != 0:
+			m.stats.Failed++
+		case plugins == 0:
+			m.stats.Unhandled++
+		default:
+			m.stats.Delivered++
+		}
+		m.mu.Unlock()
 	}
 }
 
-func (m *Manager) dispatch(item queueItem) {
+func (m *Manager) dispatch(item queueItem) (invoked, panics uint64) {
 	m.pluginsMu.RLock()
 	plugins := make([]Plugin, len(m.plugins))
 	copy(plugins, m.plugins)
 	m.pluginsMu.RUnlock()
-	if len(plugins) == 0 {
-		return
-	}
 	for _, plugin := range plugins {
 		if plugin == nil {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		invoked++
+		if !safeInvoke(plugin, item.ctx, item.record) {
+			panics++
+		}
 	}
+	return invoked, panics
 }
 
-func safeInvoke(plugin Plugin, ctx context.Context, record Record) {
+func safeInvoke(plugin Plugin, ctx context.Context, record Record) (delivered bool) {
 	defer func() {
-		if r := recover(); r != nil {
-			log.Errorf("usage: plugin panic recovered: %v", r)
+		if recover() != nil {
+			// Panic values can contain private request data. Count the failure
+			// without including the panic value or record in logs.
+			log.Error("usage: plugin panic recovered")
 		}
 	}()
 	plugin.HandleUsage(ctx, record)
+	return true
 }
 
 var defaultManager = NewManager(512)
@@ -841,5 +973,13 @@ func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publis
 // StartDefault starts the default manager's dispatcher.
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
-// StopDefault stops the default manager's dispatcher.
+// StopDefault closes admission and begins draining without waiting.
 func StopDefault() { DefaultManager().Stop() }
+
+// TryPublishRecord attempts admission to the default manager.
+func TryPublishRecord(ctx context.Context, record Record) bool {
+	return DefaultManager().TryPublish(ctx, record)
+}
+
+// ShutdownDefault closes admission and joins the default dispatcher.
+func ShutdownDefault(ctx context.Context) error { return DefaultManager().Shutdown(ctx) }
