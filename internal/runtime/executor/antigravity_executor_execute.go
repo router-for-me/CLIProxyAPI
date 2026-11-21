@@ -164,7 +164,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, bodyBytes); err429 != nil {
+		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
 			err = err429
 			return resp, err
 		}
@@ -179,7 +179,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
 
@@ -399,7 +399,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			return resp, err
 		}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, bodyBytes); err429 != nil {
+			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
 				err = err429
 				return resp, err
 			}
@@ -412,7 +412,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
 
@@ -446,7 +446,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			}
 			var midStreamErr error
 			if statusCode == http.StatusTooManyRequests {
-				if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, payload); err429 != nil {
+				if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, nil, payload); err429 != nil {
 					midStreamErr = err429
 				}
 			}

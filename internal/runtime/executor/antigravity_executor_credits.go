@@ -234,13 +234,16 @@ func classifyAntigravity429(body []byte) antigravity429Category {
 }
 
 func decideAntigravity429(body []byte) antigravity429Decision {
+	return decideAntigravity429WithHeaders(body, nil)
+}
+
+func decideAntigravity429WithHeaders(body []byte, headers http.Header) antigravity429Decision {
 	decision := antigravity429Decision{kind: antigravity429DecisionSoftRetry}
+	if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, body, time.Now()); parseErr == nil && retryAfter != nil {
+		decision.retryAfter = retryAfter
+	}
 	if len(body) == 0 {
 		return decision
-	}
-
-	if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
-		decision.retryAfter = retryAfter
 	}
 
 	status := strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String())
@@ -406,9 +409,13 @@ func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
 }
 
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
+	return newAntigravityStatusErrWithHeaders(statusCode, nil, body)
+}
+
+func newAntigravityStatusErrWithHeaders(statusCode int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
-		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
+		if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, body, time.Now()); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
 	} else if statusCode == http.StatusUnauthorized {
@@ -430,12 +437,12 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 // Antigravity 429 response (either HTTP status 429 or a mid-stream SSE 429
 // error frame): closing idle transports, recording short model cooldowns, and
 // permanently disabling credits on explicit balance exhaustion.
-func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, bodyBytes []byte) error {
+func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, headers http.Header, bodyBytes []byte) error {
 	var cfg *config.Config
 	if e != nil {
 		cfg = e.cfg
 	}
-	decision := decideAntigravity429(bodyBytes)
+	decision := decideAntigravity429WithHeaders(bodyBytes, headers)
 	switch decision.kind {
 	case antigravity429DecisionShortCooldownSwitchAuth:
 		closeAntigravityAuthIdleTransports(auth)

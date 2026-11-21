@@ -169,7 +169,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return nil, err
 		}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, bodyBytes); err429 != nil {
+			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
 				err = err429
 				return nil, err
 			}
@@ -182,7 +182,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return nil, err
 	}
 	if len(replayRequestPayload) == 0 {
@@ -292,7 +292,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					statusCode = http.StatusBadGateway
 				}
 				if statusCode == http.StatusTooManyRequests {
-					if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, payload); err429 != nil {
+					if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, nil, payload); err429 != nil {
 						streamErr = err429
 					}
 				}
