@@ -751,6 +751,124 @@ func TestGoPluginLoaderConcurrentOpenDoesNotHang(t *testing.T) {
 	}
 }
 
+// TestGoPluginLoaderLookupFailureIsNotPoisoned verifies that a plugin whose
+// New symbol cannot be resolved does not record its load path as failed.
+//
+// The plugin was opened successfully, so Go's plugin cache holds a valid
+// entry for that path and a later load can reuse it. Only a failure of
+// plugin.Open itself makes a path unusable for the rest of the process.
+func TestGoPluginLoaderLookupFailureIsNotPoisoned(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	const loadPath = "/nonexistent-lookup-failure.so"
+	var openCalls int32
+	loader := goPluginLoader{
+		shadow: func(pluginFile) (string, func(), error) {
+			return loadPath, func() {}, nil
+		},
+		open: func(string) (*plugin.Plugin, error) {
+			atomic.AddInt32(&openCalls, 1)
+			return &plugin.Plugin{}, nil
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			return nil, errors.New("plugin: symbol New not found in plugin")
+		},
+	}
+
+	_, err := loader.Open(pluginFile{ID: "p", Path: loadPath}, &Host{})
+	if err == nil {
+		t.Fatal("expected the missing New symbol to surface as an error")
+	}
+	if !strings.Contains(err.Error(), "no New symbol") {
+		t.Fatalf("error %q does not report the missing New symbol", err)
+	}
+	if _, failed := goPluginFailedPaths.Load(canonicalizePluginPath(loadPath)); failed {
+		t.Fatal("a lookup failure must not record the load path as failed")
+	}
+
+	// The path stays usable: the next load opens the plugin again.
+	_, err = loader.Open(pluginFile{ID: "p", Path: loadPath}, &Host{})
+	if err == nil {
+		t.Fatal("expected the missing New symbol to surface as an error again")
+	}
+	if got := atomic.LoadInt32(&openCalls); got != 2 {
+		t.Fatalf("the plugin was opened %d times, want 2", got)
+	}
+}
+
+// TestGoPluginLoaderPrimaryFailureThenFallbackPreparationFailure verifies
+// that a failing primary load followed by a failing preparation of the
+// executable fallback reports both failures and keeps the fallback
+// retryable.
+//
+// The fallback preparation failed before plugin.Open was reached, so Go's
+// plugin cache was not touched for the fallback path and a later load has to
+// try the fallback again instead of failing with "cannot be retried".
+func TestGoPluginLoaderPrimaryFailureThenFallbackPreparationFailure(t *testing.T) {
+	resetGoPluginFailures(t)
+
+	// The plugin file does not exist, so the executable fallback cannot be
+	// prepared: the copy into the cache directory fails before plugin.Open
+	// is reached.
+	const missingPath = "/nonexistent-primary-then-prepare.so"
+	const primaryPath = "/nonexistent-primary-then-prepare-primary.so"
+	var openCalls int32
+	loader := goPluginLoader{
+		shadow: func(pluginFile) (string, func(), error) {
+			return primaryPath, func() {}, nil
+		},
+		open: func(string) (*plugin.Plugin, error) {
+			atomic.AddInt32(&openCalls, 1)
+			return nil, errors.New("permission denied")
+		},
+		lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+			t.Fatal("lookup must not run after a failed open")
+			return nil, nil
+		},
+	}
+
+	_, err := loader.Open(pluginFile{ID: "p", Path: missingPath}, &Host{})
+	if err == nil {
+		t.Fatal("expected the failed load to surface as an error")
+	}
+	if !strings.Contains(err.Error(), "preparation failed as well") {
+		t.Fatalf("error %q does not mention the failed fallback preparation", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error %q does not carry the underlying primary failure", err)
+	}
+
+	// Only the primary path may be recorded: the fallback preparation never
+	// reached plugin.Open, so Go's plugin cache was not touched for it.
+	failedPaths := 0
+	goPluginFailedPaths.Range(func(key, _ any) bool {
+		failedPaths++
+		if key != canonicalizePluginPath(primaryPath) {
+			t.Errorf("unexpected failed load path recorded: %v", key)
+		}
+		return true
+	})
+	if failedPaths != 1 {
+		t.Fatalf("%d failed load paths recorded, want 1", failedPaths)
+	}
+
+	// The fallback path stays retryable: the next load tries the fallback
+	// again instead of failing immediately.
+	_, err = loader.Open(pluginFile{ID: "p", Path: missingPath}, &Host{})
+	if err == nil {
+		t.Fatal("expected the second attempt to fail as well")
+	}
+	if strings.Contains(err.Error(), "cannot be retried") {
+		t.Fatalf("the fallback path must stay retryable after a preparation failure: %v", err)
+	}
+	if !strings.Contains(err.Error(), "preparation failed") {
+		t.Fatalf("error %q does not mention the failed fallback preparation", err)
+	}
+	if got := atomic.LoadInt32(&openCalls); got != 1 {
+		t.Fatalf("the plugin was opened %d times, want 1: the preparation failed before plugin.Open", got)
+	}
+}
+
 // TestGoPluginLoaderCanonicalizesFailurePath verifies that the failure record
 // is keyed by the canonical path. Go's plugin package canonicalizes the path
 // with realpath before it caches a plugin, so two spellings of the same file
