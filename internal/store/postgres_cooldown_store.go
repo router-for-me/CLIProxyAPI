@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,18 @@ func (s *postgresCooldownStateStore) Save(ctx context.Context, records []cliprox
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	for key := range s.previous {
+		if _, ok := current[key]; !ok {
+			encoded = append(encoded, postgresCooldownStateRecord{key: key})
+		}
+	}
+	slices.SortStableFunc(encoded, func(a, b postgresCooldownStateRecord) int {
+		if n := strings.Compare(a.key.authID, b.key.authID); n != 0 {
+			return n
+		}
+		return strings.Compare(a.key.model, b.key.model)
+	})
+
 	tx, errBegin := s.store.db.BeginTx(ctx, nil)
 	if errBegin != nil {
 		return fmt.Errorf("postgres cooldown store: begin save: %w", errBegin)
@@ -137,12 +150,6 @@ func (s *postgresCooldownStateStore) Save(ctx context.Context, records []cliprox
 			updated_at = EXCLUDED.updated_at
 		WHERE target.updated_at <= EXCLUDED.updated_at
 	`, table)
-	for i := range encoded {
-		record := encoded[i]
-		if _, errExec := tx.ExecContext(ctx, upsertQuery, record.key.authID, record.key.model, record.content, record.updatedAt); errExec != nil {
-			return rollbackPostgresCooldownTransaction(tx, fmt.Errorf("postgres cooldown store: save state for %q: %w", record.key.authID, errExec))
-		}
-	}
 	deleteQuery := fmt.Sprintf(`
 		INSERT INTO %s AS target (auth_id, model, content, deleted, created_at, updated_at)
 		VALUES ($1, $2, $3, TRUE, NOW(), $4)
@@ -152,16 +159,21 @@ func (s *postgresCooldownStateStore) Save(ctx context.Context, records []cliprox
 			updated_at = EXCLUDED.updated_at
 		WHERE NOT target.deleted AND target.updated_at <= $5
 	`, table)
-	for key, previous := range s.previous {
-		if _, ok := current[key]; ok {
-			continue
-		}
-		deletedAt := now
-		if !deletedAt.After(previous.updatedAt) {
-			deletedAt = previous.updatedAt.Add(time.Microsecond)
-		}
-		if _, errExec := tx.ExecContext(ctx, deleteQuery, key.authID, key.model, []byte(`{}`), deletedAt, previous.updatedAt); errExec != nil {
-			return rollbackPostgresCooldownTransaction(tx, fmt.Errorf("postgres cooldown store: clear state for %q: %w", key.authID, errExec))
+	for _, record := range encoded {
+		key := record.key
+		if record.content != nil {
+			if _, errExec := tx.ExecContext(ctx, upsertQuery, key.authID, key.model, record.content, record.updatedAt); errExec != nil {
+				return rollbackPostgresCooldownTransaction(tx, fmt.Errorf("postgres cooldown store: save state for %q: %w", key.authID, errExec))
+			}
+		} else {
+			previous := s.previous[key]
+			deletedAt := now
+			if !deletedAt.After(previous.updatedAt) {
+				deletedAt = previous.updatedAt.Add(time.Microsecond)
+			}
+			if _, errExec := tx.ExecContext(ctx, deleteQuery, key.authID, key.model, []byte(`{}`), deletedAt, previous.updatedAt); errExec != nil {
+				return rollbackPostgresCooldownTransaction(tx, fmt.Errorf("postgres cooldown store: clear state for %q: %w", key.authID, errExec))
+			}
 		}
 	}
 	if errCommit := tx.Commit(); errCommit != nil {
