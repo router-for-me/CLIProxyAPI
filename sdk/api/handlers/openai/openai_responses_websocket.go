@@ -25,7 +25,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -462,12 +461,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	writer := newResponsesWebsocketWriter(conn)
-	drainSession := maintenance.ManageWebsocket(c.Request.Context())
-	// Registered before socket cleanup so restart readiness follows upstream cleanup.
-	defer drainSession.Close()
-	closeForDrain := func() {
-		_, _ = writer.closeForUpstreamError(responsesWebsocketHTTPReplayRequiredError())
-	}
+	wsDrain := startResponsesWebsocketDrain(c.Request.Context(), writer)
+	defer wsDrain.Close()
 	passthroughSessionID := uuid.NewString()
 	// After the upgrade, error-only HTTP logs cannot consume deferred bodies.
 	// Apply the policy before routing so plugin callbacks inherit it as well.
@@ -623,7 +618,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	// Remains pending until a generating request commits successfully.
 	pendingPrewarmID := ""
 	var lastResponsePendingToolCallIDs []string
-	drainPendingTools := false
 	pinnedAuthID := ""
 	// Preserve independent upstream auth affinity when a downstream session switches providers.
 	pinnedAuthByProvider := make(map[string]responsesWebsocketPinnedAuthState)
@@ -680,7 +674,6 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	}
 
 	for {
-		drainSignal := drainSession.Waiting(drainPendingTools)
 		var msgType int
 		var payload []byte
 		var msgEpoch uint64
@@ -700,8 +693,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 				msgType, payload, msgEpoch, errReadMessage = websocket.TextMessage, message.Payload, message.Epoch, message.Err
 			}
-		case <-drainSignal:
-			closeForDrain()
+		case <-wsDrain.Waiting():
+			wsDrain.CloseSocket()
 			return
 		case <-socketCtx.Done():
 			errReadMessage = context.Cause(socketCtx)
@@ -721,8 +714,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
 			continue
 		}
-		if !drainSession.BeginTurn() {
-			closeForDrain()
+		if !wsDrain.BeginTurn() {
 			return
 		}
 		updateKeepAlive()
@@ -1270,7 +1262,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 
-		drainPendingTools = len(completedPendingToolCallIDs) != 0
+		wsDrain.SetPendingTools(len(completedPendingToolCallIDs) != 0)
 		toolCacheTurn.commit()
 		pendingPrewarmID = ""
 		localTurnExecuted := cliproxyexecutor.LocalWebsocketTurnExecuted(cliCtx)
