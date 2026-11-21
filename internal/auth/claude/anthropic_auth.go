@@ -568,6 +568,12 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 
 	resp, err := o.httpClient.Do(req)
 	if err != nil {
+		if isRequestNotSent(err) {
+			// The connection failed before the request was written (for example DNS
+			// is not up yet after a wake), so the refresh token is still unused.
+			// Defer instead of recording a renewal failure; callers retry soon.
+			return nil, fmt.Errorf("token refresh request not sent: %w: %w", err, ErrClaudeRefreshDeferred)
+		}
 		return nil, fmt.Errorf("token refresh request failed: %w", err)
 	}
 	defer func() {
