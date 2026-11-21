@@ -62,12 +62,8 @@ jobs:
       - uses: ./.github/actions/proxx-setup
         with:
           flavor: race
-      - name: Restore test timings recorded on main
-        uses: actions/cache/restore@v4
-        with:
-          path: .github/proxx-ci/timings.json
-          key: proxx-timings-${{ github.sha }}
-          restore-keys: proxx-timings-
+      # Shards plan from the committed .github/proxx-ci/timings.json only. Every shard (and any
+      # re-run) must compute the same plan, or the cross-shard coverage proof means nothing.
       - name: Select tests
         run: |
           if [ -n "$SELECT_BASE" ]; then
@@ -82,16 +78,17 @@ jobs:
           --shards "$SHARDS" --index $(( ${{ matrix.shard }} - 1 ))
           --packages selected.txt --out test-output.json
       - name: Upload timings
-        if: always() && (github.event_name == 'push' || failure())
+        if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch' || failure())
         uses: actions/upload-artifact@v4
         with:
           name: test-output-${{ matrix.shard }}
           path: test-output.json
           retention-days: 3
 
-  # main only, not required: records test times for shard balancing.
+  # main and dispatch only, not required: merges every shard's test times. To rebalance, commit
+  # the proxx-timings artifact as .github/proxx-ci/timings.json (docs/proxx/ci.md).
   record-timings:
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && !inputs.select_base
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -104,10 +101,11 @@ jobs:
           pattern: test-output-*
           path: outputs
       - run: python3 .github/scripts/proxx_ci.py timings outputs/*/test-output.json > .github/proxx-ci/timings.json
-      - uses: actions/cache/save@v4
+      - uses: actions/upload-artifact@v4
         with:
+          name: proxx-timings
           path: .github/proxx-ci/timings.json
-          key: proxx-timings-${{ github.sha }}
+          retention-days: 30
 
   # main only, not required: seeds the Go build cache that every PR job restores.
   # workflow_dispatch too, so a branch can measure the warm path in its own cache scope.

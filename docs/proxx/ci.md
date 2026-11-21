@@ -27,8 +27,10 @@ Every job starts at once. None waits on another.
 
 ## Shards
 
-- Every shard computes the same plan from the timings recorded on `main` (falling back to the
-  committed `.github/proxx-ci/timings.json`).
+- Every shard computes the same plan from the committed `.github/proxx-ci/timings.json`, so the
+  plan depends only on the commit, and re-runs reproduce it.
+- `main` records fresh times on every full run (`proxx-timings` artifact of `record-timings`). To
+  rebalance: `gh run download <run> -n proxx-timings -D .github/proxx-ci`, then commit it in a PR.
 - Before running anything, each shard proves that the shards together cover every selected
   package exactly once. After running, it proves it ran exactly its own part.
 - A package slower than 20s is split by top-level test name. The last part uses `-skip` with the

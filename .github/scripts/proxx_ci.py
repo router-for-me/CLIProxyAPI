@@ -16,6 +16,7 @@ Design rules (see docs/proxx/ci.md):
 """
 
 import argparse
+import hashlib
 import fnmatch
 import json
 import os
@@ -231,8 +232,9 @@ def anchored(names):
 def run_shard(shards, index, timings, packages, target, race, out_path):
     full = plan(shards, timings, packages, target)
     mine = full[index]["items"]
+    digest = hashlib.sha256(json.dumps(full, sort_keys=True).encode()).hexdigest()[:12]
     print(f"shard {index + 1}/{shards}: {len(mine)} items, planned {full[index]['cost']}s "
-          f"(all shards: {[s['cost'] for s in full]})", flush=True)
+          f"(all shards: {[s['cost'] for s in full]}), plan {digest}", flush=True)
     flags = ["-count=1", "-shuffle=on", "-json"] + (["-race"] if race else [])
     whole = [it["package"] for it in mine if "run" not in it and "skip" not in it]
     cmds = []  # (label, command, plan item or None)
