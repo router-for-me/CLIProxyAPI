@@ -18,6 +18,7 @@ import (
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/atomicfile"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -445,10 +446,10 @@ func (h *Handler) shouldLockCodexAuthFileV8(dst string, metadata map[string]any,
 func (h *Handler) writeAuthFileBytes(dst string, data []byte, auth *coreauth.Auth) error {
 	if h.shouldLockCodexAuthFile(auth) {
 		return codex.WithFileLock(dst, func() error {
-			return os.WriteFile(dst, data, 0o600)
+			return atomicfile.WriteFile(dst, data, 0o600)
 		})
 	}
-	return os.WriteFile(dst, data, 0o600)
+	return atomicfile.WriteFile(dst, data, 0o600)
 }
 
 func (h *Handler) shouldLockCodexAuthFile(auth *coreauth.Auth) bool {
