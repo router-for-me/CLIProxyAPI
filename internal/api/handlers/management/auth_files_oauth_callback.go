@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,7 @@ func isWebUIRequest(c *gin.Context) bool {
 	}
 }
 
-func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
+func startCallbackForwarder(bindHost string, port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
 	if prev != nil {
@@ -58,7 +59,12 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 		stopForwarderInstance(port, prev)
 	}
 
-	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	// server.host may carry the bracketed IPv6 spelling; JoinHostPort adds its own brackets.
+	bindHost = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(bindHost), "["), "]")
+	if bindHost == "" {
+		bindHost = "0.0.0.0"
+	}
+	addr := net.JoinHostPort(bindHost, strconv.Itoa(port))
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
