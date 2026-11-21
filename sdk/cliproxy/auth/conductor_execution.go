@@ -1246,6 +1246,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
 		}
+		for authID := range m.coolingDisabledRetryExclusions(retryRound, routeModel) {
+			tried[authID] = struct{}{}
+		}
 	}
 	attempted := make(map[string]struct{})
 	lastAttemptedAuthID := ""
@@ -1545,6 +1548,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+		for authID := range m.coolingDisabledRetryExclusions(retryRound, routeModel) {
 			tried[authID] = struct{}{}
 		}
 	}
@@ -1858,6 +1864,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+			tried[authID] = struct{}{}
+		}
+		for authID := range m.coolingDisabledRetryExclusions(retryRound, routeModel) {
 			tried[authID] = struct{}{}
 		}
 	}
