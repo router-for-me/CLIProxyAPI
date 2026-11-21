@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -542,4 +543,203 @@ func (e *transportThenSuccessExecutor) callCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.calls
+}
+
+func TestManager_MarkResult_UpstreamRetryBufferLimit507DoesNotCooldown(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	model := "gpt-6-astra"
+	raw507 := customStatusError{
+		code: http.StatusInsufficientStorage,
+		msg:  "exceeded request buffer limit while retrying upstream",
+	}
+	if isRequestInvalidError(raw507) {
+		t.Fatalf("isRequestInvalidError(%v) = true, upstream retry buffer limit must not stop credential fallback", raw507)
+	}
+	if !isTransientTransportError(raw507) {
+		t.Fatalf("isTransientTransportError(%v) = false, want true", raw507)
+	}
+	classified := resultErrorFromError(raw507)
+	if classified == nil || classified.HTTPStatus != http.StatusInsufficientStorage || classified.Code != transientTransportErrorCode {
+		t.Fatalf("resultErrorFromError(507) = %#v, want HTTP 507 with code %q", classified, transientTransportErrorCode)
+	}
+	if !shouldSkipCredentialCooldown(classified) {
+		t.Fatalf("shouldSkipCredentialCooldown(%#v) = false, want true", classified)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		model string
+		err   *Error
+	}{
+		{
+			name:  "classified model level",
+			model: model,
+			err:   classified,
+		},
+		{
+			name:  "raw auth Error model level",
+			model: model,
+			err: &Error{
+				HTTPStatus: http.StatusInsufficientStorage,
+				Message:    "exceeded request buffer limit while retrying upstream",
+			},
+		},
+		{
+			name:  "auth level",
+			model: "",
+			err: &Error{
+				HTTPStatus: http.StatusInsufficientStorage,
+				Message:    "exceeded request buffer limit while retrying upstream",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			auth := &Auth{ID: "auth-507-buffer-" + uuid.NewString(), Provider: "codex"}
+			if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+			m.MarkResult(context.Background(), Result{
+				AuthID:   auth.ID,
+				Provider: auth.Provider,
+				Model:    tc.model,
+				Success:  false,
+				Error:    tc.err,
+			})
+			if tc.model != "" {
+				assertNoCooldown(t, m, auth.ID, tc.model)
+				return
+			}
+			updated, ok := m.GetByID(auth.ID)
+			if !ok || updated == nil {
+				t.Fatal("expected auth to be present")
+			}
+			if updated.Unavailable || !updated.NextRetryAfter.IsZero() {
+				t.Fatalf("expected auth-level 507 buffer limit not to cool auth, got unavailable=%v nextRetry=%v", updated.Unavailable, updated.NextRetryAfter)
+			}
+		})
+	}
+}
+
+func TestExecuteAndStreamRetryUpstreamRetryBufferLimit507WithoutPoisoningSingleCredential(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(0)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	upstream507 := customStatusError{
+		code: http.StatusInsufficientStorage,
+		msg:  "exceeded request buffer limit while retrying upstream",
+	}
+
+	for _, kind := range []string{"execute", "stream"} {
+		for _, retries := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/retries=%d", kind, retries), func(t *testing.T) {
+				m := NewManager(nil, nil, nil)
+				m.SetRetryConfig(retries, 30*time.Second, 0)
+				executor := &transportThenSuccessExecutor{
+					identifier: "codex",
+					fail:       upstream507,
+				}
+				m.RegisterExecutor(executor)
+
+				model := "gpt-6-astra-" + uuid.NewString()
+				authID := "codex-single-" + uuid.NewString()
+				registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+				if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+					t.Fatalf("register auth: %v", errRegister)
+				}
+
+				call := func() error {
+					req := cliproxyexecutor.Request{Model: model}
+					if kind == "execute" {
+						_, errExec := m.Execute(context.Background(), []string{"codex"}, req, cliproxyexecutor.Options{})
+						return errExec
+					}
+					stream, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, req, cliproxyexecutor.Options{})
+					if errStream != nil {
+						return errStream
+					}
+					for chunk := range stream.Chunks {
+						if chunk.Err != nil {
+							return chunk.Err
+						}
+					}
+					return nil
+				}
+
+				errCall := call()
+				assertNoCooldown(t, m, authID, model)
+				if retries == 0 {
+					if statusCodeFromError(errCall) != http.StatusInsufficientStorage || executor.callCount() != 1 {
+						t.Fatalf("retries=0: err=%v (status=%d), calls=%d; want 507 and 1 call", errCall, statusCodeFromError(errCall), executor.callCount())
+					}
+					// Next request on the single credential must succeed immediately instead of failing with 503 model_cooldown.
+					if errNext := call(); errNext != nil {
+						t.Fatalf("subsequent request on single credential failed: %v", errNext)
+					}
+				} else if errCall != nil {
+					t.Fatalf("retries=1: request failed instead of succeeding on retry round: %v", errCall)
+				}
+				if executor.callCount() != 2 {
+					t.Fatalf("executor calls = %d, want 2", executor.callCount())
+				}
+				assertNoCooldown(t, m, authID, model)
+			})
+		}
+	}
+}
+
+func TestManager_ShouldRetryAfterError_Includes507AndCloudflare52x(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	prevTransient := transientErrorCooldownSeconds.Load()
+	SetTransientErrorCooldownSeconds(5)
+	t.Cleanup(func() { transientErrorCooldownSeconds.Store(prevTransient) })
+
+	for _, status := range []int{http.StatusInsufficientStorage, 520, 521, 522, 523, 524, 525, 526} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(1, 30*time.Second, 0)
+			model := fmt.Sprintf("gpt-retry-%d-%s", status, uuid.NewString())
+			authID := fmt.Sprintf("auth-retry-%d-%s", status, uuid.NewString())
+			registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+			if _, errRegister := m.Register(context.Background(), &Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+				t.Fatalf("register auth: %v", errRegister)
+			}
+
+			hint := 2 * time.Second
+			err := &Error{HTTPStatus: status, Message: "transient upstream error"}
+			m.MarkResult(context.Background(), Result{
+				AuthID:     authID,
+				Provider:   "codex",
+				Model:      model,
+				Success:    false,
+				RetryAfter: &hint,
+				Error:      err,
+			})
+
+			wait, shouldRetry := m.shouldRetryAfterError(err, 0, []string{"codex"}, model, 10*time.Second)
+			if !shouldRetry {
+				t.Fatalf("shouldRetryAfterError(status=%d) = (%v, false), want true", status, wait)
+			}
+			if wait <= 0 || wait > 3*time.Second {
+				t.Fatalf("shouldRetryAfterError(status=%d) wait = %v, want ~2s", status, wait)
+			}
+		})
+	}
 }
