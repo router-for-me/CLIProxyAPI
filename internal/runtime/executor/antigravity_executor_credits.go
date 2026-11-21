@@ -945,6 +945,18 @@ func markAntigravityTOSPause(cfg *config.Config, auth *cliproxyauth.Auth) {
 	log.Warnf("antigravity executor: TOS_VIOLATION pause armed for %s (pool-wide until %s)", window, until.Format(time.RFC3339))
 }
 
+// newAntigravityTOSPauseStatusErr builds the 503 error returned while the
+// Antigravity pool is under a protective TOS_VIOLATION pause. Marking it
+// request-scoped ensures the conductor aborts immediately without failing,
+// cooling, or rotating across healthy sibling credentials.
+func newAntigravityTOSPauseStatusErr() statusErr {
+	return statusErr{
+		code:          http.StatusServiceUnavailable,
+		msg:           "antigravity pool paused after TOS_VIOLATION",
+		requestScoped: true,
+	}
+}
+
 // antigravityInTOSPause reports whether the Antigravity pool is currently under
 // a protective TOS pause. The check is provider-scoped (any Antigravity
 // credential) and ignores per-credential identity.

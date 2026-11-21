@@ -1279,6 +1279,7 @@ type statusErr struct {
 	code               int
 	msg                string
 	retryAfter         *time.Duration
+	requestScoped      bool
 	credentialScoped   bool
 	streamTruncated    bool
 	transientRateLimit bool
@@ -1298,6 +1299,7 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+func (e statusErr) IsRequestScoped() bool      { return e.requestScoped }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
 
 // LogDiagnostic lets upstream failure logs explain a sanitized client message.
