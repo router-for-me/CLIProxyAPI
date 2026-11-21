@@ -486,6 +486,11 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 
 	chatModelUID := helps.ResolveDevinChatModelUID(req.Model, thinkingLevel, budgetTokens)
 
+	// Devin's Claude-backed upstream rejects tools with root-level JSON Schema
+	// unions (for example, Codex's mcp__cua_repl__js). Fold these before
+	// encoding the native wire request while leaving ordinary schemas intact.
+	tools = helps.NormalizeDevinToolSchemas(tools)
+
 	helps.RestoreDevinToolCallIDs(prompts)
 	matcher := e.getSensitiveWordMatcher()
 
