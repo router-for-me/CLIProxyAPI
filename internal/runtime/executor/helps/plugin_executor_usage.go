@@ -9,25 +9,41 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
+// UnobservedPluginExecutorUsage records an attempt without inventing a token
+// measurement. An explicit all-zero usage object is parsed separately.
+func UnobservedPluginExecutorUsage() usage.Detail {
+	return usage.Detail{TokenBreakdown: usage.NewUnobservedTokenBreakdown()}
+}
+
 // ParsePluginExecutorResponseUsage extracts token usage from a non-streaming plugin executor response.
 func ParsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Detail {
-	if len(payload) == 0 {
-		return usage.Detail{}
+	if observed := NewPluginUsageObservation(protocol); observed != nil {
+		observed.Observe(payload)
+		if observed.seen || len(payload) == 0 {
+			return observed.Detail()
+		}
+	} else if len(payload) == 0 {
+		return UnobservedPluginExecutorUsage()
 	}
+	var detail usage.Detail
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
-		return parseClaudePayloadUsage(payload)
+		detail = parseClaudePayloadUsage(payload)
 	case "gemini":
-		return ParseGeminiUsage(payload)
+		detail = ParseGeminiUsage(payload)
 	case "interactions", "interactions-response":
-		return ParseInteractionsUsage(payload)
+		detail = ParseInteractionsUsage(payload)
 	case "antigravity":
-		return ParseAntigravityUsage(payload)
+		detail = ParseAntigravityUsage(payload)
 	case "codex", "openai-response":
-		return parseResponsesPluginExecutorUsage(payload)
+		detail = parseResponsesPluginExecutorUsage(payload)
 	default:
-		return ParseOpenAIUsage(payload)
+		detail = ParseOpenAIUsage(payload)
 	}
+	if !detail.TokenBreakdown.Valid() && !hasNonZeroTokenUsage(detail) && !hasStructuredUsageDetail(detail) {
+		detail.TokenBreakdown = usage.NewUnobservedTokenBreakdown()
+	}
+	return detail
 }
 
 // parseResponsesPluginExecutorUsage reads both streaming-event usage (response.usage)
@@ -49,6 +65,35 @@ func parseResponsesPluginExecutorUsage(payload []byte) usage.Detail {
 		return detail
 	}
 	return openAIDetail
+}
+
+// retainPluginUsagePresence records which token fields were present without
+// replacing a detail that already carries tool usage from earlier stream events.
+func retainPluginUsagePresence(buffer *StreamUsageBuffer, observed *PluginUsageObservation) {
+	if buffer == nil || observed == nil || !observed.seen {
+		return
+	}
+	incoming := observed.Detail()
+	if incoming.TokenBreakdown.Observed == nil {
+		return
+	}
+	if !buffer.ok {
+		buffer.Observe(incoming, true)
+		return
+	}
+	kept := buffer.detail
+	kept.InputTokens = incoming.InputTokens
+	kept.OutputTokens = incoming.OutputTokens
+	kept.ReasoningTokens = incoming.ReasoningTokens
+	kept.CachedTokens = incoming.CachedTokens
+	kept.CacheReadTokens = incoming.CacheReadTokens
+	kept.CacheCreationTokens = incoming.CacheCreationTokens
+	kept.TotalTokens = incoming.TotalTokens
+	kept.TokenBreakdown = incoming.TokenBreakdown
+	if incoming.ResponseServiceTier != "" {
+		kept.ResponseServiceTier = incoming.ResponseServiceTier
+	}
+	buffer.detail = kept
 }
 
 // ObservePluginExecutorStreamUsage parses streaming chunks and updates a stream usage buffer.
@@ -77,22 +122,36 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 		})
 	case "codex", "openai-response":
 		IterateStreamLines(payload, func(line []byte) {
+			observed := NewPluginUsageObservation(protocol)
+			observed.Observe(line)
+			handled := false
 			if jsonBytes := ExtractStreamJSONPayload(line); len(jsonBytes) > 0 {
 				if bytes.Contains(jsonBytes, responsesOutputItemDoneMarker) && buffer.ObserveResponsesStream(jsonBytes) {
-					return
-				}
-				// A service tier without response.usage is not token usage. Fall through
-				// so a completed Responses object's top-level usage is still recorded.
-				if detail, ok := ParseCodexUsageWithOutputItems(jsonBytes, buffer.responsesOutputByIndex, buffer.responsesOutputFallback); ok && (hasNonZeroTokenUsage(detail) || hasStructuredUsageDetail(detail)) {
+					handled = true
+				} else if detail, ok := ParseCodexUsageWithOutputItems(jsonBytes, buffer.responsesOutputByIndex, buffer.responsesOutputFallback); ok && (hasNonZeroTokenUsage(detail) || hasStructuredUsageDetail(detail)) {
 					buffer.Observe(detail, true)
-					return
+					handled = true
 				}
 			}
-			buffer.ObserveOpenAIStream(line)
+			if !handled {
+				if observed.seen {
+					buffer.Observe(observed.Detail(), true)
+					return
+				}
+				buffer.ObserveOpenAIStream(line)
+				return
+			}
+			retainPluginUsagePresence(buffer, observed)
 		})
 	default:
 		IterateStreamLines(payload, func(line []byte) {
 			buffer.ObserveOpenAIStream(line)
+			if observed := NewPluginUsageObservation(protocol); observed != nil {
+				observed.Observe(line)
+				if observed.seen {
+					buffer.Observe(observed.Detail(), true)
+				}
+			}
 		})
 	}
 }
