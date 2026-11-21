@@ -186,32 +186,77 @@ func unwrapUpstreamExecutionAttempt(err error) error {
 }
 
 func unwrapExecutionBoundaryError(err error) error {
+	unwrapped, _ := unwrapExecutionBoundaryErrorChanged(err)
+	return unwrapped
+}
+
+func unwrapExecutionBoundaryErrorChanged(err error) (error, bool) {
+	changed := false
 	for err != nil {
 		switch wrapped := err.(type) {
 		case requestStopError:
 			err = wrapped.error
+			changed = true
 		case schedulerRejectError:
 			err = wrapped.error
+			changed = true
 		case *roundEndedBySchedulerRejectError:
 			if wrapped == nil || wrapped.cause == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.cause
+			changed = true
 		case *upstreamExecutionAttemptError:
 			if wrapped == nil || wrapped.cause == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.cause
+			changed = true
 		case *credentialTerminatedError:
 			if wrapped == nil || wrapped.terminal == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.terminal
+			changed = true
+		case requestScopedContinueError:
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.error)
+			if !innerChanged {
+				return err, changed
+			}
+			return requestScopedContinueError{error: inner}, true
+		case *streamHeaderError:
+			if wrapped == nil {
+				return nil, changed
+			}
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.cause)
+			if !innerChanged {
+				return err, changed
+			}
+			return newStreamHeaderError(inner, wrapped.headers), true
+		case *streamBootstrapError:
+			if wrapped == nil {
+				return nil, changed
+			}
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.cause)
+			if !innerChanged {
+				return err, changed
+			}
+			copied := *wrapped
+			copied.cause = inner
+			return &copied, true
 		default:
-			return err
+			return err, changed
 		}
 	}
-	return nil
+	return nil, changed
+}
+
+func unwrapStoppedStreamError(err error) error {
+	unwrapped := unwrapExecutionBoundaryError(err)
+	if bootstrap, ok := unwrapped.(*streamBootstrapError); ok && bootstrap != nil {
+		return newStreamHeaderError(bootstrap.cause, bootstrap.headers)
+	}
+	return unwrapped
 }
 
 func roundPickFailureError(lastErr, upstreamErr, errPick error) error {
@@ -347,7 +392,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			continuitySession.priorAttemptSeen = true
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isTerminalRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isCredentialTerminatedError(errExec) {
@@ -442,7 +487,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
-				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) {
+				if isTerminalRequestStopError(errCredits) {
 					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errCredits)
 				}
 				errCredits = unwrapExecutionBoundaryError(errCredits)
@@ -503,7 +548,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errExec == nil {
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isTerminalRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isCredentialTerminatedError(errExec) {
@@ -622,18 +667,28 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			continuitySession.priorAttemptSeen = true
 			return result, nil
 		}
+		if isTerminalRequestStopError(errStream) {
+			// Keep stopped/terminated bootstrap failures as direct errors carrying
+			// upstream headers via streamHeaderError rather than streamErrorResult so
+			// outer bootstrap retries cannot replay an explicitly stopped request.
+			return nil, unwrapStoppedStreamError(errStream)
+		}
 		if !m.HomeEnabled() {
 			observeSelectionCooldownDeadline(&selectionCooldownDeadline, errStream, time.Now())
 		}
 		upstreamAttempted := hasUpstreamExecutionAttempt(errStream)
 		if upstreamAttempted {
-			preferredUpstreamErr = errStream
+			if isDirectStreamTerminalError(errStream) {
+				preferredUpstreamErr = errStream
+			} else {
+				syncPreferredUpstreamError(&preferredUpstreamErr, errStream)
+			}
 		}
 		if m.HomeEnabled() && retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
 					errOut := unwrapExecutionBoundaryError(errStream)
-					if pinnedThread && !isRequestStopError(errStream) {
+					if pinnedThread {
 						errOut = claudeThreadReplayError(errOut)
 					}
 					return nil, errOut
@@ -652,9 +707,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		retryRoundPending = false
 		retryRoundWaited = false
-		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
-			return nil, unwrapExecutionBoundaryError(errStream)
-		}
 		if isCredentialTerminatedError(errStream) {
 			if preferredUpstreamErr == nil {
 				return nil, unwrapExecutionBoundaryError(errStream)
@@ -754,16 +806,16 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				return nil, errCtx
 			}
 		}
-		if preferredUpstreamErr != nil && (!m.HomeEnabled() || isHomeRetryRoundExhausted(lastErr)) {
+		if preferredUpstreamErr != nil && !isDirectStreamTerminalError(lastErr) && (!m.HomeEnabled() || isHomeRetryRoundExhausted(lastErr)) {
 			lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
 		}
 		lastErr = unwrapExecutionBoundaryError(lastErr)
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
-				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) ||
+				if isTerminalRequestStopError(errCredits) ||
 					isTOSViolationError(errCredits) || isAntigravityValidationRequiredError(errCredits) {
-					return nil, unwrapExecutionBoundaryError(errCredits)
+					return nil, unwrapStoppedStreamError(errCredits)
 				}
 				errCredits = unwrapExecutionBoundaryError(errCredits)
 				if pinnedThread {
@@ -1069,13 +1121,53 @@ func syncPreferredUpstreamError(upstreamErr *error, errExec error) {
 	// error value.
 	var bootstrap *streamBootstrapError
 	if errors.As(*upstreamErr, &bootstrap) && bootstrap != nil {
-		if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 &&
-			upstreamErrorMatchesBootstrap(errExec, bootstrap) {
-			bootstrap.cause = withTrustedRetryAfter(bootstrap.cause, hint)
+		if upstreamErrorMatchesBootstrap(errExec, bootstrap) {
+			if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 {
+				bootstrap.cause = withTrustedRetryAfter(bootstrap.cause, hint)
+			}
+			if IsRequestScopedContinueError(errExec) {
+				bootstrap.cause = wrapRequestScopedContinueError(bootstrap.cause)
+			}
+			return
+		}
+		// A synthetic empty_stream wrapper must not mask a later real upstream
+		// failure, and a headerless bootstrap wrapper can advance to a later
+		// real bootstrap failure while still staying preferred over headerless
+		// stream-start errors or empty_stream.
+		if isEmptyStreamError(bootstrap.cause) && !isEmptyStreamError(errExec) {
+			*upstreamErr = errExec
+			return
+		}
+		var execBootstrap *streamBootstrapError
+		if len(bootstrap.headers) == 0 && errors.As(errExec, &execBootstrap) && execBootstrap != nil && !isEmptyStreamError(execBootstrap.cause) {
+			*upstreamErr = errExec
 		}
 		return
 	}
 	*upstreamErr = errExec
+}
+
+func isEmptyStreamError(err error) bool {
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == "empty_stream"
+}
+
+func isDirectStreamTerminalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var bootstrap *streamBootstrapError
+	if errors.As(err, &bootstrap) && bootstrap != nil {
+		return false
+	}
+	var headerErr *streamHeaderError
+	if errors.As(err, &headerErr) && headerErr != nil {
+		return true
+	}
+	if isTerminalRequestStopError(err) || isTOSViolationError(err) {
+		return true
+	}
+	return !IsRequestScopedContinueError(err) && isRequestInvalidError(err)
 }
 
 // upstreamErrorMatchesBootstrap reports whether err belongs to the same
@@ -1119,6 +1211,8 @@ func unwrapBootstrapSyncError(err error) error {
 			err = wrapped.cause
 		case *streamBootstrapError:
 			err = wrapped.cause
+		case requestScopedContinueError:
+			err = wrapped.error
 		default:
 			return err
 		}
@@ -1209,9 +1303,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
-			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
@@ -1292,19 +1383,18 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
+			var preRefreshExecErr error
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
-				if hasUpstreamExecutionAttempt(errExec) {
-					upstreamErr = errExec
-				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+					preRefreshExecErr = errExec
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
@@ -1316,9 +1406,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
-						if hasUpstreamExecutionAttempt(errExec) {
-							upstreamErr = errExec
-						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
@@ -1343,12 +1430,22 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.requestScopedErrorConfig(execCtx))
 				applyRequestScopedActionToResult(action, okAction, &result)
+				if okAction && !isRequestStopError(errExec) && !isRequestScopedStop(action, okAction) {
+					errExec = wrapRequestScopedContinueError(errExec)
+				}
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
+				}
+				if hasUpstreamExecutionAttempt(errExec) {
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				} else if preRefreshExecErr != nil {
+					syncPreferredUpstreamError(&upstreamErr, preRefreshExecErr)
+				}
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1488,9 +1585,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
-			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
@@ -1571,19 +1665,18 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
+			var preRefreshExecErr error
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
-				if hasUpstreamExecutionAttempt(errExec) {
-					upstreamErr = errExec
-				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+					preRefreshExecErr = errExec
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
@@ -1595,9 +1688,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
-						if hasUpstreamExecutionAttempt(errExec) {
-							upstreamErr = errExec
-						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
@@ -1624,6 +1714,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// explicit 501 / unsupported-capability error. Record the failure
 				// for hooks and metrics without suspending a model that remains
 				// usable through the messages endpoint.
+				if okAction && !isRequestStopError(errExec) && !isRequestScopedStop(action, okAction) {
+					errExec = wrapRequestScopedContinueError(errExec)
+				}
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
@@ -1632,7 +1725,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					}
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
+				}
+				if hasUpstreamExecutionAttempt(errExec) {
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				} else if preRefreshExecErr != nil {
+					syncPreferredUpstreamError(&upstreamErr, preRefreshExecErr)
+				}
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1929,9 +2029,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
-			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				if selection != nil {
 					releaseAttempt()
@@ -1975,14 +2072,23 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(execCtx, result)
 			}
 			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			if okAction && !isRequestStopError(errPrepare) && !isRequestScopedStop(action, okAction) {
+				errPrepare = wrapRequestScopedContinueError(errPrepare)
+			}
 			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestStopError(errPrepare) {
+				if selection != nil {
+					selection.End("request_stopped")
+				}
+				return nil, errPrepare
+			}
 			if isRequestScopedStop(action, okAction) {
 				if selection != nil {
 					selection.End("request_stopped")
 				}
 				return nil, wrapRequestStopError(errPrepare)
 			}
-			if !okAction && isRequestInvalidError(errPrepare) {
+			if isTerminalRequestStopError(errPrepare) || (!okAction && isRequestInvalidError(errPrepare)) {
 				if selection != nil {
 					selection.End("request_invalid")
 				}
@@ -2070,20 +2176,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 				continue
 			}
-			if hasUpstreamExecutionAttempt(errStream) {
-				upstreamErr = errStream
-			}
-			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
-			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
-			if stoppedByRule || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
+			syncPreferredUpstreamError(&upstreamErr, errStream)
+			if isTerminalRequestStopError(errStream) || isTOSViolationError(errStream) || (!IsRequestScopedContinueError(errStream) && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
 				// Only redispatch needs a release acknowledgement. Preserve the final
 				// response even when Home cannot acknowledge the released admission.
 				if selection != nil {
 					releaseAttempt()
 					selection.End("request_stopped")
-				}
-				if stoppedByRule {
-					return nil, wrapRequestStopError(errStream)
 				}
 				return nil, errStream
 			}
@@ -2106,16 +2205,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
-			}
-			if okAction {
-				lastErr = keepPreferredCandidateError(lastErr, errStream)
-				if homeMode {
-					roundTiming.Observe(errStream)
-				}
-				if homeMode {
-					homeAuthCount++
-				}
-				continue
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errStream)
 			if homeMode {
