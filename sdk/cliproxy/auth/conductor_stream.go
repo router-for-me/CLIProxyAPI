@@ -382,6 +382,40 @@ func anthropicStopReasonFlags(stopReason string) (completed, incomplete bool) {
 	return false, false
 }
 
+// geminiCandidatesCompletionFlags inspects a Gemini/Antigravity candidates slice
+// and classifies terminal finishReason values as completed or incomplete.
+func geminiCandidatesCompletionFlags(candidates []any) (completed, incomplete bool) {
+	for _, item := range candidates {
+		cand, okCand := item.(map[string]any)
+		if !okCand {
+			continue
+		}
+		fr, okFR := cand["finishReason"].(string)
+		if !okFR {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(fr)) {
+		case "MAX_TOKENS",
+			"SAFETY",
+			"RECITATION",
+			"OTHER",
+			"MALFORMED_FUNCTION_CALL",
+			"UNEXPECTED_TOOL_CALL",
+			"MALFORMED_RESPONSE",
+			"PROHIBITED_CONTENT",
+			"BLOCKLIST",
+			"SPII",
+			"IMAGE_SAFETY",
+			"LANGUAGE",
+			"NO_IMAGE":
+			incomplete = true
+		case "STOP":
+			completed = true
+		}
+	}
+	return completed, incomplete
+}
+
 func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 	var obj map[string]any
 	if err := json.Unmarshal(rawJSON, &obj); err != nil || len(obj) == 0 {
@@ -394,7 +428,8 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 	eventType = strings.TrimSpace(eventType)
 	status, _ := obj["status"].(string)
 	status = strings.ToLower(strings.TrimSpace(status))
-	if respObj, ok := obj["response"].(map[string]any); ok {
+	respObj, hasRespObj := obj["response"].(map[string]any)
+	if hasRespObj {
 		if respObj["error"] != nil || respObj["incomplete_details"] != nil {
 			incomplete = true
 		}
@@ -446,20 +481,22 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 		}
 	}
 	if candidates, ok := obj["candidates"].([]any); ok {
-		for _, item := range candidates {
-			cand, okCand := item.(map[string]any)
-			if !okCand {
-				continue
-			}
-			fr, okFR := cand["finishReason"].(string)
-			if !okFR {
-				continue
-			}
-			switch strings.ToUpper(strings.TrimSpace(fr)) {
-			case "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE":
-				incomplete = true
-			case "STOP":
+		candCompleted, candIncomplete := geminiCandidatesCompletionFlags(candidates)
+		if candCompleted {
+			completed = true
+		}
+		if candIncomplete {
+			incomplete = true
+		}
+	}
+	if hasRespObj {
+		if candidates, ok := respObj["candidates"].([]any); ok {
+			candCompleted, candIncomplete := geminiCandidatesCompletionFlags(candidates)
+			if candCompleted {
 				completed = true
+			}
+			if candIncomplete {
+				incomplete = true
 			}
 		}
 	}
