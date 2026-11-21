@@ -128,12 +128,22 @@ var (
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs map[string]struct{}
-	revision uint64
+	ModelIDs         map[string]struct{}
+	revision         uint64
+	updatedAt        time.Time
+	expiresAt        time.Time
+	routeFingerprint string
 }
 
 func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints {
-	return antigravityModelCapabilityHints{WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs), ModelIDs: maps.Clone(h.ModelIDs), revision: h.revision}
+	return antigravityModelCapabilityHints{
+		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
+		ModelIDs:          maps.Clone(h.ModelIDs),
+		revision:          h.revision,
+		updatedAt:         h.updatedAt,
+		expiresAt:         h.expiresAt,
+		routeFingerprint:  h.routeFingerprint,
+	}
 }
 
 // antigravityCapabilityKey isolates catalogs by account, project, route and client
@@ -160,11 +170,14 @@ func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCa
 		return antigravityModelCapabilityHints{}
 	}
 	endpoint := antigravityModelBaseURLs(auth)[0]
-	key := antigravityCapabilityKeyForRoute(auth, endpoint, s.antigravityModelFetchProxyURL(auth), antigravityModelUserAgent())
-	return s.cachedAntigravityHintsForKey(auth, endpoint, key)
+	proxyURL := s.antigravityModelFetchProxyURL(auth)
+	userAgent := antigravityModelUserAgent()
+	key := antigravityCapabilityKeyForRoute(auth, endpoint, proxyURL, userAgent)
+	routeFingerprint := sdkauth.AntigravityCapabilityRouteFingerprint(proxyURL, userAgent)
+	return s.cachedAntigravityHintsForKey(auth, endpoint, routeFingerprint, key)
 }
 
-func (s *Service) cachedAntigravityHintsForKey(auth *coreauth.Auth, endpoint, key string) antigravityModelCapabilityHints {
+func (s *Service) cachedAntigravityHintsForKey(auth *coreauth.Auth, endpoint, routeFingerprint, key string) antigravityModelCapabilityHints {
 	antigravityCapabilityMu.RLock()
 	entry := antigravityCapabilityCache[key]
 	antigravityCapabilityMu.RUnlock()
@@ -177,20 +190,51 @@ func (s *Service) cachedAntigravityHintsForKey(auth *coreauth.Auth, endpoint, ke
 	}
 	antigravityCapabilityMu.Lock()
 	defer antigravityCapabilityMu.Unlock()
-	entry = seedAntigravityCapabilityCacheLocked(key, persisted)
+	entry = seedAntigravityCapabilityCacheLocked(key, persisted, routeFingerprint)
 	return entry.hints.clone()
 }
 
-func seedAntigravityCapabilityCacheLocked(cacheKey string, persisted antigravityModelCapabilityHints) antigravityCapabilityCacheEntry {
+func persistedAntigravityHintsExpiresAt(persisted antigravityModelCapabilityHints, expectedRouteFingerprint string, now time.Time) time.Time {
+	expectedRouteFingerprint = strings.TrimSpace(expectedRouteFingerprint)
+	persistedRouteFingerprint := strings.TrimSpace(persisted.routeFingerprint)
+	if expectedRouteFingerprint == "" || persistedRouteFingerprint == "" || persistedRouteFingerprint != expectedRouteFingerprint {
+		return time.Time{}
+	}
+	var candidate time.Time
+	switch {
+	case !persisted.expiresAt.IsZero():
+		candidate = persisted.expiresAt
+		if !persisted.updatedAt.IsZero() {
+			if updatedCap := persisted.updatedAt.Add(antigravityCapabilityCacheTTL); updatedCap.Before(candidate) {
+				candidate = updatedCap
+			}
+		}
+	case !persisted.updatedAt.IsZero():
+		candidate = persisted.updatedAt.Add(antigravityCapabilityCacheTTL)
+	default:
+		return time.Time{}
+	}
+	if maxExpiry := now.Add(antigravityCapabilityCacheTTL); candidate.After(maxExpiry) {
+		candidate = maxExpiry
+	}
+	if !candidate.After(now) {
+		return time.Time{}
+	}
+	return candidate
+}
+
+func seedAntigravityCapabilityCacheLocked(cacheKey string, persisted antigravityModelCapabilityHints, expectedRouteFingerprint string) antigravityCapabilityCacheEntry {
 	entry := antigravityCapabilityCache[cacheKey]
 	if entry.hints.ModelIDs != nil {
 		return entry
 	}
+	now := antigravityNowFunc()
 	seeded := persisted.clone()
 	seeded.revision = antigravityProbeSequence.Add(1)
 	entry.hints = seeded
 	entry.persistedRevision = seeded.revision
-	entry.lastUsed = antigravityNowFunc()
+	entry.expiresAt = persistedAntigravityHintsExpiresAt(seeded, expectedRouteFingerprint, now)
+	entry.lastUsed = now
 	antigravityCapabilityCache[cacheKey] = entry
 	return entry
 }
@@ -263,6 +307,9 @@ func buildPersistedAntigravityCapabilityHintsValue(project, endpoint string, hin
 	return sdkauth.BuildPersistedAntigravityCapabilityHints(project, endpoint, sdkauth.AntigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		UpdatedAt:         hints.updatedAt,
+		ExpiresAt:         hints.expiresAt,
+		RouteFingerprint:  hints.routeFingerprint,
 	})
 }
 
@@ -274,6 +321,9 @@ func parsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 	return antigravityModelCapabilityHints{
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
+		updatedAt:         hints.UpdatedAt,
+		expiresAt:         hints.ExpiresAt,
+		routeFingerprint:  hints.RouteFingerprint,
 	}, true
 }
 
@@ -294,10 +344,11 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 	baseURLs, proxyURL := antigravityModelBaseURLs(auth), s.antigravityModelFetchProxyURL(auth)
 	userAgent := antigravityModelUserAgent()
 	cacheKey := antigravityCapabilityKeyForRoute(auth, baseURLs[0], proxyURL, userAgent)
+	routeFingerprint := sdkauth.AntigravityCapabilityRouteFingerprint(proxyURL, userAgent)
 	accessToken, _ := auth.Metadata["access_token"].(string)
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" || ctx.Err() != nil {
-		return cacheKey, s.cachedAntigravityHintsForKey(auth, baseURLs[0], cacheKey)
+		return cacheKey, s.cachedAntigravityHintsForKey(auth, baseURLs[0], routeFingerprint, cacheKey)
 	}
 	// Keep singleflight and transient/401 failure keys token-scoped, while 403 forbidden
 	// failures use cacheKey so routine access_token rotation does not reset backoff.
@@ -308,7 +359,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 		defer antigravityCapabilityMu.Unlock()
 		entry, exists := antigravityCapabilityCache[cacheKey]
 		if entry.hints.ModelIDs == nil && hasPersisted {
-			entry = seedAntigravityCapabilityCacheLocked(cacheKey, persisted)
+			entry = seedAntigravityCapabilityCacheLocked(cacheKey, persisted, routeFingerprint)
 			exists = true
 		}
 		now := antigravityNowFunc()
@@ -329,7 +380,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 		}
 		ctx, finish, active := s.beginAntigravityAccountProbe(ctx, auth, cacheKey, flightKey, accessToken)
 		if !active {
-			return s.cachedAntigravityHintsForKey(auth, baseURLs[0], cacheKey), nil
+			return s.cachedAntigravityHintsForKey(auth, baseURLs[0], routeFingerprint, cacheKey), nil
 		}
 		defer finish()
 		revision := antigravityProbeSequence.Add(1)
@@ -373,8 +424,12 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			}
 		}
 		if status == antigravityProbeStatusSuccess && hints.ModelIDs != nil {
+			expiresAt := now.Add(antigravityCapabilityCacheTTL)
 			hints.revision = revision
-			current.hints, current.expiresAt, current.lastUsed = hints.clone(), now.Add(antigravityCapabilityCacheTTL), now
+			hints.updatedAt = now
+			hints.expiresAt = expiresAt
+			hints.routeFingerprint = routeFingerprint
+			current.hints, current.expiresAt, current.lastUsed = hints.clone(), expiresAt, now
 			antigravityCapabilityCache[cacheKey] = current
 			delete(antigravityAuthFailureCache, flightKey)
 			delete(antigravityAuthFailureCache, cacheKey)
