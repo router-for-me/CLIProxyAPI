@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,8 +32,16 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		changeHeader    bool
 		tooBig          bool
 		payloadRules    bool
+		terminalFailure bool
+		contextLimit    bool
+		lostParent      bool
+		nonUpgradeOK    bool
 	}{
 		{name: "reuse"},
+		{name: "terminal first frame is not replayed", terminalFailure: true},
+		{name: "accepted request preserves known status", contextLimit: true},
+		{name: "expired upstream parent falls back with full input", lostParent: true},
+		{name: "ordinary 200 cannot masquerade as an upgrade", nonUpgradeOK: true, wantHTTP: true},
 		{name: "no replay after an ambiguous disconnect", stopAfterCreate: true},
 		{name: "no replay after a buffered accepted error", acceptedError: true},
 		{name: "body agent is isolated", changeAgent: true},
@@ -46,14 +55,23 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var connections, creates, httpCalls atomic.Int32
+			fullRetry := make(chan []byte, 1)
 			frames := make(chan []byte, 8)
 			origins := make(chan string, 8)
 			upgrader := websocket.Upgrader{}
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !websocket.IsWebSocketUpgrade(r) {
 					httpCalls.Add(1)
+					if test.lostParent {
+						body, _ := io.ReadAll(r.Body)
+						fullRetry <- body
+					}
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"resp_http","model":"gpt-5.5","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n")
+					return
+				}
+				if test.nonUpgradeOK {
+					_, _ = fmt.Fprint(w, "websocket not supported")
 					return
 				}
 				if test.rejectUpgrade {
@@ -76,9 +94,22 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 					if test.stopAfterCreate {
 						return
 					}
-					if test.acceptedError {
+					if test.terminalFailure {
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"server_error","code":"server_is_overloaded","message":"accepted terminal failure"}}}`))
+						return
+					}
+					if test.lostParent && turn == 2 {
+						frames <- frame
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`))
+						return
+					}
+					if test.acceptedError || test.contextLimit {
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","output":[]}}`))
-						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":500,"error":{"type":"server_error","message":"accepted turn failed"}}`))
+						text := `{"type":"error","status":500,"error":{"type":"server_error","message":"accepted turn failed"}}`
+						if test.contextLimit {
+							text = `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"input exceeds context"}}`
+						}
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(text))
 						return
 					}
 					if test.tooBig {
@@ -104,7 +135,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			cfg := &proxyconfig.Config{Codex: proxyconfig.CodexConfig{ServeHTTPMessagesOverWebsockets: !test.disabled}}
 			cfg.PassthroughHeaders = true
 			cfg.Streaming.BootstrapRetries = 2
-			cfg.Codex.StreamBootstrapBuffering = test.acceptedError
+			cfg.Codex.StreamBootstrapBuffering = test.acceptedError || test.contextLimit || test.terminalFailure
 			cfg.Codex.DisableCodexCloaking = test.changeHeader
 			if test.payloadRules {
 				models := []proxyconfig.PayloadModelRule{{Name: "*"}}
@@ -123,7 +154,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			registry.GetGlobalRegistry().RegisterClient(entry.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5"}})
-			if test.acceptedError {
+			if test.acceptedError || test.terminalFailure || test.contextLimit {
 				backup := entry.Clone()
 				backup.ID += "-backup"
 				if _, err := server.handlers.AuthManager.Register(t.Context(), backup); err != nil {
@@ -173,7 +204,13 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				}
 				return
 			}
-			if test.stopAfterCreate || test.acceptedError {
+			if test.contextLimit {
+				if first.Code != http.StatusBadRequest || creates.Load() != 1 || !strings.Contains(first.Body.String(), "input exceeds context") {
+					t.Fatalf("expected original 400 without replay: status=%d creates=%d body=%s", first.Code, creates.Load(), first.Body)
+				}
+				return
+			}
+			if test.stopAfterCreate || test.acceptedError || test.terminalFailure {
 				if first.Code < 400 || creates.Load() != 1 {
 					t.Fatalf("ambiguous lost turn must fail without replay: status=%d creates=%d body=%s", first.Code, creates.Load(), first.Body)
 				}
@@ -195,6 +232,20 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			second := request(`[`+history+`,`+assistant+`,`+result+`]`, "b")
 			if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"type":"message_stop"`) {
 				t.Fatalf("expected Messages SSE, got %d: %s", second.Code, second.Body)
+			}
+			if test.lostParent {
+				if creates.Load() != 2 || httpCalls.Load() != 1 {
+					t.Fatalf("expected one HTTP recovery, websocket=%d http=%d", creates.Load(), httpCalls.Load())
+				}
+				attempt := ojson.NewDoc(<-frames)
+				if attempt.Get("previous_response_id").String() != "resp_1" || attempt.Get("input.#").Int() != 1 {
+					t.Fatalf("expected a rejected incremental create before recovery: %s", attempt.String())
+				}
+				body := ojson.NewDoc(<-fullRetry)
+				if body.Get("previous_response_id").Exists() || body.Get("input.#").Int() != 3 {
+					t.Fatalf("recovery must send full history: %s", body.String())
+				}
+				return
 			}
 			frame := ojson.NewDoc(<-frames)
 			if test.payloadRules {

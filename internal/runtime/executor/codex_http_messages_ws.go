@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -22,6 +24,29 @@ import (
 )
 
 const codexHTTPMessagesLimit = 256
+
+var errCodexHTTPMessagesParentMissing = errors.New("Codex rejected the generated previous_response_id")
+
+func codexHTTPMessagesParentMissing(payload []byte) bool {
+	status := codexWebsocketErrorStatus(payload)
+	if status != http.StatusBadRequest && status != http.StatusNotFound && status != 0 {
+		return false
+	}
+	for _, path := range []string{"error.code", "body.error.code"} {
+		if ojson.GetBytesNoCopy(payload, path).String() == "previous_response_not_found" {
+			return true
+		}
+	}
+	return false
+}
+
+func codexHTTPMessagesUpgradeUnsupported(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	status := resp.StatusCode
+	return status >= 200 && status < 300 || status == http.StatusMethodNotAllowed || status == http.StatusNotImplemented
+}
 
 // The lease fields are protected by the WebSocket store mutex; the continuation
 // fields are used only by the lease owner and committed before the stream closes.
@@ -44,7 +69,6 @@ type codexHTTPMessagesContinuation struct {
 }
 
 type codexHTTPMessagesTurn struct {
-	doc   *ojson.Doc
 	input []ojson.Result
 	shape [32]byte
 }
@@ -79,8 +103,8 @@ func (e *CodexWebsocketsExecutor) serveHTTPMessages(ctx context.Context, auth *c
 		return nil, nil, false
 	}
 	res, err := e.executeStream(ctx, auth, req, opts, sess, release)
-	if cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) {
-		return nil, nil, false // The socket vanished before the incremental request was written.
+	if cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) || errors.Is(err, errCodexHTTPMessagesParentMissing) {
+		return nil, nil, false // HTTP sends the original full history after a definite rejection or no write.
 	}
 	return res, err, true
 }
@@ -183,33 +207,31 @@ func (s *codexWebsocketSession) matchesHTTPMessagesHandshake(conn *websocket.Con
 	return s.conn == conn && !s.httpMessages.closed && s.httpMessages.handshake == digest
 }
 
-func prepareCodexHTTPMessagesTurn(body []byte, cfg *config.Config) *codexHTTPMessagesTurn {
-	// Payload rules must see an untouched full input and remain the final
-	// semantic writer. Reuse the socket, but do not synthesize a delta with rules.
-	if helps.HasPayloadRules(cfg.Payload) {
-		return nil
+func prepareCodexHTTPMessagesTurn(doc *ojson.Doc, cfg *config.Config) (*codexHTTPMessagesTurn, error) {
+	// Only called for requests without user payload rules.
+	if doc.Get("previous_response_id").Exists() {
+		return nil, nil
 	}
-	root := ojson.ParseBytes(body)
-	if root.Get("previous_response_id").Exists() {
-		return nil
-	}
-	input := root.Get("input")
+	input := doc.Get("input")
 	if !input.IsArray() {
-		return nil
+		return nil, nil
 	}
-	h := sha256.New()
-	root.ForEach(func(key, value ojson.Result) bool {
-		if key.String() != "input" {
-			_, _ = io.WriteString(h, key.Raw)
-			_, _ = h.Write([]byte{0})
-			_, _ = io.WriteString(h, value.Raw)
-			_, _ = h.Write([]byte{0})
-		}
-		return true
-	})
+	// Hash the envelope without materializing the complete outgoing request.
+	// Restore input on the same Doc before matching or finalizing it.
+	if err := doc.Delete("input"); err != nil {
+		return nil, err
+	}
+	hash := sha256.New()
+	_, _ = fmt.Fprintln(hash, cfg.DisableImageGeneration)
+	if _, err := doc.WriteTo(hash); err != nil {
+		return nil, err
+	}
+	if err := doc.SetRaw("input", input.Raw); err != nil {
+		return nil, err
+	}
 	var shape [32]byte
-	h.Sum(shape[:0])
-	return &codexHTTPMessagesTurn{doc: ojson.NewDoc(body), input: input.Array(), shape: shape}
+	hash.Sum(shape[:0])
+	return &codexHTTPMessagesTurn{input: input.Array(), shape: shape}, nil
 }
 
 func hashCodexHTTPMessagesInput(input []ojson.Result) [32]byte {
@@ -243,7 +265,7 @@ func codexHTTPMessagesOutput(item ojson.Result) (digest [32]byte, call bool, ok 
 	return digest, false, false
 }
 
-func (t *codexHTTPMessagesTurn) apply(previous codexHTTPMessagesContinuation, conn *websocket.Conn) bool {
+func (t *codexHTTPMessagesTurn) apply(doc *ojson.Doc, previous codexHTTPMessagesContinuation, conn *websocket.Conn) bool {
 	if t == nil || conn == nil || previous.conn != conn || previous.shape != t.shape || previous.calls == 0 || len(t.input) != previous.count+len(previous.output)+previous.calls ||
 		hashCodexHTTPMessagesInput(t.input[:previous.count]) != previous.prefix {
 		return false
@@ -281,8 +303,8 @@ func (t *codexHTTPMessagesTurn) apply(previous codexHTTPMessagesContinuation, co
 		return false
 	}
 	suffix.WriteByte(']')
-	_ = t.doc.SetRaw("input", suffix.String())
-	_ = t.doc.Set("previous_response_id", previous.id)
+	_ = doc.SetRaw("input", suffix.String())
+	_ = doc.Set("previous_response_id", previous.id)
 	return true
 }
 
