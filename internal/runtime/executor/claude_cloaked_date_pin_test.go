@@ -533,3 +533,115 @@ func TestClaudeCloakedDateReminderPersistsAcrossRestartWithLocalBBoltKV(t *testi
 		t.Fatalf("caller-seeded messages[0] lost user text 'Say OK.': %s", callerMsg0After)
 	}
 }
+
+// TestClaudeCloakedDateReminderFollowsUnconfirmedCallerSession covers a caller
+// that is not confirmed Claude Code but sends X-Claude-Code-Session-Id. Its
+// cloaking session is derived from message text: before the first assistant
+// text it is shared by every conversation with the same opening, and after it
+// the assistant text makes a new one. The date pin must still hold one date for
+// the whole conversation, and a new conversation must not inherit the date of
+// an older one with the same opening.
+func TestClaudeCloakedDateReminderFollowsUnconfirmedCallerSession(t *testing.T) {
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
+
+	var mockTime time.Time
+	claudeCodeCurrentTimeFunc = func(cfg *config.Config, auth *cliproxyauth.Auth) time.Time {
+		return mockTime
+	}
+	t.Cleanup(func() {
+		claudeCodeCurrentTimeFunc = nil
+	})
+
+	var capturedBodies [][]byte
+	call := 0
+	transport := datePinRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body := make([]byte, 0)
+		if req.Body != nil {
+			buf, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatal(errRead)
+			}
+			body = buf
+		}
+		capturedBodies = append(capturedBodies, body)
+		call++
+		response := fmt.Sprintf(`{"id":"msg_%d","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"OK"}],"usage":{"input_tokens":10,"output_tokens":2}}`, call)
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		header.Set("request-id", fmt.Sprintf("req_upstream_%d", call))
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(response)),
+			Request:    req,
+		}, nil
+	})
+
+	cfg := &config.Config{}
+	auth := &cliproxyauth.Auth{
+		ID:         "test-date-pin-unconfirmed-caller",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-oauth-key-date-pin", "cloak_mode": "always", "timezone": "Asia/Shanghai"},
+		Metadata: map[string]any{
+			"account_uuid": "11111111-2222-4333-8444-555555555555",
+			claudeauth.ClaudeDeviceIDsMetadataKey: []string{
+				"00000000000000000000000000000000000000000000000000000000000000d1",
+			},
+		},
+	}
+	exec := NewClaudeExecutor(cfg)
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(transport))
+
+	firstTurn := []byte(`{
+		"model": "claude-opus-5",
+		"system": [{"type": "text", "text": "You are an expert software engineer."}],
+		"messages": [{"role": "user", "content": "Say OK."}],
+		"max_tokens": 100
+	}`)
+	secondTurn := []byte(`{
+		"model": "claude-opus-5",
+		"system": [{"type": "text", "text": "You are an expert software engineer."}],
+		"messages": [
+			{"role": "user", "content": "Say OK."},
+			{"role": "assistant", "content": [{"type": "text", "text": "I will say OK now."}]},
+			{"role": "user", "content": "Again."}
+		],
+		"max_tokens": 100
+	}`)
+	optionsFor := func(sessionID string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatClaude,
+			Headers:      http.Header{helps.ClaudeCodeSessionHeader: []string{sessionID}},
+		}
+	}
+	send := func(payload []byte, sessionID string) []byte {
+		t.Helper()
+		before := len(capturedBodies)
+		req := cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}
+		if _, err := exec.Execute(ctx, auth, req, optionsFor(sessionID)); err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if len(capturedBodies) != before+1 {
+			t.Fatalf("expected one upstream request, got %d", len(capturedBodies)-before)
+		}
+		return capturedBodies[len(capturedBodies)-1]
+	}
+
+	mockTime = time.Date(2026, 8, 1, 4, 0, 0, 0, time.UTC)
+	send(firstTurn, "aaaaaaaa-1111-4111-8111-111111111111")
+
+	mockTime = time.Date(2026, 8, 3, 4, 0, 0, 0, time.UTC)
+	conversation := "bbbbbbbb-2222-4222-8222-222222222222"
+	first := send(firstTurn, conversation)
+	second := send(secondTurn, conversation)
+
+	if got := extractClaudeCloakDate(t, first); got != "2026-08-03" {
+		t.Fatalf("new conversation date = %q, want 2026-08-03 (inherited from an older conversation with the same opening)", got)
+	}
+	if got := extractClaudeCloakDate(t, second); got != "2026-08-03" {
+		t.Fatalf("second request date = %q, want 2026-08-03", got)
+	}
+	if a, b := ojson.GetBytes(first, "messages.0").Raw, ojson.GetBytes(second, "messages.0").Raw; a != b {
+		t.Fatalf("messages[0] changed after the first assistant text:\nfirst:  %s\nsecond: %s", a, b)
+	}
+}

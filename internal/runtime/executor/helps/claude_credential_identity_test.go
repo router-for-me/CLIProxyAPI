@@ -337,3 +337,26 @@ func TestApplyClaudeCredentialMetadataDocMutatesInPlace(t *testing.T) {
 		}
 	})
 }
+
+func TestClaudeSessionDatePinIDFollowsUnconfirmedCallerSessionHeader(t *testing.T) {
+	const derived = "derived-session"
+	headers := http.Header{ClaudeCodeSessionHeader: {"AAAAAAAA-1111-4111-8111-111111111111"}}
+	tests := []struct {
+		name      string
+		headers   http.Header
+		confirmed bool
+		want      string
+	}{
+		{name: "unconfirmed caller with session header", headers: headers, want: "aaaaaaaa-1111-4111-8111-111111111111"},
+		{name: "confirmed caller keeps its session", headers: headers, confirmed: true, want: derived},
+		{name: "unconfirmed caller without session header", headers: http.Header{}, want: derived},
+		{name: "unconfirmed caller with invalid session header", headers: http.Header{ClaudeCodeSessionHeader: {"not-a-uuid"}}, want: derived},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ClaudeSessionDatePinID(context.Background(), test.headers, derived, test.confirmed); got != test.want {
+				t.Fatalf("ClaudeSessionDatePinID() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
