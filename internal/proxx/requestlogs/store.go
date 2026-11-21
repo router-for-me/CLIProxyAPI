@@ -403,6 +403,11 @@ type Query struct {
 type Page struct {
 	Items      []Row
 	NextCursor string
+	// Models and Providers list every distinct value in the Since/Until window, ignoring the other
+	// filters and paging, so the viewer's dropdowns offer values that are not loaded yet. Only the
+	// first page (no cursor) fills them.
+	Models    []string
+	Providers []string
 }
 
 func encodeCursor(r Row) string {
@@ -509,7 +514,8 @@ func (s *Store) List(q Query) (Page, error) {
 		if q.Until > 0 && r.TimeMs > q.Until {
 			continue
 		}
-		if model != "" && strings.ToLower(r.RequestedModel) != model && strings.ToLower(r.ServedModel) != model {
+		if model != "" && strings.ToLower(r.RequestedModel) != model && strings.ToLower(r.ServedModel) != model &&
+			strings.ToLower(r.Group) != model {
 			continue
 		}
 		if provider != "" && strings.ToLower(r.Provider) != provider {
@@ -528,7 +534,39 @@ func (s *Store) List(q Query) (Page, error) {
 	if more && len(items) > 0 {
 		page.NextCursor = encodeCursor(items[len(items)-1])
 	}
+	if q.Cursor == "" {
+		page.Models, page.Providers = facets(all, q.Since, q.Until)
+	}
 	return page, nil
+}
+
+// facets returns the sorted distinct models (group, requested and served) and providers of rows
+// in the [since, until] window (0 = open).
+func facets(rows []Row, since, until int64) ([]string, []string) {
+	models, providers := map[string]struct{}{}, map[string]struct{}{}
+	for _, r := range rows {
+		if (since > 0 && r.TimeMs < since) || (until > 0 && r.TimeMs > until) {
+			continue
+		}
+		for _, m := range []string{r.Group, r.RequestedModel, r.ServedModel} {
+			if m != "" {
+				models[m] = struct{}{}
+			}
+		}
+		if r.Provider != "" {
+			providers[r.Provider] = struct{}{}
+		}
+	}
+	return sortedKeys(models), sortedKeys(providers)
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // fileContains reports whether the file contains needle (already lower-cased), ignoring case.

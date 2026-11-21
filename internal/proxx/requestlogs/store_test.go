@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +121,26 @@ func TestListPagingAndFilters(t *testing.T) {
 	}
 	if n := count(Query{Since: baseTime.Add(5 * time.Second).UnixMilli(), Until: baseTime.Add(7 * time.Second).UnixMilli()}); n != 3 {
 		t.Fatalf("since/until -> %d", n)
+	}
+	// Facets cover every row in the time window, whatever the other filters and the page size.
+	fp, err := s.List(Query{Limit: 1, Model: "auto", Provider: "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.Items) != 0 || !slices.Contains(fp.Models, "auto") || !slices.Contains(fp.Models, "model-ok") ||
+		!slices.Contains(fp.Providers, "openai-compatible-p400") || !slices.Contains(fp.Providers, "openai-compatible-pok") {
+		t.Fatalf("facets models=%v providers=%v", fp.Models, fp.Providers)
+	}
+	if !slices.IsSorted(fp.Models) || !slices.IsSorted(fp.Providers) {
+		t.Fatalf("facets not sorted: %v %v", fp.Models, fp.Providers)
+	}
+	// The 400 row (t+9s) is outside this window, so its provider is not offered.
+	wp, _ := s.List(Query{Limit: 1, Until: baseTime.Add(8 * time.Second).UnixMilli()})
+	if slices.Contains(wp.Providers, "openai-compatible-p400") {
+		t.Fatalf("window facets providers=%v", wp.Providers)
+	}
+	if np, _ := s.List(Query{Limit: 1, Cursor: p1.NextCursor}); np.Models != nil {
+		t.Fatalf("later page facets = %v", np.Models)
 	}
 	if _, err := s.List(Query{Cursor: "!!!"}); err != ErrBadCursor {
 		t.Fatalf("bad cursor err = %v", err)

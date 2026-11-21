@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -395,6 +396,17 @@ func TestE2EDecisions(t *testing.T) {
 		_ = json.Unmarshal(body, &listed)
 		if len(listed.Items) < 3 || listed.Items[0].Path != "/v1/systemone" || listed.Items[0].Provider != "typesafe" {
 			t.Fatalf("viewer rows = %s", body)
+		}
+		// The dropdown values cover every logged request, not only the loaded page.
+		_, _, body = p.call(http.MethodGet, "/v8/management/proxx/requests?limit=1", "", nil, mgmtKey, nil)
+		var facets struct {
+			Models    []string `json:"models"`
+			Providers []string `json:"providers"`
+		}
+		_ = json.Unmarshal(body, &facets)
+		if !slices.Contains(facets.Models, "jev-latest") || !slices.Contains(facets.Models, "gpt-6-luna") ||
+			!slices.Contains(facets.Providers, "typesafe") || !slices.Contains(facets.Providers, "openai") {
+			t.Fatalf("viewer facets = %s", body)
 		}
 	})
 
