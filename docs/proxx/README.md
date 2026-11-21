@@ -146,6 +146,7 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `internal/managementasset/updater.go` | `proxxPanelCompatible(data)` in `fetchLatestAsset` | skip panel releases that declare `proxx-min-backend-api` above our `api_level` |
 | `.github/workflows/release.yaml` | `--prerelease` for `-rc` tags (3 lines in `prepare-release`); checkout + setup-go + sign/verify/upload `checksums.txt.sig` in `publish-checksums` (all marked `# proxx:`) | signed releases for self-update; rc prereleases |
 | `config.example.yaml` | `# proxx: 0 (unset) drains for up to 120s` under `shutdown-timeout` | documentation only |
+| `sdk/api/handlers/handlers.go` | `parentCtx = proxxEnsureDeferredAPICapture(c, parentCtx)` in `GetContextWithCancel` (helper in `deferred_capture_proxx.go`) | race fix: executor goroutines that outlive the handler use a request-scoped capture, never the pooled gin context |
 
 Fork-owned files that other proxx features also touch: `internal/api/server_management_proxx.go`
 (one `s.registerProxx*Routes(proxx)` line per feature), `internal/proxx/proxx.go` (lifecycle facade),
