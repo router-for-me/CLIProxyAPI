@@ -294,7 +294,7 @@ func TestGoPluginLoaderOpensFromShadowPath(t *testing.T) {
 		},
 	}
 
-	client, err := loader.Open(pluginFile{ID: "p", Path: "/data/cpa/plugins/linux/arm64/probe.so"}, h)
+	client, err := loader.Open(pluginFile{ID: "p", Path: "/opt/plugins/linux/arm64/probe.so"}, h)
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -419,11 +419,11 @@ func TestGoPluginLoaderRetriesDifferentBuild(t *testing.T) {
 		},
 	}
 
-	if _, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h); err == nil {
+	if _, err := loader.Open(pluginFile{ID: "p", Path: "/opt/plugins/probe.so"}, h); err == nil {
 		t.Fatal("expected the initializer panic to surface as an error")
 	}
 	before := atomic.LoadInt32(&openCalls)
-	_, err := loader.Open(pluginFile{ID: "p", Path: "/data/plugins/probe.so"}, h)
+	_, err := loader.Open(pluginFile{ID: "p", Path: "/opt/plugins/probe.so"}, h)
 	if err != nil && strings.Contains(err.Error(), "cannot be retried") {
 		t.Fatalf("a different build must not be blocked by the recorded failure: %v", err)
 	}

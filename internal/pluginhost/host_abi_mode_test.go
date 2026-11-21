@@ -32,3 +32,23 @@ func TestPluginABIModeTrimsWhitespace(t *testing.T) {
 		t.Fatalf("pluginABIMode() = %q, want trimmed %q", got, "go")
 	}
 }
+
+func TestPluginABIModeChangedIgnoresCase(t *testing.T) {
+	// The loader selection is case-insensitive, so a differently spelled
+	// value must not be reported as an ABI change.
+	if pluginABIModeChanged("go", "GO") {
+		t.Fatal(`plugins.abi "GO" must not be reported as a change of the loaded "go" ABI`)
+	}
+	if pluginABIModeChanged("", "") {
+		t.Fatal("an unchanged plugins.abi must not be reported as a change")
+	}
+}
+
+func TestPluginABIModeChangedDetectsRealChanges(t *testing.T) {
+	if !pluginABIModeChanged("go", "") {
+		t.Fatal("switching plugins.abi from \"go\" to the default must be reported")
+	}
+	if !pluginABIModeChanged("", "go") {
+		t.Fatal("switching plugins.abi from the default to \"go\" must be reported")
+	}
+}

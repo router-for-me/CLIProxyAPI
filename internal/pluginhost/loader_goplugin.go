@@ -219,9 +219,12 @@ func (l goPluginLoader) openFallbackShadow(file pluginFile, open func(path strin
 	if errFallback != nil {
 		return nil, &goPluginFallbackPrepareError{err: errFallback}
 	}
+	// The guard is released on every return path, including a panic in the
+	// open: the release closure is idempotent, so releasing it twice is
+	// safe.
+	defer releaseFallbackGuard()
 	fallbackPath = canonicalizePluginPath(fallbackPath)
 	p, errOpen := openGoPluginSerialized(open, fallbackPath)
-	releaseFallbackGuard()
 	return p, errOpen
 }
 

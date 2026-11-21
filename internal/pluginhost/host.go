@@ -304,7 +304,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			// The loader is selected when a plugin is opened, so switching
 			// plugins.abi does not move an already-loaded plugin to another
 			// loader. Report it instead of letting the change look applied.
-			if currentABIMode != lp.abiMode {
+			if pluginABIModeChanged(lp.abiMode, currentABIMode) {
 				log.Warnf("pluginhost: plugins.abi changed from %q to %q while plugin %s was loaded; restart the host to apply the new ABI to it", lp.abiMode, currentABIMode, file.ID)
 			}
 		}
@@ -487,6 +487,16 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 			log.Warnf("pluginhost: failed to clean old plugin files: %v", errCleanup)
 		}
 	}
+}
+
+// pluginABIModeChanged reports whether the configured plugins.abi differs
+// from the ABI that was in effect when a plugin was loaded.
+//
+// The comparison ignores case because the loader selection does too: a
+// configuration of "GO" selects the same loader as "go", so it must not be
+// reported as an ABI change.
+func pluginABIModeChanged(loadedMode, currentMode string) bool {
+	return !strings.EqualFold(currentMode, loadedMode)
 }
 
 // pluginABIMode returns the configured plugin loading mechanism. The empty

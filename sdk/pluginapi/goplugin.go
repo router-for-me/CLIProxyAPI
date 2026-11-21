@@ -21,9 +21,14 @@ type GoPlugin interface {
 	// whose schema is defined per method, matching the C ABI envelopes.
 	Call(ctx context.Context, method string, request []byte) ([]byte, error)
 
-	// Shutdown releases plugin-side resources. Go plugins cannot be safely
-	// unloaded from a running process, so replacing a plugin requires
-	// restarting the host.
+	// Shutdown releases plugin-side resources.
+	//
+	// A Go plugin cannot be unloaded from a running process, so replacing a
+	// plugin does not require a host restart: the host opens the replacement
+	// from a content-addressed copy of the new build, which Go's plugin
+	// package loads as a separate image, and retires the previous instance
+	// once the replacement is in place. The retired instance is released
+	// through this method.
 	Shutdown()
 }
 
