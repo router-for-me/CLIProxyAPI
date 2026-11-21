@@ -49,6 +49,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		if errExecute == nil {
 			return response, nil
 		}
+		if isTerminalRequestStopError(errExecute) {
+			return cliproxyexecutor.Response{}, errExecute
+		}
 		upstreamAttempted := hasUpstreamExecutionAttempt(errExecute)
 		if upstreamAttempted {
 			preferredUpstreamErr = errExecute
@@ -115,9 +118,6 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		}
 		retryRoundPending = false
 		retryRoundWaited = false
-		if isRequestTerminatedError(errExecute) || isRequestStopError(errExecute) {
-			return cliproxyexecutor.Response{}, errExecute
-		}
 		if isCredentialTerminatedError(errExecute) {
 			if preferredUpstreamErr != nil {
 				return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(preferredExecutionAttemptError(lastErr, preferredUpstreamErr))
@@ -278,9 +278,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
-			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -302,12 +299,19 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			m.reportHomeResult(execCtx, result, auth)
 			releaseAttempt()
 			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			if okAction && !isRequestStopError(errPrepare) && !isRequestScopedStop(action, okAction) {
+				errPrepare = wrapRequestScopedContinueError(errPrepare)
+			}
 			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestStopError(errPrepare) {
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			if isRequestScopedStop(action, okAction) {
 				selection.End("request_stopped")
 				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
 			}
-			if !okAction && isRequestInvalidError(errPrepare) {
+			if isTerminalRequestStopError(errPrepare) || (!okAction && isRequestInvalidError(errPrepare)) {
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errPrepare
 			}
@@ -415,9 +419,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 			}
 			if errExecute != nil {
-				if hasUpstreamExecutionAttempt(errExecute) {
-					upstreamErr = errExecute
-				}
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, CompletedResponse: errExecute == nil && !countTokens && !response.Incomplete && isCompletedExecutionPayload(response.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, preparedAuth, execOpts.Headers), RefreshToken: authRefreshToken(preparedAuth), CredentialVersion: preparedAuth.CredentialVersion, RegistrationEpoch: preparedAuth.RegistrationEpoch}
@@ -445,7 +447,14 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
-			lastErr = keepPreferredCandidateError(lastErr, errExecute)
+			if isRequestStopError(errExecute) {
+				errExecute = annotateTrustedRetryAfterByHint(errExecute)
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
+				lastErr = errExecute
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, errExecute
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					errExecute = annotateTrustedRetryAfterByHint(errExecute)
@@ -455,11 +464,15 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					selection.End("request_stopped")
 					return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
 				}
-				if result.CredentialScope {
+				errExecute = wrapRequestScopedContinueError(errExecute)
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
+				lastErr = keepPreferredCandidateError(lastErr, errExecute)
+				if result.CredentialScope || isRequestTerminatedError(errExecute) {
 					break
 				}
 				continue
 			}
+			lastErr = keepPreferredCandidateError(lastErr, errExecute)
 			if isRequestInvalidError(errExecute) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")
