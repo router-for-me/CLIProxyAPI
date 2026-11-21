@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -101,6 +102,10 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
 		if result, err, handled := e.wsExec.serveHTTPMessages(ctx, auth, req, opts); handled {
+			if errors.Is(err, errCodexHTTPMessagesContinuationRejected) || cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) {
+				// Use the original input once after a definite rejection or an unsent WS create.
+				return e.httpExec.executeStream(ctx, auth, req, opts, true)
+			}
 			return result, err
 		}
 	}

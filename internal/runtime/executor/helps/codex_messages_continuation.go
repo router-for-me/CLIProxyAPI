@@ -163,12 +163,11 @@ func (t *CodexMessagesTurn) Complete(payload []byte) CodexMessagesContinuation {
 	if t == nil {
 		return CodexMessagesContinuation{}
 	}
-	root := ojson.ParseBytes(payload)
-	id := root.Get("response.id").String()
+	id := ojson.GetBytesNoCopy(payload, "response.id").String()
 	if id == "" {
 		return CodexMessagesContinuation{}
 	}
-	items := root.Get("response.output").Array()
+	items := ojson.GetBytesNoCopy(payload, "response.output").Array()
 	output := make([][32]byte, 0, len(items))
 	calls := 0
 	for _, item := range items {

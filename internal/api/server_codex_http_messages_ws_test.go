@@ -40,6 +40,11 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		internalPath    string
 		contextLimit    bool
 		rejectionFrame  string
+		rejectionDelay  int
+		recoveryEOF     bool
+		emptyRecovery   bool
+		retryAfter      string
+		quotaExceeded   bool
 		nonUpgradeOK    bool
 	}{
 		{name: "reuse"},
@@ -62,6 +67,13 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		{name: "statusless missing parent falls back with full input", rejectionFrame: `{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "untyped statusless missing parent falls back", rejectionFrame: `{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "expired upstream socket falls back with full history", rejectionFrame: `{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"connection expired"}}`},
+		{name: "late continuation rejection still recovers", rejectionDelay: 49, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"parent expired"}}`},
+		{name: "ambiguous HTTP recovery is not replayed", recoveryEOF: true, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"parent expired"}}`},
+		{name: "empty HTTP recovery SSE is not replayed", recoveryEOF: true, emptyRecovery: true, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"parent expired"}}`},
+		{name: "failed terminal event preserves capacity retry", terminalStatus: 429, retryAfter: "17", terminalFrame: `{"type":"response.failed","status":429,"headers":{"Retry-After":"17"},"response":{"error":{"code":"turn_rate_limit_exceeded","message":"accepted terminal failure"}}}`},
+		{name: "error event preserves capacity retry", terminalStatus: 429, retryAfter: "17", terminalFrame: `{"type":"error","status":429,"headers":{"Retry-After":"17"},"error":{"code":"turn_rate_limit_exceeded","message":"accepted terminal failure"}}`},
+		{name: "failed terminal event preserves quota reset", terminalStatus: 429, retryAfter: "120", quotaExceeded: true, terminalFrame: `{"type":"response.failed","status":429,"headers":{"Retry-After":"17"},"response":{"error":{"type":"usage_limit_reached","resets_in_seconds":120,"message":"accepted terminal failure"}}}`},
+		{name: "error event preserves quota reset", terminalStatus: 429, retryAfter: "120", quotaExceeded: true, terminalFrame: `{"type":"error","status":429,"headers":{"Retry-After":"17"},"error":{"type":"usage_limit_reached","resets_in_seconds":120,"message":"accepted terminal failure"}}`},
 		{name: "ordinary 200 cannot masquerade as an upgrade", nonUpgradeOK: true, wantHTTP: true},
 		{name: "no replay after an ambiguous disconnect", stopAfterCreate: true},
 		{name: "no replay after a buffered accepted error", acceptedError: true},
@@ -86,6 +98,18 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 					if test.rejectionFrame != "" {
 						body, _ := io.ReadAll(r.Body)
 						fullRetry <- body
+						if test.emptyRecovery {
+							w.Header().Set("Content-Type", "text/event-stream")
+							w.WriteHeader(http.StatusOK)
+							return
+						}
+						if test.recoveryEOF {
+							conn, _, errHijack := w.(http.Hijacker).Hijack()
+							if errHijack == nil {
+								_ = conn.Close()
+							}
+							return
+						}
 					}
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"id":"resp_http","model":"gpt-5.5","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n")
@@ -124,6 +148,11 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 					}
 					if test.rejectionFrame != "" && turn == 2 {
 						frames <- frame
+						for range test.rejectionDelay {
+							if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"keepalive"}`)); errWrite != nil {
+								return
+							}
+						}
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(test.rejectionFrame))
 						return
 					}
@@ -171,6 +200,11 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			exec := executor.NewCodexAutoExecutor(cfg)
 			server.handlers.AuthManager.RegisterExecutor(exec)
 			server.handlers.AuthManager.SetRetryConfig(1, 0, 2)
+			if test.recoveryEOF {
+				affinity := auth.NewSessionAffinitySelector(&auth.RoundRobinSelector{})
+				server.handlers.AuthManager.SetSelector(affinity)
+				t.Cleanup(affinity.Stop)
+			}
 			entry := &auth.Auth{ID: t.Name(), Provider: "codex", Status: auth.StatusActive,
 				Attributes: map[string]string{"base_url": upstream.URL, "websockets": "true"},
 				Metadata:   map[string]any{"type": "codex", "access_token": "test-only-token", "account_id": "test-account"}}
@@ -178,7 +212,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			registry.GetGlobalRegistry().RegisterClient(entry.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5"}})
-			if test.acceptedError || test.terminalFrame != "" || test.contextLimit {
+			if test.recoveryEOF || test.acceptedError || test.terminalFrame != "" && test.retryAfter == "" || test.contextLimit {
 				backup := entry.Clone()
 				backup.ID += "-backup"
 				if _, err := server.handlers.AuthManager.Register(t.Context(), backup); err != nil {
@@ -255,6 +289,16 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				if want == 0 {
 					want = http.StatusServiceUnavailable
 				}
+				if test.retryAfter != "" {
+					got, ok := server.handlers.AuthManager.GetByID(entry.ID)
+					if !ok {
+						t.Fatal("missing test credential")
+					}
+					state := got.ModelStates["gpt-5.5"]
+					if got.Quota.Exceeded != test.quotaExceeded || (!test.quotaExceeded && state != nil && state.Quota.Exceeded) || first.Header().Get("Retry-After") != test.retryAfter {
+						t.Fatalf("expected auth quota=%v and Retry-After %s, got %q; auth quota=%v model quota=%v", test.quotaExceeded, test.retryAfter, first.Header().Get("Retry-After"), got.Quota.Exceeded, state != nil && state.Quota.Exceeded)
+					}
+				}
 				if first.Code != want || creates.Load() != 1 || !strings.Contains(first.Body.String(), "accepted terminal failure") {
 					t.Fatalf("expected original %d without replay: status=%d creates=%d body=%s", want, first.Code, creates.Load(), first.Body)
 				}
@@ -280,6 +324,12 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				history = strings.Replace(user, "run probe", "edited prompt", 1)
 			}
 			second := request(`[`+history+`,`+assistant+`,`+result+`]`, "b")
+			if test.recoveryEOF {
+				if second.Code != http.StatusBadGateway || creates.Load() != 2 || httpCalls.Load() != 1 {
+					t.Fatalf("expected a single recovery attempt: status=%d WS=%d HTTP=%d", second.Code, creates.Load(), httpCalls.Load())
+				}
+				return
+			}
 			if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"type":"message_stop"`) {
 				t.Fatalf("expected Messages SSE, got %d: %s", second.Code, second.Body)
 			}

@@ -458,6 +458,7 @@ upstream:
     # Requires a WebSocket-enabled credential, authenticated caller, and explicit session ID.
     # Sends incremental tool results when the conversation prefix is unchanged and the same credential is selected.
     # Other API formats, requests without an explicit session, and concurrent turns use HTTP.
+    # An explicitly rejected incremental turn retries once over HTTP with the full history.
     # Payload rules keep full input; Home mode is not supported. Sockets use the standard Codex liveness handling.
     serve-http-messages-over-websockets: false
     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.

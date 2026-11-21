@@ -99,18 +99,21 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		return nil, false
 	}
 
-	out := buildCodexWebsocketErrorPayload(payload, status)
-	isUsageLimit := isCodexUsageLimitError(out)
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
+	return newCodexWebsocketStatusError(payload, buildCodexWebsocketErrorPayload(payload, status), status, headers, modelLevelCooling), true
+}
+
+func newCodexWebsocketStatusError(payload, body []byte, status int, headers http.Header, modelLevelCooling bool) statusErrWithHeaders {
+	isUsageLimit := isCodexUsageLimitError(body)
+	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
 	statusError := statusErr{
 		code:               status,
-		msg:                string(out),
+		msg:                string(body),
 		credentialScoped:   isUsageLimit && !modelLevelCooling,
 		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
 	}
 	// Hint precedence: the quota body reset wins, then the connection-limit
 	// immediate-retry contract, then the generic Retry-After header.
-	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+	if retryAfter := parseCodexRetryAfter(status, body, time.Now()); retryAfter != nil {
 		statusError.retryAfter = retryAfter
 	} else if isCodexWebsocketConnectionLimitError(payload) {
 		retryAfter := time.Duration(0)
@@ -123,7 +126,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	return statusErrWithHeaders{
 		statusErr: statusError,
 		headers:   headers,
-	}, true
+	}
 }
 
 func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexReasoningReplayScope, payload []byte) error {

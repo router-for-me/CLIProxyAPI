@@ -18,13 +18,12 @@ import (
 
 var payloadConfigEvaluations atomic.Int64
 
-// PayloadConfigEvaluationCount returns the cumulative number of payload rule
-// engine evaluations across the process.
 // HasPayloadRules reports whether the operator configured any payload rules.
 func HasPayloadRules(rules config.PayloadConfig) bool {
 	return len(rules.Default)+len(rules.DefaultRaw)+len(rules.Override)+len(rules.OverrideRaw)+len(rules.Replace)+len(rules.Filter) != 0
 }
 
+// PayloadConfigEvaluationCount returns the cumulative number of payload rule engine evaluations.
 func PayloadConfigEvaluationCount() int64 {
 	return payloadConfigEvaluations.Load()
 }

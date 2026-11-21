@@ -441,7 +441,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			failure = wsErr
 			status = codexWebsocketErrorStatusWithHeaders(payload, parseCodexWebsocketErrorHeaders(payload))
 		} else if status >= 400 && status <= 599 {
-			failure = statusErrWithHeaders{statusErr: statusErr{code: status, msg: string(body)}, headers: parseCodexWebsocketErrorHeaders(payload)}
+			failure = newCodexWebsocketStatusError(payload, body, status, parseCodexWebsocketErrorHeaders(payload), e.modelLevelCooling())
 		} else {
 			streamErr, _, _ := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling())
 			status, failure = streamErr.StatusCode(), streamErr
@@ -545,7 +545,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 
 			payload = bytes.TrimSpace(payload)
 			if len(payload) == 0 {
-				if !windowOpen {
+				if !windowOpen && !(prepared.httpContinuationConn != nil && !acceptedHTTP && len(bufferedChunks) == 0) {
 					break
 				}
 				continue
@@ -554,6 +554,9 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			if httpSession != nil && helps.CodexResponseEventType(payload) == "keepalive" {
+				continue
+			}
 			observeAcceptedHTTP(payload)
 
 			if failure := handleHTTPFailure(payload, true); failure != nil {
@@ -720,6 +723,11 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 				helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap byte limit reached after %d messages / %d bytes, releasing stream without overload probing", bufferedFrames, bufferedBytes)
 			}
 
+			// Skipped frames cannot commit SSE. Keep waiting for admission or a rejection
+			// without growing the bootstrap buffer or adding a deadline to the socket.
+			if prepared.httpContinuationConn != nil && !acceptedHTTP && !isTerminalEvent && len(currentChunks) == 0 && len(bufferedChunks) == 0 {
+				continue
+			}
 			initialChunks = currentChunks
 			if isTerminalEvent {
 				observeHTTPCompletion(eventType, completedPayload)
@@ -866,6 +874,9 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			if httpSession != nil && helps.CodexResponseEventType(payload) == "keepalive" {
+				continue
+			}
 			observeAcceptedHTTP(payload)
 			if failure := handleHTTPFailure(payload, false); failure != nil {
 				terminateReason, terminateErr = "upstream_error", failure

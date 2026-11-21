@@ -95,9 +95,6 @@ func (e *CodexWebsocketsExecutor) serveHTTPMessages(ctx context.Context, auth *c
 		return nil, nil, false
 	}
 	res, err := e.executeStream(ctx, auth, req, opts, sess, release)
-	if cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) || errors.Is(err, errCodexHTTPMessagesContinuationRejected) {
-		return nil, nil, false // HTTP sends the original full history after a definite rejection or no write.
-	}
 	return res, err, true
 }
 
