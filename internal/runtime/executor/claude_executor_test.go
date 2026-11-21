@@ -1454,6 +1454,90 @@ func TestClaudeExecutor_ConfiguredNativeEntrypointPassesThroughWithRealProfile(t
 	}
 }
 
+func TestClaudeExecutor_ConfiguredNativeEntrypointHaiku55TitleHelperBehindCustomBaseURLPassesThrough(t *testing.T) {
+	helps.ResetClaudeDeviceProfileCache()
+	var seenBody []byte
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-haiku-5-5\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	const sessionID = "33333333-4444-4555-8666-777777777777"
+	const userID = `{"device_id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","account_uuid":"","session_id":"33333333-4444-4555-8666-777777777777"}`
+	const t3CodeUA = "claude-cli/2.1.330 (external, t3-code, agent-sdk/0.3.321)"
+	payload := []byte(`{"model":"claude-haiku-5-5","messages":[{"role":"user","content":[{"type":"text","text":"name this session"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.330.4f2; cc_entrypoint=t3-code;"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."},{"type":"text","text":"You are naming a coding session so the user can pick it out of a long list of sessions."}],"tools":[],"metadata":{"user_id":` + fmt.Sprintf("%q", userID) + `},"max_tokens":128000,"output_config":{"effort":"medium","format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
+	incoming := http.Header{
+		"Accept":            {"application/json"},
+		"Accept-Encoding":   {"gzip, deflate, br, zstd"},
+		"Anthropic-Beta":    {"interleaved-thinking-2025-05-14,context-management-2025-06-27,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,thinking-token-count-2026-05-13,effort-2025-11-24,structured-outputs-2025-12-15"},
+		"Anthropic-Version": {"2023-06-01"},
+		"Anthropic-Dangerous-Direct-Browser-Access": {"true"},
+		"Content-Type":                {"application/json"},
+		"User-Agent":                  {t3CodeUA},
+		"X-App":                       {"cli"},
+		"X-Claude-Code-Session-Id":    {sessionID},
+		"X-Stainless-Arch":            {"x64"},
+		"X-Stainless-Lang":            {"js"},
+		"X-Stainless-Os":              {"Linux"},
+		"X-Stainless-Package-Version": {"0.128.0"},
+		"X-Stainless-Retry-Count":     {"0"},
+		"X-Stainless-Runtime":         {"node"},
+		"X-Stainless-Runtime-Version": {"v26.12.1"},
+		"X-Stainless-Timeout":         {"600"},
+	}
+	executor := NewClaudeExecutor(&config.Config{
+		ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{
+			NativeEntrypoints: []string{"t3-code"},
+		},
+	})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-t3-code-oauth",
+		Attributes: map[string]string{
+			"api_key":  "sk-ant-oat-native-t3-code",
+			"base_url": server.URL,
+		},
+		Metadata: map[string]any{
+			"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"claude_device_ids": []string{"0000000000000000000000000000000000000000000000000000000000000000"},
+		},
+	}
+
+	result, errStream := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-haiku-5-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Headers:         incoming,
+	})
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+
+	assertClaudeFingerprint(t, seenHeaders, t3CodeUA, "0.128.0", "v26.12.1", "Linux", "x64")
+	if got := ojson.GetBytes(seenBody, "system.1.text").String(); got != "You are a Claude agent, built on Anthropic's Claude Agent SDK." {
+		t.Fatalf("system.1.text = %q, want Agent SDK identity preserved", got)
+	}
+	if got := ojson.GetBytes(seenBody, "messages.#").Int(); got != 1 {
+		t.Fatalf("messages.# = %d, want 1 (no relocated system turn): %s", got, seenBody)
+	}
+	if got := seenHeaders.Get("X-Claude-Code-Session-Id"); got != sessionID {
+		t.Fatalf("X-Claude-Code-Session-Id = %q, want caller session %q", got, sessionID)
+	}
+	if bytes.Contains(seenBody, []byte(`"cache_control"`)) {
+		t.Fatalf("helper body gained cache_control: %s", seenBody)
+	}
+}
+
 func TestClaudeExecutor_CloakModeNeverPreservesConfirmedShapeClaudeCodeCallerHeaders(t *testing.T) {
 	helps.ResetClaudeDeviceProfileCache()
 	var seenBody []byte
