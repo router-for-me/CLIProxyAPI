@@ -435,6 +435,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			observeCodexTokenEvent(reporter, payload)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			upstreamEvent := payload
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
@@ -471,6 +472,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return nil, wsErr
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+				streamErr.usageFailureBody = bytes.Clone(upstreamEvent)
 				// A transient capacity or usage-limit rejection during bootstrap is retried on
 				// another credential, so the downstream websocket session must survive this
 				// upstream teardown. Notifying the disconnect here (or when no buffered payload
@@ -533,7 +535,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sawOutputDelta = true
 			}
 			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-				streamErr := newCodexEmptyIncompleteStreamError()
+				streamErr := newCodexEmptyIncompleteStreamError(upstreamEvent)
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				if sess != nil {
@@ -729,6 +731,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			observeCodexTokenEvent(reporter, payload)
 			helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+			upstreamEvent := payload
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
@@ -763,6 +766,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				return
 			}
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+				streamErr.usageFailureBody = bytes.Clone(upstreamEvent)
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				// Publish the downstream disconnect only after an in-stream error was delivered,
@@ -798,7 +802,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				sawOutputDelta = true
 			}
 			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-				streamErr := newCodexEmptyIncompleteStreamError()
+				streamErr := newCodexEmptyIncompleteStreamError(upstreamEvent)
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				if sess != nil {

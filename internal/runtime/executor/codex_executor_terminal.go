@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -20,11 +21,26 @@ type codexIncompleteStreamError struct {
 	statusErr
 }
 
-func newCodexIncompleteStreamError() codexIncompleteStreamError {
+func newCodexIncompleteStreamError(upstreamStatus int, lastEvent string, cause error) codexIncompleteStreamError {
 	return codexIncompleteStreamError{statusErr: statusErr{
-		code: http.StatusRequestTimeout,
-		msg:  codexIncompleteStreamMessage,
+		code:             http.StatusRequestTimeout,
+		msg:              codexIncompleteStreamMessage,
+		usageFailureBody: codexStreamFailureDoc(codexIncompleteStreamMessage, upstreamStatus, lastEvent, cause).Bytes(),
 	}}
+}
+
+func codexStreamFailureDoc(message string, upstreamStatus int, lastEvent string, cause error) *ojson.Doc {
+	if cause == nil {
+		cause = io.EOF
+	}
+	doc := ojson.NewDocString(`{}`)
+	_ = doc.Set("message", message)
+	_ = doc.Set("upstream_http_status", upstreamStatus)
+	if lastEvent != "" {
+		_ = doc.Set("last_event", lastEvent)
+	}
+	_ = doc.Set("cause", cause.Error())
+	return doc
 }
 
 func (codexIncompleteStreamError) IsRequestScoped() bool {
@@ -35,10 +51,11 @@ type codexEmptyIncompleteStreamError struct {
 	statusErr
 }
 
-func newCodexEmptyIncompleteStreamError() codexEmptyIncompleteStreamError {
+func newCodexEmptyIncompleteStreamError(eventData []byte) codexEmptyIncompleteStreamError {
 	return codexEmptyIncompleteStreamError{statusErr: statusErr{
-		code: http.StatusBadGateway,
-		msg:  helps.CodexEmptyIncompleteStreamMessage,
+		code:             http.StatusBadGateway,
+		msg:              helps.CodexEmptyIncompleteStreamMessage,
+		usageFailureBody: bytes.Clone(eventData),
 	}}
 }
 
@@ -162,7 +179,9 @@ func codexTerminalStreamErrWithCooling(eventData []byte, modelLevelCooling bool)
 		return statusErr{}, nil, false
 	}
 	headers := parseCodexWebsocketErrorHeaders(eventData)
-	return newCodexStatusErrWithHeadersAndCooling(http.StatusBadRequest, headers, body, modelLevelCooling), body, true
+	err := newCodexStatusErrWithHeadersAndCooling(http.StatusBadRequest, headers, body, modelLevelCooling)
+	err.usageFailureBody = bytes.Clone(eventData)
+	return err, body, true
 }
 
 func codexTerminalFailureErr(eventData []byte) (statusErr, []byte, bool) {
@@ -178,7 +197,9 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 		return statusErr{}, nil, false
 	}
 	headers := parseCodexWebsocketErrorHeaders(eventData)
-	return newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling), body, true
+	err := newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling)
+	err.usageFailureBody = bytes.Clone(eventData)
+	return err, body, true
 }
 
 func codexTerminalFailureStatus(body []byte) int {
@@ -365,6 +386,7 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 }
 
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
+	responseBody := bytes.Clone(body)
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
@@ -373,7 +395,7 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
+	err := statusErr{code: errCode, msg: string(body), usageFailureBody: responseBody, credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	// A usage_limit_reached body reset describes quota recovery and wins over
 	// the generic Retry-After header. Other 429s and recoverable transient
 	// upstream errors honour the upstream header so capacity rejections cool

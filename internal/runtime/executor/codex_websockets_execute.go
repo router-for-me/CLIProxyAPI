@@ -367,6 +367,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		observeCodexTokenEvent(reporter, payload)
 		helps.AppendCodexAPIWebsocketResponse(ctx, e.cfg, payload)
 		helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
+		upstreamEvent := payload
 		payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 
 		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
@@ -380,6 +381,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			return resp, wsErr
 		}
 		if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			streamErr.usageFailureBody = bytes.Clone(upstreamEvent)
 			if sess != nil {
 				unlockSession()
 				e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
@@ -405,7 +407,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 					e.invalidateUpstreamConn(sess, conn, "terminal_empty_incomplete", nil)
 					unlockSession()
 				}
-				streamErr := newCodexEmptyIncompleteStreamError()
+				streamErr := newCodexEmptyIncompleteStreamError(upstreamEvent)
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				return resp, streamErr
