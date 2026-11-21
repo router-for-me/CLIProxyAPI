@@ -282,6 +282,19 @@ func newAuthUnavailableErrorWithCause(next, now time.Time, cause error) error {
 	return err
 }
 
+// newPartialQuotaUnavailableError reports a pool blocked partly by quota cooldowns. It stays a
+// retryable 503, but only non-quota recovery sets Retry-After: a quota reset can be days away
+// while the other credentials may recover in minutes.
+func newPartialQuotaUnavailableError(earliestNonQuota, now time.Time, cause error) error {
+	if earliestNonQuota.After(now) {
+		return newAuthUnavailableErrorWithCause(earliestNonQuota, now, cause)
+	}
+	return &authUnavailableError{
+		cause: cause,
+		base:  &Error{Code: "auth_unavailable", Message: "no auth available", Retryable: true, HTTPStatus: http.StatusServiceUnavailable},
+	}
+}
+
 func (e *authUnavailableError) Error() string {
 	if e == nil || e.base == nil {
 		return ""

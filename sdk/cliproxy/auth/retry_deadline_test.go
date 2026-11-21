@@ -40,7 +40,7 @@ func TestSchedulerPreservesTemporaryDeadlineWithoutChangingQuotaClassification(t
 		"temporary": {auth: &Auth{ID: "temporary"}, state: scheduledStateBlocked, nextRetryAt: now.Add(time.Minute)},
 		"disabled":  {auth: &Auth{ID: "disabled"}, state: scheduledStateDisabled, nextRetryAt: now.Add(time.Second)},
 	}}
-	total, quota, _, earliest := shard.availabilitySummaryLocked(nil)
+	total, quota, _, earliest, _ := shard.availabilitySummaryLocked(nil)
 	if total != 2 || quota != 0 || !earliest.Equal(now.Add(time.Minute)) {
 		t.Fatalf("unexpected summary: total=%d quota=%d earliest=%v", total, quota, earliest)
 	}

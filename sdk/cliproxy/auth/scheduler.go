@@ -742,6 +742,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	cooldownCount := 0
 	unauthorizedCount := 0
 	earliest := time.Time{}
+	earliestNonQuota := time.Time{}
 
 	var latestModelTime time.Time
 	var latestModelAuthID string
@@ -765,12 +766,15 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localUnauthorizedCount, localEarliest := shard.availabilitySummaryLocked(predicate)
+		localTotal, localCooldownCount, localUnauthorizedCount, localEarliest, localEarliestNonQuota := shard.availabilitySummaryLocked(predicate)
 		total += localTotal
 		cooldownCount += localCooldownCount
 		unauthorizedCount += localUnauthorizedCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
+		}
+		if !localEarliestNonQuota.IsZero() && (earliestNonQuota.IsZero() || localEarliestNonQuota.Before(earliestNonQuota)) {
+			earliestNonQuota = localEarliestNonQuota
 		}
 		if localTotal > 0 {
 			localClaude, localClaudeEarliest, localClaudeID, localSignals := shard.claudeCooldownSummaryLocked(providerKey, model, now, predicate)
@@ -833,6 +837,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 			Retryable:  false,
 			HTTPStatus: http.StatusServiceUnavailable,
 		}, terminalCause)
+	}
+	if cooldownCount > 0 {
+		return newPartialQuotaUnavailableError(earliestNonQuota, now, lastCandidateErr)
 	}
 	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 }
@@ -1556,7 +1563,7 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, unauthorizedCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, cooldownCount, unauthorizedCount, earliest, earliestNonQuota := m.availabilitySummaryLocked(predicate)
 	_, _, _, authErr, _, _ := m.candidateErrorsLocked(model, predicate)
 	lastCandidateErr, _, _ := m.latestCandidateErrorWithTimeLocked(model, predicate)
 	if total == 0 {
@@ -1585,6 +1592,9 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 			Retryable:  false,
 			HTTPStatus: http.StatusServiceUnavailable,
 		}, terminalCause)
+	}
+	if cooldownCount > 0 {
+		return newPartialQuotaUnavailableError(earliestNonQuota, now, lastCandidateErr)
 	}
 	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 }
@@ -1658,15 +1668,17 @@ func (m *modelScheduler) candidateErrorsLocked(model string, predicate func(*sch
 	return modelErr, modelTime, modelAuthID, authErr, authTime, authAuthID
 }
 
-// availabilitySummaryLocked summarizes total candidates, cooldown count, and earliest retry time.
-func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, int, time.Time) {
+// availabilitySummaryLocked summarizes total candidates, cooldown count, and the earliest retry
+// time overall and among non-quota blocks.
+func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth) bool) (int, int, int, time.Time, time.Time) {
 	if m == nil {
-		return 0, 0, 0, time.Time{}
+		return 0, 0, 0, time.Time{}, time.Time{}
 	}
 	total := 0
 	cooldownCount := 0
 	unauthorizedCount := 0
 	earliest := time.Time{}
+	earliestNonQuota := time.Time{}
 	for _, entry := range m.entries {
 		if predicate != nil && !predicate(entry) {
 			continue
@@ -1684,8 +1696,11 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if (entry.state == scheduledStateCooldown || entry.state == scheduledStateBlocked) && !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
 			earliest = entry.nextRetryAt
 		}
+		if entry.state == scheduledStateBlocked && !entry.nextRetryAt.IsZero() && (earliestNonQuota.IsZero() || entry.nextRetryAt.Before(earliestNonQuota)) {
+			earliestNonQuota = entry.nextRetryAt
+		}
 	}
-	return total, cooldownCount, unauthorizedCount, earliest
+	return total, cooldownCount, unauthorizedCount, earliest, earliestNonQuota
 }
 
 func (m *modelScheduler) claudeCooldownSummaryLocked(fallbackProvider, model string, now time.Time, predicate func(*scheduledAuth) bool) (bool, time.Time, string, map[string]string) {

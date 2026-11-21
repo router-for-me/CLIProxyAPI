@@ -915,11 +915,11 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest, earliestNonQuota time.Time) {
 	return collectAvailableByPriorityForRequest(nil, auths, model, now)
 }
 
-func collectAvailableByPriorityForRequest(ctx context.Context, auths []*Auth, model string, now time.Time, clientHeaders ...http.Header) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+func collectAvailableByPriorityForRequest(ctx context.Context, auths []*Auth, model string, now time.Time, clientHeaders ...http.Header) (available map[int][]*Auth, cooldownCount int, earliest, earliestNonQuota time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
 		candidate := auths[i]
@@ -935,8 +935,11 @@ func collectAvailableByPriorityForRequest(ctx context.Context, auths []*Auth, mo
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
 		}
+		if reason == blockReasonOther && next.After(now) && (earliestNonQuota.IsZero() || next.Before(earliestNonQuota)) {
+			earliestNonQuota = next
+		}
 	}
-	return available, cooldownCount, earliest
+	return available, cooldownCount, earliest, earliestNonQuota
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
@@ -982,7 +985,7 @@ func getAvailableAuthsWithPriorityModeForRequest(ctx context.Context, auths []*A
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriorityForRequest(ctx, auths, model, now, clientHeaders...)
+	availableByPriority, cooldownCount, earliest, earliestNonQuota := collectAvailableByPriorityForRequest(ctx, auths, model, now, clientHeaders...)
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
@@ -997,6 +1000,9 @@ func getAvailableAuthsWithPriorityModeForRequest(ctx context.Context, auths []*A
 				return model
 			}, now, clientHeaders...)
 			return nil, newModelCooldownErrorForCandidates(model, providerForError, resetIn, nil, claudeCooldown, claudeSignals)
+		}
+		if cooldownCount > 0 {
+			return nil, newPartialQuotaUnavailableError(earliestNonQuota, now, nil)
 		}
 		return nil, newAuthUnavailableError(earliest, now)
 	}
