@@ -629,3 +629,26 @@ func TestUpdateTokenStoragePreservesAccountWhenRefreshOmitsIt(t *testing.T) {
 		t.Fatalf("organization = %q/%q, want preserved", storage.OrganizationUUID, storage.OrganizationName)
 	}
 }
+
+
+func TestUpdateTokenStoragePreservesRefreshTokenWhenRefreshOmitsIt(t *testing.T) {
+	storage := &ClaudeTokenStorage{RefreshToken: "existing-refresh"}
+	(&ClaudeAuth{}).UpdateTokenStorage(storage, &ClaudeTokenData{
+		AccessToken: "new-access",
+		Expire:      "2099-01-01T00:00:00Z",
+	})
+	if storage.RefreshToken != "existing-refresh" {
+		t.Fatalf("refresh token = %q, want the existing token kept when the refresh response omits one", storage.RefreshToken)
+	}
+	if storage.AccessToken != "new-access" {
+		t.Fatalf("access token = %q, want refreshed access token", storage.AccessToken)
+	}
+}
+
+func TestUpdateTokenStorageAppliesRotatedRefreshToken(t *testing.T) {
+	storage := &ClaudeTokenStorage{RefreshToken: "old-refresh"}
+	(&ClaudeAuth{}).UpdateTokenStorage(storage, &ClaudeTokenData{RefreshToken: "new-refresh"})
+	if storage.RefreshToken != "new-refresh" {
+		t.Fatalf("refresh token = %q, want rotated token applied", storage.RefreshToken)
+	}
+}

@@ -408,7 +408,11 @@ func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *Co
 	}
 	storage.IDToken = tokenData.IDToken
 	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
+	// A refresh response may legally omit refresh_token; the existing token
+	// remains valid then and must not be overwritten with an empty value.
+	if strings.TrimSpace(tokenData.RefreshToken) != "" {
+		storage.RefreshToken = tokenData.RefreshToken
+	}
 	storage.AccountID = tokenData.AccountID
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
 	storage.Email = tokenData.Email
