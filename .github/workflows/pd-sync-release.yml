@@ -1,4 +1,5 @@
-# Fork-only merge, verify and atomic release. Never reset custom main to upstream.
+# Fork-only merge of upstream's latest release tag, verify and atomic release.
+# Never reset custom main to upstream. See docs/fork-routing.md.
 name: Fork sync, verify and release
 
 on:
@@ -24,6 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # pd-verify.py compares with the upstream commit the PR is built on.
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@v5
         with:
@@ -45,7 +48,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Merge upstream main
+      - name: Merge upstream release tag
         id: merge
         run: |
           set -euo pipefail
@@ -53,11 +56,19 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
           git fetch --tags upstream main
+          # Upstream tags a release most days. Its main between tags is often
+          # mid-change, so the fork follows the newest release tag on main.
+          tag=$(git tag --merged upstream/main --sort=-v:refname --list 'v[0-9]*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ && !found {print; found=1}')
+          [[ -n "$tag" ]] || { echo 'No upstream release tag on main' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           before=$(git rev-parse HEAD)
-          if ! git merge --no-edit upstream/main; then
+          if ! git merge --no-edit "refs/tags/$tag"; then
             git merge --abort || true
-            echo 'Upstream merge conflicted; retaining the last published release.' >> "$GITHUB_STEP_SUMMARY"
-            exit 1
+            # Still verify and release main as it is, so a just-merged fix PR
+            # ships; the last step then fails the run.
+            echo 'conflict=true' >> "$GITHUB_OUTPUT"
+            echo "Merging upstream $tag conflicted. Main is verified and released without it. ai's cliproxy-fork-sync job opens a PR that resolves it." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
           if [[ "$before" != "$(git rev-parse HEAD)" ]]; then
             echo 'merged=true' >> "$GITHUB_OUTPUT"
@@ -72,10 +83,10 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' upstream/main)
+          base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$(git merge-base HEAD upstream/main)")
           tag="pd-${base}-$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short=12 HEAD)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          bash .github/scripts/pd-build-release.sh "$tag" upstream/main
+          bash .github/scripts/pd-build-release.sh "$tag" "$(git merge-base HEAD upstream/main)"
       - name: Push verified merge
         if: steps.merge.outputs.merged == 'true'
         env:
@@ -112,6 +123,13 @@ jobs:
             --draft --target "$sha" --title "$RELEASE_TAG" --notes-file notes.md
           gh release edit "$RELEASE_TAG" --draft=false --latest
           echo "Published $RELEASE_TAG at $sha" >> "$GITHUB_STEP_SUMMARY"
+      - name: Fail when the upstream merge conflicted
+        if: steps.merge.outputs.conflict == 'true'
+        env:
+          UPSTREAM_TAG: ${{ steps.merge.outputs.tag }}
+        run: |
+          echo "::error::Merging upstream $UPSTREAM_TAG conflicted"
+          exit 1
       - name: Report failure without replacing latest release
         if: failure()
         env:
@@ -119,7 +137,7 @@ jobs:
         run: |
           set -euo pipefail
           title='Upstream sync or release failed'
-          printf 'Run: %s/%s/actions/runs/%s\n\nMerge, verification, build, push or publish failed. The last published release remains available. Inspect this run before retrying; never force-reset the fork.\n\nWorkflow-changing merges need a SYNC_TOKEN with contents and workflows write access. See docs/fork-routing.md.\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > failure.md
+          printf 'Run: %s/%s/actions/runs/%s\n\nMerge, verification, build, push or publish failed. The last published release remains available. On ai, the cliproxy-fork-sync fleet job opens a PR that resolves a conflict or a fork-caused failure and merges it once its checks pass. Never force-reset the fork.\n\nWorkflow-changing merges need a SYNC_TOKEN with contents and workflows write access. See docs/fork-routing.md.\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > failure.md
           cat failure.md >> "$GITHUB_STEP_SUMMARY"
           existing=$(gh issue list --state open --search '"Upstream sync or release failed" in:title' --json number --jq '.[0].number')
           if [[ -n "$existing" ]]; then

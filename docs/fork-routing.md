@@ -218,12 +218,14 @@ CLIPROXY_CODEX_DRAIN_SMOKE=1 go test ./internal/api -run '^TestDrainCodexClientR
 ## Fork sync and releases
 
 `.github/workflows/pd-sync-release.yml` runs every six hours, on main pushes and
-by manual dispatch. PRs run the same verification script. Sync merges
-`router-for-me/CLIProxyAPI:main`, runs formatting, all tests, the required build
-and offline checks, then stages the entire release before pushing the merge.
-It never resets or force-pushes custom commits. A failure creates or updates the
-fork's failure issue and action summary. The previous published release remains
-available. Publication uploads all assets to a draft before marking it latest.
+by manual dispatch. PRs run the same verification script. Sync merges the newest
+release tag on `router-for-me/CLIProxyAPI:main` (upstream tags most days; its
+main between tags is often mid-change), verifies, then stages the entire release
+before pushing the merge. It never resets or force-pushes custom commits. A
+failure creates or updates the fork's failure issue and action summary. The
+previous published release remains available. When the newest tag conflicts,
+the run still verifies and releases main as it is, so a just-merged fix ships,
+and then fails. Publication uploads all assets to a draft before marking it latest.
 Unchanged commits do not produce duplicate releases. The upstream tag release
 workflow is restricted to the upstream repository so fork tags cannot publish
 partial upstream-style releases.
@@ -233,6 +235,49 @@ with Contents and Workflows write access to **PDiTO/CLIProxyAPI**. Only the push
 step receives it. Other publishing uses the built-in repository token. Without
 that secret a workflow-changing push fails visibly and keeps the last release.
 Create/renew the secret through GitHub's secret UI; never commit it.
+
+### Verification
+
+`.github/scripts/pd-verify.sh` runs `pd-verify.py`, then the build, capabilities
+and example config checks, which always block. Upstream's own CI builds but
+never runs its tests or gofmt, so its tags often carry failing or flaky tests.
+`pd-verify.py` compares the fork with the upstream commit it is built on (the
+merge base of HEAD and `upstream/main`):
+
+- A Go file the fork adds must be gofmt-formatted. A file the fork changes must
+  be formatted if upstream's copy is.
+- A failing test blocks when the fork owns it, meaning upstream's package has no
+  test of that name, or when it fails again on the fork while passing three
+  reruns on upstream. Tests that fail on upstream too, and tests that pass
+  every rerun, are listed in the run summary without blocking.
+- Each rerun is a fresh `go test -count=1` process, because some upstream tests
+  leave global state behind and fail a second run in one process.
+
+### Keeping merges clean
+
+Most sync failures were conflicts between fork edits and upstream's next change
+to the same lines. To keep them rare:
+
+- Never edit upstream's tests or reformat upstream files to get a green run.
+  The verification above already ignores upstream's own failures, and the edit
+  conflicts as soon as upstream fixes the test its own way.
+- Put fork code in fork-owned files. Upstream files keep one-line hooks into it,
+  as in `server.go`, `selector.go` and `openai_responses_websocket.go`. Don't
+  append functions to the end of an upstream file; upstream appends there too.
+- Don't edit upstream comments, `config.example.yaml` or `.gitignore`. This
+  document stays tracked without a `.gitignore` exception.
+
+### Automatic conflict resolution
+
+The `cliproxy-fork-sync` job on ai (in the fleet repository) checks hourly.
+When the latest sync run on main failed and main lacks upstream's newest tag, it
+merges the tag on a `sync/upstream-<tag>` branch in its own clone. If the merge
+conflicts or verification fails, Claude Code resolves it under the rules above.
+The job then refuses the result if conflict markers remain, if any `pd-` script
+or workflow changed, if it edited an upstream test file that main didn't already
+edit or if a fork test was deleted, and it runs `pd-verify.sh` itself. It opens a PR and merges it
+once the PR's checks pass. That push runs this workflow, which releases it. A
+result it refuses is left for a person, and `fleet status ai` says why.
 
 Tags are `pd-v<upstream-version>-<UTC YYYYMMDDHHMMSS>-<12-char fork SHA>`.
 The timestamp precedes the hash so consecutive builds of one upstream version
@@ -256,7 +301,6 @@ these options and uses explicit asset patterns without platform autodetection.
 Never fall back to the upstream binary when a fork update fails. Fleet owns
 minimum release age, staging, rollback, restart deferral and deployment.
 
-The verification gate also includes two small upstream fixes discovered while
-running it: Claude setup-token flags now use the metadata writers' existing lock,
-and the Home heartbeat test allows failure detection plus the retry backoff.
-These do not change the Home protocol or require a Home repository update.
+The fork also carries one small upstream fix: Claude setup-token flags use the
+metadata writers' existing lock. It does not change the Home protocol or require
+a Home repository update.
