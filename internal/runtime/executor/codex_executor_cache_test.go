@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -293,5 +294,35 @@ func TestCodexExecutorCacheHelper_ClaudeAgentScopeUsesResolvedModelAcrossHTTPAnd
 	}
 	if websocketKey := ojson.GetBytes(websocketBody, "prompt_cache_key").String(); websocketKey != childKey {
 		t.Fatalf("HTTP/WebSocket prompt keys differ: http=%q websocket=%q", childKey, websocketKey)
+	}
+}
+
+// OpenCode sends X-Session-ID on every request; session.Enrich keeps it only as the canonical session.
+func TestCodexExecutorCacheHelper_UsesExplicitSessionHeader(t *testing.T) {
+	t.Parallel()
+
+	executor := &CodexExecutor{}
+	for _, format := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI} {
+		keyFor := func(sessionID string, text string) string {
+			headers := http.Header{"X-Session-Id": {sessionID}}
+			payload := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"` + text + `"}]}`)
+			req, _ := cliproxysession.Enrich(cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload}, cliproxyexecutor.Options{Headers: headers, SourceFormat: format})
+			httpReq, body, err := executor.cacheHelper(context.Background(), format, "https://example.com/responses", req, []byte(`{"model":"gpt-5.4"}`), nil)
+			if err != nil {
+				t.Fatalf("%s: cacheHelper error: %v", format, err)
+			}
+			key := ojson.GetBytes(body, "prompt_cache_key").String()
+			if key == "" || httpReq.Header.Get("Session-Id") != key {
+				t.Fatalf("%s: prompt_cache_key = %q, Session-Id = %q, want equal and non-empty", format, key, httpReq.Header.Get("Session-Id"))
+			}
+			return key
+		}
+		first := keyFor("session-a", "hello")
+		if next := keyFor("session-a", "next turn"); next != first {
+			t.Fatalf("%s: key changed across turns: %q -> %q", format, first, next)
+		}
+		if other := keyFor("session-b", "hello"); other == first {
+			t.Fatalf("%s: sessions share key %q", format, first)
+		}
 	}
 }

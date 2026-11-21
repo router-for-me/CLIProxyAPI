@@ -26,14 +26,23 @@ func DerivedSessionUUID(provider string, metadataSets ...map[string]any) string 
 	return stableProviderSessionUUID(provider, "derived-session", DerivedSessionID(metadataSets...))
 }
 
-// ProviderSessionUUID prefers a long-lived execution session and falls back to the derived identity.
+// ProviderSessionUUID prefers a long-lived execution session, then the derived identity, then the
+// canonical session, which is the only identity session.Enrich keeps for explicit session headers.
 func ProviderSessionUUID(provider string, metadataSets ...map[string]any) string {
 	for _, metadata := range metadataSets {
 		if executionID := metadataString(metadata, cliproxyexecutor.ExecutionSessionMetadataKey); executionID != "" {
 			return stableProviderSessionUUID(provider, "execution-session", executionID)
 		}
 	}
-	return DerivedSessionUUID(provider, metadataSets...)
+	if derivedID := DerivedSessionUUID(provider, metadataSets...); derivedID != "" {
+		return derivedID
+	}
+	for _, metadata := range metadataSets {
+		if canonicalID := metadataString(metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey); canonicalID != "" {
+			return stableProviderSessionUUID(provider, "canonical-session", canonicalID)
+		}
+	}
+	return ""
 }
 
 func stableProviderSessionUUID(provider string, kind string, identityValue string) string {
