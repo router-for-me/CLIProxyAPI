@@ -1132,6 +1132,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1144,6 +1146,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 	}
 	attempted := make(map[string]struct{})
+	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -1153,7 +1156,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		opts.Metadata = cloneRequestMetadata(opts.Metadata)
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
+		if !homeMode && lastAttemptedAuthID != "" {
+			// Preserve the mid-round selected_auth_id signal for scheduler plugins (#7434)
+			// as a one-shot signal after an executed failure without carrying over
+			// affinity/LCP, selection_id, or index keys from prior attempts.
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = lastAttemptedAuthID
+			lastAttemptedAuthID = ""
+		}
 		pickOpts := opts
 		if homeMode {
 			pickOpts = withHomeRetryRound(pickOpts, retryRound)
@@ -1188,7 +1198,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			lastAttemptedAuthID = authID
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		if homeMode {
+			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
+		}
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
@@ -1395,6 +1411,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1407,6 +1425,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 	}
 	attempted := make(map[string]struct{})
+	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -1416,7 +1435,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		opts.Metadata = cloneRequestMetadata(opts.Metadata)
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
+		if !homeMode && lastAttemptedAuthID != "" {
+			// Preserve the mid-round selected_auth_id signal for scheduler plugins (#7434)
+			// as a one-shot signal after an executed failure without carrying over
+			// affinity/LCP, selection_id, or index keys from prior attempts.
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = lastAttemptedAuthID
+			lastAttemptedAuthID = ""
+		}
 		pickOpts := opts
 		if homeMode {
 			pickOpts = withHomeRetryRound(pickOpts, retryRound)
@@ -1451,7 +1477,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			lastAttemptedAuthID = authID
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		if homeMode {
+			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
+		}
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
@@ -1664,6 +1696,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1685,6 +1719,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
+	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
@@ -1700,7 +1735,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		opts.Metadata = cloneRequestMetadata(opts.Metadata)
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
+		if !homeMode && lastAttemptedAuthID != "" {
+			// Preserve the mid-round selected_auth_id signal for scheduler plugins (#7434)
+			// as a one-shot signal after an executed failure without carrying over
+			// affinity/LCP, selection_id, or index keys from prior attempts.
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = lastAttemptedAuthID
+			lastAttemptedAuthID = ""
+		}
 		pickOpts := opts
 		if homeMode {
 			pickOpts = withHomeRetryRound(pickOpts, retryRound)
@@ -1870,7 +1912,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			lastAttemptedAuthID = authID
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		if homeMode {
+			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
+		}
 		var preparedAuth *Auth
 		var errPrepare error
 		if selection != nil {
@@ -2117,15 +2165,151 @@ func withAttemptedAuthTracker(opts cliproxyexecutor.Options, attempted map[strin
 	return opts
 }
 
+type metadataCloneVisitKey struct {
+	ptr      uintptr
+	capacity int
+	isSlice  bool
+	typ      reflect.Type
+}
+
+var metadataMapAnyType = reflect.TypeFor[map[string]any]()
+
 func cloneRequestMetadata(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return make(map[string]any, 4)
 	}
 	dst := make(map[string]any, len(src)+4)
+	var visited map[metadataCloneVisitKey]any
+	rootKey := metadataCloneVisitKey{ptr: reflect.ValueOf(src).Pointer()}
 	for k, v := range src {
-		dst[k] = v
+		dst[k] = cloneRequestMetadataValue(v, rootKey, dst, &visited)
 	}
 	return dst
+}
+
+func cloneRequestMetadataValue(v any, rootKey metadataCloneVisitKey, rootDst map[string]any, visited *map[metadataCloneVisitKey]any) any {
+	switch v.(type) {
+	case nil, string, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr, float32, float64, func(string):
+		return v
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		if rv.IsNil() {
+			return v
+		}
+		key := metadataCloneVisitKey{ptr: rv.Pointer()}
+		if key == rootKey {
+			if rv.Type() == metadataMapAnyType {
+				return rootDst
+			}
+			return reflect.ValueOf(rootDst).Convert(rv.Type()).Interface()
+		}
+		if *visited == nil {
+			*visited = make(map[metadataCloneVisitKey]any)
+		} else if existing, ok := (*visited)[key]; ok {
+			ev := reflect.ValueOf(existing)
+			if ev.Type() == rv.Type() {
+				return existing
+			}
+			return ev.Convert(rv.Type()).Interface()
+		}
+		cloned := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+		(*visited)[key] = cloned.Interface()
+		elemType := rv.Type().Elem()
+		iter := rv.MapRange()
+		for iter.Next() {
+			cloned.SetMapIndex(iter.Key(), cloneReflectMetadataElement(iter.Value(), elemType, rootKey, rootDst, visited))
+		}
+		return cloned.Interface()
+	case reflect.Slice:
+		if rv.IsNil() {
+			return v
+		}
+		if rv.Cap() == 0 {
+			return reflect.MakeSlice(rv.Type(), 0, 0).Interface()
+		}
+		elemType := rv.Type().Elem()
+		if elemType.Size() == 0 {
+			return reflect.MakeSlice(rv.Type(), rv.Len(), rv.Cap()).Interface()
+		}
+		key := metadataCloneVisitKey{ptr: rv.Pointer(), capacity: rv.Cap(), isSlice: true, typ: elemType}
+		if *visited == nil {
+			*visited = make(map[metadataCloneVisitKey]any)
+		} else if existing, ok := (*visited)[key]; ok {
+			ev := reflect.ValueOf(existing)
+			if ev.Type() != rv.Type() {
+				ev = ev.Convert(rv.Type())
+			}
+			return ev.Slice(0, rv.Len()).Interface()
+		}
+		clonedFull := reflect.MakeSlice(rv.Type(), rv.Cap(), rv.Cap())
+		(*visited)[key] = clonedFull.Interface()
+		fullSrc := rv.Slice(0, rv.Cap())
+		switch elemType.Kind() {
+		case reflect.Map, reflect.Slice, reflect.Array, reflect.Struct, reflect.Interface:
+			for i := 0; i < rv.Cap(); i++ {
+				clonedFull.Index(i).Set(cloneReflectMetadataElement(fullSrc.Index(i), elemType, rootKey, rootDst, visited))
+			}
+		default:
+			reflect.Copy(clonedFull, fullSrc)
+		}
+		return clonedFull.Slice(0, rv.Len()).Interface()
+	case reflect.Array:
+		cloned := reflect.New(rv.Type()).Elem()
+		elemType := rv.Type().Elem()
+		for i := 0; i < rv.Len(); i++ {
+			cloned.Index(i).Set(cloneReflectMetadataElement(rv.Index(i), elemType, rootKey, rootDst, visited))
+		}
+		return cloned.Interface()
+	case reflect.Struct:
+		rt := rv.Type()
+		var cloned reflect.Value
+		for i := 0; i < rt.NumField(); i++ {
+			sf := rt.Field(i)
+			if !sf.IsExported() {
+				continue
+			}
+			fv := rv.Field(i)
+			switch fv.Kind() {
+			case reflect.Map, reflect.Slice, reflect.Array, reflect.Struct, reflect.Interface:
+				if !cloned.IsValid() {
+					cloned = reflect.New(rt).Elem()
+					cloned.Set(rv)
+				}
+				cloned.Field(i).Set(cloneReflectMetadataElement(fv, sf.Type, rootKey, rootDst, visited))
+			}
+		}
+		if !cloned.IsValid() {
+			return v
+		}
+		return cloned.Interface()
+	default:
+		return v
+	}
+}
+
+func cloneReflectMetadataElement(elem reflect.Value, elemType reflect.Type, rootKey metadataCloneVisitKey, rootDst map[string]any, visited *map[metadataCloneVisitKey]any) reflect.Value {
+	switch elem.Kind() {
+	case reflect.Interface:
+		if elem.IsNil() {
+			return reflect.Zero(elemType)
+		}
+		clonedVal := cloneRequestMetadataValue(elem.Interface(), rootKey, rootDst, visited)
+		if clonedVal == nil {
+			return reflect.Zero(elemType)
+		}
+		return reflect.ValueOf(clonedVal)
+	case reflect.Map, reflect.Slice:
+		if elem.IsNil() {
+			return elem
+		}
+		return reflect.ValueOf(cloneRequestMetadataValue(elem.Interface(), rootKey, rootDst, visited))
+	case reflect.Array, reflect.Struct:
+		return reflect.ValueOf(cloneRequestMetadataValue(elem.Interface(), rootKey, rootDst, visited))
+	default:
+		return elem
+	}
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
@@ -2895,6 +3079,22 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 		if callback, ok := meta[cliproxyexecutor.SelectedAuthIndexCallbackMetadataKey].(func(string)); ok && callback != nil {
 			callback(authIndex)
 		}
+	}
+}
+
+func syncPublishedSelectedAuthMetadata(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	if authID, ok := src[cliproxyexecutor.SelectedAuthMetadataKey]; ok {
+		dst[cliproxyexecutor.SelectedAuthMetadataKey] = authID
+	} else {
+		delete(dst, cliproxyexecutor.SelectedAuthMetadataKey)
+	}
+	if authIndex, ok := src[cliproxyexecutor.SelectedAuthIndexMetadataKey]; ok {
+		dst[cliproxyexecutor.SelectedAuthIndexMetadataKey] = authIndex
+	} else {
+		delete(dst, cliproxyexecutor.SelectedAuthIndexMetadataKey)
 	}
 }
 
