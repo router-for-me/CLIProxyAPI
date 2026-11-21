@@ -32,6 +32,8 @@ type antigravityCreditsFailureState struct {
 type antigravity429DecisionKind string
 
 const (
+	antigravityLoadCodeAssistMaxResponseBytes = 1 << 20
+
 	antigravity429Unknown                         antigravity429Category     = "unknown"
 	antigravity429RateLimited                     antigravity429Category     = "rate_limited"
 	antigravity429QuotaExhausted                  antigravity429Category     = "quota_exhausted"
@@ -374,11 +376,10 @@ func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
 		return nil
 	}
 	code := int(ojson.GetBytesNoCopy(body, "error.code").Int())
-	if code != http.StatusForbidden {
-		return nil
-	}
 	status := strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String())
-	if !strings.EqualFold(status, "PERMISSION_DENIED") {
+	isHTTPForbidden := code == http.StatusForbidden && strings.EqualFold(status, "PERMISSION_DENIED")
+	isGRPCPermissionDenied := code == 7 && (status == "" || strings.EqualFold(status, "PERMISSION_DENIED"))
+	if !isHTTPForbidden && !isGRPCPermissionDenied {
 		return nil
 	}
 	details := ojson.GetBytesNoCopy(body, "error.details")
@@ -417,6 +418,34 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 		}
 	}
 	return err
+}
+
+// applyAntigravity429State performs the executor-side bookkeeping for an
+// Antigravity 429 response (either HTTP status 429 or a mid-stream SSE 429
+// error frame): closing idle transports, recording short model cooldowns, and
+// permanently disabling credits on explicit balance exhaustion.
+func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, bodyBytes []byte) error {
+	var cfg *config.Config
+	if e != nil {
+		cfg = e.cfg
+	}
+	decision := decideAntigravity429(bodyBytes)
+	switch decision.kind {
+	case antigravity429DecisionShortCooldownSwitchAuth:
+		closeAntigravityAuthIdleTransports(auth)
+		if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, cfg) {
+			if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
+				return homeKVUnavailableStatusErr(errMarkCooldown)
+			}
+			log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
+		}
+	case antigravity429DecisionFullQuotaExhausted:
+		closeAntigravityAuthIdleTransports(auth)
+		if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, cfg) {
+			markAntigravityCreditsPermanentlyDisabled(auth)
+		}
+	}
+	return nil
 }
 
 // applyAntigravityTOSState performs the executor-side bookkeeping for a terminal
@@ -636,9 +665,17 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, antigravityLoadCodeAssistMaxResponseBytes+1))
 	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
+		return
+	}
+	if len(bodyBytes) > antigravityLoadCodeAssistMaxResponseBytes {
+		log.Debugf("antigravity executor: loadCodeAssist response exceeded %d bytes", antigravityLoadCodeAssistMaxResponseBytes)
+		return
+	}
+	if !ojson.ValidBytes(bodyBytes) {
+		log.Debugf("antigravity executor: loadCodeAssist returned invalid JSON")
 		return
 	}
 
@@ -667,43 +704,42 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	paidTierID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(bodyBytes, "paidTier.id").String()))
 
 	credits := ojson.GetBytesNoCopy(bodyBytes, "paidTier.availableCredits")
-	if !credits.IsArray() {
-		publish(nil, cliproxyauth.AntigravityCreditsHint{
-			Known:      true,
-			Available:  false,
-			PaidTierID: paidTierID,
-			UpdatedAt:  time.Now(),
-		})
-		return
+	if credits.IsArray() {
+		for _, credit := range credits.Array() {
+			if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
+				continue
+			}
+			creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
+			if errCA != nil {
+				continue
+			}
+			minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
+			if errMA != nil {
+				continue
+			}
+			bal := antigravityCreditsBalance{
+				CreditAmount:    creditAmount,
+				MinCreditAmount: minAmount,
+				PaidTierID:      paidTierID,
+				Known:           true,
+			}
+			publish(&bal, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       creditAmount >= minAmount,
+				CreditAmount:    creditAmount,
+				MinCreditAmount: minAmount,
+				PaidTierID:      paidTierID,
+				UpdatedAt:       time.Now(),
+			})
+			return
+		}
 	}
-	for _, credit := range credits.Array() {
-		if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
-			continue
-		}
-		creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
-		if errCA != nil {
-			continue
-		}
-		minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
-		if errMA != nil {
-			continue
-		}
-		bal := antigravityCreditsBalance{
-			CreditAmount:    creditAmount,
-			MinCreditAmount: minAmount,
-			PaidTierID:      paidTierID,
-			Known:           true,
-		}
-		publish(&bal, cliproxyauth.AntigravityCreditsHint{
-			Known:           true,
-			Available:       creditAmount >= minAmount,
-			CreditAmount:    creditAmount,
-			MinCreditAmount: minAmount,
-			PaidTierID:      paidTierID,
-			UpdatedAt:       time.Now(),
-		})
-		return
-	}
+	publish(nil, cliproxyauth.AntigravityCreditsHint{
+		Known:      true,
+		Available:  false,
+		PaidTierID: paidTierID,
+		UpdatedAt:  time.Now(),
+	})
 }
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)
@@ -934,6 +970,18 @@ func markAntigravityTOSPause(cfg *config.Config, auth *cliproxyauth.Auth) {
 		}
 	}
 	log.Warnf("antigravity executor: TOS_VIOLATION pause armed for %s (pool-wide until %s)", window, until.Format(time.RFC3339))
+}
+
+// newAntigravityTOSPauseStatusErr builds the 503 error returned while the
+// Antigravity pool is under a protective TOS_VIOLATION pause. Marking it
+// request-scoped ensures the conductor aborts immediately without failing,
+// cooling, or rotating across healthy sibling credentials.
+func newAntigravityTOSPauseStatusErr() statusErr {
+	return statusErr{
+		code:          http.StatusServiceUnavailable,
+		msg:           "antigravity pool paused after TOS_VIOLATION",
+		requestScoped: true,
+	}
 }
 
 // antigravityInTOSPause reports whether the Antigravity pool is currently under

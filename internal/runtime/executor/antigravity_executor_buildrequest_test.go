@@ -360,8 +360,12 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	if !ok {
 		t.Fatalf("error should expose status code, got %T", err)
 	}
-	if got := status.StatusCode(); got != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	if got := status.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	scoped, okScoped := err.(interface{ IsCredentialScoped() bool })
+	if !okScoped || !scoped.IsCredentialScoped() {
+		t.Fatalf("missing project_id error should be credential-scoped, got %T (%v)", err, err)
 	}
 }
 

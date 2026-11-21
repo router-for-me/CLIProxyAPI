@@ -45,7 +45,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if antigravityInTOSPause(e.cfg, auth) {
-		return resp, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+		return resp, newAntigravityTOSPauseStatusErr()
 	}
 	if !antigravityCoolingDisabled(auth, e.cfg) {
 		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
@@ -163,23 +163,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		decision := decideAntigravity429(bodyBytes)
-		switch decision.kind {
-		case antigravity429DecisionShortCooldownSwitchAuth:
-			closeAntigravityAuthIdleTransports(auth)
-			if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, e.cfg) {
-				if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
-					err = homeKVUnavailableStatusErr(errMarkCooldown)
-					return resp, err
-				}
-				log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
-			}
-		case antigravity429DecisionFullQuotaExhausted:
-			closeAntigravityAuthIdleTransports(auth)
-			if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-				markAntigravityCreditsPermanentlyDisabled(auth)
-			}
-			// No credits logic - just fall through to error return below
+		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, bodyBytes); err429 != nil {
+			err = err429
+			return resp, err
 		}
 	}
 
@@ -292,7 +278,7 @@ func (e *AntigravityExecutor) executeCompaction(ctx context.Context, auth *clipr
 func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if antigravityInTOSPause(e.cfg, auth) {
-		return resp, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+		return resp, newAntigravityTOSPauseStatusErr()
 	}
 	if !antigravityCoolingDisabled(auth, e.cfg) {
 		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
@@ -412,24 +398,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			return resp, err
 		}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			decision := decideAntigravity429(bodyBytes)
-
-			switch decision.kind {
-			case antigravity429DecisionShortCooldownSwitchAuth:
-				closeAntigravityAuthIdleTransports(auth)
-				if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, e.cfg) {
-					if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
-						err = homeKVUnavailableStatusErr(errMarkCooldown)
-						return resp, err
-					}
-					log.Debugf("antigravity executor: short quota cooldown (%s) for model %s, recorded cooldown", *decision.retryAfter, baseModel)
-				}
-			case antigravity429DecisionFullQuotaExhausted:
-				closeAntigravityAuthIdleTransports(auth)
-				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-					markAntigravityCreditsPermanentlyDisabled(auth)
-				}
-				// No credits logic - just fall through to error return below
+			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, bodyBytes); err429 != nil {
+				err = err429
+				return resp, err
 			}
 		}
 
@@ -444,10 +415,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, err
 	}
 
-	// Stream success
-	if useCredits {
-		clearAntigravityCreditsFailureState(auth)
-	}
 	if len(replayRequestPayload) == 0 {
 		replayRequestPayload = requestPayload
 	}
@@ -455,56 +422,49 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	var rawPayloads [][]byte
 	var pendingFilterPayload []byte
 	var pendingFilterMsg string
-	var pendingJSON []byte
+	sseJSON := helps.NewSSEJSONAssembler(streamScannerBuffer)
 	scanner := bufio.NewScanner(httpResp.Body)
 	scanner.Buffer(nil, streamScannerBuffer)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-		if replayAccumulator != nil {
-			replayAccumulator.ObserveSSELine(line)
-		}
-		payload := helps.JSONPayload(line)
-		if len(pendingJSON) > 0 {
-			// Reassemble a logical SSE event whose JSON is split across multiple
-			// data: lines before classification; a TOS error object may span
-			// lines and must not be swallowed line-by-line.
-			trimmedLine := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmedLine, []byte("data:")) {
-				trimmedLine = bytes.TrimSpace(trimmedLine[len("data:"):])
-			}
-			if len(trimmedLine) > 0 {
-				pendingJSON = append(pendingJSON, 10)
-				pendingJSON = append(pendingJSON, trimmedLine...)
-			}
-			if !ojson.ValidBytes(pendingJSON) {
-				continue
-			}
-			payload = pendingJSON
-			pendingJSON = nil
-		} else if payload != nil && !ojson.ValidBytes(payload) {
-			pendingJSON = append([]byte(nil), payload...)
-			continue
-		}
+		payload := sseJSON.Push(line)
 		if payload == nil {
 			continue
 		}
-		// A mid-stream error frame can still carry the TOS_VIOLATION signature on
-		// HTTP 200; surface it as a terminal credential error before it degrades
-		// into a generic empty-output failure so the credential is deactivated
-		// and the pool pause armed.
-		if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() {
-			tosCode := int(errorResult.Get("code").Int())
-			if tosCode == http.StatusForbidden {
-				e.applyAntigravityTOSState(e.cfg, auth, payload)
-				if errClose := httpResp.Body.Close(); errClose != nil {
-					log.Errorf("antigravity executor: close response body error: %v", errClose)
-				}
-				err = newAntigravityStatusErr(tosCode, payload)
-				helps.RecordAPIResponseError(ctx, e.cfg, err)
-				reporter.PublishFailure(ctx, err)
-				return resp, err
+		// Surface any mid-stream JSON error frame on HTTP 200 immediately with its
+		// upstream status and 429/TOS/replay bookkeeping instead of letting it
+		// degrade into a synthetic zero-output 502 or truncated HTTP 200 response.
+		if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
+			statusCode := int(errorResult.Get("code").Int())
+			if statusCode < http.StatusBadRequest || statusCode > 599 {
+				statusCode = http.StatusBadGateway
 			}
+			if errClose := httpResp.Body.Close(); errClose != nil {
+				log.Errorf("antigravity executor: close response body error: %v", errClose)
+			}
+			var midStreamErr error
+			if statusCode == http.StatusTooManyRequests {
+				if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, payload); err429 != nil {
+					midStreamErr = err429
+				}
+			}
+			if midStreamErr == nil {
+				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, payload); errClear != nil {
+					logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+				}
+				if statusCode == http.StatusForbidden {
+					e.applyAntigravityTOSState(e.cfg, auth, payload)
+				}
+				midStreamErr = newAntigravityStatusErr(statusCode, payload)
+			}
+			err = midStreamErr
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			reporter.PublishFailure(ctx, err)
+			return resp, err
+		}
+		if replayAccumulator != nil {
+			replayAccumulator.ObserveSSELine(payload)
 		}
 		if len(pendingFilterPayload) > 0 {
 			reporter.ObserveResponseModel(pendingFilterPayload)
@@ -563,6 +523,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
+	}
+	if useCredits {
+		clearAntigravityCreditsFailureState(auth)
 	}
 	antiDetail := helps.ParseAntigravityUsage(resp.Payload)
 	helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
