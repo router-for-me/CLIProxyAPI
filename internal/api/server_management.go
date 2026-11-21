@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	log "github.com/sirupsen/logrus"
 )
@@ -275,6 +276,7 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 	if !s.managementAvailable(c) {
 		return
 	}
+	c.Set(management.PluginRouteContextKey, true)
 	s.mgmt.Middleware()(c)
 	if c.IsAborted() {
 		return
