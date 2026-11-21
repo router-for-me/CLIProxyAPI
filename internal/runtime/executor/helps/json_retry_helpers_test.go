@@ -205,3 +205,111 @@ func TestParseGoogleRetryAfter_PrecedenceAndHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRetryDelayWithHeaders_FallbackAndPrecedence(t *testing.T) {
+	now := time.Date(2026, 11, 21, 10, 30, 0, 0, time.UTC)
+	futureHTTPDate := now.Add(45 * time.Second).UTC().Format(http.TimeFormat)
+	pastHTTPDate := now.Add(-15 * time.Second).UTC().Format(http.TimeFormat)
+
+	tests := []struct {
+		name    string
+		headers http.Header
+		body    string
+		want    time.Duration
+		wantErr bool
+	}{
+		{
+			name:    "body RetryInfo wins over Retry-After header",
+			headers: http.Header{"Retry-After": []string{"45"}},
+			body:    `{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"12s"}]}}`,
+			want:    12 * time.Second,
+		},
+		{
+			name:    "body zero RetryInfo preserved over Retry-After header",
+			headers: http.Header{"Retry-After": []string{"45"}},
+			body:    `{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"0s"}]}}`,
+			want:    0,
+		},
+		{
+			name:    "body message duration wins over Retry-After header",
+			headers: http.Header{"Retry-After": []string{"45"}},
+			body:    `{"error":{"code":429,"message":"Your quota will reset after 1h43m56s."}}`,
+			want:    time.Hour + 43*time.Minute + 56*time.Second,
+		},
+		{
+			name:    "delta-seconds Retry-After fallback when body lacks delay",
+			headers: http.Header{"Retry-After": []string{"45"}},
+			body:    `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"}]}}`,
+			want:    45 * time.Second,
+		},
+		{
+			name:    "lowercase retry-after header key honored on empty body",
+			headers: http.Header{"retry-after": []string{"30"}},
+			body:    "",
+			want:    30 * time.Second,
+		},
+		{
+			name:    "future HTTP-date Retry-After fallback",
+			headers: http.Header{"Retry-After": []string{futureHTTPDate}},
+			body:    `{"error":{"code":429,"message":"Too many requests."}}`,
+			want:    45 * time.Second,
+		},
+		{
+			name:    "huge Retry-After seconds clamps to MaxInt64",
+			headers: http.Header{"Retry-After": []string{"18446744074"}},
+			body:    `{"error":{"code":429}}`,
+			want:    time.Duration(math.MaxInt64),
+		},
+		{
+			name:    "zero Retry-After preserved for Antigravity when body has no delay",
+			headers: http.Header{"Retry-After": []string{"0"}},
+			body:    `{"error":{"code":429}}`,
+			want:    0,
+		},
+		{
+			name:    "negative Retry-After yields error when body has no delay",
+			headers: http.Header{"Retry-After": []string{"-10"}},
+			body:    `{"error":{"code":429}}`,
+			wantErr: true,
+		},
+		{
+			name:    "past HTTP-date Retry-After yields error when body has no delay",
+			headers: http.Header{"Retry-After": []string{pastHTTPDate}},
+			body:    `{"error":{"code":429}}`,
+			wantErr: true,
+		},
+		{
+			name:    "malformed Retry-After yields error when body has no delay",
+			headers: http.Header{"Retry-After": []string{"soon"}},
+			body:    `{"error":{"code":429}}`,
+			wantErr: true,
+		},
+		{
+			name:    "nil headers and body without hint yields error",
+			headers: nil,
+			body:    `{"error":{"code":429}}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, errParse := ParseRetryDelayWithHeaders(tc.headers, []byte(tc.body), now)
+			if tc.wantErr {
+				if errParse == nil {
+					t.Fatalf("ParseRetryDelayWithHeaders() error = nil (got=%v), want error", got)
+				}
+				if got != nil {
+					t.Fatalf("ParseRetryDelayWithHeaders() = %v, err=%v; want nil duration", *got, errParse)
+				}
+				return
+			}
+			if errParse != nil {
+				t.Fatalf("ParseRetryDelayWithHeaders() error = %v", errParse)
+			}
+			if got == nil || *got != tc.want {
+				t.Fatalf("ParseRetryDelayWithHeaders() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

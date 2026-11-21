@@ -3,10 +3,12 @@ package executor
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -18,11 +20,22 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const antigravityCountTokensMaxResponseBytes = 1 << 20
+
 // CountTokens counts tokens for the given request using the Antigravity API.
 func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if antigravityInTOSPause(e.cfg, auth) {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+		return cliproxyexecutor.Response{}, newAntigravityTOSPauseStatusErr()
+	}
+	if !antigravityCoolingDisabled(auth, e.cfg) {
+		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
+			return cliproxyexecutor.Response{}, homeKVUnavailableStatusErr(errCooldown)
+		} else if inCooldown {
+			log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", antigravityAuthID(auth), baseModel, remaining)
+			d := remaining
+			return cliproxyexecutor.Response{}, statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &d}
+		}
 	}
 
 	from := opts.SourceFormat
@@ -80,6 +93,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	_ = doc.Delete("request.toolConfig")
 	_ = doc.Delete("request.labels")
 	_ = doc.Delete("request.sessionId")
+	sanitizeAntigravityRequestSchemasForModelIfNeededDoc(baseModel, doc)
 
 	base := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -139,9 +153,13 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, antigravityCountTokensMaxResponseBytes+1))
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("antigravity executor: close response body error: %v", errClose)
+	}
+	bodyTruncated := len(bodyBytes) > antigravityCountTokensMaxResponseBytes
+	if bodyTruncated {
+		bodyBytes = bodyBytes[:antigravityCountTokensMaxResponseBytes]
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 	if errRead != nil {
@@ -150,20 +168,24 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 
 	if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+		if bodyTruncated {
+			errOversize := statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("antigravity count_tokens response exceeded %d bytes", antigravityCountTokensMaxResponseBytes)}
+			helps.RecordAPIResponseError(ctx, e.cfg, errOversize)
+			return cliproxyexecutor.Response{}, errOversize
+		}
 		count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
 		translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
 		return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 	}
 
-	if httpResp.StatusCode == http.StatusForbidden {
-		e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
-	}
-	sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 	if httpResp.StatusCode == http.StatusTooManyRequests {
-		closeAntigravityAuthIdleTransports(auth)
-		if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-			sErr.retryAfter = retryAfter
+		if err429 := e.applyAntigravity429StateWithEvictAll(ctx, auth, baseModel, false, httpResp.Header, bodyBytes, true); err429 != nil {
+			return cliproxyexecutor.Response{}, err429
 		}
 	}
+	if httpResp.StatusCode == http.StatusForbidden {
+		e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
+	}
+	sErr := newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 	return cliproxyexecutor.Response{}, sErr
 }

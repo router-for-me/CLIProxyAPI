@@ -1,0 +1,134 @@
+{
+  "gemini-4-hydrogen": {
+    "model": "gemini-4-hydrogen",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Reply with exactly the label requested. No tools or explanation."
+      },
+      {
+        "role": "user",
+        "content": "<current_datetime>2026-11-20T12:00:00Z</current_datetime>\n\nReturn exactly PARITY-27."
+      }
+    ],
+    "reasoning_effort": "medium",
+    "temperature": 1,
+    "snippy": {
+      "enabled": false
+    },
+    "tool_choice": "validated",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "probe_lookup",
+          "description": "No-op test tool.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "claude-haiku-5.5": {
+    "model": "claude-haiku-5.5",
+    "max_tokens": 128000,
+    "system": [
+      {
+        "type": "text",
+        "text": "Reply with exactly the label requested. No tools or explanation.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "<current_datetime>2026-11-20T12:00:00Z</current_datetime>\n\nReturn exactly PARITY-27.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "probe_lookup",
+        "description": "No-op test tool.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ],
+    "temperature": 1,
+    "thinking": {
+      "type": "adaptive",
+      "display": "summarized",
+      "block_binding": {
+        "prefix_mismatch_behavior": "drop_block"
+      }
+    },
+    "output_config": {
+      "effort": "medium"
+    },
+    "stream": true
+  },
+  "mai-code-2-flash": {
+    "model": "mai-code-2-flash",
+    "instructions": "Reply with exactly the label requested. No tools or explanation.",
+    "input": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "<current_datetime>2026-11-20T12:00:00Z</current_datetime>\n\nReturn exactly PARITY-27."
+          }
+        ],
+        "type": "message"
+      }
+    ],
+    "tools": [
+      {
+        "name": "probe_lookup",
+        "description": "No-op test tool.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        },
+        "strict": false,
+        "type": "function"
+      }
+    ],
+    "reasoning": {
+      "effort": "medium",
+      "summary": "auto"
+    },
+    "text": {
+      "verbosity": "low"
+    },
+    "store": false,
+    "stream": true,
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "parallel_tool_calls": true
+  }
+}

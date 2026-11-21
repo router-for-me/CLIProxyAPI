@@ -67,22 +67,26 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	geminiToAntigravityDocForAuth(doc, modelName, projectID, antigravityAuthID(auth), derivedSessionIDs...)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
+	lowerModel := strings.ToLower(modelName)
+
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		if modelInfo == nil && lowerModel != modelName {
+			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
+		}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
 				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
 			}
 		}
 	}
-
-	isClaudeModel := strings.Contains(modelName, "claude")
-	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
 	if isClaudeModel {
-		if !promptStructuredOutput {
+		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
 			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
 	} else {
@@ -141,6 +145,28 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	return httpReq, finalPayload, nil
 }
 
+// antigravityToolChoiceModeIsNoneDoc reports whether the request already sets
+// function calling mode to NONE under either camelCase or snake_case proto-JSON
+// paths, canonicalizing non-canonical casing or surrounding whitespace in place.
+func antigravityToolChoiceModeIsNoneDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	for _, container := range []string{"request.toolConfig", "request.tool_config"} {
+		for _, key := range []string{"functionCallingConfig", "function_calling_config"} {
+			modePath := container + "." + key + ".mode"
+			mode := doc.Get(modePath)
+			if mode.Type == ojson.String && strings.EqualFold(strings.TrimSpace(mode.String()), "NONE") {
+				if mode.String() != "NONE" {
+					_ = doc.Set(modePath, "NONE")
+				}
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
 //
 // Cleaning is applied only to the payload locations that actually hold a JSON schema. The schema
@@ -162,6 +188,21 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 func sanitizeAntigravityRequestSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
 	payloadStr = sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, isClaudeModel)
 	return sanitizeAntigravityGenerationSchemas(payloadStr)
+}
+
+func antigravitySchemaSanitizationFlags(modelName string) (useAntigravitySchema, isClaudeModel bool) {
+	lowerModel := strings.ToLower(modelName)
+	isClaudeModel = strings.Contains(lowerModel, "claude")
+	useAntigravitySchema = isClaudeModel || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-pro")
+	return useAntigravitySchema, isClaudeModel
+}
+
+func sanitizeAntigravityRequestSchemasForModelIfNeededDoc(modelName string, doc *ojson.Doc) bool {
+	if !antigravityRequestNeedsSchemaSanitizationDoc(doc) {
+		return false
+	}
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
+	return sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 }
 
 func sanitizeAntigravityRequestSchemasForModelDoc(doc *ojson.Doc, useAntigravitySchema, isClaudeModel bool) bool {
@@ -739,7 +780,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 	helps.SetStringIfDifferentDoc(doc, "model", modelName)
 	helps.SetStringIfDifferentDoc(doc, "userAgent", "antigravity")
 
-	isImageModel := strings.Contains(modelName, "image")
+	isImageModel := strings.Contains(strings.ToLower(modelName), "image")
 	reqType := strings.TrimSpace(doc.Get("requestType").String())
 	if reqType == "" {
 		if isImageModel {
@@ -830,7 +871,16 @@ func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID st
 		if content.Get("role").String() != "user" {
 			return true
 		}
-		text := content.Get("parts.0.text").String()
+		text := ""
+		if parts := content.Get("parts"); parts.IsArray() {
+			parts.ForEach(func(_, part ojson.Result) bool {
+				if candidate := part.Get("text").String(); candidate != "" {
+					text = candidate
+					return false
+				}
+				return true
+			})
+		}
 		if text == "" {
 			return true
 		}

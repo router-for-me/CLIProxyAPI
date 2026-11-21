@@ -118,9 +118,12 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 		convert bool
 	}{
 		{"claude-opus-5-5", true}, {"claude-sonnet-5-5-high", true},
+		{"claude-opus-5-5-low", true}, {"claude-opus-5-5-medium", true}, {"claude-opus-5-5-max", true},
+		{"claude-sonnet-5-5-low", true}, {"claude-sonnet-5-5-medium", true}, {"claude-sonnet-5-5-max", true},
 		{"claude-opus-5-5-reasoning", true}, {"claude-sonnet-5-5(high)", true},
 		{"claude-opus-5-5-20261001", true}, {"claude-sonnet-5-5[1m]", true},
-		{"claude-opus-5-5-20261001[1m](high)", true},
+		{"claude-opus-5-5-20261001[1m](high)", true}, {"claude-opus-5-5-max-20261001[1m](max)", true},
+		{"claude-opus-5-5-custom", false},
 		{"claude-opus-5-50-high", false}, {"claude-sonnet-5-50", false},
 		{"claude-opus-4-6", false}, {"claude-haiku-5-5", false},
 		{"gemini-3.8-flash-high", false}, {"other/claude-opus-5-5-high", false},
@@ -137,6 +140,9 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 			}
 			if tc.convert {
 				assertIssue7000PromptSchema(t, ojson.GetBytes(encoded, "request.systemInstruction"), `{"type":"object","properties":{"title":{"type":"string"}}}`)
+				if mode := ojson.GetBytes(encoded, "request.toolConfig.functionCallingConfig.mode").String(); mode != "" && mode != "AUTO" {
+					t.Errorf("functionCallingConfig.mode = %q, want AUTO or omitted when converted", mode)
+				}
 			}
 		})
 	}

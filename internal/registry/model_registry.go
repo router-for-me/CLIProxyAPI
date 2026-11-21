@@ -41,8 +41,12 @@ type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
 	// MetadataModelID identifies the canonical model used to resolve client metadata.
-	// It is internal and must not be exposed in model-list responses.
+	// For Copilot it is also the route's upstream model ID. It is never exposed in model lists.
 	MetadataModelID string `json:"-"`
+	// OAuthAlias is the configured alias that produced this route, before adding any auth prefix.
+	OAuthAlias string `json:"-"`
+	// OAuthAliasSource is the exact published source of that alias, including any suffix.
+	OAuthAliasSource string `json:"-"`
 	// ExplicitThinking indicates thinking/reasoning configuration was explicitly configured for this model.
 	ExplicitThinking bool `json:"-"`
 	// ExplicitInputModalities indicates input modalities were explicitly configured for this model.
@@ -1473,6 +1477,42 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	return false
+}
+
+// ClientModelRoute returns the native model and alias for the first matching client route.
+func (r *ModelRegistry) ClientModelRoute(clientID string, modelIDs ...string) (metadataModelID, oauthAlias string) {
+	route := r.LookupClientModelRoute(clientID, modelIDs...)
+	return route.MetadataModelID, route.OAuthAlias
+}
+
+// ClientModelRouteInfo describes the source and alias of a registered route.
+type ClientModelRouteInfo struct {
+	MetadataModelID  string
+	OAuthAlias       string
+	OAuthAliasSource string
+}
+
+// LookupClientModelRoute returns the first matching route registered by this client.
+// Candidates are tried in order, preferring exact spelling within each candidate.
+func (r *ModelRegistry) LookupClientModelRoute(clientID string, modelIDs ...string) ClientModelRouteInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	models := r.clientModelInfos[clientID]
+	for _, modelID := range modelIDs {
+		if modelID == "" {
+			continue
+		}
+		if info := models[modelID]; info != nil {
+			return ClientModelRouteInfo{info.MetadataModelID, info.OAuthAlias, info.OAuthAliasSource}
+		}
+		for _, id := range r.clientModels[clientID] {
+			if info := models[id]; info != nil && strings.EqualFold(id, modelID) {
+				return ClientModelRouteInfo{info.MetadataModelID, info.OAuthAlias, info.OAuthAliasSource}
+			}
+		}
+	}
+	return ClientModelRouteInfo{}
 }
 
 // IsModelSuspendedForClient reports whether a model is currently suspended for a specific client.
