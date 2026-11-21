@@ -540,3 +540,89 @@ func closeTestPeerConnection(t *testing.T, connection *webrtc.PeerConnection) {
 		t.Errorf("close test PeerConnection: %v", errClose)
 	}
 }
+
+func TestMediaSessionSendUpstreamTextDeliversQueuedUpdateFirst(t *testing.T) {
+	clientAPI := newTestWebRTCAPI(t)
+	client, errClient := clientAPI.NewPeerConnection(webrtc.Configuration{})
+	if errClient != nil {
+		t.Fatalf("create client PeerConnection: %v", errClient)
+	}
+	defer closeTestPeerConnection(t, client)
+	clientData, errData := client.CreateDataChannel(realtimeDataChannelLabel, nil)
+	if errData != nil {
+		t.Fatalf("create client DataChannel: %v", errData)
+	}
+	clientOffer := completeOffer(t, client)
+
+	relayConfig := config.CodexLiveMediaRelayConfig{Enabled: true, MaxSessions: 1}
+	relay, errRelay := newPionMediaRelay(relayConfig)
+	if errRelay != nil {
+		t.Fatalf("create media relay: %v", errRelay)
+	}
+	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{})
+	if errSession != nil {
+		t.Fatalf("create media relay session: %v", errSession)
+	}
+	defer func() {
+		if errClose := session.Close(); errClose != nil {
+			t.Errorf("close media relay session: %v", errClose)
+		}
+	}()
+
+	// Queue the session update before the upstream leg is connected; it must be
+	// buffered until the upstream DataChannel opens and delivered first.
+	queuedUpdate := `{"type":"session.update","session":{"voice":"marin"}}`
+	if errSend := session.SendUpstreamText(queuedUpdate); errSend != nil {
+		t.Fatalf("SendUpstreamText() error = %v", errSend)
+	}
+
+	upstreamAPI := newTestWebRTCAPI(t)
+	upstream, errUpstream := upstreamAPI.NewPeerConnection(webrtc.Configuration{})
+	if errUpstream != nil {
+		t.Fatalf("create upstream PeerConnection: %v", errUpstream)
+	}
+	defer closeTestPeerConnection(t, upstream)
+	upstreamDataChannels := make(chan *webrtc.DataChannel, 1)
+	upstreamMessages := make(chan webrtc.DataChannelMessage, 4)
+	upstream.OnDataChannel(func(channel *webrtc.DataChannel) {
+		if channel.Label() != realtimeDataChannelLabel {
+			return
+		}
+		channel.OnMessage(func(message webrtc.DataChannelMessage) {
+			message.Data = append([]byte(nil), message.Data...)
+			upstreamMessages <- message
+		})
+		upstreamDataChannels <- channel
+	})
+	if errRemote := upstream.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: relayOffer}); errRemote != nil {
+		t.Fatalf("set upstream offer: %v", errRemote)
+	}
+	upstreamAnswer := completeAnswer(t, upstream)
+	downstreamAnswer, errAnswer := session.AcceptUpstreamAnswer(context.Background(), upstreamAnswer)
+	if errAnswer != nil {
+		t.Fatalf("accept upstream answer: %v", errAnswer)
+	}
+	if errRemote := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: downstreamAnswer}); errRemote != nil {
+		t.Fatalf("set client answer: %v", errRemote)
+	}
+
+	upstreamData := receiveDataChannel(t, upstreamDataChannels)
+	waitDataChannelOpen(t, clientData)
+	waitDataChannelOpen(t, upstreamData)
+
+	if got := receiveDataMessage(t, upstreamMessages); !got.IsString || string(got.Data) != queuedUpdate {
+		t.Fatalf("first upstream DataChannel message = %#v, want the queued session update", got)
+	}
+	if errSend := clientData.SendText("from-client"); errSend != nil {
+		t.Fatalf("send client DataChannel message: %v", errSend)
+	}
+	if got := receiveDataMessage(t, upstreamMessages); !got.IsString || string(got.Data) != "from-client" {
+		t.Fatalf("second upstream DataChannel message = %#v, want text from-client", got)
+	}
+	if errSend := session.SendUpstreamText("after-open"); errSend != nil {
+		t.Fatalf("SendUpstreamText() after open error = %v", errSend)
+	}
+	if got := receiveDataMessage(t, upstreamMessages); !got.IsString || string(got.Data) != "after-open" {
+		t.Fatalf("third upstream DataChannel message = %#v, want text after-open", got)
+	}
+}

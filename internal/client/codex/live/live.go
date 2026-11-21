@@ -179,7 +179,9 @@ func (h *Handler) Close() {
 	}
 }
 
-// Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
+// Handle forwards a WebRTC SDP bootstrap request. Standard GPT Realtime models
+// are exchanged with the OpenAI Realtime endpoint with the requested model
+// preserved; other models go to the Codex realtime calls (Quicksilver) endpoint.
 func (h *Handler) Handle(c *gin.Context) {
 	if h == nil || h.authManager == nil {
 		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable")
@@ -198,6 +200,13 @@ func (h *Handler) Handle(c *gin.Context) {
 	upstreamBody, upstreamContentType, model, errPayload := prepareCallRequest(body, c.GetHeader("Content-Type"))
 	if errPayload == nil {
 		upstreamBody, upstreamContentType, model, errPayload = applyClientSecretCallSession(upstreamBody, upstreamContentType, model, clientSecretSession(c))
+	}
+	if errPayload == nil && strings.TrimSpace(model) == "" {
+		model = strings.TrimSpace(c.Query("model"))
+	}
+	if errPayload == nil && isStandardRealtimeModel(model) {
+		h.handleStandardRealtimeCall(c, body, upstreamBody, upstreamContentType, model)
+		return
 	}
 	if errPayload == nil {
 		upstreamBody, model, errPayload = rewriteCallRequestModel(upstreamBody, upstreamContentType, model)
@@ -539,14 +548,10 @@ func prepareCallRequest(body []byte, contentType string) ([]byte, string, string
 	if errMediaType == nil && strings.EqualFold(mediaType, "multipart/form-data") {
 		return multipartCallRequest(body, strings.TrimSpace(params["boundary"]))
 	}
-	model := modelFromJSON(body)
-	if model == "" {
-		model = defaultLiveModel
-	}
 	if strings.TrimSpace(contentType) == "" {
 		contentType = "application/json"
 	}
-	return body, contentType, model, nil
+	return body, contentType, modelFromJSON(body), nil
 }
 
 func applyClientSecretCallSession(body []byte, contentType, model string, session json.RawMessage) ([]byte, string, string, error) {
@@ -661,9 +666,6 @@ func multipartCallRequest(body []byte, boundary string) ([]byte, string, string,
 	}
 	if sdp == nil {
 		return nil, "", "", errors.New("Codex live multipart body requires an sdp field")
-	}
-	if model == "" {
-		model = defaultLiveModel
 	}
 
 	encoded, errEncode := encodeCallRequest(*sdp, session)
