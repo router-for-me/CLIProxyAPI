@@ -131,7 +131,8 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSessionWithProxy(state, "anthropic", sessionProxyURL)
+	receipt := oauthSessions.RegisterWithProxy(state, "anthropic", sessionProxyURL)
+	fail := func(message string) { oauthSessions.SetError(state, message, receipt) }
 	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
 	bindOAuthSessionTarget(c, state, respPayload)
 
@@ -166,15 +167,17 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 					return nil, errOAuthSessionNotPending
 				}
 				if time.Now().After(deadline) {
-					SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
+					fail("Timeout waiting for OAuth callback")
 					return nil, fmt.Errorf("timeout waiting for OAuth callback")
 				}
-				data, errRead := os.ReadFile(path)
+				data, errRead := receipt.consume(path)
 				if errRead == nil {
 					var m map[string]string
 					_ = json.Unmarshal(data, &m)
-					_ = os.Remove(path)
 					return m, nil
+				}
+				if errors.Is(errRead, errOAuthSessionNotPending) {
+					return nil, errRead
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
@@ -194,13 +197,13 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if errStr := resultMap["error"]; errStr != "" {
 			oauthErr := claude.NewOAuthError(errStr, "", http.StatusBadRequest)
 			log.Error(claude.GetUserFriendlyMessage(oauthErr))
-			SetOAuthSessionError(state, "Bad request")
+			fail("Bad request")
 			return
 		}
 		if resultMap["state"] != state {
 			authErr := claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, resultMap["state"]))
 			log.Error(claude.GetUserFriendlyMessage(authErr))
-			SetOAuthSessionError(state, "State code error")
+			fail("State code error")
 			return
 		}
 
@@ -213,7 +216,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
-			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
+			fail("Failed to exchange authorization code for tokens")
 			return
 		}
 
@@ -240,7 +243,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
-		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "anthropic", sessionProxyURL, record, "Failed to save authentication tokens", false)
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "anthropic", sessionProxyURL, record, "Failed to save authentication tokens", false, receipt)
 		if !okSaved {
 			return
 		}
@@ -290,7 +293,8 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	RegisterOAuthSessionWithProxy(state, "codex", sessionProxyURL)
+	receipt := oauthSessions.RegisterWithProxy(state, "codex", sessionProxyURL)
+	fail := func(message string) { oauthSessions.SetError(state, message, receipt) }
 	sessionTarget, hasSessionTarget := oauthSessionTargetFromContext(c)
 	if hasSessionTarget {
 		SetOAuthSessionTarget(state, sessionTarget)
@@ -329,27 +333,28 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 			if time.Now().After(deadline) {
 				authErr := codex.NewAuthenticationError(codex.ErrCallbackTimeout, fmt.Errorf("timeout waiting for OAuth callback"))
 				log.Error(codex.GetUserFriendlyMessage(authErr))
-				SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
+				fail("Timeout waiting for OAuth callback")
 				return
 			}
-			if data, errR := os.ReadFile(waitFile); errR == nil {
+			if data, errR := receipt.consume(waitFile); errR == nil {
 				var m map[string]string
 				_ = json.Unmarshal(data, &m)
-				_ = os.Remove(waitFile)
 				if errStr := m["error"]; errStr != "" {
 					oauthErr := codex.NewOAuthError(errStr, "", http.StatusBadRequest)
 					log.Error(codex.GetUserFriendlyMessage(oauthErr))
-					SetOAuthSessionError(state, "Bad Request")
+					fail("Bad Request")
 					return
 				}
 				if m["state"] != state {
 					authErr := codex.NewAuthenticationError(codex.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, m["state"]))
-					SetOAuthSessionError(state, "State code error")
+					fail("State code error")
 					log.Error(codex.GetUserFriendlyMessage(authErr))
 					return
 				}
 				code = m["code"]
 				break
+			} else if errors.Is(errR, errOAuthSessionNotPending) {
+				return
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -359,7 +364,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
-			SetOAuthSessionError(state, redactSessionProxyInString(oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange), sessionProxyURL))
+			fail(redactSessionProxyInString(oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange), sessionProxyURL))
 			log.Errorf("Failed to exchange authorization code for tokens: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
 			return
 		}
@@ -402,7 +407,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 				"plan_type": planType,
 			},
 		}
-		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "codex", sessionProxyURL, record, "Failed to save authentication tokens", true)
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "codex", sessionProxyURL, record, "Failed to save authentication tokens", true, receipt)
 		if !okSaved {
 			return
 		}
@@ -533,9 +538,9 @@ func applyOAuthRecoveryTargetToRecord(target oauthRecoveryTarget, record *coreau
 	return true
 }
 
-func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, state, sessionProvider, sessionProxyURL string, record *coreauth.Auth, failSaveMessage string, alwaysTrackOutcome bool) (string, bool) {
+func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, state, sessionProvider, sessionProxyURL string, record *coreauth.Auth, failSaveMessage string, alwaysTrackOutcome bool, expected ...*oauthCallbackReceipt) (string, bool) {
 	if record == nil {
-		SetOAuthSessionError(state, failSaveMessage)
+		oauthSessions.SetError(state, failSaveMessage, expected...)
 		return "", false
 	}
 	target, hasTarget := GetOAuthSessionTarget(state)
@@ -543,12 +548,12 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 	if isTargeted {
 		if strings.TrimSpace(target.Provider) != "" && strings.TrimSpace(record.Provider) != "" &&
 			!h.oauthTargetProviderMatches(target.Provider, record.Provider) {
-			SetOAuthSessionError(state, "Authenticated account does not match target credential")
+			oauthSessions.SetError(state, "Authenticated account does not match target credential", expected...)
 			log.Warnf("%s OAuth recovery rejected for %s: provider %s does not match target provider %s", record.Provider, target.AuthID, record.Provider, target.Provider)
 			return "", false
 		}
 		if !applyOAuthRecoveryTargetToRecord(target, record) {
-			SetOAuthSessionError(state, "Authenticated account does not match target credential")
+			oauthSessions.SetError(state, "Authenticated account does not match target credential", expected...)
 			log.Warnf("%s OAuth recovery rejected for %s: authenticated account does not match target credential", record.Provider, target.AuthID)
 			return "", false
 		}
@@ -567,22 +572,22 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 	}
 
 	applySessionProxyToAuthRecord(record, sessionProxyURL)
-	if errGuard := claimOAuthSessionCommit(state, sessionProvider); errGuard != nil {
+	if !oauthSessions.claimCommit(state, sessionProvider, expected...) {
 		return "", false
 	}
 	savedPath, errSave := h.saveTokenRecord(ctx, record)
 	if !alwaysTrackOutcome && !isTargeted {
 		if errSave != nil {
 			log.Errorf("%s: %v", failSaveMessage, errSave)
-			FailOAuthSessionCommit(state, failSaveMessage)
+			oauthSessions.FailCommit(state, failSaveMessage, expected...)
 			return "", false
 		}
-		CompleteOAuthSession(state)
+		oauthSessions.Complete(state, expected...)
 		return savedPath, true
 	}
 
 	if errSave != nil && strings.TrimSpace(savedPath) == "" {
-		FailOAuthSessionCommit(state, failSaveMessage)
+		oauthSessions.FailCommit(state, failSaveMessage, expected...)
 		log.Errorf("%s: %v", failSaveMessage, errSave)
 		return "", false
 	}
@@ -616,7 +621,7 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 		}
 	}
 
-	CompleteOAuthSessionWithOutcome(state, record.ID, savedGrantHash, strings.TrimSpace(savedPath) != "", adopted, hadPrevAuth, prevVersion, prevEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr)
+	oauthSessions.CompleteWithOutcome(state, record.ID, savedGrantHash, strings.TrimSpace(savedPath) != "", adopted, hadPrevAuth, prevVersion, prevEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr, expected...)
 	return savedPath, true
 }
 
@@ -747,7 +752,8 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
-	RegisterOAuthSessionWithProxy(state, "antigravity", sessionProxyURL)
+	receipt := oauthSessions.RegisterWithProxy(state, "antigravity", sessionProxyURL)
+	fail := func(message string) { oauthSessions.SetError(state, message, receipt) }
 	respPayload := gin.H{"status": "ok", "url": authURL, "state": state}
 	bindOAuthSessionTarget(c, state, respPayload)
 
@@ -782,30 +788,31 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			}
 			if time.Now().After(deadline) {
 				log.Error("oauth flow timed out")
-				SetOAuthSessionError(state, "OAuth flow timed out")
+				fail("OAuth flow timed out")
 				return
 			}
-			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+			if data, errReadFile := receipt.consume(waitFile); errReadFile == nil {
 				var payload map[string]string
 				_ = json.Unmarshal(data, &payload)
-				_ = os.Remove(waitFile)
 				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
 					log.Errorf("Authentication failed: %s", errStr)
-					SetOAuthSessionError(state, "Authentication failed")
+					fail("Authentication failed")
 					return
 				}
 				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
 					log.Errorf("Authentication failed: state mismatch")
-					SetOAuthSessionError(state, "Authentication failed: state mismatch")
+					fail("Authentication failed: state mismatch")
 					return
 				}
 				authCode = strings.TrimSpace(payload["code"])
 				if authCode == "" {
 					log.Error("Authentication failed: code not found")
-					SetOAuthSessionError(state, "Authentication failed: code not found")
+					fail("Authentication failed: code not found")
 					return
 				}
 				break
+			} else if errors.Is(errReadFile, errOAuthSessionNotPending) {
+				return
 			}
 			time.Sleep(500 * time.Millisecond)
 		}
@@ -813,27 +820,27 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		tokenResp, errToken := authSvc.ExchangeCodeForTokens(ctx, authCode, redirectURI)
 		if errToken != nil {
 			log.Errorf("Failed to exchange token: %s", redactSessionProxyInString(errToken.Error(), sessionProxyURL))
-			SetOAuthSessionError(state, "Failed to exchange token")
+			fail("Failed to exchange token")
 			return
 		}
 
 		accessToken := strings.TrimSpace(tokenResp.AccessToken)
 		if accessToken == "" {
 			log.Error("antigravity: token exchange returned empty access token")
-			SetOAuthSessionError(state, "Failed to exchange token")
+			fail("Failed to exchange token")
 			return
 		}
 
 		email, errInfo := authSvc.FetchUserInfo(ctx, accessToken)
 		if errInfo != nil {
 			log.Errorf("Failed to fetch user info: %s", redactSessionProxyInString(errInfo.Error(), sessionProxyURL))
-			SetOAuthSessionError(state, "Failed to fetch user info")
+			fail("Failed to fetch user info")
 			return
 		}
 		email = strings.TrimSpace(email)
 		if email == "" {
 			log.Error("antigravity: user info returned empty email")
-			SetOAuthSessionError(state, "Failed to fetch user info")
+			fail("Failed to fetch user info")
 			return
 		}
 
@@ -843,7 +850,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			if errProject != nil {
 				if sessionProxyURL != "" {
 					log.Errorf("antigravity: failed to fetch project ID: %s", redactSessionProxyInString(errProject.Error(), sessionProxyURL))
-					SetOAuthSessionError(state, "Failed to fetch project ID")
+					fail("Failed to fetch project ID")
 					return
 				}
 				log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
@@ -882,7 +889,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			Label:    label,
 			Metadata: metadata,
 		}
-		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "antigravity", sessionProxyURL, record, "Failed to save token to file", false)
+		savedPath, okSaved := h.commitAndCompleteBuiltinOAuthSession(ctx, state, "antigravity", sessionProxyURL, record, "Failed to save token to file", false, receipt)
 		if !okSaved {
 			return
 		}
