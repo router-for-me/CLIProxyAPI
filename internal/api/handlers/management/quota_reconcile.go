@@ -11,6 +11,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -51,7 +52,7 @@ func (h *Handler) ReconcileQuota(c *gin.Context) {
 		return
 	}
 	token, _ := auth.Metadata["access_token"].(string)
-	if _, knownExpiry := auth.AccessTokenExpirationTime(); token == "" || !knownExpiry {
+	if _, knownExpiry := auth.AccessTokenExpirationTime(); token == "" || !knownExpiry || (auth.Provider == "codex" && coreauth.IsCodexUseSIWC(auth)) {
 		c.JSON(http.StatusOK, gin.H{"status": "unsupported_credential"})
 		return
 	}
@@ -108,8 +109,11 @@ func (h *Handler) fetchQuotaRecovery(req *http.Request, auth *coreauth.Auth) ([]
 	if resp.StatusCode != http.StatusOK || (resp.Header.Get("Age") != "" && resp.Header.Get("Age") != "0") {
 		return nil, errors.New("usage evidence unavailable")
 	}
-	const maxBody = 512 * 1024
-	body, errRead := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	maxBody := 512 << 10
+	if auth.Provider == "antigravity" && req.URL.String() == sdkauth.AntigravityModelBaseURLDaily+sdkauth.AntigravityModelsPath {
+		maxBody = sdkauth.AntigravityMaxCatalogBytes
+	}
+	body, errRead := io.ReadAll(io.LimitReader(resp.Body, int64(maxBody)+1))
 	if errRead != nil || len(body) > maxBody {
 		return nil, errors.New("invalid usage response")
 	}

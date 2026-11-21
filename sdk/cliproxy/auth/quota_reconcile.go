@@ -15,6 +15,7 @@ var ErrQuotaReconcileChanged = errors.New("quota reconciliation state changed or
 // account-wide operation, so a usage check must not erase an unrelated block.
 func CanReconcileQuota(a *Auth, now time.Time) bool {
 	if a == nil || strings.TrimSpace(a.Provider) == "" || a.Disabled || a.Status == StatusDisabled ||
+		(a.Provider == "codex" && IsCodexUseSIWC(a)) ||
 		a.RequiresSignIn || a.RefreshError != nil || hasUnauthorizedAuthFailure(a) ||
 		a.RejectedAccessToken != "" || a.RejectedRefreshToken != "" ||
 		a.RejectedSIWCAccessToken != "" || a.RejectedSIWCRefreshToken != "" {

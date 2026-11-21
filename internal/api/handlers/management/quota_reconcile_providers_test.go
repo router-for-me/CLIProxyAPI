@@ -274,3 +274,53 @@ func TestQuotaRecoveryCapabilitiesAndUnsupported(t *testing.T) {
 		t.Fatal("Home mode permitted local mutation")
 	}
 }
+
+func TestQuotaRecoveryCodexPartition(t *testing.T) {
+	a := providerReconcileAuth("codex")
+	a.Metadata["use_siwc"] = true
+	a.Metadata["siwc"] = map[string]any{"access_token": "nested", "account_id": "other", "expired": a.Metadata["expired"]}
+	manager := coreauth.NewManager(nil, nil, nil)
+	_, _ = manager.Register(context.Background(), a)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+	calls := 0
+	h.quotaRecoveryClient = quotaRecoveryDoer(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(codexRecoveryFixture))}, nil
+	})
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest("POST", "/reconcile", strings.NewReader(`{"auth_index":"`+a.EnsureIndex()+`"}`))
+	h.ReconcileQuota(ctx)
+	after, _ := manager.GetByID(a.ID)
+	if !strings.Contains(rec.Body.String(), "unsupported_credential") || calls != 0 || !after.Quota.Exceeded || coreauth.CanReconcileQuota(a, time.Now()) {
+		t.Fatalf("ambiguous partition: status=%s calls=%d blocked=%v", rec.Body.String(), calls, after.Quota.Exceeded)
+	}
+}
+
+func TestQuotaRecoveryAntigravityResponseLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		catalog bool
+		size    int
+		want    bool
+	}{{"large catalog", true, 512<<10 + 1, true}, {"oversized catalog", true, 8<<20 + 1, false}, {"oversized summary", false, 512<<10 + 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := providerReconcileAuth("antigravity")
+			h := &Handler{quotaRecoveryClient: quotaRecoveryDoer(func(req *http.Request) (*http.Response, error) {
+				catalog := strings.HasSuffix(req.URL.Path, ":fetchAvailableModels")
+				body := antigravityRecoveryFixture
+				if catalog {
+					body = antigravityModelsRecoveryFixture
+				}
+				if catalog == tc.catalog {
+					body += strings.Repeat(" ", tc.size-len(body))
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}
+			got, _ := h.antigravityQuotaRecovered(context.Background(), a)
+			if got != tc.want {
+				t.Fatalf("recovered=%v want %v", got, tc.want)
+			}
+		})
+	}
+}

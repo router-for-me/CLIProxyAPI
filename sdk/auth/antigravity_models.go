@@ -27,6 +27,8 @@ const (
 	// AntigravityPersistedHintsMetaKey is the auth metadata key storing persisted model capability hints.
 	AntigravityPersistedHintsMetaKey = "antigravity_capability_hints"
 
+	// AntigravityMaxCatalogBytes bounds model-discovery responses, including quota checks.
+	AntigravityMaxCatalogBytes  = 8 << 20
 	antigravityMaxCatalogModels = 1024
 	antigravityMaxModelIDBytes  = 256
 )
@@ -152,9 +154,8 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
-	const maxCatalogBytes = 8 << 20
-	data, errRead := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBytes+1))
-	if errRead != nil || len(data) > maxCatalogBytes {
+	data, errRead := io.ReadAll(io.LimitReader(resp.Body, AntigravityMaxCatalogBytes+1))
+	if errRead != nil || len(data) > AntigravityMaxCatalogBytes {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
 	hints, ok := ParseAntigravityModelCapabilityHints(data)

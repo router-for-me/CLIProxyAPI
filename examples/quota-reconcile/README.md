@@ -14,7 +14,7 @@ are deliberately explicit about what their non-spending evidence can establish:
 | Provider | Evidence required before local quota reset |
 | --- | --- |
 | Claude OAuth | Usage GET: aggregate recovery plus every known window and scoped limit below threshold |
-| Codex OAuth | Account-bound wham usage GET: primary, secondary, additional model limits and code-review limits recovered; credit balance alone never qualifies |
+| Codex OAuth | Account-bound wham usage GET: primary, secondary, additional model limits and code-review limits recovered; credit balance alone never qualifies. SIWC-enabled credentials are unsupported because cooldowns do not identify the token partition |
 | Antigravity (including Gemini) OAuth | Quota-summary POST: every group/bucket positive, plus model-discovery POST proving positive quota for each exact blocked model; no aliases or disabled model substitution |
 | Kimi OAuth | Same-domain usages GET: every known usage counter/window recovered |
 | xAI/Grok | Explicitly unsupported: billing balance and the panel's paid inference health fallback do not establish rate-limit recovery without inference |
