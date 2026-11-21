@@ -178,6 +178,77 @@ func TestBuildHTTPTransportSOCKS5HProxy(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPTransportSOCKSProxyDialCancellation(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		t.Run(scheme, func(t *testing.T) {
+			listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+			if errListen != nil {
+				t.Fatalf("net.Listen returned error: %v", errListen)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			type acceptResult struct {
+				conn net.Conn
+				err  error
+			}
+			accepted := make(chan acceptResult, 1)
+			go func() {
+				conn, errAccept := listener.Accept()
+				accepted <- acceptResult{conn: conn, err: errAccept}
+			}()
+
+			transport, _, errBuild := BuildHTTPTransport(scheme + "://" + listener.Addr().String())
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			dialDone := make(chan error, 1)
+			go func() {
+				conn, errDial := transport.DialContext(ctx, "tcp", "target.example.com:443")
+				if conn != nil {
+					_ = conn.Close()
+				}
+				dialDone <- errDial
+			}()
+
+			var result acceptResult
+			select {
+			case result = <-accepted:
+			case <-time.After(5 * time.Second):
+				t.Fatal("proxy connection was not established")
+			}
+			if result.err != nil {
+				t.Fatalf("proxy accept returned error: %v", result.err)
+			}
+			t.Cleanup(func() { _ = result.conn.Close() })
+			if errDeadline := result.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+				t.Fatalf("SetReadDeadline returned error: %v", errDeadline)
+			}
+			var greeting [3]byte
+			if _, errRead := io.ReadFull(result.conn, greeting[:]); errRead != nil {
+				t.Fatalf("read SOCKS greeting: %v", errRead)
+			}
+			if greeting != [3]byte{5, 1, 0} {
+				t.Fatalf("SOCKS greeting = %v, want [5 1 0]", greeting)
+			}
+			// Leave negotiation pending until the caller cancels the dial.
+			cancel()
+			select {
+			case errDial := <-dialDone:
+				if errDial == nil {
+					t.Fatal("canceled SOCKS dial returned nil error")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled SOCKS dial did not return")
+			}
+			var buffer [1]byte
+			if _, errRead := result.conn.Read(buffer[:]); errRead != io.EOF {
+				t.Fatalf("proxy connection read error = %v, want EOF after cancellation", errRead)
+			}
+		})
+	}
+}
+
 func TestBuildHTTPTransportHTTPSProxyInheritsDefaultTransportSettings(t *testing.T) {
 	t.Parallel()
 
