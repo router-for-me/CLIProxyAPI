@@ -1,0 +1,35 @@
+amends "package://github.com/jdx/hk/releases/download/v2.13.0/hk@2.13.0#/Config.pkl"
+
+// proxx: local hooks (docs/proxx/ci.md). Install once per clone: `hk install`.
+local linters = new Mapping<String, Step> {
+    ["gofmt"] {
+        glob = "**/*.go"
+        check = "test -z \"$(gofmt -l {{ files }})\""
+        fix = "gofmt -w {{ files }}"
+    }
+    ["go vet"] {
+        glob = "**/*.go"
+        // vet the packages that contain the staged files
+        check = "go vet $(for f in {{ files }}; do echo ./$(dirname $f); done | sort -u)"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["pre-push"] {
+        steps {
+            // The same checks job CI runs, plus the build.
+            ["ci checks"] { check = "bash .github/scripts/proxx-checks.sh origin/main" }
+            ["build"] { check = "go build -o /dev/null ./cmd/server" }
+        }
+    }
+    ["check"] { steps = linters }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+}
