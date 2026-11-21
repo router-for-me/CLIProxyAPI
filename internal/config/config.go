@@ -24,6 +24,13 @@ type Config struct {
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
+	// UnixSocket is an optional Unix domain socket path for the API server.
+	// When set, the server listens on this socket instead of host:port (no TCP port is opened).
+	// The server applies it at startup; changing it requires a restart.
+	UnixSocket string `yaml:"unix-socket,omitempty" json:"-"`
+	// UnixSocketMode is the octal file mode applied to UnixSocket (for example "0660").
+	// Empty means "0600" (owner only).
+	UnixSocketMode string `yaml:"unix-socket-mode,omitempty" json:"-"`
 
 	// GitHubToken is the global token for GitHub requests, taking precedence over GITHUB_TOKEN.
 	GitHubToken string `yaml:"github-token" json:"-"`

@@ -330,13 +330,21 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
 	}
 
+	cfg := s.getConfig()
 	addr := s.server.Addr
-	listener, errListen := net.Listen("tcp", addr)
+	var listener net.Listener
+	var errListen error
+	if socketPath := unixSocketPath(cfg); socketPath != "" {
+		// The Unix socket replaces the TCP listener, so no TCP port is opened.
+		addr = "unix:" + socketPath
+		listener, errListen = listenUnixSocket(socketPath, cfg.UnixSocketMode)
+	} else {
+		listener, errListen = net.Listen("tcp", addr)
+	}
 	if errListen != nil {
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
 
-	cfg := s.getConfig()
 	useTLS := cfg != nil && cfg.TLS.Enable
 	if useTLS {
 		certPath := strings.TrimSpace(cfg.TLS.Cert)

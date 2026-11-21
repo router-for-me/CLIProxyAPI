@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api"
@@ -188,7 +189,11 @@ func (s *Service) Run(ctx context.Context) error {
 
 	time.Sleep(100 * time.Millisecond)
 	if currentCfg := s.currentConfig(); currentCfg != nil {
-		fmt.Printf("API server started successfully on: %s:%d\n", currentCfg.Host, currentCfg.Port)
+		if socketPath := strings.TrimSpace(currentCfg.UnixSocket); socketPath != "" {
+			fmt.Printf("API server started successfully on: unix:%s\n", socketPath)
+		} else {
+			fmt.Printf("API server started successfully on: %s:%d\n", currentCfg.Host, currentCfg.Port)
+		}
 	}
 
 	s.configRuntimeMu.Lock()
