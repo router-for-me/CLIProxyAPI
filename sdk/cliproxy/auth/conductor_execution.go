@@ -1080,20 +1080,27 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 		out = make(http.Header)
 	}
 	for _, key := range clear {
-		out.Del(key)
-		for existingKey := range out {
-			if strings.EqualFold(existingKey, key) {
-				delete(out, existingKey)
-			}
-		}
+		deleteRequestHeaderFold(out, key)
 	}
 	for key, values := range updates {
-		out.Del(key)
+		deleteRequestHeaderFold(out, key)
 		for _, value := range values {
 			out.Add(key, value)
 		}
 	}
 	return out
+}
+
+func deleteRequestHeaderFold(headers http.Header, key string) {
+	if len(headers) == 0 {
+		return
+	}
+	headers.Del(key)
+	for existingKey := range headers {
+		if strings.EqualFold(existingKey, key) {
+			delete(headers, existingKey)
+		}
+	}
 }
 
 func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
