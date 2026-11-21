@@ -217,7 +217,7 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
-		log.WithError(errDo).Debug("management APICall request failed")
+		log.WithError(errDo).Error("management APICall request failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
@@ -229,6 +229,7 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
+		log.WithError(errReadAll).Error("management APICall response read failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
