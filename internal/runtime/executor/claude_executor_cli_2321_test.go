@@ -96,6 +96,11 @@ func TestClaudeIncludePerTurnTiming_2321CatalogModels(t *testing.T) {
 		{model: "claude-opus-5-5", want: true},
 		{model: "claude-sonnet-5-5", want: true},
 		{model: "claude-mythos-5-2", want: true},
+		{model: "claude-mythos-5-1", want: true},
+		{model: "claude-mythos-5.1", want: true},
+		{model: "claude-mythos-5-10", want: false},
+		{model: "claude-mythos-5-20", want: false},
+		{model: "claude-mythos-5", want: false},
 		{model: "claude-haiku-5-5", want: false},
 		{model: "claude-fable-5", want: false},
 	} {
@@ -103,6 +108,28 @@ func TestClaudeIncludePerTurnTiming_2321CatalogModels(t *testing.T) {
 			body := []byte(`{"model":"` + tc.model + `","output_config":{"timing":{"type":"enabled"}}}`)
 			if got := claudeIncludePerTurnTiming(body, nil); got != tc.want {
 				t.Fatalf("claudeIncludePerTurnTiming(%s) = %v, want %v", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeIncludePerTurnControl_MythosModels(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		want  bool
+	}{
+		{model: "claude-mythos-5-2", want: true},
+		{model: "claude-mythos-5-1", want: true},
+		{model: "claude-mythos-5.1", want: true},
+		{model: "claude-mythos-5.2", want: true},
+		{model: "claude-mythos-5-10", want: false},
+		{model: "claude-mythos-5-20", want: false},
+		{model: "claude-mythos-5", want: false},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			body := []byte(`{"model":"` + tc.model + `"}`)
+			if got := claudeIncludePerTurnControl(body, nil); got != tc.want {
+				t.Fatalf("claudeIncludePerTurnControl(%s) = %v, want %v", tc.model, got, tc.want)
 			}
 		})
 	}
