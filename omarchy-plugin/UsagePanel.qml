@@ -16,6 +16,7 @@ Panel {
     property bool failed: false
     property double now: Date.now()
     readonly property bool autoRefresh: setting("autoRefresh", true)
+    readonly property string authDir: setting("authDir", "")
     readonly property var locale: Qt.locale(Commons.I18n.formatLocale)
 
     readonly property color secondary: Commons.Util.alpha(Commons.Color.foreground, 0.72)
@@ -47,8 +48,20 @@ Panel {
 
     function refresh() {
         if (!loader.running) {
+            refreshTimer.stop()
             loader.running = true
         }
+    }
+
+    function scheduleRefresh() {
+        if (!opened || !autoRefresh || loader.running) {
+            refreshTimer.stop()
+            return
+        }
+        // A fixed timer can fire just before a slow lookup's cache expires.
+        refreshTimer.interval = failed ? 900000 :
+            Math.max(1000, usage.next_check * 1000 - Date.now() + 1000)
+        refreshTimer.restart()
     }
 
     function resetLabel(timestamp, relative) {
@@ -74,8 +87,11 @@ Panel {
         if (opened) {
             now = Date.now()
             refresh()
+        } else {
+            refreshTimer.stop()
         }
     }
+    onAutoRefreshChanged: scheduleRefresh()
 
     Commons.Translations {
         id: strings
@@ -84,7 +100,8 @@ Panel {
 
     Process {
         id: loader
-        command: ["/usr/bin/python3", Qt.resolvedUrl("usage.py").toString().replace(/^file:\/\//, "")]
+        command: ["/usr/bin/python3", Qt.resolvedUrl("usage.py").toString().replace(/^file:\/\//, ""),
+                  "--auth-dir=" + root.authDir]
         stdout: StdioCollector {
             id: output
             waitForEnd: true
@@ -99,13 +116,12 @@ Panel {
                     // Keep the previous snapshot and show the error.
                 }
             }
+            Qt.callLater(root.scheduleRefresh)
         }
     }
 
     Timer {
-        interval: 900000
-        repeat: true
-        running: root.opened && root.autoRefresh
+        id: refreshTimer
         onTriggered: root.refresh()
     }
 
@@ -328,6 +344,7 @@ Panel {
                                                 Layout.preferredWidth: Commons.Style.space(146)
                                                 horizontalAlignment: Text.AlignRight
                                                 text: root.resetLabel(meter.modelData.reset,
+                                                    meter.modelData.five_hour ??
                                                     meter.modelData.label.toLowerCase() === "session")
                                                 color: root.secondary
                                                 font.pixelSize: Commons.Style.font.caption

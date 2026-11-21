@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import concurrent.futures
 import datetime as dt
 from email.utils import parsedate_to_datetime
@@ -46,11 +47,11 @@ def epoch(value):
     return None
 
 
-def window(label, percent, reset, custom=False):
+def window(label, percent, reset, custom=False, five_hour=False):
     if type(percent) not in (float, int) or not 0 <= percent <= 100:
         return None
     return {"label": label, "percent": round(percent, 1), "reset": epoch(reset),
-            "custom": custom}
+            "custom": custom, "five_hour": five_hour or label == "session"}
 
 
 def claude_windows(data):
@@ -92,18 +93,34 @@ def claude_windows(data):
 
 
 def codex_windows(data):
-    for group, fallback in (("rate_limit", "window"), ("code_review_rate_limit", "codeReview")):
-        limit = data.get(group)
+    groups = [(data.get("rate_limit"), "window", False),
+              (data.get("code_review_rate_limit"), "codeReview", False)]
+    extra = data.get("additional_rate_limits")
+    for entry in extra[:8] if isinstance(extra, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("limit_name") or entry.get("metered_feature")
+        if isinstance(name, str) and re.fullmatch(r"[\w .()+/-]{1,48}", name):
+            name = re.sub(r"^GPT-[\d.]+-Codex-", "", name)
+            groups.append((entry.get("rate_limit"), name, True))
+    for limit, fallback, custom in groups:
         if not isinstance(limit, dict):
             continue
+        multiple = bool(limit.get("primary_window") and limit.get("secondary_window"))
         for key in ("primary_window", "secondary_window"):
             row = limit.get(key)
             if isinstance(row, dict):
                 label = fallback
-                if group == "rate_limit":
+                seconds = row.get("limit_window_seconds")
+                if fallback == "window" and not custom:
                     label = {18000: "session", 604800: "weekly", 2592000: "monthly"}.get(
-                        row.get("limit_window_seconds"), fallback)
-                yield window(label, row.get("used_percent"), row.get("reset_at"))
+                        seconds, fallback)
+                elif custom and multiple:
+                    period = {18000: "5h", 604800: "7d", 2592000: "30d"}.get(seconds)
+                    if period:
+                        label = f"{label} {period}"
+                yield window(label, row.get("used_percent"), row.get("reset_at"),
+                             custom, seconds == 18000)
 
 
 def proxy_quota(provider, auth, row):
@@ -156,9 +173,15 @@ def local_usage(agent, name):
         if isinstance(plan, str) and re.fullmatch(r"[\w .()+-]{1,48}", plan):
             row["detail"] = plan
         for entry in data.get("limits", [])[:8]:
-            label = entry.get("title")
+            label = entry.get("title") or entry.get("label")
             if isinstance(label, str) and re.fullmatch(r"[\w .()+/-]{1,40}", label):
-                parsed = window(label, entry.get("percent"), entry.get("resetsAt"), True)
+                five_hour = entry.get("label") == "Session (5-hour)"
+                if label == "Session (5-hour)":
+                    label = "Session"
+                if label == "Weekly (7-day)":
+                    label = "Weekly"
+                parsed = window(label, entry.get("percent"), entry.get("resetsAt"),
+                                True, five_hour)
                 if parsed:
                     row["windows"].append(parsed)
         if data.get("hasLocalStats"):
@@ -175,11 +198,10 @@ def local_usage(agent, name):
     return row
 
 
-def proxy_accounts():
+def proxy_accounts(auth_dir):
     accounts = {provider: {} for provider in PROVIDERS}
-    auth_dir = Path.home() / ".cli-proxy-api"
     count = 0
-    for path in sorted(auth_dir.glob("*.json")):
+    for path in sorted(auth_dir.rglob("*.json", case_sensitive=False)):
         if count == MAX_ACCOUNTS:
             break
         try:
@@ -190,7 +212,8 @@ def proxy_accounts():
                 continue
             identity = (auth.get("account_uuid") or auth.get("account_id")
                         or auth.get("email") or auth.get("access_token", ""))
-            key = hashlib.sha256(f"{path.name}\0{identity}".encode()).hexdigest()
+            file_id = path.relative_to(auth_dir)
+            key = hashlib.sha256(f"{file_id}\0{identity}".encode()).hexdigest()
             email = auth.get("email") or path.stem.split("-", 2)[-1].split("-pro")[0]
             alias = email.split("@", 1)[0]
             detail = alias if re.fullmatch(r"[\w.+-]{1,28}", alias) else f"Account {count + 1}"
@@ -229,7 +252,10 @@ def refresh_proxy(provider, accounts, previous):
 
 
 def main():
-    accounts = proxy_accounts()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--auth-dir", default="", help="Papa Proxy OAuth credential directory")
+    auth_dir = parser.parse_args().auth_dir
+    accounts = proxy_accounts(Path(auth_dir).expanduser() if auth_dir else Path.home() / ".cli-proxy-api")
     root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     directory = root / "omarchy" / "proxy-usage"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -261,8 +287,10 @@ def main():
                 json.dump(snapshot, temp, allow_nan=False)
                 temp.close()
                 os.replace(temp.name, path)
-        proxy = [entry["row"] for p in PROVIDERS for entry in snapshot[p]["rows"].values()]
-        print(json.dumps({"proxy": proxy, "local": local["rows"],
+        entries = [entry for p in PROVIDERS for entry in snapshot[p]["rows"].values()]
+        deadline = min([local["next_check"], *(entry["next_check"] for entry in entries)])
+        print(json.dumps({"proxy": [entry["row"] for entry in entries],
+                          "local": local["rows"], "next_check": deadline,
                           "checked": max(s["checked"] for s in snapshot.values())}, allow_nan=False))
 
 

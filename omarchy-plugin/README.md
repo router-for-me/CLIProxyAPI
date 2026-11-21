@@ -28,13 +28,15 @@ manually; it still reuses readings less than 15 minutes old. You can disable
 automatic checks in the widget settings.
 
 The widget saves readings in your user cache so reopening the panel or
-restarting Omarchy does not repeat quota requests. When a quota endpoint
-throttles a request, the widget honors its retry time for that provider and
-labels any previous readings as last known.
+restarting Omarchy does not repeat quota requests. When Claude or Codex throttles
+a lookup, the widget honors the provider's retry time and labels any previous
+readings as last known. Standalone retry behavior comes from Omarchy's collectors.
 
 The widget expects Papa Proxy at `http://127.0.0.1:8317`, with its Claude and
-Codex OAuth files in `~/.cli-proxy-api`. It queries the same read-only quota
-endpoints as the dashboard for those accounts. It shows upstream limits; the
+Codex OAuth files in `~/.cli-proxy-api`. If you configured a different auth
+directory, select it in the widget settings. The widget scans subdirectories
+and shows up to 16 accounts. It queries the same read-only quota endpoints
+as the dashboard for those accounts. It shows upstream limits; the
 proxy's scheduler cooldowns can differ. No management key is required.
 
 Antigravity and Meta use Omarchy's bundled collectors and your existing local
