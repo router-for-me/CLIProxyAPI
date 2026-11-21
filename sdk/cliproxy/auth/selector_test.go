@@ -209,7 +209,7 @@ func TestSmoothWeightedStateCharge_SaturatesAndClampsCorruptState(t *testing.T) 
 	t.Parallel()
 
 	state := weightedPoolForTest("route", map[string]int64{"a": 1, "b": 1}, map[string]int64{"a": math.MaxInt64, "b": math.MinInt64})
-	state.charge(0, false)
+	state.charge(0, 2, nil, false)
 	limit := maxSmoothWeightedCreditRounds * 2
 	if state.currentForTest()["a"] != limit || state.currentForTest()["b"] != -limit {
 		t.Fatalf("current state = %#v, want saturated and clamped arithmetic", state.currentForTest())

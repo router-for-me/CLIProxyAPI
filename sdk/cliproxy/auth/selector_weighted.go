@@ -28,6 +28,10 @@ type weightedReservation struct {
 	generation      uint64
 	member          int
 	selectedID      string
+	// candidates lists the member indexes that participated in this request's
+	// smooth-WRR step. Transiently excluded credentials (retry tried-sets,
+	// cooldowns, disallow filters) must keep their credits untouched.
+	candidates []int
 	selectedEpoch   uint64
 	candidateIDs    []string
 	candidateEpochs []uint64
@@ -396,6 +400,7 @@ func (s *WeightedRoundRobinSelector) reservePoolScoped(route string, priority in
 	var picked *Auth
 	var pickedCurrent, total int64
 	pickedMember := -1
+	candidates := make([]int, 0, len(available))
 	for _, auth := range available {
 		if auth == nil {
 			continue
@@ -405,6 +410,7 @@ func (s *WeightedRoundRobinSelector) reservePoolScoped(route string, priority in
 			continue
 		}
 		total = saturatingAddInt64(total, weights[index])
+		candidates = append(candidates, index)
 		if authID != "" && auth.ID != authID {
 			continue
 		}
@@ -420,14 +426,14 @@ func (s *WeightedRoundRobinSelector) reservePoolScoped(route string, priority in
 	}
 	// Bound traffic beyond the compensation window still keeps its credential,
 	// but must not create speculative credit that can starve concurrent picks.
-	if authID != "" && !state.boundChargeFits(pickedMember, total) {
+	if authID != "" && !state.boundChargeFits(pickedMember, total, candidates) {
 		return picked, nil
 	}
-	state.adjustPending(pickedMember, total, false)
+	state.adjustPending(pickedMember, total, false, candidates)
 	state.inFlight++
 	return picked, &weightedReservation{
 		selector: s, state: state, generation: state.generation,
-		member: pickedMember, total: total, bound: authID != "",
+		member: pickedMember, total: total, bound: authID != "", candidates: candidates,
 	}
 }
 
@@ -818,10 +824,10 @@ func (r *weightedReservation) finish(committed bool) {
 		}
 		return
 	}
-	r.state.adjustPending(r.member, r.total, true)
+	r.state.adjustPending(r.member, r.total, true, r.candidates)
 	r.state.inFlight--
 	if committed {
-		r.state.charge(r.member, r.bound)
+		r.state.charge(r.member, r.total, r.candidates, r.bound)
 	} else if r.state.inFlight == 0 {
 		// A final rollback can remove the offset to already committed credit.
 		r.state.boundCredits(r.total)
@@ -830,8 +836,14 @@ func (r *weightedReservation) finish(committed bool) {
 
 // adjustPending must be called with the selector mutex held. Pending deltas are
 // not clamped, so releasing them cannot lose credit at the compensation bound.
-func (s *weightedPoolState) adjustPending(selected int, total int64, release bool) {
-	for i := range s.members {
+func (s *weightedPoolState) adjustPending(selected int, total int64, release bool, candidates []int) {
+	if candidates == nil {
+		candidates = make([]int, len(s.members))
+		for i := range s.members {
+			candidates[i] = i
+		}
+	}
+	for _, i := range candidates {
 		member := &s.members[i]
 		delta := member.weight
 		if i == selected {
@@ -850,12 +862,19 @@ const maxSmoothWeightedCreditRounds int64 = 32
 // boundChargeFits admits the whole sticky delta or none. Both reservation and
 // commit include outstanding deltas: committed credit alone can transiently
 // exceed the cap while successful reservations settle in a different order.
-func (s *weightedPoolState) boundChargeFits(selected int, totalWeight int64) bool {
+func (s *weightedPoolState) boundChargeFits(selected int, totalWeight int64, candidates []int) bool {
 	limit := int64(math.MaxInt64)
 	if totalWeight <= math.MaxInt64/maxSmoothWeightedCreditRounds {
 		limit = totalWeight * maxSmoothWeightedCreditRounds
 	}
-	for i, member := range s.members {
+	if candidates == nil {
+		candidates = make([]int, len(s.members))
+		for i := range s.members {
+			candidates[i] = i
+		}
+	}
+	for _, i := range candidates {
+		member := &s.members[i]
 		delta := member.weight
 		if i == selected {
 			delta -= totalWeight
@@ -869,15 +888,19 @@ func (s *weightedPoolState) boundChargeFits(selected int, totalWeight int64) boo
 	return true
 }
 
-func (s *weightedPoolState) charge(selected int, bound bool) {
-	var totalWeight int64
-	for _, member := range s.members {
-		totalWeight = saturatingAddInt64(totalWeight, member.weight)
+func (s *weightedPoolState) charge(selected int, totalWeight int64, candidates []int, bound bool) {
+	if candidates == nil {
+		candidates = make([]int, len(s.members))
+		for i := range s.members {
+			candidates[i] = i
+		}
 	}
-	if !bound || s.boundChargeFits(selected, totalWeight) {
+	if !bound || s.boundChargeFits(selected, totalWeight, candidates) {
 		// At the cap, forced traffic cannot erase a small peer's earnings.
 		// Pending repayments still count until they actually roll back.
-		for i := range s.members {
+		// Only participating candidates take part in the smooth-WRR step;
+		// transiently excluded credentials keep their credits untouched.
+		for _, i := range candidates {
 			member := &s.members[i]
 			member.current = saturatingAddInt64(member.current, member.weight)
 		}

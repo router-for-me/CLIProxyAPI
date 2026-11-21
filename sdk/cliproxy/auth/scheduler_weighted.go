@@ -15,15 +15,21 @@ func (s *authScheduler) pickWeightedPoolLocked(route string, priority int, trans
 		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
 			continue
 		}
-		if predicate != nil && !predicate(entry) {
-			continue
-		}
 		if nonWebsocketOnly && entry.meta.websocketEnabled {
 			continue
 		}
-		auths = append(auths, entry.auth)
+		// The pool identity must cover every positive-weight credential of the
+		// structural pool (transport-filtered). Keying on the predicate-filtered
+		// subset would mint a fresh pool state (resetting all accumulated credits)
+		// whenever a retry exclusion or cooldown shrinks the candidate set,
+		// collapsing large pools onto the first Auth.ID-sorted members. Selection
+		// still happens only among `auths`.
 		ids = append(ids, entry.auth.ID)
 		weights = append(weights, entry.meta.weight)
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		auths = append(auths, entry.auth)
 	}
 	picked, reservation := s.weightedSelector.reservePoolScoped(route, priority, transportClass, auths, weights, ids, pinnedAuthID)
 	if picked == nil {

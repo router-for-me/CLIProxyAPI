@@ -323,7 +323,7 @@ func TestWeightedOverloadSaturatedChargeLeavesPeersUnchanged(t *testing.T) {
 		{"a": -112, "b": 222, "c": -110},
 	} {
 		state := weightedPoolForTest("route", map[string]int64{"a": 1, "b": 5, "c": 1}, credit)
-		state.charge(0, true)
+		state.charge(0, 7, nil, true)
 		if !maps.Equal(state.currentForTest(), credit) {
 			t.Fatalf("saturated sticky charge changed peers: got=%v want=%v", state.currentForTest(), credit)
 		}
