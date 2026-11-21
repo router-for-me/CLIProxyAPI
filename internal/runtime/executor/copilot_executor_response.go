@@ -96,9 +96,9 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 	usage.SetRequestPayload(prepared.body)
 	inputTokens := helps.NewClaudeInputTokenState(opts.SourceFormat, from, to, prepared.original)
 	translationOriginal := prepared.original
-	if from == sdktranslator.FormatOpenAI && to == sdktranslator.FormatClaude && !ojson.GetBytesNoCopy(translationOriginal, "stream").Exists() {
-		// Only the response translator needs this hint. Keep both the original client
-		// request and the already finalized upstream payload unchanged.
+	if from == sdktranslator.FormatOpenAI && to == sdktranslator.FormatClaude && ojson.GetBytesNoCopy(translationOriginal, "stream").Type != ojson.True {
+		// ExecuteStream determines the response mode even if the caller reused a non-streaming body.
+		// Set the hint only on the response translator's view of the request.
 		doc := ojson.NewDoc(translationOriginal)
 		_ = doc.Set("stream", true)
 		translationOriginal = doc.Bytes()

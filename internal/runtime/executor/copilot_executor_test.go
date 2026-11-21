@@ -62,6 +62,48 @@ func TestDefaultChatToClaudeStreamUsesOriginalFlag(t *testing.T) {
 	}
 }
 
+func TestCopilotChatToClaudeExecuteStreamUsesExecutionMode(t *testing.T) {
+	const model = "test-model"
+	const upstream = "data: " + `{"id":"chat-1","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}` + "\n\n" +
+		"data: " + `{"id":"chat-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
+	e := NewCopilotExecutor(nil)
+	auth := copilotTestAuth(t, "account", model, copilot.Chat)
+	for _, tc := range []struct{ name, field string }{{"omitted", ""}, {"true", `"stream":true,`}, {"false", `"stream":false,`}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					return nil, err
+				}
+				if ojson.GetBytesNoCopy(body, "stream").Type != ojson.True {
+					t.Errorf("upstream request is not streaming: %s", body)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: r, Body: io.NopCloser(strings.NewReader(upstream))}, nil
+			}))
+			original := `{` + tc.field + `"messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
+			req := cliproxyexecutor.Request{Model: copilot.ModelPrefix + model, Payload: []byte(original)}
+			opts := cliproxyexecutor.Options{SourceFormat: tr.FormatClaude, OriginalRequest: req.Payload, Stream: true}
+			res, err := e.ExecuteStream(ctx, auth, req, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output strings.Builder
+			for chunk := range res.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				output.Write(chunk.Payload)
+			}
+			if got := output.String(); !strings.Contains(got, "event: content_block_delta") || !strings.Contains(got, `"text":"hello"`) || !strings.Contains(got, "event: message_stop") {
+				t.Errorf("incomplete Claude stream: %s", got)
+			}
+			if string(opts.OriginalRequest) != original {
+				t.Errorf("original request was modified: %s", opts.OriginalRequest)
+			}
+		})
+	}
+}
+
 func TestCopilotProtocolMatrix(t *testing.T) {
 	executor := NewCopilotExecutor(&config.Config{})
 	const model = "test-model"
