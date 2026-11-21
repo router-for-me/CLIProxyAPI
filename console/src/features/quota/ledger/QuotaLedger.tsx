@@ -52,7 +52,9 @@ const tone = (remaining: number | null) =>
         ? styles.toneMedium
         : styles.toneLow;
 
-const percent = (value: number | null) => (value === null ? '--' : `${Math.round(value)}%`);
+// 0% is reserved for an exhausted window; a sliver left reads `<1%`.
+const percent = (value: number | null) =>
+  value === null ? '--' : value > 0 && value < 0.5 ? '<1%' : `${Math.round(value)}%`;
 
 /** `in 1 day · 09/13, 13:00`, relative first like the rest of the ledger. */
 function ResetLine({
@@ -77,9 +79,22 @@ function ResetLine({
   );
 }
 
-function MeterCell({ meter, now, t }: { meter: LedgerMeter; now: number; t: TFunction }) {
+function MeterCell({
+  meter,
+  rowExhausted,
+  now,
+  t,
+}: {
+  meter: LedgerMeter;
+  rowExhausted: boolean;
+  now: number;
+  t: TFunction;
+}) {
+  // On an exhausted account the empty window is the one that matters; the rest recede.
+  const state =
+    meter.remaining === 0 ? styles.meterExhausted : rowExhausted ? styles.meterMuted : '';
   return (
-    <div className={`${styles.meter} ${meter.muted ? styles.meterMuted : ''}`}>
+    <div className={`${styles.meter} ${state}`}>
       <div className={styles.meterHead}>
         <span>{t(meter.labelKey)}</span>
         <strong>{percent(meter.remaining)}</strong>
@@ -184,7 +199,7 @@ function LedgerRowView({
       <>
         {row.meters.length === 0 && <div className={styles.message}>{t('ledger.no_windows')}</div>}
         {row.meters.map((meter) => (
-          <MeterCell key={meter.id} meter={meter} now={now} t={t} />
+          <MeterCell key={meter.id} meter={meter} rowExhausted={row.exhausted} now={now} t={t} />
         ))}
       </>
     );
@@ -203,6 +218,11 @@ function LedgerRowView({
           <span className={styles.name} title={props.showEmails ? entry.file.name : undefined}>
             {name}
           </span>
+          {row.exhausted && (
+            <span className={styles.exhausted} title={t('ledger.exhausted_hint')}>
+              {t('ledger.exhausted')}
+            </span>
+          )}
           {row.nextUp && (
             <span className={styles.nextUp} title={t('ledger.next_up_hint')}>
               {t('ledger.next_up')}

@@ -2476,6 +2476,8 @@
     "loading": "할당량 불러오는 중…",
     "next_up": "다음 사용",
     "next_up_hint": "reset-first 라우팅은 주간 할당량이 가장 먼저 초기화되는 이 계정을 먼저 사용합니다.",
+    "exhausted": "소진됨",
+    "exhausted_hint": "이 계정의 한도 중 하나가 초기화될 때까지 모두 소진되었습니다.",
     "refresh_quota": "할당량 새로고침",
     "other_credentials": "기타 자격 증명",
     "window_seven_day_fable": "7일 Fable 5",

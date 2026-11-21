@@ -2497,6 +2497,8 @@
     "loading": "正在載入額度…",
     "next_up": "優先使用",
     "next_up_hint": "重置優先路由會先使用此帳號：它的每週額度最先重置。",
+    "exhausted": "已耗盡",
+    "exhausted_hint": "此帳號的某項額度已用完，需等待重置。",
     "refresh_quota": "重新整理額度",
     "other_credentials": "其他憑證",
     "window_seven_day_fable": "7 天 Fable 5",

@@ -2476,6 +2476,8 @@
     "loading": "Kota yükleniyor…",
     "next_up": "Sıradaki",
     "next_up_hint": "reset-first yönlendirme önce bu hesabı kullanır: haftalık kotası en erken sıfırlanır.",
+    "exhausted": "Tükendi",
+    "exhausted_hint": "Bu hesabın limitlerinden biri sıfırlanana kadar doldu.",
     "refresh_quota": "Kotayı yenile",
     "other_credentials": "Diğer kimlik bilgileri",
     "window_seven_day_fable": "7 gün Fable 5",
