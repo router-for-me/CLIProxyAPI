@@ -910,6 +910,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 	cooldownCount := 0
 	unauthorizedCount := 0
 	var earliest time.Time
+	var earliestAuth *Auth
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
@@ -923,6 +924,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
+			earliestAuth = candidate
 		}
 		if hasUnauthorizedAuthFailure(candidate) {
 			unauthorizedCount++
@@ -946,7 +948,8 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 			claudeCooldown, claudeSignals := claudeCooldownMetadataForAuths(ctx, auths, func(candidate *Auth) string {
 				return m.selectionModelForAuth(candidate, routeModel)
 			}, now, clientHeaders...)
-			return nil, newModelCooldownErrorForCandidates(routeModel, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals)
+			return nil, newModelCooldownErrorForCandidates(routeModel, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals).
+				withNextRetry(earliest, earliestAuth)
 		}
 		if unauthorizedCount == len(auths) && len(auths) > 0 {
 			terminalCause := latestUnauthorizedCandidateError(auths)
@@ -1061,7 +1064,7 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 	if !errors.As(err, &cooldownErr) || cooldownErr == nil || cooldownErr.model != "" {
 		return err
 	}
-	return newModelCooldownErrorForCandidates(
+	restored := newModelCooldownErrorForCandidates(
 		requestedModel,
 		cooldownErr.provider,
 		cooldownErr.resetIn,
@@ -1069,6 +1072,10 @@ func restoreModelCooldownErrorModel(err error, requestedModel string) error {
 		cooldownErr.claudeCooldown,
 		cooldownErr.claudeSignals,
 	)
+	restored.retryAt = cooldownErr.retryAt
+	restored.nextAuthIndex = cooldownErr.nextAuthIndex
+	restored.nextAuthHint = cooldownErr.nextAuthHint
+	return restored
 }
 
 func latestUnauthorizedCandidateError(auths []*Auth) error {

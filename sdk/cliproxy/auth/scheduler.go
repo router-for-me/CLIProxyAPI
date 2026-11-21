@@ -742,6 +742,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	cooldownCount := 0
 	unauthorizedCount := 0
 	earliest := time.Time{}
+	var earliestAuth *Auth
 
 	var latestModelTime time.Time
 	var latestModelAuthID string
@@ -771,6 +772,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		unauthorizedCount += localUnauthorizedCount
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
+			earliestAuth = shard.earliestRetryAuthLocked(predicate, localEarliest)
 		}
 		if localTotal > 0 {
 			localClaude, localClaudeEarliest, localClaudeID, localSignals := shard.claudeCooldownSummaryLocked(providerKey, model, now, predicate)
@@ -820,7 +822,8 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if allClaude {
 			claudeSignals = earliestClaudeSignals
 		}
-		return newModelCooldownErrorForCandidates(model, "", resetIn, lastCandidateErr, allClaude, claudeSignals)
+		return newModelCooldownErrorForCandidates(model, "", resetIn, lastCandidateErr, allClaude, claudeSignals).
+			withNextRetry(earliest, earliestAuth)
 	}
 	if unauthorizedCount == total {
 		terminalCause := latestAuthErr
@@ -1572,7 +1575,8 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 			resetIn = 0
 		}
 		claudeCooldown, _, _, claudeSignals := m.claudeCooldownSummaryLocked(provider, model, now, predicate)
-		return newModelCooldownErrorForCandidates(model, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals)
+		return newModelCooldownErrorForCandidates(model, providerForError, resetIn, lastCandidateErr, claudeCooldown, claudeSignals).
+			withNextRetry(earliest, m.earliestRetryAuthLocked(predicate, earliest))
 	}
 	if unauthorizedCount == total {
 		terminalCause := authErr
@@ -1686,6 +1690,22 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		}
 	}
 	return total, cooldownCount, unauthorizedCount, earliest
+}
+
+func (m *modelScheduler) earliestRetryAuthLocked(predicate func(*scheduledAuth) bool, earliest time.Time) *Auth {
+	var best *Auth
+	for _, entry := range m.entries {
+		if entry == nil || entry.auth == nil ||
+			(predicate != nil && !predicate(entry)) ||
+			(entry.state != scheduledStateCooldown && entry.state != scheduledStateBlocked) ||
+			!entry.nextRetryAt.Equal(earliest) {
+			continue
+		}
+		if best == nil || entry.auth.ID < best.ID {
+			best = entry.auth
+		}
+	}
+	return best
 }
 
 func (m *modelScheduler) claudeCooldownSummaryLocked(fallbackProvider, model string, now time.Time, predicate func(*scheduledAuth) bool) (bool, time.Time, string, map[string]string) {

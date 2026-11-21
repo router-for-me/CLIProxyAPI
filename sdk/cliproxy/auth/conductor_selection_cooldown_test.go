@@ -21,6 +21,7 @@ func TestBuiltInSelectorCooldownErrorPreservesRouteModel(t *testing.T) {
 	next := time.Now().Add(time.Hour)
 	auth := &Auth{
 		ID:             "cooling-auth",
+		Index:          "cccccccccccccccc",
 		Unavailable:    true,
 		NextRetryAfter: next,
 		Quota: QuotaState{
@@ -59,6 +60,9 @@ func TestBuiltInSelectorCooldownErrorPreservesRouteModel(t *testing.T) {
 			}
 			if cooldownErr.model != routeModel {
 				t.Fatalf("cooldown model = %q, want %q", cooldownErr.model, routeModel)
+			}
+			if cooldownErr.nextAuthIndex != auth.Index || !cooldownErr.retryAt.Equal(next) {
+				t.Fatalf("restored cooldown lost retry details: %+v", cooldownErr)
 			}
 		})
 	}
