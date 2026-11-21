@@ -11,6 +11,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature/signaturetest"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -113,6 +114,88 @@ func TestDevinStreamEmitsContentBeforeThinkingCloses(t *testing.T) {
 				t.Errorf("content deltas after EOS = %q, want [甲 乙] without loss or duplication", content)
 			}
 		})
+	}
+}
+
+// Devin Claude models send the complete thought signature before the answer.
+// The Claude stream must close the signed thinking block and stream the answer
+// while the upstream is still generating, not hold it until EOS.
+func TestDevinClaudeStreamsContentAfterCompleteThoughtSignature(t *testing.T) {
+	signature, errDecode := base64.StdEncoding.DecodeString(signaturetest.AntigravityCAQS())
+	if errDecode != nil {
+		t.Fatalf("decode signature fixture: %v", errDecode)
+	}
+	out := make(chan cliproxyexecutor.StreamChunk, 64)
+	var events []ojson.Result
+	drain := func() {
+		got, errs := devinContentTestEvents(out)
+		if len(errs) > 0 {
+			t.Fatalf("unexpected stream errors: %v", errs)
+		}
+		events = append(events, got...)
+	}
+	textBeforeEOS := func() []string {
+		var text []string
+		for _, event := range events {
+			if event.Get("delta.type").String() == "text_delta" {
+				text = append(text, event.Get("delta.text").String())
+			}
+		}
+		return text
+	}
+
+	readers := []io.Reader{
+		bytes.NewReader(devinContentTestFrame(9, "planning")),
+		bytes.NewReader(devinContentTestFrame(10, string(signature))),
+	}
+	for _, stage := range []struct {
+		text string
+		want []string
+	}{
+		{text: "甲", want: []string{"甲"}},
+		{text: "乙", want: []string{"甲", "乙"}},
+	} {
+		readers = append(readers, bytes.NewReader(devinContentTestFrame(3, stage.text)), devinContentCheckpointReader(func([]byte) (int, error) {
+			drain()
+			if got := textBeforeEOS(); !slices.Equal(got, stage.want) {
+				t.Errorf("text deltas before upstream EOS = %q, want %q", got, stage.want)
+			}
+			return 0, io.EOF
+		}))
+	}
+	readers = append(readers, bytes.NewReader(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`))))
+
+	original := []byte(`{"model":"devin/claude-opus-5-5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, OriginalRequest: original}
+	req := cliproxyexecutor.Request{
+		Model:   "devin/claude-opus-5-5",
+		Payload: sdktranslator.TranslateRequest(sdktranslator.FormatClaude, sdktranslator.FormatInteractions, "devin/claude-opus-5-5", original, true),
+	}
+	(&DevinExecutor{}).streamDevinFrames(context.Background(), io.MultiReader(readers...), req, opts, "claude-opus-5-5", sdktranslator.FormatClaude, nil, out)
+	drain()
+
+	var gotSignature strings.Builder
+	thinkingStopped := false
+	for _, event := range events {
+		switch event.Get("type").String() {
+		case "content_block_delta":
+			if event.Get("delta.type").String() == "signature_delta" {
+				if thinkingStopped {
+					t.Fatal("signature_delta arrived after the thinking block stopped")
+				}
+				gotSignature.WriteString(event.Get("delta.signature").String())
+			}
+		case "content_block_stop":
+			if event.Get("index").Int() == 0 {
+				thinkingStopped = true
+			}
+		}
+	}
+	if gotSignature.String() != string(signature) {
+		t.Errorf("thinking signature = %d bytes, want the complete %d-byte signature", gotSignature.Len(), len(signature))
+	}
+	if got := textBeforeEOS(); !slices.Equal(got, []string{"甲", "乙"}) {
+		t.Errorf("text deltas after EOS = %q, want [甲 乙] without loss or duplication", got)
 	}
 }
 
