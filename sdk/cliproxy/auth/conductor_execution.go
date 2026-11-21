@@ -1326,6 +1326,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 					syncPreferredUpstreamError(&upstreamErr, errExec)
 				}
+				if isTOSViolationStopError(errExec) {
+					return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
+				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
 						return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
@@ -1593,6 +1596,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				}
+				if isTOSViolationStopError(errExec) {
+					return cliproxyexecutor.Response{}, wrapRequestStopError(errExec)
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -2018,7 +2024,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				upstreamErr = errStream
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
-			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
+			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction) || isTOSViolationStopError(errStream)
 			if stoppedByRule || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
 				// Only redispatch needs a release acknowledgement. Preserve the final
 				// response even when Home cannot acknowledge the released admission.

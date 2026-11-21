@@ -73,6 +73,19 @@ func isRequestStopError(err error) bool {
 	return errors.As(err, &sc) && sc != nil && sc.IsRequestStop()
 }
 
+// isTOSViolationStopError reports whether an attempt failed with a terminal
+// Antigravity TOS_VIOLATION. Such a failure must end the request instead of
+// rotating it to the next credential: the provider rejected the request
+// content/pattern, so replaying the identical payload on another credential
+// typically gets that credential suspended as well, and with the optional
+// pool pause disabled (the default) one request can walk the whole pool.
+func isTOSViolationStopError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isTOSViolationResultError(resultErrorFromError(err))
+}
+
 func unwrapRequestStopError(err error) error {
 	var stopErr requestStopError
 	if errors.As(err, &stopErr) {
