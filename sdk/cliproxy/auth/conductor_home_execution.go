@@ -278,9 +278,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
-			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -415,9 +412,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 			}
 			if errExecute != nil {
-				if hasUpstreamExecutionAttempt(errExecute) {
-					upstreamErr = errExecute
-				}
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, CompletedResponse: errExecute == nil && !countTokens && !response.Incomplete && isCompletedExecutionPayload(response.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, preparedAuth, execOpts.Headers), RefreshToken: authRefreshToken(preparedAuth), CredentialVersion: preparedAuth.CredentialVersion, RegistrationEpoch: preparedAuth.RegistrationEpoch}
