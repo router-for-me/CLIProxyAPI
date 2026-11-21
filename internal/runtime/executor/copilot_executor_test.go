@@ -83,7 +83,7 @@ func TestCopilotProtocolMatrix(t *testing.T) {
 		for _, to := range versions {
 			t.Run(from.format.String()+" to "+to.format.String(), func(t *testing.T) {
 				auth := copilotTestAuth(t, to.path, model, to.path)
-				req := cliproxyexecutor.Request{Model: model, Payload: []byte(from.req)}
+				req := cliproxyexecutor.Request{Model: copilot.ModelPrefix + model, Payload: []byte(from.req)}
 				for _, stream := range []bool{false, true} {
 					opts := executor.PlanRequestRoute(auth, req, cliproxyexecutor.Options{SourceFormat: from.format, Stream: stream})
 					if got := executor.RequestToFormat(req, opts); got != to.format {
@@ -118,7 +118,8 @@ func TestCopilotProtocolMatrix(t *testing.T) {
 						if to.format == tr.FormatOpenAIResponse {
 							promptKey = "input"
 						}
-						if !ojson.GetBytesNoCopy(body, promptKey).Exists() || ojson.GetBytesNoCopy(body, "stream").Bool() != stream || !bytes.Contains(body, []byte("hello")) {
+						wireModel := ojson.GetBytesNoCopy(body, "model").String()
+						if wireModel != model || !ojson.GetBytesNoCopy(body, promptKey).Exists() || ojson.GetBytesNoCopy(body, "stream").Bool() != stream || !bytes.Contains(body, []byte("hello")) {
 							t.Fatalf("unexpected upstream request: %s", body)
 						}
 						wire := to.response

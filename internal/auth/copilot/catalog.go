@@ -15,6 +15,7 @@ import (
 
 const (
 	CatalogKey    = "copilot_catalog"
+	ModelPrefix   = Provider + "/"
 	Chat          = "/chat/completions"
 	Messages      = "/v1/messages"
 	Responses     = "/responses"

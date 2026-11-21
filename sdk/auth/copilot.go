@@ -35,7 +35,7 @@ func (CopilotAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("Open %s and enter GitHub Copilot device code: %s\n", device.VerificationURI, device.UserCode)
+	fmt.Printf("Open %s and enter Copilot device code: %s\n", device.VerificationURI, device.UserCode)
 	if (opts == nil || !opts.NoBrowser) && browser.IsAvailable() {
 		if errOpen := browser.OpenURL(device.VerificationURI); errOpen != nil {
 			log.Warn("Could not open browser; visit the Copilot device URL manually")

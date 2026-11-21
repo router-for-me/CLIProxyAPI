@@ -54,7 +54,7 @@ func (*CopilotExecutor) PlanRequestRoute(auth *cliproxyauth.Auth, req cliproxyex
 	raw, _ := auth.Metadata[copilot.CatalogKey].(string)
 	model := thinking.ParseSuffix(req.Model).ModelName
 	catalog := copilot.ReadCatalog(raw, time.Now())
-	route, _ := catalog.Route(model)
+	route, _ := catalog.Route(strings.TrimPrefix(model, copilot.ModelPrefix))
 	opts.Metadata = maps.Clone(opts.Metadata)
 	if opts.Metadata == nil {
 		opts.Metadata = make(map[string]any, 1)
@@ -148,10 +148,10 @@ func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, 
 	if auth == nil {
 		return copilotPreparedRequest{}, statusErr{code: http.StatusUnauthorized, msg: "copilot: missing auth record"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	model := thinking.ParseSuffix(req.Model).ModelName
 	plan, planned := opts.Metadata[copilotRouteKey].(copilotAttemptRoute)
 	raw, _ := auth.Metadata[copilot.CatalogKey].(string)
-	if !planned || plan.authID != auth.ID || plan.model != baseModel || plan.catalog != raw {
+	if !planned || plan.authID != auth.ID || plan.model != model || plan.catalog != raw {
 		previous := plan
 		plan, _ = e.PlanRequestRoute(auth, req, opts).Metadata[copilotRouteKey].(copilotAttemptRoute)
 		if planned && previous.route.Endpoint != plan.route.Endpoint {
@@ -164,6 +164,7 @@ func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, 
 	if route.Format == "" || !time.Now().Before(plan.expiresAt) {
 		return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: no supported endpoint for this model and account"}
 	}
+	baseModel := route.Info.ID
 	from, to := opts.SourceFormat, route.Format
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	requestTranslators := helps.CopilotTranslationRegistry(from, to)
