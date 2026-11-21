@@ -438,6 +438,10 @@ func newAntigravityStatusErrWithHeaders(statusCode int, headers http.Header, bod
 // error frame): closing idle transports, recording short model cooldowns, and
 // permanently disabling credits on explicit balance exhaustion.
 func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, headers http.Header, bodyBytes []byte) error {
+	return e.applyAntigravity429StateWithEvictAll(ctx, auth, baseModel, useCredits, headers, bodyBytes, false)
+}
+
+func (e *AntigravityExecutor) applyAntigravity429StateWithEvictAll(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, headers http.Header, bodyBytes []byte, evictAll bool) error {
 	var cfg *config.Config
 	if e != nil {
 		cfg = e.cfg
@@ -456,6 +460,10 @@ func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth
 		closeAntigravityAuthIdleTransports(auth)
 		if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, cfg) {
 			markAntigravityCreditsPermanentlyDisabled(auth)
+		}
+	default:
+		if evictAll {
+			closeAntigravityAuthIdleTransports(auth)
 		}
 	}
 	return nil

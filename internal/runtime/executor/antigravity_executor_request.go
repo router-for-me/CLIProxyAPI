@@ -81,8 +81,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 			}
 		}
 	}
-	isClaudeModel := strings.Contains(lowerModel, "claude")
-	useAntigravitySchema := isClaudeModel || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-pro")
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
@@ -189,6 +188,21 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 func sanitizeAntigravityRequestSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
 	payloadStr = sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, isClaudeModel)
 	return sanitizeAntigravityGenerationSchemas(payloadStr)
+}
+
+func antigravitySchemaSanitizationFlags(modelName string) (useAntigravitySchema, isClaudeModel bool) {
+	lowerModel := strings.ToLower(modelName)
+	isClaudeModel = strings.Contains(lowerModel, "claude")
+	useAntigravitySchema = isClaudeModel || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-pro")
+	return useAntigravitySchema, isClaudeModel
+}
+
+func sanitizeAntigravityRequestSchemasForModelIfNeededDoc(modelName string, doc *ojson.Doc) bool {
+	if !antigravityRequestNeedsSchemaSanitizationDoc(doc) {
+		return false
+	}
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
+	return sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 }
 
 func sanitizeAntigravityRequestSchemasForModelDoc(doc *ojson.Doc, useAntigravitySchema, isClaudeModel bool) bool {
