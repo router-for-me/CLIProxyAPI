@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"maps"
 	"net/http"
@@ -86,7 +87,7 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 			return http.ErrUseLastResponse
 		},
 	}
-	transport, _, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(req.ProxyURL))
+	transport, errProxy := newAntigravityProbeTransport(req.ProxyURL)
 	if errProxy != nil {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
@@ -134,6 +135,48 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
 	return hints, AntigravityProbeStatusSuccess
+}
+
+func newAntigravityProbeTransport(proxyURL string) (*http.Transport, error) {
+	transport, mode, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(proxyURL))
+	if errProxy != nil {
+		return nil, errProxy
+	}
+	if transport == nil {
+		if mode != proxyutil.ModeInherit || http.DefaultTransport == nil {
+			transport = &http.Transport{}
+		} else if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			if base == nil {
+				transport = &http.Transport{}
+			} else {
+				transport = base.Clone()
+			}
+		} else {
+			// A custom non-*http.Transport RoundTripper installed on http.DefaultTransport
+			// owns its own protocol behavior.
+			return nil, nil
+		}
+	}
+	return configureAntigravityHTTP11Transport(transport), nil
+}
+
+func configureAntigravityHTTP11Transport(transport *http.Transport) *http.Transport {
+	if transport == nil {
+		return nil
+	}
+	transport.Protocols = nil
+	transport.ForceAttemptHTTP2 = false
+	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
+	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
+	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
+	transport.TLSClientConfig.NextProtos = nil
+	return transport
 }
 
 // NormalizeAntigravityModelID normalizes an Antigravity model identifier for case-insensitive matching.
