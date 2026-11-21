@@ -155,10 +155,26 @@ func assertCodexSIWCUpdateStripped(t *testing.T, gotBody []byte, wantEffort stri
 func TestCodexExecutorUseSIWCStripsConfigurationUpdatesBeforePayloadFinalizer(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		payload    string
+		model      string
 		cfg        *config.Config
 		wantEffort string
 	}{
 		{name: "latest update becomes top level effort", cfg: &config.Config{}, wantEffort: "high"},
+		{
+			name:       "disabled baseline is normalized before dispatch",
+			model:      "gpt-6.1-sol",
+			payload:    `{"model":"gpt-6.1-sol","reasoning":{"effort":"none"},"input":[{"role":"user","content":"hi"}]}`,
+			cfg:        &config.Config{},
+			wantEffort: "low",
+		},
+		{
+			name:       "disabled update is normalized before SIWC collapse",
+			model:      "gpt-6.1-sol",
+			payload:    `{"model":"gpt-6.1-sol","reasoning":{"effort":"high"},"input":[{"type":"configuration_update","reasoning":{"effort":"none"}},{"role":"user","content":"hi"}]}`,
+			cfg:        &config.Config{},
+			wantEffort: "low",
+		},
 		{
 			name: "payload finalizer stays the last barrier",
 			cfg: &config.Config{
@@ -184,10 +200,18 @@ func TestCodexExecutorUseSIWCStripsConfigurationUpdatesBeforePayloadFinalizer(t 
 			}))
 			defer server.Close()
 
+			model := tc.model
+			if model == "" {
+				model = "gpt-6-astra"
+			}
+			payload := tc.payload
+			if payload == "" {
+				payload = codexSIWCUpdatePayload
+			}
 			executor := NewCodexExecutor(tc.cfg)
 			_, err := executor.Execute(context.Background(), codexSIWCAuthForUpdateTest(server.URL), cliproxyexecutor.Request{
-				Model:   "gpt-6-astra",
-				Payload: []byte(codexSIWCUpdatePayload),
+				Model:   model,
+				Payload: []byte(payload),
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response")})
 			if err != nil {
 				t.Fatalf("Execute error: %v", err)

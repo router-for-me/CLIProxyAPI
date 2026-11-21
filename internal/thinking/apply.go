@@ -316,11 +316,18 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
+	var nativeOriginalConfig, nativeOriginalBaseline ThinkingConfig
 	if nativeResponses {
-		normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
-		modified = modified || normalized
-		if errNormalize != nil {
-			return modified, errNormalize
+		if log.IsLevelEnabled(log.DebugLevel) {
+			nativeOriginalConfig = extractCodexUsageConfigDoc(doc, docValid)
+			nativeOriginalBaseline = extractCodexConfigFromGetter(doc.Get)
+		}
+		if !isPluginApplier {
+			normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
+			modified = modified || normalized
+			if errNormalize != nil {
+				return modified, errNormalize
+			}
 		}
 	}
 	if !suffixResult.HasSuffix && len(sourceBody) > 0 && isResponsesFormat(fromFormat) && !docValid && hasThinkingConfig(extractConfigurationUpdateConfig(sourceBody)) {
@@ -342,7 +349,17 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 					fields["baseline_level"] = baseline.Level
 				}
 				entry := log.WithFields(fields)
-				entry.Debug("thinking: original config from request |")
+				originalFields := log.Fields{
+					"provider": providerFormat,
+					"model":    modelInfo.ID,
+					"mode":     nativeOriginalConfig.Mode,
+					"budget":   nativeOriginalConfig.Budget,
+					"level":    nativeOriginalConfig.Level,
+				}
+				if nativeOriginalBaseline.Mode == ModeLevel {
+					originalFields["baseline_level"] = nativeOriginalBaseline.Level
+				}
+				log.WithFields(originalFields).Debug("thinking: original config from request |")
 				entry.Debug("thinking: processed config to apply |")
 			}
 		}
