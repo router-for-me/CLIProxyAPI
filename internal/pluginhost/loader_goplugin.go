@@ -48,15 +48,15 @@ func newGoPluginLoader() goPluginLoader {
 	}
 }
 
-// goPluginFailedPaths remembers the load paths of plugins that failed to
-// initialize.
+// goPluginFailedPaths remembers the load paths whose plugin.Open failed.
 //
 // Go's plugin package stores a per-path placeholder before it runs the
-// plugin initializer and only closes that placeholder's loaded channel after
-// the initialization succeeded. A failed or panicking initialization leaves
-// a placeholder whose channel is never closed, so a second plugin.Open on the
-// same path blocks forever. Remembering the failed path keeps exactly that
-// broken build from being retried.
+// plugin initializer and closes that placeholder's loaded channel only after
+// the plugin was fully loaded. Both a panicking initializer and a symbol
+// that cannot be resolved return before that channel is closed, so a second
+// plugin.Open on the same path blocks forever. The judgement is therefore
+// not "did the initializer panic" but "did plugin.Open fail": every failure
+// of plugin.Open marks the path as unusable for the rest of the process.
 //
 // The load path is content-addressed, so a plugin that is fixed gets a
 // different digest and therefore a different path: only the unchanged broken
@@ -71,10 +71,35 @@ var goPluginFailedPaths sync.Map
 var goPluginOpenAttempts sync.Map
 
 // goPluginFallbackPaths remembers the load paths whose local shadow copy
-// could not be opened but that were loaded from the executable fallback.
+// could not be opened but that are loaded from the executable fallback.
 // Such a path stays usable: later loads go straight to the fallback instead
 // of being rejected as a failed path.
 var goPluginFallbackPaths sync.Map
+
+// goPluginFallbackPrepareError reports a failure of the executable fallback
+// that happened before plugin.Open was reached, for example because the
+// cache directory cannot be written.
+//
+// Go's plugin cache was not touched in that case, so the path stays
+// retryable: a later load tries the fallback again instead of failing
+// immediately, even after the filesystem problem is fixed.
+type goPluginFallbackPrepareError struct {
+	err error
+}
+
+func (e *goPluginFallbackPrepareError) Error() string {
+	if e == nil || e.err == nil {
+		return "the executable fallback could not be prepared"
+	}
+	return e.err.Error()
+}
+
+func (e *goPluginFallbackPrepareError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
 
 // goPluginOpenAttempt is a single plugin.Open attempt and its outcome.
 type goPluginOpenAttempt struct {
@@ -95,10 +120,12 @@ type goPluginOpenAttempt struct {
 // lock file descriptor open for the rest of the process and lets the
 // exclusive lock of the shadow pruning on the same file keep failing.
 //
-// A panic raised by the plugin initializer is fatal: Go's plugin cache keeps
-// the path poisoned, so the path is recorded as failed and never opened
-// again. Any other failure may be caused by the shadow copy itself, so the
-// executable fallback is tried before the path is given up on.
+// A failure of plugin.Open leaves Go's plugin cache poisoned for that path,
+// so the path is recorded as failed and never opened again. A failure other
+// than a panicking initializer may be caused by the shadow copy itself, so
+// the executable fallback is tried before the path is given up on. A failure
+// of the fallback that happened before plugin.Open was reached does not
+// poison anything: the path stays retryable.
 func (l goPluginLoader) openWithFallback(file pluginFile, open func(path string) (*plugin.Plugin, error), loadPath string, releaseGuard func()) (*plugin.Plugin, error) {
 	// The release closure is idempotent, but the guard is released exactly
 	// once here: the explicit releases below and the deferred backstop share
@@ -107,21 +134,24 @@ func (l goPluginLoader) openWithFallback(file pluginFile, open func(path string)
 	release := func() { releaseOnce.Do(releaseGuard) }
 	defer release()
 
-	if _, failed := goPluginFailedPaths.Load(loadPath); failed {
-		return nil, &goPluginPreviouslyFailedError{path: file.Path}
-	}
-
 	if _, needsFallback := goPluginFallbackPaths.Load(loadPath); needsFallback {
-		// The local copy was already found to be unusable, and the plugin was
-		// loaded successfully from the executable fallback before. Release the
-		// primary guard first: the fallback lock lives in the same lock file.
+		// The local copy was already found to be unusable and the plugin is
+		// loaded from the executable fallback instead. Release the primary
+		// guard first: the fallback lock lives in the same lock file.
+		//
+		// The local path is not checked against the failed paths here: it
+		// may have failed to open, which is exactly why the fallback is
+		// used, and it is never opened again.
 		release()
 		p, errFallback := l.openFallbackShadow(file, open, loadPath)
 		if errFallback != nil {
-			goPluginFailedPaths.Store(loadPath, struct{}{})
-			return nil, fmt.Errorf("the executable fallback failed: %w", errFallback)
+			return nil, fmt.Errorf("%s: %w", goPluginFallbackFailurePhrase(errFallback), errFallback)
 		}
 		return p, nil
+	}
+
+	if _, failed := goPluginFailedPaths.Load(loadPath); failed {
+		return nil, &goPluginPreviouslyFailedError{path: file.Path}
 	}
 
 	p, err := openGoPluginSerialized(open, loadPath)
@@ -132,31 +162,62 @@ func (l goPluginLoader) openWithFallback(file pluginFile, open func(path string)
 		return p, nil
 	}
 
+	var failedErr *goPluginPreviouslyFailedError
+	if errors.As(err, &failedErr) {
+		// The path is known to be unusable, so the fallback is not tried
+		// either: it carries the same broken build.
+		return nil, err
+	}
+
 	var panicErr *goPluginPanicError
 	if errors.As(err, &panicErr) {
-		// openGoPluginSerialized already recorded the path as failed.
+		// A panicking initializer leaves Go's plugin cache poisoned for
+		// this path, so the path must never be opened again. The executable
+		// copy carries the same initializer, so it is not tried either.
 		return nil, err
 	}
 
 	// The local shadow copy may live on a noexec mount, in which case the
 	// plugin cannot be loaded from it. The C ABI loader falls back to an
 	// executable copy in the cache directory; do the same here.
+	//
+	// openGoPluginSerialized recorded the local path as failed: its
+	// plugin.Open failed, so a retry of it would block in Go's plugin cache.
+	// The fallback marker makes the next load go straight to the fallback,
+	// so the poisoned local path is never opened again.
 	goPluginFallbackPaths.Store(loadPath, struct{}{})
 	fallbackPlugin, errFallback := l.openFallbackShadow(file, open, loadPath)
 	if errFallback != nil {
-		goPluginFailedPaths.Store(loadPath, struct{}{})
-		return nil, fmt.Errorf("%w (the executable fallback failed as well: %v)", err, errFallback)
+		return nil, fmt.Errorf("%w (%s as well: %v)", err, goPluginFallbackFailurePhrase(errFallback), errFallback)
 	}
 	return fallbackPlugin, nil
+}
+
+// goPluginFallbackFailurePhrase describes a failed executable fallback.
+//
+// A preparation failure is reported with its own wording: it happened
+// before plugin.Open was reached, so Go's plugin cache was not touched and
+// the path stays retryable.
+func goPluginFallbackFailurePhrase(err error) string {
+	var prepareErr *goPluginFallbackPrepareError
+	if errors.As(err, &prepareErr) {
+		return "the executable fallback preparation failed"
+	}
+	return "the executable fallback failed"
 }
 
 // openFallbackShadow loads the plugin from an executable copy in the cache
 // directory. It is the Go-native counterpart of the C ABI loader's fallback
 // for plugin directories that are mounted noexec.
+//
+// A failure of the preparation is reported as a *goPluginFallbackPrepareError:
+// plugin.Open was not reached, so Go's plugin cache was not touched and the
+// path stays retryable. A failure of the open itself is reported as an
+// ordinary error; the failed path is recorded by openGoPluginSerialized.
 func (l goPluginLoader) openFallbackShadow(file pluginFile, open func(path string) (*plugin.Plugin, error), failedLoadPath string) (*plugin.Plugin, error) {
 	fallbackPath, releaseFallbackGuard, errFallback := acquireShadowPluginFallbackLoad(file, failedLoadPath)
 	if errFallback != nil {
-		return nil, errFallback
+		return nil, &goPluginFallbackPrepareError{err: errFallback}
 	}
 	fallbackPath = canonicalizePluginPath(fallbackPath)
 	p, errOpen := openGoPluginSerialized(open, fallbackPath)
@@ -169,10 +230,17 @@ func (l goPluginLoader) openFallbackShadow(file pluginFile, open func(path strin
 // attempt and observe its result, so a plugin whose initializer panics can
 // never leave another caller waiting on Go's plugin cache forever.
 //
+// A path whose plugin.Open already failed is never opened again: Go's plugin
+// cache keeps a placeholder whose channel is never closed for it, so a second
+// open of the same path blocks forever.
+//
 // A failed attempt is recorded before the shared entry is released, so a
 // caller that arrives in between observes the failure instead of opening the
 // poisoned path again.
 func openGoPluginSerialized(open func(path string) (*plugin.Plugin, error), loadPath string) (*plugin.Plugin, error) {
+	if _, failed := goPluginFailedPaths.Load(loadPath); failed {
+		return nil, &goPluginPreviouslyFailedError{path: loadPath}
+	}
 	attempt := &goPluginOpenAttempt{done: make(chan struct{})}
 	actual, loaded := goPluginOpenAttempts.LoadOrStore(loadPath, attempt)
 	att := actual.(*goPluginOpenAttempt)
@@ -182,12 +250,12 @@ func openGoPluginSerialized(open func(path string) (*plugin.Plugin, error), load
 	}
 	att.plugin, att.err = openGoPluginGuarded(open, loadPath)
 	if att.err != nil {
-		var panicErr *goPluginPanicError
-		if errors.As(att.err, &panicErr) {
-			// A panicking initializer leaves Go's plugin cache poisoned for
-			// this path, so the path must never be opened again.
-			goPluginFailedPaths.Store(loadPath, struct{}{})
-		}
+		// Every failure of plugin.Open poisons the path in Go's plugin
+		// cache: the placeholder's channel is closed only after a fully
+		// loaded plugin. It does not matter whether the initializer panicked
+		// or whether a symbol could not be resolved, both return before the
+		// channel is closed.
+		goPluginFailedPaths.Store(loadPath, struct{}{})
 	}
 	close(att.done)
 	goPluginOpenAttempts.Delete(loadPath)
@@ -251,8 +319,8 @@ func (e *goPluginPanicError) Error() string {
 	return fmt.Sprintf("panic during plugin initialization: %v", e.value)
 }
 
-// goPluginPreviouslyFailedError reports a load path that already failed to
-// initialize in this process. The error is reported as it is, without the
+// goPluginPreviouslyFailedError reports a load path whose plugin.Open
+// already failed in this process. The error is reported as it is, without the
 // buildmode hint of a regular load failure: rebuilding the plugin does not
 // unblock the poisoned path, only a host restart does.
 type goPluginPreviouslyFailedError struct {
@@ -299,12 +367,15 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 		return nil, fmt.Errorf("go plugin open %s: %w (hint: build the plugin with -buildmode=plugin, and make sure the host and the plugin share the same Go toolchain, GOOS/GOARCH, build tags and dependency graph; building both inside one go.work is the supported layout)", file.Path, err)
 	}
 	if p == nil {
-		goPluginFailedPaths.Store(loadPath, struct{}{})
+		// The open succeeded, so Go's plugin cache holds a valid entry for
+		// the load path and a later load can reuse it. Only a failure of
+		// plugin.Open itself makes a path unusable.
 		return nil, fmt.Errorf("go plugin open %s returned no plugin handle", file.Path)
 	}
 	sym, err := lookup(p, "New")
 	if err != nil {
-		goPluginFailedPaths.Store(loadPath, struct{}{})
+		// The plugin was opened successfully, so the load path stays usable:
+		// the failure is in the plugin, not in the open.
 		return nil, fmt.Errorf("go plugin %s has no New symbol: %w (hint: the plugin must export New(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error))", file.Path, err)
 	}
 
