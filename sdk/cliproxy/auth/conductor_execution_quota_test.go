@@ -210,7 +210,7 @@ func TestSyncMetadataSessionToContext(t *testing.T) {
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
+func TestPrepareRequestAfterAuthSessionClearing(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
 		Payload: nil,
@@ -230,7 +230,7 @@ func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
 		},
 	}
 
-	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	finalReq, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestGhostParentElimination(t *testing.T) {
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrelatedHeaderChange(t *testing.T) {
+func TestPrepareRequestAfterAuthPreservesOriginalRequestSessionOnUnrelatedHeaderChange(t *testing.T) {
 	bodyWithSession := []byte(`{"session_id":"important-session"}`)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
@@ -303,7 +303,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrela
 		},
 	}
 
-	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	_, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrela
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderChange(t *testing.T) {
+func TestPrepareRequestAfterAuthPreservesLCPHierarchyOnUnrelatedHeaderChange(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
 		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
@@ -334,7 +334,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderC
 		},
 	}
 
-	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	_, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderC
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptor_OverridesPath_Issue6196(t *testing.T) {
+func TestPrepareRequestAfterAuth_OverridesPath_Issue6196(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-image-2.5",
 		Payload: []byte(`{"model":"gpt-image-2.5","prompt":"edit this"}`),
@@ -371,7 +371,7 @@ func TestApplyRequestAfterAuthInterceptor_OverridesPath_Issue6196(t *testing.T) 
 		},
 	}
 
-	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai-compatibility", req, opts, "gpt-image-2.5")
+	finalReq, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai-compatibility", req, opts, "gpt-image-2.5")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

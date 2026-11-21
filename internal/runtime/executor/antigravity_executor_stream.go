@@ -48,7 +48,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	if antigravityInTOSPause(e.cfg, auth) {
-		return nil, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+		return nil, newAntigravityTOSPauseStatusErr()
 	}
 	ctx = context.WithValue(ctx, "alt", "")
 	if !antigravityCoolingDisabled(auth, e.cfg) {
@@ -169,24 +169,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return nil, err
 		}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			decision := decideAntigravity429(bodyBytes)
-
-			switch decision.kind {
-			case antigravity429DecisionShortCooldownSwitchAuth:
-				closeAntigravityAuthIdleTransports(auth)
-				if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, e.cfg) {
-					if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
-						err = homeKVUnavailableStatusErr(errMarkCooldown)
-						return nil, err
-					}
-					log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
-				}
-			case antigravity429DecisionFullQuotaExhausted:
-				closeAntigravityAuthIdleTransports(auth)
-				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-					markAntigravityCreditsPermanentlyDisabled(auth)
-				}
-				// No credits logic - just fall through to error return below
+			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
+				err = err429
+				return nil, err
 			}
 		}
 
@@ -195,15 +180,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
 		if httpResp.StatusCode == http.StatusForbidden {
-			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return nil, err
-	}
-
-	// Stream success
-	if useCredits {
-		clearAntigravityCreditsFailureState(auth)
 	}
 	if len(replayRequestPayload) == 0 {
 		replayRequestPayload = requestPayload
@@ -225,7 +205,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var streamErr error
 		var translatedClaudeErr error
 		var translatedErrorStopped bool
-		var pendingJSON []byte
+		sseJSON := helps.NewSSEJSONAssembler(streamScannerBuffer)
 		var replayCommitted bool
 		var terminalDelivered bool
 		var param any
@@ -245,6 +225,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// for the HTTP consumer, which may need EOF to acknowledge delivery.
 			if terminalDelivered {
 				commitReplay()
+				if useCredits && !translatedErrorStopped && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil && (streamErr == nil || errors.Is(streamErr, context.Canceled)) {
+					clearAntigravityCreditsFailureState(auth)
+				}
 			}
 			close(out)
 			if translatedErrorStopped {
@@ -294,44 +277,34 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if replayAccumulator != nil {
-				replayAccumulator.ObserveSSELine(line)
-			}
 
-			// Capture accounting before the client-facing filter renames usage.
-			streamUsage.ObserveAntigravityStream(line)
-
-			payload := helps.JSONPayload(line)
-			if len(pendingJSON) > 0 {
-				trimmedLine := bytes.TrimSpace(line)
-				if bytes.HasPrefix(trimmedLine, []byte("data:")) {
-					trimmedLine = bytes.TrimSpace(trimmedLine[len("data:"):])
-				}
-				if len(trimmedLine) > 0 {
-					pendingJSON = append(pendingJSON, '\n')
-					pendingJSON = append(pendingJSON, trimmedLine...)
-				}
-				if !ojson.ValidBytes(pendingJSON) {
-					continue
-				}
-				payload = pendingJSON
-				pendingJSON = nil
-			} else if payload != nil && !ojson.ValidBytes(payload) {
-				pendingJSON = append([]byte(nil), payload...)
-				continue
-			}
+			payload := sseJSON.Push(line)
 			if payload == nil {
 				continue
 			}
-			if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() {
+
+			// Capture accounting before the client-facing filter renames usage.
+			streamUsage.ObserveAntigravityStream(payload)
+
+			if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
 				statusCode := int(errorResult.Get("code").Int())
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
 				}
-				if statusCode == http.StatusForbidden {
-					e.applyAntigravityTOSState(e.cfg, auth, payload)
+				if statusCode == http.StatusTooManyRequests {
+					if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, nil, payload); err429 != nil {
+						streamErr = err429
+					}
 				}
-				streamErr = newAntigravityStatusErr(statusCode, payload)
+				if streamErr == nil {
+					if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, payload); errClear != nil {
+						logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+					}
+					if statusCode == http.StatusForbidden {
+						e.applyAntigravityForbiddenState(e.cfg, auth, payload)
+					}
+					streamErr = newAntigravityStatusErr(statusCode, payload)
+				}
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {
@@ -339,6 +312,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				case <-ctx.Done():
 				}
 				return
+			}
+			if replayAccumulator != nil {
+				replayAccumulator.ObserveSSELine(payload)
 			}
 			emitTranslatedPayload := func(p []byte) bool {
 				// Filter usage metadata for all models after block classification

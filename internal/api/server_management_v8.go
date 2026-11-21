@@ -27,6 +27,7 @@ func (s *Server) registerManagementV8Routes() {
 		v8.Handle(method, "/config/*path", s.mgmt.ConfigV8)
 	}
 
+	v8.GET("/server/server-id", s.mgmt.GetServerID)
 	v8.GET("/server/latest-version", s.mgmt.GetLatestVersion)
 	s.registerForkManagementV8Routes(v8)
 	v8.POST("/requests/api-call", s.mgmt.APICall)

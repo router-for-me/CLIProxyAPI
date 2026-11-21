@@ -360,8 +360,12 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 	if !ok {
 		t.Fatalf("error should expose status code, got %T", err)
 	}
-	if got := status.StatusCode(); got != http.StatusBadRequest {
-		t.Fatalf("status code = %d, want %d", got, http.StatusBadRequest)
+	if got := status.StatusCode(); got != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+	scoped, okScoped := err.(interface{ IsCredentialScoped() bool })
+	if !okScoped || !scoped.IsCredentialScoped() {
+		t.Fatalf("missing project_id error should be credential-scoped, got %T (%v)", err, err)
 	}
 }
 
@@ -858,5 +862,328 @@ func TestAntigravityPrepareRequestAuth_SharedRefreshFailureMarksEachTracker(t *t
 	}
 	if !cliproxyexecutor.UpstreamAttempted(ctxB) {
 		t.Fatalf("request B tracker was not marked on shared upstream refresh failure")
+	}
+}
+
+func TestGenerateStableSessionID_ScansAllUserPartsForMultimodalTurn1(t *testing.T) {
+	t.Parallel()
+
+	turn1Inline := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+						{"text": "describe this"}
+					]
+				}
+			]
+		}
+	}`)
+	turn1And2Inline := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"inlineData": {"mimeType": "image/png", "data": "aGVsbG8="}},
+						{"text": "describe this"}
+					]
+				},
+				{
+					"role": "model",
+					"parts": [{"text": "It is a diagram."}]
+				},
+				{
+					"role": "user",
+					"parts": [{"text": "now summarize it"}]
+				}
+			]
+		}
+	}`)
+	turn1Plain := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [{"text": "describe this"}]
+				}
+			]
+		}
+	}`)
+
+	idTurn1 := generateStableSessionID(turn1Inline)
+	idTurn1And2 := generateStableSessionID(turn1And2Inline)
+	idPlain := generateStableSessionID(turn1Plain)
+	if idTurn1 != idPlain {
+		t.Fatalf("multimodal turn 1 sessionId = %q, want deterministic hash %q matching text part", idTurn1, idPlain)
+	}
+	if idTurn1 != idTurn1And2 {
+		t.Fatalf("sessionId changed between turn 1 (%q) and turn 2 (%q)", idTurn1, idTurn1And2)
+	}
+
+	turn1FileAndEmpty := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"fileData": {"mimeType": "application/pdf", "fileUri": "gs://bucket/doc.pdf"}},
+						{"text": ""},
+						{"text": "summarize pdf"}
+					]
+				}
+			]
+		}
+	}`)
+	turn1And2FileAndEmpty := []byte(`{
+		"request": {
+			"contents": [
+				{
+					"role": "user",
+					"parts": [
+						{"fileData": {"mimeType": "application/pdf", "fileUri": "gs://bucket/doc.pdf"}},
+						{"text": ""},
+						{"text": "summarize pdf"}
+					]
+				},
+				{
+					"role": "model",
+					"parts": [{"text": "Summary."}]
+				},
+				{
+					"role": "user",
+					"parts": [{"text": "details please"}]
+				}
+			]
+		}
+	}`)
+
+	docTurn1 := ojson.NewDoc(turn1FileAndEmpty)
+	docTurn1And2 := ojson.NewDoc(turn1And2FileAndEmpty)
+	authATurn1 := generateStableSessionIDDocForAuth(docTurn1, "auth-a")
+	authATurn2 := generateStableSessionIDDocForAuth(docTurn1And2, "auth-a")
+	authBTurn1 := generateStableSessionIDDocForAuth(docTurn1, "auth-b")
+	if authATurn1 != authATurn2 {
+		t.Fatalf("auth-scoped multimodal sessionId changed between turn 1 (%q) and turn 2 (%q)", authATurn1, authATurn2)
+	}
+	if authATurn1 == authBTurn1 {
+		t.Fatalf("different authIDs produced identical multimodal sessionId %q", authATurn1)
+	}
+}
+
+func TestAntigravityBuildRequest_CaseInsensitiveClaudeModel(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {"maxOutputTokens": 2048},
+			"tools": [
+				{
+					"functionDeclarations": [
+						{
+							"name": "pick_item",
+							"parametersJsonSchema": {
+								"type": "object",
+								"properties": {
+									"item": {
+										"anyOf": [
+											{"type": "string"},
+											{"type": "object", "properties": {"image": {"type": "string"}}},
+											{"type": "object", "properties": {"audio": {"type": "string"}}}
+										]
+									}
+								}
+							}
+						},
+						{
+							"name": "ping",
+							"parameters": {"type": "object"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	for _, modelName := range []string{"Claude-Sonnet-5-5", "CLAUDE-OPUS-5-5"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").String(); got != "VALIDATED" {
+				t.Fatalf("model %q: mode = %q, want VALIDATED", modelName, got)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 2048 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want 2048", modelName, got)
+			}
+			firstParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.0.parameters")
+			if !firstParams.Exists() {
+				t.Fatalf("model %q: expected parameters after parametersJsonSchema rename", modelName)
+			}
+			if firstParams.Get("properties.item.anyOf").Exists() {
+				t.Fatalf("model %q: expected Claude multi-branch anyOf union to be flattened, got %s", modelName, firstParams.Raw)
+			}
+			secondParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.1.parameters")
+			if !secondParams.Get("properties.reason").Exists() {
+				t.Fatalf("model %q: expected Antigravity placeholder property on empty object schema, got %s", modelName, secondParams.Raw)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_CaseInsensitiveClaudeCapsMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {"maxOutputTokens": 100000}
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	for _, modelName := range []string{"claude-sonnet-4-6", "Claude-Sonnet-4-6"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want capped 64000", modelName, got)
+			}
+		})
+	}
+}
+
+func TestAntigravityBuildRequest_CaseInsensitiveGeminiProAndImageModels(t *testing.T) {
+	t.Parallel()
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+
+	proPayload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {"maxOutputTokens": 2048},
+			"tools": [
+				{
+					"functionDeclarations": [
+						{
+							"name": "pick_item",
+							"parameters": {
+								"type": "object",
+								"properties": {
+									"item": {
+										"anyOf": [
+											{"type": "string"},
+											{"type": "object", "properties": {"image": {"type": "string"}}},
+											{"type": "object", "properties": {"audio": {"type": "string"}}}
+										]
+									}
+								}
+							}
+						},
+						{
+							"name": "ping",
+							"parameters": {"type": "object"}
+						}
+					]
+				}
+			]
+		}
+	}`)
+
+	for _, modelName := range []string{"Gemini-3-Pro", "Gemini-3.1-Pro"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(proPayload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if ojson.GetBytes(finalPayload, "request.toolConfig.functionCallingConfig.mode").Exists() {
+				t.Fatalf("model %q: unexpected VALIDATED mode on Gemini model", modelName)
+			}
+			if ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Exists() {
+				t.Fatalf("model %q: maxOutputTokens should be removed for non-Claude model", modelName)
+			}
+			firstParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.0.parameters")
+			if got := len(firstParams.Get("properties.item.anyOf").Array()); got != 3 {
+				t.Fatalf("model %q: expected preserved 3-branch anyOf union, got %d (%s)", modelName, got, firstParams.Raw)
+			}
+			secondParams := ojson.GetBytes(finalPayload, "request.tools.0.functionDeclarations.1.parameters")
+			if !secondParams.Get("properties.reason").Exists() {
+				t.Fatalf("model %q: expected Antigravity placeholder property on empty object schema, got %s", modelName, secondParams.Raw)
+			}
+		})
+	}
+
+	t.Run("Gemini-3.1-Flash-Image", func(t *testing.T) {
+		doc := ojson.NewDoc([]byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`))
+		_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", "Gemini-3.1-Flash-Image", doc, false, "", "https://example.com")
+		if errBuild != nil {
+			t.Fatalf("buildRequestDoc image model error: %v", errBuild)
+		}
+		if got := ojson.GetBytes(finalPayload, "requestType").String(); got != "image_gen" {
+			t.Fatalf("requestType = %q, want image_gen", got)
+		}
+		if got := ojson.GetBytes(finalPayload, "requestId").String(); !strings.HasPrefix(got, "image_gen/") {
+			t.Fatalf("requestId = %q, want image_gen/ prefix", got)
+		}
+		if ojson.GetBytes(finalPayload, "request.sessionId").Exists() {
+			t.Fatalf("image model request should not set request.sessionId: %s", string(finalPayload))
+		}
+	})
+}
+
+func TestAntigravityExecute_CaseInsensitiveGeminiRouteToStreamHelper(t *testing.T) {
+	t.Parallel()
+
+	for _, modelName := range []string{"Gemini-3-Pro", "Gemini-3.1-Flash-Image"} {
+		t.Run(modelName, func(t *testing.T) {
+			var capturedPath string
+			rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				capturedPath = req.URL.Path
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:       io.NopCloser(strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n")),
+				}, nil
+			})
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+			executor := &AntigravityExecutor{cfg: &config.Config{}}
+			auth := &cliproxyauth.Auth{
+				ID: "auth-case-route",
+				Metadata: map[string]any{
+					"access_token": "token",
+					"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+					"project_id":   "project-1",
+				},
+			}
+			req := cliproxyexecutor.Request{
+				Model:   modelName,
+				Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:   sdktranslator.FormatGemini,
+				ResponseFormat: sdktranslator.FormatGemini,
+			}
+
+			_, errExec := executor.Execute(ctx, auth, req, opts)
+			if errExec != nil {
+				t.Fatalf("Execute(%q) error: %v", modelName, errExec)
+			}
+			if !strings.Contains(capturedPath, "streamGenerateContent") {
+				t.Fatalf("Execute(%q) hit path %q, want streamGenerateContent via executeClaudeNonStream", modelName, capturedPath)
+			}
+		})
 	}
 }

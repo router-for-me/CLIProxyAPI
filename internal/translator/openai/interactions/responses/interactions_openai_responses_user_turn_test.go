@@ -86,7 +86,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_RefusesAnyEmptiedUserTurn(t
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := convertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", tc.input, false)
+			body, err := ConvertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", tc.input, false)
 			var unsupported *translatorcommon.UnsupportedPartError
 			if !errors.As(err, &unsupported) || unsupported.Type != tc.wantType || unsupported.StatusCode() != 400 {
 				t.Fatalf("err = %v, want unsupported content part: %s; body = %s", err, tc.wantType, body)
@@ -111,7 +111,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_KeepsTurnWithTextBesideAtta
 	for name, attachment := range map[string]string{"file id": interactionsTurnFileID, "audio without bytes": interactionsTurnNoAudio} {
 		t.Run(name, func(t *testing.T) {
 			input := interactionsTurnPayload("", interactionsTurnHello, interactionsTurnAssistant, interactionsUserTurn("user", interactionsTurnText, attachment))
-			body, err := convertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false)
+			body, err := ConvertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false)
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
@@ -143,7 +143,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_MapsBytesAndUrls(t *testing
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			input := interactionsTurnPayload("", interactionsTurnHello, interactionsTurnAssistant, interactionsUserTurn("user", tc.part))
-			body, err := convertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false)
+			body, err := ConvertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false)
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
@@ -159,7 +159,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_MapsBytesAndUrls(t *testing
 
 func TestConvertOpenAIResponsesRequestToInteractions_BareFileItemStaysADocument(t *testing.T) {
 	input := interactionsTurnPayload("", interactionsTurnHello, interactionsTurnAssistant, interactionsTurnFileData)
-	body, err := convertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false)
+	body, err := ConvertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -171,7 +171,7 @@ func TestConvertOpenAIResponsesRequestToInteractions_BareFileItemStaysADocument(
 
 func TestConvertOpenAIResponsesRequestToInteractions_DeveloperAttachmentIsNotAUserTurn(t *testing.T) {
 	input := interactionsTurnPayload("", interactionsUserTurn("developer", interactionsTurnFileID), interactionsTurnNext)
-	if _, err := convertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false); err != nil {
+	if _, err := ConvertOpenAIResponsesRequestToInteractions("gemini-3.5-flash", input, false); err != nil {
 		t.Fatalf("err = %v, want no refusal for a developer message", err)
 	}
 }

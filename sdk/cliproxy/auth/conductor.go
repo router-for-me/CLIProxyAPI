@@ -199,7 +199,7 @@ type Manager struct {
 	executorRevisions         map[string]uint64
 	selector                  Selector
 	routingQuota              atomic.Pointer[SoonestResetSelector]
-	hook                      Hook
+	hook                      *hookChain
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
@@ -292,7 +292,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		executors:             make(map[string]ProviderExecutor),
 		executorRevisions:     make(map[string]uint64),
 		selector:              selector,
-		hook:                  hook,
+		hook:                  &hookChain{primary: hook},
 		auths:                 make(map[string]*Auth),
 		authEpochs:            make(map[string]uint64),
 		homeRuntimeAuths:      make(map[string]map[string]*Auth),

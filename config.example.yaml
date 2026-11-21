@@ -22,6 +22,11 @@ models:
 
 # Listener, TLS, network discovery, and server operation.
 server:
+  # Deployment UUID. Leave empty to generate and save one on the first valid startup.
+  # The value is normalized to lowercase; a read-only file uses a generated ID for
+  # this process only. Reuse the persisted value across restarts and shared storage.
+  server-id: ""
+
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
   # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
   host: ""
@@ -1080,7 +1085,7 @@ oauth:
 
   # Global OAuth model name aliases (per channel)
   # These aliases rename model IDs for both model listing and request routing.
-  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
   # NOTE: These aliases do not apply to any of the upstream groups under api-keys.
   # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
   # client-visible names can become ambiguous across providers. For strict backend pinning, use
@@ -1130,6 +1135,9 @@ oauth:
   #   meta:
   #     - name: "muse-spark-1.3"
   #       alias: "muse-latest"
+  #   copilot:
+  #     - name: "copilot/claude-sonnet-5" # use the listed Copilot model ID, before any auth prefix
+  #       alias: "copilot-sonnet"
   #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
   #     - name: "sample-model-latest"
   #       alias: "sample-latest"
@@ -1167,6 +1175,8 @@ oauth:
   #     - "grok-3-mini"
   #   meta:
   #     - "muse-spark-1.1"
+  #   copilot:
+  #     - "copilot/claude-haiku-*" # match Copilot model IDs before aliases and auth prefixes
 
   # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
   # request-scoped-errors:
@@ -1214,6 +1224,11 @@ oauth:
   #       match:
   #         - "context_length_exceeded"
   #       action: "stop"
+  #   copilot:
+  #     - status: 400
+  #       match:
+  #         - "context_length_exceeded"
+  #       action: "stop"
 
   # Provider options below apply to OAuth/file-backed credentials.
   # API-key credentials use their own group/key options.
@@ -1232,6 +1247,8 @@ oauth:
     codex:
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+      # On Solaris and illumos, leave this disabled: in-process media relay is unsupported.
+      # Enabling it returns HTTP 503 for call setup; direct SDP forwarding and sideband work when disabled.
       live-media-relay:
         enabled: false
         # Maximum concurrent media sessions. Zero uses the default of 32.
@@ -1283,7 +1300,7 @@ oauth:
       # connection-pool:              # optional: upstream HTTP connection pool settings
       #   enabled: false             # whether to enable connection pooling (default: false)
       #   idle-conn-timeout: "30s"    # idle keep-alive timeout (default: 30s, capped at 210s)
-      #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2)
+      #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2; <= 0 disables idle pooling)
       # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
                                     # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
       # Use credits as a last resort after free-tier Claude quota is exhausted.
