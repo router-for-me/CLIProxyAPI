@@ -52,7 +52,9 @@ const tone = (remaining: number | null) =>
         ? styles.toneMedium
         : styles.toneLow;
 
-const percent = (value: number | null) => (value === null ? '--' : `${Math.round(value)}%`);
+// 0% is reserved for an exhausted window; a sliver left reads `<1%`.
+const percent = (value: number | null) =>
+  value === null ? '--' : value > 0 && value < 0.5 ? '<1%' : `${Math.round(value)}%`;
 
 /** `in 1 day · 09/13, 13:00`, relative first like the rest of the ledger. */
 function ResetLine({

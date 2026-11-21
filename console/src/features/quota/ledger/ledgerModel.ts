@@ -42,7 +42,7 @@ export interface LedgerRow {
   renewsAt: string | number | null;
   /** Codex manual resets: how many are banked and when each expires, soonest first. */
   resetCredits: { available: number; expiresAt: string[] } | null;
-  /** A window is at 0%, so routing skips the account until it resets. */
+  /** At least one shown window is at 0%. */
   exhausted: boolean;
   nextUp: boolean;
 }
@@ -171,6 +171,7 @@ export function buildLedgerRows(
   });
 
   // Any exhausted window (shared weekly, 5-hour) keeps routing off the account.
+  // An unknown first window (the shared weekly for Claude) also withholds the mark.
   const next = rows.find(
     (row) =>
       !row.entry.file.disabled &&
