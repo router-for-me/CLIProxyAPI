@@ -21,10 +21,14 @@ import (
 )
 
 type loadedPlugin struct {
-	id               string
-	path             string
-	version          string
-	name             string
+	id      string
+	path    string
+	version string
+	name    string
+	// abiMode records the plugin ABI that was in effect when the plugin was
+	// loaded, so a later plugins.abi change can be reported instead of
+	// silently leaving the already-loaded plugin on the previous loader.
+	abiMode          string
 	configYAML       []byte
 	plugin           pluginapi.Plugin
 	registered       bool
@@ -286,12 +290,23 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		if !item.Enabled {
 			continue
 		}
+		// Read the configured ABI before taking the lock: pluginABIMode()
+		// acquires h.mu itself.
+		currentABIMode := h.pluginABIMode()
 		h.mu.Lock()
 		lp := h.loaded[file.ID]
 		var replaced *loadedPlugin
 		if lp != nil && cleanPluginPath(lp.path) != cleanPluginPath(file.Path) {
 			replaced = lp
 			lp = nil
+		}
+		if lp != nil {
+			// The loader is selected when a plugin is opened, so switching
+			// plugins.abi does not move an already-loaded plugin to another
+			// loader. Report it instead of letting the change look applied.
+			if pluginABIModeChanged(lp.abiMode, currentABIMode) {
+				log.Warnf("pluginhost: plugins.abi changed from %q to %q while plugin %s was loaded; restart the host to apply the new ABI to it", lp.abiMode, currentABIMode, file.ID)
+			}
 		}
 		_, disabled := h.fused[file.ID]
 		h.mu.Unlock()
@@ -474,6 +489,32 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 	}
 }
 
+// pluginABIModeChanged reports whether the configured plugins.abi differs
+// from the ABI that was in effect when a plugin was loaded.
+//
+// The comparison ignores case because the loader selection does too: a
+// configuration of "GO" selects the same loader as "go", so it must not be
+// reported as an ABI change.
+func pluginABIModeChanged(loadedMode, currentMode string) bool {
+	return !strings.EqualFold(currentMode, loadedMode)
+}
+
+// pluginABIMode returns the configured plugin loading mechanism. The empty
+// string means the default C ABI (c-shared) path; "go" selects Go-native
+// plugin loading. It is safe to call before a config has been applied.
+func (h *Host) pluginABIMode() string {
+	if h == nil {
+		return ""
+	}
+	h.mu.Lock()
+	cfg := h.runtimeConfig
+	h.mu.Unlock()
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Plugins.ABI)
+}
+
 func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
 	if h == nil || instance == nil {
 		return
@@ -533,6 +574,7 @@ func (h *Host) startPluginLoad(ctx context.Context, file pluginFile, item runtim
 			id:               file.ID,
 			path:             file.Path,
 			version:          file.Version,
+			abiMode:          h.pluginABIMode(),
 			client:           guardedClient,
 			callbackInstance: pluginCallbackInstance(guardedClient),
 		}

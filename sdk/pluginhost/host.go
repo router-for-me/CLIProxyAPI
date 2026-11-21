@@ -26,8 +26,12 @@ type OAuthModelAlias struct {
 
 // RuntimeConfig is the public plugin host configuration used by embedders.
 type RuntimeConfig struct {
-	Enabled             bool
-	Dir                 string
+	Enabled bool
+	Dir     string
+	// ABI selects the plugin loading mechanism. An empty value keeps the
+	// default C ABI (c-shared) loader; "go" loads Go-native plugins built
+	// with -buildmode=plugin.
+	ABI                 string
 	AuthDir             string
 	ProxyURL            string
 	ForceModelPrefix    bool
@@ -261,6 +265,7 @@ func runtimeConfigToInternalConfig(cfg RuntimeConfig) *internalconfig.Config {
 		Plugins: internalconfig.PluginsConfig{
 			Enabled: cfg.Enabled,
 			Dir:     cfg.Dir,
+			ABI:     cfg.ABI,
 			Configs: pluginConfigsToInternal(cfg.Configs),
 		},
 	}

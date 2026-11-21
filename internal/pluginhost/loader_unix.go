@@ -173,7 +173,9 @@ type dynamicLibraryClient struct {
 }
 
 func defaultPluginLoader() pluginLoader {
-	return dynamicLibraryLoader{}
+	// abiSwitchLoader keeps the existing C ABI path as the default while
+	// allowing plugins.abi="go" to select the Go-native loader on musl.
+	return abiSwitchLoader{}
 }
 
 func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
