@@ -1,3 +1,13 @@
+# Bundled Antigravity guard plugin, installed into the plugins directory at startup.
+FROM golang:1.26-bookworm AS guard-plugin
+
+ARG GUARD_PLUGIN_REPO
+ARG GUARD_PLUGIN_REF
+
+COPY internal/bundledplugins/build-guard-plugin.sh /build-guard-plugin.sh
+
+RUN bash /build-guard-plugin.sh /out
+
 FROM golang:1.26-bookworm AS builder
 
 WORKDIR /app
@@ -23,6 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certi
 RUN mkdir /CLIProxyAPI
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+COPY --from=guard-plugin /out/ /CLIProxyAPI/bundled-plugins/${TARGETOS}/${TARGETARCH}/
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 

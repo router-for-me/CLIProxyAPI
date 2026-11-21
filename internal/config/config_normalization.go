@@ -34,6 +34,7 @@ func (cfg *Config) NormalizePluginsConfig() {
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
 	}
+	cfg.applyAntigravityGuardPluginDefault()
 }
 
 // NormalizeClaudeConfig applies default Claude provider configuration values.
@@ -245,6 +246,9 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 	out := make(map[string][]RequestScopedErrorRule, len(cfg.OAuthRequestScopedErrors))
 	for rawChannel, rules := range cfg.OAuthRequestScopedErrors {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if keepAntigravityGuardOptOut(out, channel, rules) {
+			continue
+		}
 		if channel == "" || len(rules) == 0 {
 			continue
 		}

@@ -253,6 +253,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {
 		return
 	}
 
+	installBundledPlugins(rc.Dir)
 	desiredVersions := desiredPluginVersions(rc.Items)
 	files, errSelect := selectPluginFiles(rc.Dir, desiredVersions)
 	if errSelect != nil {

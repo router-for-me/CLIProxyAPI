@@ -17,8 +17,8 @@ plugins: {}
 		t.Fatalf("ParseConfigBytes() error = %v", errParse)
 	}
 
-	if cfg.Plugins.Enabled {
-		t.Fatal("Plugins.Enabled = true, want false")
+	if !cfg.Plugins.Enabled {
+		t.Fatal("Plugins.Enabled = false, want true (antigravity guard default)")
 	}
 	if cfg.Plugins.Dir != "plugins" {
 		t.Fatalf("Plugins.Dir = %q, want plugins", cfg.Plugins.Dir)
@@ -26,8 +26,8 @@ plugins: {}
 	if cfg.Plugins.Configs == nil {
 		t.Fatal("Plugins.Configs = nil, want empty map")
 	}
-	if len(cfg.Plugins.Configs) != 0 {
-		t.Fatalf("len(Plugins.Configs) = %d, want 0", len(cfg.Plugins.Configs))
+	if _, ok := cfg.Plugins.Configs[AntigravityGuardPluginID]; len(cfg.Plugins.Configs) != 1 || !ok {
+		t.Fatalf("Plugins.Configs = %#v, want only the bundled antigravity guard plugin", cfg.Plugins.Configs)
 	}
 }
 

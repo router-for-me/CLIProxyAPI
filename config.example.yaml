@@ -1378,7 +1378,8 @@ observability:
     enable: false
     addr: "127.0.0.1:8316"
 
-# Standard dynamic library plugins are trusted in-process code. They are disabled by default.
+# Standard dynamic library plugins are trusted in-process code. Plugin loading is enabled by default so the
+# bundled antigravity-coding-filter guard loads; set enabled: false to load no plugins.
 # Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
 # Other languages can implement the same C ABI and JSON method protocol.
 # Plugin executors require a matching auth record with the same provider key.
@@ -1388,7 +1389,7 @@ observability:
 # Plugin list Management API reads Logo and ConfigFields from plugin metadata for management UI display.
 # Per-plugin enabled only controls plugins.configs.<pluginID>.enabled and does not implicitly change global plugins.enabled.
 plugins:
-  enabled: false
+  enabled: true
   dir: "plugins"
   # Additional plugin store registries. The built-in official registry is always included.
   # store-sources:
