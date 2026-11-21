@@ -320,7 +320,30 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return
 			}
 		}
-		for chunk := range remaining {
+		for {
+			var (
+				chunk cliproxyexecutor.StreamChunk
+				open  bool
+			)
+			if ctx != nil {
+				// Prefer a chunk that is already available so an upstream error delivered
+				// together with cancellation can still record its RetryAfter cooldown.
+				select {
+				case chunk, open = <-remaining:
+				default:
+					select {
+					case <-ctx.Done():
+						discardStreamChunks(remaining)
+						return
+					case chunk, open = <-remaining:
+					}
+				}
+			} else {
+				chunk, open = <-remaining
+			}
+			if !open {
+				break
+			}
 			if ok := emit(chunk); !ok {
 				discardStreamChunks(remaining)
 				return
