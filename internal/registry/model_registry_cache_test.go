@@ -1,6 +1,9 @@
 package registry
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestGetAvailableModelsReturnsClonedSnapshots(t *testing.T) {
 	r := newTestModelRegistry()
@@ -19,6 +22,28 @@ func TestGetAvailableModelsReturnsClonedSnapshots(t *testing.T) {
 	}
 	if got := second[0]["display_name"]; got != "Model One" {
 		t.Fatalf("expected cached snapshot to stay isolated, got display_name %v", got)
+	}
+}
+
+func TestGetAvailableModelsOpenAIIncludesModalities(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{
+		ID:                        "gpt-vision",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"text"},
+	}})
+
+	models := r.GetAvailableModels("openai")
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	if got := models[0]["input_modalities"]; got == nil {
+		t.Fatalf("input_modalities missing: %#v", models[0])
+	} else if want := []string{"text", "image"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("input_modalities = %#v, want %#v", got, want)
+	}
+	if got := models[0]["output_modalities"]; got == nil {
+		t.Fatalf("output_modalities missing: %#v", models[0])
 	}
 }
 
