@@ -259,7 +259,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		}
 		events, errBridge := prepared.applyPatch.Transform(eventData)
 		if errBridge != nil {
-			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(prepared.to, eventData)}
 			return metaCompletedTranslation{}, errBridge
 		}
 		for _, eventData := range events {
@@ -273,7 +273,7 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 				var param any
 				out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 				if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-					return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+					return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: true}
 				}
 				return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
 			}
@@ -288,13 +288,13 @@ func (e *MetaExecutor) translateMetaCompleted(ctx context.Context, req cliproxye
 		var errBridge error
 		completedData, errBridge = prepared.applyPatch.Bridge.TransformNonStream(completedData)
 		if errBridge != nil {
-			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			errBridge = statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: true}
 			return metaCompletedTranslation{}, errBridge
 		}
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, completedData, &param)
 		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-			return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return metaCompletedTranslation{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: true}
 		}
 		return metaCompletedTranslation{payload: out, sourceEvent: completedData}, nil
 	}
@@ -475,7 +475,7 @@ func isMetaSubscriptionUsageEvent(eventType string, eventData []byte) bool {
 }
 
 func wrapMetaUpstreamError(statusCode int, body []byte) error {
-	se := statusErr{code: statusCode, msg: string(body)}
+	se := statusErr{code: statusCode, msg: string(body), providerErrorPayload: helps.IsProviderErrorPayload(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter := parseMetaRetryAfter(statusCode, body, time.Now()); retryAfter != nil {
 			se.retryAfter = retryAfter

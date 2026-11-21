@@ -346,6 +346,7 @@ func (e *DevinExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	out := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, targetFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), req.Payload, interactionsJSON, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
 		patchErr := devinApplyPatchStatusError(patchDiagnostics.Render(param, ""))
+		patchErr.submissionOutcomeKnown = true
 		if respLog != nil && respLog.Usage != nil {
 			publishDevinUsageFailure(ctx, reporter, respLog.Usage, patchErr)
 		}
@@ -2990,13 +2991,15 @@ func (e devinTransientStreamError) Unwrap() error {
 
 func newDevinTransientStreamError(msg string, cause error) devinTransientStreamError {
 	return devinTransientStreamError{
-		statusErr: statusErr{code: http.StatusBadGateway, msg: msg},
+		statusErr: statusErr{code: http.StatusBadGateway, msg: msg, transientTransport: true},
 		cause:     cause,
 	}
 }
 
 func newDevinEmptyCompletionError() devinTransientStreamError {
-	return newDevinTransientStreamError("devin upstream returned an empty completion (0 output tokens)", nil)
+	err := newDevinTransientStreamError("devin upstream returned an empty completion (0 output tokens)", nil)
+	err.submissionOutcomeKnown = true // Only constructed after a clean EOS trailer with zero output.
+	return err
 }
 
 // devinTruncatedStreamError marks a mid-generation Devin stream drop after
@@ -3093,7 +3096,7 @@ func newDevinStatusError(code int, headers http.Header, body []byte) statusErr {
 // (non-trailer) upstream failure. Daily/weekly quota exhaustion becomes
 // credential-scoped and, when auth is known, retries at the observed reset.
 func newDevinStatusErrorForAuth(code int, headers http.Header, body []byte, auth *cliproxyauth.Auth) statusErr {
-	err := statusErr{code: code, msg: string(body)}
+	err := statusErr{code: code, msg: string(body), providerErrorPayload: helps.IsProviderErrorPayload(body)}
 	if code == http.StatusTooManyRequests && headers != nil {
 		if raw := strings.TrimSpace(headers.Get("Retry-After")); raw != "" {
 			if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil && seconds >= 0 {

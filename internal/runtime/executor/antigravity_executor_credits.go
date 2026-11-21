@@ -403,7 +403,7 @@ func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
 }
 
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
-	err := statusErr{code: statusCode, msg: string(body)}
+	err := statusErr{code: statusCode, msg: string(body), providerErrorPayload: helps.IsProviderErrorPayload(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter

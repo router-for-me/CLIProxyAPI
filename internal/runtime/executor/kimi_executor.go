@@ -232,7 +232,7 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), body, data, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, data)}
 	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
@@ -539,13 +539,13 @@ func (e *KimiExecutor) executeResponses(ctx context.Context, auth *cliproxyauth.
 	bridge := helps.NewApplyPatchResponsesState(opts.SourceFormat, originalRequest, originalRequest)
 	out, errTransform := bridge.Bridge.TransformNonStream(data)
 	if errTransform != nil || (len(out) == 0 && helps.ApplyPatchRequested(originalRequest)) {
-		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return resp, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(sdktranslator.FormatOpenAIResponse, data)}
 	}
 	if responseFormat != sdktranslator.FormatOpenAIResponse {
 		var param any
 		out = sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatOpenAIResponse, responseFormat, req.Model, originalRequest, body, out, &param)
 		if helps.ApplyPatchTranslationError(param) != nil || len(out) == 0 {
-			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+			return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(sdktranslator.FormatOpenAIResponse, data)}
 		}
 	}
 	if usage, ok := helps.ParseCodexUsage(data); ok && (usage.TotalTokens > 0 || usage.InputTokens > 0) {

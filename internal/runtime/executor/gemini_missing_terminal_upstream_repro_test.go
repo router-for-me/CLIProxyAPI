@@ -37,8 +37,8 @@ func TestGeminiMissingTerminalUpstreamRepro(t *testing.T) {
 		wantErrorText string
 	}{
 		{name: "normal_terminal", status: 200, body: complete, wantCalls: 1},
-		{name: "partial_then_missing_terminal", status: 200, body: partial, wantError: true, wantCalls: 1, wantErrorText: "before finishReason"},
-		{name: "empty_200_missing_terminal", status: 200, wantError: true, wantCalls: 1, wantErrorText: "before finishReason"},
+		{name: "partial_then_missing_terminal", status: 200, body: partial, wantError: true, wantCalls: 1, wantErrorText: "upstream_outcome_unknown"},
+		{name: "empty_200_missing_terminal", status: 200, wantError: true, wantCalls: 1, wantErrorText: "upstream_outcome_unknown"},
 		{name: "real_http_502_control", status: 502, body: `{"error":{"code":502,"message":"mock upstream rejection","status":"UNAVAILABLE"}}`, wantError: true, wantCalls: 2, wantCooled: 2, wantErrorText: "mock upstream rejection"},
 	}
 	for _, tc := range cases {
@@ -107,6 +107,9 @@ func TestGeminiMissingTerminalUpstreamRepro(t *testing.T) {
 			}
 			if tc.wantErrorText != "" && (observedError == nil || !strings.Contains(observedError.Error(), tc.wantErrorText)) {
 				t.Errorf("error=%v, want text %q", observedError, tc.wantErrorText)
+			}
+			if tc.status == http.StatusOK && tc.wantError {
+				assertSubmissionUnknown(t, observedError)
 			}
 			if calls.Load() != tc.wantCalls {
 				t.Errorf("generation POSTs=%d, want %d", calls.Load(), tc.wantCalls)

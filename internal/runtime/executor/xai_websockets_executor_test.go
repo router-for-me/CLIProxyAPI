@@ -22,6 +22,7 @@ import (
 	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -2713,7 +2714,7 @@ func TestApplyXAIWebsocketHeaders_UserAgent(t *testing.T) {
 	})
 }
 
-func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *testing.T) {
+func TestXAIWebsocketWriteFailureRecordedWithoutReconnectWhenRequestLogDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	var dials atomic.Int32
@@ -2723,7 +2724,11 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 			if errUpgrade != nil {
 				return
 			}
-			defer func() { _ = conn.Close() }()
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Logf("close synthetic websocket: %v", errClose)
+				}
+			}()
 			for {
 				if _, _, errRead := conn.ReadMessage(); errRead != nil {
 					return
@@ -2772,8 +2777,8 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 			},
 		},
 	)
-	if errExec == nil {
-		t.Fatal("expected ExecuteStream reconnect rejection to fail")
+	if !httptransport.IsOutcomeUnknown(errExec) {
+		t.Fatal("expected terminal unknown outcome after failed generation write")
 	}
 
 	value, exists := ginCtx.Get(logging.DeferredAPIResponseContextKey)
@@ -2788,17 +2793,24 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 	for _, want := range []string{
 		"=== API RESPONSE 1 ===",
 		"Status: 101",
-		"=== API RESPONSE 2 ===",
-		"Status: 429",
-		"Retry-After: 9",
-		`{"error":{"message":"xai websocket reconnect rate limited"}}`,
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
 		}
 	}
 
-	t.Run("reconnect transport failure without HTTP response", func(t *testing.T) {
+	if strings.Contains(rendered, "Error:") || strings.Contains(rendered, "=== API RESPONSE 2 ===") {
+		t.Fatalf("local error fabricated an upstream response: %s", rendered)
+	}
+	diagnostics := value.(*logging.DeferredAPICapture).ResponseDiagnostics()
+	if len(diagnostics) != 1 || !strings.Contains(diagnostics[0].Error.Error(), "send:") || !strings.Contains(diagnostics[0].Error.Error(), "upstream_outcome_unknown") {
+		t.Fatalf("missing local send diagnostic: %v", diagnostics)
+	}
+	if dials.Load() != 1 || writes.Load() != 1 {
+		t.Fatalf("ambiguous write retried: dials=%d writes=%d", dials.Load(), writes.Load())
+	}
+
+	t.Run("write failure prevents transport reconnect", func(t *testing.T) {
 		var transportDials atomic.Int32
 		var transportServer *httptest.Server
 		transportServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2807,7 +2819,11 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 				if errUpgrade != nil {
 					return
 				}
-				defer func() { _ = conn.Close() }()
+				defer func() {
+					if errClose := conn.Close(); errClose != nil {
+						t.Logf("close synthetic websocket: %v", errClose)
+					}
+				}()
 				for {
 					if _, _, errRead := conn.ReadMessage(); errRead != nil {
 						return
@@ -2857,8 +2873,8 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 				},
 			},
 		)
-		if errSub == nil {
-			t.Fatal("expected transport reconnect failure")
+		if !httptransport.IsOutcomeUnknown(errSub) {
+			t.Fatal("expected terminal unknown outcome after transport write failure")
 		}
 		subVal, ok := subGinCtx.Get(logging.DeferredAPIResponseContextKey)
 		if !ok {
@@ -2867,10 +2883,21 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 		subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
 		for _, want := range []string{
 			"=== API RESPONSE 1 ===",
+			"Status: 101",
 		} {
 			if !strings.Contains(subRendered, want) {
 				t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
 			}
+		}
+		if strings.Contains(subRendered, "Error:") || strings.Contains(subRendered, "=== API RESPONSE 2 ===") {
+			t.Fatalf("transport error fabricated an upstream response: %s", subRendered)
+		}
+		subDiagnostics := subVal.(*logging.DeferredAPICapture).ResponseDiagnostics()
+		if len(subDiagnostics) != 1 || !strings.Contains(subDiagnostics[0].Error.Error(), "send:") || !strings.Contains(subDiagnostics[0].Error.Error(), "upstream_outcome_unknown") {
+			t.Fatalf("missing local transport send diagnostic: %v", subDiagnostics)
+		}
+		if transportDials.Load() != 1 || transportWrites.Load() != 1 {
+			t.Fatalf("ambiguous transport write retried: dials=%d writes=%d", transportDials.Load(), transportWrites.Load())
 		}
 	})
 

@@ -1,4 +1,5 @@
-// Package httptransport exposes an additive, request-scoped observation seam.
+// Package httptransport preserves selected transports while observing requests
+// and preventing replay after ambiguous provider submission.
 // A decorator wraps the transport already selected by the executor: it must not
 // replace provider fingerprints, proxy routing, pools, or HTTP protocol policy.
 package httptransport
@@ -50,9 +51,8 @@ func InheritDecorator(ctx, fallback context.Context) context.Context {
 	return ctx
 }
 
-// Decorate applies a context decorator AFTER transport selection. With no
-// decorator, the exact original client is returned. Only the client value is
-// copied; the original selected transport/pool and all client policy survive.
+// Decorate observes all HTTP traffic, including credential and auxiliary calls.
+// GenerationTransport guards submission only at the generation send boundary.
 func Decorate(ctx context.Context, client *http.Client) *http.Client {
 	if ctx == nil || client == nil {
 		return client
@@ -69,6 +69,7 @@ func Decorate(ctx context.Context, client *http.Client) *http.Client {
 	if wrapped == nil {
 		return client
 	}
+
 	clone := *client
 	clone.Transport = wrapped
 	return &clone

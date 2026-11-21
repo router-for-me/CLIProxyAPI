@@ -18,6 +18,7 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -588,7 +589,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					}
 					return emitDuplexError(status, errType, "", "", errPrepare.Error(), eventID)
 				}
-				fail(errPrepare)
+				fail(httptransport.BeforeSubmission(errPrepare))
 				return false
 			}
 			if errConn := prepared.sessionInstructions.OnConnection(conn); errConn != nil {
@@ -619,7 +620,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 				URL: initial.wsURL, Method: "WEBSOCKET", Body: prepared.sessionInstructions.LogBody(payload), Provider: e.Identifier(), AuthID: auth.ID,
 			})
-			if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+			if errWrite := writeCodexWebsocketMessage(streamCtx, sess, conn, payload); errWrite != nil {
 				fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 				return false
 			}
@@ -764,7 +765,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 					})
-					if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+					if errWrite := writeCodexWebsocketMessage(streamCtx, sess, conn, payload); errWrite != nil {
 						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 						return
 					}

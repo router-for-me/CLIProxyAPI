@@ -21,11 +21,22 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 )
+
+type generationHTTPKey struct{}
+
+// The invocation role reaches RPC callbacks; refresh and catalog calls omit it.
+func withGenerationHTTP(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, generationHTTPKey{}, true)
+}
 
 type hostHTTPClient struct {
 	host            *Host
@@ -167,6 +178,11 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		client = &http.Client{}
 	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	if generation, _ := ctx.Value(generationHTTPKey{}).(bool); generation && !req.Auxiliary {
+		generationClient := *client
+		generationClient.Transport = httptransport.GenerationTransport(ctx, client.Transport)
+		client = &generationClient
+	}
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
 		if cleanup != nil {

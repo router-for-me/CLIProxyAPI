@@ -152,11 +152,11 @@ func TestIssue7600CodexWebsocketOverloadExplicit503HonorsRetryAfter(t *testing.T
 }
 
 func TestIssue7600CodexBootstrapOverloadPreservesRetryAfter(t *testing.T) {
-	_, terminalBody, ok := codexTerminalFailureErrWithCooling([]byte(issue7600CapturedOverload326), false)
+	streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling([]byte(issue7600CapturedOverload326), false)
 	if !ok {
 		t.Fatal("codexTerminalFailureErrWithCooling returned ok=false, want true")
 	}
-	bootstrapErr := newCodexBootstrapOverloadErr(terminalBody)
+	bootstrapErr := newCodexBootstrapOverloadErr(terminalBody, streamErr)
 	if got := bootstrapErr.StatusCode(); got != http.StatusServiceUnavailable {
 		t.Fatalf("StatusCode() = %d, want 503", got)
 	}
@@ -170,7 +170,7 @@ func TestIssue7600CodexBootstrapOverloadPreservesRetryAfter(t *testing.T) {
 		}
 		assertIssue7600RetryAfter(t, streamErr, 326*time.Second)
 
-		overloadErr := newCodexBootstrapOverloadErrWithRetryAfter(body, streamErr.RetryAfter())
+		overloadErr := newCodexBootstrapOverloadErrWithRetryAfter(body, streamErr)
 		if got := overloadErr.StatusCode(); got != http.StatusServiceUnavailable {
 			t.Fatalf("StatusCode() = %d, want 503", got)
 		}
@@ -212,7 +212,7 @@ func TestIssue7600CodexBootstrapOverloadPreservesRetryAfter(t *testing.T) {
 					t.Fatalf("streamErr.RetryAfter() = %v, want nil", *got)
 				}
 
-				overloadErr := newCodexBootstrapOverloadErrWithRetryAfter(body, streamErr.RetryAfter())
+				overloadErr := newCodexBootstrapOverloadErrWithRetryAfter(body, streamErr)
 				if got := overloadErr.StatusCode(); got != http.StatusServiceUnavailable {
 					t.Fatalf("StatusCode() = %d, want 503", got)
 				}

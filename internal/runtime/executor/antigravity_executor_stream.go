@@ -278,7 +278,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(true, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
 			translatedClaudeErr = nil
-			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason), finishReason)
 			stopDeliverySupport()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
@@ -451,7 +451,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 		}
 		if pendingFilterMsg != "" && scanner.Err() == nil && !terminalDelivered {
-			streamErr = statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+			streamErr = statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg, providerErrorPayload: true}
 			stopDeliverySupport()
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			select {

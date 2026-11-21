@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -21,7 +22,7 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-func TestIssue7536_SignatureOnlyZeroOutputNoFinishReasonRotatesAndExhaustsTo502(t *testing.T) {
+func TestIssue7536_SignatureOnlyZeroOutputNoFinishReasonDoesNotReplay(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	zeroOutputSSE := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"opaque-sig-7536","text":""}]}}],"usageMetadata":{"promptTokenCount":378515,"cachedContentTokenCount":376466,"totalTokenCount":378515},"modelVersion":"gemini-4-hydrogen","responseId":"resp-7536"},"traceId":"trace-7536","metadata":{}}` + "\n\n"
@@ -45,7 +46,7 @@ func TestIssue7536_SignatureOnlyZeroOutputNoFinishReasonRotatesAndExhaustsTo502(
 	model := "gemini-4-hydrogen-7536"
 	cfg := &config.Config{}
 
-	// 1. Credential 1 returns signature-only zero-output EOF -> rotates to Credential 2 and returns 200 with real output.
+	// A signature-only EOF cannot prove that generation failed, even with another credential available.
 	manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
 	manager.RegisterExecutor(runtimeexecutor.NewAntigravityExecutor(cfg))
 
@@ -96,17 +97,19 @@ func TestIssue7536_SignatureOnlyZeroOutputNoFinishReasonRotatesAndExhaustsTo502(
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("failover status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	assertUnknown := func(response *httptest.ResponseRecorder) {
+		t.Helper()
+		body := response.Body.String()
+		if response.Code != http.StatusBadGateway || ojson.Get(body, "error.code").String() != "upstream_outcome_unknown" || ojson.Get(body, "error.retryable").Raw != "false" || response.Header().Get("x-should-retry") != "false" {
+			t.Fatalf("signature-only EOF lost the nonretryable unknown outcome: status=%d body=%s", response.Code, body)
+		}
 	}
-	if !strings.Contains(rec.Body.String(), "recovered on second credential") {
-		t.Fatalf("expected failover response from second credential, got: %s", rec.Body.String())
-	}
-	if badCalls.Load() != 1 || okCalls.Load() != 1 {
-		t.Fatalf("calls = (bad=%d, ok=%d), want (1, 1)", badCalls.Load(), okCalls.Load())
+	assertUnknown(rec)
+	if badCalls.Load() != 1 || okCalls.Load() != 0 {
+		t.Fatalf("calls = (bad=%d, ok=%d), want (1, 0)", badCalls.Load(), okCalls.Load())
 	}
 
-	// 2. When all credentials return signature-only zero-output EOF, return HTTP 502 (never HTTP 200 + finish_reason:"stop").
+	// Bootstrap retries must not replay the ambiguous request either.
 	exhaustedModel := model + "-exhausted"
 	exhaustedManager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
 	exhaustedManager.RegisterExecutor(runtimeexecutor.NewAntigravityExecutor(cfg))
@@ -142,13 +145,11 @@ func TestIssue7536_SignatureOnlyZeroOutputNoFinishReasonRotatesAndExhaustsTo502(
 	exRec := httptest.NewRecorder()
 	exhaustedRouter.ServeHTTP(exRec, exReq)
 
-	if exRec.Code != http.StatusBadGateway {
-		t.Fatalf("exhausted status = %d, want 502; body=%s", exRec.Code, exRec.Body.String())
-	}
+	assertUnknown(exRec)
 	if strings.Contains(exRec.Body.String(), `"finish_reason":"stop"`) {
 		t.Fatalf("exhausted response must not emit finish_reason:stop: %s", exRec.Body.String())
 	}
-	if got := badCalls.Load() - beforeCalls; got < 2 {
-		t.Fatalf("expected credential rotation & bootstrap retry (>=2 calls), got %d", got)
+	if got := badCalls.Load() - beforeCalls; got != 1 {
+		t.Fatalf("ambiguous submission replayed with bootstrap retries: calls=%d, want 1", got)
 	}
 }

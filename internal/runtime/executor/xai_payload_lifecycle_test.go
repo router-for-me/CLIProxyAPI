@@ -17,80 +17,118 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestXAIPayloadTransportRetryReusesFinalFrame(t *testing.T) {
-	captured := make(chan []byte, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upgrader := websocket.Upgrader{}
-		conn, errUpgrade := upgrader.Upgrade(w, r, nil)
-		if errUpgrade != nil {
-			t.Error(errUpgrade)
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		_, body, errRead := conn.ReadMessage()
-		if errRead != nil {
-			return // The first connection intentionally fails before writing.
-		}
-		captured <- bytes.Clone(body)
-		if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r","output":[]}}`)); errWrite != nil {
-			t.Error(errWrite)
-		}
-	}))
-	defer server.Close()
-	var writes atomic.Int32
-	testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
-		if writes.Add(1) == 1 {
-			_ = conn.SetWriteDeadline(time.Now().Add(-time.Second))
-		}
-	}
-	defer func() { testWebsocketWritePayloadHook = nil }()
-	cfg := &config.Config{Payload: config.PayloadConfig{
-		Replace: []config.PayloadReplaceRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Target: config.PayloadReplaceTarget{Role: "user", All: true}, Replacements: []config.PayloadReplacement{{"hero": "hero!"}}}},
-		Filter:  []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: []string{"input.0"}}},
-	}}
-	exec := NewXAIWebsocketsExecutor(cfg)
-	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
-	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
-	defer exec.CloseExecutionSession(t.Name())
-	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
-	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.WithValue(t.Context(), "gin", ginCtx))
-	finalized := 0
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Metadata: map[string]any{
-		cliproxyexecutor.ExecutionSessionMetadataKey:                t.Name(),
-		cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey: func(string) { finalized++ },
-	}}
-	before := helps.PayloadConfigEvaluationCount()
-	result, errExecute := exec.ExecuteStream(ctx, &cliproxyauth.Auth{ID: t.Name(), Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}, cliproxyexecutor.Request{Model: "grok-4.3", Payload: []byte(`{"input":[{"role":"assistant","content":"drop"},{"role":"user","content":"hero"},{"role":"user","content":"last"}]}`)}, opts)
-	if errExecute != nil {
-		t.Fatal(errExecute)
-	}
-	for chunk := range result.Chunks {
-		if chunk.Err != nil {
-			t.Fatal(chunk.Err)
-		}
-	}
-	if writes.Load() != 2 || finalized != 1 || helps.PayloadConfigEvaluationCount()-before != 1 {
-		t.Fatalf("writes=%d finalizations=%d evaluations=%d, want 2/1/1", writes.Load(), finalized, helps.PayloadConfigEvaluationCount()-before)
-	}
-	body := <-captured
-	if ojson.GetBytes(body, "input.#").Int() != 2 || ojson.GetBytes(body, "input.0.content").String() != "hero!" {
-		t.Fatalf("payload repeated during retry: %s", body)
-	}
-	value, _ := ginCtx.Get(logging.DeferredAPIRequestContextKey)
-	requests, ok := value.([]logging.DeferredAPIRequest)
-	if !ok || len(requests) != 2 {
-		t.Fatalf("expected both send attempts in request log, got %T", value)
-	}
-	for _, request := range requests {
-		if !bytes.Contains(request(), body) {
-			t.Fatalf("attempt body differs from final frame: %s", request())
-		}
-	}
-	if got := getXAIWebsocketIDState(exec.idStore, t.Name()).snapshotTranscriptInput(); bytes.Contains(got, []byte("hero!")) || len(ojson.ParseBytes(got).Array()) != 3 {
-		t.Fatalf("history must contain unconfigured input, including filtered items: %s", got)
+	for _, tc := range []struct {
+		name       string
+		warmup     bool
+		failWrite  bool
+		wantWrites int32
+	}{
+		{name: "generation_write_failure", failWrite: true, wantWrites: 1},
+		{name: "auxiliary_warmup_retry", warmup: true, failWrite: true, wantWrites: 2},
+		{name: "successful_generation", wantWrites: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upgrader := websocket.Upgrader{}
+				conn, errUpgrade := upgrader.Upgrade(w, r, nil)
+				if errUpgrade != nil {
+					t.Error(errUpgrade)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				_, body, errRead := conn.ReadMessage()
+				if errRead != nil {
+					return // The injected write failure need not deliver a complete frame.
+				}
+				captured <- bytes.Clone(body)
+				if errWrite := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r","output":[]}}`)); errWrite != nil {
+					t.Error(errWrite)
+				}
+			}))
+			defer server.Close()
+			var writes atomic.Int32
+			testWebsocketWritePayloadHook = func(conn *websocket.Conn) {
+				if writes.Add(1) == 1 && tc.failWrite {
+					_ = conn.SetWriteDeadline(time.Now().Add(-time.Second))
+				}
+			}
+			defer func() { testWebsocketWritePayloadHook = nil }()
+			cfg := &config.Config{Payload: config.PayloadConfig{
+				Replace: []config.PayloadReplaceRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Target: config.PayloadReplaceTarget{Role: "user", All: true}, Replacements: []config.PayloadReplacement{{"hero": "hero!"}}}},
+				Filter:  []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: []string{"input.0"}}},
+			}}
+			exec := NewXAIWebsocketsExecutor(cfg)
+			exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
+			exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
+			defer exec.CloseExecutionSession(t.Name())
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx := cliproxyexecutor.WithDownstreamWebsocket(context.WithValue(t.Context(), "gin", ginCtx))
+			requestDoc := ojson.NewDoc([]byte(`{"input":[{"role":"assistant","content":"drop"},{"role":"user","content":"hero"},{"role":"user","content":"last"}]}`))
+			if tc.warmup {
+				// Only the non-generating control may disable submission tracking and retry a write failure.
+				_ = requestDoc.Set("generate", false)
+				ctx = httptransport.WithoutSubmissionTracking(ctx)
+			}
+			finalized := 0
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Metadata: map[string]any{
+				cliproxyexecutor.ExecutionSessionMetadataKey:                t.Name(),
+				cliproxyexecutor.FinalizedResponseFormatCallbackMetadataKey: func(string) { finalized++ },
+			}}
+			before := helps.PayloadConfigEvaluationCount()
+			result, errExecute := exec.ExecuteStream(ctx, &cliproxyauth.Auth{ID: t.Name(), Attributes: map[string]string{"base_url": server.URL, "api_key": "test"}}, cliproxyexecutor.Request{Model: "grok-4.3", Payload: requestDoc.Bytes()}, opts)
+			if tc.failWrite && !tc.warmup {
+				if !httptransport.IsOutcomeUnknown(errExecute) {
+					t.Fatalf("generation write failure = %v, want unknown outcome", errExecute)
+				}
+				if writes.Load() != 1 || finalized != 1 || helps.PayloadConfigEvaluationCount()-before != 1 {
+					t.Fatalf("writes=%d finalizations=%d evaluations=%d, want 1/1/1", writes.Load(), finalized, helps.PayloadConfigEvaluationCount()-before)
+				}
+				if got := getXAIWebsocketIDState(exec.idStore, t.Name()).snapshotTranscriptInput(); len(ojson.ParseBytes(got).Array()) != 0 {
+					t.Fatalf("failed generation committed history: %s", got)
+				}
+				return
+			}
+			if errExecute != nil {
+				t.Fatal(errExecute)
+			}
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+			}
+			if writes.Load() != tc.wantWrites || finalized != 1 || helps.PayloadConfigEvaluationCount()-before != 1 {
+				t.Fatalf("writes=%d finalizations=%d evaluations=%d, want %d/1/1", writes.Load(), finalized, helps.PayloadConfigEvaluationCount()-before, tc.wantWrites)
+			}
+			body := <-captured
+			if ojson.GetBytes(body, "input.#").Int() != 2 || ojson.GetBytes(body, "input.0.content").String() != "hero!" {
+				t.Fatalf("payload repeated during retry: %s", body)
+			}
+			value, _ := ginCtx.Get(logging.DeferredAPIRequestContextKey)
+			requests, ok := value.([]logging.DeferredAPIRequest)
+			if !ok || len(requests) != int(tc.wantWrites) {
+				t.Fatalf("expected all send attempts in request log, got %T", value)
+			}
+			for _, request := range requests {
+				if !bytes.Contains(request(), body) {
+					t.Fatalf("attempt body differs from final frame: %s", request())
+				}
+			}
+			got := getXAIWebsocketIDState(exec.idStore, t.Name()).snapshotTranscriptInput()
+			if tc.warmup {
+				if len(ojson.ParseBytes(got).Array()) != 0 {
+					t.Fatalf("warmup committed history: %s", got)
+				}
+			} else if bytes.Contains(got, []byte("hero!")) || len(ojson.ParseBytes(got).Array()) != 3 {
+				t.Fatalf("history must contain unconfigured input, including filtered items: %s", got)
+			}
+
+		})
 	}
 }
 

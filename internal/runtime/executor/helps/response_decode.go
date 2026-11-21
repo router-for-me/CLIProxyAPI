@@ -47,7 +47,14 @@ func (p *peekableBody) Close() error {
 
 // DecodeResponseBody decodes declared encodings in reverse order, or sniffs gzip/zstd without a header.
 // Closing the returned body also closes all decoders and the original body, including on setup errors.
-func DecodeResponseBody(body io.ReadCloser, header http.Header) (io.ReadCloser, error) {
+func DecodeResponseBody(body io.ReadCloser, header http.Header) (decoded io.ReadCloser, failed error) {
+	defer func() {
+		if failed != nil {
+			failed = responseDecodeError{failed}
+		} else if decoded != nil {
+			decoded = &decodedResponseBody{decoded}
+		}
+	}()
 	contentEncoding := strings.Join(header.Values("Content-Encoding"), ",")
 	if body == nil {
 		return nil, fmt.Errorf("response body is nil")
@@ -220,4 +227,21 @@ func (s *sniffedResponseBody) Close() error {
 		return errClose
 	}
 	return errDecoder
+}
+
+// A decoder failure leaves an accepted response incomplete, unlike a decoded
+// provider error payload whose refusal semantics remain available to the caller.
+type responseDecodeError struct{ error }
+
+func (responseDecodeError) IsResponseIncomplete() bool { return true }
+func (e responseDecodeError) Unwrap() error            { return e.error }
+
+type decodedResponseBody struct{ io.ReadCloser }
+
+func (b *decodedResponseBody) Read(p []byte) (int, error) {
+	n, errRead := b.ReadCloser.Read(p)
+	if errRead != nil && errRead != io.EOF {
+		errRead = responseDecodeError{errRead}
+	}
+	return n, errRead
 }

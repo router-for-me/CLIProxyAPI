@@ -161,9 +161,9 @@ func observeClaudeSSEEvent(rawEvent []byte, messageID *string, completed *bool, 
 	observeClaudeStreamJSONPayload(joined, true, messageID, completed)
 	if streamErr != nil && *streamErr == nil {
 		if util.ParseGJSONBytesNoCopy(joined).Get("type").String() == "error" {
-			*streamErr = statusErr{code: 502, msg: string(joined)}
+			*streamErr = statusErr{code: 502, msg: string(joined), providerErrorPayload: helps.IsProviderErrorPayload(joined)}
 		} else if refusalMsg, blocked := clienterror.ClaudePolicyRefusalMessage(joined); blocked {
-			*streamErr = statusErr{code: 400, msg: refusalMsg}
+			*streamErr = statusErr{code: 400, msg: refusalMsg, providerErrorPayload: true}
 		}
 	}
 }

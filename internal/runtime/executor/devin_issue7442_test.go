@@ -211,30 +211,34 @@ func TestIssue7442_DevinEmptyCompletionFailsOverWithoutCredentialCooldown(t *tes
 
 				ctx := context.Background()
 				var combinedOut strings.Builder
+				var observedErr error
 				if stream {
 					streamRes, errStream := manager.ExecuteStream(ctx, []string{"devin"}, req, opts)
-					if errStream != nil {
-						t.Fatalf("ExecuteStream failed: %v", errStream)
-					}
-					for chunk := range streamRes.Chunks {
-						if chunk.Err != nil {
-							t.Fatalf("unexpected chunk error after failover: %v", chunk.Err)
+					observedErr = errStream
+					if streamRes != nil {
+						for chunk := range streamRes.Chunks {
+							if chunk.Err != nil {
+								observedErr = chunk.Err
+							}
+							combinedOut.Write(chunk.Payload)
 						}
-						combinedOut.Write(chunk.Payload)
 					}
 				} else {
 					resp, errExec := manager.Execute(ctx, []string{"devin"}, req, opts)
-					if errExec != nil {
-						t.Fatalf("Execute failed: %v", errExec)
-					}
+					observedErr = errExec
 					combinedOut.Write(resp.Payload)
 				}
 
-				if badHits.Load() != 1 || goodHits.Load() != 1 {
-					t.Fatalf("upstream hits bad=%d good=%d, want 1 and 1", badHits.Load(), goodHits.Load())
+				ambiguous := tc.name == "premature_eof_before_any_output"
+				wantGood := int32(1)
+				if ambiguous {
+					wantGood = 0
+					assertSubmissionUnknown(t, observedErr)
+				} else if observedErr != nil || !strings.Contains(combinedOut.String(), "recovered-from-second-credential") {
+					t.Fatalf("known empty completion did not fail over: err=%v payload=%s", observedErr, combinedOut.String())
 				}
-				if !strings.Contains(combinedOut.String(), "recovered-from-second-credential") {
-					t.Fatalf("expected failover response text, got: %s", combinedOut.String())
+				if badHits.Load() != 1 || goodHits.Load() != wantGood {
+					t.Fatalf("upstream hits bad=%d good=%d, want 1 and %d", badHits.Load(), goodHits.Load(), wantGood)
 				}
 
 				gotBad, okBad := manager.GetByID(badAuth.ID)
@@ -250,7 +254,11 @@ func TestIssue7442_DevinEmptyCompletionFailsOverWithoutCredentialCooldown(t *tes
 				sawBadFailureRecord := false
 				deadline := time.NewTimer(2 * time.Second)
 				defer deadline.Stop()
-				for i := 0; i < 2; i++ {
+				recordCount := 2
+				if ambiguous {
+					recordCount = 1
+				}
+				for i := 0; i < recordCount; i++ {
 					select {
 					case rec := <-capture.records:
 						if rec.AuthID == badAuth.ID {
@@ -723,11 +731,11 @@ func TestIssue7442_DevinDeclaredApplyPatchPreservesEmptyCompletionAndQuotaErrors
 			),
 		},
 		{
-			name:      "premature_eof_rotates_instead_of_apply_patch_error",
+			name:      "premature_eof_has_unknown_outcome",
 			badFrames: nil,
 		},
 		{
-			name:      "stream_read_error_rotates_instead_of_apply_patch_error",
+			name:      "stream_read_error_has_unknown_outcome",
 			badFrames: []byte{0, 0},
 		},
 	} {
@@ -739,7 +747,7 @@ func TestIssue7442_DevinDeclaredApplyPatchPreservesEmptyCompletionAndQuotaErrors
 			t.Run(badCase.name+"/"+mode, func(t *testing.T) {
 				goodFrames := buildIssue7442DevinTextStream("patch-free-ok", 20, 4)
 
-				var badHits atomic.Int32
+				var badHits, goodHits atomic.Int32
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					_, _, _ = helps.ReadConnectFrame(r.Body)
 					w.Header().Set("Content-Type", "application/connect+proto")
@@ -748,6 +756,7 @@ func TestIssue7442_DevinDeclaredApplyPatchPreservesEmptyCompletionAndQuotaErrors
 						_, _ = w.Write(badCase.badFrames)
 						return
 					}
+					goodHits.Add(1)
 					_, _ = w.Write(goodFrames)
 				}))
 				defer server.Close()
@@ -790,26 +799,33 @@ func TestIssue7442_DevinDeclaredApplyPatchPreservesEmptyCompletionAndQuotaErrors
 				}
 
 				var out strings.Builder
+				var observedErr error
 				if stream {
 					res, errStream := manager.ExecuteStream(context.Background(), []string{"devin"}, req, opts)
-					if errStream != nil {
-						t.Fatalf("ExecuteStream failed: %v", errStream)
-					}
-					for chunk := range res.Chunks {
-						if chunk.Err != nil {
-							t.Fatalf("unexpected stream chunk error: %v", chunk.Err)
+					observedErr = errStream
+					if res != nil {
+						for chunk := range res.Chunks {
+							if chunk.Err != nil {
+								observedErr = chunk.Err
+							}
+							out.Write(chunk.Payload)
 						}
-						out.Write(chunk.Payload)
 					}
 				} else {
 					resp, errExec := manager.Execute(context.Background(), []string{"devin"}, req, opts)
-					if errExec != nil {
-						t.Fatalf("Execute failed: %v", errExec)
-					}
+					observedErr = errExec
 					out.Write(resp.Payload)
 				}
-				if badHits.Load() != 1 || !strings.Contains(out.String(), "patch-free-ok") {
-					t.Fatalf("badHits=%d payload=%s", badHits.Load(), out.String())
+				ambiguous := badCase.name != "empty_completion_rotates_instead_of_apply_patch_error"
+				wantGood := int32(1)
+				if ambiguous {
+					wantGood = 0
+					assertSubmissionUnknown(t, observedErr)
+				} else if observedErr != nil || !strings.Contains(out.String(), "patch-free-ok") {
+					t.Fatalf("known empty completion did not fail over: err=%v payload=%s", observedErr, out.String())
+				}
+				if badHits.Load() != 1 || goodHits.Load() != wantGood {
+					t.Fatalf("upstream hits bad=%d good=%d, want 1 and %d", badHits.Load(), goodHits.Load(), wantGood)
 				}
 				gotBad, _ := manager.GetByID(badAuth.ID)
 				if gotBad.Unavailable || !gotBad.NextRetryAfter.IsZero() {
@@ -948,7 +964,7 @@ func TestIssue7442_DevinDeclaredApplyPatchPreservesEmptyCompletionAndQuotaErrors
 			} else {
 				_, gotErr = manager.Execute(context.Background(), []string{"devin"}, req, opts)
 			}
-			assertTask6PatchError(t, gotErr)
+			assertSubmissionUnknown(t, gotErr)
 			var truncErr cliproxyexecutor.StreamTruncatedError
 			if !errors.As(gotErr, &truncErr) || !truncErr.IsStreamTruncated() {
 				t.Fatalf("gotErr = %T (%v), want IsStreamTruncated()==true", gotErr, gotErr)

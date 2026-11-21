@@ -189,15 +189,15 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, body.replayScope, wsResp.Status, wsResp.Body); errClear != nil {
 			logAntigravityReasoningReplayDegraded(body.replayScope, "invalidate", errClear)
 		}
-		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
+		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body), providerErrorPayload: wsResp.Status >= 400 && wsResp.Status < 600 && helps.IsProviderErrorPayload(wsResp.Body)}
 	}
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	reporter.ObserveResponseModel(wsResp.Body)
 	if body.action != "countTokens" {
-		if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, wsResp.Body, false); zeroOutput {
+		if finishReason, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, wsResp.Body, false); zeroOutput {
 			gemDetail := helps.ParseGeminiUsage(wsResp.Body)
 			helps.ApplyGeminiRequestImageConfig(&gemDetail, body.payload)
-			err = newGeminiZeroOutputStatusErr(zeroErrMsg)
+			err = newGeminiZeroOutputStatusErr(zeroErrMsg, finishReason)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailureWithDetail(ctx, gemDetail, err)
 			return cliproxyexecutor.Response{}, err
@@ -308,7 +308,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, body.replayScope, firstEvent.Status, errBody.Bytes()); errClear != nil {
 				logAntigravityReasoningReplayDegraded(body.replayScope, "invalidate", errClear)
 			}
-			return nil, statusErr{code: firstEvent.Status, msg: errBody.String()}
+			return nil, statusErr{code: firstEvent.Status, msg: errBody.String(), providerErrorPayload: firstEvent.Status >= 400 && firstEvent.Status < 600 && helps.IsProviderErrorPayload(errBody.Bytes())}
 		}
 		for event := range wsStream {
 			if event.Err != nil {
@@ -335,7 +335,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, body.replayScope, firstEvent.Status, errBody.Bytes()); errClear != nil {
 			logAntigravityReasoningReplayDegraded(body.replayScope, "invalidate", errClear)
 		}
-		return nil, statusErr{code: firstEvent.Status, msg: errBody.String()}
+		return nil, statusErr{code: firstEvent.Status, msg: errBody.String(), providerErrorPayload: firstEvent.Status >= 400 && firstEvent.Status < 600 && helps.IsProviderErrorPayload(errBody.Bytes())}
 	}
 	replayAccumulator := newAntigravityReasoningReplayAccumulator(body.replayScope, body.replayRequestPayload)
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
@@ -369,7 +369,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		var relayFrames helps.RelaySSEBuffer
 		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(false, responseFormat)
 		failZeroOutput := func(finishReason string) bool {
-			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason), finishReason)
 			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 			_ = helps.StopTranslatedClaudeStream(ctx, &streamErr, reporter, &streamUsage, out)
 			return false
@@ -534,7 +534,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 					if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, body.replayScope, event.Status, event.Payload); errClear != nil {
 						logAntigravityReasoningReplayDegraded(body.replayScope, "invalidate", errClear)
 					}
-					errResponse := statusErr{code: event.Status, msg: string(event.Payload)}
+					errResponse := statusErr{code: event.Status, msg: string(event.Payload), providerErrorPayload: event.Status >= 400 && event.Status < 600 && helps.IsProviderErrorPayload(event.Payload)}
 					helps.RecordAPIResponseError(ctx, e.cfg, errResponse)
 					reporter.PublishFailure(ctx, errResponse)
 					select {

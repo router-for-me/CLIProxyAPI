@@ -10,6 +10,7 @@ import (
 	"github.com/MoeForge/moego/regexp"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 )
 
 type requestScopedErrorConfigContextKey struct{}
@@ -374,6 +375,9 @@ func MatchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Co
 }
 
 func matchRequestScopedErrorAction(auth *Auth, err error, cfg *internalconfig.Config) (string, bool) {
+	if httptransport.IsOutcomeUnknown(err) {
+		return "", false
+	}
 	if err == nil || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) {
 		return "", false
 	}

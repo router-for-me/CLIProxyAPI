@@ -162,7 +162,9 @@ func codexTerminalStreamErrWithCooling(eventData []byte, modelLevelCooling bool)
 		return statusErr{}, nil, false
 	}
 	headers := parseCodexWebsocketErrorHeaders(eventData)
-	return newCodexStatusErrWithHeadersAndCooling(http.StatusBadRequest, headers, body, modelLevelCooling), body, true
+	err := newCodexStatusErrWithHeadersAndCooling(http.StatusBadRequest, headers, body, modelLevelCooling)
+	err.providerErrorPayload = helps.IsProviderErrorPayload(eventData)
+	return err, body, true
 }
 
 func codexTerminalFailureErr(eventData []byte) (statusErr, []byte, bool) {
@@ -178,7 +180,9 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 		return statusErr{}, nil, false
 	}
 	headers := parseCodexWebsocketErrorHeaders(eventData)
-	return newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling), body, true
+	err := newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling)
+	err.providerErrorPayload = helps.IsProviderErrorPayload(eventData)
+	return err, body, true
 }
 
 func codexTerminalFailureStatus(body []byte) int {
@@ -365,6 +369,7 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 }
 
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
+	providerErrorPayload := helps.IsProviderErrorPayload(body)
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
@@ -373,7 +378,7 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 		errCode = http.StatusTooManyRequests
 	}
 	body = classifyCodexStatusError(errCode, body)
-	err := statusErr{code: errCode, msg: string(body), credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
+	err := statusErr{code: errCode, msg: string(body), providerErrorPayload: providerErrorPayload, credentialScoped: credentialScoped, transientRateLimit: transientCapacity && errCode == http.StatusTooManyRequests}
 	// A usage_limit_reached body reset describes quota recovery and wins over
 	// the generic Retry-After header. Other 429s and recoverable transient
 	// upstream errors honour the upstream header so capacity rejections cool
@@ -752,13 +757,17 @@ func observeCodexTokenEvent(reporter *helps.UsageReporter, payload []byte) {
 // is shared with the unbuffered path, where the rejection is delivered in-stream and a status
 // change would alter cooldown classification and retry-after parsing for everyone. Keeping 503
 // scoped to this path means disabling the feature restores the previous behaviour exactly.
-func newCodexBootstrapOverloadErr(body []byte) statusErr {
-	return newCodexStatusErrWithHeaders(http.StatusServiceUnavailable, parseCodexWebsocketErrorHeaders(body), body)
+func newCodexBootstrapOverloadErr(body []byte, source statusErr) statusErr {
+	err := newCodexStatusErrWithHeaders(http.StatusServiceUnavailable, parseCodexWebsocketErrorHeaders(body), body)
+	// The body may be a normalized fallback; only the original event grants replay.
+	err.providerErrorPayload = source.providerErrorPayload
+	return err
 }
 
-func newCodexBootstrapOverloadErrWithRetryAfter(body []byte, preferredRetryAfter *time.Duration) statusErr {
+func newCodexBootstrapOverloadErrWithRetryAfter(body []byte, source statusErr) statusErr {
 	err := newCodexStatusErr(http.StatusServiceUnavailable, body)
-	if preferredRetryAfter != nil {
+	err.providerErrorPayload = source.providerErrorPayload
+	if preferredRetryAfter := source.RetryAfter(); preferredRetryAfter != nil {
 		delay := *preferredRetryAfter
 		err.retryAfter = &delay
 	}

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/MoeForge/moego/json"
@@ -23,10 +24,8 @@ import (
 // handler against an upstream that stops mid function-call arguments without ever
 // sending response.completed, which is the failure Codex clients see in the wild.
 //
-// The emitted terminal frame must not claim the client's request was invalid. The
-// stream was cut in transit, so the request may be replayed, and every downstream
-// consumer keys retry off the OpenAI error taxonomy: "invalid_request_error" means
-// "do not retry", which turns a recoverable transport fault into a hard failure.
+// Partial tool arguments without response.completed leave the generation's
+// outcome unknown. Report a server error without permitting replay.
 func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	const model = "gpt-5.4"
 	events := []string{
@@ -35,7 +34,9 @@ func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":"{\"path\":\"app/page.tsx\"","sequence_number":3}`,
 		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":0,"delta":",\"text\":\"editor","sequence_number":4}`,
 	}
+	var submissions atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		submissions.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		for _, event := range events {
@@ -78,14 +79,17 @@ func TestCodexIncompleteStreamIsNotTypedAsInvalidRequest(t *testing.T) {
 	openaihandlers.NewOpenAIResponsesAPIHandler(base).Responses(c)
 
 	detail := terminalStreamErrorDetail(t, recorder.Body.String())
-	if got := detail["code"]; got != "request_timeout" {
-		t.Fatalf("error.code = %v, want %q (the stream was cut in transit)", got, "request_timeout")
+	if got := detail["code"]; got != "upstream_outcome_unknown" {
+		t.Fatalf("error.code = %v, want upstream_outcome_unknown", got)
+	}
+	if submissions.Load() != 1 || detail["retryable"] != false {
+		t.Fatalf("truncated generation replayed or lost terminal outcome: calls=%d error=%v", submissions.Load(), detail)
 	}
 	if got := detail["type"]; got == "invalid_request_error" {
-		t.Fatalf("error.type = %q for a truncated stream: the request was well formed, and this type tells every downstream client not to retry", got)
+		t.Fatalf("error.type = %q for a truncated stream: the request was well formed", got)
 	}
 	if got := detail["type"]; got != "server_error" {
-		t.Fatalf("error.type = %v, want %q so the failure is classified as retryable", got, "server_error")
+		t.Fatalf("error.type = %v, want %q for an upstream outcome failure", got, "server_error")
 	}
 }
 

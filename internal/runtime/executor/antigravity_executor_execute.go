@@ -201,10 +201,10 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		clearAntigravityCreditsFailureState(auth)
 	}
 	reporter.ObserveResponseModel(bodyBytes)
-	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, bodyBytes, true); zeroOutput {
+	if finishReason, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, bodyBytes, true); zeroOutput {
 		antiDetail := helps.ParseAntigravityUsage(bodyBytes)
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
-		err = newGeminiZeroOutputStatusErr(zeroErrMsg)
+		err = newGeminiZeroOutputStatusErr(zeroErrMsg, finishReason)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
@@ -217,7 +217,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bodyBytes, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, bodyBytes)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, converted); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)
@@ -530,17 +530,17 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		return resp, scanErr
 	}
 	if pendingFilterMsg != "" {
-		filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg}
+		filterErr := statusErr{code: http.StatusBadRequest, msg: pendingFilterMsg, providerErrorPayload: true}
 		helps.RecordAPIResponseError(ctx, e.cfg, filterErr)
 		reporter.PublishFailure(ctx, filterErr)
 		return resp, filterErr
 	}
 	aggregatedPayload := e.convertStreamChunksToNonStream(rawPayloads)
 	reporter.ObserveResponseModel(aggregatedPayload)
-	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, aggregatedPayload, true); zeroOutput {
+	if finishReason, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, aggregatedPayload, true); zeroOutput {
 		antiDetail := helps.ParseAntigravityUsage(aggregatedPayload)
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
-		err = newGeminiZeroOutputStatusErr(zeroErrMsg)
+		err = newGeminiZeroOutputStatusErr(zeroErrMsg, finishReason)
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
@@ -555,7 +555,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, resp.Payload, &param)
 	if helps.ApplyPatchTranslationError(param) != nil || len(converted) == 0 {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage, submissionOutcomeKnown: helps.GenerationResponseComplete(to, aggregatedPayload)}
 	}
 	if errPayload, okErr := helps.TranslatedClaudeErrorPayload(responseFormat, converted); okErr {
 		err = newGeminiTranslatedClaudeErrorStatusErr(errPayload)
