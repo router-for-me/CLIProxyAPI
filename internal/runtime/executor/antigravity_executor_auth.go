@@ -353,6 +353,31 @@ func newAntigravityOAuthHTTPClient(ctx context.Context, cfg *config.Config, auth
 	return client, cleanup
 }
 
+// newAntigravityProjectDiscoveryHTTPClient clones the credential's HTTP/1.1
+// Antigravity transport into an isolated per-discovery client whose cleanup
+// closes idle sockets and cancels abandoned in-flight dials (such as a stalled
+// SOCKS5 handshake after net/http.Transport.getConn detaches req.Context())
+// without disturbing the credential's shared connection pool.
+func newAntigravityProjectDiscoveryHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (clientOut *http.Client, cleanup func()) {
+	cleanup = func() {}
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
+
+	client := newAntigravityHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, 0)
+	if client == nil {
+		return &http.Client{}, cleanup
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		return client, cleanup
+	}
+	owned := transport.Clone()
+	owned.MaxIdleConnsPerHost = -1
+	clone := *client
+	clone.Transport = owned
+	cleanup = owned.CloseIdleConnections
+	return &clone, cleanup
+}
+
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
 	if auth == nil {
 		return nil
@@ -393,7 +418,8 @@ func (e *AntigravityExecutor) fetchAntigravityProjectID(ctx context.Context, aut
 	// Exclude execution-scoped request proxy overrides while preserving caller cancellation.
 	acquisitionCtx, cancelAcquisition := context.WithTimeout(cliproxyexecutor.WithoutRequestProxyURL(ctx), antigravityCredentialAcquisitionTimeout)
 	defer cancelAcquisition()
-	httpClient := newAntigravityHTTPClient(acquisitionCtx, e.cfg, auth, 0)
+	httpClient, cleanup := newAntigravityProjectDiscoveryHTTPClient(acquisitionCtx, e.cfg, auth)
+	defer cleanup()
 	tracedClient := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "project_discovery")
 	projectID, errFetch := sdkAuth.FetchAntigravityProjectID(acquisitionCtx, token, tracedClient)
 	if errFetch != nil {
