@@ -66,7 +66,12 @@ func inferCodexWebsocketErrorStatus(payload []byte) int {
 	if !ok {
 		return 0
 	}
-	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+	return inferCodexWebsocketFailureBodyStatus(body)
+}
+
+// Infer from the same normalized business error for both WS terminal frame shapes.
+func inferCodexWebsocketFailureBodyStatus(body []byte) int {
+	if isCodexWebsocketConnectionLimitError(body) || isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
 		return http.StatusTooManyRequests
 	}
 	if codexTerminalErrorIsContextLength(body) {

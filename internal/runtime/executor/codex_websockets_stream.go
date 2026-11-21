@@ -436,16 +436,11 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			return errCodexHTTPMessagesContinuationRejected
 		}
 		status := codexWebsocketErrorStatus(payload)
-		var failure error
-		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
-			failure = wsErr
-			status = codexWebsocketErrorStatusWithHeaders(payload, parseCodexWebsocketErrorHeaders(payload))
-		} else if status >= 400 && status <= 599 {
-			failure = newCodexWebsocketStatusError(payload, body, status, parseCodexWebsocketErrorHeaders(payload), e.modelLevelCooling())
-		} else {
-			streamErr, _, _ := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling())
-			status, failure = streamErr.StatusCode(), streamErr
+		if status < 400 || status > 599 {
+			status = inferCodexWebsocketFailureBodyStatus(body)
 		}
+		headers := parseCodexWebsocketErrorHeaders(payload)
+		failure := newCodexWebsocketStatusError(payload, body, status, headers, e.modelLevelCooling())
 		e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", failure)
 		sess.clearActive(conn, readCh)
 		unlockStreamSession()

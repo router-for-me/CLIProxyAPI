@@ -45,6 +45,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		emptyRecovery   bool
 		retryAfter      string
 		quotaExceeded   bool
+		modelQuota      bool
 		nonUpgradeOK    bool
 	}{
 		{name: "reuse"},
@@ -74,6 +75,11 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		{name: "error event preserves capacity retry", terminalStatus: 429, retryAfter: "17", terminalFrame: `{"type":"error","status":429,"headers":{"Retry-After":"17"},"error":{"code":"turn_rate_limit_exceeded","message":"accepted terminal failure"}}`},
 		{name: "failed terminal event preserves quota reset", terminalStatus: 429, retryAfter: "120", quotaExceeded: true, terminalFrame: `{"type":"response.failed","status":429,"headers":{"Retry-After":"17"},"response":{"error":{"type":"usage_limit_reached","resets_in_seconds":120,"message":"accepted terminal failure"}}}`},
 		{name: "error event preserves quota reset", terminalStatus: 429, retryAfter: "120", quotaExceeded: true, terminalFrame: `{"type":"error","status":429,"headers":{"Retry-After":"17"},"error":{"type":"usage_limit_reached","resets_in_seconds":120,"message":"accepted terminal failure"}}`},
+		{name: "accepted error cools only the model", acknowledge: true, terminalStatus: 429, retryAfter: "120", modelQuota: true, terminalFrame: `{"type":"error","error":{"type":"usage_limit_reached","resets_in_seconds":120,"message":"accepted terminal failure"},"status":429}`},
+		{name: "accepted failed event cools only the model", acknowledge: true, terminalStatus: 429, retryAfter: "120", modelQuota: true, terminalFrame: `{"type":"response.failed","response":{"id":"resp_1","error":{"type":"usage_limit_reached","resets_in_seconds":120,"message":"accepted terminal failure"}},"status":429}`},
+		{name: "statusless overload error infers 503", acknowledge: true, retryAfter: "17", terminalFrame: `{"type":"error","headers":{"Retry-After":"17"},"error":{"code":"server_is_overloaded","message":"accepted terminal failure"}}`},
+		{name: "statusless overload failed event infers 503", acknowledge: true, retryAfter: "17", terminalFrame: `{"type":"response.failed","headers":{"Retry-After":"17"},"response":{"id":"resp_1","error":{"code":"server_is_overloaded","message":"accepted terminal failure"}}}`},
+		{name: "statusless overload without retry hint infers 503", acknowledge: true, terminalFrame: `{"type":"response.failed","response":{"id":"resp_1","error":{"code":"server_is_overloaded","message":"accepted terminal failure"}}}`},
 		{name: "ordinary 200 cannot masquerade as an upgrade", nonUpgradeOK: true, wantHTTP: true},
 		{name: "no replay after an ambiguous disconnect", stopAfterCreate: true},
 		{name: "no replay after a buffered accepted error", acceptedError: true},
@@ -190,6 +196,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			cfg.Streaming.BootstrapRetries = 2
 			cfg.Codex.StreamBootstrapBuffering = !test.noBuffer && (test.acceptedError || test.contextLimit || test.terminalFrame != "")
 			cfg.Codex.DisableCodexCloaking = test.changeHeader
+			cfg.Codex.ModelLevelCooling = test.modelQuota
 			if test.payloadRules {
 				models := []proxyconfig.PayloadModelRule{{Name: "*"}}
 				cfg.Payload.Override = []proxyconfig.PayloadRule{{Models: models, Params: map[string]any{"instructions": "operator override"}}}
@@ -295,12 +302,20 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 						t.Fatal("missing test credential")
 					}
 					state := got.ModelStates["gpt-5.5"]
-					if got.Quota.Exceeded != test.quotaExceeded || (!test.quotaExceeded && state != nil && state.Quota.Exceeded) || first.Header().Get("Retry-After") != test.retryAfter {
-						t.Fatalf("expected auth quota=%v and Retry-After %s, got %q; auth quota=%v model quota=%v", test.quotaExceeded, test.retryAfter, first.Header().Get("Retry-After"), got.Quota.Exceeded, state != nil && state.Quota.Exceeded)
+					modelExceeded := state != nil && state.Quota.Exceeded
+					credentialExceeded := got.Quota.Exceeded && got.Quota.Reason == "credential_quota"
+					if credentialExceeded != test.quotaExceeded || (!test.quotaExceeded && modelExceeded != test.modelQuota) || first.Header().Get("Retry-After") != test.retryAfter {
+						t.Fatalf("expected credential quota=%v, model quota=%v and Retry-After %s, got credential quota=%v, model quota=%v, Retry-After %q", test.quotaExceeded, test.modelQuota, test.retryAfter, credentialExceeded, modelExceeded, first.Header().Get("Retry-After"))
 					}
 				}
 				if first.Code != want || creates.Load() != 1 || !strings.Contains(first.Body.String(), "accepted terminal failure") {
 					t.Fatalf("expected original %d without replay: status=%d creates=%d body=%s", want, first.Code, creates.Load(), first.Body)
+				}
+				if test.modelQuota {
+					second := request(`[`+user+`]`, "b")
+					if second.Code != http.StatusTooManyRequests || creates.Load() != 1 || httpCalls.Load() != 0 {
+						t.Fatalf("cooldown did not stop subsequent request: status=%d WS=%d HTTP=%d", second.Code, creates.Load(), httpCalls.Load())
+					}
 				}
 				return
 			}

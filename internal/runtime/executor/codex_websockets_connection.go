@@ -134,14 +134,18 @@ func mapCodexWebsocketReadError(err error) error {
 
 type codexHTTPMessagesStopError struct{ error }
 
-func (e codexHTTPMessagesStopError) Unwrap() error       { return e.error }
-func (codexHTTPMessagesStopError) IsRequestStop() bool   { return true }
-func (codexHTTPMessagesStopError) IsRequestScoped() bool { return true }
+func (e codexHTTPMessagesStopError) Unwrap() error     { return e.error }
+func (codexHTTPMessagesStopError) IsRequestStop() bool { return true }
+
+// A local transport failure is not an upstream rejection and must not cool the credential.
+type codexHTTPMessagesUnknownOutcome struct{ statusErr }
+
+func (codexHTTPMessagesUnknownOutcome) IsRequestScoped() bool { return true }
 
 // codexHTTPMessagesNoReplay keeps a known upstream status, but prevents replay.
 func codexHTTPMessagesNoReplay(err error) error {
 	if clienterror.HTTPStatusFromError(err) == 0 {
-		err = statusErr{code: http.StatusBadGateway, msg: "The upstream Codex connection ended after the request was submitted. The outcome is unknown; the request was not retried."}
+		err = codexHTTPMessagesUnknownOutcome{statusErr{code: http.StatusBadGateway, msg: "The upstream Codex connection ended after the request was submitted. The outcome is unknown; the request was not retried."}}
 	}
 	return codexHTTPMessagesStopError{err}
 }

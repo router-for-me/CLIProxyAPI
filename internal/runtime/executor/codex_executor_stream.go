@@ -445,7 +445,7 @@ func (e *CodexExecutor) executeStream(ctx context.Context, auth *cliproxyauth.Au
 				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 				reporter.PublishFailure(ctx, emptyErr)
 				if recovery {
-					return nil, emptyErr
+					return nil, codexHTTPMessagesUnknownOutcome{emptyErr}
 				}
 				closedCh := make(chan cliproxyexecutor.StreamChunk)
 				close(closedCh)
@@ -606,7 +606,7 @@ func (e *CodexExecutor) executeStream(ctx context.Context, auth *cliproxyauth.Au
 			reporter.PublishFailure(ctx, emptyErr)
 			if recovery {
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(emptyErr)}:
+				case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(codexHTTPMessagesUnknownOutcome{emptyErr})}:
 				case <-ctx.Done():
 				}
 			}
