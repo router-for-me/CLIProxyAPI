@@ -942,6 +942,7 @@ func responsesReasoningItem(index int, st *interactionsToResponsesStreamState) [
 }
 
 func setResponsesUsageFromInteractionsDoc(outDoc *ojson.Doc, path string, usage ojson.Result) {
+	reasoningTokens, hasReasoning := firstUsageInt(usage, "reasoning_tokens", "total_thought_tokens")
 	var inputTokens int64
 	var outputTokens int64
 	var totalTokens int64
@@ -949,8 +950,11 @@ func setResponsesUsageFromInteractionsDoc(outDoc *ojson.Doc, path string, usage 
 		if v, ok := firstUsageInt(usage, "input_tokens", "total_input_tokens"); ok {
 			inputTokens = v
 		}
-		if v, ok := firstUsageInt(usage, "output_tokens", "total_output_tokens"); ok {
+		if v, ok := firstUsageInt(usage, "output_tokens"); ok {
 			outputTokens = v
+		} else {
+			// Native Interactions reports thought tokens separately from output tokens.
+			outputTokens = usage.Get("total_output_tokens").Int() + reasoningTokens
 		}
 		if v, ok := firstUsageInt(usage, "total_tokens"); ok {
 			totalTokens = v
@@ -965,8 +969,8 @@ func setResponsesUsageFromInteractionsDoc(outDoc *ojson.Doc, path string, usage 
 		if v, ok := firstUsageInt(usage, "cached_tokens", "total_cached_tokens"); ok {
 			_ = outDoc.Set(path+".input_tokens_details.cached_tokens", v)
 		}
-		if v, ok := firstUsageInt(usage, "reasoning_tokens", "total_thought_tokens"); ok {
-			_ = outDoc.Set(path+".output_tokens_details.reasoning_tokens", v)
+		if hasReasoning {
+			_ = outDoc.Set(path+".output_tokens_details.reasoning_tokens", reasoningTokens)
 		}
 	}
 }
