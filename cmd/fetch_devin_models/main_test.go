@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestSplitDevinUID(t *testing.T) {
@@ -135,5 +137,55 @@ func TestAggregateModels_PreservesCatalogThinkingLevels(t *testing.T) {
 	}
 	if aggregated[0].Thinking == nil || len(aggregated[0].Thinking.Levels) == 0 {
 		t.Fatalf("expected thinking levels seeded from catalog for claude-fable-5-1, got nil")
+	}
+}
+
+func TestParseSingleModelConfig_ReadsMaxOutputFromModelConfig(t *testing.T) {
+	var cfg []byte
+	cfg = protowire.AppendTag(cfg, 4, protowire.VarintType)
+	cfg = protowire.AppendVarint(cfg, 1048576)
+	cfg = protowire.AppendTag(cfg, 5, protowire.BytesType)
+	cfg = protowire.AppendString(cfg, "LLAMA_WITH_SPECIAL")
+	cfg = protowire.AppendTag(cfg, 13, protowire.VarintType)
+	cfg = protowire.AppendVarint(cfg, 384000)
+
+	var msg []byte
+	msg = protowire.AppendTag(msg, 18, protowire.VarintType)
+	msg = protowire.AppendVarint(msg, 1048576)
+	msg = protowire.AppendTag(msg, 22, protowire.BytesType)
+	msg = protowire.AppendString(msg, "deepseek-v4-1-flash-1017-low")
+	msg = protowire.AppendTag(msg, 23, protowire.BytesType)
+	msg = protowire.AppendBytes(msg, cfg)
+
+	got := parseSingleModelConfig(msg)
+	if got.UID != "deepseek-v4-1-flash-1017-low" || got.ContextLength != 1048576 {
+		t.Fatalf("parsed %+v", got)
+	}
+	if got.MaxOutput != 384000 {
+		t.Fatalf("MaxOutput = %d, want 384000", got.MaxOutput)
+	}
+}
+
+func TestAggregateModels_UsesUpstreamMaxOutput(t *testing.T) {
+	raw := []rawDevinModel{
+		{UID: "grok-4-7-low", Label: "Grok 4.7 Low", ContextLength: 500000, MaxOutput: 100000, VendorID: 5},
+		{UID: "grok-4-7-high", Label: "Grok 4.7 High", ContextLength: 500000, MaxOutput: 100000, VendorID: 5},
+		{UID: "old-model", Label: "Old Model", ContextLength: 200000},
+		{UID: "mixed-model-low", Label: "Mixed Low", ContextLength: 200000, MaxOutput: 128000},
+		{UID: "mixed-model-high", Label: "Mixed High", ContextLength: 200000},
+	}
+	got := map[string]int{}
+	for _, m := range aggregateModels(raw) {
+		got[m.ID] = m.MaxCompletionTokens
+	}
+	if got["grok-4-7"] != 100000 {
+		t.Fatalf("grok-4-7 max_completion_tokens = %d, want 100000", got["grok-4-7"])
+	}
+	if got["old-model"] != defaultDevinMaxCompletionTokens {
+		t.Fatalf("old-model max_completion_tokens = %d, want default %d", got["old-model"], defaultDevinMaxCompletionTokens)
+	}
+	// A variant without a reported limit counts as the fallback, so the aggregate never exceeds it.
+	if got["mixed-model"] != defaultDevinMaxCompletionTokens {
+		t.Fatalf("mixed-model max_completion_tokens = %d, want fallback %d", got["mixed-model"], defaultDevinMaxCompletionTokens)
 	}
 }

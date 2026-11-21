@@ -7,7 +7,7 @@
       "owned_by": "cognition",
       "display_name": "SWE-2",
       "context_length": 262000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -30,7 +30,7 @@
       "owned_by": "cognition",
       "display_name": "SWE-2 Flash",
       "context_length": 262144,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 131072,
       "supportedInputModalities": [
         "text"
       ],
@@ -52,7 +52,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Fable 5.2",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -77,7 +77,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Opus 5.5",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -102,7 +102,7 @@
       "owned_by": "openai",
       "display_name": "GPT-6 Astra",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -127,7 +127,7 @@
       "owned_by": "openai",
       "display_name": "GPT-6 Sol",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -153,7 +153,7 @@
       "owned_by": "openai",
       "display_name": "GPT-6 Luna",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -179,7 +179,7 @@
       "owned_by": "google",
       "display_name": "Gemini 4 Carbon",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 1000000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -202,7 +202,7 @@
       "owned_by": "moonshot",
       "display_name": "Kimi K3.1 Pro",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 131072,
       "supportedInputModalities": [
         "text",
         "image"
@@ -226,7 +226,7 @@
       "owned_by": "zhipu",
       "display_name": "GLM-5.3",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text"
       ],
@@ -248,7 +248,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Sonnet 5.5",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -273,7 +273,7 @@
       "owned_by": "google",
       "display_name": "Gemini 3.8 Flash",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 65535,
       "supportedInputModalities": [
         "text",
         "image"
@@ -296,7 +296,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Opus 4.7",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -321,7 +321,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Opus 4.8",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -346,7 +346,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Opus 5",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -371,7 +371,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Fable 5",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -396,7 +396,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Fable 5.1",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -421,7 +421,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Sonnet 5",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -446,7 +446,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Haiku 5.5",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -471,7 +471,7 @@
       "owned_by": "google",
       "display_name": "Gemini 3.5 Flash",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 65535,
       "supportedInputModalities": [
         "text",
         "image"
@@ -495,7 +495,7 @@
       "owned_by": "google",
       "display_name": "Gemini 3.6 Flash",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 65535,
       "supportedInputModalities": [
         "text",
         "image"
@@ -519,7 +519,7 @@
       "owned_by": "google",
       "display_name": "Gemini 3.7 Flash",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 65535,
       "supportedInputModalities": [
         "text",
         "image"
@@ -542,7 +542,7 @@
       "owned_by": "google",
       "display_name": "Gemini 4 Argon",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 1000000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -565,7 +565,7 @@
       "owned_by": "openai",
       "display_name": "GPT-5.6 Sol",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -591,7 +591,7 @@
       "owned_by": "openai",
       "display_name": "GPT-5.6 Terra",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -617,7 +617,7 @@
       "owned_by": "openai",
       "display_name": "GPT-5.6 Luna",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -643,7 +643,7 @@
       "owned_by": "openai",
       "display_name": "GPT-6.1 Sol",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -668,7 +668,7 @@
       "owned_by": "openai",
       "display_name": "GPT-6.1 Terra",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -693,7 +693,7 @@
       "owned_by": "zhipu",
       "display_name": "GLM-5.2",
       "context_length": 200000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text"
       ],
@@ -714,7 +714,7 @@
       "owned_by": "zhipu",
       "display_name": "GLM-5.2 High 1M",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text"
       ],
@@ -735,7 +735,7 @@
       "owned_by": "xai",
       "display_name": "Grok 4.6",
       "context_length": 500000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 100000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -759,7 +759,7 @@
       "owned_by": "xai",
       "display_name": "Grok 4.7",
       "context_length": 500000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 100000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -783,7 +783,7 @@
       "owned_by": "devin",
       "display_name": "Muse Wonder",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 131072,
       "supportedInputModalities": [
         "text",
         "image"
@@ -809,7 +809,7 @@
       "owned_by": "nvidia",
       "display_name": "Nemotron 3.5 Super",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 65536,
       "supportedInputModalities": [
         "text",
         "image"
@@ -832,7 +832,7 @@
       "owned_by": "moonshot",
       "display_name": "Kimi K3",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 131072,
       "supportedInputModalities": [
         "text",
         "image"
@@ -855,7 +855,7 @@
       "owned_by": "zhipu",
       "display_name": "GLM-5.3 Flash",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 131072,
       "supportedInputModalities": [
         "text",
         "image"
@@ -878,7 +878,7 @@
       "owned_by": "deepseek",
       "display_name": "DeepSeek V4 Flash",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 384000,
       "supportedInputModalities": [
         "text"
       ],
@@ -899,7 +899,7 @@
       "owned_by": "deepseek",
       "display_name": "DeepSeek V4.1 Flash",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 384000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -923,7 +923,7 @@
       "owned_by": "cognition",
       "display_name": "SWE-1.7",
       "context_length": 262000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -944,7 +944,7 @@
       "owned_by": "cognition",
       "display_name": "SWE-2 Lightning",
       "context_length": 262144,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -967,7 +967,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Opus 4.6",
       "context_length": 200000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -983,7 +983,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Opus 4.6 1M",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -999,7 +999,7 @@
       "owned_by": "openai",
       "display_name": "GPT-5.4",
       "context_length": 272000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1024,7 +1024,7 @@
       "owned_by": "openai",
       "display_name": "GPT-5.5",
       "context_length": 272000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1049,7 +1049,7 @@
       "owned_by": "openai",
       "display_name": "GPT-5.4 Mini",
       "context_length": 400000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1073,7 +1073,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Sonnet 4.6",
       "context_length": 200000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1089,7 +1089,7 @@
       "owned_by": "anthropic",
       "display_name": "Claude Sonnet 4.6 1M",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1105,7 +1105,7 @@
       "owned_by": "moonshot",
       "display_name": "Kimi K2.6",
       "context_length": 262144,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 8192,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1121,7 +1121,7 @@
       "owned_by": "moonshot",
       "display_name": "Kimi K2.7",
       "context_length": 262144,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 16000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1137,7 +1137,7 @@
       "owned_by": "nvidia",
       "display_name": "Nemotron 3 Ultra",
       "context_length": 1000000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 32768,
       "supportedInputModalities": [
         "text"
       ],
@@ -1159,7 +1159,7 @@
       "owned_by": "cognition",
       "display_name": "SWE-1.6",
       "context_length": 200000,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 128000,
       "supportedInputModalities": [
         "text",
         "image"
@@ -1175,7 +1175,7 @@
       "owned_by": "deepseek",
       "display_name": "DeepSeek V4 Pro",
       "context_length": 1048576,
-      "max_completion_tokens": 64000,
+      "max_completion_tokens": 384000,
       "supportedInputModalities": [
         "text"
       ],

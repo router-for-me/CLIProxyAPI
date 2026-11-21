@@ -327,6 +327,17 @@ func cleanDevinDisplayName(name string) string {
 	return trimmed
 }
 
+// minPositiveDevinLimit returns the smaller of two limits, ignoring unset (zero) ones.
+func minPositiveDevinLimit(current, value int) int {
+	if value <= 0 {
+		return current
+	}
+	if current <= 0 || value < current {
+		return value
+	}
+	return current
+}
+
 func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
 	type aggEntry struct {
 		model  *ModelInfo
@@ -375,15 +386,12 @@ func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
 		if m.ContextLength > entry.model.ContextLength {
 			entry.model.ContextLength = m.ContextLength
 		}
-		if m.MaxCompletionTokens > entry.model.MaxCompletionTokens {
-			entry.model.MaxCompletionTokens = m.MaxCompletionTokens
-		}
+		// The executor applies the one aggregate output limit to every variant, so keep the smallest.
+		entry.model.MaxCompletionTokens = minPositiveDevinLimit(entry.model.MaxCompletionTokens, m.MaxCompletionTokens)
 		if m.InputTokenLimit > entry.model.InputTokenLimit {
 			entry.model.InputTokenLimit = m.InputTokenLimit
 		}
-		if m.OutputTokenLimit > entry.model.OutputTokenLimit {
-			entry.model.OutputTokenLimit = m.OutputTokenLimit
-		}
+		entry.model.OutputTokenLimit = minPositiveDevinLimit(entry.model.OutputTokenLimit, m.OutputTokenLimit)
 		for _, mod := range m.SupportedInputModalities {
 			if !slices.Contains(entry.model.SupportedInputModalities, mod) {
 				entry.model.SupportedInputModalities = append(entry.model.SupportedInputModalities, mod)
