@@ -375,7 +375,7 @@ func (e *MetaExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth,
 	if errEnc != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("meta executor: tokenizer init failed: %w", errEnc)
 	}
-	count, errCount := countCodexInputTokens(enc, prepared.body)
+	count, errCount := helps.CountResponsesInputTokens(enc, prepared.body)
 	if errCount != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("meta executor: token counting failed: %w", errCount)
 	}
