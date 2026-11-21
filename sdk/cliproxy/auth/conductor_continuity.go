@@ -411,7 +411,7 @@ func (m *Manager) isCodexAttemptFailure(err error, attempted map[string]struct{}
 }
 
 func isPreAdmissionContinuityError(err error) bool {
-	if err == nil || IsTerminalAuthError(err) || isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) {
+	if err == nil || IsTerminalAuthError(err) || isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) || isCredentialTerminatedError(err) {
 		return false
 	}
 	if isSchedulerRejectError(err) {
@@ -435,7 +435,7 @@ func isPositiveQuotaRejectionError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) ||
+	if isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) || isCredentialTerminatedError(err) ||
 		isStreamTruncatedError(err) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) ||
 		IsTerminalAuthError(err) {
 		return false

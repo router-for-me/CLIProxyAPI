@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/json"
@@ -420,7 +421,44 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 }
 
 type authRefreshLock struct {
-	mu sync.Mutex
+	gate    chan struct{}
+	waiters atomic.Int32
+}
+
+// lockRefreshContext acquires the per-credential refresh lock while honoring ctx cancellation
+// whenever lock acquisition would block behind another holder.
+func (m *Manager) lockRefreshContext(ctx context.Context, id string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{gate: make(chan struct{}, 1)})
+	lock, ok := lockValue.(*authRefreshLock)
+	if !ok || lock == nil || lock.gate == nil {
+		lock = &authRefreshLock{gate: make(chan struct{}, 1)}
+		m.refreshLocks.Store(id, lock)
+	}
+	select {
+	case lock.gate <- struct{}{}:
+	default:
+		lock.waiters.Add(1)
+		select {
+		case lock.gate <- struct{}{}:
+			lock.waiters.Add(-1)
+			if errCtx := ctx.Err(); errCtx != nil {
+				<-lock.gate
+				return nil, errCtx
+			}
+		case <-ctx.Done():
+			lock.waiters.Add(-1)
+			return nil, ctx.Err()
+		}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-lock.gate
+		})
+	}, nil
 }
 
 func authOuterAccessToken(auth *Auth) string {
@@ -1157,9 +1195,9 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if m == nil || auth == nil || execErr == nil {
 		return auth, false
 	}
-	// Request-scoped failures describe this request, not stale credentials.
-	// Refreshing would turn a direct error response into an implicit retry.
-	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
+	// Request-scoped and explicit hard-stop failures describe this request, not stale credentials.
+	// Refreshing would turn a direct stop/error response into an implicit retry.
+	if isRequestScopedError(execErr) || isRequestStopError(execErr) || isRequestTerminatedError(execErr) || isTOSViolationError(execErr) || !isUnauthorizedError(execErr) {
 		return auth, false
 	}
 	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
@@ -1276,14 +1314,11 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
+	releaseRefresh, errLock := m.lockRefreshContext(ctx, id)
+	if errLock != nil {
+		return nil, errLock
 	}
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
+	defer releaseRefresh()
 
 	m.mu.RLock()
 	auth := m.auths[id].Clone()
