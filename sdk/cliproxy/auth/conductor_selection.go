@@ -55,21 +55,35 @@ func pluginSchedulerWantsAcrossPriorities(scheduler PluginScheduler) bool {
 	return false
 }
 
-func (m *Manager) snapshotPluginScheduler() (PluginScheduler, bool) {
+func pluginSchedulerNeedsAllPriorities(scheduler PluginScheduler) bool {
+	if pluginSchedulerWantsAcrossPriorities(scheduler) {
+		return true
+	}
+	if pool, ok := scheduler.(pluginSchedulerPriorityPool); ok && pool != nil {
+		return pool.SchedulerWantsAllPriorityCandidates()
+	}
+	return false
+}
+
+func (m *Manager) snapshotPluginSchedulerRef() PluginScheduler {
 	if m == nil {
-		return nil, false
+		return nil
 	}
 	m.mu.RLock()
 	scheduler := m.pluginScheduler
 	m.mu.RUnlock()
-	return scheduler, pluginSchedulerWantsAcrossPriorities(scheduler)
+	return scheduler
+}
+
+func (m *Manager) snapshotPluginScheduler() (PluginScheduler, bool) {
+	scheduler := m.snapshotPluginSchedulerRef()
+	return scheduler, pluginSchedulerNeedsAllPriorities(scheduler)
 }
 
 // PluginSchedulerWantsAcrossPriorities reports whether the configured plugin scheduler
 // opted into receiving candidates across all priority tiers.
 func (m *Manager) PluginSchedulerWantsAcrossPriorities() bool {
-	_, wants := m.snapshotPluginScheduler()
-	return wants
+	return pluginSchedulerWantsAcrossPriorities(m.snapshotPluginSchedulerRef())
 }
 
 func isBuiltInSelector(selector Selector) bool {
