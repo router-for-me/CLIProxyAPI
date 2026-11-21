@@ -163,7 +163,7 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 	if ch == nil {
 		return nil, true, nil
 	}
-	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	sawIncomplete := false
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -185,15 +185,21 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk, ok = <-ch
 		}
 		if !ok {
-			return buffered, true, nil
+			return nil, true, nil
 		}
 		if chunk.Err != nil {
 			return nil, false, chunk.Err
 		}
-		buffered = append(buffered, chunk)
-		if len(chunk.Payload) > 0 {
-			return buffered, false, nil
+		if len(chunk.Payload) == 0 {
+			if chunk.Incomplete {
+				sawIncomplete = true
+			}
+			continue
 		}
+		if sawIncomplete {
+			chunk.Incomplete = true
+		}
+		return []cliproxyexecutor.StreamChunk{chunk}, false, nil
 	}
 }
 
@@ -530,8 +536,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			execReq.Model = executionModel
 		}
 		execOpts := opts
+		payload := execOpts.OriginalRequest
+		if len(payload) == 0 {
+			payload = execReq.Payload
+		}
+		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		var errIntercept error
-		execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(ctx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+		execReq, execOpts, errIntercept = prepareRequestAfterAuth(ctx, executor, auth, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 		if errIntercept != nil {
 			if isCredentialTerminatedError(errIntercept) {
 				if auth != nil {
@@ -548,11 +559,6 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, errCtx
 		}
 		entry := logEntryWithRequestID(ctx)
-		payload := execOpts.OriginalRequest
-		if len(payload) == 0 {
-			payload = execReq.Payload
-		}
-		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		executionSeq := m.nextExecutionSeq()
 		accessToken := authAccessTokenForRequest(ctx, auth, execOpts.Headers)
@@ -782,7 +788,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 		}
 
-		if closed && len(buffered) == 0 {
+		if closed || len(buffered) == 0 {
+			if !closed {
+				discardStreamChunks(streamResult.Chunks)
+			}
 			emptyErr := markUpstreamExecutionAttemptFromContext(ctx, &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true})
 			currentErr := newStreamBootstrapError(emptyErr, streamResult.Headers)
 			if hasUpstreamExecutionAttempt(emptyErr) {
@@ -798,14 +807,8 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 		}
 
-		remaining := streamResult.Chunks
-		if closed {
-			closedCh := make(chan cliproxyexecutor.StreamChunk)
-			close(closedCh)
-			remaining = closedCh
-		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, executionSeq), nil
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, streamResult.Chunks, attemptAliasResult, ephemeralResult, execOpts, executionSeq), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

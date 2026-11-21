@@ -6,10 +6,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -197,6 +199,15 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 			}
 		}
 		models = applyExcludedModels(models, excluded)
+	case copilot.Provider:
+		raw, _ := a.Metadata[copilot.CatalogKey].(string)
+		for _, route := range copilot.ReadCatalog(raw, time.Now()).Routes() {
+			id := route.Info.ID
+			models = append(models, copilotPublicModel(route.Info, id, id))
+		}
+		// Native and plugin IDs share the same public namespace before exclusions and aliases.
+		models = appendDistinctModels(models, copilotPublicPluginModels(s.pluginModelsForProvider(provider)))
+		models = applyExcludedModels(models, excluded)
 	case "devin":
 		models = registry.GetDevinModels()
 		models = applyExcludedModels(models, excluded)
@@ -328,7 +339,9 @@ func (s *Service) registerModelsForAuthWithConfigAndCache(ctx context.Context, c
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
 	}
-	models = s.appendPluginModels(key, models, excluded)
+	if provider != copilot.Provider {
+		models = s.appendPluginModels(key, models, excluded)
+	}
 	if len(models) > 0 {
 		models = applyOAuthSettingsForAuth(cfg, provider, authKind, models)
 		published = s.registerResolvedModelsForAuthFenced(a, fence, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix))
@@ -652,6 +665,35 @@ func oauthExcludedModelsForConfig(cfg *config.Config, provider, authKind string)
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+func copilotPublicModel(model *ModelInfo, nativeID, routeID string) *ModelInfo {
+	clone := *model
+	clone.MetadataModelID = nativeID
+	clone.ID = copilot.ModelPrefix + routeID
+	displayName := strings.TrimSpace(clone.DisplayName)
+	if displayName == "" {
+		displayName = nativeID
+	}
+	const suffix = " (Copilot)"
+	clone.DisplayName = strings.TrimSuffix(displayName, suffix) + suffix
+	return &clone
+}
+
+func copilotPublicPluginModels(models []*ModelInfo) []*ModelInfo {
+	var out []*ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		// Plugins can declare either a native ID or an already qualified route.
+		// Keep exact route suffixes public, but use the base as the native ID.
+		routeID := strings.TrimPrefix(strings.TrimSpace(model.ID), copilot.ModelPrefix)
+		if nativeID := strings.TrimSpace(thinking.ParseSuffix(routeID).ModelName); nativeID != "" {
+			out = append(out, copilotPublicModel(model, nativeID, routeID))
+		}
+	}
+	return out
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
@@ -1313,6 +1355,8 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			seen[mappedID] = struct{}{}
 			clone := cloneModelInfoForCatalogRoute(model)
 			clone.ID = mappedID
+			clone.OAuthAlias = mappedID
+			clone.OAuthAliasSource = id
 			if model.MetadataModelID != "" {
 				clone.MetadataModelID = model.MetadataModelID
 			} else {
