@@ -4,6 +4,21 @@ Claude Code can remain the client while CLIProxyAPI routes its Messages requests
 to a Codex credential. Client model names are routing aliases: they do not change
 the upstream model or make the connection an Anthropic subscription session.
 
+## Optional advisor on Codex routes
+
+Set `CCS_CODEX_ADVISOR_MODEL` on the proxy to a model ID served exclusively by
+Codex. By default the feature is off. On an eligible Messages request that
+declares `advisor_20260301`, the proxy can consult that model on behalf of the
+worker, return the linked advisor result, and continue the original turn.
+Both the consultation and the continuation consume provider quota.
+
+If Claude Code omits the declaration when using a GPT model, the client can
+opt in with the `X-CCS-Local-Advisor: 1` header. Injection is limited to
+recognized main turns; it is not intended for permission classifier requests.
+The advisor receives visible conversation text and no tools. Encrypted results
+from an earlier provider are marked unavailable rather than sent onward.
+Emulated turns buffer upstream output and emit Messages events after completion.
+
 ## Public progress during tool use
 
 Codex distinguishes public `commentary` messages from `final_answer` messages.
