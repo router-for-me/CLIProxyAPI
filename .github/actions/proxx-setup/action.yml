@@ -9,6 +9,10 @@ inputs:
 runs:
   using: composite
   steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: false
     - name: Restore Go cache from main
       id: restore
       uses: actions/cache/restore@v4
@@ -22,24 +26,6 @@ runs:
         restore-keys: |
           proxx-go-${{ inputs.flavor }}-${{ runner.os }}-${{ hashFiles('go.sum') }}-
           proxx-go-${{ inputs.flavor }}-${{ runner.os }}-
-    # The toolchain go.mod asks for lives in the restored module cache (GOTOOLCHAIN=auto), so the
-    # image's own Go only bootstraps it. setup-go (a ~6.5s download) is only the fallback.
-    - name: Go toolchain from the module cache
-      id: toolchain
-      shell: bash
-      run: |
-        if command -v go >/dev/null && GOTOOLCHAIN=auto go version 2>/dev/null | grep -q "go$(sed -n 's/^go //p' go.mod) "; then
-          echo "GOTOOLCHAIN=auto" >> "$GITHUB_ENV"
-          echo "found=true" >> "$GITHUB_OUTPUT"
-          GOTOOLCHAIN=auto go version
-        else
-          echo "found=false" >> "$GITHUB_OUTPUT"
-        fi
-    - uses: actions/setup-go@v5
-      if: steps.toolchain.outputs.found != 'true'
-      with:
-        go-version-file: go.mod
-        cache: false
     - name: Report cache hit
       shell: bash
       run: echo "go cache restored from ${{ steps.restore.outputs.cache-matched-key || 'nothing' }}" | tee -a "$GITHUB_STEP_SUMMARY"
