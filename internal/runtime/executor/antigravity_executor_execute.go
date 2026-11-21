@@ -57,8 +57,9 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}
 
-	isClaude := strings.Contains(strings.ToLower(baseModel), "claude")
-	if isClaude || strings.Contains(baseModel, "gemini-3-pro") || strings.Contains(baseModel, "gemini-3.1-flash-image") {
+	lowerModel := strings.ToLower(baseModel)
+	isClaude := strings.Contains(lowerModel, "claude")
+	if isClaude || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-flash-image") {
 		return e.executeClaudeNonStream(ctx, auth, req, opts)
 	}
 
