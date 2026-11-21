@@ -19,6 +19,12 @@ models:
   catalog: ""
   codex-catalog: ""
   devin-catalog: ""
+  # Ask each Claude, Codex and Meta login for its own model list (at startup, every 3 hours and on
+  # POST /v8/management/models/refresh). Catalog models the provider no longer lists for that account
+  # are hidden, and Claude and Codex models the catalog doesn't have yet are added from the provider's
+  # description. Catalog values win for models it already has; until a list arrives, or when a fetch
+  # fails, the catalog is used as is. API keys keep the catalog.
+  # live-lists: false
 
 # Listener, TLS, network discovery, and server operation.
 server:

@@ -156,10 +156,21 @@ func (w *Watcher) reloadConfig() bool {
 	if authDirChanged {
 		w.syncAuthDirWatch()
 	}
-	retryConfigChanged := oldConfig != nil && (oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials)
-	forceAuthRefresh := oldConfig != nil && (oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) || !reflect.DeepEqual(oldConfig.OAuthSettings, newConfig.OAuthSettings) || retryConfigChanged)
+	forceAuthRefresh := configChangeForcesAuthRefresh(oldConfig, newConfig)
 
 	log.Infof("config successfully reloaded, triggering client reload")
 	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
 	return true
+}
+
+// configChangeForcesAuthRefresh reports whether a reload changes how every auth registers its
+// models or retries, so all auths must be refreshed even when their files are unchanged.
+func configChangeForcesAuthRefresh(oldConfig, newConfig *config.Config) bool {
+	if oldConfig == nil || newConfig == nil {
+		return false
+	}
+	retryConfigChanged := oldConfig.RequestRetry != newConfig.RequestRetry || oldConfig.MaxRetryInterval != newConfig.MaxRetryInterval || oldConfig.MaxRetryCredentials != newConfig.MaxRetryCredentials
+	return oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias) ||
+		!reflect.DeepEqual(oldConfig.OAuthSettings, newConfig.OAuthSettings) || retryConfigChanged ||
+		oldConfig.Models.LiveLists != newConfig.Models.LiveLists
 }
