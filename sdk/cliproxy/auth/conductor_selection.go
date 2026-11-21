@@ -200,6 +200,28 @@ func (m *Manager) RefreshSchedulerAll() {
 	}
 }
 
+func isAuthDisabled(auth *Auth) bool {
+	return auth == nil || auth.Disabled || auth.Status == StatusDisabled
+}
+
+func reconcileAggregatedAuthState(auth *Auth, now time.Time) {
+	if auth == nil {
+		return
+	}
+	wasDisabled := isAuthDisabled(auth)
+	wasUnavailable := auth.Unavailable
+	updateAggregatedAvailability(auth, now)
+	if wasDisabled {
+		auth.Unavailable = wasUnavailable
+		return
+	}
+	if !hasModelError(auth, now) && !hasUnauthorizedAuthFailure(auth) {
+		auth.LastError = nil
+		auth.StatusMessage = ""
+		auth.Status = StatusActive
+	}
+}
+
 // ReconcileRegistryModelStates aligns per-model runtime state with the current
 // registry snapshot for one auth.
 //
@@ -288,12 +310,7 @@ func (m *Manager) ReconcileRegistryModelStates(ctx context.Context, authID strin
 			if globalReg.ClientRegistrationEpoch(authID) == regEpoch {
 				auth.ModelStates = candidateAuth.ModelStates
 				if candidateChanged {
-					updateAggregatedAvailability(auth, now)
-					if !hasModelError(auth, now) {
-						auth.LastError = nil
-						auth.StatusMessage = ""
-						auth.Status = StatusActive
-					}
+					reconcileAggregatedAuthState(auth, now)
 					auth.Generation++
 					auth.UpdatedAt = now
 					if errPersist := m.persistLocked(context.Background(), auth); errPersist != nil {
@@ -644,12 +661,7 @@ func (m *Manager) publishOAuthModelAliasAndReconcileStates(ctx context.Context, 
 		supportedModels, regEpoch := globalReg.GetModelsAndEpochForClient(authID)
 		candidateChanged := m.migrateAuthAliasModelStatesLocked(auth, supportedModels, now, false)
 		if candidateChanged {
-			updateAggregatedAvailability(auth, now)
-			if !hasModelError(auth, now) && !hasUnauthorizedAuthFailure(auth) {
-				auth.LastError = nil
-				auth.StatusMessage = ""
-				auth.Status = StatusActive
-			}
+			reconcileAggregatedAuthState(auth, now)
 			auth.Generation++
 			auth.UpdatedAt = now
 		}
@@ -699,12 +711,7 @@ func (m *Manager) publishOAuthModelAliasAndReconcileStates(ctx context.Context, 
 				}
 				postNow := time.Now()
 				if m.migrateAuthAliasModelStatesLocked(current, nil, postNow, false) {
-					updateAggregatedAvailability(current, postNow)
-					if !hasModelError(current, postNow) && !hasUnauthorizedAuthFailure(current) {
-						current.LastError = nil
-						current.StatusMessage = ""
-						current.Status = StatusActive
-					}
+					reconcileAggregatedAuthState(current, postNow)
 					current.Generation++
 					current.UpdatedAt = postNow
 					if m.scheduler != nil {
@@ -2384,7 +2391,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
 	}
 	for _, candidate := range m.auths {
-		if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
+		if isAuthDisabled(candidate) || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey {
 			continue
 		}
 		if !trackPinnedAccounting && pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -2711,7 +2718,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if strings.TrimSpace(model) != "" || targetKey == "codex" {
 		m.mu.RLock()
 		for _, candidate := range m.auths {
-			if candidate == nil || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey || candidate.Disabled {
+			if isAuthDisabled(candidate) || canonicalSchedulingProvider(executorKeyFromAuth(candidate)) != targetKey {
 				continue
 			}
 			if !eligibility.allows(candidate) {
@@ -2789,7 +2796,7 @@ func (m *Manager) HasAlternativeTargetForModel(ctx context.Context, providers []
 	defer m.mu.RUnlock()
 	candidates := make([]*Auth, 0, len(m.auths))
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if isAuthDisabled(candidate) {
 			continue
 		}
 		candidateID := strings.TrimSpace(candidate.ID)
@@ -2872,7 +2879,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		affinityCandidates = make([]*Auth, 0, len(m.auths))
 	}
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if isAuthDisabled(candidate) {
 			continue
 		}
 		if !trackPinnedAccounting && pinnedAuthID != "" && candidate.ID != pinnedAuthID {
@@ -3076,7 +3083,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if strings.TrimSpace(model) != "" || hasCodex {
 		m.mu.RLock()
 		for _, candidate := range m.auths {
-			if candidate == nil || candidate.Disabled {
+			if isAuthDisabled(candidate) {
 				continue
 			}
 			if _, ok := providerSet[canonicalSchedulingProvider(executorKeyFromAuth(candidate))]; !ok {
@@ -3208,7 +3215,7 @@ func (m *Manager) earliestPoolCooldownForModelAt(ctx context.Context, providers 
 	totalCandidates := 0
 	cooling := 0
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if isAuthDisabled(candidate) {
 			continue
 		}
 		if excludeZeroWeight && authWeight(candidate) <= 0 {
@@ -3329,7 +3336,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 	coolingSummaries := make([]string, 0)
 	totalCandidates := 0
 	for _, candidate := range m.auths {
-		if candidate == nil || candidate.Disabled {
+		if isAuthDisabled(candidate) {
 			continue
 		}
 		providerKey := executorKeyFromAuth(candidate)
