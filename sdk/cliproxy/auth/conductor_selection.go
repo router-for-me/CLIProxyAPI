@@ -1999,6 +1999,9 @@ func isRequestRetryRoundError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if !isCredentialScopedError(err) && strings.EqualFold(strings.TrimSpace(errorCodeFromError(err)), transientTransportErrorCode) {
+		return true
+	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)
 }
 

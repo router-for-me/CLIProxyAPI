@@ -376,11 +376,10 @@ func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
 		return nil
 	}
 	code := int(ojson.GetBytesNoCopy(body, "error.code").Int())
-	if code != http.StatusForbidden {
-		return nil
-	}
 	status := strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String())
-	if !strings.EqualFold(status, "PERMISSION_DENIED") {
+	isHTTPForbidden := code == http.StatusForbidden && strings.EqualFold(status, "PERMISSION_DENIED")
+	isGRPCPermissionDenied := code == 7 && (status == "" || strings.EqualFold(status, "PERMISSION_DENIED"))
+	if !isHTTPForbidden && !isGRPCPermissionDenied {
 		return nil
 	}
 	details := ojson.GetBytesNoCopy(body, "error.details")
