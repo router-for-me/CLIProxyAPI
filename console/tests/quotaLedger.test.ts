@@ -27,14 +27,10 @@ const claudeQuota = (fableUsed: number, resetInHours: number) => ({
 });
 
 describe('ledger meters', () => {
-  test('claude spends the model-scoped weekly window and greys the shared one', () => {
+  test('claude shows the shared weekly window, then the model-scoped one, then five hours', () => {
     const meters = selectLedgerMeters('claude', claudeQuota(42, 24).windows);
-    expect(meters.map((m) => [m.id, m.muted])).toEqual([
-      ['seven-day-fable', false],
-      ['five-hour', false],
-      ['seven-day', true],
-    ]);
-    expect(meters[0].remaining).toBe(58);
+    expect(meters.map((m) => m.id)).toEqual(['seven-day', 'seven-day-fable', 'five-hour']);
+    expect(meters[1].remaining).toBe(58);
   });
 
   test('codex shows the weekly window first', () => {

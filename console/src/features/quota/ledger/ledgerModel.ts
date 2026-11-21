@@ -26,8 +26,6 @@ export interface LedgerMeter {
   remaining: number | null;
   resetAtMs: number | null;
   resetLabel: string;
-  /** Shown de-emphasised: informative, but not what routing spends. */
-  muted: boolean;
 }
 
 export interface LedgerRow {
@@ -36,7 +34,7 @@ export interface LedgerRow {
   status: 'idle' | 'loading' | 'success' | 'error';
   error?: string;
   meters: LedgerMeter[];
-  /** The window routing spends first; null until quota has loaded. */
+  /** The first meter shown; null until quota has loaded. */
   primary: LedgerMeter | null;
   /** The weekly (or longer) reset reset-first routing ranks by; null when not reported. */
   weeklyResetAtMs: number | null;
@@ -66,9 +64,11 @@ interface QuotaLike {
   rateLimitResetCredits?: { status?: string; expiresAt?: string }[];
 }
 
-/* Primary window candidates per provider; the first one present is spent first. */
-const CLAUDE_PRIMARY = ['seven-day-fable', 'seven-day'];
-const CODEX_PRIMARY = ['weekly', 'monthly'];
+/* Meters each provider shows, in order; each slot shows the first window present. */
+const METER_SLOTS: Record<LedgerProvider, string[][]> = {
+  claude: [['seven-day'], ['seven-day-fable'], ['five-hour']],
+  codex: [['weekly', 'monthly'], ['five-hour']],
+};
 
 /* The window papa-proxy's reset-first selector ranks by: Claude's shared weekly
  * limit, and Codex's longest window. Mirrors sdk/cliproxy/auth/selector_reset_first.go. */
@@ -99,7 +99,7 @@ const remainingOf = (window: WindowLike): number | null => {
   return Math.max(0, Math.min(100, 100 - used));
 };
 
-const toMeter = (provider: LedgerProvider, window: WindowLike, muted: boolean): LedgerMeter => ({
+const toMeter = (provider: LedgerProvider, window: WindowLike): LedgerMeter => ({
   id: window.id ?? '',
   labelKey: LABEL_KEYS[`${provider}:${window.id}`] ?? window.id ?? '',
   remaining: remainingOf(window),
@@ -108,23 +108,15 @@ const toMeter = (provider: LedgerProvider, window: WindowLike, muted: boolean): 
       ? window.resetAtMs
       : null,
   resetLabel: window.resetLabel ?? '',
-  muted,
 });
 
 /** Pick the meters a ledger row shows, primary first. */
 export function selectLedgerMeters(provider: LedgerProvider, windows: WindowLike[]): LedgerMeter[] {
   const byId = new Map(windows.filter((w) => w.id).map((w) => [w.id as string, w]));
-  const meters: LedgerMeter[] = [];
-  const primaryIds = provider === 'claude' ? CLAUDE_PRIMARY : CODEX_PRIMARY;
-  const primaryId = primaryIds.find((id) => byId.has(id));
-  if (primaryId) meters.push(toMeter(provider, byId.get(primaryId) as WindowLike, false));
-  const fiveHour = byId.get('five-hour');
-  if (fiveHour) meters.push(toMeter(provider, fiveHour, false));
-  // Claude's shared weekly limit stays visible, greyed, beside the model-scoped one.
-  if (provider === 'claude' && primaryId === 'seven-day-fable' && byId.has('seven-day')) {
-    meters.push(toMeter(provider, byId.get('seven-day') as WindowLike, true));
-  }
-  return meters;
+  return METER_SLOTS[provider].flatMap((ids) => {
+    const id = ids.find((candidate) => byId.has(candidate));
+    return id ? [toMeter(provider, byId.get(id) as WindowLike)] : [];
+  });
 }
 
 /**
@@ -154,7 +146,7 @@ export function buildLedgerRows(
         status,
         error: quota.error,
         meters,
-        primary: meters.find((meter) => !meter.muted) ?? null,
+        primary: meters[0] ?? null,
         weeklyResetAtMs:
           status === 'success' ? routingResetOf(provider, quota.windows ?? []) : null,
         planType: quota.planType ?? null,

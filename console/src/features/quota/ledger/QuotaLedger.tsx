@@ -90,11 +90,7 @@ function MeterCell({
 }) {
   // On an exhausted account the empty window is the one that matters; the rest recede.
   const state =
-    meter.remaining === 0
-      ? styles.meterExhausted
-      : meter.muted || rowExhausted
-        ? styles.meterMuted
-        : '';
+    meter.remaining === 0 ? styles.meterExhausted : rowExhausted ? styles.meterMuted : '';
   return (
     <div className={`${styles.meter} ${state}`}>
       <div className={styles.meterHead}>
