@@ -385,3 +385,33 @@ func TestObservePluginExecutorInteractionsUsageIgnoresNullCounters(t *testing.T)
 		})
 	}
 }
+
+func TestObservePluginExecutorInteractionsUsageKeepsStructuredFields(t *testing.T) {
+	t.Parallel()
+
+	for _, protocol := range []string{"interactions", "interactions-response"} {
+		t.Run(protocol+"/single event", func(t *testing.T) {
+			t.Parallel()
+			payload := `{"usage":{"total_input_tokens":10,"input_tokens_by_modality":[{"modality":"IMAGE","tokens":10}],"total_output_tokens":5,"total_tokens":15}}`
+			var buffer StreamUsageBuffer
+			ObservePluginExecutorStreamUsage(protocol, []byte("data: "+payload+"\n\n"), &buffer)
+			got, ok := buffer.Detail()
+			if !ok || got.ImageInputTokens == nil || *got.ImageInputTokens != 10 {
+				t.Fatalf("image input tokens = %+v (ok=%v), want 10", got.ImageInputTokens, ok)
+			}
+		})
+		t.Run(protocol+"/later partial event", func(t *testing.T) {
+			t.Parallel()
+			var buffer StreamUsageBuffer
+			ObservePluginExecutorStreamUsage(protocol, []byte(`data: {"usage":{"total_input_tokens":10,"input_tokens_by_modality":[{"modality":"IMAGE","tokens":10}],"total_tokens":10}}`+"\n\n"), &buffer)
+			ObservePluginExecutorStreamUsage(protocol, []byte(`data: {"usage":{"total_output_tokens":5}}`+"\n\n"), &buffer)
+			got, ok := buffer.Detail()
+			if !ok || got.InputTokens != 10 || got.OutputTokens != 5 || got.TotalTokens != 15 {
+				t.Fatalf("tokens = %+v (ok=%v), want input 10 output 5 total 15", got, ok)
+			}
+			if got.ImageInputTokens == nil || *got.ImageInputTokens != 10 {
+				t.Fatalf("image input tokens = %+v, want 10 retained", got.ImageInputTokens)
+			}
+		})
+	}
+}

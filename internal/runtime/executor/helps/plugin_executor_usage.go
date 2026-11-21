@@ -108,7 +108,8 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 		return
 	}
 	total := firstNumericInteractionsUsageNode(node, "total_tokens", "totalTokenCount")
-	if total.Exists() && total.Float() == 0 {
+	reset := total.Exists() && total.Float() == 0
+	if reset {
 		// An explicit zero total resets omitted counters from earlier snapshots.
 		clear(buffer.interactionsUsage)
 	}
@@ -143,7 +144,25 @@ func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer
 	for key, value := range buffer.interactionsUsage {
 		merged.Set(key, value)
 	}
-	detail := parseInteractionsUsageDetail(util.ParseGJSONBytesNoCopy(merged.Bytes()))
+	counters := parseInteractionsUsageDetail(util.ParseGJSONBytesNoCopy(merged.Bytes()))
+	// Structured fields (modality counts, service tiers, tool details) are not
+	// scalar counters, so take them from the event itself and keep earlier ones.
+	detail := ParseInteractionsUsage(payload)
+	update := detail
+	detail.InputTokens = counters.InputTokens
+	detail.OutputTokens = counters.OutputTokens
+	detail.ReasoningTokens = counters.ReasoningTokens
+	detail.TotalTokens = counters.TotalTokens
+	detail.CachedTokens = counters.CachedTokens
+	detail.CacheReadTokens = counters.CacheReadTokens
+	detail.CacheCreationTokens = counters.CacheCreationTokens
+	detail.TokenBreakdown = counters.TokenBreakdown
+	// The tier is applied after Observe, so a zero-token snapshot still replaces
+	// earlier counters instead of being treated as a tier-only update.
+	detail.ResponseServiceTier = ""
+	if existing, ok := buffer.Detail(); ok && !reset {
+		mergeStreamStructuredFields(&detail, existing, update)
+	}
 	buffer.Observe(detail, true)
 	if tier := extractResponseServiceTier(payload); tier != "" {
 		buffer.detail.ResponseServiceTier = tier
