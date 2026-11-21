@@ -407,29 +407,56 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		if httpSession == nil || acceptedHTTP {
 			return
 		}
-		root := ojson.ParseBytes(payload)
 		event := helps.CodexResponseEventType(payload)
 		switch event {
 		case "error", "response.failed", "response.incomplete":
 			// A terminal frame can be the first one. A response ID distinguishes
 			// an accepted terminal failure from a rejection before admission.
-			acceptedHTTP = codexWebsocketEventResponseID(root, event) != ""
+			acceptedHTTP = codexWebsocketEventResponseID(payload, event) != ""
 		case "response.metadata":
 		default:
 			acceptedHTTP = strings.HasPrefix(event, "response.")
 		}
 	}
 
-	terminalFailure := func(payload []byte) (statusErr, []byte, bool) {
-		if acceptedHTTP {
-			// An explicit failure status on an accepted turn is not a synthetic admission rejection.
-			if status := codexWebsocketErrorStatus(payload); status >= 400 && status <= 599 {
-				if body, ok := codexTerminalFailureBody(payload); ok {
-					return statusErr{code: status, msg: string(body)}, body, true
-				}
-			}
+	// Handle Messages failures before any buffered SSE headers are committed.
+	// Other transports retain their existing admission/cooldown semantics.
+	handleHTTPFailure := func(payload []byte, beforeDelivery bool) error {
+		if httpSession == nil {
+			return nil
 		}
-		return codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling())
+		body, ok := codexTerminalFailureBody(payload)
+		if !ok {
+			return nil
+		}
+		if beforeDelivery && prepared.httpContinuationConn != nil && !acceptedHTTP && codexHTTPMessagesCanRecoverContinuation(payload) {
+			e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "continuation_rejected", nil)
+			sess.clearActive(conn, readCh)
+			unlockStreamSession()
+			return errCodexHTTPMessagesContinuationRejected
+		}
+		status := codexWebsocketErrorStatus(payload)
+		var failure error
+		if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
+			failure = wsErr
+			status = codexWebsocketErrorStatusWithHeaders(payload, parseCodexWebsocketErrorHeaders(payload))
+		} else if status >= 400 && status <= 599 {
+			failure = statusErrWithHeaders{statusErr: statusErr{code: status, msg: string(body)}, headers: parseCodexWebsocketErrorHeaders(payload)}
+		} else {
+			streamErr, _, _ := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling())
+			status, failure = streamErr.StatusCode(), streamErr
+		}
+		e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", failure)
+		sess.clearActive(conn, readCh)
+		unlockStreamSession()
+		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, body); errClearReplay != nil {
+			helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
+			reporter.PublishFailure(ctx, errClearReplay)
+			return guardAcceptedHTTP(errClearReplay)
+		}
+		helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", failure)
+		reporter.PublishFailure(ctx, failure)
+		return guardAcceptedHTTP(failure)
 	}
 
 	if buffering {
@@ -529,12 +556,8 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			observeAcceptedHTTP(payload)
 
-			if prepared.httpContinuationConn != nil && !acceptedHTTP && codexHTTPMessagesParentMissing(payload) {
-				// This rejection proves there is no active generation to replay.
-				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "previous_response_not_found", nil)
-				sess.clearActive(conn, readCh)
-				unlockStreamSession()
-				return nil, errCodexHTTPMessagesParentMissing
+			if failure := handleHTTPFailure(payload, true); failure != nil {
+				return nil, failure
 			}
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				if sess != nil {
@@ -569,7 +592,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 				}
 				return nil, guardAcceptedHTTP(wsErr)
 			}
-			if streamErr, terminalBody, ok := terminalFailure(payload); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
 				// A transient capacity or usage-limit rejection during bootstrap is retried on
 				// another credential, so the downstream websocket session must survive this
 				// upstream teardown. Notifying the disconnect here (or when no buffered payload
@@ -844,6 +867,11 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			observeAcceptedHTTP(payload)
+			if failure := handleHTTPFailure(payload, false); failure != nil {
+				terminateReason, terminateErr = "upstream_error", failure
+				_ = send(cliproxyexecutor.StreamChunk{Err: failure})
+				return
+			}
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
@@ -876,7 +904,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 				}
 				return
 			}
-			if streamErr, terminalBody, ok := terminalFailure(payload); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				// Publish the downstream disconnect only after an in-stream error was delivered,

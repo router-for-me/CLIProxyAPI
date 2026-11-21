@@ -19,14 +19,18 @@ import (
 
 const codexHTTPMessagesLimit = 256
 
-var errCodexHTTPMessagesParentMissing = errors.New("Codex rejected the generated previous_response_id")
+var errCodexHTTPMessagesContinuationRejected = errors.New("Codex rejected the continuation before starting a response")
 
-func codexHTTPMessagesParentMissing(payload []byte) bool {
+func codexHTTPMessagesCanRecoverContinuation(payload []byte) bool {
 	event := helps.CodexResponseEventType(payload)
 	if event != "error" && event != "response.failed" {
 		return false
 	}
 	status := codexWebsocketErrorStatus(payload)
+	if (status == 0 || status == http.StatusBadRequest || status == http.StatusTooManyRequests) &&
+		(isCodexWebsocketConnectionLimitError(payload) || ojson.GetBytesNoCopy(payload, "response.error.code").String() == "websocket_connection_limit_reached") {
+		return true
+	}
 	if status != http.StatusBadRequest && status != http.StatusNotFound && status != 0 {
 		return false
 	}
@@ -91,7 +95,7 @@ func (e *CodexWebsocketsExecutor) serveHTTPMessages(ctx context.Context, auth *c
 		return nil, nil, false
 	}
 	res, err := e.executeStream(ctx, auth, req, opts, sess, release)
-	if cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) || errors.Is(err, errCodexHTTPMessagesParentMissing) {
+	if cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) || errors.Is(err, errCodexHTTPMessagesContinuationRejected) {
 		return nil, nil, false // HTTP sends the original full history after a definite rejection or no write.
 	}
 	return res, err, true

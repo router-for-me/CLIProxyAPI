@@ -35,9 +35,11 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		payloadRules    bool
 		terminalFrame   string
 		terminalStatus  int
+		acknowledge     bool
+		noBuffer        bool
 		internalPath    string
 		contextLimit    bool
-		missingParent   string
+		rejectionFrame  string
 		nonUpgradeOK    bool
 	}{
 		{name: "reuse"},
@@ -49,10 +51,17 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		{name: "accepted capacity failure keeps 503", terminalFrame: `{"type":"response.failed","status":503,"response":{"id":"resp_1","error":{"type":"server_error","code":"model_at_capacity","message":"accepted terminal failure: model is at capacity"}}}`},
 		{name: "only the public Messages route opts in", internalPath: "/internal/claude"},
 		{name: "internal callback stays HTTP even with the Messages path", internalPath: "/v1/messages"},
+		{name: "acknowledged failed event before SSE keeps 413", acknowledge: true, terminalStatus: 413, terminalFrame: `{"type":"response.failed","status":413,"response":{"id":"resp_1","error":{"code":"context_length_exceeded","message":"accepted terminal failure"}}}`},
+		{name: "acknowledged socket limit is not recoverable", acknowledge: true, terminalStatus: 400, terminalFrame: `{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"accepted terminal failure"}}`},
+		{name: "acknowledged failed event before SSE keeps 503", acknowledge: true, terminalFrame: `{"type":"response.failed","status":503,"response":{"id":"resp_1","error":{"code":"model_at_capacity","message":"accepted terminal failure"}}}`},
+		{name: "acknowledged error event before SSE keeps 503", acknowledge: true, terminalFrame: `{"type":"error","status":503,"error":{"code":"model_at_capacity","message":"accepted terminal failure"}}`},
+		{name: "unaccepted terminal failure keeps 413", terminalStatus: 413, terminalFrame: `{"type":"response.failed","status":413,"response":{"error":{"code":"context_length_exceeded","message":"accepted terminal failure"}}}`},
+		{name: "unbuffered unaccepted terminal failure keeps 413", terminalStatus: 413, noBuffer: true, terminalFrame: `{"type":"response.failed","status":413,"response":{"error":{"code":"context_length_exceeded","message":"accepted terminal failure"}}}`},
 		{name: "accepted request preserves known status", contextLimit: true},
-		{name: "expired upstream parent falls back with full input", missingParent: `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
-		{name: "statusless missing parent falls back with full input", missingParent: `{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
-		{name: "untyped statusless missing parent falls back", missingParent: `{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
+		{name: "expired upstream parent falls back with full input", rejectionFrame: `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
+		{name: "statusless missing parent falls back with full input", rejectionFrame: `{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
+		{name: "untyped statusless missing parent falls back", rejectionFrame: `{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
+		{name: "expired upstream socket falls back with full history", rejectionFrame: `{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"connection expired"}}`},
 		{name: "ordinary 200 cannot masquerade as an upgrade", nonUpgradeOK: true, wantHTTP: true},
 		{name: "no replay after an ambiguous disconnect", stopAfterCreate: true},
 		{name: "no replay after a buffered accepted error", acceptedError: true},
@@ -74,7 +83,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !websocket.IsWebSocketUpgrade(r) {
 					httpCalls.Add(1)
-					if test.missingParent != "" {
+					if test.rejectionFrame != "" {
 						body, _ := io.ReadAll(r.Body)
 						fullRetry <- body
 					}
@@ -107,12 +116,15 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 						return
 					}
 					if test.terminalFrame != "" {
+						if test.acknowledge {
+							_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.5","output":[]}}`))
+						}
 						_ = conn.WriteMessage(websocket.TextMessage, []byte(test.terminalFrame))
 						return
 					}
-					if test.missingParent != "" && turn == 2 {
+					if test.rejectionFrame != "" && turn == 2 {
 						frames <- frame
-						_ = conn.WriteMessage(websocket.TextMessage, []byte(test.missingParent))
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(test.rejectionFrame))
 						return
 					}
 					if test.acceptedError || test.contextLimit {
@@ -147,7 +159,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			cfg := &proxyconfig.Config{Codex: proxyconfig.CodexConfig{ServeHTTPMessagesOverWebsockets: !test.disabled}}
 			cfg.PassthroughHeaders = true
 			cfg.Streaming.BootstrapRetries = 2
-			cfg.Codex.StreamBootstrapBuffering = test.acceptedError || test.contextLimit || test.terminalFrame != ""
+			cfg.Codex.StreamBootstrapBuffering = !test.noBuffer && (test.acceptedError || test.contextLimit || test.terminalFrame != "")
 			cfg.Codex.DisableCodexCloaking = test.changeHeader
 			if test.payloadRules {
 				models := []proxyconfig.PayloadModelRule{{Name: "*"}}
@@ -271,7 +283,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"type":"message_stop"`) {
 				t.Fatalf("expected Messages SSE, got %d: %s", second.Code, second.Body)
 			}
-			if test.missingParent != "" {
+			if test.rejectionFrame != "" {
 				if creates.Load() != 2 || httpCalls.Load() != 1 {
 					t.Fatalf("expected one HTTP recovery, websocket=%d http=%d", creates.Load(), httpCalls.Load())
 				}

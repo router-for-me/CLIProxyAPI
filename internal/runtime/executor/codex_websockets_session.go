@@ -895,7 +895,10 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			// id-less failure ends the running one. Success terminals only
 			// carry response.id, and one without an id is left unattributed,
 			// as before.
-			responseID := strings.Clone(codexWebsocketEventResponseID(ojson.ParseBytes(payload), eventType))
+			var responseID string
+			if eventType == "response.created" || isTerminalEvent(eventType) {
+				responseID = strings.Clone(codexWebsocketEventResponseID(payload, eventType))
+			}
 			if eventType == "response.created" {
 				if responseID != "" {
 					sess.activeMu.Lock()
@@ -1163,10 +1166,10 @@ func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string
 }
 
 // codexWebsocketEventResponseID returns the response to which an event belongs.
-func codexWebsocketEventResponseID(root ojson.Result, event string) string {
-	id := root.Get("response.id").String()
+func codexWebsocketEventResponseID(payload []byte, event string) string {
+	id := ojson.GetBytesNoCopy(payload, "response.id").String()
 	if id == "" && (event == "error" || event == "response.failed" || event == "response.incomplete") {
-		return root.Get("response_id").String()
+		return ojson.GetBytesNoCopy(payload, "response_id").String()
 	}
 	return id
 }
