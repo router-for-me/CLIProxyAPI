@@ -108,8 +108,9 @@ jobs:
           key: proxx-timings-${{ github.sha }}
 
   # main only, not required: seeds the Go build cache that every PR job restores.
+  # workflow_dispatch too, so a branch can measure the warm path in its own cache scope.
   warm-cache:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
