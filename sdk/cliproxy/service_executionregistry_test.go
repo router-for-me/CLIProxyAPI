@@ -1450,8 +1450,7 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 	select {
 	case <-secondSubscribe:
-		// Allow heartbeat failure detection plus the existing retry backoff.
-	case <-time.After(5 * homeSubscriberRetryInitial):
+	case <-time.After(time.Second):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
