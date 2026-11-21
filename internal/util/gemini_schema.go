@@ -1396,11 +1396,15 @@ func convertConstToEnum(jsonStr string) string {
 	doc := ojson.NewDocString(jsonStr)
 	modified := false
 	for _, p := range paths {
+		parentPath := trimSuffix(p, ".const")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
 		val := doc.Get(p)
 		if !val.Exists() {
 			continue
 		}
-		enumPath := trimSuffix(p, ".const") + ".enum"
+		enumPath := joinPath(parentPath, "enum")
 		if !doc.Get(enumPath).Exists() {
 			if doc.Set(enumPath, []interface{}{val.Value()}) == nil {
 				modified = true
@@ -1424,6 +1428,10 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 	doc := ojson.NewDocString(jsonStr)
 	modified := false
 	for _, p := range paths {
+		parentPath := trimSuffix(p, ".enum")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
 		arr := doc.Get(p)
 		if !arr.IsArray() {
 			continue
@@ -1438,7 +1446,6 @@ func convertEnumValuesToStrings(jsonStr string, forceStringType bool) string {
 			modified = true
 		}
 		if forceStringType {
-			parentPath := trimSuffix(p, ".enum")
 			if doc.Set(joinPath(parentPath, "type"), "string") == nil {
 				modified = true
 			}
@@ -1458,6 +1465,10 @@ func addEnumHints(jsonStr string) string {
 	doc := ojson.NewDocString(jsonStr)
 	modified := false
 	for _, p := range paths {
+		parentPath := trimSuffix(p, ".enum")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
 		arr := doc.Get(p)
 		if !arr.IsArray() {
 			continue
@@ -1471,7 +1482,7 @@ func addEnumHints(jsonStr string) string {
 		for _, item := range items {
 			vals = append(vals, item.String())
 		}
-		appendHintDoc(doc, trimSuffix(p, ".enum"), "Allowed: "+strings.Join(vals, ", "))
+		appendHintDoc(doc, parentPath, "Allowed: "+strings.Join(vals, ", "))
 		modified = true
 	}
 	if modified {
@@ -1492,6 +1503,9 @@ func dropIgnoredEnumsToHints(jsonStr string, options jsonSchemaCleanOptions) str
 	modified := false
 	for _, path := range paths {
 		parentPath := trimSuffix(path, ".enum")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
 		shouldDrop := options.dropAllEnums || (options.dropBooleanEnums && doc.Get(joinPath(parentPath, "type")).String() == "boolean")
 		if !shouldDrop {
 			continue
@@ -1517,8 +1531,12 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 	doc := ojson.NewDocString(jsonStr)
 	modified := false
 	for _, p := range paths {
+		parentPath := trimSuffix(p, ".additionalProperties")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
 		if doc.Get(p).Type == ojson.False {
-			appendHintDoc(doc, trimSuffix(p, ".additionalProperties"), "No extra properties allowed")
+			appendHintDoc(doc, parentPath, "No extra properties allowed")
 			modified = true
 		}
 	}

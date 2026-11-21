@@ -4275,6 +4275,11 @@ func TestIssue6732_PropertyNamedConstRemainsProperty(t *testing.T) {
 	if parsed.Get("enum").Exists() {
 		t.Errorf("property named const fabricates a root enum: %s", got)
 	}
+	for _, forbidden := range []string{"properties.enum", "properties.type", "properties.description"} {
+		if parsed.Get(forbidden).Exists() {
+			t.Errorf("property named const fabricates %s: %s", forbidden, got)
+		}
+	}
 }
 
 // geminiSchemaDiamondInput builds a schema referencing D12, where each Di is an object with two
@@ -4645,4 +4650,168 @@ func TestIssue7149_CleanJSONSchemaForGeminiJSONSchemaNormalizesNumericConstraint
 	if got := unicodeParsed.Get("properties.Msg.maxLength"); got.Type != ojson.Number || got.Int() != 2 {
 		t.Errorf("unicode-escaped properties.Msg.maxLength = %s (type %v), want number 2; output=%s", got.Raw, got.Type, unicodeEscapedGot)
 	}
+}
+
+// TestIssue7762_PropertyNamedConstEnumAndAdditionalPropertiesPreserved verifies that
+// author-defined tool parameters literally named "const", "enum", or "additionalProperties"
+// are not treated as schema keywords by convertConstToEnum, enum passes, or
+// addAdditionalPropertiesHints.
+func TestIssue7762_PropertyNamedConstEnumAndAdditionalPropertiesPreserved(t *testing.T) {
+	cleaners := map[string]func(string) string{
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(s string) string { return CleanJSONSchemaForAntigravityTool(s, false) },
+		"AntigravityClaudeTool": func(s string) string { return CleanJSONSchemaForAntigravityClaudeTool(s, true) },
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+		"Gemini":                CleanJSONSchemaForGemini,
+		"GeminiJSONSchema":      CleanJSONSchemaForGeminiJSONSchema,
+	}
+
+	t.Run("property named const", func(t *testing.T) {
+		input := `{"type":"object","properties":{"const":{"type":"string"}}}`
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := ojson.Parse(got)
+				if gotType := parsed.Get("properties.const.type").String(); gotType != "string" {
+					t.Errorf("properties.const.type = %q, want string; output=%s", gotType, got)
+				}
+				for _, forbidden := range []string{"properties.description", "properties.enum", "properties.type"} {
+					if parsed.Get(forbidden).Exists() {
+						t.Errorf("unexpected %s fabricated inside properties: %s", forbidden, got)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("property named const with nested const constraint", func(t *testing.T) {
+		input := `{"type":"object","properties":{"const":{"type":"string","const":"v1"}},"required":["const"]}`
+		got := CleanJSONSchemaForAntigravityTool(input, true)
+		parsed := ojson.Parse(got)
+		if gotType := parsed.Get("properties.const.type").String(); gotType != "string" {
+			t.Errorf("properties.const.type = %q, want string; output=%s", gotType, got)
+		}
+		if gotDesc := parsed.Get("properties.const.description").String(); gotDesc != "Allowed: v1" {
+			t.Errorf("properties.const.description = %q, want %q; output=%s", gotDesc, "Allowed: v1", got)
+		}
+		if parsed.Get("properties.const.const").Exists() {
+			t.Errorf("nested const keyword should be stripped: %s", got)
+		}
+		for _, forbidden := range []string{"properties.description", "properties.enum", "properties.type"} {
+			if parsed.Get(forbidden).Exists() {
+				t.Errorf("unexpected %s fabricated inside properties: %s", forbidden, got)
+			}
+		}
+	})
+
+	t.Run("property named enum", func(t *testing.T) {
+		input := `{"type":"object","properties":{"enum":{"type":"string","description":"Enum name"}},"required":["enum"]}`
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := ojson.Parse(got)
+				if gotType := parsed.Get("properties.enum.type").String(); gotType != "string" {
+					t.Errorf("properties.enum.type = %q, want string; output=%s", gotType, got)
+				}
+				if gotDesc := parsed.Get("properties.enum.description").String(); gotDesc != "Enum name" {
+					t.Errorf("properties.enum.description = %q, want %q; output=%s", gotDesc, "Enum name", got)
+				}
+				req := getStrings(got, "required")
+				if !reflect.DeepEqual(req, []string{"enum"}) {
+					t.Errorf("required = %v, want [enum]; output=%s", req, got)
+				}
+				for _, forbidden := range []string{"properties.description", "properties.type"} {
+					if parsed.Get(forbidden).Exists() {
+						t.Errorf("unexpected %s fabricated inside properties: %s", forbidden, got)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("property named enum with nested enum constraint", func(t *testing.T) {
+		input := `{"type":"object","properties":{"enum":{"type":"string","enum":["a","b"]}},"required":["enum"]}`
+		got := CleanJSONSchemaForAntigravityTool(input, true)
+		parsed := ojson.Parse(got)
+		if gotType := parsed.Get("properties.enum.type").String(); gotType != "string" {
+			t.Errorf("properties.enum.type = %q, want string; output=%s", gotType, got)
+		}
+		if gotDesc := parsed.Get("properties.enum.description").String(); gotDesc != "Allowed: a, b" {
+			t.Errorf("properties.enum.description = %q, want %q; output=%s", gotDesc, "Allowed: a, b", got)
+		}
+		if parsed.Get("properties.enum.enum").Exists() {
+			t.Errorf("nested enum keyword should be dropped on Antigravity tool: %s", got)
+		}
+		if parsed.Get("properties.description").Exists() {
+			t.Errorf("unexpected properties.description fabricated: %s", got)
+		}
+	})
+
+	t.Run("property named additionalProperties with false value", func(t *testing.T) {
+		input := `{"type":"object","properties":{"additionalProperties":false}}`
+		for name, clean := range cleaners {
+			t.Run(name, func(t *testing.T) {
+				got := clean(input)
+				parsed := ojson.Parse(got)
+				if parsed.Get("properties.additionalProperties").Type != ojson.False {
+					t.Errorf("properties.additionalProperties = %s, want false; output=%s", parsed.Get("properties.additionalProperties").Raw, got)
+				}
+				if parsed.Get("properties.description").Exists() {
+					t.Errorf("unexpected properties.description fabricated: %s", got)
+				}
+			})
+		}
+	})
+
+	t.Run("property named additionalProperties with nested additionalProperties false", func(t *testing.T) {
+		input := `{"type":"object","properties":{"additionalProperties":{"type":"object","properties":{"x":{"type":"string"}},"additionalProperties":false}}}`
+		got := CleanJSONSchemaForAntigravityTool(input, false)
+		parsed := ojson.Parse(got)
+		if gotDesc := parsed.Get("properties.additionalProperties.description").String(); gotDesc != "No extra properties allowed" {
+			t.Errorf("properties.additionalProperties.description = %q, want %q; output=%s", gotDesc, "No extra properties allowed", got)
+		}
+		if parsed.Get("properties.additionalProperties.additionalProperties").Exists() {
+			t.Errorf("nested additionalProperties keyword should be stripped: %s", got)
+		}
+		if parsed.Get("properties.description").Exists() {
+			t.Errorf("unexpected properties.description fabricated: %s", got)
+		}
+	})
+
+	t.Run("direct passes skip property map entries", func(t *testing.T) {
+		// Verify each guarded pass independently skips name-map keys even when values look like keywords.
+		constInput := `{"type":"object","properties":{"const":{"type":"string"}}}`
+		if got := convertConstToEnum(constInput); got != constInput {
+			t.Errorf("convertConstToEnum mutated properties.const: got=%s", got)
+		}
+
+		enumArrInput := `{"type":"object","properties":{"enum":[1,2]}}`
+		if got := convertEnumValuesToStrings(enumArrInput, true); got != enumArrInput {
+			t.Errorf("convertEnumValuesToStrings mutated properties.enum: got=%s", got)
+		}
+		if got := addEnumHints(enumArrInput); got != enumArrInput {
+			t.Errorf("addEnumHints mutated properties.enum: got=%s", got)
+		}
+		if got := dropIgnoredEnumsToHints(enumArrInput, jsonSchemaCleanOptions{dropAllEnums: true}); got != enumArrInput {
+			t.Errorf("dropIgnoredEnumsToHints mutated properties.enum: got=%s", got)
+		}
+
+		addPropsInput := `{"type":"object","properties":{"additionalProperties":false}}`
+		if got := addAdditionalPropertiesHints(addPropsInput); got != addPropsInput {
+			t.Errorf("addAdditionalPropertiesHints mutated properties.additionalProperties: got=%s", got)
+		}
+	})
+
+	t.Run("root-level const converts to root enum", func(t *testing.T) {
+		input := `{"type":"string","const":"fixed"}`
+		got := convertConstToEnum(input)
+		parsed := ojson.Parse(got)
+		enum := getStrings(got, "enum")
+		if !reflect.DeepEqual(enum, []string{"fixed"}) {
+			t.Errorf("root enum = %v, want [fixed]; output=%s", enum, got)
+		}
+		if _, hasEmptyKey := parsed.Map()[""]; hasEmptyKey {
+			t.Errorf("unexpected empty key fabricated in root object: %s", got)
+		}
+	})
 }
