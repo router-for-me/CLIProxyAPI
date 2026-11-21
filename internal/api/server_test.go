@@ -1608,7 +1608,9 @@ func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	server := newTestServer(t)
-	state := "server-plugin-oauth-state"
+	// Completed sessions stay in the global store until they expire, so a
+	// fixed state would collide when the test runs again (-count > 1).
+	state := "server-plugin-oauth-state-" + uuid.NewString()
 	if errRegister := managementHandlers.RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
 		t.Fatalf("register plugin oauth session: %v", errRegister)
 	}
