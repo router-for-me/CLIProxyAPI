@@ -677,3 +677,189 @@ func TestGoPluginLoaderReportsFallbackFailure(t *testing.T) {
 		t.Fatalf("error %q does not carry the underlying plugin failure", err)
 	}
 }
+
+// countingGuard records the releases of a shadow coordination guard.
+//
+// The release closures returned by acquireShadowPluginLoad and
+// acquireShadowPluginFallbackLoad are wrapped in a sync.Once, so releasing
+// them twice has no additional effect. This counter records the calls
+// instead, so the test can assert that the loader releases the guard
+// exactly once on every return path.
+type countingGuard struct {
+	calls int32
+}
+
+// release releases the guard and records the call.
+func (g *countingGuard) release() {
+	atomic.AddInt32(&g.calls, 1)
+}
+
+// releases returns the number of release calls.
+func (g *countingGuard) releases() int {
+	return int(atomic.LoadInt32(&g.calls))
+}
+
+// TestGoPluginLoaderReleasesPrimaryGuardBeforeFallback verifies that the
+// primary shadow coordination guard is released before the executable
+// fallback lock is taken, and exactly once on every return path.
+//
+// The primary shadow lock and the executable fallback lock are both derived
+// from the digest of the plugin's directory, so they live in the same lock
+// file. Taking the fallback lock while the primary lock is still held keeps
+// the lock file descriptor open for the rest of the process, and the
+// exclusive lock that the shadow pruning takes on the same file keeps
+// failing.
+func TestGoPluginLoaderReleasesPrimaryGuardBeforeFallback(t *testing.T) {
+	resetGoPluginFailures(t)
+	goPluginFallbackPaths.Clear()
+	t.Cleanup(func() { goPluginFallbackPaths.Clear() })
+
+	// writePlugin creates a plugin artifact in a directory of its own. Every
+	// subtest needs its own file: the loader keys the failure and fallback
+	// records by the content-addressed shadow path.
+	writePlugin := func(t *testing.T) string {
+		t.Helper()
+		target := filepath.Join(t.TempDir(), "probe.so")
+		if err := os.WriteFile(target, []byte("plugin"), 0o600); err != nil {
+			t.Fatalf("write plugin: %v", err)
+		}
+		return target
+	}
+
+	// lookupFactory is the loader's lookup seam. It hands out a factory
+	// that returns a usable plugin instance.
+	lookupFactory := func(*plugin.Plugin, string) (plugin.Symbol, error) {
+		return plugin.Symbol(func(pluginapi.GoPluginCaller) (pluginapi.GoPlugin, error) {
+			return &fakeGoPlugin{}, nil
+		}), nil
+	}
+
+	t.Run("a failing primary load releases the guard before the fallback", func(t *testing.T) {
+		target := writePlugin(t)
+		localPath := canonicalizePluginPath(target)
+		guard := &countingGuard{}
+		releasesAtFallback := -1
+		loader := goPluginLoader{
+			shadow: func(pluginFile) (string, func(), error) {
+				return target, guard.release, nil
+			},
+			open: func(path string) (*plugin.Plugin, error) {
+				if path == localPath {
+					return nil, errors.New("permission denied")
+				}
+				releasesAtFallback = guard.releases()
+				return &plugin.Plugin{}, nil
+			},
+			lookup: lookupFactory,
+		}
+
+		client, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{})
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected a client")
+		}
+		if releasesAtFallback < 1 {
+			t.Fatalf("the primary guard was still held when the fallback lock was taken: %d releases, want at least 1", releasesAtFallback)
+		}
+		if got := guard.releases(); got != 1 {
+			t.Fatalf("the primary guard was released %d times, want 1", got)
+		}
+	})
+
+	t.Run("a successful primary load releases the guard exactly once", func(t *testing.T) {
+		target := writePlugin(t)
+		localPath := canonicalizePluginPath(target)
+		guard := &countingGuard{}
+		loader := goPluginLoader{
+			shadow: func(pluginFile) (string, func(), error) {
+				return target, guard.release, nil
+			},
+			open: func(path string) (*plugin.Plugin, error) {
+				if path != localPath {
+					t.Fatalf("opened %q, want the local shadow copy %q", path, localPath)
+				}
+				return &plugin.Plugin{}, nil
+			},
+			lookup: lookupFactory,
+		}
+
+		client, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{})
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected a client")
+		}
+		if got := guard.releases(); got != 1 {
+			t.Fatalf("the primary guard was released %d times, want 1", got)
+		}
+	})
+
+	t.Run("a failing fallback releases the guard exactly once", func(t *testing.T) {
+		target := writePlugin(t)
+		guard := &countingGuard{}
+		loader := goPluginLoader{
+			shadow: func(pluginFile) (string, func(), error) {
+				return target, guard.release, nil
+			},
+			open: func(string) (*plugin.Plugin, error) {
+				return nil, errors.New("plugin was built with a different version of package")
+			},
+			lookup: func(*plugin.Plugin, string) (plugin.Symbol, error) {
+				t.Fatal("lookup must not run after a failed open")
+				return nil, nil
+			},
+		}
+
+		if _, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{}); err == nil {
+			t.Fatal("expected the load to fail")
+		}
+		if got := guard.releases(); got != 1 {
+			t.Fatalf("the primary guard was released %d times, want 1", got)
+		}
+	})
+
+	t.Run("a fallback-only path releases the guard before the fallback", func(t *testing.T) {
+		target := writePlugin(t)
+		localPath := canonicalizePluginPath(target)
+		// Mark the load path as fallback-only, the way a previous load that
+		// could not use the local shadow copy did.
+		goPluginFallbackPaths.Store(localPath, struct{}{})
+		guard := &countingGuard{}
+		releasesAtFallback := -1
+		primaryOpens := 0
+		loader := goPluginLoader{
+			shadow: func(pluginFile) (string, func(), error) {
+				return target, guard.release, nil
+			},
+			open: func(path string) (*plugin.Plugin, error) {
+				if path == localPath {
+					primaryOpens++
+					return &plugin.Plugin{}, nil
+				}
+				releasesAtFallback = guard.releases()
+				return &plugin.Plugin{}, nil
+			},
+			lookup: lookupFactory,
+		}
+
+		client, err := loader.Open(pluginFile{ID: "p", Path: target}, &Host{})
+		if err != nil {
+			t.Fatalf("Open failed: %v", err)
+		}
+		if client == nil {
+			t.Fatal("expected a client")
+		}
+		if primaryOpens != 0 {
+			t.Fatalf("the local shadow copy was opened %d times, want 0 for a fallback-only path", primaryOpens)
+		}
+		if releasesAtFallback < 1 {
+			t.Fatalf("the primary guard was still held when the fallback lock was taken: %d releases, want at least 1", releasesAtFallback)
+		}
+		if got := guard.releases(); got != 1 {
+			t.Fatalf("the primary guard was released %d times, want 1", got)
+		}
+	})
+}
