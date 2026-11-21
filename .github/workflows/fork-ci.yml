@@ -47,9 +47,5 @@ jobs:
           bash .github/scripts/refresh-model-catalogs.sh
           go build -o "$RUNNER_TEMP/cli-proxy-api" ./cmd/server
 
-      # Upstream never runs go test, so its own stale assertion ships red:
-      # TestModelsWithClientVersionReturnsCodexCatalog still expects gpt-5.5 to carry a
-      # "priority" service tier, which upstream a5e8f69e removed from the checked-in
-      # catalog. Skip that one test until upstream fixes it; everything else enforces.
       - name: Test
-        run: go test -timeout 20m -skip 'TestModelsWithClientVersionReturnsCodexCatalog' ./...
+        run: go test -timeout 20m ./...

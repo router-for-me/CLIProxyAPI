@@ -1,6 +1,6 @@
 # Fork state
 
-Last updated: 2026-11-19
+Last updated: 2026-11-21
 
 ## Verified
 
@@ -29,10 +29,11 @@ state, 14 files), #7643 (shorten overlong Codex call IDs — cheap follow-up).
 
 ## CI
 
-`fork-ci` runs build + tests. Upstream never runs `go test`, so its own
-`TestModelsWithClientVersionReturnsCodexCatalog` assertion has been stale since `a5e8f69e`
-(dropped gpt-5.5's priority tier). That single test is skipped with a comment in
-`fork-ci.yml`; everything else enforces. `go vet` stays advisory because upstream's
+`fork-ci` runs build + the full test suite. The 2026-11-21 upstream sync failed
+because `TestModelsWithClientVersionReturnsCodexCatalog` hard-coded gpt-5.5
+metadata that differs between the embedded and refreshed catalogs. The test
+now checks the loaded template and still checks the custom model's fallback
+version. Both workflows run the test. `go vet` stays advisory because upstream's
 `internal/pluginhost/host_test.go` trips copylocks.
 
 First run with the merged PRs failed once in
@@ -44,14 +45,19 @@ rerun first; only investigate if it repeats.
 
 ## Touched upstream files
 
-- `.github/workflows/fork-ci.yml` — advisory vet + one skipped upstream assertion (both commented).
+- `internal/api/server_test.go` — check the loaded Codex template's version and
+  service tiers in the catalog integration test. Drop this patch once upstream
+  accounts for refreshed catalog metadata.
+- Fork-owned `.github/workflows/fork-ci.yml` runs all tests with advisory vet.
 - Our additions: `FORK.md`, `FORK-STATE.md`, `.github/workflows/sync-upstream.yml`.
 
-## Not verified yet
+## 2026-11-21 sync verification
 
-- First green `fork-ci` run with the merged PRs (running now).
-- First `sync-upstream` run (expected "Nothing new upstream").
-- No local Go toolchain on this machine, so CI is the only build evidence.
+- Reproduced the CI failure locally with refreshed catalogs. The targeted
+  test and the `internal/api` package passed with refreshed catalogs after
+  the fix. The package also passed with embedded catalogs, and the server built.
+- Full-suite CI and the merge are pending. The current `main` build-test job
+  is queued for an `instabox-medium` runner.
 
 ## Next
 
