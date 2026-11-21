@@ -19,6 +19,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -47,10 +48,18 @@ func seedTestSettledConfigs(t *testing.T) map[string]string {
 	if errHash != nil {
 		t.Fatalf("bcrypt.GenerateFromPassword() error = %v", errHash)
 	}
-	return map[string]string{
+	settled := map[string]string{
 		"hashed secret": "# operator note\nport: 8317\nremote-management:\n  secret-key: '" + string(hashed) + "'\n",
 		"null secret":   "# operator note\nport: 8317\nmanagement:\n  secret-key: null\n",
 	}
+	for name, data := range settled {
+		prepared, _, errPrepare := config.EnsureServerIDInConfigBytes([]byte(data))
+		if errPrepare != nil {
+			t.Fatal(errPrepare)
+		}
+		settled[name] = string(prepared)
+	}
+	return settled
 }
 
 func writeSeedTestFile(t *testing.T, path, content string) {
@@ -96,11 +105,34 @@ func assertSeededWithHashedSecret(t *testing.T, seeded []byte, configPath, secti
 
 // newSeedTestObjectStore returns an object store whose bucket has no config object and
 // records every config upload.
-func newSeedTestObjectStore(t *testing.T, configPath string) (*ObjectTokenStore, *[][]byte) {
+func newSeedTestObjectStore(t *testing.T, configPath string) (*ObjectTokenStore, func() [][]byte) {
 	t.Helper()
-	// Every request answers 404, so the bucket holds no config.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
+	var uploadMu sync.Mutex
+	var uploads [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bucket/"+objectStoreConfigKey {
+			t.Errorf("unexpected object path: %s", r.URL.Path)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPut:
+			if got := r.Header.Get("If-None-Match"); got != "*" {
+				t.Errorf("If-None-Match = %q, want literal *", got)
+			}
+			data, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Error(errRead)
+			}
+			uploadMu.Lock()
+			uploads = append(uploads, data)
+			uploadMu.Unlock()
+			w.Header().Set("ETag", "seeded")
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected method: %s", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 	}))
 	t.Cleanup(server.Close)
 	client, errClient := minio.New(strings.TrimPrefix(server.URL, "http://"), &minio.Options{
@@ -110,20 +142,16 @@ func newSeedTestObjectStore(t *testing.T, configPath string) (*ObjectTokenStore,
 	if errClient != nil {
 		t.Fatalf("minio.New() error = %v", errClient)
 	}
-	uploads := &[][]byte{}
 	objectStore := &ObjectTokenStore{
 		client:     client,
 		cfg:        ObjectStoreConfig{Bucket: "bucket"},
 		configPath: configPath,
-		putObjectFn: func(_ context.Context, key string, data []byte, _ string) error {
-			if key != objectStoreConfigKey {
-				return fmt.Errorf("unexpected object upload %s", key)
-			}
-			*uploads = append(*uploads, append([]byte(nil), data...))
-			return nil
-		},
 	}
-	return objectStore, uploads
+	return objectStore, func() [][]byte {
+		uploadMu.Lock()
+		defer uploadMu.Unlock()
+		return append([][]byte(nil), uploads...)
+	}
 }
 
 func TestObjectTokenStoreSeedHashesPlaintextManagementSecret(t *testing.T) {
@@ -131,15 +159,16 @@ func TestObjectTokenStoreSeedHashesPlaintextManagementSecret(t *testing.T) {
 	examplePath := filepath.Join(dir, "config.example.yaml")
 	writeSeedTestFile(t, examplePath, seedTestPlaintextConfig("remote-management"))
 	configPath := filepath.Join(dir, "objectstore", "config", "config.yaml")
-	objectStore, uploads := newSeedTestObjectStore(t, configPath)
+	objectStore, readUploads := newSeedTestObjectStore(t, configPath)
 
-	if errSync := objectStore.syncConfigFromBucket(context.Background(), examplePath); errSync != nil {
+	if _, errSync := objectStore.syncConfigFromBucket(context.Background(), examplePath); errSync != nil {
 		t.Fatalf("syncConfigFromBucket() error = %v", errSync)
 	}
-	if len(*uploads) != 1 {
-		t.Fatalf("config uploads = %d, want 1", len(*uploads))
+	uploads := readUploads()
+	if len(uploads) != 1 {
+		t.Fatalf("config uploads = %d, want 1", len(uploads))
 	}
-	assertSeededWithHashedSecret(t, (*uploads)[0], configPath, "remote-management")
+	assertSeededWithHashedSecret(t, uploads[0], configPath, "remote-management")
 }
 
 func TestObjectTokenStoreSeedUploadsSettledConfigUnchanged(t *testing.T) {
@@ -147,13 +176,13 @@ func TestObjectTokenStoreSeedUploadsSettledConfigUnchanged(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			writeSeedTestFile(t, configPath, original)
-			objectStore, uploads := newSeedTestObjectStore(t, configPath)
+			objectStore, readUploads := newSeedTestObjectStore(t, configPath)
 
-			if errSync := objectStore.syncConfigFromBucket(context.Background(), ""); errSync != nil {
+			if _, errSync := objectStore.syncConfigFromBucket(context.Background(), ""); errSync != nil {
 				t.Fatalf("syncConfigFromBucket() error = %v", errSync)
 			}
-			if len(*uploads) != 1 || string((*uploads)[0]) != original {
-				t.Fatalf("config uploads = %q, want exactly the original config %q", *uploads, original)
+			if uploads := readUploads(); len(uploads) != 1 || string(uploads[0]) != original {
+				t.Fatalf("config uploads = %q, want exactly the original config %q", uploads, original)
 			}
 			if local := readSeedTestFile(t, configPath); string(local) != original {
 				t.Fatalf("local config rewritten to %q, want it untouched", local)
@@ -169,15 +198,15 @@ func TestObjectTokenStoreSeedRefusesConfigThatKeepsPlaintextSecret(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			configPath := filepath.Join(t.TempDir(), "config.yaml")
 			writeSeedTestFile(t, configPath, content)
-			objectStore, uploads := newSeedTestObjectStore(t, configPath)
+			objectStore, readUploads := newSeedTestObjectStore(t, configPath)
 
 			for attempt := 1; attempt <= 2; attempt++ {
-				if errSync := objectStore.syncConfigFromBucket(context.Background(), ""); errSync == nil {
+				if _, errSync := objectStore.syncConfigFromBucket(context.Background(), ""); errSync == nil {
 					t.Fatalf("attempt %d: syncConfigFromBucket() succeeded, want bootstrap to fail", attempt)
 				}
 			}
-			if len(*uploads) != 0 {
-				t.Fatalf("uploaded a config that still holds the plaintext secret:\n%s", (*uploads)[0])
+			if uploads := readUploads(); len(uploads) != 0 {
+				t.Fatalf("uploaded a config that still holds the plaintext secret:\n%s", uploads[0])
 			}
 			if local := readSeedTestFile(t, configPath); string(local) != content {
 				t.Fatalf("local config rewritten to %q, want the original kept", local)
@@ -189,8 +218,9 @@ func TestObjectTokenStoreSeedRefusesConfigThatKeepsPlaintextSecret(t *testing.T)
 // seedTestDatabase is a database/sql driver whose config table is empty; it records
 // every config upsert.
 type seedTestDatabase struct {
-	mu      sync.Mutex
-	upserts []string
+	mu          sync.Mutex
+	upserts     []string
+	beforeWrite func(string) error
 }
 
 type seedTestConn struct {
@@ -222,12 +252,17 @@ func (*seedTestConn) Begin() (driver.Tx, error) {
 }
 
 func (c *seedTestConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	if !strings.Contains(query, "INSERT INTO") || len(args) != 2 {
+	if !strings.Contains(query, "ON CONFLICT (id) DO NOTHING") || len(args) != 2 {
 		return nil, fmt.Errorf("unexpected statement %q", query)
 	}
 	content, ok := args[1].Value.(string)
 	if !ok {
 		return nil, errors.New("config content is not a string")
+	}
+	if c.database.beforeWrite != nil {
+		if errWrite := c.database.beforeWrite(content); errWrite != nil {
+			return nil, errWrite
+		}
 	}
 	c.database.mu.Lock()
 	c.database.upserts = append(c.database.upserts, content)
@@ -279,7 +314,7 @@ func TestPostgresStoreSeedHashesPlaintextManagementSecret(t *testing.T) {
 	writeSeedTestFile(t, configPath, seedTestPlaintextConfig("management"))
 	postgresStore, database := newSeedTestPostgresStore(t, configPath)
 
-	if errSync := postgresStore.syncConfigFromDatabase(context.Background(), ""); errSync != nil {
+	if _, errSync := postgresStore.syncConfigFromDatabase(context.Background(), ""); errSync != nil {
 		t.Fatalf("syncConfigFromDatabase() error = %v", errSync)
 	}
 	upserts := database.recordedUpserts()
@@ -296,7 +331,7 @@ func TestPostgresStoreSeedUploadsSettledConfigUnchanged(t *testing.T) {
 			writeSeedTestFile(t, configPath, original)
 			postgresStore, database := newSeedTestPostgresStore(t, configPath)
 
-			if errSync := postgresStore.syncConfigFromDatabase(context.Background(), ""); errSync != nil {
+			if _, errSync := postgresStore.syncConfigFromDatabase(context.Background(), ""); errSync != nil {
 				t.Fatalf("syncConfigFromDatabase() error = %v", errSync)
 			}
 			if upserts := database.recordedUpserts(); len(upserts) != 1 || upserts[0] != original {
@@ -319,7 +354,7 @@ func TestPostgresStoreSeedRefusesConfigThatKeepsPlaintextSecret(t *testing.T) {
 			postgresStore, database := newSeedTestPostgresStore(t, configPath)
 
 			for attempt := 1; attempt <= 2; attempt++ {
-				if errSync := postgresStore.syncConfigFromDatabase(context.Background(), ""); errSync == nil {
+				if _, errSync := postgresStore.syncConfigFromDatabase(context.Background(), ""); errSync == nil {
 					t.Fatalf("attempt %d: syncConfigFromDatabase() succeeded, want bootstrap to fail", attempt)
 				}
 			}
@@ -330,5 +365,47 @@ func TestPostgresStoreSeedRefusesConfigThatKeepsPlaintextSecret(t *testing.T) {
 				t.Fatalf("local config rewritten to %q, want the original kept", local)
 			}
 		})
+	}
+}
+
+func TestPostgresPersistConfigUploadsExactVerifiedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	const tail = "---\r\npreserve: true\r\n"
+	writeSeedTestFile(t, path, seedTestPlaintextConfig("management")+tail)
+	store, database := newSeedTestPostgresStore(t, path)
+	const edit = "port: 8888\nmanagement:\n  secret-key: kept-locally\n"
+	database.beforeWrite = func(content string) error {
+		snapshot, errRead := config.ReadConfigFileSnapshot(path)
+		if errRead != nil {
+			return errRead
+		}
+		if content != string(snapshot.Bytes()) || strings.Contains(content, seedTestPlaintextSecret) || !strings.HasSuffix(content, tail) {
+			return fmt.Errorf("persistence did not use the exact verified spool snapshot")
+		}
+		_, errWrite := config.WriteConfigFileCAS(path, snapshot, []byte(edit))
+		return errWrite
+	}
+	if errPersist := store.PersistConfig(context.Background()); errPersist != nil {
+		t.Fatal(errPersist)
+	}
+	if upserts := database.recordedUpserts(); len(upserts) != 1 || string(readSeedTestFile(t, path)) != edit {
+		t.Fatal("verified upload changed a concurrent local edit")
+	}
+}
+
+func TestPostgresOptionalConfigStandsByWithoutUploading(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeSeedTestFile(t, path, "port: [\n")
+	store, database := newSeedTestPostgresStore(t, path)
+	store.cfg.OptionalConfig = true
+	cfg, errSync := store.syncConfigFromDatabase(context.Background(), "")
+	if errSync != nil || cfg.ServerID != "" || cfg.SourceHash != "" {
+		t.Fatalf("invalid config did not enter standby: %v", errSync)
+	}
+	if errPersist := store.PersistConfig(context.Background()); errPersist != nil {
+		t.Fatal(errPersist)
+	}
+	if upserts := database.recordedUpserts(); len(upserts) != 0 || string(readSeedTestFile(t, path)) != "port: [\n" {
+		t.Fatal("standby uploaded or modified the invalid input")
 	}
 }

@@ -22,6 +22,11 @@ models:
 
 # Listener, TLS, network discovery, and server operation.
 server:
+  # Deployment UUID. Leave empty to generate and save one on the first valid startup.
+  # The value is normalized to lowercase; a read-only file uses a generated ID for
+  # this process only. Reuse the persisted value across restarts and shared storage.
+  server-id: ""
+
   # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
   # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
   host: ""
@@ -1242,6 +1247,8 @@ oauth:
     codex:
       # Terminate and relay Codex Live WebRTC audio and DataChannel traffic in this process.
       # This requires inbound UDP reachability. Keep disabled to preserve direct media behavior.
+      # On Solaris and illumos, leave this disabled: in-process media relay is unsupported.
+      # Enabling it returns HTTP 503 for call setup; direct SDP forwarding and sideband work when disabled.
       live-media-relay:
         enabled: false
         # Maximum concurrent media sessions. Zero uses the default of 32.
