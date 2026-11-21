@@ -136,6 +136,11 @@ type ClaudeClientConfig struct {
 	// ShowCodexCommentary mirrors public Codex progress into visible Claude text.
 	// Default false preserves the existing hidden-commentary behavior.
 	ShowCodexCommentary bool `yaml:"show-codex-commentary" json:"show-codex-commentary"`
+
+	// AnthropicOAuthPassthrough forwards requests that carry the client's own Anthropic
+	// credential (an sk-ant- OAuth token or Console API key that is not a configured
+	// access key) unchanged to api.anthropic.com. Default false rejects them with 401.
+	AnthropicOAuthPassthrough bool `yaml:"anthropic-oauth-passthrough" json:"anthropic-oauth-passthrough"`
 }
 
 // CodexClientConfig configures Codex client compatibility and the model catalog.

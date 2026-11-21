@@ -269,6 +269,8 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
 	engine.Use(s.exampleAPIKeySafeModeMiddleware())
+	// Forward client-owned Anthropic credentials after the server-wide gates above.
+	engine.Use(s.claudeOAuthPassthroughMiddleware(s.newDefaultAnthropicPassthroughProxy()))
 
 	// Setup routes
 	s.setupRoutes()
