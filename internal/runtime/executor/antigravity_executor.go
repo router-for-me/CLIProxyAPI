@@ -9,8 +9,10 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -1033,29 +1035,41 @@ func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 
 // PrepareRequest injects Antigravity credentials into the outgoing HTTP request.
 func (e *AntigravityExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	_, errPrepare := e.prepareRequestWithAuth(req, auth)
+	return errPrepare
+}
+
+func (e *AntigravityExecutor) prepareRequestWithAuth(req *http.Request, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if req == nil {
-		return nil
+		return auth, nil
 	}
-	token, _, errToken := e.ensureAccessToken(req.Context(), auth)
+	token, updatedAuth, errToken := e.ensureAccessToken(req.Context(), auth)
 	if errToken != nil {
-		return errToken
+		return nil, errToken
+	}
+	if updatedAuth != nil {
+		auth = updatedAuth
 	}
 	if strings.TrimSpace(token) == "" {
-		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	return nil
+	return auth, nil
 }
 
 // HttpRequest injects Antigravity credentials into the request and executes it.
 // It uses a whitelist approach: all incoming headers are stripped and only
-// the minimum set required by the Antigravity protocol is explicitly set.
+// the minimum set required by the Antigravity protocol (plus per-credential
+// custom header:* attributes) is explicitly set.
 func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("antigravity executor: request is nil")
 	}
 	if ctx == nil {
 		ctx = req.Context()
+	}
+	if antigravityInTOSPause(e.cfg, auth) {
+		return nil, newAntigravityTOSPauseStatusErr()
 	}
 	httpReq := req.WithContext(ctx)
 
@@ -1068,25 +1082,140 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	// --- Whitelist: save only the headers we need from the original request ---
 	contentType := httpReq.Header.Get("Content-Type")
 
-	// Wipe ALL incoming headers
-	for k := range httpReq.Header {
-		delete(httpReq.Header, k)
-	}
+	// Wipe ALL incoming headers without mutating the caller's header map or panicking on nil Header.
+	httpReq.Header = make(http.Header)
 
 	// --- Set only the headers Antigravity actually sends ---
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}
+
+	// Inject Authorization: Bearer <token> and adopt any refreshed/newer auth snapshot.
+	effectiveAuth, errPrepare := e.prepareRequestWithAuth(httpReq, auth)
+	if errPrepare != nil {
+		return nil, errPrepare
+	}
+	if effectiveAuth != nil {
+		auth = effectiveAuth
+	}
+
 	// Content-Length is managed automatically by Go's http.Client from the Body
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
 
-	// Inject Authorization: Bearer <token>
-	if err := e.PrepareRequest(httpReq, auth); err != nil {
-		return nil, err
+	if httpReq.URL != nil {
+		if host := strings.TrimSpace(httpReq.URL.Host); host != "" {
+			httpReq.Host = host
+		}
 	}
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	return helps.WithAntigravityHTTPClientTrace(httpClient, auth, "http_request").Do(httpReq)
+	httpClient := helps.WithAntigravityHTTPClientTrace(newAntigravityHTTPClient(ctx, e.cfg, auth, 0), auth, "http_request")
+	installAntigravityHTTPRequestRedirectPolicy(httpClient, attrs)
+	return httpClient.Do(httpReq)
+}
+
+func installAntigravityHTTPRequestRedirectPolicy(client *http.Client, attrs map[string]string) {
+	if client == nil {
+		return
+	}
+	customNames := antigravityCustomHeaderNames(attrs)
+	previous := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if antigravityCrossOriginRedirect(req, via) {
+			stripAntigravityCrossOriginHeaders(req, customNames)
+		}
+		if previous != nil {
+			return previous(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+}
+
+func antigravityCustomHeaderNames(attrs map[string]string) map[string]struct{} {
+	if len(attrs) == 0 {
+		return nil
+	}
+	names := make(map[string]struct{})
+	for k := range attrs {
+		if !strings.HasPrefix(k, "header:") {
+			continue
+		}
+		name := strings.TrimSpace(strings.TrimPrefix(k, "header:"))
+		if name == "" {
+			continue
+		}
+		names[strings.ToLower(name)] = struct{}{}
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+func stripAntigravityCrossOriginHeaders(req *http.Request, customNames map[string]struct{}) {
+	if req == nil {
+		return
+	}
+	req.Host = ""
+	for name := range req.Header {
+		lower := strings.ToLower(name)
+		if lower == "authorization" || lower == "host" {
+			delete(req.Header, name)
+			continue
+		}
+		if _, ok := customNames[lower]; ok {
+			delete(req.Header, name)
+		}
+	}
+}
+
+func antigravityCrossOriginRedirect(req *http.Request, via []*http.Request) bool {
+	if req == nil || len(via) == 0 || via[0] == nil {
+		return false
+	}
+	origin := via[0].URL
+	if !antigravitySameRedirectOrigin(origin, req.URL) {
+		return true
+	}
+	for _, hop := range via[1:] {
+		if hop == nil || !antigravitySameRedirectOrigin(origin, hop.URL) {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravitySameRedirectOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		antigravityRedirectOriginPort(a) == antigravityRedirectOriginPort(b)
+}
+
+func antigravityRedirectOriginPort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.

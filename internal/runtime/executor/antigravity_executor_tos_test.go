@@ -369,6 +369,30 @@ func TestAntigravityTOSPauseErrorIsRequestScoped(t *testing.T) {
 				return errCount
 			},
 		},
+		{
+			name: "HttpRequest",
+			call: func() error {
+				httpReq, errReq := http.NewRequest(http.MethodPost, antigravityBaseURLDaily+"/v1internal:fetchUserInfo", nil)
+				if errReq != nil {
+					return errReq
+				}
+				callCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					t.Error("HttpRequest() dialed upstream during active TOS pause")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       http.NoBody,
+					}, nil
+				}))
+				resp, errDo := exec.HttpRequest(callCtx, auth, httpReq)
+				if resp != nil && resp.Body != nil {
+					if errClose := resp.Body.Close(); errClose != nil {
+						t.Errorf("close response body error: %v", errClose)
+					}
+				}
+				return errDo
+			},
+		},
 	}
 
 	for _, tc := range cases {
