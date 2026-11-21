@@ -47,6 +47,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
+	if antigravityInTOSPause(e.cfg, auth) {
+		return nil, newAntigravityTOSPauseStatusErr()
+	}
 	ctx = context.WithValue(ctx, "alt", "")
 	if !antigravityCoolingDisabled(auth, e.cfg) {
 		if inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, baseModel, time.Now()); errCooldown != nil {
@@ -129,7 +132,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if replayScope.valid() {
 		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
 	}
-	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata))
+	httpReq, requestPayload, errReq := e.buildRequestDoc(ctx, auth, token, baseModel, doc, true, opts.Alt, baseURL, helps.AntigravitySessionIDForAuth(antigravityAuthID(auth), opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq
 		return nil, err
@@ -166,24 +169,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return nil, err
 		}
 		if httpResp.StatusCode == http.StatusTooManyRequests {
-			decision := decideAntigravity429(bodyBytes)
-
-			switch decision.kind {
-			case antigravity429DecisionShortCooldownSwitchAuth:
-				closeAntigravityAuthIdleTransports(auth)
-				if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, e.cfg) {
-					if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
-						err = homeKVUnavailableStatusErr(errMarkCooldown)
-						return nil, err
-					}
-					log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
-				}
-			case antigravity429DecisionFullQuotaExhausted:
-				closeAntigravityAuthIdleTransports(auth)
-				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-					markAntigravityCreditsPermanentlyDisabled(auth)
-				}
-				// No credits logic - just fall through to error return below
+			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, bodyBytes); err429 != nil {
+				err = err429
+				return nil, err
 			}
 		}
 
@@ -191,13 +179,11 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
 		}
+		if httpResp.StatusCode == http.StatusForbidden {
+			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+		}
 		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 		return nil, err
-	}
-
-	// Stream success
-	if useCredits {
-		clearAntigravityCreditsFailureState(auth)
 	}
 	if len(replayRequestPayload) == 0 {
 		replayRequestPayload = requestPayload
@@ -217,12 +203,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var streamUsage helps.StreamUsageBuffer
 		streamUsage.SetRequestPayload(requestPayload)
 		var streamErr error
-		var pendingJSON []byte
+		var translatedClaudeErr error
+		var translatedErrorStopped bool
+		sseJSON := helps.NewSSEJSONAssembler(streamScannerBuffer)
 		var replayCommitted bool
 		var terminalDelivered bool
 		var param any
 		commitReplay := func() {
-			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && helps.ApplyPatchTranslationError(param) == nil {
+			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamErr == nil && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil {
 				replayAccumulator.Commit(ctx)
 				replayCommitted = true
 			}
@@ -237,8 +225,14 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// for the HTTP consumer, which may need EOF to acknowledge delivery.
 			if terminalDelivered {
 				commitReplay()
+				if useCredits && !translatedErrorStopped && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil && (streamErr == nil || errors.Is(streamErr, context.Canceled)) {
+					clearAntigravityCreditsFailureState(auth)
+				}
 			}
 			close(out)
+			if translatedErrorStopped {
+				return
+			}
 			if streamErr == nil {
 				streamErr = ctx.Err()
 			}
@@ -264,45 +258,53 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		}()
 		var pendingFilterPayload []byte
 		var pendingFilterMsg string
+		zeroOutputGuard := helps.NewGeminiZeroOutputStreamGuard(true, responseFormat)
+		failZeroOutput := func(finishReason string) bool {
+			translatedClaudeErr = nil
+			streamErr = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, finishReason))
+			stopDeliverySupport()
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			if !streamUsage.PublishFailure(ctx, reporter, streamErr) {
+				reporter.PublishFailure(ctx, streamErr)
+			}
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+			return false
+		}
 		helps.InitializeApplyPatchStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, &param)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			if replayAccumulator != nil {
-				replayAccumulator.ObserveSSELine(line)
-			}
 
-			// Capture accounting before the client-facing filter renames usage.
-			streamUsage.ObserveAntigravityStream(line)
-
-			payload := helps.JSONPayload(line)
-			if len(pendingJSON) > 0 {
-				trimmedLine := bytes.TrimSpace(line)
-				if bytes.HasPrefix(trimmedLine, []byte("data:")) {
-					trimmedLine = bytes.TrimSpace(trimmedLine[len("data:"):])
-				}
-				if len(trimmedLine) > 0 {
-					pendingJSON = append(pendingJSON, '\n')
-					pendingJSON = append(pendingJSON, trimmedLine...)
-				}
-				if !ojson.ValidBytes(pendingJSON) {
-					continue
-				}
-				payload = pendingJSON
-				pendingJSON = nil
-			} else if payload != nil && !ojson.ValidBytes(payload) {
-				pendingJSON = append([]byte(nil), payload...)
-				continue
-			}
+			payload := sseJSON.Push(line)
 			if payload == nil {
 				continue
 			}
-			if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() {
+
+			// Capture accounting before the client-facing filter renames usage.
+			streamUsage.ObserveAntigravityStream(payload)
+
+			if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
 				statusCode := int(errorResult.Get("code").Int())
 				if statusCode < http.StatusBadRequest || statusCode > 599 {
 					statusCode = http.StatusBadGateway
 				}
-				streamErr = newAntigravityStatusErr(statusCode, payload)
+				if statusCode == http.StatusTooManyRequests {
+					if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, payload); err429 != nil {
+						streamErr = err429
+					}
+				}
+				if streamErr == nil {
+					if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, payload); errClear != nil {
+						logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+					}
+					if statusCode == http.StatusForbidden {
+						e.applyAntigravityTOSState(e.cfg, auth, payload)
+					}
+					streamErr = newAntigravityStatusErr(statusCode, payload)
+				}
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {
@@ -311,7 +313,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				}
 				return
 			}
-			processPayload := func(p []byte) bool {
+			if replayAccumulator != nil {
+				replayAccumulator.ObserveSSELine(payload)
+			}
+			emitTranslatedPayload := func(p []byte) bool {
 				// Filter usage metadata for all models after block classification
 				// so only the terminal chunk retains client-visible usage statistics.
 				p = helps.JSONPayload(helps.FilterSSEUsageMetadata(append([]byte("data: "), p...)))
@@ -323,6 +328,9 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 				p = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, p)
 				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(p), &param, claudeInputTokens)
 				helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+				helps.CaptureTranslatedClaudeStreamError(responseFormat, chunks, &translatedClaudeErr, func(msg string) error {
+					return newGeminiTranslatedClaudeErrorStatusErr(msg)
+				})
 				var isTerminalChunk bool
 				if finishReason := ojson.GetBytesNoCopy(p, "candidates.0.finishReason"); finishReason.Exists() && strings.TrimSpace(finishReason.String()) != "" {
 					isTerminalChunk = true
@@ -358,20 +366,48 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 						}
 					}
 				}
-				if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && antigravityStreamChunksHaveTerminalCommitEvent(chunks) {
+				if replayAccumulator != nil && replayAccumulator.terminal && !replayCommitted && translatedClaudeErr == nil && antigravityStreamChunksHaveTerminalCommitEvent(chunks) {
 					commitReplay()
 				}
 				for i := range chunks {
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+						if len(chunks[i]) > 0 {
+							zeroOutputGuard.MarkEmitted()
+						}
 					case <-ctx.Done():
 						return false
 					}
 				}
-				if isTerminalChunk {
+				if isTerminalChunk && translatedClaudeErr == nil {
 					terminalDelivered = true
 				}
 				return !helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			}
+			processPayload := func(p []byte) bool {
+				shells, action, finishReason := zeroOutputGuard.Observe(p)
+				switch action {
+				case helps.GeminiZeroOutputContinue:
+					return true
+				case helps.GeminiZeroOutputFailNow:
+					return failZeroOutput(finishReason)
+				case helps.GeminiZeroOutputEmitErrorThenFail:
+					errFrame := zeroOutputGuard.AbnormalFrame()
+					if len(errFrame) == 0 {
+						errFrame = p
+					}
+					if !emitTranslatedPayload(errFrame) {
+						return false
+					}
+					return failZeroOutput(finishReason)
+				default:
+					for _, shell := range shells {
+						if !emitTranslatedPayload(shell) {
+							return false
+						}
+					}
+					return emitTranslatedPayload(p)
+				}
 			}
 			if len(pendingFilterPayload) > 0 {
 				flushed := pendingFilterPayload
@@ -400,7 +436,31 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 			return
 		}
+		if scanner.Err() == nil && ctx.Err() == nil && zeroOutputGuard.HasAbnormalFinish() {
+			_, action, finishReason := zeroOutputGuard.Finalize()
+			if action == helps.GeminiZeroOutputEmitErrorThenFail {
+				errFrame := zeroOutputGuard.AbnormalFrame()
+				if len(errFrame) == 0 {
+					errFrame = []byte("[DONE]")
+				}
+				tailErr := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, errFrame, &param, claudeInputTokens)
+				for i := range tailErr {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: tailErr[i]}:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+			failZeroOutput(finishReason)
+			return
+		}
 		if helps.EndApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+			return
+		}
+		if helps.StopTranslatedClaudeStream(ctx, &translatedClaudeErr, reporter, &streamUsage, out) {
+			stopDeliverySupport()
+			translatedErrorStopped = true
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -420,6 +480,44 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			case <-ctx.Done():
 			}
 		} else if ctx.Err() == nil {
+			shells, action, finishReason := zeroOutputGuard.Finalize()
+			switch action {
+			case helps.GeminiZeroOutputFailNow:
+				failZeroOutput(finishReason)
+				return
+			case helps.GeminiZeroOutputEmitErrorThenFail:
+				errFrame := zeroOutputGuard.AbnormalFrame()
+				if len(errFrame) == 0 {
+					errFrame = []byte("[DONE]")
+				}
+				tailErr := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, errFrame, &param, claudeInputTokens)
+				for i := range tailErr {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: tailErr[i]}:
+					case <-ctx.Done():
+						return
+					}
+				}
+				failZeroOutput(finishReason)
+				return
+			default:
+				for _, shell := range shells {
+					shellFiltered := helps.JSONPayload(helps.FilterSSEUsageMetadata(append([]byte("data: "), shell...)))
+					if len(shellFiltered) == 0 {
+						continue
+					}
+					reporter.ObserveResponseModel(shellFiltered)
+					shellFiltered = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, shellFiltered)
+					shellChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bytes.Clone(shellFiltered), &param, claudeInputTokens)
+					for i := range shellChunks {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: shellChunks[i]}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}
 			// Only a clean end of stream may produce a synthetic terminal event.
 			// Translating [DONE] after a read error would report a truncated
 			// stream as a successful completion. A clean EOF is a normal end
@@ -427,15 +525,25 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			// end that way (see antigravityNoFinishReasonSSE).
 			tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, []byte("[DONE]"), &param, claudeInputTokens)
 			helps.RecordApplyPatchStreamFailure(ctx, param, reporter, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage})
+			helps.CaptureTranslatedClaudeStreamError(responseFormat, tail, &translatedClaudeErr, func(msg string) error {
+				return newGeminiTranslatedClaudeErrorStatusErr(msg)
+			})
 			// Commit upstream output before EOF-generated completion reaches interceptors.
 			// Commit itself rejects partial streams without an upstream terminal.
-			commitReplay()
+			if translatedClaudeErr == nil {
+				commitReplay()
+			}
 			for i := range tail {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
 				case <-ctx.Done():
 					return
 				}
+			}
+			if helps.StopTranslatedClaudeStream(ctx, &translatedClaudeErr, reporter, &streamUsage, out) {
+				stopDeliverySupport()
+				translatedErrorStopped = true
+				return
 			}
 			terminalDelivered = true
 		}

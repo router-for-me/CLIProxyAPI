@@ -167,10 +167,16 @@ func sampleCloneRuntimeConfig() *Config {
 		Antigravity: AntigravityConfig{
 			SensitiveWords:        []string{"Codex"},
 			SensitiveWordsReplace: map[string]string{"You are Codex": "You are an assistant"},
+			SensitivePatternsReplace: []SensitivePatternRule{
+				{Pattern: `(?m)^RFC 2119[^\n]*\n?`, Replacement: ""},
+			},
 		},
 		Devin: DevinConfig{
 			SensitiveWords:        []string{"DevinWord"},
 			SensitiveWordsReplace: map[string]string{"Claude Code": "Devin"},
+			SensitivePatternsReplace: []SensitivePatternRule{
+				{Pattern: `(?m)^You are omp[^\n]*\n?`, Replacement: ""},
+			},
 		},
 		GeminiKey: []GeminiKey{{
 			APIKey:         "gemini-key",
@@ -192,7 +198,10 @@ func sampleCloneRuntimeConfig() *Config {
 			Cloak: &CloakConfig{
 				SensitiveWords:        []string{"secret"},
 				SensitiveWordsReplace: map[string]string{"Claude Code": "Claude"},
-				CacheUserID:           &cacheUserID,
+				SensitivePatternsReplace: []SensitivePatternRule{
+					{Pattern: `Claude\s+Code`, Replacement: "Claude"},
+				},
+				CacheUserID: &cacheUserID,
 			},
 		}},
 		OpenAICompatibility: []OpenAICompatibility{{
@@ -416,5 +425,47 @@ api-keys:
 	}
 	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Cloak == nil || cfg.ClaudeKey[0].Cloak.SensitiveWordsReplace["Claude Code"] != "Claude" {
 		t.Fatalf("ClaudeKey[0].Cloak = %#v", cfg.ClaudeKey)
+	}
+}
+
+func TestV8Validate_SensitivePatternsReplaceAndInvalidDrop(t *testing.T) {
+	v8YAML := []byte(`config-version: 8
+oauth:
+  providers:
+    antigravity:
+      sensitive-patterns-replace:
+        - pattern: '(?m)^RFC 2119[^\n]*\n?'
+          replacement: ""
+        - pattern: '[invalid'
+          replacement: "ignored"
+    devin:
+      sensitive-patterns-replace:
+        - pattern: '(?m)^You are omp[^\n]*\n?'
+          replacement: ""
+api-keys:
+  claude:
+    - name: claude-1
+      keys:
+        - api-key: sk-ant-test
+          cloak:
+            sensitive-patterns-replace:
+              - pattern: 'Claude\s+Code'
+                replacement: "Claude"
+`)
+	if err := ValidateV8Config(v8YAML); err != nil {
+		t.Fatalf("ValidateV8Config() error = %v", err)
+	}
+	cfg, errParse := ParseConfigBytes(v8YAML)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if len(cfg.Antigravity.SensitivePatternsReplace) != 1 || cfg.Antigravity.SensitivePatternsReplace[0].Pattern != `(?m)^RFC 2119[^\n]*\n?` || cfg.Antigravity.SensitivePatternsReplace[0].Replacement != "" {
+		t.Fatalf("Antigravity.SensitivePatternsReplace = %#v", cfg.Antigravity.SensitivePatternsReplace)
+	}
+	if len(cfg.Devin.SensitivePatternsReplace) != 1 || cfg.Devin.SensitivePatternsReplace[0].Pattern != `(?m)^You are omp[^\n]*\n?` {
+		t.Fatalf("Devin.SensitivePatternsReplace = %#v", cfg.Devin.SensitivePatternsReplace)
+	}
+	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Cloak == nil || len(cfg.ClaudeKey[0].Cloak.SensitivePatternsReplace) != 1 || cfg.ClaudeKey[0].Cloak.SensitivePatternsReplace[0].Replacement != "Claude" {
+		t.Fatalf("ClaudeKey[0].Cloak.SensitivePatternsReplace = %#v", cfg.ClaudeKey)
 	}
 }

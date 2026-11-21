@@ -27,7 +27,7 @@ func NormalizeCodexToolIntegerTypesDoc(doc *ojson.Doc, headers http.Header) bool
 // NormalizeCodexToolSchemas inspects function tools in a Codex request payload
 // and simplifies pure constant union combinations (e.g. large oneOf branch sets
 // representing enums with descriptions, as emitted by MCP servers) into semantically
-// equivalent enum lists, and sanitizes unsupported schema patterns.
+// equivalent enum lists, and sanitizes unsupported schema keywords and patterns.
 // It does not normalize tool integer types because upstream OpenAI Codex models
 // strictly validate reserved tool schemas (e.g. collaboration.wait_agent).
 func NormalizeCodexToolSchemas(body []byte) []byte {
@@ -35,7 +35,7 @@ func NormalizeCodexToolSchemas(body []byte) []byte {
 }
 
 // NormalizeCodexToolSchemasDoc inspects function tools in doc and simplifies
-// pure constant union combinations and sanitizes unsupported schema patterns in place.
+// pure constant union combinations and sanitizes unsupported schema keywords and patterns in place.
 func NormalizeCodexToolSchemasDoc(doc *ojson.Doc) bool {
 	return toolschema.NormalizeCodexToolSchemasDoc(doc)
 }

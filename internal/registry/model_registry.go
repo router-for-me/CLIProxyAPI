@@ -5,7 +5,6 @@ package registry
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	misc "github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
@@ -41,8 +41,12 @@ type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
 	// MetadataModelID identifies the canonical model used to resolve client metadata.
-	// It is internal and must not be exposed in model-list responses.
+	// For Copilot it is also the route's upstream model ID. It is never exposed in model lists.
 	MetadataModelID string `json:"-"`
+	// OAuthAlias is the configured alias that produced this route, before adding any auth prefix.
+	OAuthAlias string `json:"-"`
+	// OAuthAliasSource is the exact published source of that alias, including any suffix.
+	OAuthAliasSource string `json:"-"`
 	// ExplicitThinking indicates thinking/reasoning configuration was explicitly configured for this model.
 	ExplicitThinking bool `json:"-"`
 	// ExplicitInputModalities indicates input modalities were explicitly configured for this model.
@@ -281,7 +285,9 @@ func (r *ModelRegistry) RegistrationEpoch() uint64 {
 	return r.registrationEpoch.Load()
 }
 
-// LookupModelInfo searches dynamic registry (provider-specific > global) then static definitions.
+// LookupModelInfo looks up ModelInfo by checking dynamic registrations first
+// (strictly scoped to provider when non-empty, or global when empty) and then
+// falling back to channel-specific and global static definitions.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -295,6 +301,11 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return cloneModelInfo(info)
+	}
+	if p != "" {
+		if info := LookupStaticModelInfoByChannel(modelID, p); info != nil {
+			return cloneModelInfo(info)
+		}
 	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
 }
@@ -1468,6 +1479,42 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
+// ClientModelRoute returns the native model and alias for the first matching client route.
+func (r *ModelRegistry) ClientModelRoute(clientID string, modelIDs ...string) (metadataModelID, oauthAlias string) {
+	route := r.LookupClientModelRoute(clientID, modelIDs...)
+	return route.MetadataModelID, route.OAuthAlias
+}
+
+// ClientModelRouteInfo describes the source and alias of a registered route.
+type ClientModelRouteInfo struct {
+	MetadataModelID  string
+	OAuthAlias       string
+	OAuthAliasSource string
+}
+
+// LookupClientModelRoute returns the first matching route registered by this client.
+// Candidates are tried in order, preferring exact spelling within each candidate.
+func (r *ModelRegistry) LookupClientModelRoute(clientID string, modelIDs ...string) ClientModelRouteInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	models := r.clientModelInfos[clientID]
+	for _, modelID := range modelIDs {
+		if modelID == "" {
+			continue
+		}
+		if info := models[modelID]; info != nil {
+			return ClientModelRouteInfo{info.MetadataModelID, info.OAuthAlias, info.OAuthAliasSource}
+		}
+		for _, id := range r.clientModels[clientID] {
+			if info := models[id]; info != nil && strings.EqualFold(id, modelID) {
+				return ClientModelRouteInfo{info.MetadataModelID, info.OAuthAlias, info.OAuthAliasSource}
+			}
+		}
+	}
+	return ClientModelRouteInfo{}
+}
+
 // IsModelSuspendedForClient reports whether a model is currently suspended for a specific client.
 func (r *ModelRegistry) IsModelSuspendedForClient(clientID, modelID string) bool {
 	clientID = strings.TrimSpace(clientID)
@@ -1941,22 +1988,25 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
-// GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
+// GetModelInfo returns dynamically registered ModelInfo. When provider is non-empty,
+// only active registrations for that provider are returned; when provider is empty,
+// it falls back to the global registration.
 func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
+	provider = strings.ToLower(strings.TrimSpace(provider))
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	if reg, ok := r.models[modelID]; ok && reg != nil {
-		// Try provider specific definition first
-		if provider != "" && reg.InfoByProvider != nil {
+		if provider != "" {
 			if reg.Providers != nil {
-				if count, ok := reg.Providers[provider]; ok && count > 0 {
-					if info, ok := reg.InfoByProvider[provider]; ok && info != nil {
+				if count, okProv := reg.Providers[provider]; okProv && count > 0 && reg.InfoByProvider != nil {
+					if info, okInfo := reg.InfoByProvider[provider]; okInfo && info != nil {
 						return cloneModelInfo(info)
 					}
 				}
 			}
+			return nil
 		}
-		// Fallback to global info (last registered)
+		// Fallback to global info (last registered) when provider is unspecified.
 		return cloneModelInfo(reg.Info)
 	}
 	return nil

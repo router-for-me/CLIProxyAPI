@@ -2,15 +2,17 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -419,7 +421,44 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 }
 
 type authRefreshLock struct {
-	mu sync.Mutex
+	gate    chan struct{}
+	waiters atomic.Int32
+}
+
+// lockRefreshContext acquires the per-credential refresh lock while honoring ctx cancellation
+// whenever lock acquisition would block behind another holder.
+func (m *Manager) lockRefreshContext(ctx context.Context, id string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{gate: make(chan struct{}, 1)})
+	lock, ok := lockValue.(*authRefreshLock)
+	if !ok || lock == nil || lock.gate == nil {
+		lock = &authRefreshLock{gate: make(chan struct{}, 1)}
+		m.refreshLocks.Store(id, lock)
+	}
+	select {
+	case lock.gate <- struct{}{}:
+	default:
+		lock.waiters.Add(1)
+		select {
+		case lock.gate <- struct{}{}:
+			lock.waiters.Add(-1)
+			if errCtx := ctx.Err(); errCtx != nil {
+				<-lock.gate
+				return nil, errCtx
+			}
+		case <-ctx.Done():
+			lock.waiters.Add(-1)
+			return nil, ctx.Err()
+		}
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-lock.gate
+		})
+	}, nil
 }
 
 func authOuterAccessToken(auth *Auth) string {
@@ -1144,15 +1183,21 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(ctx context.Context, sel
 	return current, false, nil
 }
 
+// RefreshAfterUnauthorized refreshes a local credential once after an upstream 401
+// using the same rejection-marking and single-refresh rules as request execution.
+func (m *Manager) RefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
+	return m.tryRefreshAfterUnauthorized(ctx, auth, execErr, alreadyTried, clientHeaders...)
+}
+
 // tryRefreshAfterUnauthorized refreshes local OAuth credentials once after a
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
 	if m == nil || auth == nil || execErr == nil {
 		return auth, false
 	}
-	// Request-scoped failures describe this request, not stale credentials.
-	// Refreshing would turn a direct error response into an implicit retry.
-	if isRequestScopedError(execErr) || !isUnauthorizedError(execErr) {
+	// Request-scoped and explicit hard-stop failures describe this request, not stale credentials.
+	// Refreshing would turn a direct stop/error response into an implicit retry.
+	if isRequestScopedError(execErr) || isRequestStopError(execErr) || isRequestTerminatedError(execErr) || isTOSViolationError(execErr) || !isUnauthorizedError(execErr) {
 		return auth, false
 	}
 	// A 401 matched by a configured request-scoped rule is the rule's to handle: no rejection, no refresh.
@@ -1249,7 +1294,16 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 	m.mu.Unlock()
 }
 
+var (
+	errVerifyCredentialRemoved    = errors.New("credential removed before or during refresh")
+	errVerifyCredentialSuperseded = errors.New("credential superseded before or during refresh")
+)
+
 func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64) (*Auth, error) {
+	return m.refreshAuthForRequestAtVersion(ctx, id, failedAccessToken, registrationEpoch, 0)
+}
+
+func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failedAccessToken string, registrationEpoch, credentialVersion uint64) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -1265,18 +1319,15 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if id == "" {
 		return nil, errors.New("auth id is empty")
 	}
-	if failedAccessToken != "" {
+	if credentialVersion == 0 && failedAccessToken != "" {
 		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 
-	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
-	lock, _ := lockValue.(*authRefreshLock)
-	if lock == nil {
-		lock = &authRefreshLock{}
-		m.refreshLocks.Store(id, lock)
+	releaseRefresh, errLock := m.lockRefreshContext(ctx, id)
+	if errLock != nil {
+		return nil, errLock
 	}
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
+	defer releaseRefresh()
 
 	m.mu.RLock()
 	auth := m.auths[id].Clone()
@@ -1288,7 +1339,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
+	if auth == nil {
+		if credentialVersion != 0 {
+			return nil, errVerifyCredentialRemoved
+		}
+		return nil, errors.New("auth or executor not found")
+	}
+	if exec == nil {
 		return nil, errors.New("auth or executor not found")
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
@@ -1305,7 +1362,16 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 	}
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
+		if credentialVersion != 0 {
+			return nil, errVerifyCredentialSuperseded
+		}
 		return nil, errors.New("auth registration changed before refresh")
+	}
+	if credentialVersion != 0 && auth.CredentialVersion != credentialVersion {
+		return nil, errVerifyCredentialSuperseded
+	}
+	if credentialVersion != 0 && failedAccessToken != "" {
+		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
@@ -1391,6 +1457,10 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			current.LastError = refreshAccessError(current, msg, accessTokenRejected, wasTerminalUnauthorized)
 			if current.LastError.Code == "refresh_outcome_unknown" {
 				current.StatusMessage = current.LastError.Message
+				if current.Status != StatusDisabled {
+					// Job completion reschedules this recovery state, so retain a positive delay.
+					current.NextRefreshAfter = checkNow.Add(refreshCheckInterval)
+				}
 			}
 			m.auths[id] = current
 			if m.scheduler != nil {
@@ -1407,8 +1477,12 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
+	if credentialVersion != 0 && err != nil && ctx != nil && ctx.Err() != nil && !codex.IsRefreshOutcomeUnknown(err) {
+		return nil, ctx.Err()
+	}
 	now := time.Now()
-	refreshCanceled := (errors.Is(err, context.Canceled) || errors.Is(err, codex.ErrSIWCRefreshDeferred)) && !codex.IsRefreshOutcomeUnknown(err)
+	isRefreshDeferred := errors.Is(err, baseauth.ErrRefreshDeferred) || errors.Is(err, codex.ErrSIWCRefreshDeferred)
+	refreshCanceled := (errors.Is(err, context.Canceled) || isRefreshDeferred) && !codex.IsRefreshOutcomeUnknown(err)
 	if refreshCanceled {
 		var partitions interface {
 			OuterRefreshError() error
@@ -1416,7 +1490,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 		if errors.As(err, &partitions) {
 			for _, partitionErr := range []error{partitions.OuterRefreshError(), partitions.SIWCRefreshError()} {
-				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
+				if partitionErr != nil && !errors.Is(partitionErr, context.Canceled) && !errors.Is(partitionErr, baseauth.ErrRefreshDeferred) && !errors.Is(partitionErr, codex.ErrSIWCRefreshDeferred) {
 					refreshCanceled = false
 					break
 				}
@@ -1426,7 +1500,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if refreshCanceled {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		backoff := time.Second
-		if errors.Is(err, codex.ErrSIWCRefreshDeferred) {
+		if isRefreshDeferred {
 			backoff = refreshCheckInterval
 		}
 		retryAfter := now.Add(backoff)
@@ -1475,6 +1549,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		if current := m.auths[id]; current != nil {
 			if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || current.CredentialVersion != base.CredentialVersion || secretGrantChanged(base, current)) {
 				m.mu.Unlock()
+				if credentialVersion != 0 {
+					return nil, errVerifyCredentialSuperseded
+				}
 				return nil, err
 			}
 			if hasUnauthorizedAuthFailure(current) && !forceRefresh {
@@ -1719,14 +1796,23 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	// A successful refresh may have rotated upstream tokens after cancellation.
 	// Commit its result with context values intact; keep epoch checks and save ordering.
-	saved, errUpdate := m.UpdateRefreshedAuth(context.WithoutCancel(ctx), base, updated)
+	saved, committed, baseSuperseded, errUpdate := m.updateRefreshedAuthWithStatus(context.WithoutCancel(ctx), base, updated)
 	if errUpdate != nil {
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		if credentialVersion != 0 && strings.Contains(errUpdate.Error(), "stale registration epoch") {
+			return nil, errVerifyCredentialSuperseded
+		}
 		return nil, errUpdate
 	}
 	if saved == nil {
+		if credentialVersion != 0 {
+			return nil, errVerifyCredentialRemoved
+		}
 		return nil, fmt.Errorf("auth %s not found", id)
+	}
+	if credentialVersion != 0 && (!committed || baseSuperseded) {
+		return nil, errVerifyCredentialSuperseded
 	}
 	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)

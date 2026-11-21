@@ -225,6 +225,114 @@ func TestRefreshAuthForRequest_EnabledAuth_InvalidGrant_ExponentialBackoff(t *te
 	}
 }
 
+func TestRefreshAuthForRequest_ClaudeExpiredRefreshToken_RequiresSignIn(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &mockOAuthErrorExecutor{
+		id: "claude",
+		// Match ClaudeAuth.RefreshTokensWithRetry wrapping a 400 refreshHTTPError.
+		errToReturn: fmt.Errorf("token refresh failed after 3 attempts: %w", errors.New(
+			`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Refresh token expired"}`,
+		)),
+	}
+	manager.RegisterExecutor(executor)
+
+	now := time.Now()
+	auth := &Auth{
+		ID:       "claude-expired-refresh-token",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":          "claude",
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-1",
+			"expired":       now.Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(ctx, auth); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+
+	_, _ = manager.refreshAuthForRequest(ctx, auth.ID, "")
+	manager.mu.RLock()
+	current := manager.auths[auth.ID].Clone()
+	manager.mu.RUnlock()
+
+	if !current.RequiresSignIn {
+		t.Fatal("RequiresSignIn = false, want true")
+	}
+	if current.RejectedRefreshToken != "refresh-1" {
+		t.Fatalf("RejectedRefreshToken = %q, want %q", current.RejectedRefreshToken, "refresh-1")
+	}
+	if !current.Unavailable || current.Status != StatusError {
+		t.Fatalf("unavailable = %v status = %v, want unavailable StatusError", current.Unavailable, current.Status)
+	}
+	if !current.NextRefreshAfter.IsZero() {
+		t.Fatalf("NextRefreshAfter = %v, want zero (no further refresh attempts)", current.NextRefreshAfter)
+	}
+	if current.StatusMessage != "unauthorized (refresh token invalid)" {
+		t.Fatalf("StatusMessage = %q, want %q", current.StatusMessage, "unauthorized (refresh token invalid)")
+	}
+	if current.RefreshError == nil || current.RefreshError.Code != "refresh_token_expired" {
+		t.Fatalf("RefreshError = %+v, want code refresh_token_expired", current.RefreshError)
+	}
+	if _, okNext := manager.nextRefreshCheckAt(now, current, refreshCheckInterval); okNext {
+		t.Fatal("nextRefreshCheckAt() ok = true, want false after terminal refresh token expiry")
+	}
+
+	// A subsequent refresh request with the same rejected refresh_token must not hit upstream again.
+	_, _ = manager.refreshAuthForRequest(ctx, auth.ID, "")
+	if calls := executor.refreshCalls.Load(); calls != 1 {
+		t.Fatalf("executor.Refresh called %d times, want 1", calls)
+	}
+}
+
+func TestRefreshAuthForRequest_ClaudeGenericInvalidGrant_StillRetries(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	executor := &mockOAuthErrorExecutor{
+		id: "claude",
+		errToReturn: fmt.Errorf("token refresh failed after 3 attempts: %w", errors.New(
+			`token refresh failed with status 400: {"error": "invalid_grant", "error_description": "Bad Request"}`,
+		)),
+	}
+	manager.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "claude-generic-invalid-grant",
+		Provider: "claude",
+		Status:   StatusActive,
+		Metadata: map[string]any{
+			"type":          "claude",
+			"access_token":  "expired-token",
+			"refresh_token": "refresh-1",
+			"expired":       time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(ctx, auth); err != nil {
+		t.Fatalf("Register error: %v", err)
+	}
+
+	t0 := time.Now()
+	_, _ = manager.refreshAuthForRequest(ctx, auth.ID, "")
+	manager.mu.RLock()
+	current := manager.auths[auth.ID].Clone()
+	manager.mu.RUnlock()
+
+	if current.RequiresSignIn {
+		t.Fatal("RequiresSignIn = true, want false for generic Claude invalid_grant")
+	}
+	if current.StatusMessage != "invalid grant (retrying)" {
+		t.Fatalf("StatusMessage = %q, want %q", current.StatusMessage, "invalid grant (retrying)")
+	}
+	if current.RefreshFailures != 1 {
+		t.Fatalf("RefreshFailures = %d, want 1", current.RefreshFailures)
+	}
+	if diff := current.NextRefreshAfter.Sub(t0); diff < 50*time.Second || diff > 70*time.Second {
+		t.Fatalf("NextRefreshAfter backoff = %v, want ~1m", diff)
+	}
+}
+
 func TestManager_AutoRefreshLoop_DisabledAuthWithInvalidGrantNeverRefreshes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

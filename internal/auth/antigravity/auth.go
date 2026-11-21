@@ -3,14 +3,16 @@ package antigravity
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -30,10 +32,16 @@ type userInfo struct {
 	Email string `json:"email"`
 }
 
+// ErrProjectIDNotFound indicates that project discovery completed without
+// yielding a usable project_id for the credential.
+var ErrProjectIDNotFound = errors.New("antigravity: project id not found")
+
 // HTTPStatusError represents an HTTP error response with status code.
 type HTTPStatusError struct {
 	StatusCodeValue int
 	Message         string
+	RetryAfterValue *time.Duration
+	Body            []byte
 }
 
 func (e *HTTPStatusError) Error() string {
@@ -48,6 +56,24 @@ func (e *HTTPStatusError) StatusCode() int {
 		return 0
 	}
 	return e.StatusCodeValue
+}
+
+// RetryAfter exposes the upstream Retry-After hint so the conductor can record
+// the provider-supplied recovery deadline on the result.
+func (e *HTTPStatusError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return e.RetryAfterValue
+}
+
+// ResponseBody exposes the raw upstream HTTP response body when captured so
+// callers can inspect structured error details without preview truncation.
+func (e *HTTPStatusError) ResponseBody() []byte {
+	if e == nil || len(e.Body) == 0 {
+		return nil
+	}
+	return e.Body
 }
 
 // AntigravityAuth handles Antigravity OAuth authentication
@@ -245,6 +271,34 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 	return email, nil
 }
 
+// retryAfterFromHeaders parses the Retry-After response header. It accepts both
+// the delta-seconds form and the absolute HTTP-date form, returning nil when the
+// header is absent or unparsable.
+func retryAfterFromHeaders(header http.Header) *time.Duration {
+	if len(header) == 0 {
+		return nil
+	}
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, errParse := strconv.Atoi(raw); errParse == nil {
+		if seconds < 0 {
+			return nil
+		}
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if when, errParse := http.ParseTime(raw); errParse == nil {
+		d := time.Until(when)
+		if d <= 0 {
+			return nil
+		}
+		return &d
+	}
+	return nil
+}
+
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
 func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
 	userAgent := o.shortUserAgent()
@@ -285,6 +339,8 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", &HTTPStatusError{
 			StatusCodeValue: resp.StatusCode,
 			Message:         fmt.Sprintf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes))),
+			RetryAfterValue: retryAfterFromHeaders(resp.Header),
+			Body:            append([]byte(nil), bodyBytes...),
 		}
 	}
 
@@ -301,7 +357,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 			return "", err
 		}
 		if projectID == "" {
-			return "", fmt.Errorf("project id not found in loadCodeAssist or onboardUser response")
+			return "", fmt.Errorf("%w in loadCodeAssist or onboardUser response", ErrProjectIDNotFound)
 		}
 		return projectID, nil
 	}
@@ -369,6 +425,10 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			}
 
 			if done, okDone := data["done"].(bool); okDone && done {
+				if errOp := onboardOperationError(data["error"], bodyBytes); errOp != nil {
+					return "", errOp
+				}
+
 				projectID := ""
 				if responseData, okResp := data["response"].(map[string]any); okResp {
 					projectID = extractCloudaicompanionProject(responseData)
@@ -379,7 +439,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 					return projectID, nil
 				}
 
-				return "", fmt.Errorf("no project_id in response")
+				return "", fmt.Errorf("%w: no project_id in response", ErrProjectIDNotFound)
 			}
 
 			time.Sleep(2 * time.Second)
@@ -398,8 +458,75 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		return "", &HTTPStatusError{
 			StatusCodeValue: resp.StatusCode,
 			Message:         fmt.Sprintf("http %d: %s", resp.StatusCode, responseErr),
+			RetryAfterValue: retryAfterFromHeaders(resp.Header),
+			Body:            append([]byte(nil), bodyBytes...),
 		}
 	}
 
 	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)
+}
+
+func onboardOperationError(raw any, bodyBytes []byte) error {
+	if raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case string:
+		msg := strings.TrimSpace(v)
+		if msg == "" {
+			return nil
+		}
+		return fmt.Errorf("onboard user operation error: %s", msg)
+	case map[string]any:
+		if len(v) == 0 {
+			return nil
+		}
+		var code int
+		var status string
+		var parts []string
+		if codeVal, okCode := v["code"].(float64); okCode && codeVal != 0 {
+			code = int(codeVal)
+			parts = append(parts, fmt.Sprintf("code %d", code))
+		}
+		if statusVal, okStatus := v["status"].(string); okStatus {
+			if trimmed := strings.TrimSpace(statusVal); trimmed != "" {
+				status = trimmed
+				parts = append(parts, trimmed)
+			}
+		}
+		if msgVal, okMsg := v["message"].(string); okMsg {
+			if trimmed := strings.TrimSpace(msgVal); trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		msg := "onboard user operation error"
+		if len(parts) > 0 {
+			msg = fmt.Sprintf("onboard user operation error (%s)", strings.Join(parts, ": "))
+		} else if encoded, errMarshal := json.Marshal(v); errMarshal == nil && len(encoded) > 0 {
+			msg = fmt.Sprintf("onboard user operation error: %s", strings.TrimSpace(string(encoded)))
+		}
+		if httpStatus := onboardOperationHTTPStatus(code, status); httpStatus > 0 {
+			return &HTTPStatusError{
+				StatusCodeValue: httpStatus,
+				Message:         msg,
+				Body:            append([]byte(nil), bodyBytes...),
+			}
+		}
+		return fmt.Errorf("%s", msg)
+	default:
+		return fmt.Errorf("onboard user operation error: %v", raw)
+	}
+}
+
+func onboardOperationHTTPStatus(code int, status string) int {
+	switch {
+	case code == 7 || code == http.StatusForbidden || strings.EqualFold(status, "PERMISSION_DENIED"):
+		return http.StatusForbidden
+	case code == 8 || code == http.StatusTooManyRequests || strings.EqualFold(status, "RESOURCE_EXHAUSTED"):
+		return http.StatusTooManyRequests
+	case code == 16 || code == http.StatusUnauthorized || strings.EqualFold(status, "UNAUTHENTICATED"):
+		return http.StatusUnauthorized
+	default:
+		return 0
+	}
 }

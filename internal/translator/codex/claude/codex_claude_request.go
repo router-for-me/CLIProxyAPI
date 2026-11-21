@@ -10,13 +10,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
@@ -54,14 +54,19 @@ func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte
 }
 
 func ConvertClaudeRequestToCodexContext(ctx context.Context, modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false, translatorcommon.VisibleCodexCommentary(ctx))
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true, false, translatorcommon.VisibleCodexCommentary(ctx))
 }
 
 func ConvertClaudeRequestToCodexWithCompatContext(ctx context.Context, modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true, translatorcommon.VisibleCodexCommentary(ctx))
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true, true, translatorcommon.VisibleCodexCommentary(ctx))
 }
 
-func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, preserveEmptyThinkingBlocks, visibleCommentary bool) ([]byte, error) {
+// ConvertClaudeRequestToResponses uses the common Responses message and tool shapes without Codex wire defaults.
+func ConvertClaudeRequestToResponses(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, false, false, false)
+}
+
+func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream, codex, preserveEmptyThinkingBlocks, visibleCommentary bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 	var drops translatorcommon.UserTurnDrops
 
@@ -157,7 +162,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 						inputItems = append(inputItems, message)
 					}
 				}
-				if additionalTools, ok := convertClaudeSystemAdditionalTools(systemContent, toolsResult, &declaredToolsByName, &declaredToolsIndexed, toolNameMap, emittedToolNames); ok {
+				if additionalTools, ok := convertClaudeSystemAdditionalTools(systemContent, toolsResult, &declaredToolsByName, &declaredToolsIndexed, toolNameMap, emittedToolNames, codex); ok {
 					hasAdditionalTools = true
 					if len(pendingToolUseIDs) > 0 {
 						pendingSystemReminders = append(pendingSystemReminders, additionalTools)
@@ -201,7 +206,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					return
 				}
 				emittedToolNames[origName] = struct{}{}
-				turnDiscoveredTools = append(turnDiscoveredTools, convertClaudeFunctionToolToCodex(def, toolNameMap))
+				turnDiscoveredTools = append(turnDiscoveredTools, convertClaudeFunctionToolToCodex(def, toolNameMap, codex))
 			}
 
 			flushTurnDiscoveredTools := func() {
@@ -255,10 +260,8 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 				bufferedSendable++
 			}
 
-			appendDocumentContent := func(dataURL string) {
+			appendDocumentContent := func(content []byte) {
 				pendingCommentaryMirror = ""
-				content := []byte(`{"type":"input_file","file_data":"","filename":"document.pdf"}`)
-				content, _ = ojson.SetBytes(content, "file_data", dataURL)
 				contentItems = append(contentItems, content)
 				bufferedSendable++
 			}
@@ -354,8 +357,29 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							inputItems = append(inputItems, pendingSystemReminders...)
 							pendingSystemReminders = nil
 						}
-						if dataURL, ok := claudeDocumentDataURL(messageContentResult); ok {
-							appendDocumentContent(dataURL)
+						if contentType == "document" {
+							if docText, ok := translatorcommon.ClaudeDocumentTextBlock(messageContentResult); ok {
+								appendTextContent(docText)
+								break
+							}
+							var onImageDrop func()
+							if messageRole == "user" {
+								onImageDrop = func() { drops.Drop("image") }
+							}
+							if translatorcommon.ExpandClaudeContentDocument(
+								messageContentResult,
+								appendTextContent,
+								func(img ojson.Result) ([]byte, bool) {
+									return claudeImageInputPart(img.Get("source"))
+								},
+								appendImageContent,
+								onImageDrop,
+							) {
+								break
+							}
+						}
+						if filePart, ok := claudeDocumentInputFile(messageContentResult); ok {
+							appendDocumentContent(filePart)
 						} else if messageRole == "user" {
 							drops.Drop(contentType)
 						}
@@ -425,28 +449,16 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 								part := contentResults[k]
 								toolResultContentType := part.Get("type").String()
 								if toolResultContentType == "image" {
-									sourceResult := part.Get("source")
-									if sourceResult.Exists() {
-										data := sourceResult.Get("data").String()
-										if data == "" {
-											data = sourceResult.Get("base64").String()
-										}
-										if data != "" {
-											mediaType := sourceResult.Get("media_type").String()
-											if mediaType == "" {
-												mediaType = sourceResult.Get("mime_type").String()
-											}
-											if mediaType == "" {
-												mediaType = "application/octet-stream"
-											}
-											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-
-											toolResultContent := []byte(`{"type":"input_image","image_url":""}`)
-											toolResultContent, _ = ojson.SetBytes(toolResultContent, "image_url", dataURL)
-											toolResultContentItems = append(toolResultContentItems, toolResultContent)
-											hasRichToolResultItems = true
-										}
+									if imagePart, ok := claudeImageInputPart(part.Get("source")); ok {
+										toolResultContentItems = append(toolResultContentItems, imagePart)
+										hasRichToolResultItems = true
 									}
+									if rewroteToolRefName {
+										rewrittenToolRefs = append(rewrittenToolRefs, []byte(part.Raw))
+									}
+								} else if toolResultContentType == "document" {
+									toolResultContentItems = append(toolResultContentItems, codexToolResultDocumentParts(part)...)
+									hasRichToolResultItems = true
 									if rewroteToolRefName {
 										rewrittenToolRefs = append(rewrittenToolRefs, []byte(part.Raw))
 									}
@@ -497,6 +509,19 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 							} else {
 								_ = functionCallOutputMessageDoc.Set("output", messageContentResult.Get("content").String())
 							}
+						} else if contentResult.IsObject() {
+							switch contentResult.Get("type").String() {
+							case "image":
+								if imagePart, ok := claudeImageInputPart(contentResult.Get("source")); ok {
+									_ = functionCallOutputMessageDoc.SetRawBytes("output", translatorcommon.JoinRawArray([][]byte{imagePart}))
+								} else {
+									_ = functionCallOutputMessageDoc.Set("output", messageContentResult.Get("content").String())
+								}
+							case "document":
+								_ = functionCallOutputMessageDoc.SetRawBytes("output", translatorcommon.JoinRawArray(codexToolResultDocumentParts(contentResult)))
+							default:
+								_ = functionCallOutputMessageDoc.Set("output", messageContentResult.Get("content").String())
+							}
 						} else {
 							_ = functionCallOutputMessageDoc.Set("output", messageContentResult.Get("content").String())
 						}
@@ -532,7 +557,7 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	// Convert tools declarations to the expected format for the Codex API.
 	hasWebSearchTool := false
 	var toolItems [][]byte
-	if toolsResult.IsArray() || hasAdditionalTools {
+	if (toolsResult.IsArray() || hasAdditionalTools) && (codex || rootResult.Get("tool_choice").Exists()) {
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
 		_ = templateDoc.SetRawBytes("tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
 	}
@@ -557,18 +582,14 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 					continue
 				}
 			}
-			toolItems = append(toolItems, convertClaudeFunctionToolToCodex(toolResult, toolNameMap))
+			toolItems = append(toolItems, convertClaudeFunctionToolToCodex(toolResult, toolNameMap, codex))
 		}
 	}
 
 	// Default to parallel tool calls unless tool_choice explicitly disables them.
-	parallelToolCalls := true
-	if disableParallelToolUse := rootResult.Get("tool_choice.disable_parallel_tool_use"); disableParallelToolUse.Exists() {
-		parallelToolCalls = !disableParallelToolUse.Bool()
+	if disable := rootResult.Get("tool_choice.disable_parallel_tool_use"); disable.Exists() || codex {
+		_ = templateDoc.Set("parallel_tool_calls", !disable.Bool())
 	}
-
-	// Add additional configuration parameters for the Codex API.
-	_ = templateDoc.Set("parallel_tool_calls", parallelToolCalls)
 
 	// Convert Claude thinking budgets and effort to reasoning.effort.
 	reasoningEffort := "medium"
@@ -601,7 +622,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	} else if !thinkingConfig.Exists() && effort != "" {
 		reasoningEffort = effort
 	}
-	_ = templateDoc.Set("reasoning.effort", reasoningEffort)
+	if codex || rootResult.Get("thinking").Exists() || effort != "" {
+		_ = templateDoc.Set("reasoning.effort", reasoningEffort)
+	}
 	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
 	// reasoning.summary to the source request's canonical summary intent instead
 	// of coupling it to reasoning effort.
@@ -612,13 +635,21 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	if serviceTier != "" {
 		_ = templateDoc.Set("service_tier", serviceTier)
 	}
-	_ = templateDoc.Set("stream", true)
-	_ = templateDoc.Set("store", false)
-	includeFields := []string{"reasoning.encrypted_content"}
-	if hasWebSearchTool {
-		includeFields = append(includeFields, "web_search_call.action.sources")
+	_ = templateDoc.Set("stream", codex || stream)
+	if codex {
+		_ = templateDoc.Set("store", false)
+		includeFields := []string{"reasoning.encrypted_content"}
+		if hasWebSearchTool {
+			includeFields = append(includeFields, "web_search_call.action.sources")
+		}
+		_ = templateDoc.Set("include", includeFields)
+	} else {
+		for _, key := range []string{"temperature", "top_p"} {
+			if value := rootResult.Get(key); value.Exists() {
+				_ = templateDoc.SetRawBytes(key, []byte(value.Raw))
+			}
+		}
 	}
-	_ = templateDoc.Set("include", includeFields)
 
 	// Map Claude output_config.format to Codex Responses text.format.
 	if format := rootResult.Get("output_config.format"); format.IsObject() && format.Get("type").String() == "json_schema" && format.Get("schema").IsObject() {
@@ -832,7 +863,7 @@ func buildShortNameMap(names []string) map[string]string {
 	return m
 }
 
-func convertClaudeFunctionToolToCodex(toolResult ojson.Result, toolNameMap map[string]string) []byte {
+func convertClaudeFunctionToolToCodex(toolResult ojson.Result, toolNameMap map[string]string, codex bool) []byte {
 	toolDoc := ojson.NewDocString(toolResult.Raw)
 	if toolResult.Get("type").Type != ojson.String || toolResult.Get("type").String() != "function" {
 		_ = toolDoc.Set("type", "function")
@@ -860,7 +891,7 @@ func convertClaudeFunctionToolToCodex(toolResult ojson.Result, toolNameMap map[s
 	if ojson.GetBytesNoCopy([]byte(normalizedParams), "$schema").Exists() {
 		_ = toolDoc.Delete("parameters.$schema")
 	}
-	if toolResult.Get("strict").Type != ojson.False {
+	if strict := toolResult.Get("strict").Type; strict != ojson.False && (codex || strict != ojson.True) {
 		_ = toolDoc.Set("strict", false)
 	}
 	return toolDoc.Bytes()
@@ -889,7 +920,7 @@ func ensureClaudeDeclaredToolsIndexed(toolsResult ojson.Result, declaredToolsByN
 
 // convertClaudeSystemAdditionalTools converts mid-conversation tool_addition blocks
 // inside a role=system message into a Responses additional_tools input item.
-func convertClaudeSystemAdditionalTools(content, toolsResult ojson.Result, declaredToolsByName *map[string]ojson.Result, declaredToolsIndexed *bool, toolNameMap map[string]string, emittedToolNames map[string]struct{}) ([]byte, bool) {
+func convertClaudeSystemAdditionalTools(content, toolsResult ojson.Result, declaredToolsByName *map[string]ojson.Result, declaredToolsIndexed *bool, toolNameMap map[string]string, emittedToolNames map[string]struct{}, codex bool) ([]byte, bool) {
 	if !content.IsArray() {
 		return nil, false
 	}
@@ -953,7 +984,7 @@ func convertClaudeSystemAdditionalTools(content, toolsResult ojson.Result, decla
 		if emittedToolNames != nil {
 			emittedToolNames[origName] = struct{}{}
 		}
-		converted := convertClaudeFunctionToolToCodex(def, toolNameMap)
+		converted := convertClaudeFunctionToolToCodex(def, toolNameMap, codex)
 		if indexByName == nil {
 			indexByName = make(map[string]int)
 		}
@@ -1336,21 +1367,78 @@ func claudeImageInputPart(source ojson.Result) ([]byte, bool) {
 	return part, true
 }
 
-func claudeDocumentDataURL(part ojson.Result) (string, bool) {
+func claudeDocumentInputFile(part ojson.Result) ([]byte, bool) {
 	source := part.Get("source")
-	if source.Get("type").String() == "base64" {
+	filename := strings.TrimSpace(part.Get("filename").String())
+	if filename == "" {
+		filename = strings.TrimSpace(part.Get("title").String())
+	}
+	switch source.Get("type").String() {
+	case "base64":
 		mediaType := strings.TrimSpace(source.Get("media_type").String())
 		if !strings.EqualFold(mediaType, "application/pdf") {
-			return "", false
+			return nil, false
 		}
 		data := source.Get("data").String()
 		if data == "" {
 			data = source.Get("base64").String()
 		}
 		if data == "" {
-			return "", false
+			return nil, false
 		}
-		return fmt.Sprintf("data:%s;base64,%s", mediaType, data), true
+		if filename == "" {
+			filename = "document.pdf"
+		}
+		partDoc := ojson.NewDocString(`{"type":"input_file","file_data":"","filename":""}`)
+		_ = partDoc.Set("file_data", fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+		_ = partDoc.Set("filename", filename)
+		return partDoc.Bytes(), true
+	case "url":
+		fileURL := strings.TrimSpace(source.Get("url").String())
+		if !translatorcommon.IsHTTPURL(fileURL) {
+			return nil, false
+		}
+		partDoc := ojson.NewDocString(`{"type":"input_file","file_url":""}`)
+		_ = partDoc.Set("file_url", fileURL)
+		if filename != "" {
+			_ = partDoc.Set("filename", filename)
+		}
+		return partDoc.Bytes(), true
+	default:
+		return nil, false
 	}
-	return "", false
+}
+
+const codexUnsupportedDocumentPlaceholder = "[Unsupported document content]"
+
+func codexInputTextPart(text string) []byte {
+	doc := ojson.NewDocString(`{"type":"input_text","text":""}`)
+	_ = doc.Set("text", text)
+	return doc.Bytes()
+}
+
+func codexUnsupportedDocumentPart() []byte {
+	return codexInputTextPart(codexUnsupportedDocumentPlaceholder)
+}
+
+func codexToolResultDocumentParts(part ojson.Result) [][]byte {
+	if docText, ok := translatorcommon.ClaudeDocumentTextBlock(part); ok {
+		return [][]byte{codexInputTextPart(docText)}
+	}
+	var items [][]byte
+	if translatorcommon.ExpandClaudeContentDocument(
+		part,
+		func(text string) { items = append(items, codexInputTextPart(text)) },
+		func(img ojson.Result) ([]byte, bool) {
+			return claudeImageInputPart(img.Get("source"))
+		},
+		func(img []byte) { items = append(items, img) },
+		nil,
+	) {
+		return items
+	}
+	if docPart, ok := claudeDocumentInputFile(part); ok {
+		return [][]byte{docPart}
+	}
+	return [][]byte{codexUnsupportedDocumentPart()}
 }

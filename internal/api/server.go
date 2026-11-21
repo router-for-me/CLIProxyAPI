@@ -21,12 +21,14 @@ import (
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/musecode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/wstunnel"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
@@ -55,6 +57,8 @@ type Server struct {
 	// handlers contains the API handlers for processing requests.
 	handlers         *handlers.BaseAPIHandler
 	codexLiveHandler *codexlive.Handler
+	museCodeHandler  *musecode.Handler
+	tunnelHub        *wstunnel.Hub
 
 	// cfg holds the current server configuration.
 	cfgMu sync.RWMutex
@@ -88,6 +92,13 @@ type Server struct {
 
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
+
+	// interceptorHost is the resolved PluginInterceptorHost installed on request
+	// handlers. When a caller provides their own host via
+	// WithPluginInterceptorHost, interceptor calls and capability detection
+	// delegate to that host while plugin model routing, lifecycle callbacks, and
+	// websocket observers stay delegated to pluginHost.
+	interceptorHost handlers.PluginInterceptorHost
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -159,6 +170,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s := &Server{
 		engine:                       engine,
 		handlers:                     handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
+		tunnelHub:                    wstunnel.NewHub(wstunnel.Options{}),
 		cfg:                          cfg,
 		accessManager:                accessManager,
 		configFilePath:               configFilePath,
@@ -167,6 +179,22 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		wsRoutes:                     make(map[string]struct{}),
 		pluginHost:                   optionState.pluginHost,
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
+	}
+
+	// Resolve the interceptor host once so startup and reload share the same
+	// wiring. A caller-provided host keeps interceptor dispatch and capability
+	// detection on the embedder implementation while model routing, lifecycle
+	// callbacks, and websocket observers remain delegated to the internal
+	// plugin host. Typed-nil values are normalized first so they cannot defeat
+	// SetPluginHost's own nil-interface normalization.
+
+	if custom := normalizeInterceptorHost(optionState.pluginInterceptorHost); custom != nil {
+		s.interceptorHost = &delegatedInterceptorHost{
+			primary:    custom,
+			pluginHost: optionState.pluginHost,
+		}
+	} else {
+		s.interceptorHost = optionState.pluginHost
 	}
 
 	// Add middleware
@@ -203,7 +231,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
-	s.handlers.SetPluginHost(optionState.pluginHost)
+	s.handlers.SetPluginHost(s.interceptorHost)
 	if optionState.pluginHost != nil {
 		optionState.pluginHost.SetModelExecutor(s.handlers)
 		optionState.pluginHost.SetAuthManager(authManager)
@@ -411,10 +439,14 @@ func (s *Server) Start() error {
 	}
 }
 
-// Stop closes listeners and immediately shuts down the API server without waiting for active connections.
+// Stop closes listeners and shuts down the API server.
+// When server.shutdown-timeout is a positive number of seconds, Stop first lets
+// in-flight requests finish within that budget (http.Server.Shutdown), then
+// forcibly closes whatever remains. The default 0 closes immediately, preserving
+// the behavior introduced to prevent hanging on active requests (#6094).
 //
 // Parameters:
-//   - ctx: Context passed for compatibility.
+//   - ctx: Context bounding the whole stop operation.
 //
 // Returns:
 //   - error: An error if the server fails to stop
@@ -444,16 +476,40 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Close the HTTP server immediately without graceful draining.
+	// Close the HTTP server. With a positive server.shutdown-timeout, drain
+	// in-flight requests for up to that many seconds first; otherwise close
+	// immediately without graceful draining.
 	var errCloseServer error
 	if s.server != nil {
-		errCloseServer = s.server.Close()
-		if errors.Is(errCloseServer, http.ErrServerClosed) || errors.Is(errCloseServer, net.ErrClosed) {
-			errCloseServer = nil
+		drainTimeout := 0
+		if cfg := s.getConfig(); cfg != nil {
+			drainTimeout = cfg.ShutdownTimeoutSeconds
+		}
+		if drainTimeout > 0 {
+			// Bound the drain by the configured timeout even when the caller's
+			// context is more generous: shutdown must never hang longer than the
+			// operator chose. A tighter caller deadline still wins via parent ctx.
+			drainCtx, cancel := context.WithTimeout(ctx, time.Duration(drainTimeout)*time.Second)
+			defer cancel()
+			log.Debugf("draining HTTP connections for up to %ds", drainTimeout)
+			errShutdown := s.server.Shutdown(drainCtx)
+			if errShutdown != nil && !errors.Is(errShutdown, context.DeadlineExceeded) && !errors.Is(errShutdown, context.Canceled) {
+				errCloseServer = errShutdown
+			}
+		}
+		// Always force-close afterwards: this terminates anything that outlived
+		// the drain budget and is a no-op when Shutdown already returned cleanly.
+		// Hijacked connections (WebSocket sessions) are not tracked by the HTTP
+		// server; they are released by their own managers below.
+		if errClose := s.server.Close(); errClose != nil && !errors.Is(errClose, http.ErrServerClosed) && !errors.Is(errClose, net.ErrClosed) && errCloseServer == nil {
+			errCloseServer = errClose
 		}
 	}
 	if s.codexLiveHandler != nil {
 		s.codexLiveHandler.Close()
+	}
+	if s.tunnelHub != nil {
+		s.tunnelHub.Close()
 	}
 	if errCloseServer != nil {
 		return fmt.Errorf("failed to shutdown HTTP server: %v", errCloseServer)

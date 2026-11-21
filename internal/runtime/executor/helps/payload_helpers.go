@@ -1,13 +1,13 @@
 package helps
 
 import (
-	"encoding/json"
 	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -143,7 +143,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 	}
 
 	rules := cfg.Payload
-	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
+	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Replace) != 0 || len(rules.Filter) != 0
 	if hasPayloadRules {
 		model = strings.TrimSpace(model)
 		requestedModel = strings.TrimSpace(requestedModel)
@@ -375,6 +375,16 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 					}
 				}
 			}
+			// Replace selected strings after overrides and before final field deletion.
+			for i := range rules.Replace {
+				rule := &rules.Replace[i]
+				if rule.Validate() != nil || !payloadModelRulesMatchDoc(rule.Models, protocol, fromProtocol, headers, doc, root, candidates) {
+					continue
+				}
+				if replacePayloadTextDoc(doc, protocol, root, rule, i, noteRuleWrite) {
+					mutated = true
+				}
+			}
 			// Apply filter rules: remove matching paths from payload.
 			for i := range rules.Filter {
 				rule := &rules.Filter[i]
@@ -401,6 +411,9 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 					}
 				}
 			}
+			// Codex compatibility (#7270/#7384): reconcile only untouched automatic
+			// image tools against the configured reasoning and route. Preserve explicit
+			// tool edits and selection, and never evaluate payload rules a second time.
 			if autoInjectedToolIdx >= 0 && !(userWroteToolChoice && docToolChoiceSelectsImageGeneration(doc, toolChoicePath)) {
 				if codexConfiguredPayloadIncompatibleWithAutoImageGenDoc(doc, root, model, auth, headers) {
 					if retractAutoInjectedImageGenerationToolAtIndexDoc(doc, toolsPath, autoInjectedToolIdx, originalHadEmptyTools) {
@@ -570,20 +583,7 @@ func payloadModelRulesMatchDoc(rules []config.PayloadModelRule, protocol string,
 	}
 	for _, model := range models {
 		for _, entry := range rules {
-			name := strings.TrimSpace(entry.Name)
-			if name == "" {
-				continue
-			}
-			if ep := strings.TrimSpace(entry.Protocol); ep != "" && protocol != "" && !strings.EqualFold(ep, protocol) {
-				continue
-			}
-			if !payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) {
-				continue
-			}
-			if !payloadHeadersMatch(headers, entry.Headers) {
-				continue
-			}
-			if !matchModelPattern(name, model) {
+			if !payloadModelSelectorMatches(entry, model, protocol, fromProtocol, headers) {
 				continue
 			}
 			if payloadModelRuleConditionsMatchDoc(doc, root, entry) {
@@ -592,6 +592,11 @@ func payloadModelRulesMatchDoc(rules []config.PayloadModelRule, protocol string,
 		}
 	}
 	return false
+}
+
+func payloadModelSelectorMatches(entry config.PayloadModelRule, model, protocol, fromProtocol string, headers http.Header) bool {
+	name, ep := strings.TrimSpace(entry.Name), strings.TrimSpace(entry.Protocol)
+	return name != "" && (ep == "" || protocol == "" || strings.EqualFold(ep, protocol)) && payloadFromProtocolMatches(entry.FromProtocol, fromProtocol) && payloadHeadersMatch(headers, entry.Headers) && matchModelPattern(name, model)
 }
 
 func payloadModelRuleConditionsMatchDoc(doc *ojson.Doc, root string, rule config.PayloadModelRule) bool {

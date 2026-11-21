@@ -2,10 +2,10 @@ package chat_completions
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 )
 
@@ -1107,4 +1107,112 @@ func TestApplyPatchChatResponseOrdinaryFunctionPreference(t *testing.T) {
 	if ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String() != "raw" {
 		t.Fatalf("ordinary preference stolen: %s", out)
 	}
+}
+
+func TestConvertCodexResponseToOpenAI_RefusalStreamAndNonStream(t *testing.T) {
+	const refusalText = "I'm sorry, but I can't help with that request."
+	ctx := context.Background()
+
+	t.Run("streamed_refusal_delta_no_duplicate_on_done", func(t *testing.T) {
+		var param any
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":"I'm sorry, but I can't help with that request."}`),
+			[]byte(`data: {"type":"response.refusal.done","output_index":0,"item_id":"msg_1","refusal":"I'm sorry, but I can't help with that request."}`),
+			[]byte(`data: {"type":"response.content_part.done","output_index":0,"item_id":"msg_1","part":{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("stream content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("done_only_refusal_fallback", func(t *testing.T) {
+		var param any
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("done-only stream content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("empty_refusal_delta_does_not_suppress_done_fallback", func(t *testing.T) {
+		var param any
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":""}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("empty-delta fallback content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("response_created_resets_message_delta_state", func(t *testing.T) {
+		var param any
+		_ = ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`), &param)
+		_ = ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, []byte(`data: {"type":"response.output_text.delta","delta":"earlier"}`), &param)
+
+		var contents []string
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_2","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_2","status":"completed"}}`),
+		}
+		for _, c := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "muse-ember-1.0", nil, nil, c, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					contents = append(contents, v.String())
+				}
+			}
+		}
+		if got := strings.Join(contents, ""); got != refusalText {
+			t.Fatalf("reused param second response content = %q, want %q", got, refusalText)
+		}
+	})
+
+	t.Run("nonstream_refusal", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "choices.0.message.content").String(); got != refusalText {
+			t.Fatalf("nonstream content = %q, want %q; raw=%s", got, refusalText, out)
+		}
+	})
+
+	t.Run("nonstream_empty_refusal_falls_back_to_text", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"","text":"I'm sorry, but I can't help with that request."}]}]}}`)
+		out := ConvertCodexResponseToOpenAINonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "choices.0.message.content").String(); got != refusalText {
+			t.Fatalf("nonstream fallback content = %q, want %q; raw=%s", got, refusalText, out)
+		}
+	})
 }

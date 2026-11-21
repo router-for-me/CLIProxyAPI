@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -959,6 +960,30 @@ func TestDecodeCapturedZstdRefusesAnOversizedWindow(t *testing.T) {
 	}
 }
 
+// A gzip request body is decoded for the log under the same bound as zstd; truncation is marked.
+func TestDecodeCapturedGzipRequestBody(t *testing.T) {
+	payload := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`)
+	var compressed bytes.Buffer
+	w := gzip.NewWriter(&compressed)
+	if _, errWrite := w.Write(payload); errWrite != nil {
+		t.Fatalf("gzip write: %v", errWrite)
+	}
+	if errClose := w.Close(); errClose != nil {
+		t.Fatalf("gzip close: %v", errClose)
+	}
+
+	if got := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "gzip", 1<<20); !bytes.Equal(got, payload) {
+		t.Fatalf("gzip decoded = %q, want %q", got, payload)
+	}
+	if got := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "x-gzip", 1<<20); !bytes.Equal(got, payload) {
+		t.Fatalf("x-gzip decoded = %q, want %q", got, payload)
+	}
+	truncated := decodeCapturedRequestBodyForLogWithLimit(compressed.Bytes(), "gzip", 8)
+	if !bytes.HasSuffix(truncated, []byte("[DECOMPRESSED REQUEST BODY TRUNCATED]")) {
+		t.Fatalf("truncated = %q, want truncation marker", truncated)
+	}
+}
+
 func TestResponseWriterLogOnErrorOnlyZeroBufferUntilActionableError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
@@ -1269,13 +1294,15 @@ func TestRequestLoggingMiddlewareErrorLogKeepsUpstreamResponseWhenRequestLogDisa
 
 		apiResponseSection := logText[apiResponseIdx:downstreamResponseIdx]
 		downstreamSection := logText[downstreamResponseIdx:]
+		if strings.Contains(apiResponseSection, "Error: unexpected EOF") {
+			t.Fatalf("local read error polluted upstream response:\n%s", apiResponseSection)
+		}
 		for _, want := range []string{
 			"=== API RESPONSE 1 ===",
 			"Status: 502",
 			"Authorization: Bearer supe...oken",
 			"X-Request-Id: xai-req-1",
 			"event: response.created\ndata: {\"type\":\"response.created\",\"id\":\"resp_1\"}",
-			"Error: unexpected EOF",
 			"=== API RESPONSE 2 ===",
 			"Status: 200",
 			"data: {\"type\":\"response.created\",\"id\":\"resp_2\"}",
@@ -1342,7 +1369,6 @@ func TestRequestLoggingMiddlewareErrorLogKeepsUpstreamResponseWhenRequestLogDisa
 			"Status: 200",
 			"X-Request-Id: xai-stream-1",
 			`data: {"type":"response.failed","response":{"error":{"message":"upstream quota exceeded"}}}`,
-			"Error: upstream quota exceeded",
 		} {
 			if !strings.Contains(logText, want) {
 				t.Fatalf("mid-stream error log missing %q:\n%s", want, logText)

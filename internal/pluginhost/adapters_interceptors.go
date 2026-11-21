@@ -3,7 +3,6 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -219,6 +219,9 @@ func (h *Host) interceptRequest(ctx context.Context, req pluginapi.RequestInterc
 			}
 			if resp.Terminate {
 				current.Terminate = true
+				if !beforeAuth {
+					current.TerminateScope = resp.TerminateScope
+				}
 				current.StatusCode = resp.StatusCode
 				current.ResponseHeaders = cloneHeader(resp.ResponseHeaders)
 				current.ResponseBody = bytes.Clone(resp.ResponseBody)

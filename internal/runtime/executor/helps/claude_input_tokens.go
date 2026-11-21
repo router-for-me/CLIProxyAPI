@@ -3,11 +3,11 @@ package helps
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	log "github.com/sirupsen/logrus"
 	"github.com/tiktoken-go/tokenizer"
@@ -63,6 +63,11 @@ func TranslateStreamWithClaudeInputTokens(
 		rawJSON,
 		param,
 	)
+	return state.FinalizeTranslatedUsage(ctx, responseFormat, chunks, param)
+}
+
+// FinalizeTranslatedUsage adds protocol usage details to native or provider-local translations.
+func (state *ClaudeInputTokenState) FinalizeTranslatedUsage(ctx context.Context, responseFormat sdktranslator.Format, chunks [][]byte, param *any) [][]byte {
 	if param != nil && ApplyPatchTranslationError(*param) != nil {
 		return chunks
 	}
@@ -129,6 +134,7 @@ func collectClaudeInputTokenSegments(payload []byte) ([]string, error) {
 	collectClaudeMessageTokenSegments(root.Get("messages"), &segments)
 	collectClaudeToolTokenSegments(root.Get("tools"), &segments)
 	collectClaudeToolChoiceTokenSegments(root.Get("tool_choice"), &segments)
+	collectClaudeOutputConfigTokenSegments(root.Get("output_config"), &segments)
 	return segments, nil
 }
 
@@ -258,6 +264,18 @@ func collectClaudeToolChoiceTokenSegments(toolChoice ojson.Result, segments *[]s
 	}
 	appendClaudeTokenString(segments, toolChoice.Get("type").String())
 	appendClaudeTokenString(segments, toolChoice.Get("name").String())
+}
+
+func collectClaudeOutputConfigTokenSegments(outputConfig ojson.Result, segments *[]string) {
+	if !outputConfig.IsObject() {
+		return
+	}
+	format := outputConfig.Get("format")
+	if !format.IsObject() {
+		return
+	}
+	appendClaudeTokenString(segments, format.Get("type").String())
+	appendClaudeTokenJSON(segments, format.Get("schema"))
 }
 
 func appendClaudeTokenString(segments *[]string, value string) {

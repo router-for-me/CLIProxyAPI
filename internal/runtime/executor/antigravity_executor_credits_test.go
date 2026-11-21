@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -29,6 +29,7 @@ import (
 // may still be writing these maps when a test's cleanup runs. Replacing the
 // variable is an unsynchronized write and races with them; Clear is not.
 func resetAntigravityCreditsRetryState() {
+	antigravityTOSPauseUntil.Clear()
 	antigravityCreditsFailureByAuth.Clear()
 	antigravityShortCooldownByAuth.Clear()
 	antigravityCreditsBalanceByAuth.Clear()
@@ -985,6 +986,179 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	}))
 
 	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+}
+
+type countingReadCloser struct {
+	reader io.Reader
+	readN  int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	c.readN += int64(n)
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	return nil
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_EmptyAndNonMatchingAvailableCredits(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseBody   string
+		seedPriorHint  bool
+		wantPaidTierID string
+	}{
+		{
+			name:           "empty availableCredits array",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[]}}`,
+			wantPaidTierID: "pro",
+		},
+		{
+			name:           "unrelated creditType only",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[{"creditType":"OTHER_CREDIT","creditAmount":"500","minimumCreditAmountForUsage":"10"}]}}`,
+			wantPaidTierID: "pro",
+		},
+		{
+			name:           "unparseable GOOGLE_ONE_AI entry",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"not-a-number","minimumCreditAmountForUsage":"50"}]}}`,
+			wantPaidTierID: "pro",
+		},
+		{
+			name:           "empty availableCredits overwrites stale positive hint",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[]}}`,
+			seedPriorHint:  true,
+			wantPaidTierID: "pro",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			authID := fmt.Sprintf("auth-issue7750-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			if tc.seedPriorHint {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+					Known:           true,
+					Available:       true,
+					CreditAmount:    25000,
+					MinCreditAmount: 50,
+					PaidTierID:      "pro",
+					UpdatedAt:       time.Now(),
+				})
+			}
+
+			exec := NewAntigravityExecutor(&config.Config{
+				QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+			})
+			auth := &cliproxyauth.Auth{ID: authID}
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+					t.Fatalf("unexpected request url %s", req.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tc.responseBody)),
+				}, nil
+			}))
+
+			exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+			hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+			if !ok || !hint.Known {
+				t.Fatalf("GetAntigravityCreditsHint() = (%#v, %v), want Known=true", hint, ok)
+			}
+			if hint.Available {
+				t.Fatalf("hint.Available = true, want false")
+			}
+			if hint.PaidTierID != tc.wantPaidTierID {
+				t.Fatalf("hint.PaidTierID = %q, want %q", hint.PaidTierID, tc.wantPaidTierID)
+			}
+			if hint.UpdatedAt.IsZero() {
+				t.Fatal("hint.UpdatedAt is zero, want non-zero timestamp")
+			}
+
+			hasCredits, errCredits := antigravityAuthHasCreditsRequired(ctx, auth)
+			if errCredits != nil {
+				t.Fatalf("antigravityAuthHasCreditsRequired() error = %v", errCredits)
+			}
+			if hasCredits {
+				t.Fatal("antigravityAuthHasCreditsRequired() = true, want false")
+			}
+		})
+	}
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_BoundsResponseBodyRead(t *testing.T) {
+	t.Run("rejects oversized response without unbounded read", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		authID := fmt.Sprintf("auth-issue7750-oversized-%d", time.Now().UnixNano())
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		})
+
+		const maxExpectedRead = antigravityLoadCodeAssistMaxResponseBytes + 1
+		oversizedBody := `{"paidTier":{"id":"pro","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]},"padding":"` + strings.Repeat("a", antigravityLoadCodeAssistMaxResponseBytes+1024) + `"}`
+		body := &countingReadCloser{reader: strings.NewReader(oversizedBody)}
+
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+		auth := &cliproxyauth.Auth{ID: authID}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+		if body.readN > maxExpectedRead {
+			t.Fatalf("loadCodeAssist read %d bytes, want <= %d bytes", body.readN, maxExpectedRead)
+		}
+		if cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
+			t.Fatal("oversized loadCodeAssist response should not publish credits hint")
+		}
+	})
+
+	t.Run("ignores invalid JSON 200 response", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		authID := fmt.Sprintf("auth-issue7750-invalid-json-%d", time.Now().UnixNano())
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		})
+
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+		auth := &cliproxyauth.Auth{ID: authID}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("<html>bad gateway</html>")),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+		if cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
+			t.Fatal("invalid JSON response should not publish credits hint")
+		}
+	})
 }
 
 func TestParseMetaFloat(t *testing.T) {

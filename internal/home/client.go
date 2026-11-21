@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -19,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/redis/go-redis/v9/maintnotifications"
@@ -190,6 +190,7 @@ type Client struct {
 	// releaseReady belongs to this acknowledged membership and is never copied to a replacement.
 	releaseReady bool
 
+	schedulerProtocol atomic.Int64
 	heartbeatOK       atomic.Bool
 	dispatchFenced    atomic.Bool
 	releaseFenced     atomic.Bool
@@ -1007,6 +1008,9 @@ func (c *Client) GetConfig(ctx context.Context) ([]byte, error) {
 	if len(raw) == 0 {
 		return nil, ErrEmptyResponse
 	}
+	if errDecode := c.updateSchedulerProtocol(raw); errDecode != nil {
+		return nil, errDecode
+	}
 	return raw, nil
 }
 
@@ -1385,6 +1389,9 @@ func (c *Client) rPopAuth(ctx context.Context, requestedModel string, sessionID 
 		req = newAuthDispatchRequest(requestedModel, sessionID, parentSessionID, headers, count, credentialPolicy, excludedAuthIDs, pinnedAuthID)
 	} else {
 		req = newAuthDispatchRequestWithRetryRound(requestedModel, sessionID, parentSessionID, headers, count, credentialPolicy, *retryRound, excludedAuthIDs, pinnedAuthID)
+	}
+	if input, ok := ctx.Value(schedulerContextKey{}).(SchedulerContext); ok {
+		req.SchedulerContext = &input
 	}
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
@@ -1948,10 +1955,12 @@ func (c *Client) handleSubscriptionPayload(ctx context.Context, channel string, 
 
 	switch strings.ToLower(strings.TrimSpace(channel)) {
 	case redisChannelConfig:
-		if onConfig == nil {
-			return nil
+		if onConfig != nil {
+			if errApply := onConfig([]byte(payload)); errApply != nil {
+				return errApply
+			}
 		}
-		return onConfig([]byte(payload))
+		return c.updateSchedulerProtocol([]byte(payload))
 	case redisChannelCluster:
 		if errUpdate := c.updateClusterNodesFromPayload([]byte(payload)); errUpdate != nil {
 			return errUpdate

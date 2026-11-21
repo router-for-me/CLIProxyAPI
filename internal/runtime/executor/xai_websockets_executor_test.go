@@ -1310,7 +1310,10 @@ func TestXAIWebsocketsExecuteStreamReplaysTranscriptWhenAuthChanges(t *testing.T
 	}))
 	defer rejectedServer.Close()
 
-	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec := NewXAIWebsocketsExecutor(&config.Config{Payload: config.PayloadConfig{
+		Replace:  []config.PayloadReplaceRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Target: config.PayloadReplaceTarget{Role: "user", All: true}, Replacements: []config.PayloadReplacement{{"hero": "hero!"}}}},
+		Override: []config.PayloadRule{{Models: []config.PayloadModelRule{{Name: "*", Match: []map[string]any{{"input.0.content": "hero"}}}}, Params: map[string]any{"instructions": "fresh-history"}}},
+	}})
 	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
 	defer exec.CloseExecutionSession("xai-auth-switch-session")
@@ -1355,7 +1358,7 @@ func TestXAIWebsocketsExecuteStreamReplaysTranscriptWhenAuthChanges(t *testing.T
 		return completed
 	}
 
-	firstCompleted := runRequest(newAuth("auth-a", "token-a", server.URL), []byte(`{"model":"grok-4.3","input":[{"type":"message","id":"user-1","role":"user","content":"first"}]}`))
+	firstCompleted := runRequest(newAuth("auth-a", "token-a", server.URL), []byte(`{"model":"grok-4.3","input":[{"type":"message","id":"user-1","role":"user","content":"hero"}]}`))
 	firstResponseID := ojson.GetBytes(firstCompleted, "response.id").String()
 	if firstResponseID != "resp-auth-a" {
 		t.Fatalf("first response ID = %q, want resp-auth-a", firstResponseID)
@@ -1365,11 +1368,15 @@ func TestXAIWebsocketsExecuteStreamReplaysTranscriptWhenAuthChanges(t *testing.T
 		t.Fatalf("first Authorization = %q, want Bearer token-a", firstUpstream.authorization)
 	}
 
-	secondBody := []byte(fmt.Sprintf(`{"model":"grok-4.3","previous_response_id":%q,"input":[{"type":"message","id":"user-2","role":"user","content":"second"}]}`, firstResponseID))
+	secondBody := []byte(fmt.Sprintf(`{"model":"grok-4.3","previous_response_id":%q,"input":[{"type":"message","id":"user-2","role":"user","content":"hero"}]}`, firstResponseID))
+	beforeFailure := getXAIWebsocketIDState(exec.idStore, "xai-auth-switch-session").snapshotTranscriptInput()
 	if _, errExecute := exec.ExecuteStream(ctx, newAuth("auth-b", "token-b", rejectedServer.URL), cliproxyexecutor.Request{Model: "grok-4.3", Payload: secondBody}, opts); errExecute == nil {
 		t.Fatal("expected auth B websocket handshake to fail")
 	}
-	runRequest(newAuth("auth-c", "token-c", server.URL), secondBody)
+	if after := getXAIWebsocketIDState(exec.idStore, "xai-auth-switch-session").snapshotTranscriptInput(); !bytes.Equal(beforeFailure, after) {
+		t.Fatalf("failed handshake committed history: %s", after)
+	}
+	secondCompleted := runRequest(newAuth("auth-c", "token-c", server.URL), secondBody)
 	secondUpstream := <-captured
 	if secondUpstream.authorization != "Bearer token-c" {
 		t.Fatalf("second successful Authorization = %q, want Bearer token-c", secondUpstream.authorization)
@@ -1383,6 +1390,24 @@ func TestXAIWebsocketsExecuteStreamReplaysTranscriptWhenAuthChanges(t *testing.T
 	}
 	if input[0].Get("id").String() != "user-1" || input[1].Get("id").String() != "msg-resp-auth-a" || input[2].Get("id").String() != "user-2" {
 		t.Fatalf("unexpected replayed input: %s", secondUpstream.payload)
+	}
+	for turn := 3; turn <= 5; turn++ {
+		if input[0].Get("content").String() != "hero!" || input[2].Get("content").String() != "hero!" {
+			t.Fatalf("replay did not start from unconfigured users: %s", secondUpstream.payload)
+		}
+		if ojson.GetBytes(secondUpstream.payload, "instructions").String() != "fresh-history" {
+			t.Fatalf("conditional rule did not see fresh history: %s", secondUpstream.payload)
+		}
+		body := []byte(fmt.Sprintf(`{"previous_response_id":%q,"input":[{"type":"message","id":"user-%d","role":"user","content":"hero"}]}`, ojson.GetBytes(secondCompleted, "response.id").String(), turn))
+		secondCompleted = runRequest(newAuth(fmt.Sprintf("auth-%d", turn), "token-c", server.URL), body)
+		secondUpstream = <-captured
+		input = ojson.GetBytes(secondUpstream.payload, "input").Array()
+		if len(input) != turn*2-1 {
+			t.Fatalf("replay count = %d: %s", len(input), secondUpstream.payload)
+		}
+		if bytes.Contains(secondUpstream.payload, []byte("hero!!")) {
+			t.Fatalf("replacement accumulated: %s", secondUpstream.payload)
+		}
 	}
 }
 
@@ -1402,7 +1427,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 			}
 			defer func() { _ = conn.Close() }()
 
-			for i := 0; i < 2; i++ {
+			for i := 0; i < 5; i++ {
 				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 				_, payload, errRead := conn.ReadMessage()
 				if errRead != nil {
@@ -1411,8 +1436,11 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 				}
 				capturedWebsocketPayload <- bytes.Clone(payload)
 				completed := []byte(`{"type":"response.completed","response":{"id":"resp-real","output":[{"type":"message","id":"out-1","role":"assistant","content":"first answer"}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
-				if i == 1 {
+				if i >= 1 {
 					completed = []byte(`{"type":"response.completed","response":{"id":"resp-after-compact","output":[{"type":"message","id":"out-2","role":"assistant","content":"second answer"}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				}
+				if xaiWebsocketGenerateFalse(payload) {
+					completed = []byte(`{"type":"response.created","response":{"id":"warmup","output":[]}}`)
 				}
 				if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
 					t.Errorf("write completed websocket message: %v", errWrite)
@@ -1435,7 +1463,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 	}))
 	defer server.Close()
 
-	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	exec := NewXAIWebsocketsExecutor(&config.Config{Payload: config.PayloadConfig{Replace: []config.PayloadReplaceRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Target: config.PayloadReplaceTarget{Role: "user", All: true}, Replacements: []config.PayloadReplacement{{"hero": "hero!"}}}}}})
 	exec.store = &codexWebsocketSessionStore{sessions: make(map[string]*codexWebsocketSession)}
 	exec.idStore = &xaiWebsocketIDStateStore{sessions: make(map[string]*xaiWebsocketIDState)}
 	auth := &cliproxyauth.Auth{
@@ -1458,7 +1486,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 
 	result, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","stream":true,"input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`),
+		Payload: []byte(`{"model":"grok-4.3","stream":true,"input":[{"type":"message","id":"msg-1","role":"user","content":"hero"}]}`),
 	}, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream first turn error: %v", err)
@@ -1507,6 +1535,9 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 		if !input.IsArray() || len(input.Array()) != 2 {
 			t.Fatalf("compact input = %s, want first request input plus response output", input.Raw)
 		}
+		if got := input.Array()[0].Get("content").String(); got != "hero!" {
+			t.Fatalf("compaction re-applied rules to configured history: %s", payload)
+		}
 		if got := input.Array()[0].Get("id").String(); got != "msg-1" {
 			t.Fatalf("compact input[0].id = %q, want msg-1; payload=%s", got, payload)
 		}
@@ -1522,7 +1553,7 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 
 	nextResult, err := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(context.Background()), auth, cliproxyexecutor.Request{
 		Model:   "grok-4.3",
-		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp_compact","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`),
+		Payload: []byte(`{"model":"grok-4.3","stream":true,"previous_response_id":"resp_compact","input":[{"type":"message","id":"msg-2","role":"user","content":"hero"}]}`),
 	}, opts)
 	if err != nil {
 		t.Fatalf("ExecuteStream post-compaction turn error: %v", err)
@@ -1553,6 +1584,37 @@ func TestXAIWebsocketsExecuteStreamCompactionTriggerUsesHTTPCompactWithRecordedC
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for post-compaction websocket payload")
 	}
+	for _, frame := range []struct {
+		kind        string
+		generate    bool
+		wantInput   int
+		wantHistory int
+	}{
+		{"response.append", false, 1, 4},
+		{"response.append", true, 1, 6},
+		{"response.create", true, 1, 2},
+	} {
+		doc := ojson.NewDocString(`{"input":[{"type":"message","role":"user","content":"hero"}]}`)
+		_ = doc.Set("type", frame.kind)
+		_ = doc.Set("generate", frame.generate)
+		result, errFrame := exec.ExecuteStream(cliproxyexecutor.WithDownstreamWebsocket(t.Context()), auth, cliproxyexecutor.Request{Model: "grok-4.3", Payload: doc.Bytes()}, opts)
+		if errFrame != nil {
+			t.Fatal(errFrame)
+		}
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				t.Fatal(chunk.Err)
+			}
+		}
+		sent := <-capturedWebsocketPayload
+		if ojson.GetBytes(sent, "input.#").Int() != int64(frame.wantInput) || ojson.GetBytes(sent, "input.0.content").String() != "hero!" {
+			t.Fatalf("invalid post-compaction frame: %s", sent)
+		}
+		history := getXAIWebsocketIDState(exec.idStore, "xai-compaction-session").snapshotTranscriptInput()
+		if len(ojson.ParseBytes(history).Array()) != frame.wantHistory || bytes.Contains(history, []byte("hero!")) {
+			t.Fatalf("invalid unconfigured history after %s generate=%v: %s", frame.kind, frame.generate, history)
+		}
+	}
 }
 
 func TestXAIWebsocketPostCompactionAppendWithoutPreviousReplaysCompactedTranscript(t *testing.T) {
@@ -1581,7 +1643,7 @@ func TestXAIWebsocketPostCompactionAppendWithoutPreviousReplaysCompactedTranscri
 		t.Fatalf("post-compaction append input[1].id = %q, want msg-2: %s", gotID, got)
 	}
 
-	state.recordTranscriptTurn(got, []byte(`{"type":"response.completed","response":{"id":"resp-after-compact","output":[{"type":"message","id":"out-2"}]}}`), true)
+	state.recordTranscriptTurn(xaiJSONRawMessages(ojson.GetBytes(got, "input")), []byte(`{"type":"response.completed","response":{"id":"resp-after-compact","output":[{"type":"message","id":"out-2"}]}}`), true)
 	nextPayload := []byte(`{"type":"response.create","model":"grok-4.3","input":[{"type":"message","id":"msg-3"}]}`)
 	nextMapper := newXAIWebsocketRequestIDMapper(store, "post-compaction-append-session", nextPayload)
 	next := nextMapper.upstreamRequestPayload(nextPayload)
@@ -1602,7 +1664,7 @@ func TestXAIWebsocketPostCompactionWarmupPreservesTranscriptForLaterCompaction(t
 		t.Fatal("post-compaction warmup did not mark full transcript replay")
 	}
 	state.recordTranscriptTurn(
-		warmupUpstream,
+		xaiJSONRawMessages(ojson.GetBytes(warmupUpstream, "input")),
 		[]byte(`{"type":"response.completed","response":{"id":"resp-warmup","output":[]}}`),
 		true,
 	)
@@ -1615,7 +1677,7 @@ func TestXAIWebsocketPostCompactionWarmupPreservesTranscriptForLaterCompaction(t
 		t.Fatalf("warmup retained pending replay instead of native append: %s", appendUpstream)
 	}
 	state.recordTranscriptTurn(
-		appendUpstream,
+		xaiJSONRawMessages(ojson.GetBytes(appendUpstream, "input")),
 		[]byte(`{"type":"response.completed","response":{"id":"resp-after-warmup","output":[{"type":"message","id":"out-after-warmup"}]}}`),
 		false,
 	)
@@ -1637,7 +1699,7 @@ func TestXAIWebsocketEmptyFullResetClearsPendingCompactionReplay(t *testing.T) {
 	state := getXAIWebsocketIDState(store, "empty-reset-session")
 	state.replaceTranscriptWithItems([]byte(`{"type":"compaction","encrypted_content":"stale-compact-state"}`))
 	state.recordTranscriptTurn(
-		[]byte(`{"type":"response.create","model":"grok-4.3","input":[]}`),
+		nil,
 		[]byte(`{"type":"response.completed","response":{"id":"resp-empty","output":[]}}`),
 		true,
 	)
@@ -1679,7 +1741,9 @@ func TestValidateXAIWebsocketCompactionResponse(t *testing.T) {
 func TestBuildXAIWebsocketRequestBodySetsStoreAndKeepsPromptCacheKey(t *testing.T) {
 	body := []byte(`{"model":"grok-4.3","stream":true,"stream_options":{"include_usage":true},"background":true,"prompt_cache_key":"cache-1","previous_response_id":"resp-prev","instructions":"system prompt","input":[{"type":"message","role":"user","content":"hello"}]}`)
 
-	payload := buildXAIWebsocketRequestBody(body)
+	doc := ojson.NewDoc(body)
+	normalizeXAIWebsocketRequestDoc(doc)
+	payload := buildXAIWebsocketRequestBodyDoc(doc)
 
 	if got := ojson.GetBytes(payload, "type").String(); got != "response.create" {
 		t.Fatalf("type = %q, want response.create; payload=%s", got, payload)
@@ -2724,12 +2788,10 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 	for _, want := range []string{
 		"=== API RESPONSE 1 ===",
 		"Status: 101",
-		"Error: send:",
 		"=== API RESPONSE 2 ===",
 		"Status: 429",
 		"Retry-After: 9",
 		`{"error":{"message":"xai websocket reconnect rate limited"}}`,
-		"Error: dial_retry:",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("deferred API response missing %q:\n%s", want, rendered)
@@ -2805,9 +2867,6 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 		subRendered := string(subVal.(logging.DeferredAPIResponse).RenderAPIResponse())
 		for _, want := range []string{
 			"=== API RESPONSE 1 ===",
-			"Error: send:",
-			"=== API RESPONSE 2 ===",
-			"Error: dial_retry:",
 		} {
 			if !strings.Contains(subRendered, want) {
 				t.Fatalf("transport reconnect response missing %q:\n%s", want, subRendered)
@@ -2878,10 +2937,8 @@ func TestXAIWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t *
 				if invalid101 {
 					wantStatus = "Status: 101"
 				}
-				for _, want := range []string{wantStatus, "Error: dial:"} {
-					if !strings.Contains(initRendered, want) {
-						t.Fatalf("initial handshake response missing %q:\n%s", want, initRendered)
-					}
+				if !strings.Contains(initRendered, wantStatus) || strings.Contains(initRendered, "Error: dial:") {
+					t.Fatalf("initial handshake response must contain only upstream details:\n%s", initRendered)
 				}
 			})
 		}

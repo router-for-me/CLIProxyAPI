@@ -1,9 +1,9 @@
 package main
 
 import (
-	"encoding/json"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )

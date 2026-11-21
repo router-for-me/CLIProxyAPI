@@ -3,13 +3,13 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -1003,6 +1003,102 @@ func TestUsageRecordRPCModalityTokenCounters(t *testing.T) {
 	}
 	if legacyRec.Detail.InputTokens != 80 || legacyRec.Detail.OutputTokens != 1056 || legacyRec.Detail.TotalTokens != 1136 {
 		t.Fatalf("legacyUsageRecordWithDetail.Detail = %+v", legacyRec.Detail)
+	}
+}
+
+func TestUsageRecordRPCCacheCreationTTLCounters(t *testing.T) {
+	var deliveredRaw []byte
+	var deliveredRecord pluginapi.UsageRecord
+	rpcAdapter := &rpcPluginAdapter{
+		id: "rpc-usage-cache-ttl",
+		client: &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+			if method != pluginabi.MethodUsageHandle {
+				return nil, io.ErrUnexpectedEOF
+			}
+			deliveredRaw = bytes.Clone(request)
+			if errUnmarshal := json.Unmarshal(request, &deliveredRecord); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		}},
+	}
+
+	host := newHostWithRecords(capabilityRecord{
+		id: "rpc-usage-cache-ttl",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: rpcAdapter,
+		}},
+	})
+	rpcAdapter.host = host
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "rpc-usage-cache-ttl",
+		plugin:   rpcAdapter,
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: coreusage.Detail{
+			InputTokens:           100,
+			OutputTokens:          50,
+			CacheCreationTokens:   1500,
+			TotalTokens:           1650,
+			CacheCreation5mTokens: coreusage.Int64Ptr(1000),
+			CacheCreation1hTokens: coreusage.Int64Ptr(500),
+		},
+	})
+
+	got := deliveredRecord.Detail
+	if got.CacheCreationTokens != 1500 {
+		t.Fatalf("delivered CacheCreationTokens = %d, want 1500", got.CacheCreationTokens)
+	}
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 1000 {
+		t.Fatalf("delivered CacheCreation5mTokens = %v, want 1000", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens == nil || *got.CacheCreation1hTokens != 500 {
+		t.Fatalf("delivered CacheCreation1hTokens = %v, want 500", got.CacheCreation1hTokens)
+	}
+
+	// Legacy plugins compiled against the 7-field UsageDetail must still unmarshal cleanly.
+	type legacyUsageDetail struct {
+		InputTokens         int64
+		OutputTokens        int64
+		ReasoningTokens     int64
+		CachedTokens        int64
+		CacheReadTokens     int64
+		CacheCreationTokens int64
+		TotalTokens         int64
+	}
+	type legacyUsageRecordWithDetail struct {
+		Provider string
+		Model    string
+		Detail   legacyUsageDetail
+	}
+	var legacyRec legacyUsageRecordWithDetail
+	if errLegacy := json.Unmarshal(deliveredRaw, &legacyRec); errLegacy != nil {
+		t.Fatalf("Unmarshal(legacyUsageRecordWithDetail) error = %v", errLegacy)
+	}
+	if legacyRec.Detail.CacheCreationTokens != 1500 {
+		t.Fatalf("legacyUsageRecordWithDetail.Detail.CacheCreationTokens = %d, want 1500", legacyRec.Detail.CacheCreationTokens)
+	}
+
+	// Verify explicit zero and nil over RPC.
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Detail: coreusage.Detail{
+			CacheCreationTokens:   500,
+			CacheCreation5mTokens: coreusage.Int64Ptr(0),
+			CacheCreation1hTokens: nil,
+		},
+	})
+	got = deliveredRecord.Detail
+	if got.CacheCreation5mTokens == nil || *got.CacheCreation5mTokens != 0 {
+		t.Fatalf("delivered CacheCreation5mTokens = %v, want explicit 0", got.CacheCreation5mTokens)
+	}
+	if got.CacheCreation1hTokens != nil {
+		t.Fatalf("delivered CacheCreation1hTokens = %v, want nil", got.CacheCreation1hTokens)
 	}
 }
 

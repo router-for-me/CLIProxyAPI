@@ -2,15 +2,16 @@ package pluginhost
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -57,6 +58,47 @@ func zstdCompress(t *testing.T, raw []byte) []byte {
 	return encoder.EncodeAll(raw, nil)
 }
 
+func gzipCompress(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, errWrite := w.Write(raw); errWrite != nil {
+		t.Fatalf("gzip write: %v", errWrite)
+	}
+	if errClose := w.Close(); errClose != nil {
+		t.Fatalf("gzip close: %v", errClose)
+	}
+	return buf.Bytes()
+}
+
+// Claude routes now read through ReadRequestBody: zstd and gzip bodies on /v1/messages and
+// /v1/messages/count_tokens reach the plugin as decoded JSON.
+func TestAccessAdapterDecodesBodyForClaudeRoutes(t *testing.T) {
+	plain := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`)
+	for _, tc := range []struct {
+		name, path, encoding string
+		body                 []byte
+	}{
+		{"messages zstd", "/v1/messages", "zstd", zstdCompress(t, plain)},
+		{"count_tokens zstd", "/v1/messages/count_tokens", "zstd", zstdCompress(t, plain)},
+		{"messages gzip", "/v1/messages", "gzip", gzipCompress(t, plain)},
+		{"count_tokens gzip", "/v1/messages/count_tokens", "gzip", gzipCompress(t, plain)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seen, calls, _, authErr := authenticateWithBody(context.Background(), t, http.MethodPost, tc.path, tc.body, tc.encoding, 0)
+			if authErr != nil || calls != 1 {
+				t.Fatalf("authErr %v calls %d", authErr, calls)
+			}
+			if !bytes.Equal(seen.DecodedBody, plain) {
+				t.Fatalf("DecodedBody = %q, want %q", seen.DecodedBody, plain)
+			}
+			if !bytes.Equal(seen.Body, tc.body) || seen.Headers.Get("Content-Encoding") != tc.encoding {
+				t.Fatalf("Body or Headers are not raw: headers %v", seen.Headers)
+			}
+		})
+	}
+}
+
 // pi and the Codex CLI send zstd bodies on POST /v1/responses; the plugin gets the decoded JSON in
 // DecodedBody, Body and Headers stay as sent, and the handler still gets the raw bytes.
 func TestAccessAdapterDecodesZstdBodyForPlugin(t *testing.T) {
@@ -90,7 +132,6 @@ func TestAccessAdapterLeavesDecodedBodyNilWhereHandlerDoesNotDecode(t *testing.T
 	}{
 		{"GET responses upgrade", http.MethodGet, "/v1/responses", compressed},
 		{"GET codex responses upgrade", http.MethodGet, "/backend-api/codex/responses", compressed},
-		{"claude handler reads raw", http.MethodPost, "/v1/messages", compressed},
 		{"gemini handler reads raw", http.MethodPost, "/v1beta/models/m:generateContent", compressed},
 		{"plain JSON labeled zstd", http.MethodPost, "/v1/responses", plainJSON},
 	} {

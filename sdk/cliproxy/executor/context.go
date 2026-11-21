@@ -9,6 +9,13 @@ type downstreamWebsocketContextKey struct{}
 type requireUpstreamWebsocketContextKey struct{}
 type upstreamAttemptTrackerContextKey struct{}
 type localWebsocketTurnTrackerContextKey struct{}
+type continuityWaitObserverContextKey struct{}
+
+// ContinuityWaitObserver notifies a downstream transport when a real continuity wait starts and ends.
+type ContinuityWaitObserver interface {
+	OnContinuityWaitStart()
+	OnContinuityWaitEnd()
+}
 
 type upstreamAttemptTracker struct {
 	attempted atomic.Bool
@@ -126,4 +133,35 @@ func LocalWebsocketTurnExecuted(ctx context.Context) bool {
 	}
 	tracker, ok := ctx.Value(localWebsocketTurnTrackerContextKey{}).(*localWebsocketTurnTracker)
 	return ok && tracker != nil && tracker.executed.Load()
+}
+
+// WithContinuityWaitObserver attaches an observer notified only while a real continuity wait is active.
+func WithContinuityWaitObserver(ctx context.Context, observer ContinuityWaitObserver) context.Context {
+	if observer == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, continuityWaitObserverContextKey{}, observer)
+}
+
+// NotifyContinuityWaitStart notifies any attached observer that a real continuity wait has started.
+func NotifyContinuityWaitStart(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if observer, ok := ctx.Value(continuityWaitObserverContextKey{}).(ContinuityWaitObserver); ok && observer != nil {
+		observer.OnContinuityWaitStart()
+	}
+}
+
+// NotifyContinuityWaitEnd notifies any attached observer that a continuity wait has ended.
+func NotifyContinuityWaitEnd(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if observer, ok := ctx.Value(continuityWaitObserverContextKey{}).(ContinuityWaitObserver); ok && observer != nil {
+		observer.OnContinuityWaitEnd()
+	}
 }

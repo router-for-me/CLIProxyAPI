@@ -3,10 +3,10 @@ package helps
 import (
 	"context"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
