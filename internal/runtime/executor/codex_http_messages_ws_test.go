@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/MoeForge/moego/base64"
@@ -21,6 +22,32 @@ import (
 	core "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
+
+func TestCodexHTTPMessagesWebsocketLeaseFollowsConnectionLifetime(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		exec := NewCodexWebsocketsExecutor(&config.Config{})
+		exec.store = &codexWebsocketSessionStore{}
+		const key = "http-messages:test"
+		sess, release := exec.leaseHTTPMessagesSession(key, "test-auth")
+		// The mock reader does not declare a liveness failure until explicitly invalidated.
+		conn := &websocket.Conn{}
+		sess.conn = conn
+		release()
+		time.Sleep(3 * time.Minute) // In the synctest bubble this only advances its virtual clock.
+		synctest.Wait()
+		reused, release := exec.leaseHTTPMessagesSession(key, "test-auth")
+		if reused != sess {
+			t.Fatal("an idle lease expired while its upstream connection was still live")
+		}
+		release()
+		exec.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "test_reader_disconnect", nil)
+		exec.store.mu.Lock()
+		defer exec.store.mu.Unlock()
+		if exec.store.sessions[key] != nil {
+			t.Fatal("disconnected idle lease still occupies the pool")
+		}
+	})
+}
 
 func TestCodexHTTPMessagesWebsocketCloseDuringHandshake(t *testing.T) {
 	for _, closeAll := range []bool{false, true} {

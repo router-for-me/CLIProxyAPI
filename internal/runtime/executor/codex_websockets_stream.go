@@ -176,7 +176,8 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		conn, closer, respHS, errDial = e.ensureUpstreamConnWithSIWC(dialCtx, auth, sess, authID, wsURL, wsHeaders, useSIWC)
 	}
 	var upstreamHeaders http.Header
-	if respHS != nil {
+	// A successful WebSocket handshake is not the downstream HTTP response.
+	if respHS != nil && httpSession == nil {
 		upstreamHeaders = respHS.Header.Clone()
 	}
 	if errDial != nil {

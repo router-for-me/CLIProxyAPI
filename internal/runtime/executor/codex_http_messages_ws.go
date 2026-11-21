@@ -10,7 +10,6 @@ import (
 
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
@@ -22,10 +21,7 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-const (
-	codexHTTPMessagesIdle  = 2 * time.Minute
-	codexHTTPMessagesLimit = 256
-)
+const codexHTTPMessagesLimit = 256
 
 // The lease fields are protected by the WebSocket store mutex; the continuation
 // fields are used only by the lease owner and committed before the stream closes.
@@ -33,7 +29,6 @@ type codexHTTPMessagesSession struct {
 	closed       bool     // protected by the connection mutex
 	handshake    [32]byte // protected by the connection mutex
 	busy         bool
-	idle         *time.Timer
 	continuation codexHTTPMessagesContinuation
 }
 
@@ -126,10 +121,6 @@ func (e *CodexWebsocketsExecutor) leaseHTTPMessagesSession(key, authID string) (
 		return nil, nil
 	}
 	state.busy = true
-	if state.idle != nil {
-		state.idle.Stop()
-		state.idle = nil
-	}
 	return sess, func() {
 		store.mu.Lock()
 		defer store.mu.Unlock()
@@ -145,18 +136,22 @@ func (e *CodexWebsocketsExecutor) leaseHTTPMessagesSession(key, authID string) (
 			return
 		}
 		state.busy = false
-		var timer *time.Timer
-		timer = time.AfterFunc(codexHTTPMessagesIdle, func() {
-			store.mu.Lock()
-			if store.sessions[key] != sess || state.idle != timer {
-				store.mu.Unlock()
-				return
-			}
-			delete(store.sessions, key)
-			store.mu.Unlock()
-			closeCodexWebsocketSession(sess, "http_messages_idle")
-		})
-		state.idle = timer
+	}
+}
+
+// A disconnected idle session no longer needs a pool entry. If a leased turn
+// still owns it, its release is responsible for removing the dead entry.
+func (e *CodexWebsocketsExecutor) removeDisconnectedHTTPMessagesSession(sess *codexWebsocketSession) {
+	store := e.sessionStore()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.sessions[sess.sessionID] != sess || sess.httpMessages.busy {
+		return
+	}
+	sess.connMu.Lock()
+	defer sess.connMu.Unlock()
+	if sess.conn == nil {
+		delete(store.sessions, sess.sessionID)
 	}
 }
 

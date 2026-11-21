@@ -980,6 +980,9 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	}
 	sess.connMu.Unlock()
 
+	if sess.httpMessages != nil {
+		e.removeDisconnectedHTTPMessagesSession(sess)
+	}
 	lastEvent := sess.getLastEventType(conn)
 	logCodexWebsocketDisconnectedWithLastEvent(sess, sessionID, authID, wsURL, reason, lastEvent, err)
 	if notify {

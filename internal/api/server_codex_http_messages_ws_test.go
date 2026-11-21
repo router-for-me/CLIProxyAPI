@@ -102,6 +102,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			}))
 			t.Cleanup(upstream.Close)
 			cfg := &proxyconfig.Config{Codex: proxyconfig.CodexConfig{ServeHTTPMessagesOverWebsockets: !test.disabled}}
+			cfg.PassthroughHeaders = true
 			cfg.Streaming.BootstrapRetries = 2
 			cfg.Codex.StreamBootstrapBuffering = test.acceptedError
 			cfg.Codex.DisableCodexCloaking = test.changeHeader
@@ -180,6 +181,9 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			}
 			if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), `"type":"tool_use"`) {
 				t.Fatalf("expected tool call, got %d: %s", first.Code, first.Body)
+			}
+			if got := first.Header().Get("Sec-WebSocket-Accept"); got != "" {
+				t.Fatal("HTTP Messages response exposed a WebSocket handshake header")
 			}
 			<-frames
 			const assistant = `{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"probe","input":{}}]}`
