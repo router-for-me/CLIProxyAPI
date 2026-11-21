@@ -484,11 +484,16 @@ func corsAllowHeadersValue(req *http.Request) string {
 // using the configured authentication providers. When no providers are available,
 // it allows all requests (legacy behaviour).
 func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, false)
+	return accessAuthMiddleware(manager, false, nil)
 }
 
-func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
-	return accessAuthMiddleware(manager, true)
+// authMiddleware authenticates proxy requests and enforces client key policies.
+func (s *Server) authMiddleware() gin.HandlerFunc {
+	return accessAuthMiddleware(s.accessManager, false, s.getConfig)
+}
+
+func realtimeStandardAuthMiddleware(manager *sdkaccess.Manager, cfgFn apiKeyPolicyConfigFunc) gin.HandlerFunc {
+	return accessAuthMiddleware(manager, true, cfgFn)
 }
 
 func closeUnconsumedRequestOnAbort(c *gin.Context) {
@@ -501,7 +506,7 @@ func closeUnconsumedRequestOnAbort(c *gin.Context) {
 	}
 }
 
-func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.HandlerFunc {
+func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool, cfgFn apiKeyPolicyConfigFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
 			middleware.CaptureAuthenticatedRequestBody(c)
@@ -524,6 +529,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
 				c.Request = c.Request.WithContext(reqCtx)
+				if !applyAPIKeyPolicy(c, cfgFn, result.Principal, result.Provider) {
+					return
+				}
 			}
 			middleware.CaptureAuthenticatedRequestBody(c)
 			if c.IsAborted() {
@@ -560,8 +568,8 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 	}
 }
 
-func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler) gin.HandlerFunc {
-	fallback := realtimeStandardAuthMiddleware(manager)
+func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handler, cfgFn apiKeyPolicyConfigFunc) gin.HandlerFunc {
+	fallback := realtimeStandardAuthMiddleware(manager, cfgFn)
 	return func(c *gin.Context) {
 		authorization, matched, errAuthenticate := handler.AuthenticateClientSecret(c.Request)
 		if !matched {
@@ -592,6 +600,9 @@ func realtimeAuthMiddleware(manager *sdkaccess.Manager, handler *codexlive.Handl
 		reqCtx = coreusage.WithAccessProvider(reqCtx, provider)
 		reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(provider))
 		c.Request = c.Request.WithContext(reqCtx)
+		if !applyAPIKeyPolicy(c, cfgFn, principal, provider) {
+			return
+		}
 		c.Set(codexlive.ClientSecretSessionContextKey, authorization.Session)
 		c.Set(codexlive.ClientSecretPrincipalContextKey, authorization.Principal)
 		middleware.CaptureAuthenticatedRequestBody(c)

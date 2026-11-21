@@ -115,7 +115,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	ctx = coreauth.WithFreshRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionErrorForRequest(ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg
@@ -186,7 +186,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = enrichAuthSelectionErrorForRequest(ctx, err, providers, normalizedModel)
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg

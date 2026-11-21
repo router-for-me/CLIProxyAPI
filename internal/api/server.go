@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,12 +21,14 @@ import (
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/middleware"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/apikeylimits"
 	codexlive "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/live"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/musecode"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/githubauth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelprices"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wstunnel"
@@ -300,6 +303,13 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 		ReadHeaderTimeout: muxSniffDeadline,
 	}
 
+	if configFilePath != "" {
+		// Client key limit counters live next to the config file, outside the watched auth dir.
+		apikeylimits.Default().Init(filepath.Join(filepath.Dir(configFilePath), "api-key-usage.json"), s.getConfig)
+		// Public model prices for cost estimates; cached next to the config file.
+		modelprices.Default().Init(filepath.Join(filepath.Dir(configFilePath), "model-prices-cache.json"), s.getConfig)
+		modelprices.Default().OnUpdate(apikeylimits.Default().BackfillCosts)
+	}
 	return s
 }
 
@@ -452,6 +462,7 @@ func (s *Server) Start() error {
 //   - error: An error if the server fails to stop
 func (s *Server) Stop(ctx context.Context) error {
 	log.Debug("Stopping API server...")
+	apikeylimits.Default().Flush()
 
 	if s.keepAliveEnabled {
 		select {

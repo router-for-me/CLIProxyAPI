@@ -337,6 +337,9 @@ func isOpenAIImageExecutionOptions(opts cliproxyexecutor.Options) bool {
 }
 
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if errModel := checkAllowedModel(ctx, req, opts); errModel != nil {
+		return cliproxyexecutor.Response{}, errModel
+	}
 	scope := m.beginInFlight("")
 	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
@@ -518,6 +521,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if errModel := checkAllowedModel(ctx, req, opts); errModel != nil {
+		return cliproxyexecutor.Response{}, errModel
+	}
 	scope := m.beginInFlight("")
 	defer func() { scope.end() }()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
@@ -594,6 +600,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (result *cliproxyexecutor.StreamResult, err error) {
+	if errModel := checkAllowedModel(ctx, req, opts); errModel != nil {
+		return nil, errModel
+	}
 	scope := m.beginInFlight("")
 	defer func() {
 		if scope != nil {

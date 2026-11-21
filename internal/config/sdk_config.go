@@ -99,6 +99,17 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyPolicies optionally restricts individual client access keys
+	// (for example to a subset of credentials). Keys without a policy are unrestricted.
+	APIKeyPolicies []APIKeyPolicy `yaml:"api-key-policies,omitempty" json:"api-key-policies,omitempty"`
+
+	// ModelPrices sets USD prices per one million tokens used for API key cost limits
+	// when the upstream does not report a cost.
+	ModelPrices []ModelPrice `yaml:"model-prices,omitempty" json:"model-prices,omitempty"`
+
+	// ModelPriceFeed downloads public model prices used when ModelPrices has no match.
+	ModelPriceFeed ModelPriceFeed `yaml:"model-price-feed,omitempty" json:"model-price-feed,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

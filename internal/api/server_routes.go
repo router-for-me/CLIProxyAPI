@@ -67,7 +67,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(AuthMiddleware(s.accessManager))
+	v1.Use(s.authMiddleware())
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.GET("/models/*model", func(c *gin.Context) {
@@ -100,8 +100,8 @@ func (s *Server) setupRoutes() {
 		s.engine.Handle(method, "/v1/tunnel", s.handleWebsocketTunnel)
 	}
 
-	realtimeAuth := realtimeAuthMiddleware(s.accessManager, s.codexLiveHandler)
-	standardAuth := realtimeStandardAuthMiddleware(s.accessManager)
+	realtimeAuth := realtimeAuthMiddleware(s.accessManager, s.codexLiveHandler, s.getConfig)
+	standardAuth := realtimeStandardAuthMiddleware(s.accessManager, s.getConfig)
 	s.engine.GET("/v1/realtime", realtimeAuth, s.codexLiveHandler.HandleRealtimeWebsocket)
 	s.engine.POST("/v1/realtime", realtimeAuth, s.codexLiveHandler.Handle)
 	s.engine.POST("/v1/realtime/calls", realtimeAuth, s.codexLiveHandler.Handle)
@@ -118,7 +118,7 @@ func (s *Server) setupRoutes() {
 	s.engine.POST("/v1/realtime/calls/:call_id/refer", standardAuth, s.codexLiveHandler.HandleSIPControl)
 
 	openaiV1 := s.engine.Group("/openai/v1")
-	openaiV1.Use(AuthMiddleware(s.accessManager))
+	openaiV1.Use(s.authMiddleware())
 	{
 		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
 		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
@@ -127,7 +127,7 @@ func (s *Server) setupRoutes() {
 
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
-	codexDirect.Use(AuthMiddleware(s.accessManager))
+	codexDirect.Use(s.authMiddleware())
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
@@ -137,7 +137,7 @@ func (s *Server) setupRoutes() {
 
 	// Muse Code CLI direct endpoints (beside /v1)
 	museCode := s.engine.Group("/muse-code")
-	museCode.Use(AuthMiddleware(s.accessManager))
+	museCode.Use(s.authMiddleware())
 	{
 		museCode.GET("/models", s.museCodeHandler.HandleModels)
 		museCode.GET("/config", s.museCodeHandler.Handle)
@@ -147,7 +147,7 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(AuthMiddleware(s.accessManager))
+	v1beta.Use(s.authMiddleware())
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/interactions", geminiHandlers.Interactions)
@@ -606,7 +606,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	authMiddleware := AuthMiddleware(s.accessManager)
+	authMiddleware := s.authMiddleware()
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
 			middleware.CaptureAuthenticatedRequestBody(c)

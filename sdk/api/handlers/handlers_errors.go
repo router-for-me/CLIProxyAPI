@@ -248,3 +248,26 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 		}
 	}
 }
+
+// enrichAuthSelectionErrorForRequest enriches selection errors and, when the client
+// key is restricted to specific credentials (access.api-key-policies), reports an
+// empty eligible pool as a permission problem instead of a server outage.
+func enrichAuthSelectionErrorForRequest(ctx context.Context, err error, providers []string, model string) error {
+	enriched := enrichAuthSelectionError(err, providers, model)
+	if enriched == nil || coreauth.AllowedAuthsFromContext(ctx) == nil {
+		return enriched
+	}
+	var authErr *coreauth.Error
+	if !errors.As(enriched, &authErr) || authErr == nil || authErr.Code != "auth_not_found" {
+		return enriched
+	}
+	modelText := strings.TrimSpace(model)
+	if modelText == "" {
+		modelText = "unknown"
+	}
+	return &coreauth.Error{
+		Code:       "no_allowed_credentials",
+		Message:    fmt.Sprintf("none of the credentials allowed for this API key can serve model %s", modelText),
+		HTTPStatus: http.StatusForbidden,
+	}
+}
