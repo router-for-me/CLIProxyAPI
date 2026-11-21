@@ -382,7 +382,7 @@ func SanitizeUpstreamErrorSummary(s string) string {
 }
 
 func (e *modelCooldownError) StatusCode() int {
-	return http.StatusTooManyRequests
+	return modelCooldownHTTPStatus()
 }
 
 func (e *modelCooldownError) resetSeconds() int64 {
