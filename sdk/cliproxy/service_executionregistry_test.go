@@ -1410,7 +1410,22 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	cfg.Home.Host = host
 	cfg.Home.Port = port
 	cfg.Home.DisableClusterDiscovery = true
-	service := &Service{cfg: cfg}
+	// The test releases the reconnect itself instead of waiting out the
+	// randomized retry backoff, so a slow worker cannot make it time out.
+	retryWaiting := make(chan struct{}, 1)
+	releaseRetry := make(chan struct{})
+	service := &Service{cfg: cfg, homeSubscriberRetryWaitFn: func(ctx context.Context, _ time.Duration) bool {
+		select {
+		case retryWaiting <- struct{}{}:
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-releaseRetry:
+			return true
+		}
+	}}
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	t.Cleanup(cancelService)
 	service.homeMu.Lock()
@@ -1443,14 +1458,22 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	}
 
 	close(loseFirst)
+	// The supervisor reaches the retry wait once the 100ms heartbeat timeout
+	// ends the first subscription; the deadline only guards against a hang.
+	select {
+	case <-retryWaiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lost subscription never scheduled a retry")
+	}
 	select {
 	case <-started:
 		t.Fatal("heartbeat failover started draining the blocking scope")
 	case <-time.After(50 * time.Millisecond):
 	}
+	close(releaseRetry)
 	select {
 	case <-secondSubscribe:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("new subscription did not start while the old scope remained active")
 	}
 	service.homeMu.Lock()
