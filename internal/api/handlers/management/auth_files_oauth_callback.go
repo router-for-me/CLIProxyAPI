@@ -248,6 +248,13 @@ func (h *Handler) ServePluginAuthURL(c *gin.Context) bool {
 		SetOAuthSessionTarget(state, sessionTarget)
 	}
 	respPayload := gin.H{"status": "ok", "url": resp.URL, "state": state}
+	if userCode := strings.TrimSpace(resp.UserCode); userCode != "" {
+		respPayload["flow"] = "device"
+		respPayload["user_code"] = userCode
+		if ttl := time.Until(resp.ExpiresAt); ttl > 0 {
+			respPayload["expires_in"] = int64((ttl-1)/time.Second) + 1
+		}
+	}
 	if hasSessionTarget {
 		respPayload["target_auth_id"] = sessionTarget.AuthID
 	}

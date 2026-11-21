@@ -375,6 +375,9 @@ type AuthLoginStartResponse struct {
 	State string
 	// ExpiresAt is the time when this login flow expires.
 	ExpiresAt time.Time
+	// UserCode is the optional public code displayed to the user in a device
+	// authorization flow. Private polling material must remain in Metadata.
+	UserCode string
 	// Metadata carries plugin-defined polling context.
 	Metadata map[string]any
 }

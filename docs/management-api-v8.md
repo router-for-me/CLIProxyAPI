@@ -306,5 +306,9 @@ files in their original layout; existing v8 files are saved in the latest v8
 layout. `PUT /v0/management/config.yaml` still replaces the complete file and
 accepts legacy, new, or mixed layouts, normalizing v8 documents on save.
 
-Plugin OAuth uses the shared v8 login endpoint. Other plugin-defined HTTP
+Plugin OAuth uses the shared v8 login endpoint. Device authorization plugins
+can set `AuthLoginStartResponse.UserCode` to expose a public `user_code` and
+`flow: "device"`; the response also includes `expires_in` when a future expiry
+is available. Private polling material in `Metadata` stays on the server.
+Other plugin-defined HTTP
 extensions retain their declared `/v0/management` routes.

@@ -375,6 +375,45 @@ func TestServePluginAuthURLPassesQueryParamsAsMetadata(t *testing.T) {
 	}
 }
 
+func TestV8PluginOAuthExposesOnlyPublicDeviceFields(t *testing.T) {
+	for _, userCode := range []string{"ABCD-1234", ""} {
+		t.Run(userCode, func(t *testing.T) {
+			host := pluginhost.New()
+			host.RegisterPluginForTest("device-fixture", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				AuthProvider: &testAuthProvider{identifier: "device-fixture", startLogin: func(_ context.Context, _ pluginapi.AuthLoginStartRequest) (pluginapi.AuthLoginStartResponse, error) {
+					return pluginapi.AuthLoginStartResponse{
+						Provider: "device-fixture", URL: "https://login.example.com/device",
+						State: "device-state-123456789" + userCode, ExpiresAt: time.Now().Add(time.Minute),
+						UserCode: userCode, Metadata: map[string]any{"private_polling_code": "must-not-leak"},
+					}, nil
+				}},
+			}})
+			h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir(), Port: 8080}, nil)
+			h.SetPluginHost(host)
+			router := gin.New()
+			router.GET("/v8/management/oauth/auth-url", h.StartOAuthV8)
+			result := httptest.NewRecorder()
+			router.ServeHTTP(result, httptest.NewRequest(http.MethodGet, "/v8/management/oauth/auth-url?provider=device-fixture", nil))
+			if result.Code != http.StatusOK || strings.Contains(result.Body.String(), "must-not-leak") {
+				t.Fatalf("unexpected plugin login response status=%d", result.Code)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(result.Body.Bytes(), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if userCode == "" {
+				if payload["flow"] != nil || payload["user_code"] != nil || payload["expires_in"] != nil {
+					t.Fatal("browser login gained device fields")
+				}
+				return
+			}
+			if payload["flow"] != "device" || payload["user_code"] != userCode || payload["expires_in"] != float64(60) {
+				t.Fatal("plugin device login did not expose its public code and expiry")
+			}
+		})
+	}
+}
+
 func TestV8PluginOAuthUsesIndependentCallback(t *testing.T) {
 	host := pluginhost.New()
 	var captured pluginapi.AuthLoginStartRequest
