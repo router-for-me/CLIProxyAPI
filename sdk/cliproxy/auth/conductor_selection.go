@@ -1031,7 +1031,7 @@ func selectorContextForAvailableAuths(ctx context.Context, selector Selector, ro
 
 func (m *Manager) transientlyUnavailableSessionAffinityAuthIDs(ctx context.Context, selector Selector, affinityCandidates []*Auth, routeModel string, now time.Time, clientHeaders ...http.Header) map[string]struct{} {
 	affinity, ok := selector.(*SessionAffinitySelector)
-	if !ok || affinity == nil || (!affinity.rebindOnQuotaOnly && !affinity.rebindOnNever) || len(affinityCandidates) == 0 {
+	if !ok || affinity == nil || !affinity.tracksTransientRebind(routeModel) || len(affinityCandidates) == 0 {
 		return nil
 	}
 	if _, weighted := affinity.fallback.(*WeightedRoundRobinSelector); weighted {
@@ -1907,7 +1907,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	if affinity, ok := m.Selector().(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever {
+	if affinity, ok := m.Selector().(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindNeverForModel(model) {
 		var authErr *Error
 		if errors.As(err, &authErr) && authErr != nil && authErr.Code == "session_auth_unavailable" {
 			return 0, false
@@ -2379,7 +2379,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 	registryRef := registry.GetGlobalRegistry()
 	targetKey := canonicalSchedulingProvider(provider)
 	affinitySelector, hasAffinity := selector.(*SessionAffinitySelector)
-	trackTransientAffinity := hasAffinity && affinitySelector != nil && (affinitySelector.rebindOnQuotaOnly || affinitySelector.rebindOnNever)
+	trackTransientAffinity := hasAffinity && affinitySelector != nil && affinitySelector.tracksTransientRebind(model)
 	_, weighted := selector.(*WeightedRoundRobinSelector)
 	if hasAffinity && affinitySelector != nil {
 		_, weighted = affinitySelector.fallback.(*WeightedRoundRobinSelector)
@@ -2418,7 +2418,7 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		}
 		candidates = append(candidates, candidate)
 	}
-	canInspectUnavailableAffinity := hasAffinity && affinitySelector != nil && affinitySelector.rebindOnNever && pluginScheduler == nil
+	canInspectUnavailableAffinity := hasAffinity && affinitySelector != nil && affinitySelector.rebindNeverForModel(model) && pluginScheduler == nil
 	if len(candidates) == 0 && !canInspectUnavailableAffinity {
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -2867,7 +2867,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 	}
 	registryRef := registry.GetGlobalRegistry()
 	affinitySelector, hasAffinity := selector.(*SessionAffinitySelector)
-	trackTransientAffinity := hasAffinity && affinitySelector != nil && (affinitySelector.rebindOnQuotaOnly || affinitySelector.rebindOnNever)
+	trackTransientAffinity := hasAffinity && affinitySelector != nil && affinitySelector.tracksTransientRebind(model)
 	_, weighted := selector.(*WeightedRoundRobinSelector)
 	if hasAffinity && affinitySelector != nil {
 		_, weighted = affinitySelector.fallback.(*WeightedRoundRobinSelector)
@@ -2916,7 +2916,7 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		}
 		candidates = append(candidates, candidate)
 	}
-	canInspectUnavailableAffinity := hasAffinity && affinitySelector != nil && affinitySelector.rebindOnNever && pluginScheduler == nil
+	canInspectUnavailableAffinity := hasAffinity && affinitySelector != nil && affinitySelector.rebindNeverForModel(model) && pluginScheduler == nil
 	if len(candidates) == 0 && !canInspectUnavailableAffinity {
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}

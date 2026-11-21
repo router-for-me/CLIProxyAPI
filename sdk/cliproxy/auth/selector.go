@@ -1403,12 +1403,13 @@ func availabilityBlock(unavailable, quotaExceeded bool, nextRetryAfter, nextReco
 // It extracts session ID from multiple sources and maintains session-to-auth
 // mappings with automatic failover when the bound auth becomes unavailable.
 type SessionAffinitySelector struct {
-	fallback          Selector
-	cache             *SessionCache
-	matcher           *cliproxysession.MerklePrefixMatcher
-	subagentAffinity  bool
-	rebindOnQuotaOnly bool
-	rebindOnNever     bool
+	fallback            Selector
+	cache               *SessionCache
+	matcher             *cliproxysession.MerklePrefixMatcher
+	subagentAffinity    bool
+	rebindOnQuotaOnly   bool
+	rebindOnNever       bool
+	rebindOnNeverModels map[string]struct{}
 }
 
 const (
@@ -1529,7 +1530,7 @@ func isStateBlockedByQuotaOrAuth(unavailable bool, quota QuotaState, nextRetryAf
 }
 
 func (s *SessionAffinitySelector) shouldPreserveBindingWhenUnavailable(ctx context.Context, candidates []*Auth, model, authID string, now time.Time) bool {
-	if s == nil || (!s.rebindOnQuotaOnly && !s.rebindOnNever) || authID == "" {
+	if s == nil || !s.tracksTransientRebind(model) || authID == "" {
 		return false
 	}
 	if ctx != nil {
@@ -1570,6 +1571,9 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+	// RebindOnModels lists model IDs that always use the "never" policy,
+	// regardless of RebindOn. Matching ignores case and thinking suffixes.
+	RebindOnModels []string
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1593,14 +1597,51 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		subagentAffinity = *cfg.SubagentAffinity
 	}
 	rebindMode := normalizeSessionAffinityRebindOn(cfg.RebindOn)
-	return &SessionAffinitySelector{
-		fallback:          cfg.Fallback,
-		cache:             NewSessionCache(cfg.TTL),
-		matcher:           cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
-		subagentAffinity:  subagentAffinity,
-		rebindOnQuotaOnly: rebindMode == SessionAffinityRebindOnQuota,
-		rebindOnNever:     rebindMode == SessionAffinityRebindOnNever,
+	var rebindOnNeverModels map[string]struct{}
+	for _, model := range cfg.RebindOnModels {
+		key := canonicalModelLookupKey(model)
+		if key == "" {
+			continue
+		}
+		if rebindOnNeverModels == nil {
+			rebindOnNeverModels = make(map[string]struct{}, len(cfg.RebindOnModels))
+		}
+		rebindOnNeverModels[key] = struct{}{}
 	}
+	return &SessionAffinitySelector{
+		fallback:            cfg.Fallback,
+		cache:               NewSessionCache(cfg.TTL),
+		matcher:             cliproxysession.NewMerklePrefixMatcher(cfg.TTL),
+		subagentAffinity:    subagentAffinity,
+		rebindOnQuotaOnly:   rebindMode == SessionAffinityRebindOnQuota,
+		rebindOnNever:       rebindMode == SessionAffinityRebindOnNever,
+		rebindOnNeverModels: rebindOnNeverModels,
+	}
+}
+
+// rebindNeverForModel reports whether an established binding for model must
+// never fail over to another credential. Models in RebindOnModels always use
+// the never policy; all other models inherit the global RebindOn value.
+func (s *SessionAffinitySelector) rebindNeverForModel(model string) bool {
+	if s == nil {
+		return false
+	}
+	if s.rebindOnNever {
+		return true
+	}
+	if len(s.rebindOnNeverModels) == 0 {
+		return false
+	}
+	_, ok := s.rebindOnNeverModels[canonicalModelLookupKey(model)]
+	return ok
+}
+
+// tracksTransientRebind reports whether the selector needs transient
+// unavailability bookkeeping for model. Quota mode tracks every model; a
+// model-scoped never entry needs the same bookkeeping so an unavailable bound
+// credential produces session_auth_retry instead of session_auth_unavailable.
+func (s *SessionAffinitySelector) tracksTransientRebind(model string) bool {
+	return s != nil && (s.rebindOnQuotaOnly || s.rebindNeverForModel(model))
 }
 
 // Trees returns a backward-compatible in-memory session tree store.
@@ -1691,7 +1732,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	// A single availability pass serves both lookups: the bound credential is validated against
 	// every priority tier, while the fallback selector keeps seeing only the highest tier.
 	available, err := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
-	if err != nil && !s.rebindOnNever {
+	if err != nil && !s.rebindNeverForModel(model) {
 		return nil, err
 	}
 	fallbackAuths := highestPriorityAuths(available)
@@ -1738,7 +1779,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 			}
 		}
-		if s.rebindOnNever {
+		if s.rebindNeverForModel(model) {
 			bind(cachedAuthID, false)
 			errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
 			entry.Infof("session-affinity: cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, errBound.Code, provider, model)
@@ -1803,7 +1844,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					}
 				}
 			}
-			if !isSubagent && !isFork && s.rebindOnNever {
+			if !isSubagent && !isFork && s.rebindNeverForModel(model) {
 				bind(cachedAuthID, false)
 				errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
 				entry.Infof("session-affinity: fallback cache hit but bound auth unavailable, refusing failover | session=%s fallback=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, errBound.Code, provider, model)
@@ -1872,7 +1913,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	}
 	now := time.Now()
 	available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
-	if errAvailable != nil && !s.rebindOnNever {
+	if errAvailable != nil && !s.rebindNeverForModel(model) {
 		return nil, true, errAvailable
 	}
 
@@ -1919,7 +1960,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			picked, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, reservation)
 			return picked, true, errPick
 		}
-		if !match.IsFork && s.rebindOnNever {
+		if !match.IsFork && s.rebindNeverForModel(model) {
 			if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, match.AuthID); bindRes.SessionID != "" {
 				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
@@ -2291,7 +2332,7 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		// selected credential is unhealthy, so preserve both explicit and LCP bindings.
 		return
 	}
-	if !res.Success && (s.rebindOnNever || (s.rebindOnQuotaOnly && !shouldRebindSessionAffinityOnError(res.Error))) {
+	if !res.Success && (s.rebindNeverForModel(nsModel) || (s.rebindOnQuotaOnly && !shouldRebindSessionAffinityOnError(res.Error))) {
 		// Under session-affinity-rebind-on: never (or quota on transient failures),
 		// keep the session bound to its original credential.
 		return
