@@ -1049,8 +1049,11 @@ func TestResponsesWebsocketTerminal429WhenAllCredentialsExhaustedOrCooling(t *te
 		t.Fatalf("expected socket close after terminal 429 error frame, got frame: %s", extraFrame)
 	}
 
-	// 3. The single credential is now cooling down. A subsequent connection must receive
-	// a terminal 429 model_cooldown error frame with reset_seconds and Retry-After.
+	// 3. The single credential is now cooling down after an explicit usage_limit_reached
+	// whose 600s reset outlasts QuotaExhaustedCooldownThreshold. A subsequent connection
+	// must receive a terminal 429 model_cooldown frame reported as a final usage limit:
+	// the reset in the body, X-Should-Retry: false and no Retry-After, so clients do not
+	// sleep through the window.
 	conn2, resp2, errDial2 := websocket.DefaultDialer.Dial(wsURL, nil)
 	if resp2 != nil && resp2.Body != nil {
 		defer func() {
@@ -1089,11 +1092,20 @@ func TestResponsesWebsocketTerminal429WhenAllCredentialsExhaustedOrCooling(t *te
 	if got := ojson.GetBytesNoCopy(frame3, "error.code").String(); got != "model_cooldown" {
 		t.Fatalf("frame3 error.code = %q, want model_cooldown: %s", got, frame3)
 	}
-	if got := int(ojson.GetBytesNoCopy(frame3, "error.reset_seconds").Int()); got <= 0 {
-		t.Fatalf("frame3 error.reset_seconds = %d, want > 0: %s", got, frame3)
+	if got := int(ojson.GetBytesNoCopy(frame3, "error.reset_seconds").Int()); got < 590 || got > 600 {
+		t.Fatalf("frame3 error.reset_seconds = %d, want the ~600s upstream reset: %s", got, frame3)
 	}
-	if got := ojson.GetBytesNoCopy(frame3, "headers.Retry-After").String(); got == "" {
-		t.Fatalf("frame3 headers.Retry-After is empty: %s", frame3)
+	if got := ojson.GetBytesNoCopy(frame3, "error.type").String(); got != "usage_limit_reached" {
+		t.Fatalf("frame3 error.type = %q, want usage_limit_reached: %s", got, frame3)
+	}
+	if got := ojson.GetBytesNoCopy(frame3, "error.resets_at").Int(); got <= time.Now().Unix() {
+		t.Fatalf("frame3 error.resets_at = %d, want a future unix time: %s", got, frame3)
+	}
+	if got := ojson.GetBytesNoCopy(frame3, "headers.X-Should-Retry").String(); got != "false" {
+		t.Fatalf("frame3 headers.X-Should-Retry = %q, want false: %s", got, frame3)
+	}
+	if got := ojson.GetBytesNoCopy(frame3, "headers.Retry-After"); got.Exists() {
+		t.Fatalf("frame3 headers.Retry-After = %q, want absent for a final usage limit: %s", got.String(), frame3)
 	}
 	if _, extraFrame, errAfter := conn2.ReadMessage(); errAfter == nil {
 		t.Fatalf("expected socket close after terminal 429 model_cooldown frame, got frame: %s", extraFrame)

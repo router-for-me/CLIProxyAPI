@@ -35,6 +35,7 @@ var corsExposedResponseHeaders = []string{
 	"X-SERVER-BUILD-DATE",
 	"Location",
 	"Retry-After",
+	"X-Should-Retry",
 	// Cross-origin management clients must read the config version token to
 	// send it back as If-Match on writes.
 	"ETag",

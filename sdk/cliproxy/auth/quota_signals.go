@@ -73,6 +73,7 @@ func cooldownFieldsOf(q QuotaState) QuotaState {
 		Reason:        q.Reason,
 		NextRecoverAt: q.NextRecoverAt,
 		BackoffLevel:  q.BackoffLevel,
+		Exhausted:     q.Exhausted,
 	}
 }
 
@@ -87,6 +88,7 @@ func applyCooldownFields(dst *QuotaState, cooldown QuotaState) {
 	dst.Reason = cooldown.Reason
 	dst.NextRecoverAt = cooldown.NextRecoverAt
 	dst.BackoffLevel = cooldown.BackoffLevel
+	dst.Exhausted = cooldown.Exhausted
 	dst.cooldownSignals = maps.Clone(cooldown.cooldownSignals)
 	dst.cooldownEvaluated = cooldown.Exceeded || cooldown.cooldownEvaluated
 }

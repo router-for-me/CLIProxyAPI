@@ -54,6 +54,20 @@ const ErrorCodeCredentialQuota = "credential_quota"
 
 const credentialQuotaErrorCode = ErrorCodeCredentialQuota
 
+// ErrorCodeQuotaExhausted marks a 429 the upstream explicitly identified as
+// quota exhaustion with a structured code (see
+// cliproxyexecutor.QuotaExhaustedError). The public status stays 429. A pool
+// cooldown is reported as a final usage limit only when every candidate
+// credential is cooling down after such a failure; unclassified 429s keep
+// their retry guidance.
+const ErrorCodeQuotaExhausted = "quota_exhausted"
+
+const quotaExhaustedErrorCode = ErrorCodeQuotaExhausted
+
+// quotaExhaustedMetadataKey retains exhaustion evidence when Code must preserve
+// another scheduling classification, such as credential_quota or force_cooldown.
+const quotaExhaustedMetadataKey = "quota_exhausted"
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -146,6 +160,13 @@ func (e *Error) StatusCode() int {
 		return 0
 	}
 	return e.HTTPStatus
+}
+
+// IsQuotaExhausted reports structured upstream exhaustion evidence independently
+// of credential scope and other scheduling classifications.
+func (e *Error) IsQuotaExhausted() bool {
+	return e != nil && e.HTTPStatus == http.StatusTooManyRequests &&
+		(e.Code == quotaExhaustedErrorCode || e.Metadata[quotaExhaustedMetadataKey] == "true")
 }
 
 // IsRequestScoped reports whether the failure is tied to the current request
@@ -387,6 +408,17 @@ func (e *authUnavailableError) Headers() http.Header {
 type poolCooldownTerminalError struct {
 	cause    error
 	deadline time.Time
+	// quotaExhausted records that every blocked candidate is cooling down
+	// after an upstream 429 explicitly marked as quota exhaustion, as for a
+	// selection-time modelCooldownError.
+	quotaExhausted bool
+}
+
+// IsUsageLimitReached reports whether every candidate credential is out of
+// quota, per explicit upstream evidence, for longer than clients should keep
+// retrying.
+func (e *poolCooldownTerminalError) IsUsageLimitReached() bool {
+	return e != nil && e.quotaExhausted && !e.deadline.IsZero() && time.Until(e.deadline) > QuotaExhaustedCooldownThreshold
 }
 
 func (e *poolCooldownTerminalError) Error() string {
@@ -442,6 +474,10 @@ func (e *poolCooldownTerminalError) RetryAfter() *time.Duration {
 func (e *poolCooldownTerminalError) SafeResponseHeaders() http.Header {
 	if e == nil || e.deadline.IsZero() {
 		return nil
+	}
+	if e.IsUsageLimitReached() {
+		// Long, explicitly exhausted quota windows are not client retries.
+		return http.Header{"X-Should-Retry": []string{"false"}}
 	}
 	return safeRetryAfterHeader(time.Until(e.deadline))
 }
