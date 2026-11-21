@@ -2469,6 +2469,8 @@
     "loading": "正在加载额度…",
     "next_up": "优先使用",
     "next_up_hint": "按重置优先路由会先使用此账号：它的每周额度最先重置。",
+    "exhausted": "已耗尽",
+    "exhausted_hint": "某项额度已用完，重置前路由会跳过此账号。",
     "refresh_quota": "刷新额度",
     "other_credentials": "其他凭证",
     "window_seven_day_fable": "7 天 Fable 5",

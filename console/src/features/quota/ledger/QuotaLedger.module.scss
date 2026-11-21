@@ -51,8 +51,9 @@
 
 .nameLine {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 4px 8px;
   min-width: 0;
 }
 
@@ -74,6 +75,16 @@
   font-weight: 600;
   color: var(--viz-success);
   background: color-mix(in srgb, var(--viz-success) 14%, transparent);
+}
+
+.exhausted {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: $radius-full;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--viz-failure);
+  background: color-mix(in srgb, var(--viz-failure) 16%, transparent);
 }
 
 .plan {
@@ -126,6 +137,18 @@
 
 .meterMuted {
   opacity: 0.45;
+}
+
+.meterExhausted {
+  .meterHead,
+  .meterHead strong,
+  .resetRelative {
+    color: var(--viz-failure);
+  }
+
+  .bar {
+    background: color-mix(in srgb, var(--viz-failure) 28%, transparent);
+  }
 }
 
 .meterHead {

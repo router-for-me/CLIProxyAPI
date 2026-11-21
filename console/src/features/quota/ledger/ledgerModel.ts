@@ -44,6 +44,8 @@ export interface LedgerRow {
   renewsAt: string | number | null;
   /** Codex manual resets: how many are banked and when each expires, soonest first. */
   resetCredits: { available: number; expiresAt: string[] } | null;
+  /** A window is at 0%, so routing skips the account until it resets. */
+  exhausted: boolean;
   nextUp: boolean;
 }
 
@@ -161,6 +163,7 @@ export function buildLedgerRows(
           provider === 'codex' && typeof available === 'number'
             ? { available, expiresAt: credits }
             : null,
+        exhausted: meters.some((meter) => meter.remaining === 0),
         nextUp: false,
       };
     });
@@ -181,7 +184,7 @@ export function buildLedgerRows(
       !row.entry.file.disabled &&
       row.primary !== null &&
       (row.primary.remaining ?? 0) > 0 &&
-      row.meters.every((meter) => meter.remaining !== 0) &&
+      !row.exhausted &&
       resetKey(row) !== Number.POSITIVE_INFINITY
   );
   if (next) next.nextUp = true;

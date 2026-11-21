@@ -2482,6 +2482,8 @@
     "loading": "Đang tải hạn mức…",
     "next_up": "Dùng trước",
     "next_up_hint": "Định tuyến reset-first dùng tài khoản này trước: hạn mức tuần của nó đặt lại sớm nhất.",
+    "exhausted": "Đã cạn",
+    "exhausted_hint": "Một hạn mức đã dùng hết nên định tuyến bỏ qua tài khoản này cho đến khi đặt lại.",
     "refresh_quota": "Làm mới hạn mức",
     "other_credentials": "Thông tin xác thực khác",
     "window_seven_day_fable": "7 ngày Fable 5",

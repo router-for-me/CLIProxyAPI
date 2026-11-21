@@ -2476,6 +2476,8 @@
     "loading": "Loading quota…",
     "next_up": "Next up",
     "next_up_hint": "Reset-first routing spends this account first: its weekly quota resets soonest.",
+    "exhausted": "Exhausted",
+    "exhausted_hint": "A limit is used up, so routing skips this account until it resets.",
     "refresh_quota": "Refresh quota",
     "other_credentials": "Other credentials",
     "window_seven_day_fable": "7-day Fable 5",
