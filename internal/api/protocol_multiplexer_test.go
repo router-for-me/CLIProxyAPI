@@ -157,6 +157,13 @@ func TestAcceptMuxUnauthenticatedRESPDoesNotStarveHTTP(t *testing.T) {
 }
 
 func TestServerRejectsIncompleteUnauthenticatedRequestBodiesPromptly(t *testing.T) {
+	// The server writes its request log before it responds. Under heavy parallel
+	// test I/O, Windows can stall opening the request body temp file for several
+	// seconds, so this is a generous failure bound, not an expected latency. The
+	// server has no body read timeout, so one that waits for a missing body
+	// still fails.
+	const responseWait = 15 * time.Second
+
 	modes := []struct {
 		name           string
 		requestLog     bool
@@ -316,7 +323,7 @@ func TestServerRejectsIncompleteUnauthenticatedRequestBodiesPromptly(t *testing.
 						_ = conn.Close()
 					}()
 
-					if errDeadline := conn.SetDeadline(time.Now().Add(500 * time.Millisecond)); errDeadline != nil {
+					if errDeadline := conn.SetDeadline(time.Now().Add(responseWait)); errDeadline != nil {
 						t.Fatalf("set deadline: %v", errDeadline)
 					}
 					if _, errWrite := conn.Write([]byte(tc.rawRequest)); errWrite != nil {
@@ -338,7 +345,7 @@ func TestServerRejectsIncompleteUnauthenticatedRequestBodiesPromptly(t *testing.
 			}
 
 			// Verify authenticated requests and /healthz still work and capture bodies on errors.
-			httpClient := &http.Client{Timeout: 2 * time.Second}
+			httpClient := &http.Client{Timeout: responseWait}
 			healthResp, errHealth := httpClient.Get("http://" + addr + "/healthz")
 			if errHealth != nil {
 				t.Fatalf("healthz failed: %v", errHealth)
