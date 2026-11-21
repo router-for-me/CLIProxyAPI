@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -2851,14 +2852,42 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	return m.PrepareRequestAuth(ctx, preparer, auth)
 }
 
-// PrepareRequestAuth prepares a registered credential using the same serialization
-// and lifecycle checks as normal request execution. Management tools use this path too.
-func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
-	if m == nil || preparer == nil || auth == nil || !preparer.ShouldPrepareRequestAuth(auth) {
+func (m *Manager) prepareRequestAuthAtVersion(ctx context.Context, executor ProviderExecutor, auth *Auth, expectedEpoch, expectedVersion uint64) (*Auth, error) {
+	if m == nil || executor == nil || auth == nil {
+		return auth, nil
+	}
+	preparer, ok := executor.(RequestAuthPreparer)
+	if !ok {
 		return auth, nil
 	}
 
+	return m.prepareRequestAuthInternal(ctx, preparer, auth, expectedEpoch, expectedVersion)
+}
+
+// PrepareRequestAuth prepares a registered credential using the same serialization
+// and lifecycle checks as normal request execution. Management tools use this path too.
+func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
+	return m.prepareRequestAuthInternal(ctx, preparer, auth, 0, 0)
+}
+
+func (m *Manager) prepareRequestAuthInternal(ctx context.Context, preparer RequestAuthPreparer, auth *Auth, expectedEpoch, expectedVersion uint64) (*Auth, error) {
+	if m == nil || preparer == nil || auth == nil {
+		return auth, nil
+	}
 	id := strings.TrimSpace(auth.ID)
+	if !preparer.ShouldPrepareRequestAuth(auth) {
+		if expectedVersion != 0 && id != "" {
+			current, okCurrent := m.GetByID(id)
+			if !okCurrent || current == nil {
+				return nil, errVerifyCredentialRemoved
+			}
+			if (expectedEpoch != 0 && current.RegistrationEpoch != expectedEpoch) || current.CredentialVersion != expectedVersion {
+				return nil, errVerifyCredentialSuperseded
+			}
+		}
+		return auth, nil
+	}
+
 	if id == "" {
 		return preparer.PrepareRequestAuth(ctx, auth.Clone())
 	}
@@ -2877,7 +2906,13 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 	}
 	m.mu.RUnlock()
 	if target == nil {
+		if expectedVersion != 0 {
+			return nil, errVerifyCredentialRemoved
+		}
 		return nil, fmt.Errorf("prepare %s auth: credential no longer registered", prepareProviderLabel(auth.Provider))
+	}
+	if expectedVersion != 0 && ((expectedEpoch != 0 && target.RegistrationEpoch != expectedEpoch) || target.CredentialVersion != expectedVersion) {
+		return nil, errVerifyCredentialSuperseded
 	}
 
 	if !preparer.ShouldPrepareRequestAuth(target) {
@@ -2886,11 +2921,37 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 
 	base := target.Clone()
 	updated, errPrepare := preparer.PrepareRequestAuth(ctx, base.Clone())
+	if expectedVersion != 0 {
+		currentAfter, okAfter := m.GetByID(id)
+		if !okAfter || currentAfter == nil {
+			return nil, errVerifyCredentialRemoved
+		}
+		if (expectedEpoch != 0 && currentAfter.RegistrationEpoch != expectedEpoch) || currentAfter.CredentialVersion != expectedVersion {
+			return nil, errVerifyCredentialSuperseded
+		}
+	}
 	if errPrepare != nil {
 		return auth, errPrepare
 	}
 	if updated == nil {
 		return target, nil
+	}
+
+	if expectedVersion != 0 {
+		saved, committed, baseSuperseded, errUpdate := m.updatePreparedAuthStrict(ctx, base, updated)
+		if errUpdate != nil {
+			if strings.Contains(errUpdate.Error(), "stale registration epoch") {
+				return nil, errVerifyCredentialSuperseded
+			}
+			return nil, errUpdate
+		}
+		if saved == nil {
+			return nil, errVerifyCredentialRemoved
+		}
+		if !committed || baseSuperseded {
+			return nil, errVerifyCredentialSuperseded
+		}
+		return saved, nil
 	}
 
 	saved, errUpdate := m.UpdatePreparedAuth(ctx, base, updated)
@@ -3507,6 +3568,240 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	return util.WithSessionID(ctx, clientMeta.SessionID)
 }
 
+func modelModalitiesContain(modalities []string, target string) bool {
+	for _, modality := range modalities {
+		if strings.EqualFold(strings.TrimSpace(modality), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelSupportsTextProbeModalities(info *registry.ModelInfo) bool {
+	if info == nil {
+		return false
+	}
+	if len(info.SupportedInputModalities) > 0 && !modelModalitiesContain(info.SupportedInputModalities, "text") {
+		return false
+	}
+	if len(info.SupportedOutputModalities) > 0 && !modelModalitiesContain(info.SupportedOutputModalities, "text") {
+		return false
+	}
+	return true
+}
+
+func selectVerifyInferenceModel(models []*registry.ModelInfo) string {
+	var nonThinking, zeroAllowed, firstText, textModalityFallback, fallback string
+	for _, info := range models {
+		if info == nil {
+			continue
+		}
+		id := strings.TrimSpace(info.ID)
+		if id == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = id
+		}
+		if !modelSupportsTextProbeModalities(info) {
+			continue
+		}
+		lowerID := strings.ToLower(id)
+		if strings.Contains(lowerID, "image") || strings.Contains(lowerID, "video") {
+			if textModalityFallback == "" {
+				textModalityFallback = id
+			}
+			continue
+		}
+		if firstText == "" {
+			firstText = id
+		}
+		if info.Thinking == nil {
+			if nonThinking == "" {
+				nonThinking = id
+			}
+			continue
+		}
+		if info.Thinking.ZeroAllowed && zeroAllowed == "" {
+			zeroAllowed = id
+		}
+	}
+	switch {
+	case nonThinking != "":
+		return nonThinking
+	case zeroAllowed != "":
+		return zeroAllowed
+	case firstText != "":
+		return firstText
+	case textModalityFallback != "":
+		return textModalityFallback
+	default:
+		return fallback
+	}
+}
+
+func resolveVerifyInferenceRouteModel(auth *Auth, provider, model string) (string, error) {
+	if routeModel := strings.TrimSpace(model); routeModel != "" {
+		return routeModel, nil
+	}
+	if auth != nil {
+		if selected := selectVerifyInferenceModel(registry.GetGlobalRegistry().GetModelsForClient(auth.ID)); selected != "" {
+			return selected, nil
+		}
+	}
+	switch provider {
+	case "codex", "openai":
+		return "gpt-5", nil
+	default:
+		return "", &Error{
+			Code:       "model_required",
+			Message:    fmt.Sprintf("no registered models available for %s credential; specify a model or wait for model discovery", provider),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+}
+
+func buildVerifyInferencePayload(provider, verifyModel string) []byte {
+	doc := ojson.NewDocString(`{"model":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"store":false}`)
+	_ = doc.Set("model", verifyModel)
+	if provider == "codex" {
+		// Codex upstreams reject integer max_output_tokens below 16, so the minimal
+		// verification budget must sit at that floor. Other providers omit
+		// max_output_tokens to avoid rejecting or truncating thinking models.
+		_ = doc.Set("max_output_tokens", 16)
+	}
+	return doc.Bytes()
+}
+
+func verifyCancellationError(execCtx context.Context, auth *Auth, err error) error {
+	if execCtx != nil {
+		if errCtx := execCtx.Err(); errCtx != nil {
+			return errCtx
+		}
+	}
+	return claudeOAuthRequestCancellation(execCtx, auth, err)
+}
+
+func verifyCredentialSupersededError() *Error {
+	return &Error{
+		Code:       "credential_superseded",
+		Message:    "credential was replaced during verification; re-run verification for the new credential",
+		HTTPStatus: http.StatusConflict,
+	}
+}
+
+func verifyCredentialRemovedError() *Error {
+	return &Error{
+		Code:       "auth_not_found",
+		Message:    "credential was removed during verification",
+		HTTPStatus: http.StatusConflict,
+	}
+}
+
+// tryRefreshVerifyAuthAfterUnauthorized refreshes an account-pinned credential
+// once after a 401 while fencing on both RegistrationEpoch and CredentialVersion
+// so an external replacement with the same ID fails with 409 credential_superseded
+// instead of retrying or verifying the replacement credential.
+func (m *Manager) tryRefreshVerifyAuthAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders http.Header, credVersion, regEpoch uint64) (*Auth, bool, error) {
+	if m == nil || auth == nil || execErr == nil {
+		return auth, false, nil
+	}
+	if isRequestScopedError(execErr) || isRequestStopError(execErr) || isRequestTerminatedError(execErr) || isTOSViolationError(execErr) || isInvalidGrantError(execErr) || !isUnauthorizedError(execErr) {
+		return auth, false, nil
+	}
+	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.requestScopedErrorConfig(ctx)); ruleMatched {
+		return auth, false, nil
+	}
+	current, okCurrent := m.GetByID(auth.ID)
+	if !okCurrent || current == nil {
+		return nil, false, verifyCredentialRemovedError()
+	}
+	if current.RegistrationEpoch != regEpoch || current.CredentialVersion != credVersion {
+		return current, false, verifyCredentialSupersededError()
+	}
+	failedToken := authAccessTokenForRequest(ctx, auth, clientHeaders)
+	if alreadyTried || !authHasRefreshCredential(auth) || hasUnauthorizedAuthFailure(auth) {
+		if failedToken != "" {
+			m.markRejectedAccessToken(auth.ID, failedToken)
+		}
+		return auth, false, nil
+	}
+	log.Debugf("unauthorized response for %s (%s) during verification, refreshing credentials before retry", auth.Provider, auth.ID)
+	refreshed, errRefresh := m.refreshAuthForRequestAtVersion(ctx, auth.ID, failedToken, regEpoch, credVersion)
+	if errors.Is(errRefresh, errVerifyCredentialRemoved) {
+		return nil, false, verifyCredentialRemovedError()
+	}
+	if errors.Is(errRefresh, errVerifyCredentialSuperseded) {
+		latest, _ := m.GetByID(auth.ID)
+		return latest, false, verifyCredentialSupersededError()
+	}
+	if errRefresh != nil || refreshed == nil {
+		log.Debugf("credential refresh during verification failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
+		latest, okLatest := m.GetByID(auth.ID)
+		if !okLatest || latest == nil {
+			return nil, false, verifyCredentialRemovedError()
+		}
+		if latest.RegistrationEpoch != regEpoch || latest.CredentialVersion != credVersion {
+			return latest, false, verifyCredentialSupersededError()
+		}
+		return auth, false, nil
+	}
+	if failedToken != "" && authAccessTokenForRequest(ctx, refreshed, clientHeaders) == failedToken && (refreshed.RejectedAccessToken == failedToken || refreshed.RejectedSIWCAccessToken == failedToken) {
+		return auth, false, nil
+	}
+	return refreshed, true, nil
+}
+
+func (m *Manager) recordVerifyFailure(execCtx context.Context, auth *Auth, provider, stateModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, credVersion, regEpoch, executionSeq uint64, err error) {
+	rerr := resultErrorFromError(err)
+	if rerr != nil {
+		rerr.Message = sanitizeRenewalMessage(rerr.Message)
+	}
+	result := Result{
+		AuthID:            auth.ID,
+		Provider:          provider,
+		Model:             stateModel,
+		RouteModel:        routeModel,
+		Success:           false,
+		Error:             rerr,
+		RetryAfter:        retryAfterFromError(err),
+		CredentialScope:   isCredentialScopedError(err),
+		Options:           opts,
+		AccessToken:       accessToken,
+		RefreshToken:      authRefreshToken(auth),
+		CredentialVersion: credVersion,
+		RegistrationEpoch: regEpoch,
+		ExecutionSeq:      executionSeq,
+	}
+	m.ApplyRequestScopedErrorResult(execCtx, auth, err, &result)
+	m.MarkResult(execCtx, result)
+}
+
+func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *Auth, provider, stateModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, credVersion, regEpoch, executionSeq uint64) (*Auth, error) {
+	m.MarkResult(execCtx, Result{
+		AuthID:            auth.ID,
+		Provider:          provider,
+		Model:             stateModel,
+		RouteModel:        routeModel,
+		Success:           true,
+		CompletedResponse: true,
+		Options:           opts,
+		AccessToken:       accessToken,
+		RefreshToken:      authRefreshToken(auth),
+		CredentialVersion: credVersion,
+		RegistrationEpoch: regEpoch,
+		ExecutionSeq:      executionSeq,
+	})
+	updated, okUpdated := m.GetByID(auth.ID)
+	if !okUpdated || updated == nil {
+		return nil, verifyCredentialRemovedError()
+	}
+	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
+		return updated, verifyCredentialSupersededError()
+	}
+	return updated, nil
+}
+
 // VerifyInference performs an operator-triggered, account-pinned inference verification
 // using an isolated session and minimal non-user prompt/token budget. It never falls back
 // to another credential and requires a completed response before marking InferenceVerified.
@@ -3535,15 +3830,10 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if executor == nil {
 		return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
 	}
-	executor = executorForAuth(executor, auth)
 
-	routeModel := strings.TrimSpace(model)
-	if routeModel == "" {
-		if models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID); len(models) > 0 && models[0] != nil && strings.TrimSpace(models[0].ID) != "" {
-			routeModel = strings.TrimSpace(models[0].ID)
-		} else {
-			routeModel = "gpt-5"
-		}
+	routeModel, errModel := resolveVerifyInferenceRouteModel(auth, provider, model)
+	if errModel != nil {
+		return auth, errModel
 	}
 	verifyModel := routeModel
 	if candidates, _, _, _ := m.executionModelCandidatesWithAlias(auth, routeModel); len(candidates) > 0 && strings.TrimSpace(candidates[0]) != "" {
@@ -3555,9 +3845,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 
 	sessionID := fmt.Sprintf("verify-%s-%d", auth.ID, time.Now().UTC().UnixNano())
-	// Codex upstreams reject integer max_output_tokens below 16, so the minimal
-	// verification budget must sit at that floor.
-	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`, verifyModel))
+	payload := buildVerifyInferencePayload(provider, verifyModel)
 	req := cliproxyexecutor.Request{
 		Model:   verifyModel,
 		Payload: payload,
@@ -3571,165 +3859,221 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		Metadata:        map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: sessionID},
 	}
 
-	execCtx := m.newUpstreamAttemptContext(ctx)
-	execCtx = syncMetadataSessionToContext(execCtx, opts.Metadata)
+	baseCtx := ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	if errCtx := baseCtx.Err(); errCtx != nil {
+		return auth, errCtx
+	}
+	if rt := m.roundTripperFor(auth); rt != nil {
+		baseCtx = context.WithValue(baseCtx, roundTripperContextKey{}, rt)
+		baseCtx = context.WithValue(baseCtx, "cliproxy.roundtripper", rt)
+	}
+	execCtx := syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 	executionSeq := m.nextExecutionSeq()
+
+	baseExecutor := executor
 	accessToken := authAccessTokenForRequest(execCtx, auth, opts.Headers)
 	credVersion := auth.CredentialVersion
 	regEpoch := auth.RegistrationEpoch
+	didRefreshOnUnauthorized := false
 
-	streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
-	if errStream != nil {
-		rerr := resultErrorFromError(errStream)
-		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
-			opts.Stream = false
-			resp, errExec := executor.Execute(execCtx, auth, req, opts)
-			rerrExec := resultErrorFromError(errExec)
-			if rerrExec != nil {
-				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
+	for {
+		preparedAuth, errPrepare := m.prepareRequestAuthAtVersion(execCtx, baseExecutor, auth, regEpoch, credVersion)
+		if errPrepare == nil {
+			if preparedAuth != nil {
+				if preparedAuth.RegistrationEpoch != regEpoch {
+					return preparedAuth, verifyCredentialSupersededError()
+				}
+				auth = preparedAuth
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion = auth.CredentialVersion
+				regEpoch = auth.RegistrationEpoch
 			}
-			if errExec != nil {
-				m.MarkResult(execCtx, Result{
-					AuthID:            auth.ID,
-					Provider:          provider,
-					Model:             stateModel,
-					RouteModel:        routeModel,
-					Success:           false,
-					Error:             rerrExec,
-					RetryAfter:        retryAfterFromError(errExec),
-					CredentialScope:   isCredentialScopedError(errExec),
-					Options:           opts,
-					AccessToken:       accessToken,
-					RefreshToken:      authRefreshToken(auth),
-					CredentialVersion: credVersion,
-					RegistrationEpoch: regEpoch,
-					ExecutionSeq:      executionSeq,
-				})
-				updated, _ := m.GetByID(auth.ID)
-				return updated, errExec
-			}
-			if resp.Incomplete || !isCompletedExecutionPayload(resp.Payload) {
-				incompleteErr := &Error{Code: "incomplete_response", Message: "verification response did not complete", HTTPStatus: http.StatusBadGateway}
-				updated, _ := m.GetByID(auth.ID)
-				return updated, incompleteErr
-			}
-			m.MarkResult(execCtx, Result{
-				AuthID:            auth.ID,
-				Provider:          provider,
-				Model:             stateModel,
-				RouteModel:        routeModel,
-				Success:           true,
-				CompletedResponse: true,
-				Options:           opts,
-				AccessToken:       accessToken,
-				RefreshToken:      authRefreshToken(auth),
-				CredentialVersion: credVersion,
-				RegistrationEpoch: regEpoch,
-				ExecutionSeq:      executionSeq,
-			})
-			updated, okUpdated := m.GetByID(auth.ID)
-			if !okUpdated || updated == nil {
-				return nil, &Error{Code: "auth_not_found", Message: "credential was removed during verification", HTTPStatus: http.StatusConflict}
-			}
-			if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
-				return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
-			}
-			return updated, nil
+			break
 		}
-		if rerr != nil {
-			rerr.Message = sanitizeRenewalMessage(rerr.Message)
+		if errors.Is(errPrepare, errVerifyCredentialRemoved) {
+			return nil, verifyCredentialRemovedError()
 		}
-		m.MarkResult(execCtx, Result{
-			AuthID:            auth.ID,
-			Provider:          provider,
-			Model:             stateModel,
-			RouteModel:        routeModel,
-			Success:           false,
-			Error:             rerr,
-			RetryAfter:        retryAfterFromError(errStream),
-			CredentialScope:   isCredentialScopedError(errStream),
-			Options:           opts,
-			AccessToken:       accessToken,
-			RefreshToken:      authRefreshToken(auth),
-			CredentialVersion: credVersion,
-			RegistrationEpoch: regEpoch,
-			ExecutionSeq:      executionSeq,
-		})
+		if errors.Is(errPrepare, errVerifyCredentialSuperseded) {
+			latest, _ := m.GetByID(auth.ID)
+			return latest, verifyCredentialSupersededError()
+		}
+		if errCancel := verifyCancellationError(execCtx, auth, errPrepare); errCancel != nil {
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errCancel
+		}
+		if accessToken != "" {
+			refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, errPrepare, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+			if errSuperseded != nil {
+				return refreshed, errSuperseded
+			}
+			if okRefresh {
+				auth = refreshed
+				didRefreshOnUnauthorized = true
+				execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+				executionSeq = m.nextExecutionSeq()
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion = auth.CredentialVersion
+				regEpoch = auth.RegistrationEpoch
+				continue
+			}
+		}
+		if errCancel := verifyCancellationError(execCtx, auth, errPrepare); errCancel != nil {
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errCancel
+		}
+		m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, errPrepare)
 		updated, _ := m.GetByID(auth.ID)
-		return updated, errStream
+		return updated, errPrepare
 	}
+	executor = executorForAuth(baseExecutor, auth)
 
-	var sawCompleted bool
-	var sawIncomplete bool
-	var chunkErr error
-	if streamRes != nil && streamRes.Chunks != nil {
-		for chunk := range streamRes.Chunks {
-			if chunk.Err != nil && chunkErr == nil {
-				chunkErr = chunk.Err
+	for {
+		streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
+		if errStream != nil {
+			if errCancel := verifyCancellationError(execCtx, auth, errStream); errCancel != nil {
+				updated, _ := m.GetByID(auth.ID)
+				return updated, errCancel
 			}
-			if chunk.Incomplete {
-				sawIncomplete = true
-			}
-			if len(chunk.Payload) > 0 {
-				comp, incomp := streamPayloadCompletionFlags(chunk.Payload)
-				if comp {
-					sawCompleted = true
+			rerr := resultErrorFromError(errStream)
+			if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
+				opts.Stream = false
+				for {
+					resp, errExec := executor.Execute(execCtx, auth, req, opts)
+					if errExec != nil {
+						if errCancel := verifyCancellationError(execCtx, auth, errExec); errCancel != nil {
+							updated, _ := m.GetByID(auth.ID)
+							return updated, errCancel
+						}
+						refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, errExec, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+						if errSuperseded != nil {
+							return refreshed, errSuperseded
+						}
+						if okRefresh {
+							auth = refreshed
+							executor = executorForAuth(baseExecutor, auth)
+							didRefreshOnUnauthorized = true
+							execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+							executionSeq = m.nextExecutionSeq()
+							accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+							credVersion = auth.CredentialVersion
+							regEpoch = auth.RegistrationEpoch
+							continue
+						}
+						if errCancel := verifyCancellationError(execCtx, auth, errExec); errCancel != nil {
+							updated, _ := m.GetByID(auth.ID)
+							return updated, errCancel
+						}
+						m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, errExec)
+						updated, _ := m.GetByID(auth.ID)
+						return updated, errExec
+					}
+					if errCancel := verifyCancellationError(execCtx, auth, nil); errCancel != nil {
+						updated, _ := m.GetByID(auth.ID)
+						return updated, errCancel
+					}
+					if resp.Incomplete || !isCompletedExecutionPayload(resp.Payload) {
+						incompleteErr := &Error{Code: "incomplete_response", Message: "verification response did not complete", HTTPStatus: http.StatusBadGateway}
+						updated, _ := m.GetByID(auth.ID)
+						return updated, incompleteErr
+					}
+					return m.completeVerifyInferenceSuccess(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq)
 				}
-				if incomp {
-					sawIncomplete = true
+			}
+			refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, errStream, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+			if errSuperseded != nil {
+				return refreshed, errSuperseded
+			}
+			if okRefresh {
+				auth = refreshed
+				executor = executorForAuth(baseExecutor, auth)
+				didRefreshOnUnauthorized = true
+				execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+				executionSeq = m.nextExecutionSeq()
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion = auth.CredentialVersion
+				regEpoch = auth.RegistrationEpoch
+				continue
+			}
+			if errCancel := verifyCancellationError(execCtx, auth, errStream); errCancel != nil {
+				updated, _ := m.GetByID(auth.ID)
+				return updated, errCancel
+			}
+			m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, errStream)
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errStream
+		}
+
+		var sawCompleted bool
+		var sawIncomplete bool
+		var chunkErr error
+		if streamRes != nil && streamRes.Chunks != nil {
+		streamDrain:
+			for {
+				select {
+				case <-execCtx.Done():
+					discardStreamChunks(streamRes.Chunks)
+					updated, _ := m.GetByID(auth.ID)
+					return updated, execCtx.Err()
+				case chunk, okChunk := <-streamRes.Chunks:
+					if !okChunk {
+						break streamDrain
+					}
+					if chunk.Err != nil && chunkErr == nil {
+						chunkErr = chunk.Err
+					}
+					if chunk.Incomplete {
+						sawIncomplete = true
+					}
+					if len(chunk.Payload) > 0 {
+						comp, incomp := streamPayloadCompletionFlags(chunk.Payload)
+						if comp {
+							sawCompleted = true
+						}
+						if incomp {
+							sawIncomplete = true
+						}
+					}
 				}
 			}
 		}
-	}
-	if chunkErr != nil {
-		rerrChunk := resultErrorFromError(chunkErr)
-		if rerrChunk != nil {
-			rerrChunk.Message = sanitizeRenewalMessage(rerrChunk.Message)
+		if errCancel := verifyCancellationError(execCtx, auth, chunkErr); errCancel != nil {
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errCancel
 		}
-		m.MarkResult(execCtx, Result{
-			AuthID:            auth.ID,
-			Provider:          provider,
-			Model:             stateModel,
-			RouteModel:        routeModel,
-			Success:           false,
-			Error:             rerrChunk,
-			RetryAfter:        retryAfterFromError(chunkErr),
-			CredentialScope:   isCredentialScopedError(chunkErr),
-			Options:           opts,
-			AccessToken:       accessToken,
-			RefreshToken:      authRefreshToken(auth),
-			CredentialVersion: credVersion,
-			RegistrationEpoch: regEpoch,
-			ExecutionSeq:      executionSeq,
-		})
-		updated, _ := m.GetByID(auth.ID)
-		return updated, chunkErr
+		if chunkErr != nil {
+			if !sawCompleted {
+				refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, chunkErr, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+				if errSuperseded != nil {
+					return refreshed, errSuperseded
+				}
+				if okRefresh {
+					auth = refreshed
+					executor = executorForAuth(baseExecutor, auth)
+					didRefreshOnUnauthorized = true
+					execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+					executionSeq = m.nextExecutionSeq()
+					accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+					credVersion = auth.CredentialVersion
+					regEpoch = auth.RegistrationEpoch
+					continue
+				}
+				if errCancel := verifyCancellationError(execCtx, auth, chunkErr); errCancel != nil {
+					updated, _ := m.GetByID(auth.ID)
+					return updated, errCancel
+				}
+			}
+			m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, chunkErr)
+			updated, _ := m.GetByID(auth.ID)
+			return updated, chunkErr
+		}
+		if !sawCompleted || sawIncomplete {
+			incompleteErr := &Error{Code: "incomplete_response", Message: "verification stream ended without a completed response", HTTPStatus: http.StatusBadGateway}
+			updated, _ := m.GetByID(auth.ID)
+			return updated, incompleteErr
+		}
+		return m.completeVerifyInferenceSuccess(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq)
 	}
-	if !sawCompleted || sawIncomplete {
-		incompleteErr := &Error{Code: "incomplete_response", Message: "verification stream ended without a completed response", HTTPStatus: http.StatusBadGateway}
-		updated, _ := m.GetByID(auth.ID)
-		return updated, incompleteErr
-	}
-	m.MarkResult(execCtx, Result{
-		AuthID:            auth.ID,
-		Provider:          provider,
-		Model:             stateModel,
-		RouteModel:        routeModel,
-		Success:           true,
-		CompletedResponse: true,
-		Options:           opts,
-		AccessToken:       accessToken,
-		RefreshToken:      authRefreshToken(auth),
-		CredentialVersion: credVersion,
-		RegistrationEpoch: regEpoch,
-		ExecutionSeq:      executionSeq,
-	})
-	updated, okUpdated := m.GetByID(auth.ID)
-	if !okUpdated || updated == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "credential was removed during verification", HTTPStatus: http.StatusConflict}
-	}
-	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
-		return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
-	}
-	return updated, nil
 }
