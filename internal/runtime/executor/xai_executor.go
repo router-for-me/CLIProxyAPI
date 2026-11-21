@@ -90,6 +90,12 @@ func StartXAIVersionUpdater(ctx context.Context, proxyURL string) {
 	helps.StartXAIVersionUpdater(ctx, proxyURL)
 }
 
+// StopXAIVersionUpdater stops the Grok CLI version updater and restores the built-in
+// fallback client version.
+func StopXAIVersionUpdater() {
+	helps.StopXAIVersionUpdater()
+}
+
 // Identifier returns the provider identifier.
 func (e *XAIExecutor) Identifier() string {
 	return "xai"

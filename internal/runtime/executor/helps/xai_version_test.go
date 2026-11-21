@@ -84,7 +84,7 @@ func TestRefreshXAIClientVersionKeepsFallbackOnError(t *testing.T) {
 	restoreURL := OverrideXAINPMRegistryURLForTest(server.URL)
 	defer restoreURL()
 
-	refreshXAIClientVersion(context.Background())
+	refreshXAIClientVersion(context.Background(), currentXAIVersionGenerationForTest())
 
 	if got := GetXAIClientVersion(); got != "1.0.50" {
 		t.Fatalf("GetXAIClientVersion() = %q, want fallback 1.0.50 preserved on error", got)
@@ -104,7 +104,7 @@ func TestRefreshXAIClientVersionUpdatesOnSuccess(t *testing.T) {
 	restoreURL := OverrideXAINPMRegistryURLForTest(server.URL)
 	defer restoreURL()
 
-	refreshXAIClientVersion(context.Background())
+	refreshXAIClientVersion(context.Background(), currentXAIVersionGenerationForTest())
 
 	if got := GetXAIClientVersion(); got != "1.0.55" {
 		t.Fatalf("GetXAIClientVersion() = %q, want updated version 1.0.55", got)
@@ -131,7 +131,7 @@ func TestRefreshXAIClientVersionAcceptsStableLatest(t *testing.T) {
 	if version != "1.0.46" {
 		t.Fatalf("FetchXAINPMLatestVersion() = %q, want 1.0.46", version)
 	}
-	refreshXAIClientVersion(context.Background())
+	refreshXAIClientVersion(context.Background(), currentXAIVersionGenerationForTest())
 	if got := GetXAIClientVersion(); got != "1.0.46" {
 		t.Fatalf("GetXAIClientVersion() = %q, want stable latest 1.0.46", got)
 	}
@@ -161,7 +161,7 @@ func TestRefreshXAIClientVersionRejectsUnsafeVersions(t *testing.T) {
 			if _, errFetch := FetchXAINPMLatestVersion(context.Background(), server.Client()); errFetch == nil {
 				t.Fatal("FetchXAINPMLatestVersion() expected error for unsafe version, got nil")
 			}
-			refreshXAIClientVersion(context.Background())
+			refreshXAIClientVersion(context.Background(), currentXAIVersionGenerationForTest())
 			if got := GetXAIClientVersion(); got != DefaultXAIFallbackClientVersion {
 				t.Fatalf("GetXAIClientVersion() = %q, want fallback %s preserved", got, DefaultXAIFallbackClientVersion)
 			}
@@ -216,7 +216,7 @@ func TestRefreshXAIClientVersionUsesConfiguredProxy(t *testing.T) {
 	restoreProxy := setXAIVersionProxyURLForTest(proxyServer.URL)
 	defer restoreProxy()
 
-	refreshXAIClientVersion(context.Background())
+	refreshXAIClientVersion(context.Background(), currentXAIVersionGenerationForTest())
 
 	if !proxied.Load() {
 		t.Fatal("expected npm lookup to use the configured proxy")
@@ -289,6 +289,90 @@ func TestStartXAIVersionUpdaterRestartsWithNewContext(t *testing.T) {
 	if got := GetXAIClientVersion(); got != "1.0.71" {
 		t.Fatalf("GetXAIClientVersion() = %q, want 1.0.71 after restart", got)
 	}
+}
+
+func TestStopXAIVersionUpdaterCancelsAndRestoresFallback(t *testing.T) {
+	restoreVersion := SetXAIClientVersionForTest(DefaultXAIFallbackClientVersion)
+	defer restoreVersion()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"1.0.80"}`))
+	}))
+	defer server.Close()
+
+	restoreURL := OverrideXAINPMRegistryURLForTest(server.URL)
+	defer restoreURL()
+	notified := make(chan struct{}, 1)
+	restoreHook := SetXAIVersionRefreshedHookForTest(notified)
+	defer restoreHook()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	StartXAIVersionUpdater(ctx, "")
+	waitXAIVersionRefresh(t, notified)
+	if got := GetXAIClientVersion(); got != "1.0.80" {
+		t.Fatalf("GetXAIClientVersion() = %q, want 1.0.80 before stop", got)
+	}
+
+	StopXAIVersionUpdater()
+
+	if got := GetXAIClientVersion(); got != DefaultXAIFallbackClientVersion {
+		t.Fatalf("GetXAIClientVersion() = %q, want fallback %q after stop", got, DefaultXAIFallbackClientVersion)
+	}
+	xaiClientVersionMu.RLock()
+	running := xaiUpdaterCancel != nil
+	xaiClientVersionMu.RUnlock()
+	if running {
+		t.Fatal("updater cancel func still set after StopXAIVersionUpdater")
+	}
+}
+
+func TestStopXAIVersionUpdaterDiscardsInFlightRefresh(t *testing.T) {
+	restoreVersion := SetXAIClientVersionForTest(DefaultXAIFallbackClientVersion)
+	defer restoreVersion()
+
+	fetchStarted := make(chan struct{})
+	releaseFetch := make(chan struct{})
+	oldFetch := fetchXAIVersion
+	fetchXAIVersion = func(context.Context, *http.Client) (string, error) {
+		close(fetchStarted)
+		<-releaseFetch
+		return "1.0.90", nil
+	}
+	t.Cleanup(func() {
+		fetchXAIVersion = oldFetch
+	})
+
+	notified := make(chan struct{}, 2)
+	restoreHook := SetXAIVersionRefreshedHookForTest(notified)
+	defer restoreHook()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	StartXAIVersionUpdater(ctx, "")
+
+	select {
+	case <-fetchStarted:
+	case <-t.Context().Done():
+		t.Fatal("timed out waiting for npm fetch to start")
+	}
+
+	// Stop while the fetch is in flight, then let it complete successfully. The
+	// stopped updater must not publish the version it fetched afterwards.
+	StopXAIVersionUpdater()
+	close(releaseFetch)
+	waitXAIVersionRefresh(t, notified)
+
+	if got := GetXAIClientVersion(); got != DefaultXAIFallbackClientVersion {
+		t.Fatalf("GetXAIClientVersion() = %q, want fallback %q after a stopped updater's in-flight refresh completed", got, DefaultXAIFallbackClientVersion)
+	}
+}
+
+func currentXAIVersionGenerationForTest() uint64 {
+	xaiClientVersionMu.RLock()
+	defer xaiClientVersionMu.RUnlock()
+	return xaiUpdaterGeneration
 }
 
 func waitXAIVersionRefresh(t *testing.T, notified <-chan struct{}) {

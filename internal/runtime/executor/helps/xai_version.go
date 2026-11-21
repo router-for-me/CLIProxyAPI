@@ -31,6 +31,9 @@ const (
 
 var (
 	xaiNPMRegistryURL = "https://registry.npmjs.org/@xai-official/grok/latest"
+	// fetchXAIVersion performs the npm lookup used by the background updater.
+	// It is a variable so tests can control when a refresh completes.
+	fetchXAIVersion = FetchXAINPMLatestVersion
 )
 
 var (
@@ -38,7 +41,11 @@ var (
 	xaiVersionProxyURL     string
 	xaiClientVersionMu     sync.RWMutex
 	xaiUpdaterCancel       context.CancelFunc
-	xaiVersionRefreshed    chan struct{}
+	// xaiUpdaterGeneration is bumped by StartXAIVersionUpdater and StopXAIVersionUpdater
+	// under xaiClientVersionMu. A refresh may only publish its fetched version if the
+	// generation it started with is still current.
+	xaiUpdaterGeneration uint64
+	xaiVersionRefreshed  chan struct{}
 )
 
 // GetXAIClientVersion returns the current Grok CLI client version.
@@ -64,14 +71,33 @@ func StartXAIVersionUpdater(ctx context.Context, proxyURL string) {
 		xaiUpdaterCancel()
 	}
 	xaiUpdaterCancel = cancel
+	xaiUpdaterGeneration++
+	generation := xaiUpdaterGeneration
 	xaiVersionProxyURL = strings.TrimSpace(proxyURL)
 	xaiClientVersionMu.Unlock()
 
-	go runXAIVersionUpdater(runCtx)
+	go runXAIVersionUpdater(runCtx, generation)
 }
 
-func runXAIVersionUpdater(ctx context.Context) {
-	refreshXAIClientVersion(ctx)
+// StopXAIVersionUpdater cancels any running Grok CLI version updater and resets the
+// cached client version to DefaultXAIFallbackClientVersion. It is used when the
+// version check is disabled, so a process that previously ran the updater does not
+// keep polling npm or advertising a fetched version. Bumping the generation also
+// fences refreshes that already fetched a version and are waiting to publish it.
+func StopXAIVersionUpdater() {
+	xaiClientVersionMu.Lock()
+	defer xaiClientVersionMu.Unlock()
+	if xaiUpdaterCancel != nil {
+		xaiUpdaterCancel()
+		xaiUpdaterCancel = nil
+	}
+	xaiUpdaterGeneration++
+	xaiVersionProxyURL = ""
+	cachedXAIClientVersion = DefaultXAIFallbackClientVersion
+}
+
+func runXAIVersionUpdater(ctx context.Context, generation uint64) {
+	refreshXAIClientVersion(ctx, generation)
 
 	ticker := time.NewTicker(XAIVersionRefreshInterval)
 	defer ticker.Stop()
@@ -83,21 +109,26 @@ func runXAIVersionUpdater(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			refreshXAIClientVersion(ctx)
+			refreshXAIClientVersion(ctx, generation)
 		}
 	}
 }
 
-func refreshXAIClientVersion(ctx context.Context) {
+func refreshXAIClientVersion(ctx context.Context, generation uint64) {
 	defer notifyXAIVersionRefreshed()
 
-	version, errFetch := FetchXAINPMLatestVersion(ctx, nil)
+	version, errFetch := fetchXAIVersion(ctx, nil)
 	if errFetch != nil {
 		log.WithError(errFetch).Warn("failed to fetch latest Grok CLI version from npm, keeping fallback/cached version")
 		return
 	}
 
 	xaiClientVersionMu.Lock()
+	if generation != xaiUpdaterGeneration || ctx.Err() != nil {
+		xaiClientVersionMu.Unlock()
+		log.WithField("version", version).Debug("discarding Grok CLI version fetched by a superseded updater")
+		return
+	}
 	changed := cachedXAIClientVersion != version
 	if changed {
 		cachedXAIClientVersion = version
