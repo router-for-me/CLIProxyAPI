@@ -326,7 +326,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return
 			}
 		}
-		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
+		tail := finishForceMappedStreamChunks(rewriter)
+		rewriter = nil
+		if len(tail) > 0 {
 			tailChunk := cliproxyexecutor.StreamChunk{Payload: tail}
 			if !emit(tailChunk) {
 				return
