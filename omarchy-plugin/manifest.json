@@ -1,0 +1,24 @@
+{
+    "schemaVersion": 1,
+    "id": "chicken.proxy-usage",
+    "name": "Usage",
+    "version": "1.0.1",
+    "author": "Local",
+    "description": "Papa Proxy quotas and standalone Antigravity and Meta usage.",
+    "kinds": ["bar-widget"],
+    "entryPoints": {"barWidget": "UsagePanel.qml"},
+    "barWidget": {
+        "displayName": "Usage",
+        "category": "AI",
+        "allowMultiple": false,
+        "defaults": {"autoRefresh": true},
+        "schema": [
+            {
+                "key": "autoRefresh",
+                "type": "boolean",
+                "label": "Refresh every five minutes while open",
+                "defaultValue": true
+            }
+        ]
+    }
+}
