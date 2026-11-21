@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -63,6 +64,11 @@ func runMockStreamTest(t *testing.T, chunks []string, authID string) string {
 
 func runMockStreamTestWithError(t *testing.T, chunks []string, trailingErr error, authID string) string {
 	t.Helper()
+	return runMockStreamTestRecorder(t, chunks, trailingErr, authID).Body.String()
+}
+
+func runMockStreamTestRecorder(t *testing.T, chunks []string, trailingErr error, authID string) *httptest.ResponseRecorder {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
 
 	executor := &mockStreamExecutor{chunks: chunks, trailingErr: trailingErr}
@@ -85,7 +91,83 @@ func runMockStreamTestWithError(t *testing.T, chunks []string, trailingErr error
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, request)
-	return recorder.Body.String()
+	return recorder
+}
+
+// SSE responses must carry X-Accel-Buffering: no so nginx/OpenResty flushes each chunk and heartbeat.
+func TestChatCompletionsStreamSetsXAccelBufferingHeader(t *testing.T) {
+	recorder := runMockStreamTestRecorder(t, []string{
+		`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"truncated-stream-chat-model","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`,
+	}, nil, "x-accel-chat-auth")
+
+	if got := recorder.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+	if got := recorder.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("X-Accel-Buffering = %q, want %q", got, "no")
+	}
+}
+
+// While upstream is silent (for example, while Claude generates a large buffered tool_use),
+// ChatCompletions must keep writing ": keep-alive" heartbeats so proxies do not time out.
+// The upstream is held open until the test has seen the heartbeat, so the heartbeat must
+// arrive before the stream finishes.
+func TestChatCompletionsStreamSendsKeepAliveWhileUpstreamSilent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tickChan := make(chan time.Time)
+	restore := handlers.SetStreamingKeepAliveTickerFactoryForTest(func(time.Duration) (<-chan time.Time, func()) {
+		return tickChan, func() {}
+	})
+	defer restore()
+
+	chunks := make(chan coreexecutor.StreamChunk)
+	executor := &preFTKeepAliveChatExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	model := "silent-upstream-keepalive-chat-model"
+	auth := &coreauth.Auth{ID: "silent-upstream-keepalive-chat-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{
+			KeepAliveSeconds:      10,
+			SendKeepAliveBeforeFT: true,
+		},
+	}, manager)
+	h := NewOpenAIAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/chat/completions", h.ChatCompletions)
+
+	// Feed two heartbeats with the upstream silent, then release the upstream with a finish chunk.
+	go func() {
+		tickChan <- time.Unix(1, 0)
+		tickChan <- time.Unix(2, 0)
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"` + model + `","choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`)}
+		close(chunks)
+	}()
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("X-Accel-Buffering = %q, want %q", got, "no")
+	}
+	body := recorder.Body.String()
+	if n := strings.Count(body, ": keep-alive\n\n"); n < 2 {
+		t.Fatalf("expected at least 2 keep-alive heartbeats while upstream silent, got %d: %q", n, body)
+	}
+	if !strings.Contains(body, "done") {
+		t.Fatalf("upstream payload missing after heartbeats: %q", body)
+	}
 }
 
 // Issue #6371: A stream that emits multiple chunks and then cleanly closes without
