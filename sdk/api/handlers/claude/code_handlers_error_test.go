@@ -236,6 +236,74 @@ func TestWriteClaudeDirectErrorMarksMissingThreadForClientReplay(t *testing.T) {
 	}
 }
 
+func TestClaudeErrorPreservesUpstreamDetails(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusBadRequest,
+		Error:      errors.New(`{"type":"error","error":{"type":"invalid_request_error","message":"bad input","details":{"error_code":"context_too_long","limit":200000}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details").Raw; got != `{"error_code":"context_too_long","limit":200000}` {
+		t.Fatalf("error.details = %s, want upstream object verbatim; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorAddsThreadNotFoundCodeToDetailsWithoutErrorCode(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"hint":"replay"}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "thread_not_found" {
+		t.Fatalf("error.details.error_code = %q, want thread_not_found; body=%s", got, body)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.hint").String(); got != "replay" {
+		t.Fatalf("error.details.hint = %q, want replay; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorKeepsUpstreamErrorCodeOnThreadNotFound(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	msg := &interfaces.ErrorMessage{
+		StatusCode: http.StatusNotFound,
+		Error:      errors.New(`{"type":"error","error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id.","details":{"error_code":"custom_code"}}}`),
+	}
+
+	body, errMarshal := json.Marshal(handler.toClaudeError(msg))
+	if errMarshal != nil {
+		t.Fatalf("marshal Claude error: %v", errMarshal)
+	}
+	if got := ojson.GetBytesNoCopy(body, "error.details.error_code").String(); got != "custom_code" {
+		t.Fatalf("error.details.error_code = %q, want custom_code; body=%s", got, body)
+	}
+}
+
+func TestClaudeErrorOmitsDetailsWhenUpstreamHasNone(t *testing.T) {
+	handler := &ClaudeCodeAPIHandler{}
+	for _, text := range []string{
+		"bad",
+		`{"type":"error","error":{"type":"invalid_request_error","message":"bad input"}}`,
+		`{"type":"error","error":{"type":"invalid_request_error","message":"bad input","details":"not an object"}}`,
+	} {
+		body, errMarshal := json.Marshal(handler.toClaudeError(&interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(text)}))
+		if errMarshal != nil {
+			t.Fatalf("marshal Claude error: %v", errMarshal)
+		}
+		if ojson.GetBytesNoCopy(body, "error.details").Exists() {
+			t.Fatalf("error.details present for %q; body=%s", text, body)
+		}
+	}
+}
+
 func TestWriteClaudeErrorResponseUsesClaudeEnvelope(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
