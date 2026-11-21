@@ -1,0 +1,41 @@
+name: proxx-setup
+description: >
+  proxx: Go toolchain plus the build and module cache. Only main saves the cache (warm-cache job);
+  every other run restores the newest main cache, so PR hits do not depend on a PR's own history.
+inputs:
+  restore-only:
+    description: "false only in the main warm-cache job"
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: false
+    - name: Restore Go cache from main
+      if: inputs.restore-only == 'true'
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+          proxx-go-${{ runner.os }}-
+    - name: Restore and save Go cache (main)
+      if: inputs.restore-only != 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        restore-keys: |
+          proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+          proxx-go-${{ runner.os }}-
+    - name: Report cache hit
+      shell: bash
+      run: echo "go cache restored from ${{ steps.restore.outputs.cache-matched-key || 'nothing' }}" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,127 @@
+name: proxx-ci
+
+# proxx: the fork's CI. See docs/proxx/ci.md for the design, budgets and how to change them.
+# checks, build and every test shard run in parallel; no job waits on another.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+    inputs:
+      select_base:
+        description: "Run only the tests a diff against this ref can reach (selection experiment)"
+        required: false
+
+concurrency:
+  group: proxx-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  SHARDS: "8"
+  # Selection narrows PR feedback only when a merge queue runs the full suite before main.
+  # Set the repo variable PROXX_MERGE_QUEUE=true once the merge queue is on.
+  SELECT_BASE: ${{ inputs.select_base || (github.event_name == 'pull_request' && vars.PROXX_MERGE_QUEUE == 'true' && github.event.pull_request.base.sha) || '' }}
+
+jobs:
+  checks:
+    name: checks (fmt, vet, tidy, catalog, inventory, translator guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          fetch-depth: 0
+      - uses: ./.github/actions/proxx-setup
+      - run: bash .github/scripts/proxx-checks.sh ${{ github.event.pull_request.base.sha }}
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+      - uses: ./.github/actions/proxx-setup
+      - run: go build -o /dev/null ./cmd/server
+
+  test:
+    name: test (${{ matrix.shard }}/8)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          fetch-depth: ${{ env.SELECT_BASE && '0' || '1' }}
+      - uses: ./.github/actions/proxx-setup
+      - name: Restore test timings recorded on main
+        uses: actions/cache/restore@v4
+        with:
+          path: .github/proxx-ci/timings.json
+          key: proxx-timings-${{ github.sha }}
+          restore-keys: proxx-timings-
+      - name: Select tests
+        run: |
+          if [ -n "$SELECT_BASE" ]; then
+            python3 .github/scripts/proxx_ci.py select --base "$SELECT_BASE" > selected.txt
+          else
+            echo ALL > selected.txt
+          fi
+          echo "selection: $(head -1 selected.txt) ($(wc -l < selected.txt) lines)"
+      - name: Test
+        run: >
+          python3 .github/scripts/proxx_ci.py run --race
+          --shards "$SHARDS" --index $(( ${{ matrix.shard }} - 1 ))
+          --packages selected.txt --out test-output.json
+      - name: Upload timings
+        if: always() && github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.shard }}
+          path: test-output.json
+          retention-days: 3
+
+  # main only, not required: records test times for shard balancing.
+  record-timings:
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+          sparse-checkout: .github
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-output-*
+          path: outputs
+      - run: python3 .github/scripts/proxx_ci.py timings outputs/*/test-output.json > .github/proxx-ci/timings.json
+      - uses: actions/cache/save@v4
+        with:
+          path: .github/proxx-ci/timings.json
+          key: proxx-timings-${{ github.sha }}
+
+  # main only, not required: seeds the Go build cache that every PR job restores.
+  warm-cache:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: blob:none
+      - uses: ./.github/actions/proxx-setup
+        with:
+          restore-only: "false"
+      - name: Compile everything CI compiles
+        run: |
+          go mod download
+          go build -o /dev/null ./cmd/server
+          go vet ./...
+          go test -race -count=1 -run '^$' ./... > /dev/null
+          go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json
