@@ -1080,7 +1080,7 @@ oauth:
 
   # Global OAuth model name aliases (per channel)
   # These aliases rename model IDs for both model listing and request routing.
-  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
   # NOTE: These aliases do not apply to any of the upstream groups under api-keys.
   # NOTE: Because aliases affect the merged /v1 model list and merged request routing, overlapping
   # client-visible names can become ambiguous across providers. For strict backend pinning, use
@@ -1130,6 +1130,9 @@ oauth:
   #   meta:
   #     - name: "muse-spark-1.3"
   #       alias: "muse-latest"
+  #   copilot:
+  #     - name: "copilot/claude-sonnet-5" # use the listed Copilot model ID, before any auth prefix
+  #       alias: "copilot-sonnet"
   #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
   #     - name: "sample-model-latest"
   #       alias: "sample-latest"
@@ -1167,6 +1170,8 @@ oauth:
   #     - "grok-3-mini"
   #   meta:
   #     - "muse-spark-1.1"
+  #   copilot:
+  #     - "copilot/claude-haiku-*" # match Copilot model IDs before aliases and auth prefixes
 
   # OAuth provider request-scoped error rules (custom error classification for OAuth credentials)
   # request-scoped-errors:
@@ -1210,6 +1215,11 @@ oauth:
   #         - "max_tokens_exceeded"
   #       action: "stop"
   #   meta:
+  #     - status: 400
+  #       match:
+  #         - "context_length_exceeded"
+  #       action: "stop"
+  #   copilot:
   #     - status: 400
   #       match:
   #         - "context_length_exceeded"

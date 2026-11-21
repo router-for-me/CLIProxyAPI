@@ -61,7 +61,7 @@ func TestManager_MarkResult_ResultPolicy_DemotesCredentialScopeBeforeMutationAnd
 	m.SetCooldownStateStore(store)
 
 	hook := &recordingHook{}
-	m.hook = hook
+	m.AddHook(hook)
 
 	var policyInvoked atomic.Bool
 	var stateCheckedBeforeMutation atomic.Bool

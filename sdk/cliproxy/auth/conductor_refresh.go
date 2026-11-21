@@ -1294,7 +1294,16 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 	m.mu.Unlock()
 }
 
+var (
+	errVerifyCredentialRemoved    = errors.New("credential removed before or during refresh")
+	errVerifyCredentialSuperseded = errors.New("credential superseded before or during refresh")
+)
+
 func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAccessToken string, registrationEpoch uint64) (*Auth, error) {
+	return m.refreshAuthForRequestAtVersion(ctx, id, failedAccessToken, registrationEpoch, 0)
+}
+
+func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failedAccessToken string, registrationEpoch, credentialVersion uint64) (*Auth, error) {
 	if m == nil {
 		return nil, errors.New("auth manager is nil")
 	}
@@ -1310,7 +1319,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if id == "" {
 		return nil, errors.New("auth id is empty")
 	}
-	if failedAccessToken != "" {
+	if credentialVersion == 0 && failedAccessToken != "" {
 		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 
@@ -1330,7 +1339,13 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
 	}
 	m.mu.RUnlock()
-	if auth == nil || exec == nil {
+	if auth == nil {
+		if credentialVersion != 0 {
+			return nil, errVerifyCredentialRemoved
+		}
+		return nil, errors.New("auth or executor not found")
+	}
+	if exec == nil {
 		return nil, errors.New("auth or executor not found")
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
@@ -1347,7 +1362,16 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 	}
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
+		if credentialVersion != 0 {
+			return nil, errVerifyCredentialSuperseded
+		}
 		return nil, errors.New("auth registration changed before refresh")
+	}
+	if credentialVersion != 0 && auth.CredentialVersion != credentialVersion {
+		return nil, errVerifyCredentialSuperseded
+	}
+	if credentialVersion != 0 && failedAccessToken != "" {
+		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
@@ -1453,6 +1477,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
+	if credentialVersion != 0 && err != nil && ctx != nil && ctx.Err() != nil && !codex.IsRefreshOutcomeUnknown(err) {
+		return nil, ctx.Err()
+	}
 	now := time.Now()
 	isRefreshDeferred := errors.Is(err, baseauth.ErrRefreshDeferred) || errors.Is(err, codex.ErrSIWCRefreshDeferred)
 	refreshCanceled := (errors.Is(err, context.Canceled) || isRefreshDeferred) && !codex.IsRefreshOutcomeUnknown(err)
@@ -1522,6 +1549,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		if current := m.auths[id]; current != nil {
 			if base != nil && (current.RegistrationEpoch != base.RegistrationEpoch || current.CredentialVersion != base.CredentialVersion || secretGrantChanged(base, current)) {
 				m.mu.Unlock()
+				if credentialVersion != 0 {
+					return nil, errVerifyCredentialSuperseded
+				}
 				return nil, err
 			}
 			if hasUnauthorizedAuthFailure(current) && !forceRefresh {
@@ -1766,14 +1796,23 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	// A successful refresh may have rotated upstream tokens after cancellation.
 	// Commit its result with context values intact; keep epoch checks and save ordering.
-	saved, errUpdate := m.UpdateRefreshedAuth(context.WithoutCancel(ctx), base, updated)
+	saved, committed, baseSuperseded, errUpdate := m.updateRefreshedAuthWithStatus(context.WithoutCancel(ctx), base, updated)
 	if errUpdate != nil {
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		if credentialVersion != 0 && strings.Contains(errUpdate.Error(), "stale registration epoch") {
+			return nil, errVerifyCredentialSuperseded
+		}
 		return nil, errUpdate
 	}
 	if saved == nil {
+		if credentialVersion != 0 {
+			return nil, errVerifyCredentialRemoved
+		}
 		return nil, fmt.Errorf("auth %s not found", id)
+	}
+	if credentialVersion != 0 && (!committed || baseSuperseded) {
+		return nil, errVerifyCredentialSuperseded
 	}
 	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
