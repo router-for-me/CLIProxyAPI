@@ -97,6 +97,15 @@ func addRequestRetryToMetadata(requestRetry *int, metadata map[string]any) {
 	metadata["request_retry"] = *requestRetry
 }
 
+// addMaxQuotaCooldownToMetadata copies a per-credential cap on inherited upstream
+// quota cooldowns into metadata. Nil, zero or negative values are treated as unset.
+func addMaxQuotaCooldownToMetadata(maxQuotaCooldownSeconds *int, metadata map[string]any) {
+	if maxQuotaCooldownSeconds == nil || *maxQuotaCooldownSeconds <= 0 || metadata == nil {
+		return
+	}
+	metadata["max_quota_cooldown_seconds"] = *maxQuotaCooldownSeconds
+}
+
 // addRequestScopedErrorsToMetadata copies per-credential request-scoped error rules into metadata.
 func addRequestScopedErrorsToMetadata(rules []config.RequestScopedErrorRule, metadata map[string]any) {
 	if len(rules) == 0 || metadata == nil {
