@@ -1287,6 +1287,7 @@ func (m *Manager) markRejectedAccessToken(id, failedAccessToken string) {
 		current.Generation++
 		current.UpdatedAt = time.Now()
 		m.auths[id] = current
+		m.notifyAuthChangeLocked(id)
 		if m.scheduler != nil {
 			m.scheduler.upsertAuth(current.Clone())
 		}
@@ -1463,6 +1464,7 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 				}
 			}
 			m.auths[id] = current
+			m.notifyAuthChangeLocked(id)
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
@@ -1579,6 +1581,7 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 					current.StatusMessage = "unauthorized (refresh token invalid)"
 				}
 				m.auths[id] = current
+				m.notifyAuthChangeLocked(id)
 				if m.scheduler != nil {
 					m.scheduler.upsertAuth(current.Clone())
 				}
@@ -1738,6 +1741,9 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 				}
 			}
 			m.auths[id] = current
+			if shouldUnschedule || hasUnauthorizedAuthFailure(current) {
+				m.notifyAuthChangeLocked(id)
+			}
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(current.Clone())
 			}
