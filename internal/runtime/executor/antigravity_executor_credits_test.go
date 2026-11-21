@@ -957,7 +957,9 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
-	exec := NewAntigravityExecutor(&config.Config{})
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	})
 	const configuredUserAgent = "antigravity/hub/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
 	const loadCodeAssistUserAgent = "antigravity/hub/1.23.2 windows/amd64"
 	auth := &cliproxyauth.Auth{
@@ -1221,7 +1223,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.
 		var gotCustom string
 		var gotURL string
 
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		auth := &cliproxyauth.Auth{
 			ID: "auth-issue7820-custom-headers",
 			Attributes: map[string]string{
@@ -1263,7 +1267,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.
 		var gotHost string
 		var gotCustom string
 
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		auth := &cliproxyauth.Auth{
 			ID: "auth-issue7820-host-override",
 			Attributes: map[string]string{
@@ -1331,7 +1337,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.
 			wg.Wait()
 		})
 
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		auth := &cliproxyauth.Auth{
 			ID: "auth-issue7820-detached-gin",
 			Attributes: map[string]string{
@@ -1388,7 +1396,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 			logger.SetOutput(oldOutput)
 		})
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1424,7 +1434,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1454,7 +1466,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		oversizedTOS := strings.TrimSuffix(strings.TrimSpace(antigravityTOSBody), "}") + `,"padding":"` + strings.Repeat("a", antigravityLoadCodeAssistMaxResponseBytes+1024) + `"}`
 		body := &countingReadCloser{reader: strings.NewReader(oversizedTOS)}
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1483,7 +1497,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1522,7 +1538,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 			logger.SetOutput(oldOutput)
 		})
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 
@@ -1606,7 +1624,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 
@@ -1658,7 +1678,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{

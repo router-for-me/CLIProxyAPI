@@ -48,7 +48,7 @@ func TestIssue7702AntigravityPostRefreshCreditsHasBoundedTimeout(t *testing.T) {
 		// A long-lived caller context with no deadline, matching a background
 		// refresh lifecycle. The stalled loadCodeAssist must still be bounded.
 		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, ctx, auth)
 		if updated == nil {

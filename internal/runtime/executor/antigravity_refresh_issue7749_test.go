@@ -717,7 +717,9 @@ func TestIssue7749CreditsRefreshPreservesContextValuesAndExcludesRequestProxy(t 
 		})
 
 		auth := newAuth("ag-credits-postrefresh-7749")
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		exec.queueAntigravityCreditsRefresh(ctx, auth, "warm-token-7749", 0)
 
 		value, ok := antigravityCreditsHintRefreshByID.Load(auth.ID)
