@@ -14,13 +14,17 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 // resetAntigravityCreditsRetryState clears the package-level credits state
@@ -988,6 +992,179 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	exec.updateAntigravityCreditsBalance(ctx, auth, "token")
 }
 
+type countingReadCloser struct {
+	reader io.Reader
+	readN  int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	c.readN += int64(n)
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error {
+	return nil
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_EmptyAndNonMatchingAvailableCredits(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseBody   string
+		seedPriorHint  bool
+		wantPaidTierID string
+	}{
+		{
+			name:           "empty availableCredits array",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[]}}`,
+			wantPaidTierID: "pro",
+		},
+		{
+			name:           "unrelated creditType only",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[{"creditType":"OTHER_CREDIT","creditAmount":"500","minimumCreditAmountForUsage":"10"}]}}`,
+			wantPaidTierID: "pro",
+		},
+		{
+			name:           "unparseable GOOGLE_ONE_AI entry",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"not-a-number","minimumCreditAmountForUsage":"50"}]}}`,
+			wantPaidTierID: "pro",
+		},
+		{
+			name:           "empty availableCredits overwrites stale positive hint",
+			responseBody:   `{"paidTier":{"id":"pro","availableCredits":[]}}`,
+			seedPriorHint:  true,
+			wantPaidTierID: "pro",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			authID := fmt.Sprintf("auth-issue7750-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			if tc.seedPriorHint {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+					Known:           true,
+					Available:       true,
+					CreditAmount:    25000,
+					MinCreditAmount: 50,
+					PaidTierID:      "pro",
+					UpdatedAt:       time.Now(),
+				})
+			}
+
+			exec := NewAntigravityExecutor(&config.Config{
+				QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+			})
+			auth := &cliproxyauth.Auth{ID: authID}
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist" {
+					t.Fatalf("unexpected request url %s", req.URL.String())
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tc.responseBody)),
+				}, nil
+			}))
+
+			exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+			hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+			if !ok || !hint.Known {
+				t.Fatalf("GetAntigravityCreditsHint() = (%#v, %v), want Known=true", hint, ok)
+			}
+			if hint.Available {
+				t.Fatalf("hint.Available = true, want false")
+			}
+			if hint.PaidTierID != tc.wantPaidTierID {
+				t.Fatalf("hint.PaidTierID = %q, want %q", hint.PaidTierID, tc.wantPaidTierID)
+			}
+			if hint.UpdatedAt.IsZero() {
+				t.Fatal("hint.UpdatedAt is zero, want non-zero timestamp")
+			}
+
+			hasCredits, errCredits := antigravityAuthHasCreditsRequired(ctx, auth)
+			if errCredits != nil {
+				t.Fatalf("antigravityAuthHasCreditsRequired() error = %v", errCredits)
+			}
+			if hasCredits {
+				t.Fatal("antigravityAuthHasCreditsRequired() = true, want false")
+			}
+		})
+	}
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_BoundsResponseBodyRead(t *testing.T) {
+	t.Run("rejects oversized response without unbounded read", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		authID := fmt.Sprintf("auth-issue7750-oversized-%d", time.Now().UnixNano())
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		})
+
+		const maxExpectedRead = antigravityLoadCodeAssistMaxResponseBytes + 1
+		oversizedBody := `{"paidTier":{"id":"pro","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"25000","minimumCreditAmountForUsage":"50"}]},"padding":"` + strings.Repeat("a", antigravityLoadCodeAssistMaxResponseBytes+1024) + `"}`
+		body := &countingReadCloser{reader: strings.NewReader(oversizedBody)}
+
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+		auth := &cliproxyauth.Auth{ID: authID}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+		if body.readN > maxExpectedRead {
+			t.Fatalf("loadCodeAssist read %d bytes, want <= %d bytes", body.readN, maxExpectedRead)
+		}
+		if cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
+			t.Fatal("oversized loadCodeAssist response should not publish credits hint")
+		}
+	})
+
+	t.Run("ignores invalid JSON 200 response", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		authID := fmt.Sprintf("auth-issue7750-invalid-json-%d", time.Now().UnixNano())
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		})
+
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
+		auth := &cliproxyauth.Auth{ID: authID}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("<html>bad gateway</html>")),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+		if cliproxyauth.HasKnownAntigravityCreditsHint(auth.ID) {
+			t.Fatal("invalid JSON response should not publish credits hint")
+		}
+	})
+}
+
 func TestParseMetaFloat(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1014,4 +1191,493 @@ func TestParseMetaFloat(t *testing.T) {
 			}
 		})
 	}
+}
+
+type errorAfterReadCloser struct {
+	payload []byte
+	read    bool
+	err     error
+}
+
+func (r *errorAfterReadCloser) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		n := copy(p, r.payload)
+		return n, r.err
+	}
+	return 0, r.err
+}
+
+func (r *errorAfterReadCloser) Close() error {
+	return nil
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.T) {
+	t.Run("applies resolved Host and credential custom headers", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		var gotHost string
+		var gotCustom string
+		var gotURL string
+
+		exec := NewAntigravityExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID: "auth-issue7820-custom-headers",
+			Attributes: map[string]string{
+				"base_url":               "https://proxy.example.com:8443",
+				"header:X-Custom-Header": "custom-123",
+			},
+		}
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(auth.ID, cliproxyauth.AntigravityCreditsHint{})
+		})
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			gotURL = req.URL.String()
+			gotHost = req.Host
+			gotCustom = req.Header.Get("X-Custom-Header")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"pro","availableCredits":[]}}`)),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if gotURL != "https://proxy.example.com:8443/v1internal:loadCodeAssist" {
+			t.Fatalf("request URL = %q, want %q", gotURL, "https://proxy.example.com:8443/v1internal:loadCodeAssist")
+		}
+		if gotHost != "proxy.example.com:8443" {
+			t.Fatalf("req.Host = %q, want %q", gotHost, "proxy.example.com:8443")
+		}
+		if gotCustom != "custom-123" {
+			t.Fatalf("X-Custom-Header = %q, want %q", gotCustom, "custom-123")
+		}
+	})
+
+	t.Run("allows header:Host attribute to override resolved Host", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		var gotHost string
+		var gotCustom string
+
+		exec := NewAntigravityExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID: "auth-issue7820-host-override",
+			Attributes: map[string]string{
+				"base_url":               "https://proxy.example.com:8443",
+				"header:Host":            "override.example.com",
+				"header:X-Custom-Header": "custom-456",
+			},
+		}
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(auth.ID, cliproxyauth.AntigravityCreditsHint{})
+		})
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			gotHost = req.Host
+			gotCustom = req.Header.Get("X-Custom-Header")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"pro","availableCredits":[]}}`)),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if gotHost != "override.example.com" {
+			t.Fatalf("req.Host = %q, want %q", gotHost, "override.example.com")
+		}
+		if gotCustom != "custom-456" {
+			t.Fatalf("X-Custom-Header = %q, want %q", gotCustom, "custom-456")
+		}
+	})
+
+	t.Run("ignores pooled gin context and client templates during background credits refresh", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		var gotStatic string
+		var gotDynamicClient string
+		var gotDynamicSession string
+
+		ginReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		ginReq.Header.Set("X-Client-Secret", "client-secret")
+		ginReq = ginReq.WithContext(util.WithSessionID(ginReq.Context(), "gin-session-id"))
+		ginCtx := &gin.Context{Request: ginReq}
+
+		stopMutate := make(chan struct{})
+		mutatorStarted := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			close(mutatorStarted)
+			for {
+				select {
+				case <-stopMutate:
+					return
+				default:
+					ginCtx.Request = nil
+					ginCtx.Request = ginReq
+				}
+			}
+		}()
+		<-mutatorStarted
+		t.Cleanup(func() {
+			close(stopMutate)
+			wg.Wait()
+		})
+
+		exec := NewAntigravityExecutor(&config.Config{})
+		auth := &cliproxyauth.Auth{
+			ID: "auth-issue7820-detached-gin",
+			Attributes: map[string]string{
+				"header:X-Static-Header":   "static-ok",
+				"header:X-Dynamic-Client":  "$X-Client-Secret",
+				"header:X-Dynamic-Session": "$CPA-SESSION-ID",
+			},
+		}
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(auth.ID, cliproxyauth.AntigravityCreditsHint{})
+		})
+		ctx := context.WithValue(context.Background(), "gin", ginCtx)
+		ctx = util.WithSessionID(ctx, "ctx-session-id")
+		ctx = context.WithValue(ctx, "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			gotStatic = req.Header.Get("X-Static-Header")
+			gotDynamicClient = req.Header.Get("X-Dynamic-Client")
+			gotDynamicSession = req.Header.Get("X-Dynamic-Session")
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"pro","availableCredits":[]}}`)),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if gotStatic != "static-ok" {
+			t.Fatalf("X-Static-Header = %q, want %q", gotStatic, "static-ok")
+		}
+		if gotDynamicClient != "" {
+			t.Fatalf("X-Dynamic-Client = %q, want empty", gotDynamicClient)
+		}
+		if gotDynamicSession != "" {
+			t.Fatalf("X-Dynamic-Session = %q, want empty", gotDynamicSession)
+		}
+	})
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing.T) {
+	t.Run("arms tos-pause-window and logs appeal URL on 403 TOS_VIOLATION", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		logger := log.StandardLogger()
+		oldLevel := logger.GetLevel()
+		oldHooks := logger.ReplaceHooks(make(log.LevelHooks))
+		oldOutput := logger.Out
+		logger.SetLevel(log.WarnLevel)
+		logger.SetOutput(io.Discard)
+		hook := logtest.NewLocal(logger)
+		t.Cleanup(func() {
+			logger.SetLevel(oldLevel)
+			logger.ReplaceHooks(oldHooks)
+			logger.SetOutput(oldOutput)
+		})
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+		auth := &cliproxyauth.Auth{
+			ID:       "auth-issue7820-tos-403",
+			Provider: "antigravity",
+		}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(antigravityTOSBody)),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if !antigravityInTOSPause(cfg, auth) {
+			t.Fatal("antigravityInTOSPause() = false after 403 TOS_VIOLATION, want true")
+		}
+		foundAppealLog := false
+		for _, entry := range hook.AllEntries() {
+			if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "TOS_VIOLATION") && strings.Contains(entry.Message, "https://forms.gle/hGzM9MEUv2azZsrb9") {
+				foundAppealLog = true
+				break
+			}
+		}
+		if !foundAppealLog {
+			t.Fatalf("expected Warn log with TOS_VIOLATION and appeal URL, got %d entries", len(hook.AllEntries()))
+		}
+	})
+
+	t.Run("does not arm tos-pause-window on plain non-TOS 403", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+		auth := &cliproxyauth.Auth{
+			ID:       "auth-issue7820-plain-403",
+			Provider: "antigravity",
+		}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"SOME_OTHER_REASON"}]}}`)),
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if antigravityInTOSPause(cfg, auth) {
+			t.Fatal("antigravityInTOSPause() = true after plain 403, want false")
+		}
+	})
+
+	t.Run("bounds 403 response read and ignores oversized 403 body", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		const maxExpectedRead = antigravityLoadCodeAssistMaxResponseBytes + 1
+		oversizedTOS := strings.TrimSuffix(strings.TrimSpace(antigravityTOSBody), "}") + `,"padding":"` + strings.Repeat("a", antigravityLoadCodeAssistMaxResponseBytes+1024) + `"}`
+		body := &countingReadCloser{reader: strings.NewReader(oversizedTOS)}
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+		auth := &cliproxyauth.Auth{
+			ID:       "auth-issue7820-oversized-403",
+			Provider: "antigravity",
+		}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       body,
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if body.readN > maxExpectedRead {
+			t.Fatalf("403 loadCodeAssist read %d bytes, want <= %d bytes", body.readN, maxExpectedRead)
+		}
+		if antigravityInTOSPause(cfg, auth) {
+			t.Fatal("antigravityInTOSPause() = true for oversized 403 body, want false")
+		}
+	})
+
+	t.Run("does not arm tos-pause-window when reading 403 body fails", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+		auth := &cliproxyauth.Auth{
+			ID:       "auth-issue7820-read-err-403",
+			Provider: "antigravity",
+		}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       &errorAfterReadCloser{payload: []byte(antigravityTOSBody), err: errors.New("stream interrupted")},
+			}, nil
+		}))
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if antigravityInTOSPause(cfg, auth) {
+			t.Fatal("antigravityInTOSPause() = true when 403 body read errored, want false")
+		}
+	})
+
+	t.Run("does not arm tos-pause-window when a superseded queued task delivers late 403 TOS_VIOLATION", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		logger := log.StandardLogger()
+		oldLevel := logger.GetLevel()
+		oldHooks := logger.ReplaceHooks(make(log.LevelHooks))
+		oldOutput := logger.Out
+		logger.SetLevel(log.WarnLevel)
+		logger.SetOutput(io.Discard)
+		hook := logtest.NewLocal(logger)
+		t.Cleanup(func() {
+			logger.SetLevel(oldLevel)
+			logger.ReplaceHooks(oldHooks)
+			logger.SetOutput(oldOutput)
+		})
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+
+		authID := "auth-issue7820-superseded-tos-403"
+		t.Cleanup(func() {
+			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		})
+
+		oldStarted := make(chan struct{})
+		releaseOld := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseOld) }) })
+
+		oldAuth := &cliproxyauth.Auth{
+			ID:                authID,
+			Provider:          "antigravity",
+			RegistrationEpoch: 1,
+		}
+		oldCtx, cancelOld := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			close(oldStarted)
+			<-releaseOld
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(antigravityTOSBody)),
+			}, nil
+		})))
+		defer cancelOld()
+
+		exec.queueAntigravityCreditsRefresh(oldCtx, oldAuth, "old-token", 0)
+		<-oldStarted
+
+		rawState, ok := antigravityCreditsHintRefreshByID.Load(authID)
+		if !ok {
+			t.Fatal("expected queued credits refresh state to exist")
+		}
+		state := rawState.(*antigravityCreditsHintRefreshState)
+		state.mu.Lock()
+		oldTask := state.task
+		state.mu.Unlock()
+		if oldTask == nil {
+			t.Fatal("expected old queued task to be active")
+		}
+
+		// Supersede the credential with a newer registration epoch whose refresh succeeds.
+		newAuth := &cliproxyauth.Auth{
+			ID:                authID,
+			Provider:          "antigravity",
+			RegistrationEpoch: 2,
+		}
+		newCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"paidTier":{"id":"pro","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1500","minimumCreditAmountForUsage":"50"}]}}`)),
+			}, nil
+		}))
+		exec.queueAntigravityCreditsRefresh(newCtx, newAuth, "new-token", 0)
+		state.mu.Lock()
+		newTask := state.task
+		state.mu.Unlock()
+		if newTask != nil {
+			<-newTask.done
+		}
+
+		// Release the stale task so it delivers a complete 403 TOS_VIOLATION after being superseded.
+		releaseOnce.Do(func() { close(releaseOld) })
+		<-oldTask.done
+
+		if antigravityInTOSPause(cfg, newAuth) {
+			t.Fatal("antigravityInTOSPause() = true after late 403 TOS_VIOLATION from superseded task, want false")
+		}
+		for _, entry := range hook.AllEntries() {
+			if entry.Level == log.WarnLevel && strings.Contains(entry.Message, "TOS_VIOLATION") {
+				t.Fatalf("unexpected TOS_VIOLATION warning from superseded task: %q", entry.Message)
+			}
+		}
+	})
+
+	t.Run("arms tos-pause-window when active queued task receives 403 TOS_VIOLATION", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+
+		authID := "auth-issue7820-active-queued-tos-403"
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+
+		auth := &cliproxyauth.Auth{
+			ID:                authID,
+			Provider:          "antigravity",
+			RegistrationEpoch: 1,
+		}
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			close(started)
+			<-release
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(antigravityTOSBody)),
+			}, nil
+		}))
+
+		exec.queueAntigravityCreditsRefresh(ctx, auth, "token", 0)
+		<-started
+
+		rawState, ok := antigravityCreditsHintRefreshByID.Load(authID)
+		if !ok {
+			t.Fatal("expected queued credits refresh state to exist")
+		}
+		state := rawState.(*antigravityCreditsHintRefreshState)
+		state.mu.Lock()
+		task := state.task
+		state.mu.Unlock()
+		if task == nil {
+			t.Fatal("expected queued task to be active")
+		}
+
+		releaseOnce.Do(func() { close(release) })
+		<-task.done
+
+		if !antigravityInTOSPause(cfg, auth) {
+			t.Fatal("antigravityInTOSPause() = false after active queued task 403 TOS_VIOLATION, want true")
+		}
+	})
+
+	t.Run("does not arm tos-pause-window when direct call context is already canceled", func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		t.Cleanup(resetAntigravityCreditsRetryState)
+
+		cfg := &config.Config{}
+		cfg.Antigravity.TOSPauseWindow = "1h"
+		exec := NewAntigravityExecutor(cfg)
+		auth := &cliproxyauth.Auth{
+			ID:       "auth-issue7820-canceled-direct-403",
+			Provider: "antigravity",
+		}
+		ctx, cancel := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(antigravityTOSBody)),
+			}, nil
+		})))
+		cancel()
+
+		exec.updateAntigravityCreditsBalance(ctx, auth, "token")
+
+		if antigravityInTOSPause(cfg, auth) {
+			t.Fatal("antigravityInTOSPause() = true when direct call context was canceled, want false")
+		}
+	})
 }

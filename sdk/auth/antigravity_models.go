@@ -3,13 +3,16 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -42,7 +45,10 @@ const (
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs map[string]struct{}
+	ModelIDs         map[string]struct{}
+	UpdatedAt        time.Time
+	ExpiresAt        time.Time
+	RouteFingerprint string
 }
 
 // Clone returns a deep copy of the capability hints.
@@ -50,7 +56,22 @@ func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
+		UpdatedAt:         h.UpdatedAt,
+		ExpiresAt:         h.ExpiresAt,
+		RouteFingerprint:  h.RouteFingerprint,
 	}
+}
+
+// AntigravityCapabilityRouteFingerprint computes a credential-free SHA-256
+// fingerprint of the effective proxy URL and client User-Agent used to fetch
+// capability hints.
+func AntigravityCapabilityRouteFingerprint(proxyURL, userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%q/%q", strings.TrimSpace(proxyURL), userAgent)))
+	return fmt.Sprintf("%x", sum)
 }
 
 // AntigravityModelProbeRequest configures a single-shot fetchAvailableModels probe.
@@ -284,6 +305,15 @@ func BuildPersistedAntigravityCapabilityHints(project, endpoint string, hints An
 	if endpoint = sanitizeAntigravityPersistedEndpoint(endpoint); endpoint != "" {
 		value["endpoint"] = endpoint
 	}
+	if routeFingerprint := strings.TrimSpace(hints.RouteFingerprint); routeFingerprint != "" {
+		value["route_fingerprint"] = routeFingerprint
+	}
+	if !hints.UpdatedAt.IsZero() {
+		value["updated_at"] = hints.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	if !hints.ExpiresAt.IsZero() {
+		value["expires_at"] = hints.ExpiresAt.UTC().Format(time.RFC3339)
+	}
 	if len(hints.WebSearchModelIDs) > 0 {
 		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
 		for id := range hints.WebSearchModelIDs {
@@ -340,10 +370,30 @@ func ParsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 		}
 		webSearchModels = parsedWebSearch
 	}
+	routeFingerprint, _ := rawMap["route_fingerprint"].(string)
 	return AntigravityModelCapabilityHints{
 		ModelIDs:          modelIDs,
 		WebSearchModelIDs: webSearchModels,
+		UpdatedAt:         parsePersistedAntigravityTime(rawMap["updated_at"]),
+		ExpiresAt:         parsePersistedAntigravityTime(rawMap["expires_at"]),
+		RouteFingerprint:  strings.TrimSpace(routeFingerprint),
 	}, true
+}
+
+func parsePersistedAntigravityTime(raw any) time.Time {
+	value, ok := raw.(string)
+	if !ok {
+		return time.Time{}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, errParse := time.Parse(time.RFC3339Nano, value)
+	if errParse != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
 }
 
 func parsePersistedAntigravityModelSet(raw any) (map[string]struct{}, bool) {

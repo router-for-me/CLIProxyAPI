@@ -22,7 +22,7 @@ import (
 func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	if antigravityInTOSPause(e.cfg, auth) {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity pool paused after TOS_VIOLATION"}
+		return cliproxyexecutor.Response{}, newAntigravityTOSPauseStatusErr()
 	}
 
 	from := opts.SourceFormat
@@ -156,14 +156,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 
 	if httpResp.StatusCode == http.StatusForbidden {
-		e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+		e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 	}
-	sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+	sErr := newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 	if httpResp.StatusCode == http.StatusTooManyRequests {
 		closeAntigravityAuthIdleTransports(auth)
-		if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-			sErr.retryAfter = retryAfter
-		}
 	}
 	return cliproxyexecutor.Response{}, sErr
 }

@@ -4,9 +4,12 @@ import (
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
+
+var claude55Model = regexp.MustCompile(`^claude-(opus|sonnet)-5-5(?:-(high|reasoning))?(?:-[0-9]{8})?(?:\[[^\[\]]+\])?$`)
 
 // NormalizeClaudeToolChoice downgrades forced tool use on Claude 5.5 to auto.
 // Use the routed upstream model, not the payload model, and run before thinking

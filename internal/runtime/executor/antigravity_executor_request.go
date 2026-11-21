@@ -67,17 +67,22 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	geminiToAntigravityDocForAuth(doc, modelName, projectID, antigravityAuthID(auth), derivedSessionIDs...)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
+	lowerModel := strings.ToLower(modelName)
+
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		if modelInfo == nil && lowerModel != modelName {
+			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
+		}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
 				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
 			}
 		}
 	}
-
-	isClaudeModel := strings.Contains(modelName, "claude")
-	useAntigravitySchema := isClaudeModel || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
+	isClaudeModel := strings.Contains(lowerModel, "claude")
+	useAntigravitySchema := isClaudeModel || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-pro")
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
@@ -739,7 +744,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 	helps.SetStringIfDifferentDoc(doc, "model", modelName)
 	helps.SetStringIfDifferentDoc(doc, "userAgent", "antigravity")
 
-	isImageModel := strings.Contains(modelName, "image")
+	isImageModel := strings.Contains(strings.ToLower(modelName), "image")
 	reqType := strings.TrimSpace(doc.Get("requestType").String())
 	if reqType == "" {
 		if isImageModel {
@@ -830,7 +835,16 @@ func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID st
 		if content.Get("role").String() != "user" {
 			return true
 		}
-		text := content.Get("parts.0.text").String()
+		text := ""
+		if parts := content.Get("parts"); parts.IsArray() {
+			parts.ForEach(func(_, part ojson.Result) bool {
+				if candidate := part.Get("text").String(); candidate != "" {
+					text = candidate
+					return false
+				}
+				return true
+			})
+		}
 		if text == "" {
 			return true
 		}
