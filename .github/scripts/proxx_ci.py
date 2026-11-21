@@ -235,19 +235,20 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
           f"(all shards: {[s['cost'] for s in full]})", flush=True)
     flags = ["-count=1", "-shuffle=on", "-json"] + (["-race"] if race else [])
     whole = [it["package"] for it in mine if "run" not in it and "skip" not in it]
-    cmds = []
+    cmds = []  # (label, command, plan item or None)
     if whole:
-        cmds.append(("whole", ["go", "test", *flags, *whole]))
+        cmds.append(("whole", ["go", "test", *flags, *whole], None))
     for it in mine:
         if "run" in it:
-            cmds.append((it["package"], ["go", "test", *flags, "-run", anchored(it["run"]), it["package"]]))
+            cmds.append((it["package"], ["go", "test", *flags, "-run", anchored(it["run"]), it["package"]], it))
         elif "skip" in it:
             extra = ["-skip", anchored(it["skip"])] if it["skip"] else []
-            cmds.append((it["package"], ["go", "test", *flags, *extra, it["package"]]))
-    ran, tests_ran, failed, ok = set(), {}, [], True
+            cmds.append((it["package"], ["go", "test", *flags, *extra, it["package"]], it))
+    ran, failed, ok = set(), [], True
     logs = {}  # (package, test) -> output lines, printed only when that test fails
     with open(out_path, "w") as out:
-        for label, cmd in cmds:
+        for label, cmd, item in cmds:
+            tests_ran = {}  # per invocation, so a -run part and the -skip part of one package stay apart
             start = time.time()
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
             for line in p.stdout:
@@ -277,18 +278,18 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
                     sys.stdout.write(e["Output"])
             ok = (p.wait() == 0) and ok
             print(f"  {label}: {time.time() - start:.1f}s", flush=True)
+            if item is not None:
+                got = tests_ran.get(item["package"], set())
+                if "run" in item and not got <= set(item["run"]):
+                    failed.append(f"{item['package']}: -run part ran unplanned tests {sorted(got - set(item['run']))}")
+                    ok = False
+                if "skip" in item and got & set(item["skip"]):
+                    failed.append(f"{item['package']}: -skip part ran skipped tests {sorted(got & set(item['skip']))}")
+                    ok = False
     planned = {it["package"] for it in mine}
     if ran != planned:
         failed.append(f"shard ran {sorted(ran ^ planned)} outside its plan (or never ran them)")
         ok = False
-    for it in mine:
-        got = tests_ran.get(it["package"], set())
-        if "run" in it and not got <= set(it["run"]):
-            failed.append(f"{it['package']}: -run part ran unplanned tests {sorted(got - set(it['run']))}")
-            ok = False
-        if "skip" in it and got & set(it["skip"]):
-            failed.append(f"{it['package']}: -skip part ran skipped tests {sorted(got & set(it['skip']))}")
-            ok = False
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     lines = [f"### shard {index + 1}/{shards}: {'pass' if ok else 'FAIL'}", ""]
     lines += [f"- `{f}`" for f in sorted(set(failed))] or ["no failures"]
