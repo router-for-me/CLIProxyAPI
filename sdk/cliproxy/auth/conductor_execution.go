@@ -892,8 +892,9 @@ func prepareRequestAfterAuth(ctx context.Context, executor ProviderExecutor, aut
 		Stream:         opts.Stream,
 		Headers:        cloneRequestHeaders(opts.Headers),
 		Body:           req.Payload,
-		Metadata:       opts.Metadata,
+		Metadata:       maps.Clone(opts.Metadata),
 	})
+	prevHeaders := opts.Headers
 	opts.Headers = mergeRequestHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = resp.Body
@@ -953,11 +954,16 @@ func prepareRequestAfterAuth(ctx context.Context, executor ProviderExecutor, aut
 			delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 		}
 	} else if len(resp.Headers) > 0 {
-		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, opts.Metadata); ok && info.SessionID != "" {
-			ensureWritableMetadata(true, 2)
-			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
-			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
-				opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
+		prevInfo, prevOK := cliproxysession.ExtractSessionInfo(prevHeaders, nil, nil)
+		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, nil); ok && info.SessionID != "" {
+			if !prevOK || prevInfo.SessionID != info.SessionID || prevInfo.ParentSessionID != info.ParentSessionID {
+				ensureWritableMetadata(true, 2)
+				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
+				if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
+					opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
+				} else {
+					delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+				}
 			}
 		}
 	}
