@@ -74,11 +74,56 @@ func isRequestStopError(err error) bool {
 }
 
 func unwrapRequestStopError(err error) error {
-	var stopErr requestStopError
-	if errors.As(err, &stopErr) {
-		return stopErr.error
+	unwrapped, _ := unwrapRequestStopErrorChanged(err)
+	return unwrapped
+}
+
+func unwrapRequestStopErrorChanged(err error) (error, bool) {
+	if err == nil {
+		return nil, false
 	}
-	return err
+	switch wrapped := err.(type) {
+	case requestStopError:
+		inner, _ := unwrapRequestStopErrorChanged(wrapped.error)
+		return inner, true
+	case requestScopedContinueError:
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.error)
+		if !changed {
+			return err, false
+		}
+		return requestScopedContinueError{error: inner}, true
+	case *streamHeaderError:
+		if wrapped == nil {
+			return nil, false
+		}
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.cause)
+		if !changed {
+			return err, false
+		}
+		return newStreamHeaderError(inner, wrapped.headers), true
+	case *streamBootstrapError:
+		if wrapped == nil {
+			return nil, false
+		}
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.cause)
+		if !changed {
+			return err, false
+		}
+		copied := *wrapped
+		copied.cause = inner
+		return &copied, true
+	case *upstreamExecutionAttemptError:
+		if wrapped == nil {
+			return nil, false
+		}
+		inner, changed := unwrapRequestStopErrorChanged(wrapped.cause)
+		if !changed {
+			return err, false
+		}
+		return markUpstreamExecutionAttemptWithProviderAndID(inner, wrapped.provider, wrapped.attemptID), true
+	default:
+		return err, false
+	}
 }
 
 func wrapRequestStopError(err error) error {
@@ -434,9 +479,26 @@ func wrapRequestScopedContinueError(err error) error {
 	if err == nil || IsRequestScopedContinueError(err) {
 		return err
 	}
+	if marked, ok := err.(*upstreamExecutionAttemptError); ok && marked != nil && marked.cause != nil {
+		return markUpstreamExecutionAttemptWithProviderAndID(requestScopedContinueError{error: marked.cause}, marked.provider, marked.attemptID)
+	}
 	return requestScopedContinueError{error: err}
 }
 
 func isRequestScopedStop(action string, okAction bool) bool {
 	return okAction && (action == RequestScopedActionStop || action == RequestScopedActionStopAndCooldown)
+}
+
+// isTerminalRequestStopError reports whether err must terminate request retries
+// and credential failover immediately (an explicit request-stop error, or a
+// preserved terminal response that is neither credential-scoped nor overridden
+// by a request-scoped continue rule).
+func isTerminalRequestStopError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRequestStopError(err) {
+		return true
+	}
+	return isRequestTerminatedError(err) && !isCredentialScopedError(err) && !IsRequestScopedContinueError(err)
 }
