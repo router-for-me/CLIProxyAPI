@@ -183,7 +183,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	if !preserveConjunctions {
 		jsonStr = cleanupRequiredFields(jsonStr)
 		jsonStr = sanitizeObjectProperties(jsonStr)
-		jsonStr = sanitizeArrayItems(jsonStr, options.addMissingArrayItems)
+		jsonStr = sanitizeArrayItems(jsonStr, options)
 	}
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
 	if options.addPlaceholder {
@@ -226,7 +226,7 @@ func sanitizeObjectProperties(jsonStr string) string {
 // sanitizeArrayItems normalizes native Schema arrays and supplies missing items placeholders.
 // The caller skips this pass for JSON Schema conjunctions, where element and instance types
 // may be constrained elsewhere and synthesizing local fields can make the intersection impossible.
-func sanitizeArrayItems(jsonStr string, addMissing bool) string {
+func sanitizeArrayItems(jsonStr string, options jsonSchemaCleanOptions) string {
 	paths := findPaths(jsonStr, "items")
 	sortByDepth(paths)
 	doc := ojson.NewDocString(jsonStr)
@@ -246,13 +246,24 @@ func sanitizeArrayItems(jsonStr string, addMissing bool) string {
 			if doc.Delete(p) == nil {
 				modified = true
 			}
+			continue
+		}
+		if options.preserveStandardConstraints {
+			continue
+		}
+		itemsVal := doc.Get(p)
+		if itemsVal.IsObject() {
+			continue
+		}
+		if normalizeNonObjectArrayItemsDoc(doc, parentPath, p, itemsVal, options) {
+			modified = true
 		}
 	}
 	if modified {
 		jsonStr = doc.String()
 	}
 
-	if !addMissing {
+	if !options.addMissingArrayItems {
 		return jsonStr
 	}
 	typePaths := findPaths(jsonStr, "type")
@@ -275,6 +286,122 @@ func sanitizeArrayItems(jsonStr string, addMissing bool) string {
 		return doc.String()
 	}
 	return jsonStr
+}
+
+func defaultArrayItemsSchema(addMissing bool) string {
+	if addMissing {
+		return `{"type":"string"}`
+	}
+	return `{}`
+}
+
+func canonicalSchemaKey(raw string) string {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var parsed any
+	if errDecode := decoder.Decode(&parsed); errDecode != nil {
+		return strings.TrimSpace(raw)
+	}
+	out, errMarshal := marshalJSONNoHTMLEscape(parsed)
+	if errMarshal != nil {
+		return strings.TrimSpace(raw)
+	}
+	return string(out)
+}
+
+func deduplicateSchemaBranches(items []ojson.Result) []ojson.Result {
+	if len(items) <= 1 {
+		return items
+	}
+	seen := make(map[string]struct{}, len(items))
+	unique := make([]ojson.Result, 0, len(items))
+	for _, item := range items {
+		key := canonicalSchemaKey(item.Raw)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, item)
+	}
+	return unique
+}
+
+// normalizeNonObjectArrayItemsDoc converts Draft-07 tuple items arrays ([...]) and non-object
+// items values (such as boolean false) into a single Schema object for native protobuf Schema
+// carriers, where Schema.items must always be an object.
+func normalizeNonObjectArrayItemsDoc(doc *ojson.Doc, parentPath, itemsPath string, itemsVal ojson.Result, options jsonSchemaCleanOptions) bool {
+	if itemsVal.IsArray() {
+		nonNullItems, hasNull, _ := partitionUnionBranches(itemsVal.Array(), ojson.Result{})
+		nonNullItems = deduplicateSchemaBranches(nonNullItems)
+		preserveNullable := !options.removeGeminiMetadata
+
+		if len(nonNullItems) == 0 {
+			fallbackDoc := ojson.NewDocString(defaultArrayItemsSchema(options.addMissingArrayItems))
+			if hasNull {
+				if preserveNullable {
+					_ = fallbackDoc.Set("nullable", true)
+				}
+				appendHintDoc(fallbackDoc, "", "(nullable)")
+			}
+			return doc.SetRaw(itemsPath, fallbackDoc.String()) == nil
+		}
+
+		if len(nonNullItems) >= 2 && !options.flattenMultiBranchUnions {
+			unionDoc := ojson.NewDocString(`{}`)
+			rawBranches := make([]json.RawMessage, 0, len(nonNullItems))
+			for _, item := range nonNullItems {
+				rawBranches = append(rawBranches, json.RawMessage(item.Raw))
+			}
+			if unionDoc.Set("anyOf", rawBranches) != nil {
+				return false
+			}
+			if hasNull {
+				if preserveNullable {
+					_ = unionDoc.Set("nullable", true)
+				}
+				appendHintDoc(unionDoc, "", "(nullable)")
+			}
+			return doc.SetRaw(itemsPath, unionDoc.String()) == nil
+		}
+
+		candidateItems := nonNullItems
+		if hasNull {
+			candidateItems = append(append([]ojson.Result(nil), nonNullItems...), ojson.Parse(`{"type":"null"}`))
+		}
+		_, allTypes := selectBest(candidateItems)
+		bestIdx, _ := selectBest(nonNullItems)
+		if bestIdx < 0 || bestIdx >= len(nonNullItems) {
+			bestIdx = 0
+		}
+		selectedDoc := ojson.NewDocString(nonNullItems[bestIdx].Raw)
+		if hasNull && preserveNullable {
+			_ = selectedDoc.Set("nullable", true)
+		}
+		uniqueTypes := make([]string, 0, len(allTypes))
+		for _, typeName := range allTypes {
+			if !contains(uniqueTypes, typeName) {
+				uniqueTypes = append(uniqueTypes, typeName)
+			}
+		}
+		if len(uniqueTypes) > 1 {
+			appendHintDoc(selectedDoc, "", "Accepts: "+strings.Join(uniqueTypes, " | "))
+		} else if hasNull {
+			appendHintDoc(selectedDoc, "", "(nullable)")
+		}
+		return doc.SetRaw(itemsPath, selectedDoc.String()) == nil
+	}
+
+	if itemsVal.Type == ojson.True {
+		return doc.SetRaw(itemsPath, `{}`) == nil
+	}
+	if itemsVal.Type == ojson.False {
+		hint := "No items allowed"
+		if prefixItems := doc.Get(joinPath(parentPath, "prefixItems")); prefixItems.IsArray() && len(prefixItems.Array()) > 0 {
+			hint = "No additional items allowed"
+		}
+		appendHintDoc(doc, parentPath, hint)
+	}
+	return doc.SetRaw(itemsPath, defaultArrayItemsSchema(options.addMissingArrayItems)) == nil
 }
 
 // removeKeywords removes all occurrences of specified keywords from the JSON schema.
