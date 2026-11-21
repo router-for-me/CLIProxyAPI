@@ -115,6 +115,9 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// copilotCatalogs owns provider-local discovery; protected by cfgMu.
+	copilotCatalogs *copilotCatalogRefresher
+
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 

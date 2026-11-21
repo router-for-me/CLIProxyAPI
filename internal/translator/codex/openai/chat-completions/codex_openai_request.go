@@ -31,13 +31,17 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertOpenAIRequestToCodex(modelName, inputRawJSON, stream)
-
+	return convertOpenAIRequestToResponses(modelName, inputRawJSON, stream, true)
 }
 
-// convertOpenAIRequestToCodex also reports a file or audio part Responses cannot
+// ConvertOpenAIRequestToResponses converts to standard Responses without Codex defaults.
+func ConvertOpenAIRequestToResponses(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIRequestToResponses(modelName, inputRawJSON, stream, false)
+}
+
+// convertOpenAIRequestToResponses also reports a file or audio part Responses cannot
 // receive when it leaves a user turn with nothing to send.
-func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+func convertOpenAIRequestToResponses(modelName string, inputRawJSON []byte, stream, codex bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 	var drops translatorcommon.UserTurnDrops
 	root := util.ParseGJSONBytesNoCopy(rawJSON)
@@ -59,17 +63,22 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Map reasoning effort
 	if v := root.Get("reasoning_effort"); v.Exists() {
 		_ = outDoc.Set("reasoning.effort", v.Value())
-	} else {
+	} else if codex {
 		_ = outDoc.Set("reasoning.effort", "medium")
 	}
-	if serviceTier := normalizeCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
-		_ = outDoc.Set("service_tier", serviceTier)
+	if codex {
+		if serviceTier := normalizeCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
+			_ = outDoc.Set("service_tier", serviceTier)
+		}
+		_ = outDoc.Set("parallel_tool_calls", root.Get("parallel_tool_calls").Type != ojson.False)
+		_ = outDoc.Set("include", []string{"reasoning.encrypted_content"})
+	} else {
+		for _, key := range []string{"temperature", "top_p", "service_tier", "parallel_tool_calls", "store"} {
+			if value := root.Get(key); value.Exists() {
+				_ = outDoc.SetRawBytes(key, []byte(value.Raw))
+			}
+		}
 	}
-	_ = outDoc.Set("parallel_tool_calls", root.Get("parallel_tool_calls").Type != ojson.False)
-	// OpenAI documents reasoning summaries as explicit opt-in output. Leave
-	// reasoning.summary to the source request's canonical summary intent instead
-	// of coupling it to reasoning effort.
-	_ = outDoc.Set("include", []string{"reasoning.encrypted_content"})
 
 	// Model
 	_ = outDoc.Set("model", modelName)
@@ -400,19 +409,13 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				}
 			}
 		}
-
-		// Map verbosity if provided
-		if text.Exists() {
-			if v := text.Get("verbosity"); v.Exists() {
-				_ = outDoc.Set("text.verbosity", v.Value())
-			}
-		}
-	} else if text.Exists() {
-		// If only text.verbosity present (no response_format), map verbosity
-		if v := text.Get("verbosity"); v.Exists() {
-			_ = outDoc.SetRawBytes("text", []byte(`{}`))
-			_ = outDoc.Set("text.verbosity", v.Value())
-		}
+	}
+	verbosity := text.Get("verbosity")
+	if !codex && !verbosity.Exists() {
+		verbosity = root.Get("verbosity")
+	}
+	if verbosity.Exists() {
+		_ = outDoc.SetRaw("text.verbosity", verbosity.Raw)
 	}
 
 	// Map tools (flatten function fields)
@@ -519,7 +522,9 @@ func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		}
 	}
 
-	_ = outDoc.Set("store", false)
+	if codex {
+		_ = outDoc.Set("store", false)
+	}
 	return outDoc.Bytes(), drops.Err()
 }
 
