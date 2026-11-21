@@ -421,6 +421,34 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 
+// applyAntigravity429State performs the executor-side bookkeeping for an
+// Antigravity 429 response (either HTTP status 429 or a mid-stream SSE 429
+// error frame): closing idle transports, recording short model cooldowns, and
+// permanently disabling credits on explicit balance exhaustion.
+func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, bodyBytes []byte) error {
+	var cfg *config.Config
+	if e != nil {
+		cfg = e.cfg
+	}
+	decision := decideAntigravity429(bodyBytes)
+	switch decision.kind {
+	case antigravity429DecisionShortCooldownSwitchAuth:
+		closeAntigravityAuthIdleTransports(auth)
+		if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, cfg) {
+			if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
+				return homeKVUnavailableStatusErr(errMarkCooldown)
+			}
+			log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
+		}
+	case antigravity429DecisionFullQuotaExhausted:
+		closeAntigravityAuthIdleTransports(auth)
+		if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, cfg) {
+			markAntigravityCreditsPermanentlyDisabled(auth)
+		}
+	}
+	return nil
+}
+
 // applyAntigravityTOSState performs the executor-side bookkeeping for a terminal
 // TOS_VIOLATION: it arms the optional pool-wide protective pause and logs the
 // appeal URL for the operator. The durable credential deactivation and the
