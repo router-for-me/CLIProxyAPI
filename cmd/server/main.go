@@ -72,9 +72,6 @@ func shouldEnableExampleAPIKeySafeMode(cfg *config.Config, commandMode, tuiMode,
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
-	if handled, code := runOfflineCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
-		os.Exit(code)
-	}
 	os.Exit(run())
 }
 

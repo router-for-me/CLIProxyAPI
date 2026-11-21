@@ -31,7 +31,6 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
-!docs/fork-routing.md
 !docs/websocket-tunnel.md
 !docs/websocket-tunnel_CN.md
 AGENTS.md

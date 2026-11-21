@@ -880,11 +880,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
-		if quota := m.routingQuota.Load(); quota != nil && !blocked && !IsCodexUseSIWCForRequest(ctx, candidate, clientHeaders...) {
-			if until := quota.blockedUntil(candidate, checkModel, now); !until.IsZero() {
-				blocked, reason, next = true, blockReasonCooldown, until
-			}
-		}
+		blocked, reason, next = m.routingQuotaBlock(ctx, candidate, checkModel, now, blocked, reason, next, clientHeaders...)
 		if !blocked {
 			priority := authPriority(candidate)
 			availableByPriority[priority] = append(availableByPriority[priority], candidate)
@@ -1839,7 +1835,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if status == http.StatusOK {
 		return 0, false
 	}
-	if isRequestInvalidError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
+	if isRequestInvalidError(err) || isRequestStopError(err) || isSchedulerRejectError(err) || isCredentialTerminatedError(err) {
 		return 0, false
 	}
 	if m.HomeEnabled() {

@@ -33,7 +33,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -42,9 +41,10 @@ import (
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
+	forkServerState
+
 	// engine is the Gin web framework engine instance.
 	engine *gin.Engine
-	drain  *maintenance.Controller
 
 	// server is the underlying HTTP server.
 	server *http.Server
@@ -171,7 +171,6 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create server instance
 	s := &Server{
 		engine:                       engine,
-		drain:                        maintenance.New(),
 		handlers:                     handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager),
 		tunnelHub:                    wstunnel.NewHub(wstunnel.Options{}),
 		cfg:                          cfg,
@@ -299,11 +298,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// Create HTTP server
 	s.server = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Handler:           s.drain.Wrap(wrapUnconsumedRequestBodyHandler(engine), s.drainExempt),
-		ConnContext:       s.drain.ConnContext,
-		ConnState:         s.drain.ConnState,
+		Handler:           wrapUnconsumedRequestBodyHandler(engine),
 		ReadHeaderTimeout: muxSniffDeadline,
 	}
+	s.installDrain()
 
 	return s
 }

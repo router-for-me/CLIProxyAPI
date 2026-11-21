@@ -12,6 +12,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
+// init handles the offline flags before main runs, so plugin bootstrap and
+// other startup side effects never happen for them. Go runs init functions in
+// file name order, so main.go's logger and build info setup comes first.
+func init() {
+	if handled, code := runOfflineCommand(os.Args[1:], os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
+}
+
 // Handle offline flags before plugin bootstrap or any other startup side effect.
 func runOfflineCommand(args []string, stdout, stderr io.Writer) (bool, int) {
 	offline := false

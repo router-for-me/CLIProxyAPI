@@ -10,10 +10,36 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/maintenance"
 	log "github.com/sirupsen/logrus"
 )
 
 const drainPath = "/v8/management/server/drain"
+
+// forkServerState holds the fork's Server fields. Server embeds it, so the
+// upstream struct needs only one extra line.
+type forkServerState struct {
+	drain *maintenance.Controller
+}
+
+// installDrain wraps the finished HTTP server so maintenance can count and
+// drain active work. NewServer calls it once, right after creating s.server.
+func (s *Server) installDrain() {
+	s.drain = maintenance.New()
+	s.server.Handler = s.drain.Wrap(s.server.Handler, s.drainExempt)
+	s.server.ConnContext = s.drain.ConnContext
+	s.server.ConnState = s.drain.ConnState
+}
+
+// registerForkManagementV8Routes adds the fork's drain and routing status
+// endpoints to the v8 management group.
+func (s *Server) registerForkManagementV8Routes(v8 *gin.RouterGroup) {
+	v8.GET("/server/drain", s.getDrain)
+	v8.POST("/server/drain", s.beginDrain)
+	v8.DELETE("/server/drain", s.cancelDrain)
+	v8.POST("/server/drain/stop", s.stopDrained)
+	v8.GET("/routing/status", s.mgmt.GetRoutingStatus)
+}
 
 func (s *Server) drainExempt(r *http.Request) bool {
 	path := r.URL.Path

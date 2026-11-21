@@ -207,6 +207,21 @@ func TestFetchAntigravityAvailableModels(t *testing.T) {
 		}
 	})
 
+	t.Run("forbidden 403 distinct from 401 auth error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+			BaseURLs:    []string{server.URL},
+			AccessToken: "forbidden-token",
+		})
+		if status != AntigravityProbeStatusForbidden {
+			t.Fatalf("expected forbidden status, got %v", status)
+		}
+	})
+
 	t.Run("empty base urls returns transient error", func(t *testing.T) {
 		_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
 			BaseURLs:    nil,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -174,6 +175,35 @@ func routingQuotaModel(ctx context.Context, a *Auth, fallback string) string {
 		}
 	}
 	return fallback
+}
+
+// soonestResetAffinityCandidates drops the accounts the soonest-reset policy
+// holds back, before session affinity picks among them. It returns the input
+// unchanged when the fallback selector isn't soonest-reset-first.
+func soonestResetAffinityCandidates(ctx context.Context, fallback Selector, auths []*Auth, model string, headers http.Header) (context.Context, []*Auth) {
+	quota := soonestSelector(fallback)
+	if quota == nil {
+		return ctx, auths
+	}
+	ctx = WithCodexClientRequest(ctx, IsCodexClientRequest(ctx, headers))
+	usable := make([]*Auth, 0, len(auths))
+	for _, a := range auths {
+		if a != nil && (IsCodexUseSIWCForRequest(ctx, a, headers) || quota.blockedUntil(a, routingQuotaModel(ctx, a, model), time.Now()).IsZero()) {
+			usable = append(usable, a)
+		}
+	}
+	return ctx, usable
+}
+
+// routingQuotaBlock adds the soonest-reset policy's hold to an account that
+// isn't otherwise blocked. SIWC requests are never held back.
+func (m *Manager) routingQuotaBlock(ctx context.Context, candidate *Auth, model string, now time.Time, blocked bool, reason blockReason, next time.Time, clientHeaders ...http.Header) (bool, blockReason, time.Time) {
+	if quota := m.routingQuota.Load(); quota != nil && !blocked && !IsCodexUseSIWCForRequest(ctx, candidate, clientHeaders...) {
+		if until := quota.blockedUntil(candidate, model, now); !until.IsZero() {
+			return true, blockReasonCooldown, until
+		}
+	}
+	return blocked, reason, next
 }
 
 func (m *Manager) routingQuotaContext(ctx context.Context, selector Selector, auths []*Auth, model string) context.Context {
