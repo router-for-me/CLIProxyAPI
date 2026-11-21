@@ -721,6 +721,13 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			}
 		}
 	}
+	// A refresh that resolved a renewal failure must not keep that failure as the
+	// credential error when an unrelated cooldown leaves it unavailable. This runs
+	// after the recovery decisions above, which still see the original error.
+	if mode == updateModeRefresh && existing.RefreshError != nil && auth.RefreshError == nil &&
+		auth.LastError != nil && auth.LastError.Message == existing.RefreshError.Message {
+		auth.LastError = nil
+	}
 	auth.UpdatedAt = now
 	cooldownStateChanged = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false) || cooldownStateChanged
 	seedInitialForceCooldownDeadlines(auth)
