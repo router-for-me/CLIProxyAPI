@@ -257,6 +257,10 @@ func TestPluginExecutorTokenCountRejectsInvalidOrModelResponseCounts(t *testing.
 		{"string-number", sdktranslator.FormatOpenAI, `{"usage":{"prompt_tokens":"12"}}`},
 		{"negative", sdktranslator.FormatOpenAI, `{"usage":{"prompt_tokens":-1}}`},
 		{"model-response", sdktranslator.FormatOpenAI, `{"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":12,"total_tokens":13}}`},
+		{"gemini-block-with-usage-metadata", sdktranslator.FormatGemini, `{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":12}}`},
+		{"wrapped-gemini-block-with-usage-metadata", sdktranslator.FormatGemini, `{"response":{"promptFeedback":{"blockReason":"SAFETY"},"usageMetadata":{"promptTokenCount":12}}}`},
+		{"gemini-generation-usage-metadata-without-total", sdktranslator.FormatGemini, `{"usageMetadata":{"promptTokenCount":12}}`},
+		{"gemini-invalid-total-with-generation-usage", sdktranslator.FormatGemini, `{"totalTokens":"12","usageMetadata":{"promptTokenCount":12}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
