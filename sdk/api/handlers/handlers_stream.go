@@ -593,6 +593,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 
 	bootstrapEligible := func(err error) bool {
 		if coreauth.IsContinuityTerminatedError(err) ||
+			coreexecutor.IsUpstreamWebsocketTurnError(err) ||
 			coreauth.IsRequestStopError(err) ||
 			coreauth.IsTOSViolationError(err) {
 			return false

@@ -15,6 +15,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -129,6 +130,24 @@ func mapCodexWebsocketReadError(err error) error {
 		}}
 	}
 	return err
+}
+
+type codexHTTPMessagesStopError struct{ error }
+
+func (e codexHTTPMessagesStopError) Unwrap() error     { return e.error }
+func (codexHTTPMessagesStopError) IsRequestStop() bool { return true }
+
+// A local transport failure is not an upstream rejection and must not cool the credential.
+type codexHTTPMessagesUnknownOutcome struct{ statusErr }
+
+func (codexHTTPMessagesUnknownOutcome) IsRequestScoped() bool { return true }
+
+// codexHTTPMessagesNoReplay keeps a known upstream status, but prevents replay.
+func codexHTTPMessagesNoReplay(err error) error {
+	if clienterror.HTTPStatusFromError(err) == 0 {
+		err = codexHTTPMessagesUnknownOutcome{statusErr{code: http.StatusBadGateway, msg: "The upstream Codex connection ended after the request was submitted. The outcome is unknown; the request was not retried."}}
+	}
+	return codexHTTPMessagesStopError{err}
 }
 
 // codexWebsocketTurnTransportError turns a transport loss (EOF, reset, close 1006) into

@@ -8,14 +8,15 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"golang.org/x/net/context"
 )
 
 const (
-	modelExecutionMetadataSourceKey = "source"
-	modelExecutionInternalSource    = "plugin_host_model_callback"
+	modelExecutionMetadataSourceKey = coreexecutor.RequestSourceMetadataKey
+	modelExecutionInternalSource    = coreexecutor.InternalModelCallbackSource
 )
 
 type modelExecutionOptions struct {

@@ -19,7 +19,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return e.executeStream(ctx, auth, req, opts, false)
+}
+
+func (e *CodexExecutor) executeStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, recovery bool) (_ *cliproxyexecutor.StreamResult, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
 	ctx = helps.WithCodexCommentaryPolicy(ctx, e.cfg)
 	if opts.Alt == "responses/compact" {
@@ -182,13 +186,40 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			bootstrapStart = nowCodexBootstrap()
 		}
 	}
-	httpResp, err := doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, responseReady)
+	stopAfterRecovery := func(failure error) error {
+		if recovery && failure != nil && ctx.Err() == nil {
+			return codexHTTPMessagesNoReplay(failure)
+		}
+		return failure
+	}
+	// From the transport boundary onward, another credential must not repeat this recovery.
+	defer func() { err = stopAfterRecovery(err) }()
+	var httpResp *http.Response
+	if recovery {
+		httpReq.GetBody = nil
+		single := *httpClient
+		single.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		httpResp, err = single.Do(httpReq)
+		if err == nil {
+			responseReady(httpResp)
+			err = decodeCodexUpstreamResponse(httpResp)
+			if err != nil {
+				_ = httpResp.Body.Close()
+			}
+		}
+	} else {
+		httpResp, err = doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, responseReady)
+	}
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		if recovery && httpResp.StatusCode < 400 {
+			_ = httpResp.Body.Close()
+			return nil, statusErr{code: http.StatusBadGateway, msg: "Unexpected upstream status during Codex HTTP recovery."}
+		}
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
@@ -413,6 +444,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 				helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 				reporter.PublishFailure(ctx, emptyErr)
+				if recovery {
+					return nil, codexHTTPMessagesUnknownOutcome{emptyErr}
+				}
 				closedCh := make(chan cliproxyexecutor.StreamChunk)
 				close(closedCh)
 				return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: closedCh}, nil
@@ -441,7 +475,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if bootstrapTerminalErr != nil {
 		// Buffered handshake payloads are flushed first so the conductor observes a committed
 		// stream and delivers this failure in-stream, exactly as the unbuffered path would.
-		out <- cliproxyexecutor.StreamChunk{Err: bootstrapTerminalErr}
+		out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(bootstrapTerminalErr)}
 		close(out)
 		return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 	}
@@ -488,7 +522,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
 						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
+						case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(errClearReplay)}:
 						case <-ctx.Done():
 						}
 						return
@@ -496,7 +530,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+					case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(streamErr)}:
 					case <-ctx.Done():
 					}
 					return
@@ -509,7 +543,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+					case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(streamErr)}:
 					case <-ctx.Done():
 					}
 					return
@@ -570,13 +604,19 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
 			helps.RecordAPIResponseError(ctx, e.cfg, emptyErr)
 			reporter.PublishFailure(ctx, emptyErr)
+			if recovery {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(codexHTTPMessagesUnknownOutcome{emptyErr})}:
+				case <-ctx.Done():
+				}
+			}
 			return
 		}
 		streamErr := newCodexIncompleteStreamError()
 		helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 		reporter.PublishFailure(ctx, streamErr)
 		select {
-		case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+		case out <- cliproxyexecutor.StreamChunk{Err: stopAfterRecovery(streamErr)}:
 		case <-ctx.Done():
 		}
 	}()

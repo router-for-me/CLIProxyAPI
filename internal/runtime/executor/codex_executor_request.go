@@ -604,6 +604,10 @@ const codexRoutingHintHeader = "X-Codex-Routing-Hint"
 // API-key requests are not touched, matching native Codex, which sends no hint
 // to API-key providers.
 func applyCodexRoutingHint(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, baseModel string, upstreamBody []byte, clientHeaders http.Header) {
+	applyCodexRoutingHintForTier(ctx, headers, auth, baseModel, ojson.GetBytesNoCopy(upstreamBody, "service_tier"), clientHeaders)
+}
+
+func applyCodexRoutingHintForTier(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, baseModel string, tier ojson.Result, clientHeaders http.Header) {
 	if codexAuthUsesAPIKey(auth) || codexUseSIWCForRequest(ctx, auth, clientHeaders) {
 		return
 	}
@@ -617,7 +621,7 @@ func applyCodexRoutingHint(ctx context.Context, headers http.Header, auth *clipr
 		return
 	}
 	hint := "model=" + model
-	if tier := ojson.GetBytesNoCopy(upstreamBody, "service_tier"); tier.Type == ojson.String {
+	if tier.Type == ojson.String {
 		if value := strings.TrimSpace(tier.String()); value != "" {
 			hint += ";tier=" + value
 		}

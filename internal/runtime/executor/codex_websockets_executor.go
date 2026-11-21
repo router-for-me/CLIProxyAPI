@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -42,7 +43,7 @@ func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
 //  1. The downstream transport is websocket, and
 //  2. The selected auth enables websockets.
 //
-// For non-websocket downstream requests, it always uses the legacy HTTP implementation.
+// Streaming HTTP Messages requests can explicitly opt in to session-bound WebSockets.
 type CodexAutoExecutor struct {
 	httpExec *CodexExecutor
 	wsExec   *CodexWebsocketsExecutor
@@ -98,6 +99,15 @@ func (e *CodexAutoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 	}
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
 		return nil, cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError()
+	}
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		if result, err, handled := e.wsExec.serveHTTPMessages(ctx, auth, req, opts); handled {
+			if errors.Is(err, errCodexHTTPMessagesRecovery) || cliproxyexecutor.IsUpstreamWebsocketReplayRequired(err) {
+				// Use the original input once after a definite rejection or an unsent WS create.
+				return e.httpExec.executeStream(ctx, auth, req, opts, true)
+			}
+			return result, err
+		}
 	}
 	return e.httpExec.ExecuteStream(ctx, auth, req, opts)
 }

@@ -454,6 +454,13 @@ upstream:
     # Enable permessage-deflate compression on Codex WebSocket connections
     # (upstream and downstream) after negotiation. Default: true.
     websocket-compression: true
+    # Reuse a Codex WebSocket for sequential streaming Messages requests (default: false).
+    # Requires a WebSocket-enabled credential, authenticated caller, and explicit session ID.
+    # Sends incremental tool results when the conversation prefix is unchanged and the same credential is selected.
+    # Other API formats, requests without an explicit session, and concurrent turns use HTTP.
+    # An expired socket or missing generated parent falls back once over HTTP with the full history.
+    # Payload rules keep full input; Home mode is not supported. Sockets use the standard Codex liveness handling.
+    serve-http-messages-over-websockets: false
     # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
     disable-codex-cloaking: false
     # Hold back the frames that carry nothing the client has seen - the handshake (response.created,

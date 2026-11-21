@@ -66,6 +66,11 @@ func inferCodexWebsocketErrorStatus(payload []byte) int {
 	if !ok {
 		return 0
 	}
+	return inferCodexWebsocketFailureBodyStatus(body)
+}
+
+// Infer from the same normalized business error for both WS terminal frame shapes.
+func inferCodexWebsocketFailureBodyStatus(body []byte) int {
 	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
 		return http.StatusTooManyRequests
 	}
@@ -99,20 +104,23 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		return nil, false
 	}
 
-	out := buildCodexWebsocketErrorPayload(payload, status)
-	isUsageLimit := isCodexUsageLimitError(out)
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
+	return newCodexWebsocketStatusError(buildCodexWebsocketErrorPayload(payload, status), status, headers, modelLevelCooling, isCodexWebsocketConnectionLimitError(payload)), true
+}
+
+func newCodexWebsocketStatusError(body []byte, status int, headers http.Header, modelLevelCooling, connectionLimit bool) statusErrWithHeaders {
+	isUsageLimit := isCodexUsageLimitError(body)
+	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
 	statusError := statusErr{
 		code:               status,
-		msg:                string(out),
+		msg:                string(body),
 		credentialScoped:   isUsageLimit && !modelLevelCooling,
 		transientRateLimit: transientCapacity && status == http.StatusTooManyRequests,
 	}
 	// Hint precedence: the quota body reset wins, then the connection-limit
 	// immediate-retry contract, then the generic Retry-After header.
-	if retryAfter := parseCodexRetryAfter(status, out, time.Now()); retryAfter != nil {
+	if retryAfter := parseCodexRetryAfter(status, body, time.Now()); retryAfter != nil {
 		statusError.retryAfter = retryAfter
-	} else if isCodexWebsocketConnectionLimitError(payload) {
+	} else if connectionLimit {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
 	} else if shouldParseCodexRetryAfterHeader(status) {
@@ -123,7 +131,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	return statusErrWithHeaders{
 		statusErr: statusError,
 		headers:   headers,
-	}, true
+	}
 }
 
 func clearCodexReasoningReplayOnWebsocketError(ctx context.Context, scope codexReasoningReplayScope, payload []byte) error {

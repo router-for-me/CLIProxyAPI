@@ -53,6 +53,7 @@ func (c *websocketConnectionCloser) Close() error {
 type codexWebsocketSession struct {
 	sessionInstructions helps.CodexInstructionChain
 	sessionID           string
+	httpMessages        *codexHTTPMessagesSession
 
 	reqMu sync.Mutex
 
@@ -518,6 +519,10 @@ func codexWebsocketRequestUsesSIWC(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, useSIWC ...bool) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
+	return detachMismatchedWebsocketSessionConnForHeaders(sess, authID, wsURL, proxyURL, nil, useSIWC...)
+}
+
+func detachMismatchedWebsocketSessionConnForHeaders(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, handshake *[32]byte, useSIWC ...bool) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
 	if sess == nil {
 		return nil, nil, "", "", nil
 	}
@@ -525,7 +530,8 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.connMu.Lock()
 	defer sess.connMu.Unlock()
 	conn := sess.conn
-	if conn == nil || websocketSessionTargetMatches(sess, authID, wsURL, proxyURL, useSIWC...) {
+	if conn == nil || (websocketSessionTargetMatches(sess, authID, wsURL, proxyURL, useSIWC...) &&
+		(handshake == nil || sess.httpMessages == nil || sess.httpMessages.handshake == *handshake)) {
 		return nil, nil, "", "", nil
 	}
 
@@ -719,8 +725,13 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 		}
 		return conn, closer, resp, err
 	}
+	var handshake *[32]byte
+	if sess.httpMessages != nil {
+		digest := helps.CodexMessagesHandshakeFingerprint(headers)
+		handshake = &digest
+	}
 	proxyURL := executionProxyURL(ctx, sess.effectiveConfig(authID, e.cfg), auth)
-	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyURL, useSIWC); staleConn != nil {
+	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConnForHeaders(sess, authID, wsURL, proxyURL, handshake, useSIWC); staleConn != nil {
 		staleLastEvent := sess.getLastEventType(staleConn)
 		logCodexWebsocketDisconnectedWithLastEvent(sess, sess.sessionID, staleAuthID, staleWSURL, "target_changed", staleLastEvent, nil)
 		if staleCloser != nil {
@@ -734,6 +745,10 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	}
 
 	sess.connMu.Lock()
+	if sess.httpMessages != nil && sess.httpMessages.closed {
+		sess.connMu.Unlock()
+		return nil, nil, nil, &cliproxyexecutor.UpstreamWebsocketTurnError{NotSent: true}
+	}
 	conn := sess.conn
 	closer := sess.connCloser
 	readerConn := sess.readerConn
@@ -760,7 +775,12 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	}
 
 	sess.connMu.Lock()
-	if sess.conn != nil && websocketSessionTargetMatches(sess, authID, wsURL, dialProxyURL, useSIWC) {
+	if sess.httpMessages != nil && sess.httpMessages.closed {
+		sess.connMu.Unlock()
+		_ = closer.Close()
+		return nil, nil, resp, &cliproxyexecutor.UpstreamWebsocketTurnError{NotSent: true}
+	}
+	if sess.conn != nil && websocketSessionTargetMatches(sess, authID, wsURL, dialProxyURL, useSIWC) && (handshake == nil || sess.httpMessages.handshake == *handshake) {
 		previous := sess.conn
 		previousCloser := sess.connCloser
 		sess.connMu.Unlock()
@@ -779,6 +799,9 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	sess.authID = authID
 	sess.proxyURL = dialProxyURL
 	sess.useSIWC = useSIWC
+	if handshake != nil {
+		sess.httpMessages.handshake = *handshake
+	}
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -851,7 +874,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 
 		payload = bytes.TrimSpace(payload)
 		if len(payload) > 0 {
-			eventType := strings.Clone(ojson.GetBytesNoCopy(payload, "type").String())
+			eventType := ojson.GetBytesNoCopy(payload, "type").String()
+			if sess.httpMessages != nil {
+				eventType = helps.CodexResponseEventType(payload)
+			}
+			eventType = strings.Clone(eventType)
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}
@@ -868,7 +895,10 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			// id-less failure ends the running one. Success terminals only
 			// carry response.id, and one without an id is left unattributed,
 			// as before.
-			responseID := strings.Clone(ojson.GetBytesNoCopy(payload, "response.id").String())
+			var responseID string
+			if eventType == "response.created" || isTerminalEvent(eventType) {
+				responseID = strings.Clone(codexWebsocketEventResponseID(payload, eventType))
+			}
 			if eventType == "response.created" {
 				if responseID != "" {
 					sess.activeMu.Lock()
@@ -880,9 +910,6 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				}
 			} else if isTerminalEvent(eventType) {
 				failure := eventType == "error" || eventType == "response.failed"
-				if failure && responseID == "" {
-					responseID = strings.Clone(ojson.GetBytesNoCopy(payload, "response_id").String())
-				}
 				if responseID != "" || failure {
 					sess.activeMu.Lock()
 					if sess.responseStateConn == conn {
@@ -957,6 +984,9 @@ func (e *CodexWebsocketsExecutor) invalidateUpstreamConnWithNotify(sess *codexWe
 	}
 	sess.connMu.Unlock()
 
+	if sess.httpMessages != nil {
+		e.removeDisconnectedHTTPMessagesSession(sess)
+	}
 	lastEvent := sess.getLastEventType(conn)
 	logCodexWebsocketDisconnectedWithLastEvent(sess, sessionID, authID, wsURL, reason, lastEvent, err)
 	if notify {
@@ -1072,6 +1102,9 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	}
 
 	sess.connMu.Lock()
+	if sess.httpMessages != nil {
+		sess.httpMessages.closed = true
+	}
 	conn := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL
@@ -1130,6 +1163,15 @@ func logCodexWebsocketConnectedWithReused(sess *codexWebsocketSession, sessionID
 
 func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
 	logCodexWebsocketDisconnectedWithLastEvent(nil, sessionID, authID, wsURL, reason, "", err)
+}
+
+// codexWebsocketEventResponseID returns the response to which an event belongs.
+func codexWebsocketEventResponseID(payload []byte, event string) string {
+	id := ojson.GetBytesNoCopy(payload, "response.id").String()
+	if id == "" && (event == "error" || event == "response.failed" || event == "response.incomplete") {
+		return ojson.GetBytesNoCopy(payload, "response_id").String()
+	}
+	return id
 }
 
 func isTerminalEvent(eventType string) bool {
