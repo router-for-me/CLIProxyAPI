@@ -55,7 +55,7 @@ func TestConvertOpenAIRequestToCodex_RefusesAnyEmptiedUserTurn(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body, err := convertOpenAIRequestToCodex("m", []byte(tc.input), false)
+			body, err := ConvertOpenAIRequestToCodex("m", []byte(tc.input), false)
 			var unsupported *translatorcommon.UnsupportedPartError
 			if !errors.As(err, &unsupported) || unsupported.Type != tc.wantType || unsupported.StatusCode() != 400 {
 				t.Fatalf("err = %v, want unsupported content part: %s; body = %s", err, tc.wantType, body)
@@ -93,7 +93,7 @@ func TestConvertOpenAIRequestToCodex_FileIDStaysAnInputFile(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			input := `{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[` + tc.part + `]}]}`
-			body, err := convertOpenAIRequestToCodex("m", []byte(input), false)
+			body, err := ConvertOpenAIRequestToCodex("m", []byte(input), false)
 			if err != nil {
 				t.Fatalf("err = %v", err)
 			}
@@ -107,7 +107,7 @@ func TestConvertOpenAIRequestToCodex_FileIDStaysAnInputFile(t *testing.T) {
 
 func TestConvertOpenAIRequestToCodex_KeepsTurnWithTextBesideAttachment(t *testing.T) {
 	input := `{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[` + userTurnText + `,` + userTurnEmptyFile + `]}]}`
-	body, err := convertOpenAIRequestToCodex("m", []byte(input), false)
+	body, err := ConvertOpenAIRequestToCodex("m", []byte(input), false)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
@@ -118,7 +118,7 @@ func TestConvertOpenAIRequestToCodex_KeepsTurnWithTextBesideAttachment(t *testin
 
 func TestConvertOpenAIRequestToCodex_AudioAfterHistoryStaysAudio(t *testing.T) {
 	input := `{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[` + userTurnAudio + `]}]}`
-	body, err := convertOpenAIRequestToCodex("m", []byte(input), false)
+	body, err := ConvertOpenAIRequestToCodex("m", []byte(input), false)
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
