@@ -60,6 +60,8 @@ jobs:
           filter: blob:none
           fetch-depth: ${{ env.SELECT_BASE && '0' || '1' }}
       - uses: ./.github/actions/proxx-setup
+        with:
+          flavor: race
       - name: Restore test timings recorded on main
         uses: actions/cache/restore@v4
         with:
@@ -112,30 +114,40 @@ jobs:
   warm-cache:
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [plain, race]
     steps:
       - uses: actions/checkout@v4
         with:
           filter: blob:none
       - uses: ./.github/actions/proxx-setup
+        with:
+          flavor: ${{ matrix.flavor }}
       # Every step runs so the cache holds everything CI compiles even when one step fails
       # (that failure is reported by the checks/test jobs; this job still goes red).
-      - name: Compile everything CI compiles
+      - name: Compile everything this flavor compiles
+        id: compile
         run: |
           status=0
           go mod download || status=1
-          go build -o /dev/null ./cmd/server || status=1
-          go vet ./... || status=1
-          go test -race -count=1 -run '^$' ./... > /dev/null || status=1
-          go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json || status=1
+          if [ "${{ matrix.flavor }}" = race ]; then
+            go test -race -count=1 -run '^$' ./... > /dev/null || status=1
+          else
+            go build -o /dev/null ./cmd/server || status=1
+            go vet ./... || status=1
+            go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json || status=1
+          fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
-        id: compile
       - name: Save Go cache
         uses: actions/cache/save@v4
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+            !~/go/pkg/mod/cache/download/**/*.zip
+          key: proxx-go-${{ matrix.flavor }}-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
       - name: Fail if a compile step failed
         if: steps.compile.outputs.status != '0'
         run: exit 1

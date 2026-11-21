@@ -2,6 +2,10 @@ name: proxx-setup
 description: >
   proxx: Go toolchain plus the build and module cache. Only the warm-cache job saves the cache (main);
   every other run restores the newest main cache, so PR hits do not depend on a PR's own history.
+inputs:
+  flavor:
+    description: "race (test shards) or plain (checks, build); each restores only what it compiles"
+    default: plain
 runs:
   using: composite
   steps:
@@ -13,13 +17,15 @@ runs:
       id: restore
       uses: actions/cache/restore@v4
       with:
+        # Module zips duplicate the extracted sources; builds only read the sources.
         path: |
           ~/.cache/go-build
           ~/go/pkg/mod
-        key: proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          !~/go/pkg/mod/cache/download/**/*.zip
+        key: proxx-go-${{ inputs.flavor }}-${{ runner.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
         restore-keys: |
-          proxx-go-${{ runner.os }}-${{ hashFiles('go.sum') }}-
-          proxx-go-${{ runner.os }}-
+          proxx-go-${{ inputs.flavor }}-${{ runner.os }}-${{ hashFiles('go.sum') }}-
+          proxx-go-${{ inputs.flavor }}-${{ runner.os }}-
     - name: Report cache hit
       shell: bash
       run: echo "go cache restored from ${{ steps.restore.outputs.cache-matched-key || 'nothing' }}" | tee -a "$GITHUB_STEP_SUMMARY"
