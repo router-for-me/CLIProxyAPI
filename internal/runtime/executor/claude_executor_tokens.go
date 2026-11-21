@@ -74,6 +74,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
 	stripPromptCacheOptionsDoc(doc)
+	normalizeClaudeAdvisorToolModelsDoc(doc, e.upstreamModel)
 	finalize := helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts)
 	ctx = helps.WithPayloadFinalizer(ctx, finalize)
 	helps.FinalizePayloadDoc(ctx, doc)
@@ -234,6 +235,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	helps.NormalizeClaudeToolPropertyNamesDoc(doc)
 	sanitizeClaudeMessagesForClaudeUpstreamWithDebugDoc(ctx, doc, baseModel, helps.APIKeyModelIsCompat(req))
 	applyClaudePreservedThinkingBindingDoc(doc)
+	normalizeClaudeAdvisorToolModelsDoc(doc, e.upstreamModel)
 	// Two different reasons converge on the same deletions, and they must stay
 	// separable.
 	//

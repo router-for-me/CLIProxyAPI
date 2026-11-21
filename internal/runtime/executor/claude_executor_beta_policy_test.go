@@ -540,3 +540,89 @@ func TestApplyClaudeHeaders_BlockBindingBodyAlwaysGetsBindingBeta(t *testing.T) 
 		}
 	}
 }
+
+func TestNormalizeClaudeAdvisorToolModels(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-opus-5-5",
+		"tools": [
+			{"type": "custom", "name": "lookup", "model": "custom(high)"},
+			{"type": "advisor_20260301", "name": "advisor", "model": "claude-opus-5-5(high)", "defer_loading": true},
+			{"type": "advisor", "name": "advisor2", "model": "claude-sonnet-4-5(8192)"},
+			{"type": "advisor_20260301", "name": "advisor3", "model": "claude-haiku-4-5"}
+		],
+		"messages": [
+			{
+				"role": "user",
+				"content": [
+					{
+						"type": "tool_addition",
+						"tool": {
+							"type": "tool_definition",
+							"definition": {
+								"type": "advisor_20260301",
+								"name": "advisor_inline",
+								"model": "claude-opus-5-5(high)"
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	out := normalizeClaudeAdvisorToolModels(body)
+	doc := ojson.NewDoc(out)
+
+	if got := doc.Get("tools.0.model").String(); got != "custom(high)" {
+		t.Errorf("custom tool model = %q, want %q", got, "custom(high)")
+	}
+	if got := doc.Get("tools.1.model").String(); got != "claude-opus-5-5" {
+		t.Errorf("advisor tool 1 model = %q, want %q", got, "claude-opus-5-5")
+	}
+	if got := doc.Get("tools.2.model").String(); got != "claude-sonnet-4-5" {
+		t.Errorf("advisor tool 2 model = %q, want %q", got, "claude-sonnet-4-5")
+	}
+	if got := doc.Get("tools.3.model").String(); got != "claude-haiku-4-5" {
+		t.Errorf("advisor tool 3 model = %q, want %q", got, "claude-haiku-4-5")
+	}
+	if got := doc.Get("messages.0.content.0.tool.definition.model").String(); got != "claude-opus-5-5" {
+		t.Errorf("inline advisor tool model = %q, want %q", got, "claude-opus-5-5")
+	}
+}
+
+func TestClaudeAdvisorBetaForInlineToolDefinitions(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"inline advisor without top-level tools", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"advisor_20260301","model":"claude-opus-5-5(high)"}}}]}]}`, true},
+		{"inline bare advisor with empty tools", `{"model":"claude-opus-5-5","tools":[],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":" Advisor ","model":"claude-opus-5-5"}}}]}]}`, true},
+		{"top-level bare advisor", `{"model":"claude-opus-5-5","tools":[{"type":"advisor","model":"claude-opus-5-5"}]}`, true},
+		{"ordinary inline tool", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"custom","name":"read_file"}}}]}]}`, false},
+		{"removal is not a declaration", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_definition","definition":{"type":"advisor_20260301"}}}]}]}`, false},
+		{"reference is not a definition", `{"model":"claude-opus-5-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","definition":{"type":"advisor_20260301"}}}]}]}`, false},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			if got := claudeBodyHasAdvisorTool(body); got != tt.want {
+				t.Errorf("advisor declaration detected = %v, want %v", got, tt.want)
+			}
+			betas := claudeCodeCLIBetas(body, nil, false)
+			count := 0
+			for _, beta := range strings.Split(betas, ",") {
+				if beta == claudeAdvisorToolBeta {
+					count++
+				}
+			}
+			wantCount := 0
+			if tt.want {
+				wantCount = 1
+			}
+			if count != wantCount {
+				t.Errorf("advisor beta count = %d, want %d in %q", count, wantCount, betas)
+			}
+		})
+	}
+}
