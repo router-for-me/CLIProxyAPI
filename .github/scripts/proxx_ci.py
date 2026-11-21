@@ -80,6 +80,25 @@ EXTRA_INPUTS = {
     "logs/**": [MODULE + "/internal/translator/openai/interactions/responses"],
 }
 
+def race_sensitive(packages):
+    """Packages with test files built only with or only without -race. Their race-free tests
+    (allocation budgets and similar) skip under -race, so they get an extra pass without it."""
+    out = []
+    for p in packages:
+        d = p[len(MODULE) + 1:] if p.startswith(MODULE + "/") else "."
+        try:
+            names = [n for n in os.listdir(d) if n.endswith("_test.go")]
+        except OSError:
+            continue
+        for n in names:
+            with open(os.path.join(d, n)) as f:
+                head = f.read(512)
+            if "//go:build" in head and "race" in head.split("//go:build", 1)[1].splitlines()[0]:
+                out.append(p)
+                break
+    return sorted(out)
+
+
 # Seconds of shard time a package costs before its tests run (link and process start).
 PACKAGE_OVERHEAD = 1.0
 
@@ -223,6 +242,8 @@ def plan(shards, timings, packages, target):
             items.append({"package": p, "skip": sorted(named + subsplit), "cost": rest + PACKAGE_OVERHEAD})
         else:
             items.append({"package": p, "cost": cost + PACKAGE_OVERHEAD})
+    for p in race_sensitive(packages):
+        items.append({"package": p, "norace": True, "cost": pk_t.get(p, default) / 2 + PACKAGE_OVERHEAD})
     out = [[0.0, []] for _ in range(shards)]
     for it in sorted(items, key=lambda x: (-x["cost"], x["package"], x.get("test", ""),
                                            (x.get("run") or x.get("subs") or [""])[:1])):
@@ -240,7 +261,8 @@ def prove_cover(packages, shard_items):
     seen = {}
     for its in shard_items:
         for it in its:
-            seen.setdefault(it["package"], []).append(it)
+            if not it.get("norace"):  # deliberate extra pass, not part of the partition
+                seen.setdefault(it["package"], []).append(it)
     missing = set(packages) - set(seen)
     extra = set(seen) - set(packages)
     if missing or extra:
@@ -276,9 +298,13 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
           f"(all shards: {[s['cost'] for s in full]}), plan {digest}", flush=True)
     flags = ["-count=1", "-shuffle=on", "-json"] + (["-race"] if race else [])
     whole = [it["package"] for it in mine if not set(it) - {"package", "cost"}]
+    norace = [it["package"] for it in mine if it.get("norace")]
     cmds = []  # (label, command, plan item or None)
     if whole:
         cmds.append(("whole", ["go", "test", *flags, *whole], None))
+    if norace:
+        plain = [f for f in flags if f != "-race"]
+        cmds.append(("without -race", ["go", "test", *plain, *norace], None))
     for it in mine:
         if "run" in it:
             cmds.append((it["package"], ["go", "test", *flags, "-run", anchored(it["run"]), it["package"]], it))

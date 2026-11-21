@@ -39,6 +39,16 @@ Every job starts at once. None waits on another.
   `-run '^X$' -skip '^X$/^(subs)$'`, so a new subtest still runs. Each shard prints the plan digest;
   every shard of one run shows the same digest.
 
+Packages with `//go:build race` / `!race` test files (allocation-budget tests skip under the race
+detector) also get one pass without `-race`, so those tests run somewhere.
+
+Tests that a full run still skips on purpose (from a full `go test -json` run):
+- `PROXX_E2E=1` e2e suites in `test/proxx/`. Self-update runs in `proxx-e2e.yml`; decisions,
+  groups, request logs and install run in no CI yet.
+- Live or opt-in tests: `CPA_LIVE_TEST`, `CLIPROXY_TEST_POSTGRES`, `CPA_TLS_FP_PROXY`.
+- `internal/signature` corpus tests, whose harvested corpora are not in the repo.
+- `internal/pluginhost` helper-process entry points; these are not real tests.
+
 ## Selection (PRs, with a merge queue only)
 
 `proxx_ci.py select --base <sha>` maps each changed path to Go packages and selects every package
