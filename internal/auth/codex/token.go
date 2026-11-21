@@ -4,14 +4,13 @@
 package codex
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
@@ -59,6 +58,10 @@ func WithFileLock(authFilePath string, fn func() error) error {
 	return fn()
 }
 
+var syncTempCredentialFile = func(tmpFile *os.File) error {
+	return tmpFile.Sync()
+}
+
 // WriteJSONFileAtomic writes data as JSON to authFilePath atomically via a temporary file in the same directory.
 func WriteJSONFileAtomic(authFilePath string, data map[string]any) error {
 	dir := filepath.Dir(authFilePath)
@@ -86,6 +89,12 @@ func WriteJSONFileAtomic(authFilePath string, data map[string]any) error {
 	if _, errWrite := tmpFile.Write(raw); errWrite != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("failed to write token to temp file: %w", errWrite)
+	}
+	if errSync := syncTempCredentialFile(tmpFile); errSync != nil {
+		if errClose := tmpFile.Close(); errClose != nil {
+			log.Errorf("codex token storage: close temp token file after sync error: %v", errClose)
+		}
+		return fmt.Errorf("failed to sync temp credential file: %w", errSync)
 	}
 	if errClose := tmpFile.Close(); errClose != nil {
 		log.Errorf("codex token storage: close temp token file error: %v", errClose)
@@ -271,7 +280,6 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	ts.Type = "codex"
-	_ = strconv.IntSize
 
 	return WithFileLock(authFilePath, func() error {
 		data, errMerge := misc.MergeMetadata(ts, ts.Metadata)

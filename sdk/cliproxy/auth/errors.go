@@ -1,12 +1,13 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // ErrorCodeRequestScoped identifies failures tied to the current request rather
@@ -47,6 +48,12 @@ const ErrorCodeTransientRateLimit = "transient_rate_limit"
 
 const transientRateLimitErrorCode = ErrorCodeTransientRateLimit
 
+// ErrorCodeCredentialQuota marks a rate-limit/quota refusal that applies to the
+// entire credential across all models rather than only the reporting model.
+const ErrorCodeCredentialQuota = "credential_quota"
+
+const credentialQuotaErrorCode = ErrorCodeCredentialQuota
+
 // Error describes an authentication related failure in a provider agnostic format.
 type Error struct {
 	// Code is a short machine readable identifier.
@@ -57,6 +64,26 @@ type Error struct {
 	Retryable bool `json:"retryable"`
 	// HTTPStatus optionally records an HTTP-like status code for the error.
 	HTTPStatus int `json:"http_status,omitempty"`
+	// Metadata carries optional provider-specific detail extracted from the
+	// upstream failure (for example an Antigravity TOS appeal URL) so the
+	// conductor can persist it on the credential record for operator tooling.
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// Clone returns an independent copy of the error, deep-copying the Metadata
+// map so snapshots cannot share mutable state with the original.
+func (e *Error) Clone() *Error {
+	if e == nil {
+		return nil
+	}
+	out := *e
+	if e.Metadata != nil {
+		out.Metadata = make(map[string]string, len(e.Metadata))
+		for key, value := range e.Metadata {
+			out.Metadata[key] = value
+		}
+	}
+	return &out
 }
 
 // IsTerminalAuthError checks if err or any error in its chain represents a permanent upstream auth failure.
@@ -352,6 +379,87 @@ func (e *authUnavailableError) Headers() http.Header {
 	return safeRetryAfterHeader(e.retryAfter)
 }
 
+// poolCooldownTerminalError wraps a terminal upstream 429 when every eligible
+// candidate credential for the requested model is blocked and at least one is
+// in a timed cooldown. It keeps the upstream error text, body, status, and
+// passthrough headers while marking the error as a model cooldown and exposing
+// the pool's earliest recovery deadline via Retry-After.
+type poolCooldownTerminalError struct {
+	cause    error
+	deadline time.Time
+}
+
+func (e *poolCooldownTerminalError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *poolCooldownTerminalError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *poolCooldownTerminalError) As(target any) bool {
+	if e == nil {
+		return false
+	}
+	if t, ok := target.(**Error); ok {
+		var base *Error
+		if errors.As(e.cause, &base) && base != nil {
+			*t = base
+			return true
+		}
+	}
+	return false
+}
+
+func (e *poolCooldownTerminalError) IsModelCooldown() bool {
+	return e != nil && !e.deadline.IsZero()
+}
+
+func (e *poolCooldownTerminalError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return statusCodeFromError(e.cause)
+}
+
+func (e *poolCooldownTerminalError) RetryAfter() *time.Duration {
+	if e == nil || e.deadline.IsZero() {
+		return nil
+	}
+	remaining := time.Until(e.deadline)
+	if remaining <= 0 {
+		return nil
+	}
+	return &remaining
+}
+
+func (e *poolCooldownTerminalError) SafeResponseHeaders() http.Header {
+	if e == nil || e.deadline.IsZero() {
+		return nil
+	}
+	return safeRetryAfterHeader(time.Until(e.deadline))
+}
+
+func (e *poolCooldownTerminalError) Headers() http.Header {
+	if e == nil || e.cause == nil {
+		return nil
+	}
+	for cur := e.cause; cur != nil; cur = errors.Unwrap(cur) {
+		if carrier, ok := cur.(interface{ Headers() http.Header }); ok && carrier != nil {
+			if hdr := carrier.Headers(); len(hdr) > 0 {
+				return hdr
+			}
+		}
+	}
+	return nil
+}
+
 // trustedRetryAfterError annotates a terminal upstream rejection whose
 // locally recorded cooldown deadline governs the client-visible Retry-After.
 // The wrapped error keeps its own status, body, identity and retry hint; the
@@ -388,8 +496,8 @@ func withTrustedRetryAfter(err error, retryAfter *time.Duration) error {
 	if err == nil || retryAfter == nil || *retryAfter <= 0 {
 		return err
 	}
-	if _, ok := err.(*upstreamExecutionAttemptError); ok {
-		return markUpstreamExecutionAttempt(withTrustedRetryAfter(unwrapUpstreamExecutionAttempt(err), retryAfter))
+	if marked, ok := err.(*upstreamExecutionAttemptError); ok && marked != nil {
+		return markUpstreamExecutionAttemptWithProviderAndID(withTrustedRetryAfter(unwrapUpstreamExecutionAttempt(err), retryAfter), upstreamAttemptProviderFromError(err), marked.attemptID)
 	}
 	if bootstrap, ok := err.(*streamBootstrapError); ok && bootstrap != nil {
 		wrapped := withTrustedRetryAfter(bootstrap.cause, retryAfter)
@@ -501,6 +609,10 @@ func HasTrustedRetryDeadline(err error) bool {
 	if SafeResponseHeaders(err).Get("Retry-After") != "" {
 		return true
 	}
+	var poolCooldown *poolCooldownTerminalError
+	if errors.As(err, &poolCooldown) && poolCooldown != nil && !poolCooldown.deadline.IsZero() {
+		return true
+	}
 	var trusted *trustedRetryAfterError
 	return errors.As(err, &trusted) && trusted != nil && !trusted.deadline.IsZero()
 }
@@ -511,6 +623,12 @@ func HasTrustedRetryDeadline(err error) bool {
 func trustedRetryAfterFromError(err error) *time.Duration {
 	if err == nil {
 		return nil
+	}
+	var poolCooldown *poolCooldownTerminalError
+	if errors.As(err, &poolCooldown) && poolCooldown != nil {
+		if remaining := poolCooldown.RetryAfter(); remaining != nil && *remaining > 0 {
+			return remaining
+		}
 	}
 	var trusted *trustedRetryAfterError
 	if errors.As(err, &trusted) && trusted != nil {

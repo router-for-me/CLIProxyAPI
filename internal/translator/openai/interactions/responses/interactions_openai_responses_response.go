@@ -426,7 +426,7 @@ func interactionsStepStartToResponses(modelName string, root ojson.Result, st *i
 		_ = addedDoc.Set("sequence_number", nextResponsesSeq(st))
 		_ = addedDoc.Set("output_index", index)
 		_ = addedDoc.Set("item.id", itemID)
-		if signature := interactionsReasoningEncryptedContent(st.ReasoningEncrypted[index]); signature != "" {
+		if signature := st.ReasoningEncrypted[index]; signature != "" {
 			_ = addedDoc.Set("item.encrypted_content", signature)
 		}
 		partDoc := ojson.NewDocString(`{"type":"response.reasoning_summary_part.added","item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
@@ -479,7 +479,7 @@ func interactionsStepDeltaToResponses(root ojson.Result, st *interactionsToRespo
 		_ = payloadDoc.Set("delta", text)
 		return [][]byte{emitResponsesEvent("response.reasoning_summary_text.delta", payloadDoc.Bytes())}
 	case "thought_signature":
-		if signature := interactionsReasoningEncryptedContent(delta.Get("signature").String()); signature != "" {
+		if signature := interactionsTypedThoughtSignature(delta); signature != "" {
 			st.ReasoningEncrypted[index] = strings.Clone(signature)
 		}
 		return nil
@@ -791,10 +791,22 @@ func responsesFailedEvent(modelName string, root ojson.Result, st *interactionsT
 	return emitResponsesEvent(eventType, payloadDoc.Bytes())
 }
 
+func interactionsTypedThoughtSignature(step ojson.Result) string {
+	raw := step.Get("signature")
+	if raw.Type == ojson.String && step.Get("signature_type").String() == "openai" && signature.IsDevinOpenAIReasoningSignature(raw.String()) {
+		return raw.String()
+	}
+	return interactionsReasoningEncryptedContent(raw.String())
+}
+
 func interactionsThoughtSignature(step ojson.Result) string {
+	if sig := interactionsReasoningEncryptedContent(step.Get("encrypted_content").String()); sig != "" {
+		return sig
+	}
+	if sig := interactionsTypedThoughtSignature(step); sig != "" {
+		return sig
+	}
 	for _, path := range []string{
-		"encrypted_content",
-		"signature",
 		"thought_signature",
 		"thoughtSignature",
 		"extra_content.google.thought_signature",
@@ -932,7 +944,7 @@ func responsesCompletedOutputItem(index int, itemType string, st *interactionsTo
 func responsesReasoningItem(index int, st *interactionsToResponsesStreamState) []byte {
 	itemDoc := ojson.NewDocString(`{"id":"","type":"reasoning","status":"completed","encrypted_content":"","summary":[]}`)
 	_ = itemDoc.Set("id", st.ItemIDs[index])
-	if signature := interactionsReasoningEncryptedContent(st.ReasoningEncrypted[index]); signature != "" {
+	if signature := st.ReasoningEncrypted[index]; signature != "" {
 		_ = itemDoc.Set("encrypted_content", signature)
 	}
 	part := []byte(`{"type":"summary_text","text":""}`)

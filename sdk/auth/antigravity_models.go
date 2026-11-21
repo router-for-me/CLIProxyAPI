@@ -3,12 +3,16 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -34,13 +38,17 @@ const (
 	AntigravityProbeStatusSuccess AntigravityProbeStatus = iota
 	AntigravityProbeStatusAuthError
 	AntigravityProbeStatusTransientError
+	AntigravityProbeStatusForbidden
 )
 
 // AntigravityModelCapabilityHints holds normalized per-account model IDs and web-search capability IDs.
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs map[string]struct{}
+	ModelIDs         map[string]struct{}
+	UpdatedAt        time.Time
+	ExpiresAt        time.Time
+	RouteFingerprint string
 }
 
 // Clone returns a deep copy of the capability hints.
@@ -48,7 +56,22 @@ func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
+		UpdatedAt:         h.UpdatedAt,
+		ExpiresAt:         h.ExpiresAt,
+		RouteFingerprint:  h.RouteFingerprint,
 	}
+}
+
+// AntigravityCapabilityRouteFingerprint computes a credential-free SHA-256
+// fingerprint of the effective proxy URL and client User-Agent used to fetch
+// capability hints.
+func AntigravityCapabilityRouteFingerprint(proxyURL, userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	if userAgent == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%q/%q", strings.TrimSpace(proxyURL), userAgent)))
+	return fmt.Sprintf("%x", sum)
 }
 
 // AntigravityModelProbeRequest configures a single-shot fetchAvailableModels probe.
@@ -86,7 +109,7 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 			return http.ErrUseLastResponse
 		},
 	}
-	transport, _, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(req.ProxyURL))
+	transport, errProxy := newAntigravityProbeTransport(req.ProxyURL)
 	if errProxy != nil {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
@@ -118,8 +141,11 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 			log.Debug("antigravity model fetch: response close failed")
 		}
 	}()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusAuthError
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusForbidden
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
@@ -134,6 +160,48 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
 	return hints, AntigravityProbeStatusSuccess
+}
+
+func newAntigravityProbeTransport(proxyURL string) (*http.Transport, error) {
+	transport, mode, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(proxyURL))
+	if errProxy != nil {
+		return nil, errProxy
+	}
+	if transport == nil {
+		if mode != proxyutil.ModeInherit || http.DefaultTransport == nil {
+			transport = &http.Transport{}
+		} else if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			if base == nil {
+				transport = &http.Transport{}
+			} else {
+				transport = base.Clone()
+			}
+		} else {
+			// A custom non-*http.Transport RoundTripper installed on http.DefaultTransport
+			// owns its own protocol behavior.
+			return nil, nil
+		}
+	}
+	return configureAntigravityHTTP11Transport(transport), nil
+}
+
+func configureAntigravityHTTP11Transport(transport *http.Transport) *http.Transport {
+	if transport == nil {
+		return nil
+	}
+	transport.Protocols = nil
+	transport.ForceAttemptHTTP2 = false
+	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
+	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
+	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
+	transport.TLSClientConfig.NextProtos = nil
+	return transport
 }
 
 // NormalizeAntigravityModelID normalizes an Antigravity model identifier for case-insensitive matching.
@@ -237,6 +305,15 @@ func BuildPersistedAntigravityCapabilityHints(project, endpoint string, hints An
 	if endpoint = sanitizeAntigravityPersistedEndpoint(endpoint); endpoint != "" {
 		value["endpoint"] = endpoint
 	}
+	if routeFingerprint := strings.TrimSpace(hints.RouteFingerprint); routeFingerprint != "" {
+		value["route_fingerprint"] = routeFingerprint
+	}
+	if !hints.UpdatedAt.IsZero() {
+		value["updated_at"] = hints.UpdatedAt.UTC().Format(time.RFC3339)
+	}
+	if !hints.ExpiresAt.IsZero() {
+		value["expires_at"] = hints.ExpiresAt.UTC().Format(time.RFC3339)
+	}
 	if len(hints.WebSearchModelIDs) > 0 {
 		webSearchIDs := make([]string, 0, len(hints.WebSearchModelIDs))
 		for id := range hints.WebSearchModelIDs {
@@ -293,10 +370,30 @@ func ParsePersistedAntigravityCapabilityHints(metadata map[string]any, expectedP
 		}
 		webSearchModels = parsedWebSearch
 	}
+	routeFingerprint, _ := rawMap["route_fingerprint"].(string)
 	return AntigravityModelCapabilityHints{
 		ModelIDs:          modelIDs,
 		WebSearchModelIDs: webSearchModels,
+		UpdatedAt:         parsePersistedAntigravityTime(rawMap["updated_at"]),
+		ExpiresAt:         parsePersistedAntigravityTime(rawMap["expires_at"]),
+		RouteFingerprint:  strings.TrimSpace(routeFingerprint),
 	}, true
+}
+
+func parsePersistedAntigravityTime(raw any) time.Time {
+	value, ok := raw.(string)
+	if !ok {
+		return time.Time{}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, errParse := time.Parse(time.RFC3339Nano, value)
+	if errParse != nil {
+		return time.Time{}
+	}
+	return parsed.UTC()
 }
 
 func parsePersistedAntigravityModelSet(raw any) (map[string]struct{}, bool) {

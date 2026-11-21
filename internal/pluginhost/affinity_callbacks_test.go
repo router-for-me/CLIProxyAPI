@@ -2,11 +2,11 @@ package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
@@ -412,6 +412,43 @@ func TestHostAffinityLookupCallback_Contract(t *testing.T) {
 		}
 		if !resp.Disabled {
 			t.Fatalf("expected disabled = true, got %v", resp.Disabled)
+		}
+	})
+
+	t.Run("bound when plugin host attached without active scheduler plugin", func(t *testing.T) {
+		inactiveSelector := coreauth.NewSessionAffinitySelector(nil)
+		defer inactiveSelector.Stop()
+		managerWithInactiveHost := coreauth.NewManager(nil, nil, nil)
+		managerWithInactiveHost.SetSelector(inactiveSelector)
+		if _, errReg := managerWithInactiveHost.Register(context.Background(), authA.Clone()); errReg != nil {
+			t.Fatalf("register authA: %v", errReg)
+		}
+		seedOpts := cliproxyexecutor.Options{
+			Headers:  map[string][]string{"X-Claude-Code-Session-Id": {"inactive-plugin-host-session"}},
+			Metadata: make(map[string]any),
+		}
+		if picked, errPick := inactiveSelector.Pick(context.Background(), "anthropic", "claude-3-7-sonnet", seedOpts, []*coreauth.Auth{authA}); errPick != nil || picked == nil || picked.ID != authA.ID {
+			t.Fatalf("seed affinity binding failed: auth=%v err=%v", picked, errPick)
+		}
+		hostWithInactiveSched := New()
+		hostWithInactiveSched.SetAuthManager(managerWithInactiveHost)
+		managerWithInactiveHost.SetPluginScheduler(hostWithInactiveSched)
+
+		reqPayload, _ := json.Marshal(pluginapi.HostAffinityLookupRequest{
+			Provider:  "anthropic",
+			Model:     "claude-3-7-sonnet",
+			SessionID: "inactive-plugin-host-session",
+		})
+		rawResp, errCall := hostWithInactiveSched.callFromPlugin(context.Background(), pluginabi.MethodHostAffinityLookup, reqPayload)
+		if errCall != nil {
+			t.Fatalf("callFromPlugin error = %v", errCall)
+		}
+		resp, errDecode := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](rawResp)
+		if errDecode != nil {
+			t.Fatalf("decode response: %v", errDecode)
+		}
+		if resp.Status != pluginapi.HostAffinityStatusBound || resp.AuthIndex != authA.Index {
+			t.Fatalf("status with inactive plugin host = (%q, %q), want (%q, %q)", resp.Status, resp.AuthIndex, pluginapi.HostAffinityStatusBound, authA.Index)
 		}
 	})
 

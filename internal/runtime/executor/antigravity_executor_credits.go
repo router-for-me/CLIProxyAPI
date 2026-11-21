@@ -3,7 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -13,11 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -32,6 +34,8 @@ type antigravityCreditsFailureState struct {
 type antigravity429DecisionKind string
 
 const (
+	antigravityLoadCodeAssistMaxResponseBytes = 1 << 20
+
 	antigravity429Unknown                         antigravity429Category     = "unknown"
 	antigravity429RateLimited                     antigravity429Category     = "rate_limited"
 	antigravity429QuotaExhausted                  antigravity429Category     = "quota_exhausted"
@@ -355,14 +359,134 @@ func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
 	return false
 }
 
+// antigravityTOSViolation captures the parsed state of a 403 PERMISSION_DENIED
+// carrying an ErrorInfo reason=TOS_VIOLATION (issue #7515). This is a
+// terminal, service-scoped credential suspension — the OAuth token and model
+// catalog keep working while inference is refused — so the credential must be
+// deactivated rather than cooled, and sibling credentials in the same pool
+// should not be hammered during an automated sweep.
+type antigravityTOSViolation struct {
+	AppealURL     string
+	AppealURLText string
+}
+
+// parseAntigravityTOSViolation extracts the TOS_VIOLATION signature from a
+// Google RPC error body. It returns nil for any other shape, including
+// transient 429 quota errors and non-TOS 403s.
+func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
+	if len(body) == 0 {
+		return nil
+	}
+	code := int(ojson.GetBytesNoCopy(body, "error.code").Int())
+	status := strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String())
+	isHTTPForbidden := code == http.StatusForbidden && strings.EqualFold(status, "PERMISSION_DENIED")
+	isGRPCPermissionDenied := code == 7 && (status == "" || strings.EqualFold(status, "PERMISSION_DENIED"))
+	if !isHTTPForbidden && !isGRPCPermissionDenied {
+		return nil
+	}
+	details := ojson.GetBytesNoCopy(body, "error.details")
+	if !details.Exists() || !details.IsArray() {
+		return nil
+	}
+	for _, detail := range details.Array() {
+		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+			continue
+		}
+		reason := strings.TrimSpace(detail.Get("reason").String())
+		if !strings.EqualFold(reason, "TOS_VIOLATION") {
+			continue
+		}
+		meta := detail.Get("metadata")
+		return &antigravityTOSViolation{
+			AppealURL:     strings.Clone(strings.TrimSpace(meta.Get("appeal_url").String())),
+			AppealURLText: strings.Clone(strings.TrimSpace(meta.Get("appeal_url_link_text").String())),
+		}
+	}
+	return nil
+}
+
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+	} else if statusCode == http.StatusUnauthorized {
+		err.credentialScoped = true
+	} else if statusCode == http.StatusForbidden {
+		if violation := parseAntigravityTOSViolation(body); violation != nil {
+			err.tosViolation = true
+			err.credentialScoped = true
+			err.tosAppealURL = violation.AppealURL
+			err.tosAppealURLText = violation.AppealURLText
+		} else if cliproxyauth.IsAntigravityValidationRequiredError(err) {
+			err.credentialScoped = true
+		}
 	}
 	return err
+}
+
+// applyAntigravity429State performs the executor-side bookkeeping for an
+// Antigravity 429 response (either HTTP status 429 or a mid-stream SSE 429
+// error frame): closing idle transports, recording short model cooldowns, and
+// permanently disabling credits on explicit balance exhaustion.
+func (e *AntigravityExecutor) applyAntigravity429State(ctx context.Context, auth *cliproxyauth.Auth, baseModel string, useCredits bool, bodyBytes []byte) error {
+	var cfg *config.Config
+	if e != nil {
+		cfg = e.cfg
+	}
+	decision := decideAntigravity429(bodyBytes)
+	switch decision.kind {
+	case antigravity429DecisionShortCooldownSwitchAuth:
+		closeAntigravityAuthIdleTransports(auth)
+		if decision.retryAfter != nil && *decision.retryAfter > 0 && !antigravityCoolingDisabled(auth, cfg) {
+			if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), *decision.retryAfter); errMarkCooldown != nil {
+				return homeKVUnavailableStatusErr(errMarkCooldown)
+			}
+			log.Debugf("antigravity executor: short quota cooldown (%s) for model %s recorded", *decision.retryAfter, baseModel)
+		}
+	case antigravity429DecisionFullQuotaExhausted:
+		closeAntigravityAuthIdleTransports(auth)
+		if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, cfg) {
+			markAntigravityCreditsPermanentlyDisabled(auth)
+		}
+	}
+	return nil
+}
+
+// applyAntigravityTOSState performs the executor-side bookkeeping for a terminal
+// TOS_VIOLATION: it arms the optional pool-wide protective pause and logs the
+// appeal URL for the operator. The durable credential deactivation and the
+// appeal metadata on the auth record are carried by the returned statusErr
+// (tos_violation code + Error.Metadata) through the conductor, since the
+// executor only sees a cloned auth. It is a no-op for non-TOS errors.
+func (e *AntigravityExecutor) applyAntigravityTOSState(cfg *config.Config, auth *cliproxyauth.Auth, body []byte) {
+	violation := parseAntigravityTOSViolation(body)
+	if violation == nil || auth == nil {
+		return
+	}
+	markAntigravityTOSPause(cfg, auth)
+	if violation.AppealURL != "" {
+		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION; submit appeal: %s (%s)", auth.ID, redactTOSAppealURL(violation.AppealURL), violation.AppealURLText)
+	} else {
+		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION", auth.ID)
+	}
+}
+
+// applyAntigravityForbiddenState performs executor-side bookkeeping for an
+// Antigravity 403 response: terminal TOS_VIOLATION closes idle pooled
+// transports and arms the optional pool-wide pause, while 403
+// VALIDATION_REQUIRED closes idle pooled transports so verification-locked
+// accounts stop reusing keep-alive sockets.
+func (e *AntigravityExecutor) applyAntigravityForbiddenState(cfg *config.Config, auth *cliproxyauth.Auth, body []byte) {
+	if parseAntigravityTOSViolation(body) != nil {
+		closeAntigravityAuthIdleTransports(auth)
+		e.applyAntigravityTOSState(cfg, auth, body)
+		return
+	}
+	if cliproxyauth.IsAntigravityValidationRequiredError(statusErr{code: http.StatusForbidden, msg: string(body)}) {
+		closeAntigravityAuthIdleTransports(auth)
+	}
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
@@ -398,13 +522,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 		if !written {
 			return
 		}
-		refreshCtx := context.Background()
-		if ctx != nil {
-			if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-				refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
-			}
-		}
-		refreshCtx, cancel := context.WithTimeout(refreshCtx, antigravityCreditsHintRefreshTimeout)
+		refreshCtx, cancel := context.WithTimeout(detachedAntigravityCredentialContext(ctx), antigravityCreditsHintRefreshTimeout)
 		authCopy := auth.Clone()
 		go func(auth *cliproxyauth.Auth, token string) {
 			defer cancel()
@@ -470,15 +588,16 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 	var refreshCtx context.Context
 	var cancelRefresh context.CancelFunc
 	if timeout > 0 {
-		// Keep the existing independent warm-hint budget and transport selection.
-		lifecycle = context.Background()
-		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-			lifecycle = context.WithValue(lifecycle, "cliproxy.roundtripper", rt)
-		}
+		// Keep the existing independent warm-hint budget and transport selection
+		// while preserving non-cancellation context values and excluding
+		// execution-scoped request proxy overrides.
+		lifecycle = detachedAntigravityCredentialContext(ctx)
 		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, timeout)
 	} else {
-		// Optional post-refresh work follows its lifecycle without adding a timer.
-		refreshCtx, cancelRefresh = context.WithCancel(lifecycle)
+		// Optional post-refresh work still follows the caller's lifecycle, but a
+		// stalled upstream must not leak the goroutine or wedge state.task, so it
+		// runs under the bounded warm-hint budget instead of an unbounded cancel.
+		refreshCtx, cancelRefresh = context.WithTimeout(cliproxyexecutor.WithoutRequestProxyURL(lifecycle), antigravityCreditsHintRefreshTimeout)
 	}
 	task := &antigravityCreditsRefreshTask{
 		state:     state,
@@ -540,7 +659,14 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	}
 	baseURL := antigravityLoadCodeAssistBaseURL(auth)
 	endpointURL := strings.TrimSuffix(baseURL, "/") + "/v1internal:loadCodeAssist"
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
+	reqCtx := ctx
+	if reqCtx != nil {
+		// Credits balance refreshes are credential-scoped background probes;
+		// explicitly clearing the session ID prevents custom header expansion
+		// from touching a caller's pooled *gin.Context or leaking session IDs.
+		reqCtx = util.WithSessionID(reqCtx, "")
+	}
+	httpReq, errReq := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, bytes.NewReader(loadReqBody))
 	if errReq != nil {
 		log.Debugf("antigravity executor: create loadCodeAssist request error: %v", errReq)
 		return
@@ -548,6 +674,10 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", userAgent)
+	if host := resolveHost(baseURL); host != "" {
+		httpReq.Host = host
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, auth.Attributes, http.Header{})
 
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, errDo := helps.WithAntigravityHTTPClientTrace(httpClient, auth, "credits_query").Do(httpReq)
@@ -561,14 +691,8 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
-	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
-		return
-	}
-
 	authID := strings.TrimSpace(auth.ID)
-	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
+	runIfCurrentTask := func(fn func()) {
 		if task != nil {
 			state := task.state
 			state.mu.Lock()
@@ -581,54 +705,78 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		if ctx.Err() != nil {
 			return
 		}
-		if balance != nil {
-			storeAntigravityCreditsBalanceBestEffort(authID, *balance)
+		fn()
+	}
+
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, antigravityLoadCodeAssistMaxResponseBytes+1))
+	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		if errRead == nil && httpResp.StatusCode == http.StatusForbidden && len(bodyBytes) <= antigravityLoadCodeAssistMaxResponseBytes {
+			runIfCurrentTask(func() {
+				e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+			})
 		}
-		cliproxyauth.SetAntigravityCreditsHint(authID, hint)
-		if balance != nil && hint.Available {
-			clearAntigravityCreditsPermanentlyDisabled(auth)
-		}
+		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
+		return
+	}
+	if len(bodyBytes) > antigravityLoadCodeAssistMaxResponseBytes {
+		log.Debugf("antigravity executor: loadCodeAssist response exceeded %d bytes", antigravityLoadCodeAssistMaxResponseBytes)
+		return
+	}
+	if !ojson.ValidBytes(bodyBytes) {
+		log.Debugf("antigravity executor: loadCodeAssist returned invalid JSON")
+		return
+	}
+
+	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
+		runIfCurrentTask(func() {
+			if balance != nil {
+				storeAntigravityCreditsBalanceBestEffort(authID, *balance)
+			}
+			cliproxyauth.SetAntigravityCreditsHint(authID, hint)
+			if balance != nil && hint.Available {
+				clearAntigravityCreditsPermanentlyDisabled(auth)
+			}
+		})
 	}
 	paidTierID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(bodyBytes, "paidTier.id").String()))
 
 	credits := ojson.GetBytesNoCopy(bodyBytes, "paidTier.availableCredits")
-	if !credits.IsArray() {
-		publish(nil, cliproxyauth.AntigravityCreditsHint{
-			Known:      true,
-			Available:  false,
-			PaidTierID: paidTierID,
-			UpdatedAt:  time.Now(),
-		})
-		return
+	if credits.IsArray() {
+		for _, credit := range credits.Array() {
+			if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
+				continue
+			}
+			creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
+			if errCA != nil {
+				continue
+			}
+			minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
+			if errMA != nil {
+				continue
+			}
+			bal := antigravityCreditsBalance{
+				CreditAmount:    creditAmount,
+				MinCreditAmount: minAmount,
+				PaidTierID:      paidTierID,
+				Known:           true,
+			}
+			publish(&bal, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       creditAmount >= minAmount,
+				CreditAmount:    creditAmount,
+				MinCreditAmount: minAmount,
+				PaidTierID:      paidTierID,
+				UpdatedAt:       time.Now(),
+			})
+			return
+		}
 	}
-	for _, credit := range credits.Array() {
-		if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
-			continue
-		}
-		creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
-		if errCA != nil {
-			continue
-		}
-		minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
-		if errMA != nil {
-			continue
-		}
-		bal := antigravityCreditsBalance{
-			CreditAmount:    creditAmount,
-			MinCreditAmount: minAmount,
-			PaidTierID:      paidTierID,
-			Known:           true,
-		}
-		publish(&bal, cliproxyauth.AntigravityCreditsHint{
-			Known:           true,
-			Available:       creditAmount >= minAmount,
-			CreditAmount:    creditAmount,
-			MinCreditAmount: minAmount,
-			PaidTierID:      paidTierID,
-			UpdatedAt:       time.Now(),
-		})
-		return
-	}
+	publish(nil, cliproxyauth.AntigravityCreditsHint{
+		Known:      true,
+		Available:  false,
+		PaidTierID: paidTierID,
+		UpdatedAt:  time.Now(),
+	})
 }
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)
@@ -797,4 +945,132 @@ func homeKVUnavailableStatusErr(cause error) statusErr {
 		return statusErr{code: http.StatusServiceUnavailable, msg: "home kv store unavailable"}
 	}
 	return statusErr{code: http.StatusServiceUnavailable, msg: fmt.Sprintf("home kv store unavailable: %v", cause)}
+}
+
+// antigravityTOSPauseUntil stores the pool-wide protective pause deadline.
+// It mirrors the credits/cooldown dual-track pattern: an in-process map for
+// standalone mode and the home KV store (prefix cpa:antigravity:*) so the pause
+// is shared when the control plane is active.
+var antigravityTOSPauseUntil sync.Map
+
+const antigravityTOSPauseKVKey = "cpa:antigravity:tos-pause:until"
+
+// antigravityTOSPauseWindow resolves the configured protective pause window.
+// Defaults to disabled (0) so a TOS_VIOLATION only deactivates the offending
+// credential unless a positive Go duration (e.g. "6h") is explicitly configured.
+func antigravityTOSPauseWindow(cfg *config.Config) (time.Duration, bool) {
+	if cfg == nil {
+		return 0, false
+	}
+	raw := strings.TrimSpace(cfg.Antigravity.TOSPauseWindow)
+	if raw == "" {
+		return 0, false
+	}
+	switch strings.ToLower(raw) {
+	case "0", "off", "false", "none", "disabled":
+		return 0, false
+	}
+	window, err := time.ParseDuration(raw)
+	if err != nil || window <= 0 {
+		return 0, false
+	}
+	return window, true
+}
+
+func antigravityTOSPauseKey(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	_ = auth
+	return "pool"
+}
+
+// markAntigravityTOSPause records a pool-wide protective pause after the first
+// TOS_VIOLATION. Only the TOS path calls this; transient 429 quota errors must
+// never write or extend the pause.
+func markAntigravityTOSPause(cfg *config.Config, auth *cliproxyauth.Auth) {
+	window, enabled := antigravityTOSPauseWindow(cfg)
+	if !enabled || window <= 0 {
+		return
+	}
+	until := time.Now().Add(window)
+	key := antigravityTOSPauseKey(auth)
+	antigravityTOSPauseUntil.Store(key, until)
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv tos pause write error: %v", errClient)
+			return
+		}
+		payload := []byte(strconv.FormatInt(until.UnixNano(), 10))
+		if _, errSet := client.KVSet(context.Background(), antigravityTOSPauseKVKey, payload, homekv.KVSetOptions{EX: window + 5*time.Second}); errSet != nil {
+			log.Errorf("antigravity executor: home kv tos pause write error: %v", errSet)
+		}
+	}
+	log.Warnf("antigravity executor: TOS_VIOLATION pause armed for %s (pool-wide until %s)", window, until.Format(time.RFC3339))
+}
+
+// newAntigravityTOSPauseStatusErr builds the 503 error returned while the
+// Antigravity pool is under a protective TOS_VIOLATION pause. Marking it
+// request-scoped ensures the conductor aborts immediately without failing,
+// cooling, or rotating across healthy sibling credentials.
+func newAntigravityTOSPauseStatusErr() statusErr {
+	return statusErr{
+		code:          http.StatusServiceUnavailable,
+		msg:           "antigravity pool paused after TOS_VIOLATION",
+		requestScoped: true,
+	}
+}
+
+// antigravityInTOSPause reports whether the Antigravity pool is currently under
+// a protective TOS pause. The check is provider-scoped (any Antigravity
+// credential) and ignores per-credential identity.
+func antigravityInTOSPause(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	_, enabled := antigravityTOSPauseWindow(cfg)
+	if !enabled {
+		return false
+	}
+	key := antigravityTOSPauseKey(auth)
+	if key == "" {
+		return false
+	}
+	now := time.Now()
+	if value, ok := antigravityTOSPauseUntil.Load(key); ok {
+		if until, ok := value.(time.Time); ok && until.After(now) {
+			return true
+		}
+		// Delete only if it is still the same expired value; a concurrent
+		// markAntigravityTOSPause may have already installed a newer deadline.
+		antigravityTOSPauseUntil.CompareAndDelete(key, value)
+	}
+	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if errClient != nil {
+			log.Errorf("antigravity executor: home kv tos pause read error: %v", errClient)
+			return false
+		}
+		raw, found, errGet := client.KVGet(context.Background(), antigravityTOSPauseKVKey)
+		if errGet != nil || !found {
+			return false
+		}
+		untilNano, errParse := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
+		if errParse != nil {
+			return false
+		}
+		remaining := time.Unix(0, untilNano).Sub(now)
+		// An expired deadline is treated as absent; the KV EX ttl reclaims the
+		// key, so no explicit delete is needed (which could race a concurrent
+		// markAntigravityTOSPause writing a newer deadline).
+		return remaining > 0
+	}
+	return false
+}
+
+// redactTOSAppealURL strips query parameters and fragments from an appeal URL
+// before logging, so a signed or tracking URL cannot leak through log output.
+// The full URL remains available on the auth record for operator use.
+func redactTOSAppealURL(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if idx := strings.IndexAny(trimmed, "?#"); idx >= 0 {
+		trimmed = trimmed[:idx]
+	}
+	return trimmed
 }

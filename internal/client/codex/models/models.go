@@ -3,12 +3,12 @@ package models
 
 import (
 	"bytes"
-	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
@@ -580,7 +580,10 @@ func nullCodexClientRequiredOptions(entry map[string]any) {
 	entry["availability_nux"] = nil
 }
 
-const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
+const (
+	codexClientFallbackInstructions         = "You are Codex, a coding agent. You and the user share one workspace."
+	codexClientFallbackMinimalClientVersion = "0.124.0"
+)
 
 // useCompactCodexClientInstructions replaces cloned template prompts with a short literal.
 // Both the legacy and canonical instruction fields must be present for catalog decoding.
@@ -674,15 +677,20 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 		if contextWindow <= 0 && info.ContextLength > 0 {
 			contextWindow = info.ContextLength
 		}
-		if info.Type == registry.OpenAIImageModelType {
-			entry["visibility"] = "hide"
-			delete(entry, "input_modalities")
-			delete(entry, "supports_image_detail_original")
-		} else {
-			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
-		}
 		if thinkingSupport == nil {
 			thinkingSupport = info.Thinking
+		}
+	}
+	if info != nil && info.Type == registry.OpenAIImageModelType {
+		entry["visibility"] = "hide"
+		delete(entry, "input_modalities")
+		delete(entry, "supports_image_detail_original")
+	} else {
+		if inherited := stringSliceValue(entry["input_modalities"]); len(inherited) > 0 {
+			applyCodexClientInputModalitiesMetadata(entry, inherited)
+		}
+		if info != nil {
+			applyCodexClientInputModalitiesMetadata(entry, info.SupportedInputModalities)
 		}
 	}
 	applyCodexClientThinkingMetadata(entry, thinkingSupport, clientVersion)
@@ -701,6 +709,7 @@ func applyCodexClientModelMetadata(entry map[string]any, id string, model map[st
 	entry["slug"] = id
 	entry["display_name"] = displayName
 	entry["description"] = description
+	entry["minimal_client_version"] = codexClientFallbackMinimalClientVersion
 	entry["prefer_websockets"] = false
 	if optimizeMultiAgentV2 {
 		entry["multi_agent_version"] = "v2"
@@ -994,6 +1003,23 @@ func codexClientModelPriority(model map[string]any) int {
 		return int(priority)
 	}
 	return 100
+}
+
+func stringSliceValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return typed
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func stringModelValue(model map[string]any, key string) string {

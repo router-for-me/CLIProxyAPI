@@ -11,8 +11,10 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,6 +26,9 @@ type CodexWebsocketsExecutor struct {
 	*CodexExecutor
 
 	store *codexWebsocketSessionStore
+
+	// Set before execution by concurrency tests; never mutated during a session.
+	duplexStateObserver func(event string, ready bool)
 }
 
 func NewCodexWebsocketsExecutor(cfg *config.Config) *CodexWebsocketsExecutor {
@@ -266,6 +271,14 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
 	}
 	if !authEnabled {
 		return fmt.Errorf("websocket credential is no longer enabled")
+	}
+	if ojson.GetBytesNoCopy(payload, "client_metadata").Exists() {
+		doc := ojson.NewDoc(payload)
+		helps.StripCodexSessionInstructionMarker(doc, sdktranslator.FormatOpenAIResponse)
+		payload = doc.Bytes()
+		if errMarker := helps.ValidateCodexSessionInstructionMarker(payload, sdktranslator.FormatOpenAIResponse); errMarker != nil {
+			return errMarker
+		}
 	}
 	if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
 		return errWrite

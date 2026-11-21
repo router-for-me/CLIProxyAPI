@@ -214,3 +214,41 @@ func BenchmarkManagerPickNextAndMarkResult1000(b *testing.B) {
 		manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "gemini", Model: model, Success: true})
 	}
 }
+
+func BenchmarkManagerPinnedLegacy1000(b *testing.B) {
+	for _, mixed := range []bool{false, true} {
+		b.Run(fmt.Sprintf("mixed=%t", mixed), func(b *testing.B) {
+			manager, providers, model := benchmarkManagerSetup(b, 1000, mixed, false)
+			selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+			b.Cleanup(selector.Stop)
+			manager.SetSelector(selector)
+			ctx := context.Background()
+			opts := cliproxyexecutor.Options{Metadata: map[string]any{
+				cliproxyexecutor.PinnedAuthMetadataKey: "bench-gemini-0000",
+			}}
+			// Warm up index assignment and selection metadata outside the timed loop.
+			if mixed {
+				if _, _, _, errWarm := manager.pickNextMixedLegacy(ctx, providers, model, opts, nil); errWarm != nil {
+					b.Fatal(errWarm)
+				}
+			} else if _, _, errWarm := manager.pickNextLegacy(ctx, providers[0], model, opts, nil); errWarm != nil {
+				b.Fatal(errWarm)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if mixed {
+					auth, exec, provider, errPick := manager.pickNextMixedLegacy(ctx, providers, model, opts, nil)
+					if errPick != nil || auth == nil || auth.ID != "bench-gemini-0000" || exec == nil || provider != providers[0] {
+						b.Fatalf("pinned mixed pick failed: auth=%v exec=%v provider=%q err=%v", auth, exec, provider, errPick)
+					}
+				} else {
+					auth, exec, errPick := manager.pickNextLegacy(ctx, providers[0], model, opts, nil)
+					if errPick != nil || auth == nil || auth.ID != "bench-gemini-0000" || exec == nil {
+						b.Fatalf("pinned pick failed: auth=%v exec=%v err=%v", auth, exec, errPick)
+					}
+				}
+			}
+		})
+	}
+}

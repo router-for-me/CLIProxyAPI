@@ -2,10 +2,10 @@ package models
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
@@ -1981,5 +1981,67 @@ func TestCodexClientModelsResponse_DoesNotAdvertiseImageDetailOriginalForClaudeO
 		if got, ok := entry["supports_image_detail_original"].(bool); !ok || got {
 			t.Errorf("%s supports_image_detail_original = %#v, want false", slug, entry["supports_image_detail_original"])
 		}
+	}
+}
+
+func TestCodexClientModelsResponse_FallbackFiltersAudioFromDefaultTemplate(t *testing.T) {
+	_, revision := registry.GetCodexClientModelsSnapshot()
+	codexClientModelTemplatesMu.Lock()
+	previousLoaded := codexClientModelTemplatesLoaded
+	previousRevision := codexClientModelTemplatesRevision
+	previousTemplates := codexClientModelTemplates
+	previousDefault := codexClientDefaultTemplate
+	previousErr := codexClientModelTemplatesErr
+	codexClientModelTemplatesLoaded = false
+	codexClientModelTemplatesMu.Unlock()
+	t.Cleanup(func() {
+		codexClientModelTemplatesMu.Lock()
+		codexClientModelTemplatesLoaded = previousLoaded
+		codexClientModelTemplatesRevision = previousRevision
+		codexClientModelTemplates = previousTemplates
+		codexClientDefaultTemplate = previousDefault
+		codexClientModelTemplatesErr = previousErr
+		codexClientModelTemplatesMu.Unlock()
+	})
+
+	snapshot := []byte(`{"models":[{
+		"slug":"gpt-5.5",
+		"display_name":"GPT-6.2-Sol",
+		"description":"Fast model.",
+		"base_instructions":"Full instructions",
+		"minimal_client_version":"0.166.0",
+		"visibility":"list",
+		"context_window":500000,
+		"max_context_window":872000,
+		"priority":2,
+		"default_reasoning_level":"low",
+		"supported_reasoning_levels":[{"effort":"low","description":"Fast"}],
+		"input_modalities":["text","image","audio"],
+		"supports_image_detail_original":true,
+		"service_tiers":[{"id":"priority"}]
+	}]}`)
+	if _, _, errLoad := loadCodexClientModelTemplatesSnapshot(snapshot, revision); errLoad != nil {
+		t.Fatalf("loadCodexClientModelTemplatesSnapshot: %v", errLoad)
+	}
+
+	// Verify with an older client version (< 0.166.0) that non-template fallback models
+	// decouple minimal_client_version from the donor template and filter donor audio modality.
+	resp := BuildResponseForClient([]map[string]any{
+		{"id": "custom-audio-filter-model"},
+	}, nil, false, "0.153.4")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want 1 entry", resp["models"])
+	}
+
+	mods, okMods := models[0]["input_modalities"].([]any)
+	if !okMods || len(mods) != 2 || mods[0] != "text" || mods[1] != "image" {
+		t.Fatalf("fallback input_modalities = %#v, want [text image]", models[0]["input_modalities"])
+	}
+	if got := stringModelValue(models[0], "minimal_client_version"); got != "0.124.0" {
+		t.Fatalf("fallback minimal_client_version = %q, want 0.124.0", got)
+	}
+	if cmp, okCmp := compareDottedVersions(stringModelValue(models[0], "minimal_client_version"), "0.153.4"); !okCmp || cmp > 0 {
+		t.Fatalf("fallback minimal_client_version = %q must remain compatible with older client 0.153.4", models[0]["minimal_client_version"])
 	}
 }

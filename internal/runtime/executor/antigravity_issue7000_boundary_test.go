@@ -2,7 +2,6 @@ package executor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -118,9 +118,12 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 		convert bool
 	}{
 		{"claude-opus-5-5", true}, {"claude-sonnet-5-5-high", true},
+		{"claude-opus-5-5-low", true}, {"claude-opus-5-5-medium", true}, {"claude-opus-5-5-max", true},
+		{"claude-sonnet-5-5-low", true}, {"claude-sonnet-5-5-medium", true}, {"claude-sonnet-5-5-max", true},
 		{"claude-opus-5-5-reasoning", true}, {"claude-sonnet-5-5(high)", true},
 		{"claude-opus-5-5-20261001", true}, {"claude-sonnet-5-5[1m]", true},
-		{"claude-opus-5-5-20261001[1m](high)", true},
+		{"claude-opus-5-5-20261001[1m](high)", true}, {"claude-opus-5-5-max-20261001[1m](max)", true},
+		{"claude-opus-5-5-custom", false},
 		{"claude-opus-5-50-high", false}, {"claude-sonnet-5-50", false},
 		{"claude-opus-4-6", false}, {"claude-haiku-5-5", false},
 		{"gemini-3.8-flash-high", false}, {"other/claude-opus-5-5-high", false},
@@ -137,6 +140,9 @@ func TestIssue7000AntigravityModelAndPlainRequestBoundaries(t *testing.T) {
 			}
 			if tc.convert {
 				assertIssue7000PromptSchema(t, ojson.GetBytes(encoded, "request.systemInstruction"), `{"type":"object","properties":{"title":{"type":"string"}}}`)
+				if mode := ojson.GetBytes(encoded, "request.toolConfig.functionCallingConfig.mode").String(); mode != "" && mode != "AUTO" {
+					t.Errorf("functionCallingConfig.mode = %q, want AUTO or omitted when converted", mode)
+				}
 			}
 		})
 	}
@@ -241,7 +247,7 @@ func TestIssue7000AntigravityExecutionAndFinalPayloadRules(t *testing.T) {
 					switch rules {
 					case "none":
 						assertIssue7000PromptSchema(t, request.Get("systemInstruction"), issue7000LiteralSchema)
-						if !strings.Contains(request.Get("systemInstruction.parts.0.text").String(), "a\u200bnthropic") {
+						if !strings.Contains(request.Get("systemInstruction.parts.0.text").String(), "a\u034fnthropic") {
 							t.Errorf("original system instruction was lost or not obfuscated: %s", body)
 						}
 						for _, key := range []string{"responseSchema", "responseMimeType"} {

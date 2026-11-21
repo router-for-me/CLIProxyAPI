@@ -18,10 +18,10 @@ import (
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = helps.WithCodexCommentaryPolicy(ctx, e.cfg)
-	if errExpand := helps.ExpandRecognizedResponsesCompactionCapsules(&req, &opts); errExpand != nil {
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if _, errExpand := e.expandCodexResponsesCompaction(auth, &req, &opts, baseModel); errExpand != nil {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -42,6 +42,7 @@ func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 	_ = doc.Delete("previous_response_id")
+	helps.StripCodexSessionInstructionMarker(doc, from)
 	_ = doc.Delete("generate")
 	_ = doc.Delete("prompt_cache_retention")
 	_ = doc.Delete("safety_identifier")
@@ -103,14 +104,26 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 	}
 
 	inputItems := root.Get("input")
-	if inputItems.IsArray() {
+	if inputItems.Type == ojson.String {
+		if text := strings.TrimSpace(inputItems.String()); text != "" {
+			segments = append(segments, text)
+		}
+	} else if inputItems.IsArray() {
 		arr := inputItems.Array()
 		for i := range arr {
 			item := arr[i]
-			switch item.Get("type").String() {
+			itemType := item.Get("type").String()
+			if itemType == "" && item.Get("role").String() != "" && item.Get("content").Exists() {
+				itemType = "message"
+			}
+			switch itemType {
 			case "message":
 				content := item.Get("content")
-				if content.IsArray() {
+				if content.Type == ojson.String {
+					if text := strings.TrimSpace(content.String()); text != "" {
+						segments = append(segments, text)
+					}
+				} else if content.IsArray() {
 					parts := content.Array()
 					for j := range parts {
 						part := parts[j]

@@ -107,6 +107,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	if !homeEnabled {
+		s.startCopilotCatalogRefresh(ctx)
 		tokenResult, err := s.tokenProvider.Load(ctx, cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
@@ -271,6 +272,17 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		s.homeMu.Unlock()
 		if runCancel != nil {
 			runCancel()
+		}
+		s.cfgMu.RLock()
+		catalogs := s.copilotCatalogs
+		s.cfgMu.RUnlock()
+		if catalogs != nil {
+			catalogs.cancel()
+			select {
+			case <-catalogs.done:
+			case <-ctx.Done():
+				shutdownErr = ctx.Err()
+			}
 		}
 
 		s.homeLifecycleMu.Lock()

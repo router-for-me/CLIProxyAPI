@@ -2,7 +2,6 @@ package registry
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestCatalogFetcherSources(t *testing.T) {
@@ -531,5 +532,33 @@ func TestRefreshModelCatalogsOnDemand(t *testing.T) {
 	}
 	if fallbackRes.Catalog != generalSrv.URL || fallbackRes.Sources.Catalog != generalSrv.URL || fallbackRes.Catalogs["catalog"].Source != generalSrv.URL {
 		t.Fatalf("expected fallback source %q, got %+v", generalSrv.URL, fallbackRes)
+	}
+}
+
+func TestCopilotCatalogOmissionAndEmptySection(t *testing.T) {
+	original := getModels()
+	t.Cleanup(func() {
+		modelsCatalogStore.mu.Lock()
+		modelsCatalogStore.data = original
+		modelsCatalogStore.mu.Unlock()
+	})
+	for _, tc := range []struct {
+		name, raw string
+	}{
+		{"omitted", `{}`},
+		{"empty", `{"copilot":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := publishCatalogBytes([]byte(`{"copilot":[{"id":"custom"}]}`)); err != nil {
+				t.Fatal(err)
+			}
+			changed, err := publishCatalogBytes([]byte(tc.raw))
+			if err != nil || !slices.Contains(changed, "copilot") {
+				t.Fatalf("publish: changed=%v err=%v", changed, err)
+			}
+			if got := len(GetStaticModelDefinitionsByChannel("copilot")); got != 0 {
+				t.Fatalf("got %d presets, want none", got)
+			}
+		})
 	}
 }

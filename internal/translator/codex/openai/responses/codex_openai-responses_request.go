@@ -2,9 +2,9 @@ package responses
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -74,6 +74,7 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	inputResult = convertSystemRoleToDeveloperDoc(inputResult, ensureDoc)
 	normalizeCodexBuiltinToolsDoc(rawJSON, ensureDoc)
 	normalizeEmptyFunctionCallArgumentsDoc(inputResult, ensureDoc)
+	translatorcommon.SanitizeOrphanResponsesToolOutputsInputDoc(inputResult, ensureDoc)
 
 	if doc != nil {
 		return doc.Bytes(), nil

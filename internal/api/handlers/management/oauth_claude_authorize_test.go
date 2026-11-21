@@ -140,3 +140,41 @@ func TestStartOAuthV8ClaudeUsesNativeAuthorizationParameters(t *testing.T) {
 		t.Errorf("authorization scope = %q, want %q", got, wantScope)
 	}
 }
+
+func TestStartOAuthV8ClaudeOmitsCreateAPIKeyScopeWhenDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var probe *claudeAuthorizationProbe
+	originalFactory := newClaudeOAuthService
+	newClaudeOAuthService = func(cfg *config.Config, proxyURL string) claudeOAuthService {
+		probe = &claudeAuthorizationProbe{ClaudeAuth: claude.NewClaudeAuthWithProxyURL(cfg, proxyURL)}
+		return probe
+	}
+	defer func() { newClaudeOAuthService = originalFactory }()
+
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: t.TempDir(),
+		Claude: config.ClaudeConfig{
+			OAuthIncludeCreateAPIKey: new(false),
+		},
+	}, nil)
+	router := gin.New()
+	router.POST("/v8/management/oauth/auth-url", handler.StartOAuthV8)
+
+	request := httptest.NewRequest(http.MethodPost, "/v8/management/oauth/auth-url", strings.NewReader(`{"provider":"claude"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("authorization probe status = %d, want 500: %s", response.Code, response.Body.String())
+	}
+	if probe == nil {
+		t.Fatal("expected newClaudeOAuthService to be called")
+	}
+	parsed, errParse := url.Parse(probe.authURL)
+	if errParse != nil {
+		t.Fatalf("parse authorization URL: %v", errParse)
+	}
+	if got := parsed.Query().Get("scope"); got != claude.ClaudeOAuthScope {
+		t.Errorf("authorization scope = %q, want %q", got, claude.ClaudeOAuthScope)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -28,7 +29,7 @@ type convertAntigravityGeminiParams struct {
 // when upstream never emits finishReason.
 func (p *convertAntigravityGeminiParams) observe(rawJSON []byte) {
 	if !p.SawResponse {
-		p.SawResponse = hasAntigravityResponsePayload(rawJSON)
+		p.SawResponse = translatorcommon.HasAntigravityResponsePayload(rawJSON)
 	}
 	if !p.SawFinishReason {
 		for _, path := range []string{"response.candidates", "candidates"} {
@@ -75,30 +76,6 @@ func (p *convertAntigravityGeminiParams) syntheticTerminalChunk() []byte {
 		_ = chunkDoc.Set("responseId", p.ResponseID)
 	}
 	return chunkDoc.Bytes()
-}
-
-// hasAntigravityResponsePayload reports whether a chunk carries actual generated
-// content or token accounting. Presence alone is not enough: an envelope such as
-// `{}`, `{"response":{}}` or `{"response":{"candidates":[]}}` must not count as a
-// started stream, otherwise a keepalive or malformed event would be enough to
-// finalize a stream that produced nothing.
-func hasAntigravityResponsePayload(rawJSON []byte) bool {
-	for _, path := range []string{"response.candidates", "candidates"} {
-		if candidates := ojson.GetBytesNoCopy(rawJSON, path); candidates.IsArray() && len(candidates.Array()) > 0 {
-			return true
-		}
-	}
-	// FilterSSEUsageMetadata renames non-terminal usage to cpaUsageMetadata before
-	// the translator sees it, so both spellings must be accepted.
-	for _, path := range []string{
-		"response.usageMetadata", "response.cpaUsageMetadata",
-		"usageMetadata", "cpaUsageMetadata",
-	} {
-		if usage := ojson.GetBytesNoCopy(rawJSON, path); usage.IsObject() && len(usage.Map()) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func firstStringValue(rawJSON []byte, paths ...string) string {
@@ -163,34 +140,40 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 
 	if alt, ok := ctx.Value("alt").(string); ok {
 		var chunk []byte
+		nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
 		if alt == "" {
-			responseResult := util.GetGJSONBytesNoCopy(rawJSON, "response")
-			if responseResult.Exists() {
-				if responseResult.Index > 0 && responseResult.Index+len(responseResult.Raw) <= len(rawJSON) {
-					chunk = rawJSON[responseResult.Index : responseResult.Index+len(responseResult.Raw)]
-				} else {
-					chunk = []byte(responseResult.Raw)
+			if response := util.GetGJSONBytesNoCopy(rawJSON, "response"); response.Exists() {
+				chunk = geminiResponseBytes(rawJSON, response)
+				doc := ojson.NewDoc(chunk)
+				if restoreGeminiResponseFields(doc, "", nameMap) {
+					chunk = doc.Bytes()
 				}
-				chunk = restoreUsageMetadata(chunk)
-				chunk = restoreGeminiFunctionNames(chunk, originalRequestRawJSON)
 			}
 		} else {
-			chunkDoc := ojson.NewDoc([]byte("[]"))
-			responseResult := util.ParseGJSONBytesNoCopy(rawJSON)
-			if responseResult.IsArray() {
-				responseResultItems := responseResult.Array()
-				for i := 0; i < len(responseResultItems); i++ {
-					responseResultItem := responseResultItems[i]
-					if responseResultItem.Get("response").Exists() {
-						_ = chunkDoc.SetRaw("-1", responseResultItem.Get("response").Raw)
+			doc := ojson.NewDocString("[]")
+			items := util.ParseGJSONBytesNoCopy(rawJSON)
+			if items.IsArray() {
+				index := 0
+				for _, item := range items.Array() {
+					if response := item.Get("response"); response.Exists() {
+						_ = doc.SetRaw("-1", response.Raw)
+						restoreGeminiResponseFields(doc, strconv.Itoa(index)+".", nameMap)
+						index++
 					}
 				}
 			}
-			chunk = chunkDoc.Bytes()
+			chunk = doc.Bytes()
 		}
 		return [][]byte{chunk}
 	}
 	return [][]byte{}
+}
+
+func geminiResponseBytes(rawJSON []byte, response ojson.Result) []byte {
+	if response.Index > 0 && response.Index+len(response.Raw) <= len(rawJSON) {
+		return rawJSON[response.Index : response.Index+len(response.Raw)]
+	}
+	return []byte(response.Raw)
 }
 
 // ConvertAntigravityResponseToGeminiNonStream converts a non-streaming Antigravity request to a non-streaming Gemini response.
@@ -205,52 +188,51 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 //
 // Returns:
 //   - []byte: A Gemini-compatible JSON response containing the response data.
-var cpaUsageMetadataMarker = []byte(`"cpaUsageMetadata"`)
-
 func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	var chunk []byte
-	responseResult := util.GetGJSONBytesNoCopy(rawJSON, "response")
-	if responseResult.Exists() {
-		if responseResult.Index > 0 && responseResult.Index+len(responseResult.Raw) <= len(rawJSON) {
-			chunk = rawJSON[responseResult.Index : responseResult.Index+len(responseResult.Raw)]
-		} else {
-			chunk = []byte(responseResult.Raw)
-		}
-		chunk = restoreUsageMetadata(chunk)
-		chunk = restoreGeminiFunctionNames(chunk, originalRequestRawJSON)
-	} else {
-		chunk = restoreGeminiFunctionNames(rawJSON, originalRequestRawJSON)
+	chunk := rawJSON
+	response := util.GetGJSONBytesNoCopy(rawJSON, "response")
+	if response.Exists() {
+		chunk = geminiResponseBytes(rawJSON, response)
 	}
-	candidates := util.GetGJSONBytesNoCopy(chunk, "candidates")
-	if candidates.IsArray() {
-		// Default every candidate, not just the first one, so a multi-candidate
-		// response cannot leave some of them unterminated.
-		var chunkDoc *ojson.Doc
+	doc := ojson.NewDoc(chunk)
+	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+	var changed bool
+	if response.Exists() {
+		changed = restoreGeminiResponseFields(doc, "", nameMap)
+	} else {
+		changed = restoreGeminiFunctionNames(doc, "", nameMap)
+	}
+	// Default every candidate, not just the first one, so a multi-candidate
+	// response cannot leave some of them unterminated.
+	if candidates := ojson.GetBytesNoCopy(chunk, "candidates"); candidates.IsArray() {
 		idx := 0
 		candidates.ForEach(func(_, candidate ojson.Result) bool {
 			if candidate.Get("finishReason").String() == "" {
-				if chunkDoc == nil {
-					chunkDoc = ojson.NewDoc(chunk)
-				}
-				_ = chunkDoc.Set(fmt.Sprintf("candidates.%d.finishReason", idx), "STOP")
+				_ = doc.Set(fmt.Sprintf("candidates.%d.finishReason", idx), "STOP")
+				changed = true
 			}
 			idx++
 			return true
 		})
-		if chunkDoc != nil {
-			chunk = chunkDoc.Bytes()
-		}
+	}
+	if changed {
+		return doc.Bytes()
 	}
 	return chunk
 }
 
-func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
-	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+// prefix is empty for a single response, or the output array index followed by a dot.
+func restoreGeminiResponseFields(doc *ojson.Doc, prefix string, nameMap map[string]string) bool {
+	usageChanged := restoreUsageMetadata(doc, prefix)
+	return restoreGeminiFunctionNames(doc, prefix, nameMap) || usageChanged
+}
+
+func restoreGeminiFunctionNames(doc *ojson.Doc, prefix string, nameMap map[string]string) bool {
 	if len(nameMap) == 0 {
-		return chunk
+		return false
 	}
-	var chunkDoc *ojson.Doc
-	candidates := ojson.GetBytesNoCopy(chunk, "candidates")
+	changed := false
+	candidates := doc.Get(prefix + "candidates")
 	for candidateIndex, candidate := range candidates.Array() {
 		for partIndex, part := range candidate.Get("content.parts").Array() {
 			for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
@@ -263,18 +245,13 @@ func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
 				if nameResult.Type == ojson.String && restoredName == name {
 					continue
 				}
-				if chunkDoc == nil {
-					chunkDoc = ojson.NewDoc(chunk)
-				}
-				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
-				_ = chunkDoc.Set(path, restoredName)
+				path := fmt.Sprintf("%scandidates.%d.content.parts.%d.%s.name", prefix, candidateIndex, partIndex, field)
+				_ = doc.Set(path, restoredName)
+				changed = true
 			}
 		}
 	}
-	if chunkDoc != nil {
-		return chunkDoc.Bytes()
-	}
-	return chunk
+	return changed
 }
 
 func GeminiTokenCount(ctx context.Context, count int64) []byte {
@@ -285,29 +262,12 @@ func GeminiTokenCount(ctx context.Context, count int64) []byte {
 // The executor renames usageMetadata to cpaUsageMetadata in non-terminal chunks
 // to preserve usage data while hiding it from clients that don't expect it.
 // When returning standard Gemini API format, we must restore the original name.
-func restoreUsageMetadata(chunk []byte) []byte {
-	if !bytes.Contains(chunk, cpaUsageMetadataMarker) {
-		return chunk
+func restoreUsageMetadata(doc *ojson.Doc, prefix string) bool {
+	usage := doc.Get(prefix + "cpaUsageMetadata")
+	if !usage.Exists() {
+		return false
 	}
-	if cpaUsage := util.GetGJSONBytesNoCopy(chunk, "cpaUsageMetadata"); cpaUsage.Exists() {
-		if cpaUsage.Index > 0 && cpaUsage.Index <= len(chunk) {
-			searchStart := cpaUsage.Index - 36
-			if searchStart < 0 {
-				searchStart = 0
-			}
-			if rel := bytes.LastIndex(chunk[searchStart:cpaUsage.Index], cpaUsageMetadataMarker); rel >= 0 {
-				keyPos := searchStart + rel + 1
-				out := make([]byte, 0, len(chunk)-3)
-				out = append(out, chunk[:keyPos]...)
-				out = append(out, "usageMetadata"...)
-				out = append(out, chunk[keyPos+len("cpaUsageMetadata"):]...)
-				return out
-			}
-		}
-		chunkDoc := ojson.NewDoc(chunk)
-		_ = chunkDoc.SetRaw("usageMetadata", cpaUsage.Raw)
-		_ = chunkDoc.Delete("cpaUsageMetadata")
-		chunk = chunkDoc.Bytes()
-	}
-	return chunk
+	_ = doc.SetRaw(prefix+"usageMetadata", usage.Raw)
+	_ = doc.Delete(prefix + "cpaUsageMetadata")
+	return true
 }

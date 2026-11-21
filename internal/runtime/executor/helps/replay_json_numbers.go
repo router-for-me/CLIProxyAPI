@@ -1,9 +1,10 @@
 package helps
 
 import (
-	"encoding/json"
 	"math/big"
 	"strings"
+
+	"github.com/MoeForge/moego/json"
 )
 
 // NormalizeReplayJSONNumbers normalizes json.Number values in a decoded JSON

@@ -9,12 +9,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -50,7 +51,10 @@ const (
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
 type AntigravityExecutor struct {
-	cfg *config.Config
+	cfg           *config.Config
+	matcherMu     sync.RWMutex
+	lastWordsKey  string
+	cachedMatcher *helps.SensitiveWordMatcher
 }
 
 // NewAntigravityExecutor creates a new Antigravity executor instance.
@@ -64,19 +68,51 @@ func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
 }
 
+func (e *AntigravityExecutor) getSensitiveWordMatcher() *helps.SensitiveWordMatcher {
+	if e == nil || e.cfg == nil {
+		return nil
+	}
+	words := e.cfg.Antigravity.SensitiveWords
+	replacements := e.cfg.Antigravity.SensitiveWordsReplace
+	patterns := e.cfg.Antigravity.SensitivePatternsReplace
+	if len(words) == 0 && len(replacements) == 0 && len(patterns) == 0 {
+		return nil
+	}
+	key := helps.SensitiveWordConfigCacheKeyWithPatterns(words, replacements, patterns)
+	e.matcherMu.RLock()
+	if e.lastWordsKey == key {
+		m := e.cachedMatcher
+		e.matcherMu.RUnlock()
+		return m
+	}
+	e.matcherMu.RUnlock()
+
+	e.matcherMu.Lock()
+	defer e.matcherMu.Unlock()
+	if e.lastWordsKey == key {
+		return e.cachedMatcher
+	}
+	e.lastWordsKey = key
+	e.cachedMatcher = helps.BuildAntigravitySensitiveWordMatcherWithPatterns(words, replacements, patterns)
+	return e.cachedMatcher
+}
+
 func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
-	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	matcher := e.getSensitiveWordMatcher()
+	if matcher == nil {
 		return payload
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
 	return helps.ObfuscateSensitiveWordsInSystemInstruction(payload, matcher)
 }
 
 func (e *AntigravityExecutor) obfuscateSensitiveWordsDoc(doc *ojson.Doc) bool {
-	if doc == nil || e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+	if doc == nil {
 		return false
 	}
-	matcher := helps.BuildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords)
+	matcher := e.getSensitiveWordMatcher()
+	if matcher == nil {
+		return false
+	}
 	return helps.ObfuscateSensitiveWordsInSystemInstructionDoc(doc, matcher)
 }
 
@@ -135,9 +171,10 @@ const (
 )
 
 type antigravityPoolSettings struct {
-	shortMode           bool
-	idleConnTimeout     time.Duration
-	maxIdleConnsPerHost int
+	shortMode                   bool
+	idleConnTimeout             time.Duration
+	maxIdleConnsPerHost         int
+	maxIdleConnsPerHostExplicit bool
 }
 
 func resolveAntigravityPoolSettings(cfg *config.Config) antigravityPoolSettings {
@@ -171,6 +208,7 @@ func resolveAntigravityPoolSettings(cfg *config.Config) antigravityPoolSettings 
 			if d <= 0 {
 				settings.shortMode = true
 				settings.maxIdleConnsPerHost = -1
+				settings.idleConnTimeout = 0
 				return settings
 			}
 			if d > antigravityMaxAllowedIdleConnTimeout {
@@ -182,15 +220,17 @@ func resolveAntigravityPoolSettings(cfg *config.Config) antigravityPoolSettings 
 
 	if cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
 		val := *cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost
-		if val < 0 {
+		if val <= 0 {
 			settings.shortMode = true
 			settings.maxIdleConnsPerHost = -1
+			settings.idleConnTimeout = 0
 			return settings
 		}
 		if val > antigravityMaxAllowedMaxIdleConnsPerHost {
 			val = antigravityMaxAllowedMaxIdleConnsPerHost
 		}
 		settings.maxIdleConnsPerHost = val
+		settings.maxIdleConnsPerHostExplicit = true
 	}
 
 	if settings.maxIdleConnsPerHost < 0 {
@@ -228,15 +268,17 @@ func closeAntigravityAuthIdleTransports(auth *cliproxyauth.Auth) {
 // antigravityTransportKey identifies one connection pool. At most one of proxy and
 // base is set: proxy for a credential-scoped proxy pool, base for a transport handed
 // in through the request context, and neither for a direct pool.
-// Resolved pool settings (shortMode, idleConnTimeout, maxIdleConnsPerHost) are included
-// in the key to prevent stale transport reuse across configuration hot-reloads under load.
+// Resolved pool settings (shortMode, idleConnTimeout, maxIdleConnsPerHost,
+// maxIdleConnsPerHostExplicit) are included in the key to prevent stale transport
+// reuse across configuration hot-reloads under load.
 type antigravityTransportKey struct {
-	credential          string
-	proxy               string
-	base                *http.Transport
-	shortMode           bool
-	idleConnTimeout     time.Duration
-	maxIdleConnsPerHost int
+	credential                  string
+	proxy                       string
+	base                        *http.Transport
+	shortMode                   bool
+	idleConnTimeout             time.Duration
+	maxIdleConnsPerHost         int
+	maxIdleConnsPerHostExplicit bool
 }
 
 func defaultAntigravityBaseTransport() *http.Transport {
@@ -269,8 +311,8 @@ func cloneTransportWithHTTP11(base *http.Transport, cfgs ...*config.Config) *htt
 
 // applyAntigravityPoolLimits configures connection pool parameters for Antigravity.
 // Default: IdleConnTimeout=30s, MaxIdleConnsPerHost=2.
-// IdleConnTimeout is strictly capped at 240s (antigravityMaxAllowedIdleConnTimeout)
-// matching the Google Frontend (GFE / ESF) HTTP/1.1 idle cutoff.
+// IdleConnTimeout is strictly capped at 210s (antigravityMaxAllowedIdleConnTimeout),
+// keeping a 30s safety margin below the Google Frontend (GFE / ESF) 240s HTTP/1.1 idle cutoff.
 // If short-lived connection mode is configured, MaxIdleConnsPerHost is set to -1
 // so idle connections are closed immediately upon request completion.
 func applyAntigravityPoolLimits(transport *http.Transport, cfgs ...*config.Config) {
@@ -294,8 +336,13 @@ func applyAntigravityPoolLimits(transport *http.Transport, cfgs ...*config.Confi
 		return
 	}
 
-	// Go treats 0 as DefaultMaxIdleConnsPerHost (2). Ensure at least configured/default limit.
-	if transport.MaxIdleConnsPerHost < settings.maxIdleConnsPerHost {
+	// Apply MaxIdleConnsPerHost:
+	// If explicitly configured, honor the configured limit even when lower than the base transport.
+	// Otherwise, ensure at least the default limit (Go treats 0 as DefaultMaxIdleConnsPerHost = 2)
+	// while preserving larger operator-configured base transport limits.
+	if settings.maxIdleConnsPerHostExplicit {
+		transport.MaxIdleConnsPerHost = settings.maxIdleConnsPerHost
+	} else if transport.MaxIdleConnsPerHost < settings.maxIdleConnsPerHost {
 		transport.MaxIdleConnsPerHost = settings.maxIdleConnsPerHost
 	}
 
@@ -307,7 +354,7 @@ func applyAntigravityPoolLimits(transport *http.Transport, cfgs ...*config.Confi
 	// Apply IdleConnTimeout:
 	// If the config explicitly specified a timeout, apply settings.idleConnTimeout.
 	// If config did not specify a timeout:
-	// - if base transport already has a timeout > 0, preserve it (capped at 240s).
+	// - if base transport already has a timeout > 0, preserve it (capped at 210s).
 	// - otherwise, apply default 30s.
 	rawTimeout := ""
 	if cfg != nil {
@@ -335,11 +382,12 @@ func antigravityHTTP11Transport(auth *cliproxyauth.Auth, base *http.Transport, c
 	}
 	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential:          antigravityTransportScope(auth),
-		base:                base,
-		shortMode:           settings.shortMode,
-		idleConnTimeout:     settings.idleConnTimeout,
-		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
+		credential:                  antigravityTransportScope(auth),
+		base:                        base,
+		shortMode:                   settings.shortMode,
+		idleConnTimeout:             settings.idleConnTimeout,
+		maxIdleConnsPerHost:         settings.maxIdleConnsPerHost,
+		maxIdleConnsPerHostExplicit: settings.maxIdleConnsPerHostExplicit,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		return cloneTransportWithHTTP11(base, cfgs...), nil
@@ -369,11 +417,12 @@ func antigravityProxiedHTTP11Transport(auth *cliproxyauth.Auth, proxyURL string,
 	}
 	settings := resolveAntigravityPoolSettings(cfg)
 	key := antigravityTransportKey{
-		credential:          antigravityTransportScope(auth),
-		proxy:               proxyURL,
-		shortMode:           settings.shortMode,
-		idleConnTimeout:     settings.idleConnTimeout,
-		maxIdleConnsPerHost: settings.maxIdleConnsPerHost,
+		credential:                  antigravityTransportScope(auth),
+		proxy:                       proxyURL,
+		shortMode:                   settings.shortMode,
+		idleConnTimeout:             settings.idleConnTimeout,
+		maxIdleConnsPerHost:         settings.maxIdleConnsPerHost,
+		maxIdleConnsPerHostExplicit: settings.maxIdleConnsPerHostExplicit,
 	}
 	transport, errGet := antigravityTransports.Get(key, func() (*http.Transport, error) {
 		base, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)

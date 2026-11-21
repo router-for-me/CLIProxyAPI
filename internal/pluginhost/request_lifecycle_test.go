@@ -2,11 +2,11 @@ package pluginhost
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -160,5 +160,77 @@ func TestRPCCapabilitiesAndAdapterIncludeRequestLifecycle(t *testing.T) {
 	}
 	if got.RequestID != "request-rpc" || got.Outcome != pluginapi.RequestCompletionSucceeded {
 		t.Fatalf("RPC completion = %#v", got)
+	}
+}
+
+func TestRequestInterceptorTerminateScopePropagationAndBeforeAuthIgnores(t *testing.T) {
+	lowCalls := 0
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "high",
+			priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					return pluginapi.RequestInterceptResponse{
+						Terminate:       true,
+						TerminateScope:  "credential",
+						StatusCode:      http.StatusForbidden,
+						ResponseHeaders: http.Header{"X-Scope": {"cred"}},
+						ResponseBody:    []byte("refused"),
+					}, nil
+				}),
+			}},
+		},
+		capabilityRecord{
+			id:       "low",
+			priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+				RequestInterceptor: requestInterceptorFunc(func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+					lowCalls++
+					return pluginapi.RequestInterceptResponse{}, nil
+				}),
+			}},
+		},
+	)
+
+	afterResp := host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{RequestID: "req-after"})
+	if !afterResp.Terminate || afterResp.TerminateScope != "credential" || afterResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("after-auth response = %#v", afterResp)
+	}
+	if lowCalls != 0 {
+		t.Fatalf("lower-priority interceptor calls = %d, want 0", lowCalls)
+	}
+
+	beforeResp := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{RequestID: "req-before"})
+	if !beforeResp.Terminate || beforeResp.TerminateScope != "" || beforeResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("before-auth response = %#v, want empty TerminateScope", beforeResp)
+	}
+}
+
+func TestRPCRequestInterceptAfterAuthTerminateScopeRoundTrip(t *testing.T) {
+	plugin := validTestPlugin("terminate-scope-rpc")
+	plugin.Capabilities.RequestInterceptor = requestInterceptorFunc(func(context.Context, pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+		return pluginapi.RequestInterceptResponse{
+			Terminate:       true,
+			TerminateScope:  "credential",
+			StatusCode:      http.StatusForbidden,
+			ResponseHeaders: http.Header{"X-Plugin": {"rpc"}},
+			ResponseBody:    []byte("rpc-refused"),
+		}, nil
+	})
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "terminate-scope-rpc", lookup, pluginabi.MethodPluginRegister, nil)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	resp, errAfter := registered.Capabilities.RequestInterceptor.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		RequestID: "req-rpc",
+	})
+	if errAfter != nil {
+		t.Fatalf("InterceptRequestAfterAuth() error = %v", errAfter)
+	}
+	if !resp.Terminate || resp.TerminateScope != "credential" || resp.StatusCode != http.StatusForbidden ||
+		resp.ResponseHeaders.Get("X-Plugin") != "rpc" || string(resp.ResponseBody) != "rpc-refused" {
+		t.Fatalf("RPC after-auth response = %#v", resp)
 	}
 }

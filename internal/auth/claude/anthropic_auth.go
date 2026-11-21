@@ -5,7 +5,6 @@ package claude
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -176,7 +176,15 @@ type OAuthProfile struct {
 // It provides methods for generating authorization URLs, exchanging codes for tokens,
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
-	httpClient *http.Client
+	httpClient     *http.Client
+	authorizeScope string
+}
+
+func resolveClaudeAuthorizeScope(cfg *config.Config) string {
+	if cfg != nil && !cfg.Claude.OAuthIncludeCreateAPIKeyEnabled() {
+		return ClaudeOAuthScope
+	}
+	return claudeOAuthAuthorizeScope
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
@@ -212,7 +220,8 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains.
 	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(sdkCfg),
+		httpClient:     NewAnthropicHttpClient(sdkCfg),
+		authorizeScope: resolveClaudeAuthorizeScope(cfg),
 	}
 }
 
@@ -329,12 +338,17 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
 
+	scope := claudeOAuthAuthorizeScope
+	if o != nil && o.authorizeScope != "" {
+		scope = o.authorizeScope
+	}
+
 	params := url.Values{
 		"code":                  {"true"},
 		"client_id":             {ClientID},
 		"response_type":         {"code"},
 		"redirect_uri":          {RedirectURI},
-		"scope":                 {claudeOAuthAuthorizeScope},
+		"scope":                 {scope},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
@@ -509,6 +523,9 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	result, err, _ := claudeRefreshGroup.Do(refreshToken, func() (interface{}, error) {
 		refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), claudeRefreshTimeout)
 		defer cancelRefresh()
+		if errReadiness := claudeRefreshReadiness(refreshCtx); errReadiness != nil {
+			return nil, errReadiness
+		}
 		refreshCtx = context.WithValue(refreshCtx, claudeRefreshHandshakeTimeoutContextKey{}, claudeRefreshHandshakeTimeout)
 		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 	})
@@ -642,6 +659,9 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 //   - *ClaudeTokenData: The refreshed token data
 //   - error: An error if all retry attempts fail
 func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
+	if maxRetries <= 0 {
+		maxRetries = 1
+	}
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -657,6 +677,9 @@ func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken st
 		tokenData, err := o.RefreshTokens(ctx, refreshToken)
 		if err == nil {
 			return tokenData, nil
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, ErrClaudeRefreshDeferred) {
+			return nil, err
 		}
 
 		lastErr = err

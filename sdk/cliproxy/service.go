@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
@@ -65,6 +66,16 @@ type Service struct {
 	// hooks provides lifecycle callbacks.
 	hooks Hooks
 
+	// executorWrapper optionally wraps every built-in executor before registration.
+	executorWrapper ExecutorWrapper
+
+	// ownedExecutors tracks the service-owned underlying executor per provider
+	// so reuse and rebinding decisions survive embedder wrapping.
+	// ownedRevisions tracks the manager revision at registration time so
+	// external overwrites and removals invalidate the cache.
+	ownedExecutors map[string]coreauth.ProviderExecutor
+	ownedRevisions map[string]uint64
+
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
 
@@ -104,11 +115,18 @@ type Service struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// copilotCatalogs owns provider-local discovery; protected by cfgMu.
+	copilotCatalogs *copilotCatalogRefresher
+
 	// cooldownStateStore persists runtime cooldown state when enabled.
 	cooldownStateStore coreauth.CooldownStateStore
 
 	// pluginHost owns dynamic plugin lifecycle and runtime capability adapters.
 	pluginHost *pluginhost.Host
+
+	// pluginInterceptorHost optionally overrides the PluginInterceptorHost
+	// installed on request handlers. Nil means the internal pluginHost is used.
+	pluginInterceptorHost handlers.PluginInterceptorHost
 
 	// shutdownOnce ensures shutdown is called only once.
 	shutdownOnce sync.Once

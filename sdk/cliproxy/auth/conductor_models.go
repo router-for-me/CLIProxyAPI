@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -163,7 +164,55 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
+func (m *Manager) usesPublishedCopilotRoutes(auth *Auth) bool {
+	return isCopilotAuth(auth) && !m.HomeEnabled() && strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) == ""
+}
+
+func copilotRouteForAuth(reg *registry.ModelRegistry, authID, routeModel string) (string, registry.ClientModelRouteInfo) {
+	routeModel = strings.TrimSpace(routeModel)
+	var fallback string
+	if thinking.HasThinkingSuffix(routeModel) {
+		fallback = strings.TrimSpace(thinking.ParseSuffix(routeModel).ModelName)
+	}
+	route := reg.LookupClientModelRoute(authID, routeModel, fallback)
+	if native := strings.TrimSpace(route.MetadataModelID); native != "" {
+		return copilot.ModelPrefix + native, route
+	}
+	return "", route
+}
+
+func (m *Manager) copilotExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {
+	model, route := copilotRouteForAuth(registry.GetGlobalRegistry(), auth.ID, routeModel)
+	if model == "" {
+		return OAuthModelAliasResult{}
+	}
+	// Like other OAuth aliases, a suffix on the published source takes precedence over the request suffix.
+	model = preserveRequestedModelSuffix(route.OAuthAliasSource, model)
+	routeModel = strings.TrimSpace(routeModel)
+	result := OAuthModelAliasResult{UpstreamModel: preserveRequestedModelSuffix(routeModel, model)}
+	if route.OAuthAliasSource == "" {
+		return result
+	}
+	// Use the current response mapping only if it still describes the exact published alias and source.
+	entry := m.lookupExactOAuthModelAlias(auth, route.OAuthAlias)
+	if strings.EqualFold(entry.upstreamModel, route.OAuthAliasSource) {
+		result.ForceMapping = entry.forceMapping
+		result.OriginalAlias = route.OAuthAlias
+		if !result.ForceMapping {
+			result.OriginalAlias = preserveRequestedModelSuffix(routeModel, route.OAuthAlias)
+		}
+	}
+	return result
+}
+
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
+	if m.usesPublishedCopilotRoutes(auth) {
+		result := m.copilotExecutionAliasResult(auth, routeModel)
+		if result.UpstreamModel == "" {
+			return nil
+		}
+		return []string{result.UpstreamModel}
+	}
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			return []string{homeModel}
@@ -186,8 +235,8 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 }
 
 // ResolveExecutionModel returns the credential-aware upstream model used by
-// normal execution. It strips auth prefixes, applies configured aliases, and
-// prefers Home-dispatched upstream models when present.
+// normal execution. It prefers Home-dispatched upstream models when present.
+// For local Copilot credentials, it returns an empty string if no route is published.
 func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 	routeModel = strings.TrimSpace(routeModel)
 	if m == nil {
@@ -195,6 +244,9 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 	}
 	candidates := m.executionModelCandidates(auth, routeModel)
 	if len(candidates) == 0 {
+		if m.usesPublishedCopilotRoutes(auth) {
+			return ""
+		}
 		return routeModel
 	}
 	if resolved := strings.TrimSpace(candidates[0]); resolved != "" {
@@ -204,6 +256,10 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 }
 
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
+	if m.usesPublishedCopilotRoutes(auth) {
+		model, _ := copilotRouteForAuth(registry.GetGlobalRegistry(), auth.ID, routeModel)
+		return model
+	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
 		requestedModel = strings.TrimSpace(routeModel)
@@ -237,43 +293,127 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 	}
 
 	state := existingModelState(auth, targetKey)
-	isSuspended := auth.Disabled || auth.Status == StatusDisabled
-	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
-		isSuspended = true
-	}
-	isQuotaExceeded := false
-	var suspendReason string
-	if state != nil {
-		if state.Status == StatusDisabled || state.Unavailable || (!state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now)) {
+	authDisabled := auth.Disabled || auth.Status == StatusDisabled
+	stateDisabled := state != nil && state.Status == StatusDisabled
+	terminalUnauthorized := hasUnauthorizedAuthFailure(auth)
+	openEnded := authDisabled || stateDisabled || terminalUnauthorized
+	isSuspended := openEnded
+
+	var credQuotaUntil time.Time
+	credQuotaSuspended := false
+	if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" {
+		if auth.Quota.NextRecoverAt.IsZero() {
 			isSuspended = true
+			credQuotaSuspended = true
+			openEnded = true
+		} else if auth.Quota.NextRecoverAt.After(now) {
+			isSuspended = true
+			credQuotaSuspended = true
+			credQuotaUntil = auth.Quota.NextRecoverAt
+		}
+	}
+
+	var credRetryUntil time.Time
+	credRetrySuspended := false
+	if authForce := effectiveAuthForceUntil(auth); authForce.After(now) && auth.NextRetryAfter.After(now) {
+		isSuspended = true
+		credRetrySuspended = true
+		credRetryUntil = authForce
+	}
+	if !auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) {
+		isSuspended = true
+		credRetrySuspended = true
+		if auth.credentialRetryAfter.After(credRetryUntil) {
+			credRetryUntil = auth.credentialRetryAfter
+		}
+	}
+
+	isQuotaExceeded := false
+	stateSuspended := false
+	var stateUntil time.Time
+	if state != nil {
+		if stateDisabled {
+			stateSuspended = true
+		} else if blocked, _, retryAfter := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now); blocked {
+			isSuspended = true
+			stateSuspended = true
+			if retryAfter.IsZero() {
+				openEnded = true
+			} else {
+				stateUntil = retryAfter
+			}
 		}
 		if state.Quota.Exceeded && (state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.After(now)) {
 			isQuotaExceeded = true
 		}
-		if isSuspended {
-			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
-		}
 	}
-	if len(auth.ModelStates) == 0 && auth.Unavailable && auth.NextRetryAfter.After(now) {
+
+	var authFallbackUntil time.Time
+	if len(auth.ModelStates) == 0 {
 		// With no per-model states, scheduling falls back to the credential-wide
 		// cooldown (isAuthBlockedForModel); the projection must agree with it.
 		// When states exist, unmatched models stay schedulable by design, so the
 		// credential-wide fields must not suspend them here either.
-		isSuspended = true
+		if blocked, _, retryAfter := availabilityBlock(auth.Unavailable, auth.Quota.Exceeded, auth.NextRetryAfter, auth.Quota.NextRecoverAt, now); blocked {
+			isSuspended = true
+			if retryAfter.IsZero() {
+				openEnded = true
+			} else {
+				authFallbackUntil = retryAfter
+			}
+		}
 	}
-	if isSuspended && suspendReason == "" {
-		suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+
+	var suspendReason string
+	var suspendUntil time.Time
+	if isSuspended {
+		switch {
+		case authDisabled || stateDisabled:
+			suspendReason = "disabled"
+		case terminalUnauthorized:
+			suspendReason = cooldownReason(auth.StatusMessage, QuotaState{}, auth.LastError)
+			if suspendReason == "" {
+				suspendReason = "unauthorized"
+			}
+		case stateSuspended:
+			suspendReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
+			suspendUntil = stateUntil
+			if credQuotaSuspended && (strings.EqualFold(suspendReason, "quota") || strings.EqualFold(suspendReason, "credential_quota")) && credQuotaUntil.After(suspendUntil) {
+				suspendUntil = credQuotaUntil
+			}
+			if credRetrySuspended && credRetryUntil.After(suspendUntil) {
+				suspendUntil = credRetryUntil
+			}
+		default:
+			suspendUntil = authFallbackUntil
+			if credQuotaUntil.After(suspendUntil) {
+				suspendUntil = credQuotaUntil
+			}
+			if credRetryUntil.After(suspendUntil) {
+				suspendUntil = credRetryUntil
+			}
+		}
+		if suspendReason == "" {
+			suspendReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+		}
+	}
+	if openEnded || !isSuspended {
+		suspendUntil = time.Time{}
 	}
 
 	return registry.ClientModelProjection{
 		ModelID:       targetModel,
 		Suspended:     isSuspended,
 		SuspendReason: suspendReason,
+		SuspendUntil:  suspendUntil,
 		QuotaExceeded: isQuotaExceeded,
 	}
 }
 
 func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
+	if m.usesPublishedCopilotRoutes(auth) {
+		return canonicalModelKey(upstreamModel)
+	}
 	if auth != nil && auth.Attributes != nil {
 		if homeModel := strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]); homeModel != "" {
 			if resolved := strings.TrimSpace(upstreamModel); resolved != "" {
@@ -284,7 +424,7 @@ func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel s
 	}
 	stateModel := executionResultModel(routeModel, upstreamModel, pooled)
 	selectionModel := m.selectionModelForAuth(auth, routeModel)
-	if canonicalModelKey(selectionModel) == canonicalModelKey(upstreamModel) && strings.TrimSpace(selectionModel) != "" {
+	if sameCanonicalModelKey(selectionModel, upstreamModel) && strings.TrimSpace(selectionModel) != "" {
 		return strings.TrimSpace(upstreamModel)
 	}
 	return stateModel
@@ -340,6 +480,13 @@ func (m *Manager) preparedExecutionModelsWithAliasForRequest(ctx context.Context
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
+	if m.usesPublishedCopilotRoutes(auth) {
+		result := m.copilotExecutionAliasResult(auth, routeModel)
+		if result.UpstreamModel == "" {
+			return nil, false, result, routing
+		}
+		return []string{result.UpstreamModel}, false, result, routing
+	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
 	if aliasResult.ForceMapping && auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes[homeForceMappingAttributeKey]), "true") {

@@ -1,9 +1,10 @@
 package helps
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestNormalizeReplayJSONNumbers(t *testing.T) {

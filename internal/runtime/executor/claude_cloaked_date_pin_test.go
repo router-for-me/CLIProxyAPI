@@ -6,12 +6,12 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
@@ -346,15 +346,21 @@ func TestClaudeCloakedDateReminderProbeOverrideDoesNotReinitializeSessionDate(t 
 
 func TestClaudeCloakedDateReminderPersistsAcrossRestartWithLocalBBoltKV(t *testing.T) {
 	homekv.ClearCurrent()
-	_ = kvstore.ShutdownLocal()
+	if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+		t.Fatalf("kvstore.ShutdownLocal() setup error = %v", errShutdown)
+	}
 	helps.ResetClaudeDiagnosticsForTest()
+
+	// Cleanups run in LIFO order: close bbolt before TempDir removes its files.
+	dbPath := filepath.Join(t.TempDir(), "kv.db")
 	t.Cleanup(func() {
 		homekv.ClearCurrent()
-		_ = kvstore.ShutdownLocal()
+		if errShutdown := kvstore.ShutdownLocal(); errShutdown != nil {
+			t.Errorf("kvstore.ShutdownLocal() cleanup error = %v", errShutdown)
+		}
 		helps.ResetClaudeDiagnosticsForTest()
 	})
 
-	dbPath := filepath.Join(t.TempDir(), "kv.db")
 	if errCfg := kvstore.ConfigureLocal(true, dbPath); errCfg != nil {
 		t.Fatalf("kvstore.ConfigureLocal(true, %q) error = %v", dbPath, errCfg)
 	}

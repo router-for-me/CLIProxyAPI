@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -51,7 +52,8 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		loggerEnabled := logger.IsEnabled()
-		captureBody := shouldCaptureRequestBody(loggerEnabled, c.Request)
+		hasMatchedRoute := c.FullPath() != ""
+		captureBody := hasMatchedRoute && shouldCaptureRequestBody(loggerEnabled, c.Request)
 
 		// Capture request metadata before authentication without reading the request body.
 		requestInfo, err := captureRequestInfo(c, false)
@@ -65,9 +67,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		wrapper.ginContext = c
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
+			deferredAPICapture := logging.NewDeferredAPICapture()
+			wrapper.deferredAPICapture = deferredAPICapture
+			c.Request = c.Request.WithContext(logging.WithDeferredAPICapture(c.Request.Context(), deferredAPICapture))
+			c.Set(logging.DeferredAPIResponseContextKey, deferredAPICapture)
 		}
 		c.Writer = wrapper
-		attachRequestLogSources(c, logger, loggerEnabled)
+		attachRequestLogSources(c, logger, loggerEnabled && hasMatchedRoute)
 		deferredCapture := attachDeferredRequestBodyCapture(c.Request, logger, requestInfo, false, false)
 		if captureBody {
 			c.Set(authenticatedRequestBodyCapturerContextKey, func() {
@@ -487,11 +493,48 @@ func decodeCapturedRequestBodyForLogWithLimit(raw []byte, encoding string, limit
 				}
 				return append(body, "[DECOMPRESSED REQUEST BODY TRUNCATED]"...)
 			}
+		case "gzip", "x-gzip":
+			decoded, truncated, errDecode := decodeCapturedGzipRequestBodyWithLimit(body, limit)
+			if errDecode != nil {
+				return raw
+			}
+			body = decoded
+			if truncated {
+				if len(body) > 0 && !bytes.HasSuffix(body, []byte("\n")) {
+					body = append(body, '\n')
+				}
+				return append(body, "[DECOMPRESSED REQUEST BODY TRUNCATED]"...)
+			}
 		default:
 			return raw
 		}
 	}
 	return body
+}
+
+func decodeCapturedGzipRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bool, error) {
+	gzReader, errNewReader := gzip.NewReader(bytes.NewReader(raw))
+	if errNewReader != nil {
+		return nil, false, fmt.Errorf("failed to create gzip request decoder: %w", errNewReader)
+	}
+	defer func() {
+		if errClose := gzReader.Close(); errClose != nil {
+			log.Warnf("failed to close gzip request decoder for request log: %v", errClose)
+		}
+	}()
+
+	var reader io.Reader = gzReader
+	if limit > 0 && limit < math.MaxInt64 {
+		reader = io.LimitReader(gzReader, limit+1)
+	}
+	decoded, errRead := io.ReadAll(reader)
+	if errRead != nil {
+		return nil, false, fmt.Errorf("failed to decode gzip request body: %w", errRead)
+	}
+	if int64(len(decoded)) > limit {
+		return decoded[:limit], true, nil
+	}
+	return decoded, false, nil
 }
 
 func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bool, error) {

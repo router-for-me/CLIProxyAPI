@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 
@@ -90,7 +91,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	if !params.SawResponse {
-		params.SawResponse = hasAntigravityResponsePayload(rawJSON)
+		params.SawResponse = translatorcommon.HasAntigravityResponsePayload(rawJSON)
 	}
 
 	// Initialize the OpenAI SSE template.
@@ -137,6 +138,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	}
 
 	// Process the main content part of the response.
+	hasDeltaContent := false
 	partsResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
@@ -205,6 +207,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				_ = templateDoc.Set("choices.0.delta.role", "assistant")
 				_ = templateDoc.SetRawBytes("choices.0.delta.tool_calls.-1", fcDoc.Bytes())
 			} else if inlineDataResult.Exists() {
+				if partResult.Get("thought").Bool() {
+					continue
+				}
 				data := inlineDataResult.Get("data").String()
 				if data == "" {
 					continue
@@ -235,6 +240,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		if hasReasoningContent {
 			_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
 		}
+		hasDeltaContent = hasTextContent || hasReasoningContent || hasToolCallsArray || imageCount > 0
 	}
 
 	// Determine finish_reason only on the final chunk, which upstream marks with
@@ -252,31 +258,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		params.SawFinishReason = true
 	}
 
-	return [][]byte{templateDoc.Bytes()}
-}
+	if !hasDeltaContent && !isFinalChunk && !usageResult.Exists() {
+		return [][]byte{}
+	}
 
-// hasAntigravityResponsePayload reports whether a chunk carries actual generated
-// content or token accounting. Presence alone is not enough: an envelope such as
-// `{}`, `{"response":{}}` or `{"response":{"candidates":[]}}` must not count as a
-// started stream, otherwise a keepalive or malformed event would be enough to
-// finalize a stream that produced nothing.
-func hasAntigravityResponsePayload(rawJSON []byte) bool {
-	for _, path := range []string{"response.candidates", "candidates"} {
-		if candidates := ojson.GetBytesNoCopy(rawJSON, path); candidates.IsArray() && len(candidates.Array()) > 0 {
-			return true
-		}
-	}
-	// FilterSSEUsageMetadata renames non-terminal usage to cpaUsageMetadata before
-	// the translator sees it, so both spellings must be accepted.
-	for _, path := range []string{
-		"response.usageMetadata", "response.cpaUsageMetadata",
-		"usageMetadata", "cpaUsageMetadata",
-	} {
-		if usage := ojson.GetBytesNoCopy(rawJSON, path); usage.IsObject() && len(usage.Map()) > 0 {
-			return true
-		}
-	}
-	return false
+	return [][]byte{templateDoc.Bytes()}
 }
 
 // resolveOpenAIFinishReason maps the cached upstream state to the OpenAI
@@ -287,7 +273,7 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 	case params.SawToolCall:
 		finishReason = "tool_calls"
 	case params.UpstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
+		finishReason = "length"
 	case isAntigravityContentFilterFinishReason(params.UpstreamFinishReason):
 		finishReason = "content_filter"
 	default:

@@ -1,16 +1,16 @@
 package helps
 
 import (
-	"regexp"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-var claude55Model = regexp.MustCompile(`^claude-(opus|sonnet)-5-5(?:-(high|reasoning))?(?:-[0-9]{8})?(?:\[[^\[\]]+\])?$`)
+var antigravityClaude55Model = regexp.MustCompile(`^claude-(opus|sonnet)-5-5(?:-(low|medium|high|max|reasoning))?(?:-[0-9]{8})?(?:\[[^\[\]]+\])?$`)
 
 // PrepareAntigravityClaudeStructuredOutput replaces native output schemas with
 // best-effort prompt instructions for Claude 5.5, which rejects forced tool use.
@@ -34,7 +34,7 @@ func PrepareAntigravityClaudeStructuredOutputDoc(model string, doc *ojson.Doc) b
 		return false
 	}
 	model = strings.ToLower(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
-	if !claude55Model.MatchString(model) {
+	if !antigravityClaude55Model.MatchString(model) {
 		return false
 	}
 

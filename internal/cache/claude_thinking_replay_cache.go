@@ -3,13 +3,13 @@ package cache
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"

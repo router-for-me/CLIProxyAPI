@@ -3,7 +3,6 @@ package pluginhost
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -15,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -652,6 +652,53 @@ func TestRPCInterceptorsIncludeHostCallbackID(t *testing.T) {
 	}
 	if chunk.HostCallbackID == "" {
 		t.Fatal("stream chunk interceptor host_callback_id is empty")
+	}
+}
+
+func TestRPCResponseInterceptPlacesKindInLeadingBytes(t *testing.T) {
+	client := &capturePluginClient{}
+	adapter := &rpcPluginAdapter{
+		host:   New(),
+		client: client,
+	}
+
+	largeBody := bytes.Repeat([]byte("x"), 64*1024)
+	if _, errResp := adapter.InterceptResponse(context.Background(), pluginapi.ResponseInterceptRequest{
+		Kind:           pluginapi.ResponseInterceptKindModelList,
+		RequestID:      "req-7655",
+		SourceFormat:   "openai",
+		Model:          "",
+		RequestedModel: "",
+		Body:           largeBody,
+		StatusCode:     http.StatusOK,
+	}); errResp != nil {
+		t.Fatalf("InterceptResponse() error = %v", errResp)
+	}
+
+	rawBytes := client.requests[pluginabi.MethodResponseInterceptAfter]
+	raw := string(rawBytes)
+	if !strings.HasPrefix(raw, `{"Kind":"model_list",`) {
+		t.Fatalf("RPC payload does not start with Kind field: %.120s", raw)
+	}
+	kindOffset := strings.Index(raw, `"Kind":`)
+	reqIDOffset := strings.Index(raw, `"RequestID":`)
+	bodyOffset := strings.Index(raw, `"Body":`)
+	if reqIDOffset < 0 || bodyOffset < 0 {
+		t.Fatalf("RPC payload missing RequestID or Body: reqID=%d body=%d", reqIDOffset, bodyOffset)
+	}
+	if kindOffset > reqIDOffset || kindOffset > bodyOffset {
+		t.Fatalf("Kind offset = %d, want before RequestID (%d) and Body (%d)", kindOffset, reqIDOffset, bodyOffset)
+	}
+
+	var decoded rpcResponseInterceptRequest
+	if errDecode := json.Unmarshal(rawBytes, &decoded); errDecode != nil {
+		t.Fatalf("decode rpcResponseInterceptRequest: %v", errDecode)
+	}
+	if decoded.Kind != pluginapi.ResponseInterceptKindModelList {
+		t.Fatalf("decoded.Kind = %q, want %q", decoded.Kind, pluginapi.ResponseInterceptKindModelList)
+	}
+	if decoded.HostCallbackID == "" {
+		t.Fatal("decoded.HostCallbackID is empty")
 	}
 }
 

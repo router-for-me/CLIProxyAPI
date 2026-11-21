@@ -2,13 +2,13 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -120,6 +120,31 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_ExactCopilotRouteBeatsOtherProviderBase(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	const model = "copilot-exact-alpha"
+	reg.RegisterClient(t.Name()+"/base", "gemini", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(t.Name()+"/exact", "copilot", []*registry.ModelInfo{{ID: model + "(high)"}})
+	reg.RegisterClient(t.Name()+"/other-exact", "claude", []*registry.ModelInfo{{ID: model + "(low)"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(t.Name() + "/base")
+		reg.UnregisterClient(t.Name() + "/exact")
+		reg.UnregisterClient(t.Name() + "/other-exact")
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	for _, tc := range []struct{ request, provider string }{
+		{model, "gemini"},
+		{model + "(high)", "copilot"},
+		{model + "(low)", "gemini"},
+	} {
+		providers, resolved, errMsg := handler.getRequestDetails(tc.request)
+		if errMsg != nil || resolved != tc.request || !reflect.DeepEqual(providers, []string{tc.provider}) {
+			t.Errorf("getRequestDetails(%q) = (%v, %q, %v), want provider %q", tc.request, providers, resolved, errMsg, tc.provider)
+		}
 	}
 }
 

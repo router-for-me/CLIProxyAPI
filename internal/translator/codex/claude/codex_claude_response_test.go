@@ -99,6 +99,46 @@ func TestConvertCodexResponseToClaude_StreamCyberPolicyError(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToClaude_StreamBioPolicyError(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	outputs := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{"code":"bio_policy","message":"This content was flagged for possible biological risk.","param":null,"type":"invalid_request"},"sequence_number":7}`), &param)
+	if len(outputs) != 1 {
+		t.Fatalf("expected one error chunk, got %d: %q", len(outputs), outputs)
+	}
+	out := string(outputs[0])
+	if !strings.Contains(out, "event: error\n") {
+		t.Fatalf("expected Claude SSE error event, got: %q", out)
+	}
+
+	payload, ok := firstClaudeStreamPayloadForEvent(out, "error")
+	if !ok {
+		t.Fatalf("missing error event payload: %q", out)
+	}
+	if got := payload.Get("type").String(); got != "error" {
+		t.Fatalf("type = %q, want error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.type").String(); got != "invalid_request_error" {
+		t.Fatalf("error.type = %q, want invalid_request_error. Payload: %s", got, payload.Raw)
+	}
+	if got := payload.Get("error.message").String(); got != "This content was flagged for possible biological risk." {
+		t.Fatalf("error.message = %q. Payload: %s", got, payload.Raw)
+	}
+
+	for _, code := range []string{"content_policy_violation", "image_content_policy_violation"} {
+		var subParam any
+		subOut := ConvertCodexResponseToClaude(ctx, "", []byte(`{"messages":[]}`), nil, []byte(`data: {"type":"error","error":{"code":"`+code+`","message":""}}`), &subParam)
+		if len(subOut) != 1 {
+			t.Fatalf("code %s: expected 1 chunk, got %d", code, len(subOut))
+		}
+		subPayload, subOK := firstClaudeStreamPayloadForEvent(string(subOut[0]), "error")
+		if !subOK || subPayload.Get("error.type").String() != "invalid_request_error" || subPayload.Get("error.message").String() != code {
+			t.Fatalf("code %s: unexpected payload %s", code, subPayload.Raw)
+		}
+	}
+}
+
 func TestConvertCodexResponseToClaude_StreamErrorTypeFallbackMessage(t *testing.T) {
 	ctx := context.Background()
 	var param any
@@ -2105,4 +2145,81 @@ func TestConvertCodexResponseToClaude_RestoresLongMidConversationToolAdditionNam
 	if got := ojson.GetBytesNoCopy(nonStreamOut, "content.1.name").String(); got != midLongMCPTool {
 		t.Fatalf("non-streaming response content.1.name = %q, want %q; body=%s", got, midLongMCPTool, nonStreamOut)
 	}
+}
+
+func TestConvertCodexResponseToClaude_RefusalStreamAndNonStream(t *testing.T) {
+	const refusalText = "I'm sorry, but I can't help with that request."
+	ctx := context.Background()
+
+	t.Run("streamed_refusal_no_duplicate", func(t *testing.T) {
+		var param any
+		events := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.content_part.added","output_index":0,"item_id":"msg_1","part":{"type":"refusal","refusal":""}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":"I'm sorry, but I can't help with that request."}`),
+			[]byte(`data: {"type":"response.refusal.done","output_index":0,"item_id":"msg_1","refusal":"I'm sorry, but I can't help with that request."}`),
+			[]byte(`data: {"type":"response.content_part.done","output_index":0,"item_id":"msg_1","part":{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		var combined strings.Builder
+		for _, ev := range events {
+			for _, out := range ConvertCodexResponseToClaude(ctx, "muse-ember-1.0", nil, nil, ev, &param) {
+				combined.Write(out)
+			}
+		}
+		got := combined.String()
+		if count := strings.Count(got, refusalText); count != 1 {
+			t.Fatalf("stream refusal count = %d, want 1:\n%s", count, got)
+		}
+	})
+
+	t.Run("done_only_refusal_fallback", func(t *testing.T) {
+		var param any
+		events := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		var combined strings.Builder
+		for _, ev := range events {
+			for _, out := range ConvertCodexResponseToClaude(ctx, "muse-ember-1.0", nil, nil, ev, &param) {
+				combined.Write(out)
+			}
+		}
+		got := combined.String()
+		if count := strings.Count(got, refusalText); count != 1 {
+			t.Fatalf("done-only stream refusal count = %d, want 1:\n%s", count, got)
+		}
+	})
+
+	t.Run("empty_refusal_delta_does_not_suppress_done_fallback", func(t *testing.T) {
+		var param any
+		events := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"muse-ember-1.0"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.refusal.delta","output_index":0,"item_id":"msg_1","delta":""}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}}`),
+			[]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`),
+		}
+		var combined strings.Builder
+		for _, ev := range events {
+			for _, out := range ConvertCodexResponseToClaude(ctx, "muse-ember-1.0", nil, nil, ev, &param) {
+				combined.Write(out)
+			}
+		}
+		got := combined.String()
+		if count := strings.Count(got, refusalText); count != 1 {
+			t.Fatalf("empty-delta fallback refusal count = %d, want 1:\n%s", count, got)
+		}
+	})
+
+	t.Run("nonstream_refusal", func(t *testing.T) {
+		raw := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"muse-ember-1.0","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I'm sorry, but I can't help with that request."}]}]}}`)
+		out := ConvertCodexResponseToClaudeNonStream(ctx, "muse-ember-1.0", nil, nil, raw, nil)
+		if got := ojson.GetBytesNoCopy(out, "content.0.text").String(); got != refusalText {
+			t.Fatalf("nonstream text = %q, want %q; body=%s", got, refusalText, out)
+		}
+	})
 }
