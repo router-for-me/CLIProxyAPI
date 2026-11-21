@@ -88,6 +88,41 @@ codex:
 	}
 }
 
+func TestLoadConfigOptional_CodexServeHTTPOverWebsockets(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML := []byte(`
+upstream:
+  codex:
+    serve-http-over-websockets: true
+`)
+	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	cfg, err := LoadConfigOptional(configPath, false)
+	if err != nil {
+		t.Fatalf("LoadConfigOptional() error = %v", err)
+	}
+
+	if !cfg.Codex.ServeHTTPOverWebsockets {
+		t.Fatalf("ServeHTTPOverWebsockets = false, want true")
+	}
+
+	scoped := cfg.ForAPIKey()
+	if !scoped.Codex.ServeHTTPOverWebsockets {
+		t.Fatalf("ForAPIKey().Codex.ServeHTTPOverWebsockets = false, want true")
+	}
+
+	defaultCfg, errDefault := ParseConfigBytes([]byte(`{}`))
+	if errDefault != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errDefault)
+	}
+	if defaultCfg.Codex.ServeHTTPOverWebsockets {
+		t.Fatalf("default ServeHTTPOverWebsockets = true, want false")
+	}
+}
+
 func TestParseConfigBytes_CodexSignInWithChatGPTIdentifier(t *testing.T) {
 	defaultCfg, errDefault := ParseConfigBytes([]byte("port: 8317\n"))
 	if errDefault != nil {

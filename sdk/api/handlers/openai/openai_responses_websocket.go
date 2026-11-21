@@ -27,6 +27,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -789,6 +790,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 						delete(pinnedAuthByProvider, providerKey)
 					}
 				}
+			}
+		}
+		// A self-contained create may leave a credential that cannot serve its tier;
+		// a continuation keeps the pin and fails selection instead of switching accounts.
+		if pinnedAuthID != "" && !responsesWebsocketRequestRequiresCurrentUpstream(payload) {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && !coreauth.AllowsServiceTier(pinnedAuth, gjson.GetBytes(payload, "service_tier").String()) {
+				forgetPinnedAuth()
 			}
 		}
 		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)

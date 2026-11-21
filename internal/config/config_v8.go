@@ -99,6 +99,7 @@ func buildV8Paths() []configPath {
 		{"codex.upstream-request-compression", "upstream.codex.upstream-request-compression"},
 		{"codex.upstream-request-compression-min-bytes", "upstream.codex.upstream-request-compression-min-bytes"},
 		{"codex.websocket-compression", "upstream.codex.websocket-compression"},
+		{"codex.serve-http-over-websockets", "upstream.codex.serve-http-over-websockets"},
 		{"codex", "oauth.providers.codex"}, {"codex-header-defaults", "oauth.providers.codex.header-defaults"},
 		{"claude.oauth-include-create-api-key", "oauth.providers.claude.oauth-include-create-api-key"},
 		{"claude", "upstream.claude"}, {"claude-code", "upstream.claude"},

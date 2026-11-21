@@ -20,6 +20,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 // codexDuplexConnectionError keeps a connection failure from cooling the shared
@@ -389,6 +390,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			model := strings.TrimSpace(ojson.GetBytesNoCopy(payload, "model").String())
 			if model != "" && model != req.Model && model != boundModel {
+				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
+				return false
+			}
+			// The bound credential skipped selection; replay so an eligible one is chosen.
+			if !cliproxyauth.AllowsServiceTier(auth, gjson.GetBytes(payload, "service_tier").String()) {
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
