@@ -87,7 +87,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
 	if isClaudeModel {
-		if !promptStructuredOutput {
+		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
 			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
 	} else {
@@ -144,6 +144,28 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	})
 
 	return httpReq, finalPayload, nil
+}
+
+// antigravityToolChoiceModeIsNoneDoc reports whether the request already sets
+// function calling mode to NONE under either camelCase or snake_case proto-JSON
+// paths, canonicalizing non-canonical casing or surrounding whitespace in place.
+func antigravityToolChoiceModeIsNoneDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	for _, container := range []string{"request.toolConfig", "request.tool_config"} {
+		for _, key := range []string{"functionCallingConfig", "function_calling_config"} {
+			modePath := container + "." + key + ".mode"
+			mode := doc.Get(modePath)
+			if mode.Type == ojson.String && strings.EqualFold(strings.TrimSpace(mode.String()), "NONE") {
+				if mode.String() != "NONE" {
+					_ = doc.Set(modePath, "NONE")
+				}
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
