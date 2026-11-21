@@ -18,6 +18,7 @@ import (
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -500,13 +501,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 		if !written {
 			return
 		}
-		refreshCtx := context.Background()
-		if ctx != nil {
-			if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-				refreshCtx = context.WithValue(refreshCtx, "cliproxy.roundtripper", rt)
-			}
-		}
-		refreshCtx, cancel := context.WithTimeout(refreshCtx, antigravityCreditsHintRefreshTimeout)
+		refreshCtx, cancel := context.WithTimeout(detachedAntigravityCredentialContext(ctx), antigravityCreditsHintRefreshTimeout)
 		authCopy := auth.Clone()
 		go func(auth *cliproxyauth.Auth, token string) {
 			defer cancel()
@@ -572,17 +567,16 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 	var refreshCtx context.Context
 	var cancelRefresh context.CancelFunc
 	if timeout > 0 {
-		// Keep the existing independent warm-hint budget and transport selection.
-		lifecycle = context.Background()
-		if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-			lifecycle = context.WithValue(lifecycle, "cliproxy.roundtripper", rt)
-		}
+		// Keep the existing independent warm-hint budget and transport selection
+		// while preserving non-cancellation context values and excluding
+		// execution-scoped request proxy overrides.
+		lifecycle = detachedAntigravityCredentialContext(ctx)
 		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, timeout)
 	} else {
 		// Optional post-refresh work still follows the caller's lifecycle, but a
 		// stalled upstream must not leak the goroutine or wedge state.task, so it
 		// runs under the bounded warm-hint budget instead of an unbounded cancel.
-		refreshCtx, cancelRefresh = context.WithTimeout(lifecycle, antigravityCreditsHintRefreshTimeout)
+		refreshCtx, cancelRefresh = context.WithTimeout(cliproxyexecutor.WithoutRequestProxyURL(lifecycle), antigravityCreditsHintRefreshTimeout)
 	}
 	task := &antigravityCreditsRefreshTask{
 		state:     state,

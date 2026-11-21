@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/json"
@@ -1920,6 +1921,9 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				c.auth = preparedAuth
+			}
 			if errAbort := m.handleAntigravityCreditsPrepareError(creditsCtx, c, routeModel, creditsOpts, errPrepare); errAbort != nil {
 				return cliproxyexecutor.Response{}, false, errAbort
 			}
@@ -1942,9 +1946,20 @@ func (m *Manager) tryAntigravityCreditsExecute(ctx context.Context, req cliproxy
 				}
 				return cliproxyexecutor.Response{}, false, errIntercept
 			}
-			creditsCtx = syncMetadataSessionToContext(creditsCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(c.auth)
+			creditsCtx = m.withExecutionAuthRefresh(syncMetadataSessionToContext(creditsCtx, execOpts.Metadata), executionAuthRefreshOptions{
+				onAuthUpdated: func(updated *Auth) {
+					if updated != nil {
+						activeAuth.Store(updated.Clone())
+					}
+				},
+			})
 			executionSeq := m.nextExecutionSeq()
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
+			if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != c.auth {
+				c.auth = currentAuth
+			}
 			errExec = markUpstreamExecutionAttemptFromContext(creditsCtx, errExec)
 			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(creditsCtx, c.auth, execOpts.Headers), RefreshToken: authRefreshToken(c.auth), CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
@@ -2030,6 +2045,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(ctx context.Context, req cl
 		creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 		preparedAuth, errPrepare := m.prepareRequestAuth(creditsCtx, c.executor, c.auth)
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				c.auth = preparedAuth
+			}
 			if errAbort := m.handleAntigravityCreditsPrepareError(creditsCtx, c, routeModel, creditsOpts, errPrepare); errAbort != nil {
 				return nil, false, errAbort
 			}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -392,7 +393,17 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
 			}
-			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(preparedAuth)
+			execCtx = m.withExecutionAuthRefresh(syncMetadataSessionToContext(execCtx, execOpts.Metadata), executionAuthRefreshOptions{
+				ephemeral: true,
+				onAuthUpdated: func(updated *Auth) {
+					if updated != nil {
+						activeAuth.Store(updated.Clone())
+						setEffectiveAuth(updated)
+					}
+				},
+			})
 			executorCtx := execCtx
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
@@ -406,6 +417,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()
+			if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != preparedAuth {
+				preparedAuth = currentAuth
+			}
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
 			if errCtx := execCtx.Err(); errCtx != nil {

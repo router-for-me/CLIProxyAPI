@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/json"
@@ -658,6 +659,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 		executionSeq := m.nextExecutionSeq()
 		accessToken := authAccessTokenForRequest(execCtx, auth, execOpts.Headers)
+		var activeAuth atomic.Pointer[Auth]
+		activeAuth.Store(auth)
+		syncActiveAuth := func() {
+			if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != auth {
+				auth = currentAuth
+				accessToken = authAccessTokenForRequest(execCtx, auth, execOpts.Headers)
+			}
+		}
 
 		var cancelAttempt context.CancelFunc
 		var attemptCleaned bool
@@ -667,6 +676,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			var attemptCtx context.Context
 			attemptCtx, cancelAttempt = context.WithCancel(parent)
+			attemptCtx = m.withExecutionAuthRefresh(attemptCtx, executionAuthRefreshOptions{
+				ephemeral: ephemeralResult,
+				onAuthUpdated: func(updated *Auth) {
+					if updated != nil {
+						activeAuth.Store(updated.Clone())
+					}
+				},
+			})
 			attemptCleaned = false
 			return attemptCtx
 		}
@@ -688,9 +705,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		var preRefreshStreamErr error
+		activeAuth.Store(auth)
 		attemptCtx := startAttempt(execCtx)
 		startStream := time.Now()
 		streamResult, errStream := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+		syncActiveAuth()
 		errStream = markUpstreamExecutionAttemptFromContext(attemptCtx, errStream)
 		durationStream := time.Since(startStream)
 		if errStream != nil {
@@ -711,9 +730,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					accessToken = authAccessTokenForRequest(execCtx, auth, execOpts.Headers)
+					activeAuth.Store(auth)
 					attemptCtx = startAttempt(execCtx)
 					startRetry := time.Now()
 					streamResult, errStream = executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+					syncActiveAuth()
 					errStream = markUpstreamExecutionAttemptFromContext(attemptCtx, errStream)
 					durationRetry := time.Since(startRetry)
 					if errStream != nil {
@@ -814,9 +835,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					accessToken = authAccessTokenForRequest(execCtx, auth, execOpts.Headers)
+					activeAuth.Store(auth)
 					attemptCtx = startAttempt(execCtx)
 					startRetry := time.Now()
 					retryStream, retryErr := executor.ExecuteStream(attemptCtx, auth, execReq, execOpts)
+					syncActiveAuth()
 					retryErr = markUpstreamExecutionAttemptFromContext(attemptCtx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(attemptCtx, retryErr)
