@@ -8,6 +8,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -162,9 +163,8 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 			if typ == "" {
 				continue
 			}
-			frame := []byte("event: " + typ + "\ndata: ")
-			frame = append(frame, data...)
-			chunks = [][]byte{append(frame, '\n', '\n')}
+			frame := common.SSEEventData(typ, data)
+			chunks = prepared.responseTranslators.TranslateStream(ctx, from, to, req.Model, translationOriginal, prepared.body, frame, &state)
 		} else if from != to || !done {
 			translatedLine := bytes.Clone(line)
 			if from == sdktranslator.FormatOpenAI && to != from && !done {
