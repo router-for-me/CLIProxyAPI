@@ -193,3 +193,19 @@ func TestSelectDeviceIDUsesOneDeviceAcrossSessions(t *testing.T) {
 		t.Fatalf("single device selection = %q then %q, want %q", first, second, deviceIDs[0])
 	}
 }
+
+func TestSnapshotMetadata(t *testing.T) {
+	metadata := map[string]any{"email": "user@example.com", "on": true}
+	snapshot := SnapshotMetadata(&metadata)
+	if !reflect.DeepEqual(snapshot, metadata) {
+		t.Fatalf("SnapshotMetadata() = %#v, want %#v", snapshot, metadata)
+	}
+	snapshot["email"] = "changed@example.com"
+	if metadata["email"] != "user@example.com" {
+		t.Fatal("writing to the snapshot changed the live metadata")
+	}
+	var nilMap map[string]any
+	if SnapshotMetadata(&nilMap) != nil || SnapshotMetadata(nil) != nil {
+		t.Fatal("SnapshotMetadata on nil metadata, want nil")
+	}
+}
