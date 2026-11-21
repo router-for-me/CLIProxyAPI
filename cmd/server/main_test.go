@@ -229,6 +229,64 @@ func TestResolveManagementBaseURL(t *testing.T) {
 	}
 }
 
+func TestResolveLocalManagementPassword(t *testing.T) {
+	tests := []struct {
+		name      string
+		flagValue string
+		env       map[string]string
+		want      string
+	}{
+		{
+			name:      "flag takes precedence over the environment",
+			flagValue: "from-flag",
+			env:       map[string]string{"LOCAL_MANAGEMENT_PASSWORD": "from-env"},
+			want:      "from-flag",
+		},
+		{
+			name: "environment used when flag is empty",
+			env:  map[string]string{"LOCAL_MANAGEMENT_PASSWORD": "from-env"},
+			want: "from-env",
+		},
+		{
+			name:      "environment used when flag is only whitespace",
+			flagValue: "   ",
+			env:       map[string]string{"LOCAL_MANAGEMENT_PASSWORD": "from-env"},
+			want:      "from-env",
+		},
+		{
+			name: "lowercase key used when uppercase is unset",
+			env:  map[string]string{"local_management_password": "from-lower"},
+			want: "from-lower",
+		},
+		{
+			name: "uppercase key wins over lowercase",
+			env:  map[string]string{"LOCAL_MANAGEMENT_PASSWORD": "from-upper", "local_management_password": "from-lower"},
+			want: "from-upper",
+		},
+		{
+			name: "empty when neither is set",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lookupEnv := func(keys ...string) (string, bool) {
+				for _, key := range keys {
+					if value, ok := tt.env[key]; ok {
+						return value, true
+					}
+				}
+				return "", false
+			}
+			got := resolveLocalManagementPassword(tt.flagValue, lookupEnv)
+			if got != tt.want {
+				t.Fatalf("resolveLocalManagementPassword(%q) = %q, want %q", tt.flagValue, got, tt.want)
+			}
+		})
+	}
+}
+
 const seededConfigTestSecret = "git-seed-plaintext-secret"
 
 // persistSeededConfigForTest seeds content into configFilePath and returns what each
