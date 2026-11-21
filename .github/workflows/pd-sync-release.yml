@@ -62,7 +62,7 @@ jobs:
           [[ -n "$tag" ]] || { echo 'No upstream release tag on main' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           before=$(git rev-parse HEAD)
-          if ! git merge --no-edit "refs/tags/$tag"; then
+          if ! git merge --no-edit -m "Merge upstream $tag" "refs/tags/$tag"; then
             git merge --abort || true
             # Still verify and release main as it is, so a just-merged fix PR
             # ships; the last step then fails the run.
