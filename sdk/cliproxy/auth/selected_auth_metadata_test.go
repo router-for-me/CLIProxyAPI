@@ -38,3 +38,25 @@ func TestPublishSelectedAuthMetadataIncludesStableIndex(t *testing.T) {
 		t.Fatalf("selected auth index metadata = %#v, want %q", got, auth.Index)
 	}
 }
+
+func TestPublishSelectedAuthMetadataReportsCredentialKind(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		auth *Auth
+		want string
+	}{
+		{name: "api key", auth: &Auth{ID: "key-1", Provider: "claude", Attributes: map[string]string{AttributeAPIKey: "k"}}, want: AuthKindAPIKey},
+		{name: "login", auth: &Auth{ID: "login-1", Provider: "claude", Attributes: map[string]string{AttributeAuthKind: "oauth"}}, want: AuthKindOAuth},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			kind := "not called"
+			meta := map[string]any{
+				cliproxyexecutor.SelectedAuthKindCallbackMetadataKey: func(value string) { kind = value },
+			}
+			publishSelectedAuthMetadata(meta, test.auth)
+			if kind != test.want {
+				t.Fatalf("selected auth kind = %q, want %q", kind, test.want)
+			}
+		})
+	}
+}

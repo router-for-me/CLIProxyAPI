@@ -420,6 +420,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		defer releaseAttempt()
 	}
 	logging.SetGinCPATraceID(c, selected.EnsureIndex())
+	logging.SetGinCPAAuthKind(c, selected.AuthKind())
 
 	upstreamURL := buildSidebandURL(h.sidebandAPIBaseURL, style, callID)
 	upstreamHTTPURL := websocketHTTPURL(upstreamURL)

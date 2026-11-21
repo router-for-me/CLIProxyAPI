@@ -438,3 +438,37 @@ func TestHomeUpdatedAPIKeyOverridesParentWithAPIKeyAfterCapture(t *testing.T) {
 		t.Fatalf("coreusage.APIKeyFromContext = %q, want %q", got, "home-dispatched-key-b")
 	}
 }
+
+func TestRequestExecutionMetadataAuthKindCallbackSkipsWebsocket(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, test := range []struct {
+		name      string
+		websocket bool
+	}{
+		{name: "ordinary HTTP request", websocket: false},
+		{name: "websocket upgrade", websocket: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+			if test.websocket {
+				ginCtx.Request.Header.Set("Connection", "Upgrade")
+				ginCtx.Request.Header.Set("Upgrade", "websocket")
+			}
+			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+
+			meta := requestExecutionMetadata(ctx)
+
+			callback, exists := meta[coreexecutor.SelectedAuthKindCallbackMetadataKey].(func(string))
+			if exists == test.websocket {
+				t.Fatalf("auth kind callback present = %v for %s", exists, test.name)
+			}
+			if exists {
+				callback("oauth")
+				if got := logging.GetGinCPAAuthKind(ginCtx); got != "oauth" {
+					t.Fatalf("stored auth kind = %q, want oauth", got)
+				}
+			}
+		})
+	}
+}

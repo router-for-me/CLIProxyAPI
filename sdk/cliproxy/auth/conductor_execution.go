@@ -3316,6 +3316,9 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 			callback(authIndex)
 		}
 	}
+	if callback, ok := meta[cliproxyexecutor.SelectedAuthKindCallbackMetadataKey].(func(string)); ok && callback != nil {
+		callback(auth.AuthKind())
+	}
 }
 
 func syncPublishedSelectedAuthMetadata(dst, src map[string]any) {

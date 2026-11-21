@@ -798,6 +798,11 @@ func claudeCooldownMetadataForAuths(ctx context.Context, auths []*Auth, modelFor
 	return true, earliestSignals
 }
 
+// Priority returns the auth's routing priority; a higher value is tried first.
+func (a *Auth) Priority() int {
+	return authPriority(a)
+}
+
 func authPriority(auth *Auth) int {
 	if auth == nil || auth.Attributes == nil {
 		return 0

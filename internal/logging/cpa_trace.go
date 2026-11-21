@@ -13,6 +13,10 @@ import (
 // CPATraceIDHeader is the downstream response header used to correlate requests with selected credentials.
 const CPATraceIDHeader = "X-CPA-TRACE-ID"
 
+// CPAAuthKindHeader is the downstream response header naming the kind of credential that served the request:
+// "oauth" for a subscription login, "apikey" for an API key.
+const CPAAuthKindHeader = "X-CPA-AUTH-KIND"
+
 const ginCPATraceStateKey = "__cpa_trace_state__"
 
 // FormatCPATraceID builds a CPA trace ID from the selection time, auth index, and request ID.
@@ -26,8 +30,28 @@ func FormatCPATraceID(selectedAt time.Time, authIndex, requestID string) string 
 }
 
 type cpaTraceState struct {
-	mu      sync.RWMutex
-	traceID string
+	mu       sync.RWMutex
+	traceID  string
+	authKind string
+}
+
+func (s *cpaTraceState) setAuthKind(kind string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.authKind = strings.TrimSpace(kind)
+	s.mu.Unlock()
+}
+
+func (s *cpaTraceState) getAuthKind() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.RLock()
+	kind := s.authKind
+	s.mu.RUnlock()
+	return kind
 }
 
 func (s *cpaTraceState) set(traceID string) {
@@ -89,6 +113,37 @@ func SetGinCPATraceID(c *gin.Context, authIndex string) {
 	if callback := GinCPATraceIDCallback(c); callback != nil {
 		callback(authIndex)
 	}
+}
+
+// GinCPAAuthKindCallback returns a callback, safe to invoke after the Gin context is released, that stores the kind
+// of the selected credential. A later call replaces an earlier one, so a retry on another credential before the
+// response headers are committed reports the credential that answered.
+func GinCPAAuthKindCallback(c *gin.Context) func(string) {
+	state := ginCPATraceState(c)
+	if state == nil {
+		return nil
+	}
+	return state.setAuthKind
+}
+
+// SetGinCPAAuthKind stores the selected credential's kind until the downstream response headers are committed.
+func SetGinCPAAuthKind(c *gin.Context, kind string) {
+	if callback := GinCPAAuthKindCallback(c); callback != nil {
+		callback(kind)
+	}
+}
+
+// GetGinCPAAuthKind returns the credential kind stored for the current request.
+func GetGinCPAAuthKind(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	value, exists := c.Get(ginCPATraceStateKey)
+	if !exists {
+		return ""
+	}
+	state, _ := value.(*cpaTraceState)
+	return state.getAuthKind()
 }
 
 // GetGinCPATraceID returns the trace ID stored for the current request.
@@ -161,5 +216,8 @@ func (w *cpaTraceResponseWriter) applyTraceHeader() {
 	}
 	if traceID := w.state.get(); traceID != "" {
 		w.ResponseWriter.Header().Set(CPATraceIDHeader, traceID)
+	}
+	if kind := w.state.getAuthKind(); kind != "" {
+		w.ResponseWriter.Header().Set(CPAAuthKindHeader, kind)
 	}
 }

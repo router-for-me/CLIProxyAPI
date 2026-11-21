@@ -113,3 +113,46 @@ func TestCPATraceIDConcurrentSelectionAndResponseCommit(t *testing.T) {
 		}
 	}
 }
+
+func TestCPAAuthKindHeaderNamesTheCredentialThatServedTheResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(CPATraceIDMiddleware())
+	engine.GET("/oauth", func(c *gin.Context) {
+		SetGinCPAAuthKind(c, "oauth")
+		c.Status(http.StatusOK)
+	})
+	engine.GET("/fallback", func(c *gin.Context) {
+		// The first credential failed before anything was sent; the second one answered.
+		callback := GinCPAAuthKindCallback(c)
+		callback("oauth")
+		callback("apikey")
+		c.Status(http.StatusOK)
+	})
+	engine.GET("/unknown", func(c *gin.Context) {
+		SetGinCPAAuthKind(c, "")
+		c.Status(http.StatusOK)
+	})
+	engine.GET("/committed", func(c *gin.Context) {
+		c.Writer.WriteHeaderNow()
+		SetGinCPAAuthKind(c, "apikey")
+	})
+
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: "/oauth", want: "oauth"},
+		{path: "/fallback", want: "apikey"},
+		{path: "/unknown", want: ""},
+		{path: "/committed", want: ""},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, test.path, nil))
+			if got := recorder.Header().Get(CPAAuthKindHeader); got != test.want {
+				t.Fatalf("%s = %q, want %q", CPAAuthKindHeader, got, test.want)
+			}
+		})
+	}
+}

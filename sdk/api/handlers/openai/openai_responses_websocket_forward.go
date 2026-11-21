@@ -33,7 +33,14 @@ type responsesWebsocketForwardOptions struct {
 	// websocketOwned reports whether this turn runs on an upstream
 	// websocket. While true, no interrupt may claim the local HTTP path.
 	websocketOwned func() bool
+	// authKind returns the kind of the credential selected for this turn ("oauth" or "apikey"), named on
+	// response.created as cpa_auth_kind: a websocket has no per-turn response headers for X-CPA-AUTH-KIND.
+	authKind func() string
 }
+
+// responsesWebsocketAuthKindField names, on a websocket turn's response.created event, the kind of credential serving
+// the turn: the websocket counterpart of the X-CPA-AUTH-KIND response header.
+const responsesWebsocketAuthKindField = "cpa_auth_kind"
 
 func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 	c *gin.Context,
@@ -232,6 +239,13 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					continue
 				}
 				if eventType == "response.created" {
+					if opts.authKind != nil {
+						if kind := opts.authKind(); kind != "" {
+							if named, errSet := ojson.SetBytes(payloads[i], responsesWebsocketAuthKindField, kind); errSet == nil {
+								payloads[i] = named
+							}
+						}
+					}
 					responseStarted = true
 					markDownstreamCommitted()
 					completed = false
