@@ -87,6 +87,27 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
+// sanitizeCodexToolArguments removes empty approval-only fields that some
+// OpenAI-compatible models emit unconditionally. Codex validates locally:
+// a present "justification" requires "sandbox_permissions:
+// "require_escalated"; an empty justification is therefore rejected even
+// though the model intended a normal sandboxed command.
+func sanitizeCodexToolArguments(args string) string {
+	if !strings.Contains(args, `"justification"`) {
+		return args
+	}
+	doc := ojson.Parse(args)
+	if !ojson.Valid(args) || !doc.IsObject() {
+		return args
+	}
+	if v := doc.Get("justification"); v.Exists() && v.String() == "" && !doc.Get("sandbox_permissions").Exists() {
+		if updated, errDelete := ojson.DeleteBytes([]byte(args), "justification"); errDelete == nil {
+			return string(updated)
+		}
+	}
+	return args
+}
+
 func incompleteByFinishReason(reason string) ([]byte, bool) {
 	switch reason {
 	case "length", "max_tokens":
@@ -416,7 +437,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, nextSeq func() int) [
 			itemDoc := ojson.NewDocString(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 			_ = itemDoc.Set("id", fmt.Sprintf("fc_%s", callID))
 			_ = itemDoc.Set("status", toolStatus)
-			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(itemDoc, "arguments", args)
+			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(itemDoc, "arguments", sanitizeCodexToolArguments(args))
 			_ = itemDoc.Set("call_id", callID)
 			st.ToolIndex.applyIdentityDoc(itemDoc, name, "")
 			outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: itemDoc.Bytes()})
@@ -932,7 +953,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			_ = fcDoneDoc.Set("sequence_number", nextSeq())
 			_ = fcDoneDoc.Set("item_id", fmt.Sprintf("fc_%s", callID))
 			_ = fcDoneDoc.Set("output_index", outputIndex)
-			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(fcDoneDoc, "arguments", args)
+			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(fcDoneDoc, "arguments", sanitizeCodexToolArguments(args))
 			out = append(out, emitRespEvent("response.function_call_arguments.done", fcDoneDoc.Bytes()))
 
 			itemDoneDoc := ojson.NewDocString(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}}`)
@@ -940,7 +961,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			_ = itemDoneDoc.Set("output_index", outputIndex)
 			_ = itemDoneDoc.Set("item.id", fmt.Sprintf("fc_%s", callID))
 			_ = itemDoneDoc.Set("item.status", toolStatus)
-			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(itemDoneDoc, "item.arguments", args)
+			_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(itemDoneDoc, "item.arguments", sanitizeCodexToolArguments(args))
 			_ = itemDoneDoc.Set("item.call_id", callID)
 			st.ToolIndex.applyIdentityDoc(itemDoneDoc, st.FuncNames[key], "item")
 			out = append(out, emitRespEvent("response.output_item.done", itemDoneDoc.Bytes()))
@@ -1341,7 +1362,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 					itemDoc := ojson.NewDocString(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					_ = itemDoc.Set("id", fmt.Sprintf("fc_%s", callID))
 					_ = itemDoc.Set("status", toolStatus)
-					_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(itemDoc, "arguments", args)
+					_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(itemDoc, "arguments", sanitizeCodexToolArguments(args))
 					_ = itemDoc.Set("call_id", callID)
 					toolIndex.applyIdentityDoc(itemDoc, name, "")
 					outputItems = append(outputItems, itemDoc.Bytes())

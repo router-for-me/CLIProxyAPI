@@ -347,6 +347,40 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCalls
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DropsEmptyJustification(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_justification","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_justification","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"pwd\",\"justification\":\"\",\"prefix_rule\":[],\"workdir\":\"/tmp\"}"}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_justification","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`,
+		`data: [DONE]`,
+	}
+
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+	var param any
+	var out [][]byte
+	for _, line := range in {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	doneArgs := ""
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.output_item.done" && data.Get("item.type").String() == "function_call" {
+			doneArgs = data.Get("item.arguments").String()
+		}
+	}
+	if !ojson.Valid(doneArgs) {
+		t.Fatalf("invalid arguments: %q", doneArgs)
+	}
+	parsed := ojson.Parse(doneArgs)
+	if parsed.Get("justification").Exists() {
+		t.Fatalf("empty justification should be removed: %q", doneArgs)
+	}
+	if parsed.Get("cmd").String() != "pwd" || parsed.Get("workdir").String() != "/tmp" {
+		t.Fatalf("other arguments were changed: %q", doneArgs)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultiChoiceToolCallsUseDistinctOutputIndexes(t *testing.T) {
 	in := []string{
 		`data: {"id":"resp_multi_choice","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice0","type":"function","function":{"name":"glob","arguments":""}}]},"finish_reason":null},{"index":1,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_choice1","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
