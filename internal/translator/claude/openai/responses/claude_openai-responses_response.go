@@ -641,6 +641,11 @@ func (st *claudeToResponsesState) emitPendingFuncArgs(idx int, nextSeq func() in
 		}
 		return nil
 	}
+	if st.isShellCommandTool(st.FuncNames[idx]) {
+		// Shell arguments are rewritten as a whole when the call finishes; streaming
+		// raw fragments would make the deltas disagree with the final arguments.
+		return nil
+	}
 	msgDoc := ojson.NewDocString(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
 	_ = msgDoc.Set("sequence_number", nextSeq())
 	_ = msgDoc.Set("item_id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
@@ -733,11 +738,20 @@ func (st *claudeToResponsesState) finalizeFuncItem(idx int, status string, nextS
 		st.applyFunctionCallNamespaceFieldsDoc(itemDoneDoc, name, "item")
 		out = append(out, emitEvent("response.output_item.done", itemDoneDoc.Bytes()))
 	} else {
+		args = st.normalizeShellArgs(name, args)
 		if !st.FuncArgsDone[idx] {
 			if st.FuncArgsDone == nil {
 				st.FuncArgsDone = make(map[int]bool)
 			}
 			st.FuncArgsDone[idx] = true
+			if st.isShellCommandTool(name) && args != "" {
+				deltaDoc := ojson.NewDocString(`{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`)
+				_ = deltaDoc.Set("sequence_number", nextSeq())
+				_ = deltaDoc.Set("item_id", fmt.Sprintf("fc_%s", callID))
+				_ = deltaDoc.Set("output_index", outputIndex)
+				_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(deltaDoc, "delta", args)
+				out = append(out, emitEvent("response.function_call_arguments.delta", deltaDoc.Bytes()))
+			}
 			fcDoneDoc := ojson.NewDocString(`{"type":"response.function_call_arguments.done","sequence_number":0,"item_id":"","output_index":0,"arguments":""}`)
 			_ = fcDoneDoc.Set("sequence_number", nextSeq())
 			_ = fcDoneDoc.Set("item_id", fmt.Sprintf("fc_%s", callID))
@@ -1421,6 +1435,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					st.applyFunctionCallNamespaceFieldsDoc(itemDoc, name, "")
 					_ = outputsWrapperDoc.SetRawBytes(fmt.Sprintf("arr.%d", st.FuncOutputIndices[idx]), itemDoc.Bytes())
 				} else {
+					args = st.normalizeShellArgs(name, args)
 					itemDoc := ojson.NewDocString(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					_ = itemDoc.Set("id", fmt.Sprintf("fc_%s", callID))
 					_ = itemDoc.Set("status", status)
@@ -1851,6 +1866,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(ctx context.Context, modelN
 			if args == "" && itemStatus == "completed" {
 				args = "{}"
 			}
+			args = st.normalizeShellArgs(outputItem.name, args)
 			itemDoc := ojson.NewDocString(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 			_ = itemDoc.Set("id", outputItem.id)
 			_ = itemDoc.Set("status", itemStatus)
