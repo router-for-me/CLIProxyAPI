@@ -23,7 +23,7 @@ check() {
 
 gofmt_clean() {
 	local files
-	files="$(gofmt -l .)"
+	files="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
 	[ -z "$files" ] || {
 		echo "gofmt -w these files:"
 		echo "$files"
