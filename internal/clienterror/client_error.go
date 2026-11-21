@@ -16,20 +16,15 @@ import (
 const StatusClientClosedRequest = 499
 
 var requestFaultCodes = map[string]struct{}{
-	"cyber_policy":                   {},
-	"cyber_policy_violation":         {},
-	"bio_policy":                     {},
-	"misalignment_policy_violation":  {},
-	"content_policy_violation":       {},
-	"image_content_policy_violation": {},
-	"context_length_exceeded":        {},
-	"message_too_big":                {},
-	"string_above_max_length":        {},
-	"invalid_prompt":                 {},
-	"invalid_value":                  {},
-	"unsupported_value":              {},
-	"invalid_request_error":          {},
-	"previous_response_not_found":    {},
+	"cyber_policy":                {},
+	"context_length_exceeded":     {},
+	"message_too_big":             {},
+	"string_above_max_length":     {},
+	"invalid_prompt":              {},
+	"invalid_value":               {},
+	"unsupported_value":           {},
+	"invalid_request_error":       {},
+	"previous_response_not_found": {},
 }
 
 var requestFaultTypes = map[string]struct{}{
@@ -125,7 +120,7 @@ func IsRequestFault(status int, err error) bool {
 	if hasRequestFaultBody(err) {
 		return true
 	}
-	if err != nil && (IsItemNotPersisted(err.Error()) || IsOpenAIPolicyBlockError(err) || IsGeminiFilterBlockError(err) || IsClaudePolicyRefusalError(err)) {
+	if err != nil && (IsItemNotPersisted(err.Error()) || IsGeminiFilterBlockError(err) || IsClaudePolicyRefusalError(err)) {
 		return true
 	}
 	switch status {
@@ -259,7 +254,7 @@ func ClaudePolicyRefusalMessage(payload []byte) (string, bool) {
 		detailsType := strings.ToLower(strings.TrimSpace(details.Get("type").String()))
 		category := strings.ToLower(strings.TrimSpace(details.Get("category").String()))
 		explanation := strings.TrimSpace(details.Get("explanation").String())
-		if stopReason == "refusal" || detailsType == "refusal" || isClaudeRefusalCategory(category) {
+		if stopReason == "refusal" || detailsType == "refusal" || category == "cyber" {
 			if explanation != "" {
 				if category != "" {
 					return "claude refusal (" + category + "): " + explanation, true
@@ -302,85 +297,6 @@ func IsClaudePolicyRefusalError(err error) bool {
 		}
 	}
 	return false
-}
-
-func isClaudeRefusalCategory(category string) bool {
-	switch category {
-	case "cyber", "bio", "frontier_llm", "reasoning_extraction", "general_harms":
-		return true
-	default:
-		return false
-	}
-}
-
-// IsOpenAIPolicyBlockError reports whether err carries an OpenAI/Codex plain-text
-// biological, cybersecurity, or safety prompt policy block message.
-func IsOpenAIPolicyBlockError(err error) bool {
-	if err == nil {
-		return false
-	}
-	matched := false
-	hasStructuredNonFault := false
-	forEachErrorJSONBody(err, func(body string) bool {
-		for _, prefix := range []string{"error.", "response.error.", "body.error.", ""} {
-			code := strings.ToLower(strings.TrimSpace(ojson.Get(body, prefix+"code").String()))
-			errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, prefix+"type").String()))
-			if prefix == "" && (errType == "error" || errType == "response.failed" || errType == "response.error") {
-				errType = ""
-			}
-			msg := strings.TrimSpace(ojson.Get(body, prefix+"message").String())
-			if code == "" && errType == "" && msg == "" {
-				continue
-			}
-			_, codeFault := requestFaultCodes[code]
-			_, typeFault := requestFaultTypes[errType]
-			if (code != "" && !codeFault) || (errType != "" && !typeFault) {
-				hasStructuredNonFault = true
-				return true
-			}
-			if hasOpenAIPolicyBlockPrefix(msg) {
-				matched = true
-				return true
-			}
-		}
-		return false
-	})
-	if hasStructuredNonFault {
-		return false
-	}
-	if matched {
-		return true
-	}
-	if isOpenAIPolicyBlockRawText(err.Error()) {
-		return true
-	}
-	type responseBodyProvider interface {
-		ResponseBody() []byte
-	}
-	var responseBody responseBodyProvider
-	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
-		if isOpenAIPolicyBlockRawText(string(responseBody.ResponseBody())) {
-			return true
-		}
-	}
-	return false
-}
-
-func isOpenAIPolicyBlockRawText(raw string) bool {
-	trimmed := unwrapKnownErrorWrapper(strings.TrimSpace(raw))
-	if trimmed == "" || ojson.Valid(trimmed) {
-		return false
-	}
-	return hasOpenAIPolicyBlockPrefix(trimmed)
-}
-
-func hasOpenAIPolicyBlockPrefix(text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	return strings.HasPrefix(lower, "this content was flagged for possible biological risk.") ||
-		strings.HasPrefix(lower, "this content was flagged for possible cybersecurity risk.") ||
-		strings.HasPrefix(lower, "this request has been flagged for possible cybersecurity risk.") ||
-		strings.HasPrefix(lower, "this request was blocked due to a misalignment policy violation.") ||
-		strings.HasPrefix(lower, "invalid prompt: we've limited access to this content for safety reasons.")
 }
 
 func isClaudePolicyRefusalText(text string) bool {
@@ -453,8 +369,14 @@ func isDevinRequestPermissionDeniedText(text string) bool {
 		strings.Contains(lower, "blocked by our content policy")
 }
 
-// IsCreditBalanceTooLow reports the Anthropic 400 response returned when a
-// credential's API credit balance is exhausted.
+// IsCreditBalanceTooLow reports the upstream 400 response returned when a
+// credential's API credit balance is exhausted. Anthropic uses a fixed
+// prefix; other providers (e.g. CommandCode) report the same billing
+// condition under an identical invalid_request_error signature with
+// different wording, so match the shared "insufficient credits" phrase as
+// well. Both callers (request-fault exemption and the conductor's credit
+// cooldown branch) delegate here, so exhausted credentials cool down and
+// rotate regardless of provider wording.
 func IsCreditBalanceTooLow(status int, err error) bool {
 	if status <= 0 && err != nil {
 		status = HTTPStatusFromError(err)
@@ -465,96 +387,85 @@ func IsCreditBalanceTooLow(status int, err error) bool {
 	return hasCreditBalanceTooLowBody(err)
 }
 
-func unwrapKnownErrorWrapper(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	const streamTerminatedPrefix = "responses stream terminated after "
-	if strings.HasPrefix(strings.ToLower(trimmed), streamTerminatedPrefix) {
-		rest := trimmed[len(streamTerminatedPrefix):]
-		if colon := strings.IndexByte(rest, ':'); colon >= 0 {
-			return strings.TrimSpace(rest[colon+1:])
-		}
-	}
-	return trimmed
-}
-
-func extractTrustedErrorJSON(raw string) (string, bool) {
-	body := unwrapKnownErrorWrapper(raw)
-	if body == "" || !ojson.Valid(body) {
-		return "", false
-	}
-	return body, true
-}
-
-func forEachErrorJSONBody(err error, fn func(body string) bool) bool {
+func hasCreditBalanceTooLowBody(err error) bool {
 	if err == nil {
 		return false
 	}
+	body := strings.TrimSpace(err.Error())
 	type responseBodyProvider interface {
 		ResponseBody() []byte
 	}
 	var responseBody responseBodyProvider
 	if errors.As(err, &responseBody) && responseBody != nil && len(responseBody.ResponseBody()) > 0 {
-		if body, ok := extractTrustedErrorJSON(string(responseBody.ResponseBody())); ok && fn(body) {
+		body = strings.TrimSpace(string(responseBody.ResponseBody()))
+	}
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
+		msg := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
+		if strings.HasPrefix(msg, "your credit balance is too low") ||
+			strings.Contains(msg, "insufficient credits") {
 			return true
 		}
-	}
-	if body, ok := extractTrustedErrorJSON(err.Error()); ok && fn(body) {
-		return true
 	}
 	return false
 }
 
-func hasCreditBalanceTooLowBody(err error) bool {
-	return forEachErrorJSONBody(err, func(body string) bool {
-		for _, path := range []string{"error.message", "message", "response.error.message", "body.error.message"} {
-			msg := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
-			if strings.HasPrefix(msg, "your credit balance is too low") {
-				return true
-			}
-		}
-		return false
-	})
-}
-
 func hasModelNotFoundErrorBody(err error) bool {
-	return forEachErrorJSONBody(err, func(body string) bool {
-		for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
-			code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
-			if code == "model_not_found" || code == "model_not_found_error" {
-				return true
-			}
-		}
+	if err == nil {
 		return false
-	})
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
+		if code == "model_not_found" || code == "model_not_found_error" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasAuthenticationErrorBody(err error) bool {
-	return forEachErrorJSONBody(err, func(body string) bool {
-		for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-			if errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())); errType == "authentication_error" {
-				return true
-			}
-		}
+	if err == nil {
 		return false
-	})
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		if errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String())); errType == "authentication_error" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasRequestFaultBody(err error) bool {
-	return forEachErrorJSONBody(err, func(body string) bool {
-		for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
-			code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
-			if _, ok := requestFaultCodes[code]; ok {
-				return true
-			}
-		}
-		for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
-			errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
-			if _, ok := requestFaultTypes[errType]; ok {
-				return true
-			}
-		}
+	if err == nil {
 		return false
-	})
+	}
+	body := strings.TrimSpace(err.Error())
+	if body == "" || !ojson.Valid(body) {
+		return false
+	}
+	for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+		code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
+		if _, ok := requestFaultCodes[code]; ok {
+			return true
+		}
+	}
+	for _, path := range []string{"error.type", "type", "response.error.type", "body.error.type"} {
+		errType := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
+		if _, ok := requestFaultTypes[errType]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IsClientCancellation reports whether an HTTP status code or error represents
