@@ -32,15 +32,18 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		changeHeader    bool
 		tooBig          bool
 		payloadRules    bool
-		terminalFailure bool
+		terminalFrame   string
 		contextLimit    bool
-		lostParent      bool
+		missingParent   string
 		nonUpgradeOK    bool
 	}{
 		{name: "reuse"},
-		{name: "terminal first frame is not replayed", terminalFailure: true},
+		{name: "nested response ID in first failed event", terminalFrame: `{"type":"response.failed","status":503,"response":{"id":"resp_1","status":"failed","error":{"type":"server_error","code":"server_is_overloaded","message":"accepted terminal failure"}}}`},
+		{name: "top-level response ID in first failed event", terminalFrame: `{"type":"response.failed","status":503,"response_id":"resp_1","response":{"status":"failed","error":{"type":"server_error","code":"server_is_overloaded","message":"accepted terminal failure"}}}`},
+		{name: "top-level response ID in first error event", terminalFrame: `{"type":"error","response_id":"resp_1","status":503,"error":{"type":"server_error","message":"accepted terminal failure"}}`},
 		{name: "accepted request preserves known status", contextLimit: true},
-		{name: "expired upstream parent falls back with full input", lostParent: true},
+		{name: "expired upstream parent falls back with full input", missingParent: `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
+		{name: "statusless missing parent falls back with full input", missingParent: `{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "ordinary 200 cannot masquerade as an upgrade", nonUpgradeOK: true, wantHTTP: true},
 		{name: "no replay after an ambiguous disconnect", stopAfterCreate: true},
 		{name: "no replay after a buffered accepted error", acceptedError: true},
@@ -62,7 +65,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !websocket.IsWebSocketUpgrade(r) {
 					httpCalls.Add(1)
-					if test.lostParent {
+					if test.missingParent != "" {
 						body, _ := io.ReadAll(r.Body)
 						fullRetry <- body
 					}
@@ -94,13 +97,13 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 					if test.stopAfterCreate {
 						return
 					}
-					if test.terminalFailure {
-						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"server_error","code":"server_is_overloaded","message":"accepted terminal failure"}}}`))
+					if test.terminalFrame != "" {
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(test.terminalFrame))
 						return
 					}
-					if test.lostParent && turn == 2 {
+					if test.missingParent != "" && turn == 2 {
 						frames <- frame
-						_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`))
+						_ = conn.WriteMessage(websocket.TextMessage, []byte(test.missingParent))
 						return
 					}
 					if test.acceptedError || test.contextLimit {
@@ -135,7 +138,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			cfg := &proxyconfig.Config{Codex: proxyconfig.CodexConfig{ServeHTTPMessagesOverWebsockets: !test.disabled}}
 			cfg.PassthroughHeaders = true
 			cfg.Streaming.BootstrapRetries = 2
-			cfg.Codex.StreamBootstrapBuffering = test.acceptedError || test.contextLimit || test.terminalFailure
+			cfg.Codex.StreamBootstrapBuffering = test.acceptedError || test.contextLimit || test.terminalFrame != ""
 			cfg.Codex.DisableCodexCloaking = test.changeHeader
 			if test.payloadRules {
 				models := []proxyconfig.PayloadModelRule{{Name: "*"}}
@@ -154,7 +157,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			registry.GetGlobalRegistry().RegisterClient(entry.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5.5"}})
-			if test.acceptedError || test.terminalFailure || test.contextLimit {
+			if test.acceptedError || test.terminalFrame != "" || test.contextLimit {
 				backup := entry.Clone()
 				backup.ID += "-backup"
 				if _, err := server.handlers.AuthManager.Register(t.Context(), backup); err != nil {
@@ -210,7 +213,13 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				}
 				return
 			}
-			if test.stopAfterCreate || test.acceptedError || test.terminalFailure {
+			if test.terminalFrame != "" {
+				if first.Code != http.StatusServiceUnavailable || creates.Load() != 1 || !strings.Contains(first.Body.String(), "accepted terminal failure") {
+					t.Fatalf("expected original 503 without replay: status=%d creates=%d body=%s", first.Code, creates.Load(), first.Body)
+				}
+				return
+			}
+			if test.stopAfterCreate || test.acceptedError {
 				if first.Code < 400 || creates.Load() != 1 {
 					t.Fatalf("ambiguous lost turn must fail without replay: status=%d creates=%d body=%s", first.Code, creates.Load(), first.Body)
 				}
@@ -233,7 +242,7 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 			if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"type":"message_stop"`) {
 				t.Fatalf("expected Messages SSE, got %d: %s", second.Code, second.Body)
 			}
-			if test.lostParent {
+			if test.missingParent != "" {
 				if creates.Load() != 2 || httpCalls.Load() != 1 {
 					t.Fatalf("expected one HTTP recovery, websocket=%d http=%d", creates.Load(), httpCalls.Load())
 				}

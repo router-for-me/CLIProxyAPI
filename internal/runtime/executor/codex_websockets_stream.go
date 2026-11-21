@@ -376,7 +376,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 	claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 	observeHTTPCompletion := func(event string, payload []byte) {
 		if httpSession != nil && (event == "response.completed" || event == "response.done") {
-			httpSession.httpMessages.continuation = prepared.httpMessagesTurn.completed(conn, payload)
+			httpSession.httpMessages.continuation = codexHTTPMessagesContinuation{conn: conn, snapshot: prepared.httpMessagesTurn.Complete(payload)}
 		}
 	}
 	var param any
@@ -410,10 +410,10 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		root := ojson.ParseBytes(payload)
 		event := root.Get("type").String()
 		switch event {
-		case "response.failed", "response.incomplete":
+		case "error", "response.failed", "response.incomplete":
 			// A terminal frame can be the first one. A response ID distinguishes
 			// an accepted terminal failure from a rejection before admission.
-			acceptedHTTP = root.Get("response.id").String() != ""
+			acceptedHTTP = codexWebsocketEventResponseID(root, event) != ""
 		case "response.metadata":
 		default:
 			acceptedHTTP = strings.HasPrefix(event, "response.")
@@ -517,6 +517,13 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 			observeAcceptedHTTP(payload)
 
+			if prepared.httpContinuationConn != nil && !acceptedHTTP && codexHTTPMessagesParentMissing(payload) {
+				// This rejection proves there is no active generation to replay.
+				e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "previous_response_not_found", nil)
+				sess.clearActive(conn, readCh)
+				unlockStreamSession()
+				return nil, errCodexHTTPMessagesParentMissing
+			}
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				if sess != nil {
 					if timeoutReached && len(bufferedChunks) > 0 {
@@ -540,9 +547,6 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
-				if prepared.httpContinuationConn != nil && !acceptedHTTP && codexHTTPMessagesParentMissing(payload) {
-					return nil, errCodexHTTPMessagesParentMissing
-				}
 				if timeoutReached {
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					bootstrapTerminalErr = guardAcceptedHTTP(wsErr)
@@ -996,7 +1000,7 @@ type codexWebsocketPrepared struct {
 	multiAgentV2Conflict bool
 	sessionInstructions  helps.CodexInstructionTurn
 	sessionReceipt       helps.CodexInstructionReceipt
-	httpMessagesTurn     *codexHTTPMessagesTurn
+	httpMessagesTurn     *helps.CodexMessagesTurn
 	httpContinuationConn *websocket.Conn
 
 	// Immutable pre-payload JSON value for duplex inheritance; never rebuild from clientBody.
@@ -1107,7 +1111,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if errSession != nil {
 		return nil, errSession
 	}
-	var httpMessagesTurn *codexHTTPMessagesTurn
+	var httpMessagesTurn *helps.CodexMessagesTurn
 	var httpContinuationConn *websocket.Conn
 	httpMessages := sess != nil && sess.httpMessages != nil
 	if httpMessages && codexSessionHeaderValue(wsHeaders) == "" && codexSessionHeaderValue(opts.Headers) == "" {
@@ -1126,13 +1130,20 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	if httpMessages && !helps.HasPayloadRules(e.cfg.Payload) {
 		// With no user rules, built-in finalization cannot change model or service tier.
 		upstreamModel = finishHeaders()
-		httpMessagesTurn, err = prepareCodexHTTPMessagesTurn(doc, e.cfg)
+		httpMessagesTurn, err = helps.CaptureCodexMessagesTurn(doc, e.cfg.DisableImageGeneration)
 		if err != nil {
 			return nil, err
 		}
 		conn, _ := existingWebsocketSessionConn(sess, auth.ID, wsURL, executionProxyURL(ctx, sess.effectiveConfig(auth.ID, e.cfg), auth), useSIWC)
-		if conn != nil && sess.matchesHTTPMessagesHandshake(conn, codexHTTPMessagesHandshake(wsHeaders)) && httpMessagesTurn.apply(doc, sess.httpMessages.continuation, conn) {
-			httpContinuationConn = conn
+		previous := sess.httpMessages.continuation
+		if conn != nil && previous.conn == conn && sess.matchesHTTPMessagesHandshake(conn, helps.CodexMessagesHandshakeFingerprint(wsHeaders)) {
+			applied, errApply := httpMessagesTurn.ApplyContinuation(doc, previous.snapshot)
+			if errApply != nil {
+				return nil, errApply
+			}
+			if applied {
+				httpContinuationConn = conn
+			}
 		}
 		helps.FinalizePayloadDoc(ctx, doc)
 	} else {

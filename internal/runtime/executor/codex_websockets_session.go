@@ -727,7 +727,7 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	}
 	var handshake *[32]byte
 	if sess.httpMessages != nil {
-		digest := codexHTTPMessagesHandshake(headers)
+		digest := helps.CodexMessagesHandshakeFingerprint(headers)
 		handshake = &digest
 	}
 	proxyURL := executionProxyURL(ctx, sess.effectiveConfig(authID, e.cfg), auth)
@@ -891,7 +891,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			// id-less failure ends the running one. Success terminals only
 			// carry response.id, and one without an id is left unattributed,
 			// as before.
-			responseID := strings.Clone(ojson.GetBytesNoCopy(payload, "response.id").String())
+			responseID := strings.Clone(codexWebsocketEventResponseID(ojson.ParseBytes(payload), eventType))
 			if eventType == "response.created" {
 				if responseID != "" {
 					sess.activeMu.Lock()
@@ -903,9 +903,6 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				}
 			} else if isTerminalEvent(eventType) {
 				failure := eventType == "error" || eventType == "response.failed"
-				if failure && responseID == "" {
-					responseID = strings.Clone(ojson.GetBytesNoCopy(payload, "response_id").String())
-				}
 				if responseID != "" || failure {
 					sess.activeMu.Lock()
 					if sess.responseStateConn == conn {
@@ -1159,6 +1156,15 @@ func logCodexWebsocketConnectedWithReused(sess *codexWebsocketSession, sessionID
 
 func logCodexWebsocketDisconnected(sessionID string, authID string, wsURL string, reason string, err error) {
 	logCodexWebsocketDisconnectedWithLastEvent(nil, sessionID, authID, wsURL, reason, "", err)
+}
+
+// codexWebsocketEventResponseID returns the response to which an event belongs.
+func codexWebsocketEventResponseID(root ojson.Result, event string) string {
+	id := root.Get("response.id").String()
+	if id == "" && (event == "error" || event == "response.failed" || event == "response.incomplete") {
+		return root.Get("response_id").String()
+	}
+	return id
 }
 
 func isTerminalEvent(eventType string) bool {
