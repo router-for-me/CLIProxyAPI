@@ -13,7 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
-var reGoogleMessageRetryDuration = regexp.MustCompile(`(?i)\b(?:after|retry\s+in)\s+(\d+(?:\.\d+)?(?:h|ms|m|s)(?:\d+(?:\.\d+)?(?:ms|m|s))*)\b`)
+var reGoogleMessageRetryDuration = regexp.MustCompile(`(?i)\b(?:after|retry\s+in|resets?\s+in)\s+(\d+(?:\.\d+)?(?:h|ms|m|s)(?:\d+(?:\.\d+)?(?:ms|m|s))*)\b`)
 
 // DeleteJSONField removes a top-level or nested JSON field from a payload.
 func DeleteJSONField(body []byte, key string) []byte {

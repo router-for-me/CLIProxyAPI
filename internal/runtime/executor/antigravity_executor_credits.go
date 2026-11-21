@@ -410,6 +410,9 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
+		} else if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.status").String()), "RESOURCE_EXHAUSTED") {
+			retryAfter := antigravityDefaultRateLimitRetryAfter
+			err.retryAfter = &retryAfter
 		}
 	} else if statusCode == http.StatusUnauthorized {
 		err.credentialScoped = true
