@@ -155,6 +155,37 @@ func TestCopilotProtocolMatrix(t *testing.T) {
 	}
 }
 
+func TestCopilotCountTokensGeminiResponse(t *testing.T) {
+	const model = "test-model"
+	const geminiBody = `{"contents":[{"role":"user","parts":[{"text":"Hello there"}]}]}`
+	e := NewCopilotExecutor(nil)
+	for _, tc := range []struct {
+		name, endpoint, body string
+		source, response     tr.Format
+	}{
+		{"gemini via chat", copilot.Chat, geminiBody, tr.FormatGemini, ""},
+		{"gemini via messages", copilot.Messages, geminiBody, tr.FormatGemini, ""},
+		{"explicit gemini response", copilot.Chat, `{"messages":[{"role":"user","content":"Hello there"}]}`, tr.FormatOpenAI, tr.FormatGemini},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := copilotTestAuth(t, "account", model, tc.endpoint)
+			req := cliproxyexecutor.Request{Model: copilot.ModelPrefix + model, Payload: []byte(tc.body)}
+			resp, err := e.CountTokens(t.Context(), auth, req, cliproxyexecutor.Options{SourceFormat: tc.source, ResponseFormat: tc.response})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := ojson.ParseBytes(resp.Payload)
+			total := body.Get("totalTokens")
+			if total.Type != ojson.Number || total.Int() <= 0 || body.Get("promptTokensDetails.0.tokenCount").Int() != total.Int() || body.Get("usage").Exists() {
+				t.Fatalf("unexpected Gemini countTokens response: %s", resp.Payload)
+			}
+			if got := resp.Headers.Get("X-Cpa-Token-Count"); got != "estimated" {
+				t.Errorf("X-Cpa-Token-Count = %q, want estimated", got)
+			}
+		})
+	}
+}
+
 func TestCopilotCLIRequestCompatibility(t *testing.T) {
 	executor := NewCopilotExecutor(&config.Config{})
 	for _, model := range []string{"gemini-4-argon", "kimi-k3"} {

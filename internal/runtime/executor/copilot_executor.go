@@ -323,12 +323,14 @@ func (e *CopilotExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	format := cliproxyexecutor.ResponseFormatOrSource(opts)
-	payload := helps.BuildOpenAIUsageJSON(count)
-	if format == sdktranslator.FormatClaude || format == sdktranslator.FormatOpenAIResponse {
-		doc := ojson.NewDocString(`{}`)
-		_ = doc.Set("input_tokens", count)
-		payload = doc.Bytes()
+	var payload []byte
+	switch cliproxyexecutor.ResponseFormatOrSource(opts) {
+	case sdktranslator.FormatGemini:
+		payload = common.GeminiTokenCountJSON(count)
+	case sdktranslator.FormatClaude, sdktranslator.FormatOpenAIResponse:
+		payload = common.ClaudeInputTokensJSON(count)
+	default:
+		payload = helps.BuildOpenAIUsageJSON(count)
 	}
 	return cliproxyexecutor.Response{Payload: payload, Headers: http.Header{"X-Cpa-Token-Count": {"estimated"}}}, nil
 }
