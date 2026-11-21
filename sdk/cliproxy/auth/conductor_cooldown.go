@@ -2427,6 +2427,18 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	m.publishErrorEvent(result, authSnapshot)
 }
 
+func modelStateKey(auth *Auth, model string) string {
+	if isCopilotAuth(auth) {
+		// Keep restored route IDs intact until the Copilot catalog can resolve them.
+		return strings.TrimSpace(model)
+	}
+	return canonicalModelKey(model)
+}
+
+func modelStateLookupKey(auth *Auth, model string) string {
+	return strings.ToLower(modelStateKey(auth, model))
+}
+
 func existingModelState(auth *Auth, model string) *ModelState {
 	model = canonicalModelKey(model)
 	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
@@ -2441,7 +2453,7 @@ func existingModelState(auth *Auth, model string) *ModelState {
 	}
 	var matched *ModelState
 	for stateModel, state := range auth.ModelStates {
-		if state == nil || canonicalModelLookupKey(stateModel) != lookupKey {
+		if state == nil || modelStateLookupKey(auth, stateModel) != lookupKey {
 			continue
 		}
 		if matched == nil {
@@ -2454,7 +2466,7 @@ func existingModelState(auth *Auth, model string) *ModelState {
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {
-	model = canonicalModelKey(model)
+	model = modelStateKey(auth, model)
 	if auth == nil || model == "" {
 		return nil
 	}
@@ -2465,9 +2477,9 @@ func ensureModelState(auth *Auth, model string) *ModelState {
 	if state, ok := auth.ModelStates[model]; ok && state != nil {
 		return state
 	}
-	lookupKey := canonicalModelLookupKey(model)
+	lookupKey := modelStateLookupKey(auth, model)
 	for stateModel, state := range auth.ModelStates {
-		if canonicalModelLookupKey(stateModel) == lookupKey && state != nil {
+		if modelStateLookupKey(auth, stateModel) == lookupKey && state != nil {
 			return state
 		}
 	}
@@ -2492,14 +2504,14 @@ func normalizeModelStates(auth *Auth) bool {
 	changed := false
 	for _, model := range keys {
 		state := auth.ModelStates[model]
-		modelKey := canonicalModelKey(model)
+		modelKey := modelStateKey(auth, model)
 		if modelKey == "" {
 			modelKey = strings.TrimSpace(model)
 		}
 		if modelKey != model {
 			changed = true
 		}
-		lookupKey := canonicalModelLookupKey(modelKey)
+		lookupKey := modelStateLookupKey(auth, modelKey)
 		if lookupKey == "" {
 			lookupKey = strings.ToLower(modelKey)
 		}

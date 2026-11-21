@@ -982,7 +982,7 @@ func isQuotaCooldownBlock(auth *Auth, checkModel string, now time.Time) bool {
 		if checkModel != "" && len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelLookupKey(checkModel)
 			for stateModel, state := range auth.ModelStates {
-				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+				if state == nil || modelStateLookupKey(auth, stateModel) != modelKey {
 					continue
 				}
 				if state.nonQuotaCooldownUntil.After(now) {
@@ -1013,7 +1013,7 @@ func isQuotaCooldownBlock(auth *Auth, checkModel string, now time.Time) bool {
 		matched := false
 		hasQuota := false
 		for stateModel, state := range auth.ModelStates {
-			if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+			if state == nil || modelStateLookupKey(auth, stateModel) != modelKey {
 				continue
 			}
 			matched = true
