@@ -23,8 +23,14 @@ version, run `omarchy restart shell`.
 
 Click the chart icon to open the panel. Five-hour windows show a live
 hours:minutes countdown; longer windows show the local reset date and time.
-The panel refreshes on open and every five minutes while visible. You can disable
-automatic refresh in the widget settings or press **R** to refresh manually.
+The panel checks on open and every 15 minutes while visible. **R** checks
+manually; it still reuses readings less than 15 minutes old. You can disable
+automatic checks in the widget settings.
+
+The widget saves readings in your user cache so reopening the panel or
+restarting Omarchy does not repeat quota requests. When a quota endpoint
+throttles a request, the widget honors its retry time for that provider and
+labels any previous readings as last known.
 
 The widget expects Papa Proxy at `http://127.0.0.1:8317`, with its Claude and
 Codex OAuth files in `~/.cli-proxy-api`. It queries the same read-only quota

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 import concurrent.futures
 import datetime as dt
+from email.utils import parsedate_to_datetime
+import fcntl
+import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import time
 
 MAX_BYTES = 1 << 20
 MAX_ACCOUNTS = 16
+REFRESH_INTERVAL = 15 * 60
 OMARCHY = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
 PROVIDERS = {
     "claude": ("api.anthropic.com", "/api/oauth/usage", {
@@ -101,10 +106,7 @@ def codex_windows(data):
                 yield window(label, row.get("used_percent"), row.get("reset_at"))
 
 
-def proxy_quota(provider, auth, fallback):
-    name = "Claude" if provider == "claude" else "Codex"
-    row = {"id": provider, "name": name, "detail": fallback,
-           "status": "unavailable", "windows": []}
+def proxy_quota(provider, auth, row):
     host, path, headers = PROVIDERS[provider]
     conn = http.client.HTTPSConnection(host, timeout=6)
     try:
@@ -114,8 +116,17 @@ def proxy_quota(provider, auth, fallback):
             headers["ChatGPT-Account-Id"] = auth["account_id"]
         conn.request("GET", path, headers=headers)
         with conn.getresponse() as response:
+            if response.status == 429:
+                now = time.time()
+                retry = response.getheader("Retry-After") or ""
+                try:
+                    until = now + int(retry) if retry.isdecimal() else (
+                        parsedate_to_datetime(retry).timestamp())
+                except (ValueError, OverflowError):
+                    until = now + REFRESH_INTERVAL
+                return row, max(now + 60, until)
             if response.status != 200:
-                return row
+                return row, 0
             data = read_json(response)
         get_windows = claude_windows if provider == "claude" else codex_windows
         row["windows"] = [entry for entry in get_windows(data) if entry]
@@ -124,7 +135,7 @@ def proxy_quota(provider, auth, fallback):
         pass
     finally:
         conn.close()
-    return row
+    return row, 0
 
 
 def local_usage(agent, name):
@@ -164,30 +175,95 @@ def local_usage(agent, name):
     return row
 
 
-def main():
-    proxy = []
+def proxy_accounts():
+    accounts = {provider: {} for provider in PROVIDERS}
     auth_dir = Path.home() / ".cli-proxy-api"
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_ACCOUNTS + 2) as pool:
-        local = [pool.submit(local_usage, agent, name)
-                 for agent, name in (("agy", "Antigravity"), ("muse", "Meta / Muse"))]
-        for path in sorted(auth_dir.glob("*.json")):
-            if len(proxy) == MAX_ACCOUNTS:
-                break
-            try:
-                with path.open("rb") as stream:
-                    auth = read_json(stream)
-                provider = auth.get("type")
-                if provider not in PROVIDERS or auth.get("disabled"):
-                    continue
-                email = auth.get("email") or path.stem.split("-", 2)[-1].split("-pro")[0]
-                alias = email.split("@", 1)[0]
-                detail = alias if re.fullmatch(r"[\w.+-]{1,28}", alias) else f"Account {len(proxy) + 1}"
-                proxy.append(pool.submit(proxy_quota, provider, auth, detail))
-            except (OSError, ValueError, TypeError, AttributeError):
+    count = 0
+    for path in sorted(auth_dir.glob("*.json")):
+        if count == MAX_ACCOUNTS:
+            break
+        try:
+            with path.open("rb") as stream:
+                auth = read_json(stream)
+            provider = auth.get("type")
+            if provider not in PROVIDERS or auth.get("disabled"):
                 continue
-        print(json.dumps({"proxy": [job.result() for job in proxy],
-                          "local": [job.result() for job in local], "checked": round(time.time())},
-                         allow_nan=False))
+            identity = (auth.get("account_uuid") or auth.get("account_id")
+                        or auth.get("email") or auth.get("access_token", ""))
+            key = hashlib.sha256(f"{path.name}\0{identity}".encode()).hexdigest()
+            email = auth.get("email") or path.stem.split("-", 2)[-1].split("-pro")[0]
+            alias = email.split("@", 1)[0]
+            detail = alias if re.fullmatch(r"[\w.+-]{1,28}", alias) else f"Account {count + 1}"
+            row = {"id": provider, "name": "Claude" if provider == "claude" else "Codex",
+                   "detail": detail, "status": "unavailable", "windows": []}
+            accounts[provider][key] = (auth, row)
+            count += 1
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return accounts
+
+
+def refresh_proxy(provider, accounts, previous):
+    rows = {}
+    checked = previous.get("checked", 0)
+    blocked = previous.get("blocked", 0)
+    for key, (auth, row) in accounts.items():
+        old = previous.get("rows", {}).get(key, {})
+        now = time.time()
+        if old.get("next_check", 0) > now:
+            rows[key] = old
+            continue
+        next_check = blocked
+        if blocked <= now:
+            row, blocked = proxy_quota(provider, auth, row)
+            checked = int(time.time())
+            next_check = blocked or checked + REFRESH_INTERVAL
+        if row["status"] == "unavailable":
+            row["windows"] = old.get("row", {}).get("windows", [])
+            if blocked > now:
+                row["status"] = "rateLimitedStale" if row["windows"] else "rateLimited"
+            elif row["windows"]:
+                row["status"] = "stale"
+        rows[key] = {"next_check": next_check, "row": row}
+    return {"checked": checked, "blocked": blocked, "rows": rows}
+
+
+def main():
+    accounts = proxy_accounts()
+    root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    directory = root / "omarchy" / "proxy-usage"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = directory / "snapshot.json"
+    with (directory / "refresh.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with path.open("rb") as stream:
+                previous = read_json(stream)
+        except (OSError, ValueError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            jobs = {p: pool.submit(refresh_proxy, p, a, previous.get(p, {}))
+                    for p, a in accounts.items()}
+            local = previous.get("local", {})
+            if local.get("next_check", 0) <= time.time():
+                local_jobs = [pool.submit(local_usage, agent, name)
+                              for agent, name in (("agy", "Antigravity"), ("muse", "Meta / Muse"))]
+                rows = [job.result() for job in local_jobs]
+                checked = int(time.time())
+                local = {"checked": checked, "next_check": checked + REFRESH_INTERVAL, "rows": rows}
+            snapshot = {**{p: job.result() for p, job in jobs.items()}, "local": local}
+
+        if snapshot != previous:
+            with tempfile.NamedTemporaryFile(mode="w", dir=directory, delete_on_close=False) as temp:
+                json.dump(snapshot, temp, allow_nan=False)
+                temp.close()
+                os.replace(temp.name, path)
+        proxy = [entry["row"] for p in PROVIDERS for entry in snapshot[p]["rows"].values()]
+        print(json.dumps({"proxy": proxy, "local": local["rows"],
+                          "checked": max(s["checked"] for s in snapshot.values())}, allow_nan=False))
 
 
 if __name__ == "__main__":

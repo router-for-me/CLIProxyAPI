@@ -103,7 +103,7 @@ Panel {
     }
 
     Timer {
-        interval: 300000
+        interval: 900000
         repeat: true
         running: root.opened && root.autoRefresh
         onTriggered: root.refresh()

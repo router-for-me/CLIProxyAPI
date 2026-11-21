@@ -2,7 +2,7 @@
     "schemaVersion": 1,
     "id": "chicken.proxy-usage",
     "name": "Usage",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "author": "Local",
     "description": "Papa Proxy quotas and standalone Antigravity and Meta usage.",
     "kinds": ["bar-widget"],
@@ -16,7 +16,7 @@
             {
                 "key": "autoRefresh",
                 "type": "boolean",
-                "label": "Refresh every five minutes while open",
+                "label": "Check every 15 minutes while open",
                 "defaultValue": true
             }
         ]
