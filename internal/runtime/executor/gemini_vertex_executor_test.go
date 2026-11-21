@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
@@ -662,5 +664,115 @@ func TestGeminiVertexExecutor_AliasedHydrogenPreservesNativeThinkingLevelWhenSha
 				}
 			})
 		}
+	}
+}
+
+func TestVertexExecutorRejectsEmbeddingActionsBeforeUpstream(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"embedding":{"values":[1]}}`))
+	}))
+	defer server.Close()
+
+	for _, tt := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+	}{
+		{
+			name: "api key",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}},
+		},
+		{
+			name: "service account",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"project_id":      "test-project",
+				"location":        "us-central1",
+				"base_url":        server.URL,
+				"service_account": `{"type":"service_account"}`,
+			}},
+		},
+	} {
+		for _, action := range []string{helps.GeminiEmbedContentAction, helps.GeminiBatchEmbedContentsAction} {
+			t.Run(tt.name+"/"+action, func(t *testing.T) {
+				calls = 0
+				exec := NewGeminiVertexExecutor(&config.Config{})
+				req := cliproxyexecutor.Request{
+					Model:    "gemini-embedding-001",
+					Payload:  []byte(`{"content":{"parts":[{"text":"hi"}]}}`),
+					Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: action},
+				}
+				_, err := exec.Execute(context.Background(), tt.auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+				if err == nil {
+					t.Fatal("Execute() error = nil, want not-implemented error")
+				}
+				var status interface{ StatusCode() int }
+				if !errors.As(err, &status) || status.StatusCode() != http.StatusNotImplemented {
+					t.Fatalf("error = %v, want status %d", err, http.StatusNotImplemented)
+				}
+				if calls != 0 {
+					t.Fatalf("upstream calls = %d, want 0", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestVertexExecutorRejectsDecisionsBeforeUpstream(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{}}`))
+	}))
+	defer server.Close()
+
+	for _, tt := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+	}{
+		{
+			name: "api key",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}},
+		},
+		{
+			name: "service account",
+			auth: &cliproxyauth.Auth{Attributes: map[string]string{
+				"project_id":      "test-project",
+				"location":        "us-central1",
+				"base_url":        server.URL,
+				"service_account": `{"type":"service_account"}`,
+			}},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			calls = 0
+			exec := NewGeminiVertexExecutor(&config.Config{})
+			req := cliproxyexecutor.Request{
+				Model:    "gemini-decision-1",
+				Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+				Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+			}
+			_, err := exec.Execute(context.Background(), tt.auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+			if err == nil {
+				t.Fatal("Execute() error = nil, want not-implemented error")
+			}
+			var status interface{ StatusCode() int }
+			if !errors.As(err, &status) || status.StatusCode() != http.StatusNotImplemented {
+				t.Fatalf("error = %v, want status %d", err, http.StatusNotImplemented)
+			}
+
+			_, errStream := exec.ExecuteStream(context.Background(), tt.auth, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+			if errStream == nil {
+				t.Fatal("ExecuteStream() error = nil, want not-implemented error")
+			}
+			if !errors.As(errStream, &status) || status.StatusCode() != http.StatusNotImplemented {
+				t.Fatalf("stream error = %v, want status %d", errStream, http.StatusNotImplemented)
+			}
+			if calls != 0 {
+				t.Fatalf("upstream calls = %d, want 0", calls)
+			}
+		})
 	}
 }

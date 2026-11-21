@@ -989,8 +989,16 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType, metadataCha
 		if resolved := modelconfig.ResolveModelInfo(name, modelType, model.GetThinking()); resolved.Thinking != nil {
 			info.Thinking = resolved.Thinking
 		}
-		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil && staticInfo.NativeCapabilities != nil {
-			info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+		if staticInfo := registry.LookupStaticModelInfoByChannel(name, metadataChannel); staticInfo != nil {
+			if staticInfo.NativeCapabilities != nil {
+				info.NativeCapabilities = cloneModelInfoForCatalogRoute(staticInfo).NativeCapabilities
+			}
+			// Configured entries start with no generation methods and are advertised as
+			// generateContent only. Native catalog entries (embeddings, decisions) must keep
+			// declaring their real actions, otherwise the catalog misreports them.
+			if methods := registry.NativeModelGenerationMethods(staticInfo.SupportedGenerationMethods); len(methods) > 0 {
+				info.SupportedGenerationMethods = methods
+			}
 		}
 		out = append(out, info)
 	}

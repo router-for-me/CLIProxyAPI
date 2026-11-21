@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/wsrelay"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -806,5 +808,440 @@ func TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsCondu
 				t.Fatal(errClient)
 			}
 		})
+	}
+}
+
+func TestAIStudioExecutorEmbeddingStaysNativeOverRelay(t *testing.T) {
+	const authID = "aistudio-embed"
+
+	for _, tt := range []struct {
+		name     string
+		action   string
+		payload  string
+		wantPath string
+	}{
+		{
+			name:     "embedContent",
+			action:   helps.GeminiEmbedContentAction,
+			payload:  `{"content":{"parts":[{"text":"hi"}]}}`,
+			wantPath: "/v1beta/models/gemini-embedding-001:embedContent",
+		},
+		{
+			name:     "batchEmbedContents",
+			action:   helps.GeminiBatchEmbedContentsAction,
+			payload:  `{"requests":[{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"a"}]}},{"model":"models/gemini-embedding-001","content":{"parts":[{"text":"b"}]}}]}`,
+			wantPath: "/v1beta/models/gemini-embedding-001:batchEmbedContents",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			connected := make(chan struct{})
+			var connectedOnce sync.Once
+			relay := wsrelay.NewManager(wsrelay.Options{
+				ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+				OnConnected: func(provider string) {
+					if provider == authID {
+						connectedOnce.Do(func() { close(connected) })
+					}
+				},
+			})
+			server := httptest.NewServer(relay.Handler())
+			defer server.Close()
+			defer func() {
+				if errStop := relay.Stop(context.Background()); errStop != nil {
+					t.Errorf("relay stop error = %v", errStop)
+				}
+			}()
+
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + relay.Path()
+			conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+			if errDial != nil {
+				t.Fatalf("dial websocket: %v", errDial)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Errorf("websocket close error = %v", errClose)
+				}
+			}()
+			select {
+			case <-connected:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for relay connection")
+			}
+
+			type captured struct {
+				url  string
+				body string
+			}
+			gotCh := make(chan captured, 1)
+			clientDone := make(chan error, 1)
+			const upstreamBody = `{"embedding":{"values":[0.5]},"usageMetadata":{"promptTokenCount":2,"totalTokenCount":2}}`
+			go func() {
+				var msg wsrelay.Message
+				if errRead := conn.ReadJSON(&msg); errRead != nil {
+					clientDone <- fmt.Errorf("read relay request: %w", errRead)
+					return
+				}
+				url, _ := msg.Payload["url"].(string)
+				body, _ := msg.Payload["body"].(string)
+				gotCh <- captured{url: url, body: body}
+				response := wsrelay.Message{
+					ID:   msg.ID,
+					Type: wsrelay.MessageTypeHTTPResp,
+					Payload: map[string]any{
+						"status":  float64(http.StatusOK),
+						"headers": map[string]any{"Content-Type": "application/json"},
+						"body":    upstreamBody,
+					},
+				}
+				if errWrite := conn.WriteJSON(response); errWrite != nil {
+					clientDone <- fmt.Errorf("write relay response: %w", errWrite)
+					return
+				}
+				clientDone <- nil
+			}()
+
+			exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+			resp, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+				Model:    "gemini-embedding-001",
+				Payload:  []byte(tt.payload),
+				Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: tt.action},
+			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, Alt: "sse"})
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			if errClient := <-clientDone; errClient != nil {
+				t.Fatal(errClient)
+			}
+			if string(resp.Payload) != upstreamBody {
+				t.Fatalf("response payload = %s, want upstream body unchanged", resp.Payload)
+			}
+
+			got := <-gotCh
+			if !strings.HasSuffix(got.url, tt.wantPath) {
+				t.Fatalf("relay url = %q, want suffix %q", got.url, tt.wantPath)
+			}
+			if strings.Contains(got.url, "alt=") {
+				t.Fatalf("embedding relay url must not carry alt: %q", got.url)
+			}
+			for _, field := range []string{"contents", "safetySettings", "tools", "generationConfig"} {
+				if ojson.GetBytes([]byte(got.body), field).Exists() {
+					t.Fatalf("relay body must not contain %q: %s", field, got.body)
+				}
+			}
+		})
+	}
+}
+
+func TestAIStudioExecutorEmbeddingMapsRelayErrorStatus(t *testing.T) {
+	const authID = "aistudio-embed-error"
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	relay := wsrelay.NewManager(wsrelay.Options{
+		ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+		OnConnected: func(provider string) {
+			if provider == authID {
+				connectedOnce.Do(func() { close(connected) })
+			}
+		},
+	})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	defer func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Errorf("relay stop error = %v", errStop)
+		}
+	}()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + relay.Path()
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	defer func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Errorf("websocket close error = %v", errClose)
+		}
+	}()
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for relay connection")
+	}
+
+	clientDone := make(chan error, 1)
+	go func() {
+		var msg wsrelay.Message
+		if errRead := conn.ReadJSON(&msg); errRead != nil {
+			clientDone <- fmt.Errorf("read relay request: %w", errRead)
+			return
+		}
+		if errWrite := conn.WriteJSON(wsrelay.Message{
+			ID:   msg.ID,
+			Type: wsrelay.MessageTypeHTTPResp,
+			Payload: map[string]any{
+				"status":  float64(http.StatusTooManyRequests),
+				"headers": map[string]any{"Content-Type": "application/json"},
+				"body":    `{"error":{"message":"quota"}}`,
+			},
+		}); errWrite != nil {
+			clientDone <- fmt.Errorf("write relay response: %w", errWrite)
+			return
+		}
+		clientDone <- nil
+	}()
+
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	_, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+		Model:    "gemini-embedding-001",
+		Payload:  []byte(`{"content":{"parts":[{"text":"hi"}]}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiEmbedContentAction},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if errExecute == nil {
+		t.Fatal("Execute() error = nil, want relay status error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("error = %v, want status %d", errExecute, http.StatusTooManyRequests)
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+}
+
+// newAIStudioDecisionsRelay wires a relay client that answers one request per case.
+func newAIStudioDecisionsRelay(t *testing.T, authID string, status int, responseBody string) (*wsrelay.Manager, *httptest.Server, *websocket.Conn) {
+	t.Helper()
+	connected := make(chan struct{})
+	var connectedOnce sync.Once
+	relay := wsrelay.NewManager(wsrelay.Options{
+		ProviderFactory: func(*http.Request) (string, error) { return authID, nil },
+		OnConnected: func(provider string) {
+			if provider == authID {
+				connectedOnce.Do(func() { close(connected) })
+			}
+		},
+	})
+	server := httptest.NewServer(relay.Handler())
+	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Errorf("relay stop error = %v", errStop)
+		}
+	})
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + relay.Path()
+	conn, _, errDial := websocket.DefaultDialer.Dial(wsURL, nil)
+	if errDial != nil {
+		t.Fatalf("dial websocket: %v", errDial)
+	}
+	t.Cleanup(func() {
+		if errClose := conn.Close(); errClose != nil {
+			t.Errorf("websocket close error = %v", errClose)
+		}
+	})
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for relay connection")
+	}
+	return relay, server, conn
+}
+
+func TestAIStudioExecutorDecisionsStaysNativeOverRelay(t *testing.T) {
+	const authID = "aistudio-decisions"
+	const upstreamBody = `{"answers":{"q":{"type":"noul","noul":0.9,"confidence":0.9}},"usage":{"total_input_tokens":2,"total_output_tokens":0,"total_tokens":2}}`
+	relay, _, conn := newAIStudioDecisionsRelay(t, authID, http.StatusOK, upstreamBody)
+
+	type captured struct{ url, body string }
+	gotCh := make(chan captured, 1)
+	clientDone := make(chan error, 1)
+	go func() {
+		var msg wsrelay.Message
+		if errRead := conn.ReadJSON(&msg); errRead != nil {
+			clientDone <- fmt.Errorf("read relay request: %w", errRead)
+			return
+		}
+		url, _ := msg.Payload["url"].(string)
+		body, _ := msg.Payload["body"].(string)
+		gotCh <- captured{url: url, body: body}
+		if errWrite := conn.WriteJSON(wsrelay.Message{
+			ID:   msg.ID,
+			Type: wsrelay.MessageTypeHTTPResp,
+			Payload: map[string]any{
+				"status":  float64(http.StatusOK),
+				"headers": map[string]any{"Content-Type": "application/json"},
+				"body":    upstreamBody,
+			},
+		}); errWrite != nil {
+			clientDone <- fmt.Errorf("write relay response: %w", errWrite)
+			return
+		}
+		clientDone <- nil
+	}()
+
+	plugin := &captureAIStudioUsagePlugin{records: make(chan usage.Record, 16)}
+	usage.RegisterPlugin(plugin)
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	resp, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, Alt: "sse"})
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+	if string(resp.Payload) != upstreamBody {
+		t.Fatalf("response payload = %s, want upstream body unchanged", resp.Payload)
+	}
+
+	got := <-gotCh
+	if !strings.HasSuffix(got.url, "/v1beta/decisions") {
+		t.Fatalf("relay url = %q, want model-less /v1beta/decisions suffix", got.url)
+	}
+	if strings.Contains(got.url, "/models/") {
+		t.Fatalf("relay url must not contain a models segment: %q", got.url)
+	}
+	if strings.Contains(got.url, "alt=") {
+		t.Fatalf("relay url must not carry alt: %q", got.url)
+	}
+	if gotField := ojson.GetBytes([]byte(got.body), "model").String(); gotField != "gemini-decision-1" {
+		t.Fatalf("relay body model = %q, want bare gemini-decision-1", gotField)
+	}
+	for _, field := range []string{"contents", "safetySettings", "tools", "generationConfig"} {
+		if ojson.GetBytes([]byte(got.body), field).Exists() {
+			t.Fatalf("relay body must not contain %q: %s", field, got.body)
+		}
+	}
+
+	record := waitForAIStudioUsageRecord(t, plugin.records, "gemini-decision-1")
+	if record.Detail.InputTokens != 2 {
+		t.Fatalf("input tokens = %d, want 2", record.Detail.InputTokens)
+	}
+	if record.Detail.OutputTokens != 0 {
+		t.Fatalf("output tokens = %d, want 0", record.Detail.OutputTokens)
+	}
+}
+
+func TestAIStudioExecutorDecisionsMapsRelayErrorStatus(t *testing.T) {
+	const authID = "aistudio-decisions-error"
+	relay, _, conn := newAIStudioDecisionsRelay(t, authID, http.StatusTooManyRequests, `{"error":{"message":"quota"}}`)
+
+	clientDone := make(chan error, 1)
+	go func() {
+		var msg wsrelay.Message
+		if errRead := conn.ReadJSON(&msg); errRead != nil {
+			clientDone <- fmt.Errorf("read relay request: %w", errRead)
+			return
+		}
+		if errWrite := conn.WriteJSON(wsrelay.Message{
+			ID:   msg.ID,
+			Type: wsrelay.MessageTypeHTTPResp,
+			Payload: map[string]any{
+				"status":  float64(http.StatusTooManyRequests),
+				"headers": map[string]any{"Content-Type": "application/json"},
+				"body":    `{"error":{"message":"quota"}}`,
+			},
+		}); errWrite != nil {
+			clientDone <- fmt.Errorf("write relay response: %w", errWrite)
+			return
+		}
+		clientDone <- nil
+	}()
+
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	_, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+	if errExecute == nil {
+		t.Fatal("Execute() error = nil, want relay status error")
+	}
+	var status interface{ StatusCode() int }
+	if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("error = %v, want status %d", errExecute, http.StatusTooManyRequests)
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+}
+
+func TestAIStudioExecutorDecisionsRejectsInvalidPayloadWithoutRelay(t *testing.T) {
+	const authID = "aistudio-decisions-invalid"
+	relay := wsrelay.NewManager(wsrelay.Options{ProviderFactory: func(*http.Request) (string, error) { return authID, nil }})
+	server := httptest.NewServer(relay.Handler())
+	defer server.Close()
+	defer func() {
+		if errStop := relay.Stop(context.Background()); errStop != nil {
+			t.Errorf("relay stop error = %v", errStop)
+		}
+	}()
+
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	for _, payload := range []string{`[]`, `{"input":"hi"}`, `{"input":"hi","questions":{},"stream":true}`} {
+		_, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+			Model:    "gemini-decision-1",
+			Payload:  []byte(payload),
+			Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini})
+		if errExecute == nil {
+			t.Fatalf("payload %s: Execute() error = nil, want client error", payload)
+		}
+		var status interface{ StatusCode() int }
+		if !errors.As(errExecute, &status) || status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("payload %s: error = %v, want status %d", payload, errExecute, http.StatusBadRequest)
+		}
+	}
+}
+
+// TestAIStudioExecutorDecisionsRelayRecordsTTFT guards the native relay path against
+// publishing a zero TTFT: the chat path starts timing before the relay call and marks
+// the first response byte, and the embedding/decisions path must do the same.
+func TestAIStudioExecutorDecisionsRelayRecordsTTFT(t *testing.T) {
+	const authID = "aistudio-decisions-ttft"
+	const upstreamBody = `{"answers":{},"usage":{"total_input_tokens":3,"total_output_tokens":0,"total_tokens":3}}`
+	relay, _, conn := newAIStudioDecisionsRelay(t, authID, http.StatusOK, upstreamBody)
+
+	clientDone := make(chan error, 1)
+	go func() {
+		var msg wsrelay.Message
+		if errRead := conn.ReadJSON(&msg); errRead != nil {
+			clientDone <- fmt.Errorf("read relay request: %w", errRead)
+			return
+		}
+		if errWrite := conn.WriteJSON(wsrelay.Message{
+			ID:   msg.ID,
+			Type: wsrelay.MessageTypeHTTPResp,
+			Payload: map[string]any{
+				"status":  float64(http.StatusOK),
+				"headers": map[string]any{"Content-Type": "application/json"},
+				"body":    upstreamBody,
+			},
+		}); errWrite != nil {
+			clientDone <- fmt.Errorf("write relay response: %w", errWrite)
+			return
+		}
+		clientDone <- nil
+	}()
+
+	plugin := &captureAIStudioUsagePlugin{records: make(chan usage.Record, 16)}
+	usage.RegisterPlugin(plugin)
+	exec := NewAIStudioExecutor(&config.Config{}, "aistudio", relay)
+	if _, errExecute := exec.Execute(context.Background(), &cliproxyauth.Auth{ID: authID, Provider: "aistudio"}, cliproxyexecutor.Request{
+		Model:    "gemini-decision-1",
+		Payload:  []byte(`{"input":"hi","questions":{"q":{"type":"noul","instructions":"ok?"}}}`),
+		Metadata: map[string]any{cliproxyexecutor.RequestActionMetadataKey: helps.GeminiDecisionsAction},
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini}); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if errClient := <-clientDone; errClient != nil {
+		t.Fatal(errClient)
+	}
+	record := waitForAIStudioUsageRecord(t, plugin.records, "gemini-decision-1")
+	if record.TTFT <= 0 {
+		t.Fatalf("TTFT = %v, want a recorded first-byte latency", record.TTFT)
 	}
 }
