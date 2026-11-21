@@ -598,24 +598,41 @@ func TestDetectClaudeCodeRequestRecognizesAgentSDKHaiku55Helpers(t *testing.T) {
 	webSearchBetas := "interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,effort-2025-11-24,dangerous-tool-use-2026-09-03,extended-cache-ttl-2025-04-11"
 	webSearchPayload := []byte(`{"max_tokens":1024,"messages":[{"role":"user","content":[{"type":"text","text":"search query"}]}],"metadata":{"user_id":` + string(encodedUserID) + `},"model":"claude-haiku-5-5","output_config":{"effort":"medium"},"stream":true,"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.304.2e0; cc_entrypoint=sdk-ts"},{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."},{"type":"text","text":"Perform web search."}],"tool_choice":{"type":"auto"},"tools":[{"type":"web_search_20250305","name":"web_search"}]}`)
 
+	// Claude Code 2.1.330 behind a custom ANTHROPIC_BASE_URL omits
+	// prompt-caching-scope-2026-01-05 (measured, issue #7809).
+	title330Betas := "interleaved-thinking-2025-05-14,context-management-2025-06-27,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,thinking-token-count-2026-05-13,effort-2025-11-24,structured-outputs-2025-12-15"
+	title330Payload := []byte(`{"model":"claude-haiku-5-5","messages":[{"role":"user","content":[{"type":"text","text":"name session"}]}],"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.330.4f2; cc_entrypoint=t3-code;"},{"type":"text","text":"You are a Claude agent, built on Anthropic's Claude Agent SDK."},{"type":"text","text":"You are naming a coding session so the user can pick it out of a long list of sessions."}],"tools":[],"metadata":{"user_id":` + string(encodedUserID) + `},"max_tokens":128000,"output_config":{"effort":"medium","format":{"type":"json_schema","schema":{"type":"object","properties":{"title":{"type":"string"}},"required":["title"],"additionalProperties":false}}},"stream":true}`)
+
 	for _, tc := range []struct {
 		name       string
 		userAgent  string
 		entrypoint string
 		subclient  string
+		agentSDK   string
 		betas      string
 		payload    []byte
 		cfg        *config.Config
 	}{
-		{name: "sdk-ts title helper", userAgent: "claude-cli/2.1.345 (external, sdk-ts, agent-sdk/0.3.276)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", betas: titleBetas, payload: titlePayload},
-		{name: "sdk-ts web_search helper", userAgent: "claude-cli/2.1.345 (external, sdk-ts, agent-sdk/0.3.276)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", betas: webSearchBetas, payload: webSearchPayload},
+		{name: "sdk-ts title helper", userAgent: "claude-cli/2.1.345 (external, sdk-ts, agent-sdk/0.3.276)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", agentSDK: "0.3.276", betas: titleBetas, payload: titlePayload},
+		{name: "sdk-ts web_search helper", userAgent: "claude-cli/2.1.345 (external, sdk-ts, agent-sdk/0.3.276)", entrypoint: "sdk-ts", subclient: "claude-code-sdk-ts", agentSDK: "0.3.276", betas: webSearchBetas, payload: webSearchPayload},
 		{
 			name:       "configured t3-code title helper",
 			userAgent:  "claude-cli/2.1.357 (external, t3-code, agent-sdk/0.3.276)",
 			entrypoint: "t3-code",
 			subclient:  "claude-code-t3-code",
+			agentSDK:   "0.3.276",
 			betas:      titleBetas,
 			payload:    []byte(strings.Replace(string(titlePayload), "cc_entrypoint=sdk-ts", "cc_entrypoint=t3-code", 1)),
+			cfg:        &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{NativeEntrypoints: []string{"t3-code"}}},
+		},
+		{
+			name:       "configured t3-code 2.1.330 title helper behind custom base URL",
+			userAgent:  "claude-cli/2.1.330 (external, t3-code, agent-sdk/0.3.321)",
+			entrypoint: "t3-code",
+			subclient:  "claude-code-t3-code",
+			agentSDK:   "0.3.321",
+			betas:      title330Betas,
+			payload:    title330Payload,
 			cfg:        &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{NativeEntrypoints: []string{"t3-code"}}},
 		},
 	} {
@@ -629,8 +646,26 @@ func TestDetectClaudeCodeRequestRecognizesAgentSDKHaiku55Helpers(t *testing.T) {
 			if !detection.Confirmed || !detection.StrongSignals || !detection.NativeClient || !detection.HelperProfile {
 				t.Fatalf("detection = %#v, want confirmed %s Haiku 5.5 helper", detection, tc.entrypoint)
 			}
-			if detection.Entrypoint != tc.entrypoint || detection.Subclient != tc.subclient || detection.AgentSDKVersion != "0.3.276" {
-				t.Fatalf("detection identity = %#v, want %s / %s / 0.3.276", detection, tc.entrypoint, tc.subclient)
+			if detection.Entrypoint != tc.entrypoint || detection.Subclient != tc.subclient || detection.AgentSDKVersion != tc.agentSDK {
+				t.Fatalf("detection identity = %#v, want %s / %s / %s", detection, tc.entrypoint, tc.subclient, tc.agentSDK)
+			}
+		})
+	}
+
+	for _, requiredBeta := range []string{"interleaved-thinking-2025-05-14", "thinking-token-count-2026-05-13", "context-management-2025-06-27"} {
+		t.Run("2.1.330 title helper without "+requiredBeta, func(t *testing.T) {
+			betas := strings.Replace(title330Betas, requiredBeta+",", "", 1)
+			if betas == title330Betas {
+				t.Fatalf("%s not found in %q", requiredBeta, title330Betas)
+			}
+			headers := measuredClaudeCodeHelperHeaders(betas)
+			headers.Set("User-Agent", "claude-cli/2.1.330 (external, t3-code, agent-sdk/0.3.321)")
+			headers.Set("X-Stainless-Package-Version", "0.128.0")
+			headers.Del("X-Client-Request-Id")
+			cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{NativeEntrypoints: []string{"t3-code"}}}
+
+			if detection := DetectClaudeCodeRequest(headers, title330Payload, false, cfg); detection.Confirmed || detection.HelperProfile {
+				t.Fatalf("detection = %#v, want the helper rejected without %s", detection, requiredBeta)
 			}
 		})
 	}
