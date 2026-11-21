@@ -620,7 +620,7 @@ func (s *Service) runHomeSubscriber(homeCtx context.Context, parentCtx context.C
 			if publishedAt := supervisor.publishedAt.Load(); publishedAt != nil {
 				healthyFor = endedAt.Sub(*publishedAt)
 			}
-			retryDelay := retryBackoff.next(healthyFor, plannedRebalance, rand.Float64())
+			retryDelay := retryBackoff.next(healthyFor, plannedRebalance, proxxHomeRetryJitter(rand.Float64())) // proxx: pinnable jitter for deterministic tests
 			if plannedRebalance {
 				log.Info("home config subscription reconnecting for load balance")
 			} else {
