@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -195,7 +196,8 @@ func updateNestedScalarYAML(data []byte, path []string, value string) ([]byte, e
 	return NormalizeCommentIndentation(buf.Bytes()), nil
 }
 
-// NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.
+// NormalizeCommentIndentation left-aligns standalone comments only when doing so
+// preserves YAML values. A line beginning with # can be part of a multiline scalar.
 func NormalizeCommentIndentation(data []byte) []byte {
 	lines := bytes.Split(data, []byte("\n"))
 	changed := false
@@ -213,7 +215,33 @@ func NormalizeCommentIndentation(data []byte) []byte {
 	if !changed {
 		return data
 	}
-	return bytes.Join(lines, []byte("\n"))
+	normalized := bytes.Join(lines, []byte("\n"))
+	original := yaml.NewDecoder(bytes.NewReader(data))
+	candidate := yaml.NewDecoder(bytes.NewReader(normalized))
+	for {
+		var before, after yaml.Node
+		left, right := original.Decode(&before), candidate.Decode(&after)
+		if left == io.EOF && right == io.EOF {
+			return normalized
+		}
+		if left != nil || right != nil || !sameYAMLContent(&before, &after) {
+			return data
+		}
+	}
+}
+
+// Compare ordered nodes directly so differently spelled keys and exact scalar
+// values survive formatting. Alias nodes carry their anchor name in Value.
+func sameYAMLContent(a, b *yaml.Node) bool {
+	if a.Kind != b.Kind || a.Tag != b.Tag || a.Anchor != b.Anchor || a.Value != b.Value || len(a.Content) != len(b.Content) {
+		return false
+	}
+	for i := range a.Content {
+		if !sameYAMLContent(a.Content[i], b.Content[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // getOrCreateMapValue finds the value node for a given key in a mapping node.
