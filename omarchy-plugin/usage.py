@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -161,10 +162,13 @@ def local_usage(agent, name):
     # Isolate them from the stock widget's account switching and other collectors.
     env = {**os.environ, "OMARCHY_PATH": str(OMARCHY)}
     env.pop("CLOUD_CODE_URL", None)
+    command = [OMARCHY / "bin" / ("omarchy-agent-usage-" + agent)]
+    if agent == "agy":
+        command = [sys.executable, Path(__file__).with_name("agy.py")]
     try:
         done = subprocess.run(
-            [OMARCHY / "bin" / ("omarchy-agent-usage-" + agent)],
-            env=env, capture_output=True, timeout=22, check=True,
+            command,
+            env=env, capture_output=True, timeout=30, check=True,
         )
         if len(done.stdout) > MAX_BYTES:
             return row
@@ -180,7 +184,11 @@ def local_usage(agent, name):
                     label = "Session"
                 if label == "Weekly (7-day)":
                     label = "Weekly"
-                parsed = window(label, entry.get("percent"), entry.get("resetsAt"),
+                # Omarchy's collectors report a fraction; the panel shows percent.
+                percent = entry.get("percent")
+                if type(percent) in (float, int):
+                    percent *= 100
+                parsed = window(label, percent, entry.get("resetsAt"),
                                 True, five_hour)
                 if parsed:
                     row["windows"].append(parsed)

@@ -40,8 +40,14 @@ as the dashboard for those accounts. It shows upstream limits; the
 proxy's scheduler cooldowns can differ. No management key is required.
 
 Antigravity and Meta use Omarchy's bundled collectors and your existing local
-sign-ins. When a provider publishes no quota windows, the panel shows local
-token counts when available.
+sign-ins. Omarchy's Antigravity collector only reads the token `agy` keeps,
+which lapses an hour after `agy` last ran, so `agy.py` renews a lapsed token
+in memory before running it. The keyring is never written. It also counts
+the sessions T3 Code runs from its own Antigravity data directory, and on
+plans like Ultra, where Google meters only Claude and GPT models, labels
+the meters as that pool. Gemini usage has no published quota, so it shows
+only in the token counts. When a provider publishes no quota windows, the
+panel shows local token counts when available.
 
 The Claude and Codex icons come from Omarchy's Agents plugin
 ([license](assets/OMARCHY-LICENSE)). The other icons are based on assets in

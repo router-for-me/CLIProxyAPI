@@ -310,7 +310,7 @@ Panel {
                                             spacing: Commons.Style.space(9)
 
                                             Readout {
-                                                Layout.preferredWidth: Commons.Style.space(88)
+                                                Layout.preferredWidth: Commons.Style.space(100)
                                                 text: meter.modelData.custom ? meter.modelData.label :
                                                     strings.t(meter.modelData.label)
                                                 font.pixelSize: Commons.Style.font.bodySmall

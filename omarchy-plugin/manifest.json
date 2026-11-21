@@ -2,7 +2,7 @@
     "schemaVersion": 1,
     "id": "chicken.proxy-usage",
     "name": "Usage",
-    "version": "1.0.3",
+    "version": "1.0.5",
     "author": "Local",
     "description": "Papa Proxy quotas and standalone Antigravity and Meta usage.",
     "kinds": ["bar-widget"],
