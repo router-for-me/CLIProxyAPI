@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -1774,6 +1775,130 @@ func TestWriteModelListResponse_MetadataNilWithoutAuthContext(t *testing.T) {
 	}
 	if capturedReq.Metadata != nil {
 		t.Fatalf("Metadata = %#v, want nil for unauthenticated context", capturedReq.Metadata)
+	}
+}
+
+func TestWriteModelListResponse_PreservesAllowedCodexSlugForDetail(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			return pluginapi.ResponseInterceptResponse{Body: []byte(`{"object":"list","data":[{"slug":"gpt-5","created":1}]}`)}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models/gpt-5", nil)
+	ctx.Set(sdkaccess.ModelPolicyContextKey, sdkaccess.NewModelPolicy([]string{"gpt-5"}, nil))
+	ctx.Set(ModelDetailIDContextKey, "gpt-5")
+	handler.WriteModelListResponse(ctx, "openai", gin.H{"object": "list", "data": []map[string]any{{"slug": "gpt-5"}}})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"slug":"gpt-5"`) {
+		t.Fatalf("body = %s, want preserved slug entry", rec.Body.String())
+	}
+}
+
+func TestWriteModelListResponse_PreservesAllowedNameForDetail(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			return pluginapi.ResponseInterceptResponse{Body: []byte(`{"object":"list","data":[{"name":"models/gemini-2.5-pro"}]}`)}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models/gemini-2.5-pro", nil)
+	ctx.Set(sdkaccess.ModelPolicyContextKey, sdkaccess.NewModelPolicy([]string{"gemini-2.5-pro"}, nil))
+	ctx.Set(ModelDetailIDContextKey, "gemini-2.5-pro")
+	handler.WriteModelListResponse(ctx, "gemini", gin.H{"models": []map[string]any{{"name": "models/gemini-2.5-pro"}}})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"name":"models/gemini-2.5-pro"`) {
+		t.Fatalf("body = %s, want preserved name entry", rec.Body.String())
+	}
+}
+
+func TestWriteModelListResponse_ReFiltersPluginReplacementForRestrictedKey(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			return pluginapi.ResponseInterceptResponse{
+				Body: []byte(`{"object":"list","data":[{"id":"gpt-5"},{"id":"claude-opus"}]}`),
+			}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Set(sdkaccess.ModelPolicyContextKey, sdkaccess.NewModelPolicy([]string{"claude-*"}, nil))
+
+	handler.WriteModelListResponse(ctx, "openai", gin.H{
+		"object": "list",
+		"data":   []map[string]any{{"id": "original-model"}},
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if strings.Contains(rec.Body.String(), "gpt-5") {
+		t.Fatalf("restricted model leaked through plugin replacement: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "claude-opus") {
+		t.Fatalf("allowed model was removed: %s", rec.Body.String())
+	}
+}
+
+func TestWriteModelListResponse_RejectsMalformedPluginReplacementForRestrictedKey(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			return pluginapi.ResponseInterceptResponse{Body: []byte(`{"object":"list","data":{"id":"gpt-5"}}`)}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Set(sdkaccess.ModelPolicyContextKey, sdkaccess.NewModelPolicy([]string{"claude-*"}, nil))
+	handler.WriteModelListResponse(ctx, "openai", gin.H{"object": "list", "data": []map[string]any{{"id": "original-model"}}})
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("code = %d, want %d for malformed restricted model list", rec.Code, http.StatusBadGateway)
+	}
+	if strings.Contains(rec.Body.String(), "gpt-5") {
+		t.Fatalf("malformed unauthorized body leaked: %s", rec.Body.String())
+	}
+}
+
+func TestWriteModelListResponseDropsNonObjectPluginModelsForRestrictedKey(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			return pluginapi.ResponseInterceptResponse{Body: []byte(`{"object":"list","data":["gpt-5",{"id":"claude-opus"}]}`)}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	ctx.Set(sdkaccess.ModelPolicyContextKey, sdkaccess.NewModelPolicy([]string{"claude-*"}, nil))
+	handler.WriteModelListResponse(ctx, "openai", gin.H{"object": "list", "data": []map[string]any{{"id": "original-model"}}})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if strings.Contains(rec.Body.String(), "gpt-5") {
+		t.Fatalf("non-object unauthorized model leaked: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "claude-opus") {
+		t.Fatalf("valid allowed model missing: %s", rec.Body.String())
 	}
 }
 

@@ -164,6 +164,10 @@ func (s *Service) commitConfigUpdate(newCfg *config.Config) configCommit {
 		log.WithError(errValidate).Warn("rejected config update with invalid credential weights")
 		return configCommit{}
 	}
+	if errValidate := config.ValidateAPIKeyModelAccess(newCfg.APIKeyModelAccess); errValidate != nil {
+		log.WithError(errValidate).Warn("rejected config update with colliding api-key-model-access keys")
+		return configCommit{}
+	}
 
 	if errValidate := newCfg.Models.Validate(); errValidate != nil {
 		log.WithError(errValidate).Warn("rejected invalid model catalog sources")
@@ -364,6 +368,7 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 		return
 	}
 	cfg.APIKeys = nil
+	cfg.APIKeyModelAccess = nil
 	cfg.UsageStatisticsEnabled = true
 	cfg.DisableCooling = true
 	cfg.SaveCooldownStatus = false

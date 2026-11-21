@@ -517,6 +517,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 			if result != nil {
 				c.Set("userApiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
+				c.Set(sdkaccess.ModelPolicyContextKey, result.ModelPolicy)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}

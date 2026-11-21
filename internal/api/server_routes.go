@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/claude"
@@ -1177,6 +1178,9 @@ func (s *Server) handleHomeGeminiModel(c *gin.Context) {
 	action = strings.TrimSpace(action)
 	for _, entry := range entries {
 		if homeGeminiModelMatches(entry, action) {
+			if !handlers.ModelPolicyFromGin(c).Allows(thinking.ParseSuffix(strings.TrimPrefix(entry.id, "models/")).ModelName) {
+				continue
+			}
 			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
 			return
 		}

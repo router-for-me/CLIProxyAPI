@@ -998,6 +998,24 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
 	}
 }
 
+func TestAPIKeyModelAccessParsesInBothLayouts(t *testing.T) {
+	for name, doc := range map[string]string{
+		"legacy": "api-keys: [k]\napi-key-model-access:\n  k:\n    allowed-models: [claude-*]\n    denied-models: [claude-3-*]\n",
+		"v8":     "access:\n  api-keys: [k]\n  api-key-model-access:\n    k:\n      allowed-models: [claude-*]\n      denied-models: [claude-3-*]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var cfg Config
+			if err := yaml.Unmarshal([]byte(doc), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			got := cfg.APIKeyModelAccess["k"]
+			if len(got.AllowedModels) != 1 || got.AllowedModels[0] != "claude-*" || len(got.DeniedModels) != 1 {
+				t.Fatalf("unexpected access config: %+v", cfg.APIKeyModelAccess)
+			}
+		})
+	}
+}
+
 func TestV8ExampleDocumentsSessionAffinityCompactionGuidance(t *testing.T) {
 	example, errRead := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
 	if errRead != nil {

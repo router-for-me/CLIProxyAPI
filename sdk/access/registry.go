@@ -18,6 +18,9 @@ type Result struct {
 	Provider  string
 	Principal string
 	Metadata  map[string]string
+	// ModelPolicy optionally restricts the models the principal may list and call.
+	// Nil means unrestricted.
+	ModelPolicy *ModelPolicy
 }
 
 var (

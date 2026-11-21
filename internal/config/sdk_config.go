@@ -99,6 +99,10 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyModelAccess optionally restricts, per entry of APIKeys, which models a client key
+	// may list and call. Keys without an entry are unrestricted.
+	APIKeyModelAccess map[string]APIKeyModelAccess `yaml:"api-key-model-access,omitempty" json:"api-key-model-access,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -123,6 +127,15 @@ func (c *SDKConfig) TLSHandshakeTimeout() time.Duration {
 		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(c.TLSHandshakeTimeoutSeconds) * time.Second
+}
+
+// APIKeyModelAccess lists the model name patterns a client API key may use.
+// Patterns are case-insensitive and support '*' and '?' wildcards.
+type APIKeyModelAccess struct {
+	// AllowedModels, when non-empty, limits the key to matching models.
+	AllowedModels []string `yaml:"allowed-models,omitempty" json:"allowed-models,omitempty"`
+	// DeniedModels always blocks matching models and takes precedence over AllowedModels.
+	DeniedModels []string `yaml:"denied-models,omitempty" json:"denied-models,omitempty"`
 }
 
 // ClientConfig configures client-facing compatibility behavior.

@@ -7,6 +7,7 @@ import (
 
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Register ensures the config-access provider is available to the access manager.
@@ -22,18 +23,44 @@ func Register(cfg *sdkconfig.SDKConfig) {
 		return
 	}
 
+	policies, errPolicies := modelPolicies(cfg.APIKeyModelAccess)
+	if errPolicies != nil {
+		// Fail closed: registering the keys without their policies would silently
+		// grant the access a malformed configuration tried to restrict.
+		log.WithError(errPolicies).Error("api-key-model-access is invalid; config API keys are rejected until it is fixed")
+		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+		return
+	}
+
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, policies),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name     string
+	keys     map[string]struct{}
+	policies map[string]*sdkaccess.ModelPolicy
 }
 
-func newProvider(name string, keys []string) *provider {
+// modelPolicies converts per-key model access config into policies keyed by trimmed API key.
+// It rejects entries that normalize to the same key instead of letting map iteration
+// order decide which policy is applied.
+func modelPolicies(access map[string]sdkconfig.APIKeyModelAccess) (map[string]*sdkaccess.ModelPolicy, error) {
+	if errValidate := sdkconfig.ValidateAPIKeyModelAccess(access); errValidate != nil {
+		return nil, errValidate
+	}
+	policies := make(map[string]*sdkaccess.ModelPolicy, len(access))
+	for key, entry := range access {
+		if policy := sdkaccess.NewModelPolicy(entry.AllowedModels, entry.DeniedModels); policy != nil {
+			policies[strings.TrimSpace(key)] = policy
+		}
+	}
+	return policies, nil
+}
+
+func newProvider(name string, keys []string, policies map[string]*sdkaccess.ModelPolicy) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +69,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, policies: policies}
 }
 
 func (p *provider) Identifier() string {
@@ -96,6 +123,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
+				ModelPolicy: p.policies[candidate.value],
 			}, nil
 		}
 	}

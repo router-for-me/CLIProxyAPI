@@ -138,6 +138,17 @@ access:
     - "your-api-key-2"
     - "your-api-key-3"
 
+  # Optional per-key model restriction, keyed by an entry of api-keys. Keys without an entry are
+  # unrestricted. Patterns are case-insensitive and support * and ?. denied-models always wins;
+  # allowed-models, when set, limits the key to matching models. Applies to model listings
+  # (/v1/models, /v1beta/models, Claude model list) and shared execute/stream/count paths.
+  # Direct Alpha Search, Live and Realtime forwarding do not enforce this policy.
+  # Reconnect an established native Responses duplex WebSocket after narrowing its key policy.
+  # api-key-model-access:
+  #   "your-api-key-2":
+  #     allowed-models: ["claude-*", "gpt-5-codex"]
+  #     denied-models: ["gpt-5.6-*"]
+
 # Optional credential concurrency and observation contracts.
 
 # credentials:

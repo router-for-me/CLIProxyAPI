@@ -18,6 +18,7 @@ type CodexClientConfig = internalconfig.CodexClientConfig
 type CodexWebSearchResultCacheConfig = internalconfig.CodexWebSearchResultCacheConfig
 type StreamingConfig = internalconfig.StreamingConfig
 type ClaudeCodeConfig = internalconfig.ClaudeCodeConfig
+type APIKeyModelAccess = internalconfig.APIKeyModelAccess
 type TLSConfig = internalconfig.TLSConfig
 type DiscoveryConfig = internalconfig.DiscoveryConfig
 type DiscoveryInterfacesConfig = internalconfig.DiscoveryInterfacesConfig
@@ -74,4 +75,8 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
+}
+
+func ValidateAPIKeyModelAccess(access map[string]APIKeyModelAccess) error {
+	return internalconfig.ValidateAPIKeyModelAccess(access)
 }
