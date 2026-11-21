@@ -564,9 +564,12 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonAuthCredentialRetryAfter = existing.nonAuthCredentialRetryAfter
+			auth.nonAuthCredentialLastError = cloneError(existing.nonAuthCredentialLastError)
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 		}
+		clearedAuthGrantRetry := false
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 			applyPreservedRenewalState(existing, auth, mode, now)
@@ -584,31 +587,27 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 					}
 				}
 				canServeWithAccessToken := !auth.RequiresSignIn || auth.HasValidAccessToken(now)
-				isAuthOrGrantFailure := hasUnauthorizedAuthFailure(existing) ||
-					existing.RequiresSignIn ||
-					(existing.RefreshError != nil && isTerminalRefreshError(existing, existing.RefreshError)) ||
-					(auth.LastError != nil && (isUnauthorizedError(auth.LastError) || isInvalidGrantResultError(auth.LastError) || isTerminalRefreshError(auth, auth.LastError)))
-				if canServeWithAccessToken && !auth.Quota.NextRecoverAt.After(now) &&
-					(isAuthOrGrantFailure || (auth.Unavailable && !auth.NextRetryAfter.After(now))) {
-					auth.Unavailable = false
-					auth.NextRetryAfter = time.Time{}
-					auth.cooldownRecordedSeq = 0
-					auth.forceCooldownUntil = time.Time{}
-					auth.quotaForceCooldownUntil = time.Time{}
-					auth.credentialRetryAfter = time.Time{}
-					auth.nonQuotaCooldownUntil = time.Time{}
-					auth.LastError = nil
-					auth.StatusMessage = ""
-					auth.Status = StatusActive
-					cooldownStateChanged = true
-				} else if canServeWithAccessToken && isAuthOrGrantFailure && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
-					auth.Unavailable = true
-					if !auth.NextRetryAfter.After(now) {
-						auth.NextRetryAfter = auth.Quota.NextRecoverAt
+				if canServeWithAccessToken {
+					preserveNonAuth := mode == updateModeRefresh ||
+						(credChanged && authRefreshToken(existing) != "" && authRefreshToken(existing) == authRefreshToken(auth))
+					if reconcileAuthGrantCooldownAfterRefresh(auth, existing, preserveNonAuth, now) {
+						clearedAuthGrantRetry = true
+						cooldownStateChanged = true
+					} else if !auth.Quota.NextRecoverAt.After(now) && auth.Unavailable && !auth.NextRetryAfter.After(now) && !auth.credentialRetryAfter.After(now) && !effectiveAuthForceUntil(auth).After(now) {
+						auth.Unavailable = false
+						auth.NextRetryAfter = time.Time{}
+						auth.cooldownRecordedSeq = 0
+						auth.forceCooldownUntil = time.Time{}
+						auth.quotaForceCooldownUntil = time.Time{}
+						auth.credentialRetryAfter = time.Time{}
+						auth.nonAuthCredentialRetryAfter = time.Time{}
+						auth.nonAuthCredentialLastError = nil
+						auth.nonQuotaCooldownUntil = time.Time{}
+						auth.LastError = nil
+						auth.StatusMessage = ""
+						auth.Status = StatusActive
+						cooldownStateChanged = true
 					}
-					auth.LastError = nil
-					auth.StatusMessage = auth.Quota.Reason
-					cooldownStateChanged = true
 				}
 				if canServeWithAccessToken {
 					resumed := clearUnauthorizedModelStates(auth, now)
@@ -649,7 +648,20 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			cooldownStateChanged = true
 		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(now) {
 			auth.Unavailable = existing.Unavailable
-			auth.NextRetryAfter = existing.NextRetryAfter
+			if clearedAuthGrantRetry {
+				auth.NextRetryAfter = existing.Quota.NextRecoverAt
+				if existing.forceCooldownUntil.After(auth.NextRetryAfter) {
+					auth.NextRetryAfter = existing.forceCooldownUntil
+				}
+				if auth.credentialRetryAfter.After(auth.NextRetryAfter) {
+					auth.NextRetryAfter = auth.credentialRetryAfter
+				}
+			} else {
+				auth.NextRetryAfter = existing.NextRetryAfter
+				if auth.credentialRetryAfter.After(auth.NextRetryAfter) {
+					auth.NextRetryAfter = auth.credentialRetryAfter
+				}
+			}
 			// Preserve cooldown fields; keep the newest observation snapshot.
 			observation := mergeQuotaObservation(auth.Quota, existing.Quota)
 			auth.Quota = existing.Quota
@@ -659,8 +671,12 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			auth.forceCooldownUntil = existing.forceCooldownUntil
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
-			auth.credentialRetryAfter = existing.credentialRetryAfter
-			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			if !clearedAuthGrantRetry {
+				auth.credentialRetryAfter = existing.credentialRetryAfter
+				auth.nonAuthCredentialRetryAfter = existing.nonAuthCredentialRetryAfter
+				auth.nonAuthCredentialLastError = cloneError(existing.nonAuthCredentialLastError)
+				auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			}
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
@@ -673,6 +689,8 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonAuthCredentialRetryAfter = existing.nonAuthCredentialRetryAfter
+			auth.nonAuthCredentialLastError = cloneError(existing.nonAuthCredentialLastError)
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 			if auth.LastError == nil && existing.LastError != nil {

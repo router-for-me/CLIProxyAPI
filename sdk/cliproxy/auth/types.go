@@ -155,13 +155,15 @@ type Auth struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq     uint64    `json:"-"`
-	forceCooldownUntil      time.Time `json:"-"`
-	quotaForceCooldownUntil time.Time `json:"-"`
-	credQuotaForceUntil     time.Time `json:"-"`
-	credentialRetryAfter    time.Time `json:"-"`
-	nonQuotaCooldownUntil   time.Time `json:"-"`
-	forceCooldownSeeded     bool      `json:"-"`
+	cooldownRecordedSeq         uint64    `json:"-"`
+	forceCooldownUntil          time.Time `json:"-"`
+	quotaForceCooldownUntil     time.Time `json:"-"`
+	credQuotaForceUntil         time.Time `json:"-"`
+	credentialRetryAfter        time.Time `json:"-"`
+	nonAuthCredentialRetryAfter time.Time `json:"-"`
+	nonAuthCredentialLastError  *Error    `json:"-"`
+	nonQuotaCooldownUntil       time.Time `json:"-"`
+	forceCooldownSeeded         bool      `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -525,6 +527,9 @@ func (a *Auth) Clone() *Auth {
 	}
 	if a.RefreshError != nil {
 		copyAuth.RefreshError = a.RefreshError.Clone()
+	}
+	if a.nonAuthCredentialLastError != nil {
+		copyAuth.nonAuthCredentialLastError = a.nonAuthCredentialLastError.Clone()
 	}
 	if a.Attributes != nil {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))

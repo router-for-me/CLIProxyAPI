@@ -411,12 +411,16 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 		if retryAfter, parseErr := helps.ParseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
+	} else if statusCode == http.StatusUnauthorized {
+		err.credentialScoped = true
 	} else if statusCode == http.StatusForbidden {
 		if violation := parseAntigravityTOSViolation(body); violation != nil {
 			err.tosViolation = true
 			err.credentialScoped = true
 			err.tosAppealURL = violation.AppealURL
 			err.tosAppealURLText = violation.AppealURLText
+		} else if cliproxyauth.IsAntigravityValidationRequiredError(err) {
+			err.credentialScoped = true
 		}
 	}
 	return err
@@ -466,6 +470,22 @@ func (e *AntigravityExecutor) applyAntigravityTOSState(cfg *config.Config, auth 
 		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION; submit appeal: %s (%s)", auth.ID, redactTOSAppealURL(violation.AppealURL), violation.AppealURLText)
 	} else {
 		log.Warnf("antigravity executor: credential %s suspended for TOS_VIOLATION", auth.ID)
+	}
+}
+
+// applyAntigravityForbiddenState performs executor-side bookkeeping for an
+// Antigravity 403 response: terminal TOS_VIOLATION closes idle pooled
+// transports and arms the optional pool-wide pause, while 403
+// VALIDATION_REQUIRED closes idle pooled transports so verification-locked
+// accounts stop reusing keep-alive sockets.
+func (e *AntigravityExecutor) applyAntigravityForbiddenState(cfg *config.Config, auth *cliproxyauth.Auth, body []byte) {
+	if parseAntigravityTOSViolation(body) != nil {
+		closeAntigravityAuthIdleTransports(auth)
+		e.applyAntigravityTOSState(cfg, auth, body)
+		return
+	}
+	if cliproxyauth.IsAntigravityValidationRequiredError(statusErr{code: http.StatusForbidden, msg: string(body)}) {
+		closeAntigravityAuthIdleTransports(auth)
 	}
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {

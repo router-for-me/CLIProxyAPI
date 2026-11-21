@@ -313,6 +313,21 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 		}
 	}
 
+	var credRetryUntil time.Time
+	credRetrySuspended := false
+	if authForce := effectiveAuthForceUntil(auth); authForce.After(now) && auth.NextRetryAfter.After(now) {
+		isSuspended = true
+		credRetrySuspended = true
+		credRetryUntil = authForce
+	}
+	if !auth.credentialRetryAfter.IsZero() && auth.credentialRetryAfter.After(now) {
+		isSuspended = true
+		credRetrySuspended = true
+		if auth.credentialRetryAfter.After(credRetryUntil) {
+			credRetryUntil = auth.credentialRetryAfter
+		}
+	}
+
 	isQuotaExceeded := false
 	stateSuspended := false
 	var stateUntil time.Time
@@ -366,10 +381,16 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 			if credQuotaSuspended && (strings.EqualFold(suspendReason, "quota") || strings.EqualFold(suspendReason, "credential_quota")) && credQuotaUntil.After(suspendUntil) {
 				suspendUntil = credQuotaUntil
 			}
+			if credRetrySuspended && credRetryUntil.After(suspendUntil) {
+				suspendUntil = credRetryUntil
+			}
 		default:
 			suspendUntil = authFallbackUntil
 			if credQuotaUntil.After(suspendUntil) {
 				suspendUntil = credQuotaUntil
+			}
+			if credRetryUntil.After(suspendUntil) {
+				suspendUntil = credRetryUntil
 			}
 		}
 		if suspendReason == "" {

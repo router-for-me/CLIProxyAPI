@@ -100,7 +100,10 @@ func (e *AntigravityExecutor) PrepareRequestAuth(ctx context.Context, auth *clip
 		}
 		preparedErr := prepareAntigravityProjectIDError(errProject)
 		if preparedErr.tosViolation {
+			closeAntigravityAuthIdleTransports(updated)
 			e.applyAntigravityTOSState(e.cfg, updated, antigravityResponseBodyFromError(errProject))
+		} else if preparedErr.code == http.StatusForbidden && cliproxyauth.IsAntigravityValidationRequiredError(preparedErr) {
+			closeAntigravityAuthIdleTransports(updated)
 		}
 		return nil, preparedErr
 	}
@@ -126,7 +129,7 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 
 func (e *AntigravityExecutor) ensureAccessTokenWithOptions(ctx context.Context, auth *cliproxyauth.Auth, discoverProject bool) (string, *cliproxyauth.Auth, bool, error) {
 	if auth == nil {
-		return "", nil, false, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
+		return "", nil, false, statusErr{code: http.StatusUnauthorized, msg: "missing auth", credentialScoped: true}
 	}
 	if !antigravityNeedsAccessTokenRefresh(auth) {
 		accessToken := metaStringValue(auth.Metadata, "access_token")
@@ -148,7 +151,7 @@ func (e *AntigravityExecutor) ensureAccessTokenWithOptions(ctx context.Context, 
 			}
 			token := metaStringValue(refreshed.Metadata, "access_token")
 			if strings.TrimSpace(token) == "" {
-				return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+				return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token", credentialScoped: true}
 			}
 			refreshedViaHome = true
 			if discoverProject {
@@ -175,7 +178,7 @@ func (e *AntigravityExecutor) ensureAccessTokenWithOptions(ctx context.Context, 
 	}
 	token := metaStringValue(updated.Metadata, "access_token")
 	if strings.TrimSpace(token) == "" {
-		return "", nil, false, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		return "", nil, false, statusErr{code: http.StatusUnauthorized, msg: "missing access token", credentialScoped: true}
 	}
 	if discoverProject && !refreshedLocal && !refreshedViaHome {
 		e.maybeRefreshAntigravityCreditsHint(ctx, updated, token)
@@ -189,11 +192,11 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 
 func (e *AntigravityExecutor) refreshTokenWithOptions(ctx context.Context, auth *cliproxyauth.Auth, requestCtx context.Context, discoverProject bool) (*cliproxyauth.Auth, error) {
 	if auth == nil {
-		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
+		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth", credentialScoped: true}
 	}
 	refreshToken := metaStringValue(auth.Metadata, "refresh_token")
 	if refreshToken == "" {
-		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token"}
+		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token", credentialScoped: true}
 	}
 	if ctx == nil {
 		ctx = context.Background()

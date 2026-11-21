@@ -156,7 +156,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 
 	if httpResp.StatusCode == http.StatusForbidden {
-		e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
+		e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 	}
 	sErr := newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
 	if httpResp.StatusCode == http.StatusTooManyRequests {
