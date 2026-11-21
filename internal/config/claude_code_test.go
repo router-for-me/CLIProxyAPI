@@ -210,6 +210,85 @@ func TestParseConfigBytesClaudeServerSideFallback(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytesClaudeConnectionPool(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		wantPool bool
+		wantIdle string
+	}{
+		{name: "absent by default", yaml: "port: 8317\n"},
+		{name: "legacy layout", yaml: "claude:\n  connection-pool:\n    idle-conn-timeout: 60s\n", wantPool: true, wantIdle: "60s"},
+		{name: "v8 empty block opts in", yaml: "config-version: 8\nupstream:\n  claude:\n    connection-pool: {}\n", wantPool: true},
+		{name: "v8 layout", yaml: "config-version: 8\nupstream:\n  claude:\n    connection-pool:\n      enabled: true\n      idle-conn-timeout: 90s\n", wantPool: true, wantIdle: "90s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.HasPrefix(tt.yaml, "config-version: 8") {
+				if errValidate := ValidateV8Config([]byte(tt.yaml)); errValidate != nil {
+					t.Fatalf("ValidateV8Config() error = %v", errValidate)
+				}
+			}
+			cfg, errParse := ParseConfigBytes([]byte(tt.yaml))
+			if errParse != nil {
+				t.Fatalf("ParseConfigBytes() error = %v", errParse)
+			}
+			pool := cfg.Claude.ConnectionPool
+			if (pool != nil) != tt.wantPool {
+				t.Fatalf("cfg.Claude.ConnectionPool = %+v, want present=%t", pool, tt.wantPool)
+			}
+			if pool != nil && pool.IdleConnTimeout != tt.wantIdle {
+				t.Fatalf("idle-conn-timeout = %q, want %q", pool.IdleConnTimeout, tt.wantIdle)
+			}
+		})
+	}
+}
+
+// An SDK embedder opts in with an empty block. Saving it into a file that never
+// carried the block must keep it, or the reloaded config silently drops pooling.
+func TestSaveConfigPreserveComments_ClaudeEmptyConnectionPoolSurvives(t *testing.T) {
+	tests := []struct {
+		name        string
+		initial     string
+		migrateV8   bool
+		pool        ProxyConnectionPoolConfig
+		wantEnabled bool
+	}{
+		{name: "legacy layout", initial: "port: 8317\n", wantEnabled: true},
+		{name: "v8 layout", initial: "config-version: 8\nserver:\n  port: 8317\n", migrateV8: true, wantEnabled: true},
+		{name: "v8 explicit opt-out", initial: "config-version: 8\nserver:\n  port: 8317\n", migrateV8: true, pool: ProxyConnectionPoolConfig{Enabled: new(false)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if errWrite := os.WriteFile(configPath, []byte(tt.initial), 0o600); errWrite != nil {
+				t.Fatalf("os.WriteFile() error = %v", errWrite)
+			}
+			pool := tt.pool
+			cfg := &Config{Port: 8317, Claude: ClaudeConfig{ConnectionPool: &pool}}
+			if errSave := SaveConfigPreserveComments(configPath, cfg, tt.migrateV8); errSave != nil {
+				t.Fatalf("SaveConfigPreserveComments() error = %v", errSave)
+			}
+			savedBytes, errRead := os.ReadFile(configPath)
+			if errRead != nil {
+				t.Fatalf("os.ReadFile() error = %v", errRead)
+			}
+			reloaded, errLoad := LoadConfig(configPath)
+			if errLoad != nil {
+				t.Fatalf("LoadConfig() error = %v", errLoad)
+			}
+			if reloaded.Claude.ConnectionPool == nil {
+				t.Fatalf("reloaded cfg.Claude.ConnectionPool = nil, want the saved block; saved:\n%s", savedBytes)
+			}
+			if got := reloaded.Claude.ConnectionPool.Enabled == nil || *reloaded.Claude.ConnectionPool.Enabled; got != tt.wantEnabled {
+				t.Fatalf("reloaded pool enabled = %t, want %t; saved:\n%s", got, tt.wantEnabled, savedBytes)
+			}
+		})
+	}
+}
+
 func TestParseAndSaveClaudeOAuthIncludeCreateAPIKey(t *testing.T) {
 	tests := []struct {
 		name        string
