@@ -678,6 +678,10 @@ func normalizeUserDefinedConfig(config ThinkingConfig, modelInfo *registry.Model
 	if config.Mode != ModeLevel {
 		return config
 	}
+	// Preserve native Gemini levels when model capabilities are unknown.
+	if fromFormat == "gemini" && toFormat == "gemini" {
+		return config
+	}
 	if toFormat == "claude" {
 		return config
 	}

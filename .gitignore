@@ -58,6 +58,7 @@ _bmad/*
 _bmad-output/*
 .gocache/
 .gitnexus/
+.codex-artifacts/*
 
 # macOS
 .DS_Store
