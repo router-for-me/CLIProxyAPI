@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -168,5 +169,32 @@ func jsonResponse(body string) *http.Response {
 		StatusCode: http.StatusOK,
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestFetchProjectIDTooManyRequestsPreservesRetryAfter(t *testing.T) {
+	auth := NewAntigravityAuth(nil, &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Retry-After", "45")
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":429,"message":"rate limited"}}`)),
+		}, nil
+	})})
+
+	_, err := auth.FetchProjectID(context.Background(), "access-token")
+	if err == nil {
+		t.Fatalf("expected error from 429 response")
+	}
+	type retryAfterProvider interface {
+		RetryAfter() *time.Duration
+	}
+	rap, ok := err.(retryAfterProvider)
+	if !ok {
+		t.Fatalf("expected error to expose RetryAfter, got %T (%v)", err, err)
+	}
+	if got := rap.RetryAfter(); got == nil || *got != 45*time.Second {
+		t.Fatalf("RetryAfter() = %v, want 45s", got)
 	}
 }

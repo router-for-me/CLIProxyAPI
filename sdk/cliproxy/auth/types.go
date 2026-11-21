@@ -572,26 +572,32 @@ func (o *ProxyConnectionPoolOverride) Clone() *ProxyConnectionPoolOverride {
 	return out
 }
 
+func cloneMetadataValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneMetadataMap(typed)
+	case []string:
+		s := make([]string, len(typed))
+		copy(s, typed)
+		return s
+	case []any:
+		s := make([]any, len(typed))
+		for i, item := range typed {
+			s[i] = cloneMetadataValue(item)
+		}
+		return s
+	default:
+		return value
+	}
+}
+
 func cloneMetadataMap(src map[string]any) map[string]any {
 	if src == nil {
 		return nil
 	}
 	dst := make(map[string]any, len(src))
 	for key, value := range src {
-		switch typed := value.(type) {
-		case map[string]any:
-			dst[key] = cloneMetadataMap(typed)
-		case []string:
-			s := make([]string, len(typed))
-			copy(s, typed)
-			dst[key] = s
-		case []any:
-			s := make([]any, len(typed))
-			copy(s, typed)
-			dst[key] = s
-		default:
-			dst[key] = value
-		}
+		dst[key] = cloneMetadataValue(value)
 	}
 	return dst
 }
