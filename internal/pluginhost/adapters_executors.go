@@ -1226,16 +1226,30 @@ func (a *executorAdapter) observeAndTranslateExecutorStream(ctx context.Context,
 	return mapExecutorStreamChunks(ctx, translatedOut)
 }
 
+func (a *executorAdapter) CanRefreshPluginAuth(auth *coreauth.Auth) bool {
+	return a != nil && a.executor != nil && !a.host.isPluginFused(a.pluginID) &&
+		a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) && a.host.canRefreshPluginAuth(auth)
+}
+
 func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) || !a.host.pluginIdentityCurrent(a.pluginID, a.path, a.version) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
 	record, authProv := a.host.authProviderCredentialEntryForAuth(auth)
 	if record == nil || authProv == nil {
+		if auth.UsesLazyRefresh() {
+			return nil, fmt.Errorf("plugin auth provider refresh is unavailable")
+		}
 		return auth.Clone(), nil
+	}
+	if auth.UsesLazyRefresh() && (!a.host.recordCurrent(*record) || a.host.isPluginFused(record.id)) {
+		return nil, fmt.Errorf("plugin auth provider refresh is unavailable")
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			if auth.UsesLazyRefresh() {
+				recovered = "credential refresh callback panicked"
+			}
 			a.host.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
 			err = fmt.Errorf("plugin executor %s refresh panic: %v", a.Identifier(), recovered)
@@ -1252,9 +1266,15 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 		HTTPClient:   a.host.newHTTPClient(auth),
 	})
 	if errRefresh != nil {
+		if auth.UsesLazyRefresh() {
+			errRefresh = coreauth.SanitizeLazyRefreshError(auth, errRefresh)
+		}
 		return nil, errRefresh
 	}
 	data := pluginResp.Auth
+	if errMerge := mergeLazyRefreshData(&data, auth); errMerge != nil {
+		return nil, errMerge
+	}
 	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)

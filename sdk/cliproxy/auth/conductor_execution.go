@@ -1189,7 +1189,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		attempted[auth.ID] = struct{}{}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
-		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
+		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if hasUpstreamExecutionAttempt(errPrepare) {
@@ -1200,6 +1200,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
+			}
+			if isAuthFreshnessError(errPrepare) {
+				lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+				continue
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
@@ -1452,7 +1456,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		attempted[auth.ID] = struct{}{}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
-		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
+		preparedAuth, errPrepare := m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if hasUpstreamExecutionAttempt(errPrepare) {
@@ -1463,6 +1467,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
+			}
+			if isAuthFreshnessError(errPrepare) {
+				lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+				continue
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
 			if stateModel == "" {
@@ -1876,7 +1884,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if selection != nil {
 			preparedAuth, errPrepare = m.prepareHomeRequestAuth(execCtx, executor, selection)
 		} else {
-			preparedAuth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
+			preparedAuth, errPrepare = m.prepareSelectedRequestAuth(execCtx, executor, auth, routeModel)
 		}
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
@@ -1904,6 +1912,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if selection == nil {
 				if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errPrepare); errCancel != nil {
 					return nil, errCancel
+				}
+				if isAuthFreshnessError(errPrepare) {
+					lastErr = keepPreferredCandidateError(lastErr, errPrepare)
+					continue
 				}
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
@@ -2655,10 +2667,18 @@ func (m *Manager) prepareHomeAuthSnapshot(ctx context.Context, executor Provider
 	}
 }
 
-func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
+func (m *Manager) prepareSelectedRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth, model string) (*Auth, error) {
 	if m == nil || executor == nil || auth == nil {
 		return auth, nil
 	}
+	fresh, _, errFresh := m.ensureAuthFresh(ctx, auth, model)
+	if errFresh != nil {
+		return auth, errFresh
+	}
+	return m.prepareRequestAuth(ctx, executor, fresh)
+}
+
+func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecutor, auth *Auth) (*Auth, error) {
 	preparer, ok := executor.(RequestAuthPreparer)
 	if !ok {
 		return auth, nil
@@ -2679,7 +2699,7 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 		return preparer.PrepareRequestAuth(ctx, auth.Clone())
 	}
 
-	releaseRefresh, errLock := m.lockRefreshContext(ctx, id)
+	_, releaseRefresh, errLock := m.lockRefreshContext(ctx, id)
 	if errLock != nil {
 		return nil, errLock
 	}
@@ -3133,6 +3153,11 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	if a == nil || exec == nil {
 		return nil
 	}
+	fresh, errFresh := m.EnsureAuthFresh(req.Context(), a, req.Header)
+	if errFresh != nil {
+		return errFresh
+	}
+	a = fresh
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
 		return p.PrepareRequest(req, a)
 	}
@@ -3153,6 +3178,11 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if ctx != nil {
 		*req = *req.WithContext(ctx)
 	}
+	fresh, errFresh := m.EnsureAuthFresh(req.Context(), auth, req.Header)
+	if errFresh != nil {
+		return errFresh
+	}
+	auth = fresh
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
 		return &Error{Code: "provider_not_found", Message: "auth provider is empty"}
@@ -3205,6 +3235,15 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if req == nil {
 		return nil, &Error{Code: "invalid_request", Message: "http request is nil"}
 	}
+	freshnessCtx := ctx
+	if freshnessCtx == nil {
+		freshnessCtx = req.Context()
+	}
+	fresh, errFresh := m.EnsureAuthFresh(freshnessCtx, auth, req.Header)
+	if errFresh != nil {
+		return nil, errFresh
+	}
+	auth = fresh
 	providerKey := executorKeyFromAuth(auth)
 	if providerKey == "" {
 		return nil, &Error{Code: "provider_not_found", Message: "auth provider is empty"}

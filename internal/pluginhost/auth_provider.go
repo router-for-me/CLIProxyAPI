@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MoeForge/moego/json"
@@ -674,6 +675,13 @@ func (h *Host) callSingleProviderParseAuths(ctx context.Context, record capabili
 	multiEntry := h.recordHasMultipleAuthProviders(record)
 	auths = make([]*coreauth.Auth, 0, len(datas))
 	for _, data := range datas {
+		if data.RefreshPolicy == nil {
+			policy, errPolicy := storedRefreshPolicy(req.RawJSON)
+			if errPolicy != nil {
+				return nil, true, errPolicy
+			}
+			data.RefreshPolicy = policy
+		}
 		if strings.TrimSpace(data.Provider) == "" {
 			data.Provider = req.Provider
 		}
@@ -1017,6 +1025,11 @@ func (h *Host) authProviderCredentialEntryForAuth(auth *coreauth.Auth) (*capabil
 	return nil, nil
 }
 
+func (h *Host) canRefreshPluginAuth(auth *coreauth.Auth) bool {
+	record, provider := h.authProviderCredentialEntryForAuth(auth)
+	return record != nil && provider != nil && h.recordCurrent(*record) && !h.isPluginFused(record.id)
+}
+
 func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, handled bool, err error) {
 	if h == nil || auth == nil {
 		return nil, false, nil
@@ -1025,11 +1038,14 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 	if record == nil || authProv == nil {
 		return nil, false, nil
 	}
-	if !h.recordCurrent(*record) {
+	if !h.recordCurrent(*record) || auth.UsesLazyRefresh() && h.isPluginFused(record.id) {
 		return nil, false, nil
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			if auth.UsesLazyRefresh() {
+				recovered = "credential refresh callback panicked"
+			}
 			h.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
 			handled = true
@@ -1047,9 +1063,15 @@ func (h *Host) RefreshAuth(ctx context.Context, auth *coreauth.Auth) (refreshed 
 		HTTPClient:   h.newHTTPClient(auth),
 	})
 	if errRefresh != nil {
+		if auth.UsesLazyRefresh() {
+			errRefresh = coreauth.SanitizeLazyRefreshError(auth, errRefresh)
+		}
 		return nil, true, errRefresh
 	}
 	data := pluginResp.Auth
+	if errMerge := mergeLazyRefreshData(&data, auth); errMerge != nil {
+		return nil, true, errMerge
+	}
 	explicitPortalHint := authDataPortalHint(&data)
 	if strings.TrimSpace(data.Provider) == "" {
 		data.Provider = authProvider(auth)
@@ -1197,6 +1219,7 @@ func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string
 }
 
 type pluginTokenStorage struct {
+	mu       sync.RWMutex
 	provider string
 	rawJSON  []byte
 	meta     map[string]any
@@ -1206,24 +1229,27 @@ func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, hadPriority := s.meta["priority"]; hadPriority {
 		if _, hasPriority := meta["priority"]; !hasPriority {
-			var raw map[string]any
-			if errUnmarshal := json.Unmarshal(s.rawJSON, &raw); errUnmarshal == nil {
-				delete(raw, "priority")
-				if cleaned, errMarshal := json.Marshal(raw); errMarshal == nil {
-					s.rawJSON = cleaned
+			doc := ojson.NewDoc(s.rawJSON)
+			if doc.Get("priority").Exists() {
+				if errDelete := doc.Delete("priority"); errDelete == nil {
+					s.rawJSON = doc.Bytes()
 				}
 			}
 		}
 	}
-	s.meta = cloneAnyMap(meta)
+	s.meta = cloneInterceptorMetadata(meta)
 }
 
 func (s *pluginTokenStorage) RawJSON() []byte {
 	if s == nil {
 		return nil
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
 	if errPayload != nil {
 		return nil
@@ -1235,7 +1261,9 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	if s == nil {
 		return fmt.Errorf("plugin token storage is nil")
 	}
+	s.mu.RLock()
 	payload, errPayload := mergedStorageJSON(s.rawJSON, s.meta, s.provider)
+	s.mu.RUnlock()
 	if errPayload != nil {
 		return errPayload
 	}
@@ -1281,8 +1309,12 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 			out = make(map[string]any)
 		}
 	}
-	for key, value := range metadata {
-		out[key] = value
+	if policy, _ := metadata["host_refresh_policy"].(map[string]any); policy["mode"] == pluginapi.AuthRefreshLazy {
+		out = coreauth.MergePluginRefreshMetadata(out, nil, metadata)
+	} else {
+		for key, value := range metadata {
+			out[key] = value
+		}
 	}
 	provider = normalizeProviderID(provider)
 	if provider != "" {
@@ -1292,9 +1324,9 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 	if len(out) == 0 {
 		return nil, fmt.Errorf("plugin token storage payload is empty")
 	}
-	payload, errMarshal := json.Marshal(out)
-	if errMarshal != nil {
-		return nil, fmt.Errorf("encode plugin token storage: %w", errMarshal)
+	payload, errEncode := encodePluginStorage(out)
+	if errEncode != nil {
+		return nil, fmt.Errorf("encode plugin token storage: %w", errEncode)
 	}
 	return payload, nil
 }
@@ -1336,9 +1368,27 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	if provider == "" {
 		return nil
 	}
+	policy := data.RefreshPolicy
+	if policy == nil {
+		var errPolicy error
+		policy, errPolicy = storedRefreshPolicy(data.StorageJSON)
+		if errPolicy != nil {
+			return nil
+		}
+	}
+	if policy != nil {
+		if !policy.Valid() {
+			return nil
+		}
+		copyPolicy := *policy
+		policy = &copyPolicy
+	}
 	metadata := cloneAnyMap(data.Metadata)
 	if metadata == nil {
 		metadata = make(map[string]any)
+	}
+	if policy != nil {
+		metadata["host_refresh_policy"] = map[string]any{"mode": policy.Mode, "expiry_margin_seconds": policy.ExpiryMarginSeconds}
 	}
 	if provider != "" {
 		metadata["type"] = provider
@@ -1377,6 +1427,7 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	now := time.Now().UTC()
 	auth := &coreauth.Auth{
+		RefreshPolicy:    policy,
 		Provider:         provider,
 		ID:               id,
 		FileName:         fileName,
@@ -1385,7 +1436,7 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 		ProxyURL:         strings.TrimSpace(data.ProxyURL),
 		Disabled:         data.Disabled,
 		Status:           status,
-		Storage:          &pluginTokenStorage{provider: provider, rawJSON: bytes.Clone(data.StorageJSON), meta: metadata},
+		Storage:          &pluginTokenStorage{provider: provider, rawJSON: bytes.Clone(data.StorageJSON), meta: cloneInterceptorMetadata(metadata)},
 		Metadata:         metadata,
 		Attributes:       attributes,
 		CreatedAt:        now,

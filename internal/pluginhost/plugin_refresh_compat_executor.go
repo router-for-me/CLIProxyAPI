@@ -123,6 +123,10 @@ func (e *pluginRefreshCompatExecutor) PrepareRequest(req *http.Request, auth *co
 	return preparer.PrepareRequest(req, auth)
 }
 
+func (e *pluginRefreshCompatExecutor) CanRefreshPluginAuth(auth *coreauth.Auth) bool {
+	return e != nil && e.host.canRefreshPluginAuth(auth)
+}
+
 func (e *pluginRefreshCompatExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	if e == nil {
 		return nil, fmt.Errorf("plugin refresh compat executor is unavailable")
@@ -138,7 +142,7 @@ func (e *pluginRefreshCompatExecutor) Refresh(ctx context.Context, auth *coreaut
 			return refreshed, errRefresh
 		}
 	}
-	if authHasRefreshToken(auth) {
+	if auth.UsesLazyRefresh() || authHasRefreshToken(auth) {
 		provider := e.Identifier()
 		if provider == "" && auth != nil {
 			provider = strings.TrimSpace(auth.Provider)
