@@ -4,6 +4,7 @@ name: proxx-e2e
 # GitHub release API and upgrades a supervised proxx in place under load.
 on:
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
