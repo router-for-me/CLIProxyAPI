@@ -1029,6 +1029,11 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 	}
 	for key, values := range updates {
 		out.Del(key)
+		for existingKey := range out {
+			if strings.EqualFold(existingKey, key) {
+				delete(out, existingKey)
+			}
+		}
 		for _, value := range values {
 			out.Add(key, value)
 		}
