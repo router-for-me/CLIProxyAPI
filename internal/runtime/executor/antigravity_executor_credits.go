@@ -32,6 +32,8 @@ type antigravityCreditsFailureState struct {
 type antigravity429DecisionKind string
 
 const (
+	antigravityLoadCodeAssistMaxResponseBytes = 1 << 20
+
 	antigravity429Unknown                         antigravity429Category     = "unknown"
 	antigravity429RateLimited                     antigravity429Category     = "rate_limited"
 	antigravity429QuotaExhausted                  antigravity429Category     = "quota_exhausted"
@@ -636,9 +638,17 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, antigravityLoadCodeAssistMaxResponseBytes+1))
 	if errRead != nil || httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		log.Debugf("antigravity executor: loadCodeAssist returned status %d, err=%v", httpResp.StatusCode, errRead)
+		return
+	}
+	if len(bodyBytes) > antigravityLoadCodeAssistMaxResponseBytes {
+		log.Debugf("antigravity executor: loadCodeAssist response exceeded %d bytes", antigravityLoadCodeAssistMaxResponseBytes)
+		return
+	}
+	if !ojson.ValidBytes(bodyBytes) {
+		log.Debugf("antigravity executor: loadCodeAssist returned invalid JSON")
 		return
 	}
 
@@ -667,43 +677,42 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	paidTierID := strings.Clone(strings.TrimSpace(ojson.GetBytesNoCopy(bodyBytes, "paidTier.id").String()))
 
 	credits := ojson.GetBytesNoCopy(bodyBytes, "paidTier.availableCredits")
-	if !credits.IsArray() {
-		publish(nil, cliproxyauth.AntigravityCreditsHint{
-			Known:      true,
-			Available:  false,
-			PaidTierID: paidTierID,
-			UpdatedAt:  time.Now(),
-		})
-		return
+	if credits.IsArray() {
+		for _, credit := range credits.Array() {
+			if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
+				continue
+			}
+			creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
+			if errCA != nil {
+				continue
+			}
+			minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
+			if errMA != nil {
+				continue
+			}
+			bal := antigravityCreditsBalance{
+				CreditAmount:    creditAmount,
+				MinCreditAmount: minAmount,
+				PaidTierID:      paidTierID,
+				Known:           true,
+			}
+			publish(&bal, cliproxyauth.AntigravityCreditsHint{
+				Known:           true,
+				Available:       creditAmount >= minAmount,
+				CreditAmount:    creditAmount,
+				MinCreditAmount: minAmount,
+				PaidTierID:      paidTierID,
+				UpdatedAt:       time.Now(),
+			})
+			return
+		}
 	}
-	for _, credit := range credits.Array() {
-		if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
-			continue
-		}
-		creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
-		if errCA != nil {
-			continue
-		}
-		minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
-		if errMA != nil {
-			continue
-		}
-		bal := antigravityCreditsBalance{
-			CreditAmount:    creditAmount,
-			MinCreditAmount: minAmount,
-			PaidTierID:      paidTierID,
-			Known:           true,
-		}
-		publish(&bal, cliproxyauth.AntigravityCreditsHint{
-			Known:           true,
-			Available:       creditAmount >= minAmount,
-			CreditAmount:    creditAmount,
-			MinCreditAmount: minAmount,
-			PaidTierID:      paidTierID,
-			UpdatedAt:       time.Now(),
-		})
-		return
-	}
+	publish(nil, cliproxyauth.AntigravityCreditsHint{
+		Known:      true,
+		Available:  false,
+		PaidTierID: paidTierID,
+		UpdatedAt:  time.Now(),
+	})
 }
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)
