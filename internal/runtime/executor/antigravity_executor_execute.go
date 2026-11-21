@@ -562,19 +562,20 @@ func (e *AntigravityExecutor) convertStreamToNonStream(stream []byte) []byte {
 
 func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []byte {
 	var (
-		responseNodeRaw    string
-		responsePartsRaw   string
-		responsePartsIndex int
-		traceID            string
-		finishReason       string
-		modelVersion       string
-		responseID         string
-		role               string
-		usageRaw           string
-		parts              []string
-		pendingKind        string
-		pendingText        strings.Builder
-		pendingThoughtSig  string
+		responseNodeRaw         string
+		responsePartsRaw        string
+		responsePartsIndex      int
+		traceID                 string
+		finishReason            string
+		modelVersion            string
+		responseID              string
+		role                    string
+		usageRaw                string
+		parts                   []string
+		pendingKind             string
+		pendingText             strings.Builder
+		pendingThoughtSig       string
+		pendingFromCurrentChunk bool
 	)
 
 	flushPending := func() {
@@ -584,19 +585,25 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 		text := pendingText.String()
 		switch pendingKind {
 		case "text":
-			if strings.TrimSpace(text) == "" {
+			if text == "" && pendingThoughtSig == "" {
 				pendingKind = ""
 				pendingText.Reset()
 				pendingThoughtSig = ""
+				pendingFromCurrentChunk = false
 				return
 			}
-			encoded, _ := json.Marshal(map[string]any{"text": text})
+			part := map[string]any{"text": text}
+			if pendingThoughtSig != "" {
+				part["thoughtSignature"] = pendingThoughtSig
+			}
+			encoded, _ := json.Marshal(part)
 			parts = append(parts, string(encoded))
 		case "thought":
-			if strings.TrimSpace(text) == "" && pendingThoughtSig == "" {
+			if text == "" && pendingThoughtSig == "" {
 				pendingKind = ""
 				pendingText.Reset()
 				pendingThoughtSig = ""
+				pendingFromCurrentChunk = false
 				return
 			}
 			part := map[string]any{"thought": true, "text": text}
@@ -609,6 +616,7 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 		pendingKind = ""
 		pendingText.Reset()
 		pendingThoughtSig = ""
+		pendingFromCurrentChunk = false
 	}
 
 	normalizeRawPart := func(partResult ojson.Result, hasSnakeSig, hasSnakeInline bool, sig string, inlineRaw string) string {
@@ -711,6 +719,7 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 		}
 
 		if partsResult.IsArray() {
+			pendingFromCurrentChunk = false
 			partsResult.ForEach(func(_, part ojson.Result) bool {
 				var (
 					hasFunctionCall bool
@@ -756,18 +765,32 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 				}
 
 				if thought || hasText {
+					if text == "" && sig == "" {
+						return true
+					}
 					kind := "text"
 					if thought {
 						kind = "thought"
 					}
-					if pendingKind != "" && pendingKind != kind {
+					if !thought && text == "" && sig != "" {
+						// Preserve standalone empty-text signature carriers as distinct parts so
+						// downstream translators keep streaming/non-streaming parity and never
+						// overwrite consecutive detached signatures.
+						flushPending()
+						encoded, _ := json.Marshal(map[string]any{"text": "", "thoughtSignature": sig})
+						parts = append(parts, string(encoded))
+						return true
+					}
+					isThoughtTrailingSig := thought && text == "" && sig != "" && pendingKind == "thought" && pendingThoughtSig == ""
+					if pendingKind != "" && (pendingKind != kind || pendingThoughtSig != "" || (pendingFromCurrentChunk && !isThoughtTrailingSig)) {
 						flushPending()
 					}
 					pendingKind = kind
 					pendingText.WriteString(text)
-					if kind == "thought" && sig != "" {
+					if sig != "" {
 						pendingThoughtSig = sig
 					}
+					pendingFromCurrentChunk = true
 					return true
 				}
 
