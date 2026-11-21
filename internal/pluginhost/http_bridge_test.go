@@ -1688,6 +1688,12 @@ func TestSameRedirectOriginAndRedirectLimit(t *testing.T) {
 	if sameRedirectOrigin(mustParse("https://example.com/v1"), mustParse("http://example.com/v2")) {
 		t.Error("expected scheme change https -> http to be treated as cross-origin")
 	}
+	if sameRedirectOrigin(mustParse("https://σ.com/v1"), mustParse("https://ς.com/v2")) {
+		t.Error("expected distinct IDNA lookup hosts to be treated as cross-origin")
+	}
+	if !sameRedirectOrigin(mustParse("https://BÜCHER.com/v1"), mustParse("https://bücher.com/v2")) {
+		t.Error("expected IDNA lookup-equivalent hosts to be treated as same-origin")
+	}
 
 	loopServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/loop", http.StatusFound)

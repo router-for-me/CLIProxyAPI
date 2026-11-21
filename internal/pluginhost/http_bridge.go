@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/idna"
 	"golang.org/x/net/proxy"
 )
 
@@ -574,9 +575,21 @@ func sameRedirectOrigin(a, b *url.URL) bool {
 	if a == nil || b == nil || a.Hostname() == "" || b.Hostname() == "" {
 		return false
 	}
+	hostA, errA := redirectHostname(a.Hostname())
+	hostB, errB := redirectHostname(b.Hostname())
+	if errA != nil || errB != nil || hostA == "" || hostB == "" {
+		return false
+	}
 	return strings.EqualFold(a.Scheme, b.Scheme) &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		strings.EqualFold(hostA, hostB) &&
 		redirectOriginPort(a) == redirectOriginPort(b)
+}
+
+func redirectHostname(host string) (string, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String(), nil
+	}
+	return idna.Lookup.ToASCII(host)
 }
 
 func redirectOriginPort(u *url.URL) string {
