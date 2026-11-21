@@ -2110,6 +2110,43 @@ func (m *Manager) PublishIfRegistrationCurrent(id string, registrationEpoch uint
 	return publish()
 }
 
+// PublishIfRegistrationCurrentContext serializes the final model-registration
+// publication against identity mutations for this auth while honoring ctx
+// cancellation during lock acquisition, then calls publish with a cloned
+// snapshot of the manager's current auth only if the manager still holds auth
+// with the same model-registration inputs. publish must be fast and must not
+// re-enter the manager.
+func (m *Manager) PublishIfRegistrationCurrentContext(ctx context.Context, id string, registrationEpoch uint64, prefix, provider string, disabled bool, authKind string, attributes map[string]string, publish func(current *Auth) bool) bool {
+	if m == nil || id == "" || publish == nil {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	releaseMutation, errMutation := m.lockAuthMutationContext(ctx, id)
+	if errMutation != nil {
+		return false
+	}
+	defer releaseMutation()
+	if ctx.Err() != nil {
+		return false
+	}
+	m.mu.RLock()
+	current, ok := m.auths[id]
+	var snapshot *Auth
+	if ok && current != nil && modelRegistrationInputsMatch(current, registrationEpoch, prefix, provider, disabled, authKind, attributes) {
+		snapshot = current.Clone()
+	}
+	m.mu.RUnlock()
+	if snapshot == nil {
+		return false
+	}
+	return publish(snapshot)
+}
+
 // UpdateIfRegistrationCurrent applies a plugin-returned auth update only
 // while the manager still holds the exact registration inputs the plugin
 // computation started from. It prevents an old plugin result from adopting

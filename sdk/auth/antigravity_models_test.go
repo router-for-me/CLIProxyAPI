@@ -712,3 +712,43 @@ func TestNewAntigravityProbeTransport_HTTP11AndNoALPN(t *testing.T) {
 		}
 	})
 }
+
+func TestFetchAntigravityAvailableModels_OmitsEmptyProject(t *testing.T) {
+	cases := []struct {
+		name      string
+		projectID string
+		wantBody  string
+	}{
+		{name: "empty project id", projectID: "", wantBody: `{}`},
+		{name: "whitespace project id", projectID: "  \t\n ", wantBody: `{}`},
+		{name: "non-empty project id", projectID: "  aicode-consumers  ", wantBody: `{"project":"aicode-consumers"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Errorf("read request body: %v", errRead)
+				}
+				gotBody = strings.TrimSpace(string(data))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+			}))
+			defer server.Close()
+
+			_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+				BaseURLs:    []string{server.URL},
+				AccessToken: "test-token",
+				ProjectID:   tc.projectID,
+			})
+			if status != AntigravityProbeStatusSuccess {
+				t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+			}
+			if gotBody != tc.wantBody {
+				t.Fatalf("request body = %q, want %q", gotBody, tc.wantBody)
+			}
+		})
+	}
+}

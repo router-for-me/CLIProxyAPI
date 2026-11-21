@@ -252,13 +252,40 @@ func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints
 	}
 }
 
+func resolveAntigravityModelUserAgent(auth *coreauth.Auth) string {
+	configured := ""
+	if auth != nil {
+		if auth.Attributes != nil {
+			if ua := strings.TrimSpace(auth.Attributes["user_agent"]); ua != "" {
+				configured = ua
+			}
+		}
+		if configured == "" && auth.Metadata != nil {
+			if ua, ok := auth.Metadata["user_agent"].(string); ok {
+				configured = strings.TrimSpace(ua)
+			}
+		}
+	}
+	if configured != "" {
+		return misc.AntigravityRequestUserAgent(configured)
+	}
+	return antigravityModelUserAgent()
+}
+
 // antigravityCapabilityKey isolates catalogs by account, project, route and client
 // fingerprint. Token rotation alone does not invalidate a successful catalog.
 func (s *Service) antigravityCapabilityKey(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	return antigravityCapabilityKeyForRoute(auth, antigravityModelBaseURLs(auth)[0], s.antigravityModelFetchProxyURL(auth), antigravityModelUserAgent())
+	return antigravityCapabilityKeyForRoute(auth, antigravityModelBaseURLs(auth)[0], s.antigravityModelFetchProxyURL(auth), resolveAntigravityModelUserAgent(auth))
+}
+
+func antigravityCapabilityKeyWithConfig(auth *coreauth.Auth, cfg *config.Config) string {
+	if auth == nil {
+		return ""
+	}
+	return antigravityCapabilityKeyForRoute(auth, antigravityModelBaseURLs(auth)[0], antigravityModelFetchProxyURLWithConfig(auth, cfg), resolveAntigravityModelUserAgent(auth))
 }
 
 func antigravityCapabilityKeyForRoute(auth *coreauth.Auth, endpoint, proxy, userAgent string) string {
@@ -277,7 +304,7 @@ func (s *Service) cachedAntigravityHints(auth *coreauth.Auth) antigravityModelCa
 	}
 	endpoint := antigravityModelBaseURLs(auth)[0]
 	proxyURL := s.antigravityModelFetchProxyURL(auth)
-	userAgent := antigravityModelUserAgent()
+	userAgent := resolveAntigravityModelUserAgent(auth)
 	key := antigravityCapabilityKeyForRoute(auth, endpoint, proxyURL, userAgent)
 	routeFingerprint := sdkauth.AntigravityCapabilityRouteFingerprint(proxyURL, userAgent)
 	return s.cachedAntigravityHintsForKey(auth, endpoint, routeFingerprint, key)
@@ -448,7 +475,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 		ctx = context.Background()
 	}
 	baseURLs, proxyURL := antigravityModelBaseURLs(auth), s.antigravityModelFetchProxyURL(auth)
-	userAgent := antigravityModelUserAgent()
+	userAgent := resolveAntigravityModelUserAgent(auth)
 	cacheKey := antigravityCapabilityKeyForRoute(auth, baseURLs[0], proxyURL, userAgent)
 	routeFingerprint := sdkauth.AntigravityCapabilityRouteFingerprint(proxyURL, userAgent)
 	accessToken, _ := auth.Metadata["access_token"].(string)
@@ -661,9 +688,19 @@ func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
 	if s != nil {
 		s.cfgMu.RLock()
 		defer s.cfgMu.RUnlock()
-		if s.cfg != nil {
-			return strings.TrimSpace(s.cfg.ProxyURL)
+		return antigravityModelFetchProxyURLWithConfig(auth, s.cfg)
+	}
+	return ""
+}
+
+func antigravityModelFetchProxyURLWithConfig(auth *coreauth.Auth, cfg *config.Config) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
 		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.ProxyURL)
 	}
 	return ""
 }
@@ -826,7 +863,7 @@ func antigravityAuthModelSettingsEqual(a, b *coreauth.Auth) bool {
 }
 
 func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth.Auth, providerKey string, hints antigravityModelCapabilityHints, expectedKey string, expectedEpoch, expectedRegEpoch uint64) {
-	if ctx.Err() != nil || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() || s.antigravityCapabilityKey(auth) != expectedKey {
+	if s == nil || auth == nil || (ctx != nil && ctx.Err() != nil) || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() || s.antigravityCapabilityKey(auth) != expectedKey {
 		return
 	}
 	if hints.ModelIDs == nil && len(hints.WebSearchModelIDs) == 0 {
@@ -838,39 +875,52 @@ func (s *Service) applyAntigravityModelHints(ctx context.Context, auth *coreauth
 			return
 		}
 	}
-	var updated bool
-	if hints.ModelIDs != nil {
-		// Keep the config snapshot stable through publication. Registry CAS must
-		// remain strict: an epoch from another publisher may use newer auth settings.
+	publish := func(current *coreauth.Auth) bool {
+		if current == nil || (ctx != nil && ctx.Err() != nil) {
+			return false
+		}
+		// Keep the config snapshot stable through publication while preserving
+		// lock order: auth mutation lock -> cfgMu.RLock -> antigravityCapabilityMu -> registry.
 		s.cfgMu.RLock()
-		models := s.antigravityModelsForHintsWithConfig(auth, hints, s.cfg)
-		// Fence the cache-to-registry publication as well as the network result.
-		// A newer successful catalog must never be replaced by an older caller.
-		antigravityCapabilityMu.Lock()
-		entry := antigravityCapabilityCache[expectedKey]
-		if entry.hints.revision != hints.revision {
-			antigravityCapabilityMu.Unlock()
-			s.cfgMu.RUnlock()
-			return
+		defer s.cfgMu.RUnlock()
+		if s.cfg != nil && s.cfg.Home.Enabled {
+			return false
 		}
-		reg := registry.GetGlobalRegistry()
-		var appliedEpoch uint64
-		appliedEpoch, updated = reg.ReplaceClientModels(auth.ID, providerKey, expectedRegEpoch, models)
-		if updated {
-			entry.appliedRevision = hints.revision
-			entry.appliedEpoch = appliedEpoch
-			antigravityCapabilityCache[expectedKey] = entry
+		if antigravityCapabilityKeyWithConfig(current, s.cfg) != expectedKey {
+			return false
 		}
-		antigravityCapabilityMu.Unlock()
-		s.cfgMu.RUnlock()
-	} else {
+		if hints.ModelIDs != nil {
+			models := s.antigravityModelsForHintsWithConfig(current, hints, s.cfg)
+			// Fence the cache-to-registry publication as well as the network result.
+			// A newer successful catalog must never be replaced by an older caller.
+			antigravityCapabilityMu.Lock()
+			defer antigravityCapabilityMu.Unlock()
+			entry := antigravityCapabilityCache[expectedKey]
+			if entry.hints.revision != hints.revision {
+				return false
+			}
+			reg := registry.GetGlobalRegistry()
+			appliedEpoch, ok := reg.ReplaceClientModels(current.ID, providerKey, expectedRegEpoch, models)
+			if ok {
+				entry.appliedRevision = hints.revision
+				entry.appliedEpoch = appliedEpoch
+				antigravityCapabilityCache[expectedKey] = entry
+			}
+			return ok
+		}
 		// Older capability-only responses cannot revoke model entitlements.
-		aliasMap := s.buildAntigravityReverseAliasMap(auth)
-		updated = GlobalModelRegistry().ApplyClientModelCapabilities(auth.ID, expectedRegEpoch, func(id string, info *ModelInfo) {
-			if _, ok := hints.WebSearchModelIDs[resolveAntigravityUpstreamModelID(id, auth.Prefix, aliasMap)]; ok {
+		aliasMap := buildAntigravityReverseAliasMapWithConfig(current, s.cfg)
+		return GlobalModelRegistry().ApplyClientModelCapabilities(current.ID, expectedRegEpoch, func(id string, info *ModelInfo) {
+			if _, ok := hints.WebSearchModelIDs[resolveAntigravityUpstreamModelID(id, current.Prefix, aliasMap)]; ok {
 				info.SupportsWebSearch = true
 			}
 		})
+	}
+	var updated bool
+	if s.coreManager != nil {
+		updated = s.coreManager.PublishIfRegistrationCurrentContext(ctx, auth.ID, expectedEpoch, auth.Prefix, auth.Provider, isAntigravityAuthDisabled(auth), auth.AuthKind(), auth.Attributes, publish)
+	} else {
+		updated = publish(auth)
 	}
 	if updated && s.coreManager != nil {
 		s.coreManager.ReconcileRegistryModelStates(ctx, auth.ID)
@@ -981,11 +1031,17 @@ func (s *Service) buildAntigravityReverseAliasMap(auth *coreauth.Auth) map[strin
 	if auth == nil {
 		return nil
 	}
-	var cfg *config.Config
 	if s != nil {
 		s.cfgMu.RLock()
-		cfg = s.cfg
-		s.cfgMu.RUnlock()
+		defer s.cfgMu.RUnlock()
+		return buildAntigravityReverseAliasMapWithConfig(auth, s.cfg)
+	}
+	return buildAntigravityReverseAliasMapWithConfig(auth, nil)
+}
+
+func buildAntigravityReverseAliasMapWithConfig(auth *coreauth.Auth, cfg *config.Config) map[string]string {
+	if auth == nil {
+		return nil
 	}
 	channel := coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())
 	aliases := oauthModelAliasesForAuth(cfg, channel, auth.Attributes)
