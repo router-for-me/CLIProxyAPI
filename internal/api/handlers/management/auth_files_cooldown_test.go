@@ -1182,8 +1182,8 @@ func TestListAuthFiles_V8CodexTerminalRenewalRecoveryWorkflow_Issue5783(t *testi
 	if optInStatus["status"] != "ok" || optInStatus["adopted"] != true || optInStatus["quota_blocked"] != true {
 		t.Fatalf("expected adopted=true quota_blocked=true after opt-in verify quota error, got %#v", optInStatus)
 	}
-	verifyErrText := fmt.Sprint(optInStatus["verification_error"])
-	if verifyErrText == "" {
+	verifyErrText, _ := optInStatus["verification_error"].(string)
+	if strings.TrimSpace(verifyErrText) == "" {
 		t.Fatalf("expected sanitized verification_error in status response, got %#v", optInStatus)
 	}
 	for _, secret := range []string{"secret-postlogin-code", "secret-postlogin-state", "secret-postlogin-bearer", "https://chatgpt.com"} {
