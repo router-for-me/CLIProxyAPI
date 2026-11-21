@@ -404,7 +404,8 @@ def merge_timings(files):
                 if t is None:
                     pk[p] = pk.get(p, 0.0) + e.get("Elapsed", 0.0)
                 elif t.count("/") <= 1:
-                    ts.setdefault(p, {})[t] = e.get("Elapsed", 0.0)
+                    # Summed: a test split by subtests runs once per part.
+                    ts.setdefault(p, {})[t] = ts.get(p, {}).get(t, 0.0) + e.get("Elapsed", 0.0)
     return {"packages": {k: round(v, 2) for k, v in sorted(pk.items())},
             # Only tests worth naming in a split; the planner charges the rest to the -skip part.
             "tests": {k: {n: round(x, 2) for n, x in sorted(v.items()) if x >= 0.5}
