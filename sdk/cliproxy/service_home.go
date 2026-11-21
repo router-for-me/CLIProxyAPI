@@ -357,7 +357,7 @@ func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Clie
 			for i := range items {
 				if errPush := client.LPushUsage(ctx, items[i]); errPush != nil {
 					for j := i; j < len(items); j++ {
-						redisqueue.Enqueue(items[j])
+						redisqueue.Requeue(items[j])
 					}
 					if !sleep(time.Second) {
 						return
