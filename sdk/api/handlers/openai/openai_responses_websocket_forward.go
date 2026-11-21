@@ -232,6 +232,7 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 					continue
 				}
 				if eventType == "response.created" {
+					opts.localInterrupt.begin()
 					responseStarted = true
 					markDownstreamCommitted()
 					completed = false
@@ -279,6 +280,8 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesWebsocket(
 						}
 					}
 				} else if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" {
+					// Disarm before the client can react to the terminal frame, even if EOF is delayed.
+					opts.localInterrupt.end()
 					// response.incomplete ends the turn too. Codex uses it, with
 					// reason "interrupted", to acknowledge response.interrupt. Closing
 					// the client socket here would block the follow-up request.
