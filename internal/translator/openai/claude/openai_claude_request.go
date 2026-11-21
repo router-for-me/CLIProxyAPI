@@ -6,9 +6,9 @@
 package claude
 
 import (
-	"github.com/MoeForge/moego/base64"
 	"strings"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -20,17 +20,17 @@ import (
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
 func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, false)
+	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, false, false)
 
 }
 
 // ConvertClaudeRequestToOpenAIWithCompat preserves assistant thinking text
 // for configured compatibility endpoints.
 func ConvertClaudeRequestToOpenAIWithCompat(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, true)
+	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, true, false)
 }
 
-func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool, preserveThinkingBlocks bool) ([]byte, error) {
+func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream, preserveThinkingBlocks, inlineToolMedia bool) ([]byte, error) {
 	// The internal commentary marker must be restored as assistant text before
 	// any thinking handling, so it is never dropped or mapped to reasoning.
 	rawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
@@ -268,9 +268,19 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						if toolName := toolNameByID[toolUseID]; toolName != "" {
 							_ = toolResultDoc.Set("name", toolName)
 						}
-						toolResultContent, toolResultImages := convertClaudeToolResultContent(part.Get("content"))
+						toolResultContent, toolResultImages := convertClaudeToolResultContent(part.Get("content"), inlineToolMedia)
 						_ = toolResultDoc.Set("content", toolResultContent)
-						relayedToolImages = append(relayedToolImages, toolResultImages...)
+						if inlineToolMedia && len(toolResultImages) != 0 {
+							parts := toolResultImages
+							if toolResultContent != "" {
+								text := ojson.NewDocString(`{"type":"text"}`)
+								_ = text.Set("text", toolResultContent)
+								parts = append([][]byte{text.Bytes()}, parts...)
+							}
+							translatorcommon.SetRawArrayItemsDoc(toolResultDoc, "content", parts)
+						} else {
+							relayedToolImages = append(relayedToolImages, toolResultImages...)
+						}
 						toolResults = append(toolResults, toolResultDoc.Bytes())
 					}
 					return true
@@ -810,7 +820,16 @@ func appendOpenAIToolResultDocument(item ojson.Result, parts *[]string, relayedM
 	*parts = append(*parts, toolResultUnsupportedDocumentPlaceholder)
 }
 
-func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
+func convertClaudeToolResultContent(content ojson.Result, inlineToolMedia bool) (string, [][]byte) {
+	imagePart := func(item ojson.Result) (string, bool) {
+		part, ok := convertClaudeContentPart(item)
+		if desc := item.Get("description"); ok && inlineToolMedia && desc.Type == ojson.String {
+			doc := ojson.NewDocString(part)
+			_ = doc.Set("description", desc.String())
+			return doc.String(), true
+		}
+		return part, ok
+	}
 	if !content.Exists() {
 		return "", nil
 	}
@@ -831,7 +850,7 @@ func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
 			case item.IsObject() && item.Get("type").String() == "document":
 				appendOpenAIToolResultDocument(item, &parts, &relayedMedia)
 			case item.IsObject() && item.Get("type").String() == "image":
-				if contentItem, ok := convertClaudeContentPart(item); ok {
+				if contentItem, ok := imagePart(item); ok {
 					relayedMedia = append(relayedMedia, []byte(contentItem))
 				} else {
 					parts = append(parts, item.Raw)
@@ -847,6 +866,9 @@ func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
 		joined := strings.Join(parts, "\n\n")
 		if strings.TrimSpace(joined) == "" {
 			if len(relayedMedia) > 0 {
+				if inlineToolMedia {
+					return joined, relayedMedia
+				}
 				return toolResultRelayPlaceholder(relayedMedia), relayedMedia
 			}
 			return content.Raw, nil
@@ -861,14 +883,17 @@ func convertClaudeToolResultContent(content ojson.Result) (string, [][]byte) {
 			var relayedMedia [][]byte
 			appendOpenAIToolResultDocument(content, &parts, &relayedMedia)
 			joined := strings.Join(parts, "\n\n")
-			if strings.TrimSpace(joined) == "" && len(relayedMedia) > 0 {
+			if !inlineToolMedia && strings.TrimSpace(joined) == "" && len(relayedMedia) > 0 {
 				return toolResultRelayPlaceholder(relayedMedia), relayedMedia
 			}
 			return joined, relayedMedia
 		}
 		if blockType == "image" {
-			if contentItem, ok := convertClaudeContentPart(content); ok {
+			if contentItem, ok := imagePart(content); ok {
 				relayed := [][]byte{[]byte(contentItem)}
+				if inlineToolMedia {
+					return "", relayed
+				}
 				return toolResultRelayPlaceholder(relayed), relayed
 			}
 		}
