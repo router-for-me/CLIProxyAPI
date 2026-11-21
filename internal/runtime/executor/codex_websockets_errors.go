@@ -71,7 +71,7 @@ func inferCodexWebsocketErrorStatus(payload []byte) int {
 
 // Infer from the same normalized business error for both WS terminal frame shapes.
 func inferCodexWebsocketFailureBodyStatus(body []byte) int {
-	if isCodexWebsocketConnectionLimitError(body) || isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
+	if isCodexUsageLimitError(body) || isCodexTransientCapacityError(body) {
 		return http.StatusTooManyRequests
 	}
 	if codexTerminalErrorIsContextLength(body) {
@@ -104,10 +104,10 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 		return nil, false
 	}
 
-	return newCodexWebsocketStatusError(payload, buildCodexWebsocketErrorPayload(payload, status), status, headers, modelLevelCooling), true
+	return newCodexWebsocketStatusError(buildCodexWebsocketErrorPayload(payload, status), status, headers, modelLevelCooling, isCodexWebsocketConnectionLimitError(payload)), true
 }
 
-func newCodexWebsocketStatusError(payload, body []byte, status int, headers http.Header, modelLevelCooling bool) statusErrWithHeaders {
+func newCodexWebsocketStatusError(body []byte, status int, headers http.Header, modelLevelCooling, connectionLimit bool) statusErrWithHeaders {
 	isUsageLimit := isCodexUsageLimitError(body)
 	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
 	statusError := statusErr{
@@ -120,7 +120,7 @@ func newCodexWebsocketStatusError(payload, body []byte, status int, headers http
 	// immediate-retry contract, then the generic Retry-After header.
 	if retryAfter := parseCodexRetryAfter(status, body, time.Now()); retryAfter != nil {
 		statusError.retryAfter = retryAfter
-	} else if isCodexWebsocketConnectionLimitError(payload) {
+	} else if connectionLimit {
 		retryAfter := time.Duration(0)
 		statusError.retryAfter = &retryAfter
 	} else if shouldParseCodexRetryAfterHeader(status) {

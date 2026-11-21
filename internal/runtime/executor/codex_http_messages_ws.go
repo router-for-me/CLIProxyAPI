@@ -19,27 +19,38 @@ import (
 
 const codexHTTPMessagesLimit = 256
 
-var errCodexHTTPMessagesContinuationRejected = errors.New("Codex rejected the continuation before starting a response")
+var errCodexHTTPMessagesRecovery = errors.New("Codex WebSocket refused the turn before starting a response")
 
-func codexHTTPMessagesCanRecoverContinuation(payload []byte) bool {
-	event := helps.CodexResponseEventType(payload)
-	if event != "error" && event != "response.failed" {
-		return false
+type codexHTTPMessagesTerminalFailure struct {
+	err         statusErrWithHeaders
+	recoverable bool
+}
+
+// Classify status, retry hints, and recovery from the same normalized failure.
+// Native Responses WebSocket parsing intentionally keeps its original rules.
+func codexHTTPMessagesFailure(payload []byte, continuation, modelLevelCooling bool) (codexHTTPMessagesTerminalFailure, bool) {
+	body, failed := codexTerminalFailureBody(payload)
+	if !failed {
+		return codexHTTPMessagesTerminalFailure{}, false
 	}
 	status := codexWebsocketErrorStatus(payload)
-	if (status == 0 || status == http.StatusBadRequest || status == http.StatusTooManyRequests) &&
-		(isCodexWebsocketConnectionLimitError(payload) || ojson.GetBytesNoCopy(payload, "response.error.code").String() == "websocket_connection_limit_reached") {
-		return true
+	connectionLimit := isCodexWebsocketConnectionLimitError(body) || isCodexWebsocketConnectionLimitError(payload)
+	recoverable := connectionLimit && (status == 0 || status == http.StatusBadRequest || status == http.StatusTooManyRequests)
+	if continuation && (status == 0 || status == http.StatusBadRequest || status == http.StatusNotFound) &&
+		ojson.GetBytesNoCopy(body, "error.code").String() == "previous_response_not_found" {
+		recoverable = true
 	}
-	if status != http.StatusBadRequest && status != http.StatusNotFound && status != 0 {
-		return false
-	}
-	for _, path := range []string{"error.code", "body.error.code", "response.error.code", "code"} {
-		if ojson.GetBytesNoCopy(payload, path).String() == "previous_response_not_found" {
-			return true
+	if status < 400 || status > 599 {
+		if connectionLimit {
+			status = http.StatusTooManyRequests
+		} else {
+			status = inferCodexWebsocketFailureBodyStatus(body)
 		}
 	}
-	return false
+	return codexHTTPMessagesTerminalFailure{
+		err:         newCodexWebsocketStatusError(body, status, parseCodexWebsocketErrorHeaders(payload), modelLevelCooling, connectionLimit),
+		recoverable: recoverable,
+	}, true
 }
 
 func codexHTTPMessagesUpgradeUnsupported(resp *http.Response) bool {

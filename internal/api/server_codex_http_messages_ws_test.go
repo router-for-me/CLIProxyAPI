@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
@@ -42,10 +43,12 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		rejectionFrame  string
 		rejectionDelay  int
 		recoveryEOF     bool
+		noRecovery      bool
 		emptyRecovery   bool
 		retryAfter      string
 		quotaExceeded   bool
 		modelQuota      bool
+		shortCooldown   bool
 		nonUpgradeOK    bool
 	}{
 		{name: "reuse"},
@@ -68,6 +71,11 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		{name: "statusless missing parent falls back with full input", rejectionFrame: `{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "untyped statusless missing parent falls back", rejectionFrame: `{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "expired upstream socket falls back with full history", rejectionFrame: `{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"connection expired"}}`},
+		{name: "expired socket recovers after history edit", editPrefix: true, rejectionDelay: 49, rejectionFrame: `{"type":"response.failed","status":400,"response":{"error":{"code":"websocket_connection_limit_reached","message":"connection expired"}}}`},
+		{name: "expired socket recovers with payload rules", payloadRules: true, rejectionFrame: `{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"connection expired"}}`},
+		{name: "accepted flat socket limit preserves immediate retry hint", acknowledge: true, terminalStatus: 429, retryAfter: "30", modelQuota: true, shortCooldown: true, terminalFrame: `{"type":"error","status":429,"headers":{"Retry-After":"30"},"error":{"code":"websocket_connection_limit_reached","message":"accepted terminal failure"}}`},
+		{name: "accepted nested socket limit preserves immediate retry hint", acknowledge: true, terminalStatus: 429, retryAfter: "30", modelQuota: true, shortCooldown: true, terminalFrame: `{"type":"response.failed","status":429,"headers":{"Retry-After":"30"},"response":{"id":"resp_1","error":{"code":"websocket_connection_limit_reached","message":"accepted terminal failure"}}}`},
+		{name: "full turn does not invent a missing-parent recovery", editPrefix: true, noRecovery: true, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"no generated parent"}}`},
 		{name: "late continuation rejection still recovers", rejectionDelay: 49, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"parent expired"}}`},
 		{name: "ambiguous HTTP recovery is not replayed", recoveryEOF: true, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"parent expired"}}`},
 		{name: "empty HTTP recovery SSE is not replayed", recoveryEOF: true, emptyRecovery: true, rejectionFrame: `{"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"parent expired"}}`},
@@ -303,6 +311,9 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 					}
 					state := got.ModelStates["gpt-5.5"]
 					modelExceeded := state != nil && state.Quota.Exceeded
+					if test.shortCooldown && (state == nil || time.Until(state.NextRetryAfter) <= 0 || time.Until(state.NextRetryAfter) > 15*time.Second) {
+						t.Fatalf("expected the ordinary cooldown floor for an immediate-retry hint, got %+v", state)
+					}
 					credentialExceeded := got.Quota.Exceeded && got.Quota.Reason == "credential_quota"
 					if credentialExceeded != test.quotaExceeded || (!test.quotaExceeded && modelExceeded != test.modelQuota) || first.Header().Get("Retry-After") != test.retryAfter {
 						t.Fatalf("expected credential quota=%v, model quota=%v and Retry-After %s, got credential quota=%v, model quota=%v, Retry-After %q", test.quotaExceeded, test.modelQuota, test.retryAfter, credentialExceeded, modelExceeded, first.Header().Get("Retry-After"))
@@ -339,6 +350,12 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				history = strings.Replace(user, "run probe", "edited prompt", 1)
 			}
 			second := request(`[`+history+`,`+assistant+`,`+result+`]`, "b")
+			if test.noRecovery {
+				if second.Code != http.StatusBadRequest || creates.Load() != 2 || httpCalls.Load() != 0 {
+					t.Fatalf("unexpected recovery: status=%d WS=%d HTTP=%d", second.Code, creates.Load(), httpCalls.Load())
+				}
+				return
+			}
 			if test.recoveryEOF {
 				if second.Code != http.StatusBadGateway || creates.Load() != 2 || httpCalls.Load() != 1 {
 					t.Fatalf("expected a single recovery attempt: status=%d WS=%d HTTP=%d", second.Code, creates.Load(), httpCalls.Load())
@@ -353,10 +370,17 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 					t.Fatalf("expected one HTTP recovery, websocket=%d http=%d", creates.Load(), httpCalls.Load())
 				}
 				attempt := ojson.NewDoc(<-frames)
-				if attempt.Get("previous_response_id").String() != "resp_1" || attempt.Get("input.#").Int() != 1 {
-					t.Fatalf("expected a rejected incremental create before recovery: %s", attempt.String())
+				wantParent, wantItems := "resp_1", int64(1)
+				if test.editPrefix || test.payloadRules {
+					wantParent, wantItems = "", 3
+				}
+				if connections.Load() != 1 || attempt.Get("previous_response_id").String() != wantParent || attempt.Get("input.#").Int() != wantItems {
+					t.Fatalf("expected the same socket to send parent=%q and %d items, got %s", wantParent, wantItems, attempt.String())
 				}
 				body := ojson.NewDoc(<-fullRetry)
+				if test.payloadRules && (body.Get("instructions").String() != "operator override" || body.Get("parallel_tool_calls").Exists()) {
+					t.Fatalf("recovery did not preserve final operator rules: %s", body.String())
+				}
 				if body.Get("previous_response_id").Exists() || body.Get("input.#").Int() != 3 {
 					t.Fatalf("recovery must send full history: %s", body.String())
 				}

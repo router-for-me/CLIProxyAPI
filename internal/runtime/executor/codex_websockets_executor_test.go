@@ -3546,3 +3546,12 @@ func TestCodexWebsocketReconnectUpgradeRejectionRecordedWhenRequestLogDisabled(t
 		})
 	}
 }
+
+func TestCodexWebsocketNativeNestedSocketLimit(t *testing.T) {
+	frame := []byte(`{"type":"error","headers":{"Retry-After":"30"},"response":{"error":{"code":"websocket_connection_limit_reached","message":"connection expired"}}}`)
+	got, ok := parseCodexWebsocketError(frame)
+	status, hasStatus := got.(interface{ StatusCode() int })
+	if !ok || !hasStatus || status.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("native WebSocket status changed: %T %v", got, got)
+	}
+}

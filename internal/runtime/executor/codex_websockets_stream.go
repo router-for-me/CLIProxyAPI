@@ -191,10 +191,13 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		bodyErr := recordWebsocketDialFailure(ctx, e.cfg, wsReqLog, respHS, errDial)
 		if httpSession != nil && codexHTTPMessagesUpgradeUnsupported(respHS) {
 			unlockStreamSession()
-			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+			return nil, errCodexHTTPMessagesRecovery
 		}
 		if respHS != nil && respHS.StatusCode == http.StatusUpgradeRequired {
 			unlockStreamSession()
+			if httpSession != nil {
+				return nil, errCodexHTTPMessagesRecovery
+			}
 			if opts.ExecutionLifecycle == nil && !cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
 			}
@@ -362,9 +365,10 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		return e.streamCodexDuplex(ctx, auth, req, opts, sess, conn, readCh, input, prepared, reporter, upstreamHeaders, unlockStreamSession), nil
 	}
 
-	// Probe an incremental create before releasing the HTTP stream so a missing
-	// parent can recover once with the unmodified request.
-	buffering := prepared.httpContinuationConn != nil || (e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering)
+	// Probe each Messages create before releasing SSE. A socket can explicitly
+	// reject even a full-history turn without starting generation.
+	bufferHandshake := prepared.httpContinuationConn != nil || (e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering)
+	buffering := httpSession != nil || bufferHandshake
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	var exhaustionLogged bool
@@ -425,26 +429,21 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		if httpSession == nil {
 			return nil
 		}
-		body, ok := codexTerminalFailureBody(payload)
-		if !ok {
+		terminal, failed := codexHTTPMessagesFailure(payload, prepared.httpContinuationConn != nil, e.modelLevelCooling())
+		if !failed {
 			return nil
 		}
-		if beforeDelivery && prepared.httpContinuationConn != nil && !acceptedHTTP && codexHTTPMessagesCanRecoverContinuation(payload) {
-			e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "continuation_rejected", nil)
+		if beforeDelivery && !acceptedHTTP && terminal.recoverable {
+			e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "websocket_refused_turn", nil)
 			sess.clearActive(conn, readCh)
 			unlockStreamSession()
-			return errCodexHTTPMessagesContinuationRejected
+			return errCodexHTTPMessagesRecovery
 		}
-		status := codexWebsocketErrorStatus(payload)
-		if status < 400 || status > 599 {
-			status = inferCodexWebsocketFailureBodyStatus(body)
-		}
-		headers := parseCodexWebsocketErrorHeaders(payload)
-		failure := newCodexWebsocketStatusError(payload, body, status, headers, e.modelLevelCooling())
+		failure := terminal.err
 		e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", failure)
 		sess.clearActive(conn, readCh)
 		unlockStreamSession()
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, body); errClearReplay != nil {
+		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, failure.StatusCode(), []byte(failure.Error())); errClearReplay != nil {
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 			reporter.PublishFailure(ctx, errClearReplay)
 			return guardAcceptedHTTP(errClearReplay)
@@ -540,7 +539,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 
 			payload = bytes.TrimSpace(payload)
 			if len(payload) == 0 {
-				if !windowOpen && !(prepared.httpContinuationConn != nil && !acceptedHTTP && len(bufferedChunks) == 0) {
+				if !windowOpen && !(httpSession != nil && !acceptedHTTP && len(bufferedChunks) == 0) {
 					break
 				}
 				continue
@@ -705,7 +704,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			// !isTerminalEvent is redundant against the closed allow-list, which admits no terminal
 			// type, and the empty-payload rule cannot fire on a payload already known non-empty. It
 			// stays as the guard a reader expects to find, and its SSE counterpart is !terminalSuccess.
-			if windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
+			if bufferHandshake && windowOpen && isCodexBootstrapBufferableEvent(eventType, payload) && !isTerminalEvent {
 				frameBytes := len(payload)
 				for i := range currentChunks {
 					frameBytes += len(currentChunks[i])
@@ -720,7 +719,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 
 			// Skipped frames cannot commit SSE. Keep waiting for admission or a rejection
 			// without growing the bootstrap buffer or adding a deadline to the socket.
-			if prepared.httpContinuationConn != nil && !acceptedHTTP && !isTerminalEvent && len(currentChunks) == 0 && len(bufferedChunks) == 0 {
+			if httpSession != nil && !acceptedHTTP && !isTerminalEvent && len(currentChunks) == 0 && len(bufferedChunks) == 0 {
 				continue
 			}
 			initialChunks = currentChunks
