@@ -80,7 +80,7 @@ jobs:
           --shards "$SHARDS" --index $(( ${{ matrix.shard }} - 1 ))
           --packages selected.txt --out test-output.json
       - name: Upload timings
-        if: always() && github.event_name == 'push'
+        if: always() && (github.event_name == 'push' || failure())
         uses: actions/upload-artifact@v4
         with:
           name: test-output-${{ matrix.shard }}

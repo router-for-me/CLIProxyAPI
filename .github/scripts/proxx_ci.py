@@ -245,6 +245,7 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
             extra = ["-skip", anchored(it["skip"])] if it["skip"] else []
             cmds.append((it["package"], ["go", "test", *flags, *extra, it["package"]]))
     ran, tests_ran, failed, ok = set(), {}, [], True
+    logs = {}  # (package, test) -> output lines, printed only when that test fails
     with open(out_path, "w") as out:
         for label, cmd in cmds:
             start = time.time()
@@ -260,8 +261,18 @@ def run_shard(shards, index, timings, packages, target, race, out_path):
                     ran.add(pkg)
                 if act in ("pass", "fail", "skip") and test and "/" not in test:
                     tests_ran.setdefault(pkg, set()).add(test)
+                if act == "output":
+                    logs.setdefault((pkg, test), []).append(e.get("Output", ""))
                 if act == "fail":
                     failed.append(f"{pkg} {test or '(package)'}")
+                    if test is None or "/" not in test:
+                        sys.stdout.write(f"::group::FAIL {pkg} {test or '(package)'}\n")
+                        lines = [l for (p_, t_), ls in logs.items() if p_ == pkg and (
+                            test is None or t_ == test or (t_ or "").startswith(test + "/")) for l in ls]
+                        sys.stdout.write("".join(lines[-400:]))
+                        sys.stdout.write("::endgroup::\n")
+                if act in ("pass", "skip") and test:
+                    logs.pop((pkg, test), None)
                 if act == "output" and test is None and pkg and e.get("Output", "").startswith(("FAIL", "# ")):
                     sys.stdout.write(e["Output"])
             ok = (p.wait() == 0) and ok
