@@ -26,6 +26,12 @@ const (
 	clientSecretMaxBodySize         = 64 << 10
 	clientSecretMaxEntries          = 1024
 	clientSecretMaxEntriesPerIssuer = 64
+
+	sessionTypeRealtime        = "realtime"
+	sessionTypeTranscription   = "transcription"
+	defaultTranscriptionModel  = "gpt-4o-transcribe"
+	realtimeSessionObject      = "realtime.session"
+	transcriptionSessionObject = "realtime.transcription_session"
 )
 
 var (
@@ -230,6 +236,74 @@ func (h *Handler) CreateClientSecret(c *gin.Context) {
 	h.createClientSecret(c, request.Session, request.ExpiresAfter, false)
 }
 
+// HandleTranscriptionSession creates a transcription-only ephemeral key.
+// Transcription-only realtime sessions require a Codex API-key upstream; the
+// ChatGPT/Codex OAuth upstream has no such capability, so the endpoint keeps
+// reporting the capability as unsupported when no API-key credential exists.
+func (h *Handler) HandleTranscriptionSession(c *gin.Context) {
+	if h == nil || h.clientSecrets == nil {
+		writeRealtimeError(c, http.StatusServiceUnavailable, "Realtime client secret service unavailable", "server_error", "realtime_client_secret_unavailable")
+		return
+	}
+	if !h.codexAPIKeyConfigured(c) {
+		writeCapabilityNotSupported(c, "Realtime transcription-only sessions")
+		return
+	}
+	body, errRead := readClientSecretBody(c.Request.Body)
+	if errRead != nil {
+		status := clienterror.HTTPStatusFromErrorOr(errRead, http.StatusBadRequest)
+		if errors.Is(errRead, errBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeRealtimeError(c, status, errRead.Error(), "invalid_request_error", "invalid_request")
+		return
+	}
+	var request clientSecretCreateRequest
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if errUnmarshal := json.Unmarshal(body, &request); errUnmarshal != nil {
+			writeRealtimeError(c, http.StatusBadRequest, "Invalid Realtime client secret request", "invalid_request_error", "invalid_request")
+			return
+		}
+	}
+	lifetime, errLifetime := clientSecretLifetime(request.ExpiresAfter)
+	if errLifetime != nil {
+		writeRealtimeError(c, http.StatusBadRequest, errLifetime.Error(), "invalid_request_error", "invalid_expires_after")
+		return
+	}
+	clientSession, errSession := normalizeTranscriptionSession(request.Session)
+	if errSession != nil {
+		writeRealtimeError(c, http.StatusBadRequest, errSession.Error(), "invalid_request_error", "invalid_session")
+		return
+	}
+	issuerPrincipal, _ := c.Get("userApiKey")
+	issuerProvider, _ := c.Get("accessProvider")
+	issuerPrincipalValue, _ := issuerPrincipal.(string)
+	issuerProviderValue, _ := issuerProvider.(string)
+	token, authorization, expiresAt, errCreate := h.clientSecrets.create(clientSession, lifetime, issuerPrincipalValue, issuerProviderValue)
+	if errCreate != nil {
+		if errors.Is(errCreate, errClientSecretCapacity) {
+			c.Header("Retry-After", "1")
+			writeRealtimeError(c, http.StatusTooManyRequests, errCreate.Error(), "rate_limit_error", "realtime_client_secret_capacity_exhausted")
+			return
+		}
+		writeRealtimeError(c, http.StatusInternalServerError, "Failed to create Realtime client secret", "server_error", "realtime_client_secret_failed")
+		return
+	}
+	responseSession, errResponse := realtimeSessionResponse(clientSession, authorization.Principal, expiresAt, transcriptionSessionObject)
+	if errResponse != nil {
+		writeRealtimeError(c, http.StatusInternalServerError, "Failed to encode Realtime session", "server_error", "realtime_session_failed")
+		return
+	}
+	var response map[string]any
+	if errUnmarshal := json.Unmarshal(responseSession, &response); errUnmarshal != nil {
+		writeRealtimeError(c, http.StatusInternalServerError, "Failed to encode Realtime session", "server_error", "realtime_session_failed")
+		return
+	}
+	response["client_secret"] = gin.H{"value": token, "expires_at": expiresAt.Unix()}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, response)
+}
+
 // CreateLegacySession implements the deprecated Realtime session credential endpoint.
 func (h *Handler) CreateLegacySession(c *gin.Context) {
 	if h == nil || h.clientSecrets == nil {
@@ -280,7 +354,7 @@ func (h *Handler) createClientSecret(c *gin.Context, session json.RawMessage, ex
 		writeRealtimeError(c, http.StatusInternalServerError, "Failed to create Realtime client secret", "server_error", "realtime_client_secret_failed")
 		return
 	}
-	responseSession, errResponse := realtimeSessionResponse(clientSession, authorization.Principal, expiresAt)
+	responseSession, errResponse := realtimeSessionResponse(clientSession, authorization.Principal, expiresAt, realtimeSessionObject)
 	if errResponse != nil {
 		writeRealtimeError(c, http.StatusInternalServerError, "Failed to encode Realtime session", "server_error", "realtime_session_failed")
 		return
@@ -332,10 +406,10 @@ func normalizeClientSecretSession(session json.RawMessage) (json.RawMessage, jso
 	}
 	sessionType, _ := clientSession["type"].(string)
 	if strings.TrimSpace(sessionType) == "" {
-		sessionType = "realtime"
+		sessionType = sessionTypeRealtime
 		clientSession["type"] = sessionType
 	}
-	if sessionType != "realtime" {
+	if sessionType != sessionTypeRealtime {
 		return nil, nil, fmt.Errorf("%w by the Codex OAuth upstream: %q", errUnsupportedSessionType, sessionType)
 	}
 	model, _ := clientSession["model"].(string)
@@ -355,15 +429,62 @@ func normalizeClientSecretSession(session json.RawMessage) (json.RawMessage, jso
 	return clientEncoded, upstreamEncoded, nil
 }
 
-func realtimeSessionResponse(session json.RawMessage, sessionID string, expiresAt time.Time) (json.RawMessage, error) {
+// normalizeTranscriptionSession validates a transcription-only session and
+// returns the session stored on the ephemeral key. API-key upstreams serve the
+// requested model directly, so the client session is stored without a Codex
+// OAuth model rewrite.
+func normalizeTranscriptionSession(session json.RawMessage) (json.RawMessage, error) {
+	trimmedSession := strings.TrimSpace(string(session))
+	if trimmedSession == "" || trimmedSession == "null" {
+		session = json.RawMessage(`{"type":"transcription","model":"` + defaultTranscriptionModel + `"}`)
+	}
+	var clientSession map[string]any
+	if errUnmarshal := json.Unmarshal(session, &clientSession); errUnmarshal != nil || clientSession == nil {
+		return nil, errors.New("session must be a valid JSON object")
+	}
+	sessionType, _ := clientSession["type"].(string)
+	if strings.TrimSpace(sessionType) == "" {
+		sessionType = sessionTypeTranscription
+		clientSession["type"] = sessionType
+	}
+	if sessionType != sessionTypeTranscription {
+		return nil, fmt.Errorf("transcription sessions must use session type %q, got %q", sessionTypeTranscription, sessionType)
+	}
+	model, _ := clientSession["model"].(string)
+	if strings.TrimSpace(model) == "" {
+		clientSession["model"] = defaultTranscriptionModel
+	}
+	encoded, errMarshal := json.Marshal(clientSession)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("encode Realtime transcription session: %w", errMarshal)
+	}
+	return encoded, nil
+}
+
+func realtimeSessionResponse(session json.RawMessage, sessionID string, expiresAt time.Time, object string) (json.RawMessage, error) {
 	var response map[string]any
 	if errUnmarshal := json.Unmarshal(session, &response); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
 	response["id"] = sessionID
-	response["object"] = "realtime.session"
+	response["object"] = object
 	response["expires_at"] = expiresAt.Unix()
 	return json.Marshal(response)
+}
+
+// clientSecretSessionType returns the normalized session type stored on a
+// Realtime client secret, or an empty string when no session is present.
+func clientSecretSessionType(session json.RawMessage) string {
+	if len(session) == 0 {
+		return ""
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if errUnmarshal := json.Unmarshal(session, &payload); errUnmarshal != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(payload.Type))
 }
 
 func codexRealtimeModel(model string) string {

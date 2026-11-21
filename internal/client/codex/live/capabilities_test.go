@@ -175,3 +175,28 @@ func TestUnsupportedRealtimeCapabilitiesUseStandardError(t *testing.T) {
 		}
 	}
 }
+
+func TestTranscriptionSessionsStayUnsupportedWithOnlyCodexOAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := auth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&captureExecutor{})
+	registerCredential(t, manager, &auth.Auth{
+		ID:       "codex-oauth",
+		Provider: "codex",
+		Status:   auth.StatusActive,
+		Metadata: map[string]any{"access_token": "oauth-token"},
+	})
+	handler := NewHandler(manager, nil)
+	router := gin.New()
+	router.POST("/v1/realtime/transcription_sessions", handler.HandleTranscriptionSession)
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/realtime/transcription_sessions", strings.NewReader(`{"session":{"language":"en"}}`))
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusNotImplemented, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"realtime_capability_not_supported"`) {
+		t.Fatalf("body = %s", recorder.Body.String())
+	}
+}

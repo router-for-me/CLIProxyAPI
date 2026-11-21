@@ -21,11 +21,6 @@ func (h *Handler) HandleTranslation(c *gin.Context) {
 	writeCapabilityNotSupported(c, "Realtime translation sessions")
 }
 
-// HandleTranscriptionSession reports that the Codex OAuth upstream has no transcription-only capability.
-func (h *Handler) HandleTranscriptionSession(c *gin.Context) {
-	writeCapabilityNotSupported(c, "Realtime transcription-only sessions")
-}
-
 // HandleSIPControl reports that the Codex OAuth upstream has no SIP dialog capability.
 func (h *Handler) HandleSIPControl(c *gin.Context) {
 	action := "control"
