@@ -222,11 +222,10 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.loggerToggle = toggle
 
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(corsMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
-
-	engine.Use(corsMiddleware())
 	engine.Use(s.responseCompressionMiddleware())
 	openai.SetResponsesWebsocketCompressionEnabled(cfg.Codex.WebsocketCompressionEnabled())
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)

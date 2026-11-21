@@ -377,7 +377,7 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 			s.serveExampleAPIKeyWarningPage(c)
 			return
 		}
-		if !isExampleAPIKeySafeModeProxyPath(path) {
+		if !IsModelServingPath(path) {
 			c.Next()
 			return
 		}
@@ -408,7 +408,10 @@ func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
 	c.Abort()
 }
 
-func isExampleAPIKeySafeModeProxyPath(path string) bool {
+// IsModelServingPath reports whether path is in a model-serving API group
+// registered by setupRoutes, including realtime and Codex direct aliases.
+// All other routes remain independent of startup model readiness.
+func IsModelServingPath(path string) bool {
 	switch {
 	case path == "/v1" || strings.HasPrefix(path, "/v1/"):
 		return true
