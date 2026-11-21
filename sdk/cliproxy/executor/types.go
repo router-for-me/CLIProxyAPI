@@ -15,6 +15,12 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// RequestSourceMetadataKey identifies internal model execution in Options.Metadata.
+const RequestSourceMetadataKey = "source"
+
+// InternalModelCallbackSource identifies a plugin host's internal model callback.
+const InternalModelCallbackSource = "plugin_host_model_callback"
+
 // RequestIDMetadataKey stores the host request lifecycle identifier in Options.Metadata.
 const RequestIDMetadataKey = "request_id"
 

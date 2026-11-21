@@ -22,7 +22,7 @@ const codexHTTPMessagesLimit = 256
 var errCodexHTTPMessagesParentMissing = errors.New("Codex rejected the generated previous_response_id")
 
 func codexHTTPMessagesParentMissing(payload []byte) bool {
-	event := ojson.GetBytesNoCopy(payload, "type").String()
+	event := helps.CodexResponseEventType(payload)
 	if event != "error" && event != "response.failed" {
 		return false
 	}
@@ -63,7 +63,8 @@ type codexHTTPMessagesContinuation struct {
 func (e *CodexWebsocketsExecutor) serveHTTPMessages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error, bool) {
 	if e.cfg == nil || !e.cfg.Codex.ServeHTTPMessagesOverWebsockets || !codexWebsocketsEnabled(auth) ||
 		auth.ID == "" || opts.SourceFormat != sdktranslator.FormatClaude || cliproxyexecutor.ResponseFormatOrSource(opts) != sdktranslator.FormatClaude ||
-		opts.Alt != "" || opts.ExecutionLifecycle != nil || e.cfg.Home.Enabled {
+		opts.Alt != "" || opts.ExecutionLifecycle != nil || e.cfg.Home.Enabled ||
+		helps.PayloadRequestPath(opts) != "/v1/messages" || opts.Metadata[cliproxyexecutor.RequestSourceMetadataKey] == cliproxyexecutor.InternalModelCallbackSource {
 		return nil, nil, false
 	}
 	scope, _ := opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey].(string)

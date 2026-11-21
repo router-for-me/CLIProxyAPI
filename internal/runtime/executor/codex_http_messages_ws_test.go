@@ -81,7 +81,7 @@ func TestCodexHTTPMessagesWebsocketCloseDuringHandshake(t *testing.T) {
 			done := make(chan bool, 1)
 			go func() {
 				req := core.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`)}
-				opts := core.Options{SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"session"}}, Metadata: map[string]any{core.CallerScopeMetadataKey: t.Name()}}
+				opts := core.Options{SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"session"}}, Metadata: map[string]any{core.CallerScopeMetadataKey: t.Name(), core.RequestPathMetadataKey: "/v1/messages"}}
 				_, err, _ := exec.serveHTTPMessages(ctx, entry, req, opts)
 				done <- err != nil
 			}()
@@ -180,7 +180,7 @@ func TestCodexHTTPMessagesWebsocketToolContinuation(t *testing.T) {
 	auth := codexOAuthTestAuth(server.URL)
 	auth.ID = "oauth-1"
 	auth.Metadata["websockets"] = true
-	opts := core.Options{Stream: true, SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"conversation-1"}}, Metadata: map[string]any{core.CallerScopeMetadataKey: "authenticated-client"}}
+	opts := core.Options{Stream: true, SourceFormat: sdktranslator.FormatClaude, Headers: http.Header{"X-Session-Id": {"conversation-1"}}, Metadata: map[string]any{core.CallerScopeMetadataKey: "authenticated-client", core.RequestPathMetadataKey: "/v1/messages"}}
 	run := func(messages string) string {
 		t.Helper()
 		payload := `{"model":"gpt-5.5","max_tokens":128,"stream":true,"tools":[{"name":"probe","description":"probe","input_schema":{"type":"object"}}],"messages":` + messages + `}`

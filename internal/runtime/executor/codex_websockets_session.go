@@ -874,7 +874,11 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 
 		payload = bytes.TrimSpace(payload)
 		if len(payload) > 0 {
-			eventType := strings.Clone(ojson.GetBytesNoCopy(payload, "type").String())
+			eventType := ojson.GetBytesNoCopy(payload, "type").String()
+			if sess.httpMessages != nil {
+				eventType = helps.CodexResponseEventType(payload)
+			}
+			eventType = strings.Clone(eventType)
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}

@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -33,6 +34,8 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		tooBig          bool
 		payloadRules    bool
 		terminalFrame   string
+		terminalStatus  int
+		internalPath    string
 		contextLimit    bool
 		missingParent   string
 		nonUpgradeOK    bool
@@ -41,9 +44,15 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 		{name: "nested response ID in first failed event", terminalFrame: `{"type":"response.failed","status":503,"response":{"id":"resp_1","status":"failed","error":{"type":"server_error","code":"server_is_overloaded","message":"accepted terminal failure"}}}`},
 		{name: "top-level response ID in first failed event", terminalFrame: `{"type":"response.failed","status":503,"response_id":"resp_1","response":{"status":"failed","error":{"type":"server_error","code":"server_is_overloaded","message":"accepted terminal failure"}}}`},
 		{name: "top-level response ID in first error event", terminalFrame: `{"type":"error","response_id":"resp_1","status":503,"error":{"type":"server_error","message":"accepted terminal failure"}}`},
+		{name: "untyped first error with response ID", terminalFrame: `{"response_id":"resp_1","status":503,"error":{"type":"server_error","message":"accepted terminal failure"}}`},
+		{name: "accepted context length failure keeps 413", terminalStatus: 413, terminalFrame: `{"type":"response.failed","response":{"id":"resp_1","error":{"status":413,"code":"context_length_exceeded","message":"accepted terminal failure"}}}`},
+		{name: "accepted capacity failure keeps 503", terminalFrame: `{"type":"response.failed","status":503,"response":{"id":"resp_1","error":{"type":"server_error","code":"model_at_capacity","message":"accepted terminal failure: model is at capacity"}}}`},
+		{name: "only the public Messages route opts in", internalPath: "/internal/claude"},
+		{name: "internal callback stays HTTP even with the Messages path", internalPath: "/v1/messages"},
 		{name: "accepted request preserves known status", contextLimit: true},
 		{name: "expired upstream parent falls back with full input", missingParent: `{"type":"error","status":400,"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "statusless missing parent falls back with full input", missingParent: `{"type":"error","error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
+		{name: "untyped statusless missing parent falls back", missingParent: `{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"unknown previous response"}}`},
 		{name: "ordinary 200 cannot masquerade as an upgrade", nonUpgradeOK: true, wantHTTP: true},
 		{name: "no replay after an ambiguous disconnect", stopAfterCreate: true},
 		{name: "no replay after a buffered accepted error", acceptedError: true},
@@ -173,6 +182,22 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				exec.CloseAuthExecutionSessions(entry.ID)
 				registry.GetGlobalRegistry().UnregisterClient(entry.ID)
 			})
+			if test.internalPath != "" {
+				stream, err := server.handlers.ExecuteModelStream(t.Context(), handlers.ModelExecutionRequest{
+					EntryProtocol: "claude", ExitProtocol: "claude", Model: "gpt-5.5", Stream: true, Path: test.internalPath, CallerScope: "test-internal",
+					Headers: http.Header{"X-Session-Id": {"internal-session"}},
+					Body:    []byte(`{"model":"gpt-5.5","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for range stream.Chunks {
+				}
+				if httpCalls.Load() != 1 || connections.Load() != 0 {
+					t.Fatalf("internal request used WebSocket rather than HTTP: HTTP=%d WS=%d", httpCalls.Load(), connections.Load())
+				}
+				return
+			}
 			request := func(messages, turn string) *httptest.ResponseRecorder {
 				t.Helper()
 				body := `{"model":"gpt-5.5","max_tokens":128,"stream":true,"tools":[{"name":"probe","input_schema":{"type":"object"}}],"messages":` + messages
@@ -214,8 +239,12 @@ func TestCodexHTTPMessagesWebsocketEndpoint(t *testing.T) {
 				return
 			}
 			if test.terminalFrame != "" {
-				if first.Code != http.StatusServiceUnavailable || creates.Load() != 1 || !strings.Contains(first.Body.String(), "accepted terminal failure") {
-					t.Fatalf("expected original 503 without replay: status=%d creates=%d body=%s", first.Code, creates.Load(), first.Body)
+				want := test.terminalStatus
+				if want == 0 {
+					want = http.StatusServiceUnavailable
+				}
+				if first.Code != want || creates.Load() != 1 || !strings.Contains(first.Body.String(), "accepted terminal failure") {
+					t.Fatalf("expected original %d without replay: status=%d creates=%d body=%s", want, first.Code, creates.Load(), first.Body)
 				}
 				return
 			}

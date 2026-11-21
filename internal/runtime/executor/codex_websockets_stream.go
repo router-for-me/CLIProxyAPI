@@ -408,7 +408,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 			return
 		}
 		root := ojson.ParseBytes(payload)
-		event := root.Get("type").String()
+		event := helps.CodexResponseEventType(payload)
 		switch event {
 		case "error", "response.failed", "response.incomplete":
 			// A terminal frame can be the first one. A response ID distinguishes
@@ -418,6 +418,18 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 		default:
 			acceptedHTTP = strings.HasPrefix(event, "response.")
 		}
+	}
+
+	terminalFailure := func(payload []byte) (statusErr, []byte, bool) {
+		if acceptedHTTP {
+			// An explicit failure status on an accepted turn is not a synthetic admission rejection.
+			if status := codexWebsocketErrorStatus(payload); status >= 400 && status <= 599 {
+				if body, ok := codexTerminalFailureBody(payload); ok {
+					return statusErr{code: status, msg: string(body)}, body, true
+				}
+			}
+		}
+		return codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling())
 	}
 
 	if buffering {
@@ -557,7 +569,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 				}
 				return nil, guardAcceptedHTTP(wsErr)
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			if streamErr, terminalBody, ok := terminalFailure(payload); ok {
 				// A transient capacity or usage-limit rejection during bootstrap is retried on
 				// another credential, so the downstream websocket session must survive this
 				// upstream teardown. Notifying the disconnect here (or when no buffered payload
@@ -864,7 +876,7 @@ func (e *CodexWebsocketsExecutor) executeStream(ctx context.Context, auth *clipr
 				}
 				return
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			if streamErr, terminalBody, ok := terminalFailure(payload); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				// Publish the downstream disconnect only after an in-stream error was delivered,
