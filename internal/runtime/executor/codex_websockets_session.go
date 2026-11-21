@@ -53,6 +53,7 @@ func (c *websocketConnectionCloser) Close() error {
 type codexWebsocketSession struct {
 	sessionInstructions helps.CodexInstructionChain
 	sessionID           string
+	httpMessages        *codexHTTPMessagesSession
 
 	reqMu sync.Mutex
 
@@ -518,6 +519,10 @@ func codexWebsocketRequestUsesSIWC(ctx context.Context, auth *cliproxyauth.Auth,
 }
 
 func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, useSIWC ...bool) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
+	return detachMismatchedWebsocketSessionConnForHeaders(sess, authID, wsURL, proxyURL, nil, useSIWC...)
+}
+
+func detachMismatchedWebsocketSessionConnForHeaders(sess *codexWebsocketSession, authID string, wsURL string, proxyURL string, handshake *[32]byte, useSIWC ...bool) (*websocket.Conn, *websocketConnectionCloser, string, string, cliproxyexecutor.ExecutionLifecycle) {
 	if sess == nil {
 		return nil, nil, "", "", nil
 	}
@@ -525,7 +530,8 @@ func detachMismatchedWebsocketSessionConn(sess *codexWebsocketSession, authID st
 	sess.connMu.Lock()
 	defer sess.connMu.Unlock()
 	conn := sess.conn
-	if conn == nil || websocketSessionTargetMatches(sess, authID, wsURL, proxyURL, useSIWC...) {
+	if conn == nil || (websocketSessionTargetMatches(sess, authID, wsURL, proxyURL, useSIWC...) &&
+		(handshake == nil || sess.httpMessages == nil || sess.httpMessages.handshake == *handshake)) {
 		return nil, nil, "", "", nil
 	}
 
@@ -719,8 +725,13 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 		}
 		return conn, closer, resp, err
 	}
+	var handshake *[32]byte
+	if sess.httpMessages != nil {
+		digest := codexHTTPMessagesHandshake(headers)
+		handshake = &digest
+	}
 	proxyURL := executionProxyURL(ctx, sess.effectiveConfig(authID, e.cfg), auth)
-	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConn(sess, authID, wsURL, proxyURL, useSIWC); staleConn != nil {
+	if staleConn, staleCloser, staleAuthID, staleWSURL, staleLifecycle := detachMismatchedWebsocketSessionConnForHeaders(sess, authID, wsURL, proxyURL, handshake, useSIWC); staleConn != nil {
 		staleLastEvent := sess.getLastEventType(staleConn)
 		logCodexWebsocketDisconnectedWithLastEvent(sess, sess.sessionID, staleAuthID, staleWSURL, "target_changed", staleLastEvent, nil)
 		if staleCloser != nil {
@@ -734,6 +745,10 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	}
 
 	sess.connMu.Lock()
+	if sess.httpMessages != nil && sess.httpMessages.closed {
+		sess.connMu.Unlock()
+		return nil, nil, nil, &cliproxyexecutor.UpstreamWebsocketTurnError{NotSent: true}
+	}
 	conn := sess.conn
 	closer := sess.connCloser
 	readerConn := sess.readerConn
@@ -760,7 +775,12 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	}
 
 	sess.connMu.Lock()
-	if sess.conn != nil && websocketSessionTargetMatches(sess, authID, wsURL, dialProxyURL, useSIWC) {
+	if sess.httpMessages != nil && sess.httpMessages.closed {
+		sess.connMu.Unlock()
+		_ = closer.Close()
+		return nil, nil, resp, &cliproxyexecutor.UpstreamWebsocketTurnError{NotSent: true}
+	}
+	if sess.conn != nil && websocketSessionTargetMatches(sess, authID, wsURL, dialProxyURL, useSIWC) && (handshake == nil || sess.httpMessages.handshake == *handshake) {
 		previous := sess.conn
 		previousCloser := sess.connCloser
 		sess.connMu.Unlock()
@@ -779,6 +799,9 @@ func (e *CodexWebsocketsExecutor) ensureUpstreamConnWithSIWC(ctx context.Context
 	sess.authID = authID
 	sess.proxyURL = dialProxyURL
 	sess.useSIWC = useSIWC
+	if handshake != nil {
+		sess.httpMessages.handshake = *handshake
+	}
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -1072,6 +1095,9 @@ func closeCodexWebsocketSession(sess *codexWebsocketSession, reason string) {
 	}
 
 	sess.connMu.Lock()
+	if sess.httpMessages != nil {
+		sess.httpMessages.closed = true
+	}
 	conn := sess.conn
 	authID := sess.authID
 	wsURL := sess.wsURL

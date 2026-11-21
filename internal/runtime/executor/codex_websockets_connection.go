@@ -131,6 +131,15 @@ func mapCodexWebsocketReadError(err error) error {
 	return err
 }
 
+// codexHTTPMessagesNoReplay preserves known request errors but stops retries
+// when a create may already have been accepted upstream.
+func codexHTTPMessagesNoReplay(err error) error {
+	if !shouldRetryCodexWebsocketSend(err) {
+		return err
+	}
+	return &cliproxyexecutor.UpstreamWebsocketTurnError{Cause: err}
+}
+
 // codexWebsocketTurnTransportError turns a transport loss (EOF, reset, close 1006) into
 // the turn error that keeps the downstream websocket open. Status, policy and other
 // close codes are returned unchanged and keep ending the downstream socket.

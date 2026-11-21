@@ -173,22 +173,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	// 1. Anthropic / Claude Code Headers
 	if sid := sessionHeaderValue(headers, "X-Claude-Code-Session-Id"); sid != "" {
 		info.ClientType = "claude"
-		agentID := sessionHeaderValue(headers, "X-Claude-Code-Agent-Id")
-		if agentID == "" && root.Exists() {
-			agentID = normalizedSessionCandidate(root.Get("metadata.agent_id").String())
-			if agentID == "" {
-				agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
-			}
-			if agentID == "" && hasNestedReq {
-				agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
-				if agentID == "" {
-					agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
-				}
-			}
-		}
-		if agentID == "" {
-			_, _, agentID = ClaudeMetadataIdentities(payload)
-		}
+		agentID := claudeAgentID(headers, payload, root, reqRoot, hasNestedReq)
 		parentAgentID := sessionHeaderValue(headers, "X-Claude-Code-Parent-Agent-Id")
 		if parentAgentID == "" && root.Exists() {
 			parentAgentID = normalizedSessionCandidate(root.Get("metadata.parent_agent_id").String())
@@ -972,6 +957,36 @@ func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 // ExtractTreeInfo is an alias for ExtractSessionInfo for backward compatibility.
 func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
 	return ExtractSessionInfo(headers, payload, metadata)
+}
+
+// ClaudeAgentID extracts the Claude Code agent identity from headers or metadata.
+func ClaudeAgentID(headers http.Header, payload []byte) string {
+	root := newSessionObject(util.ParseGJSONBytesNoCopy(payload))
+	req := root.Get("request")
+	hasNestedReq := req.Exists() && !root.Get("contents").Exists()
+	var nested sessionObject
+	if hasNestedReq {
+		nested = newSessionObject(req)
+	}
+	return claudeAgentID(headers, payload, root, nested, hasNestedReq)
+}
+
+func claudeAgentID(headers http.Header, payload []byte, root, nested sessionObject, hasNestedReq bool) string {
+	if agent := sessionHeaderValue(headers, "X-Claude-Code-Agent-Id"); agent != "" {
+		return agent
+	}
+	for _, object := range []sessionObject{root, nested} {
+		for _, path := range []string{"metadata.agent_id", "metadata.subagent_id"} {
+			if agent := normalizedSessionCandidate(object.Get(path).String()); agent != "" {
+				return agent
+			}
+		}
+		if !hasNestedReq {
+			break
+		}
+	}
+	_, _, agent := ClaudeMetadataIdentities(payload)
+	return agent
 }
 
 func sessionHeaderValue(headers http.Header, name string) string {

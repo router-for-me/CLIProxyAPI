@@ -20,6 +20,11 @@ var payloadConfigEvaluations atomic.Int64
 
 // PayloadConfigEvaluationCount returns the cumulative number of payload rule
 // engine evaluations across the process.
+// HasPayloadRules reports whether the operator configured any payload rules.
+func HasPayloadRules(rules config.PayloadConfig) bool {
+	return len(rules.Default)+len(rules.DefaultRaw)+len(rules.Override)+len(rules.OverrideRaw)+len(rules.Replace)+len(rules.Filter) != 0
+}
+
 func PayloadConfigEvaluationCount() int64 {
 	return payloadConfigEvaluations.Load()
 }
@@ -143,8 +148,7 @@ func applyPayloadConfigWithTrackedPathsForExecutorAndAuthDoc(cfg *config.Config,
 	}
 
 	rules := cfg.Payload
-	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 || len(rules.OverrideRaw) != 0 || len(rules.Replace) != 0 || len(rules.Filter) != 0
-	if hasPayloadRules {
+	if HasPayloadRules(rules) {
 		model = strings.TrimSpace(model)
 		requestedModel = strings.TrimSpace(requestedModel)
 		if model != "" || requestedModel != "" {
