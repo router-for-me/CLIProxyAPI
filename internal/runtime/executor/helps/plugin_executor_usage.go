@@ -67,9 +67,7 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 		})
 	case "interactions", "interactions-response":
 		IterateStreamLines(payload, func(line []byte) {
-			if detail, ok := ParseInteractionsStreamUsage(line); ok {
-				ObserveMergedStreamUsage(buffer, detail)
-			}
+			observeInteractionsPluginStreamUsage(line, buffer)
 		})
 	case "antigravity":
 		IterateStreamLines(payload, func(line []byte) {
@@ -95,6 +93,90 @@ func ObservePluginExecutorStreamUsage(protocol string, payload []byte, buffer *S
 			buffer.ObserveOpenAIStream(line)
 		})
 	}
+}
+
+// observeInteractionsPluginStreamUsage retains omitted counters while allowing explicit
+// zeroes to replace them. Merge raw counters before normalization so tool input and
+// separate reasoning are counted once, even when they arrive in different events.
+func observeInteractionsPluginStreamUsage(line []byte, buffer *StreamUsageBuffer) {
+	payload := ExtractStreamJSONPayload(line)
+	if !ojson.ValidBytes(payload) {
+		return
+	}
+	node := interactionsUsageNode(util.ParseGJSONBytesNoCopy(payload))
+	if !node.IsObject() {
+		return
+	}
+	total := firstNumericInteractionsUsageNode(node, "total_tokens", "totalTokenCount")
+	reset := total.Exists() && total.Float() == 0
+	if reset {
+		// An explicit zero total resets omitted counters from earlier snapshots.
+		clear(buffer.interactionsUsage)
+	}
+	updated := false
+	for _, paths := range [][]string{
+		{"input_tokens", "prompt_tokens", "total_input_tokens", "promptTokenCount"},
+		{"tool_use_tokens", "total_tool_use_tokens", "toolUseTokens", "totalToolUseTokens", "toolUsePromptTokenCount", "tool_use_prompt_token_count"},
+		{"output_tokens", "completion_tokens", "total_output_tokens", "candidatesTokenCount"},
+		{"reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens"},
+		{"cached_tokens", "cachedContentTokenCount", "total_cached_tokens"},
+		{"cache_read_tokens", "cacheReadTokens"},
+		{"cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens"},
+		{"total_tokens", "totalTokenCount"},
+	} {
+		if value := firstNumericInteractionsUsageNode(node, paths...); value.Exists() {
+			if buffer.interactionsUsage == nil {
+				buffer.interactionsUsage = make(map[string]int64)
+			}
+			buffer.interactionsUsage[paths[0]] = value.Int()
+			updated = true
+		}
+	}
+	if !updated {
+		return
+	}
+	// A previous total can be stale after a partial update. Without a new total,
+	// let the parser derive it from all accumulated counters.
+	if !total.Exists() {
+		delete(buffer.interactionsUsage, "total_tokens")
+	}
+	merged := ojson.NewDocString("{}")
+	for key, value := range buffer.interactionsUsage {
+		merged.Set(key, value)
+	}
+	counters := parseInteractionsUsageDetail(util.ParseGJSONBytesNoCopy(merged.Bytes()))
+	// Structured fields (modality counts, service tiers, tool details) are not
+	// scalar counters, so take them from the event itself and keep earlier ones.
+	detail := ParseInteractionsUsage(payload)
+	update := detail
+	detail.InputTokens = counters.InputTokens
+	detail.OutputTokens = counters.OutputTokens
+	detail.ReasoningTokens = counters.ReasoningTokens
+	detail.TotalTokens = counters.TotalTokens
+	detail.CachedTokens = counters.CachedTokens
+	detail.CacheReadTokens = counters.CacheReadTokens
+	detail.CacheCreationTokens = counters.CacheCreationTokens
+	detail.TokenBreakdown = counters.TokenBreakdown
+	// The tier is applied after Observe, so a zero-token snapshot still replaces
+	// earlier counters instead of being treated as a tier-only update.
+	detail.ResponseServiceTier = ""
+	if existing, ok := buffer.Detail(); ok && !reset {
+		mergeStreamStructuredFields(&detail, existing, update)
+	}
+	buffer.Observe(detail, true)
+	if tier := extractResponseServiceTier(payload); tier != "" {
+		buffer.detail.ResponseServiceTier = tier
+	}
+}
+
+// firstNumericInteractionsUsageNode skips nullable counters and their aliases.
+func firstNumericInteractionsUsageNode(node ojson.Result, paths ...string) ojson.Result {
+	for _, path := range paths {
+		if value := node.Get(path); value.Type == ojson.Number {
+			return value
+		}
+	}
+	return ojson.Result{}
 }
 
 // ObservePluginExecutorStreamTTFT inspects a streaming payload and records TTFT on the reporter.
