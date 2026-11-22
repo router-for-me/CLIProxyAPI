@@ -662,7 +662,8 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Antigravity,
 		data.XAI,
 		GetDevinModels(),
-		GetMetaModels(),
+		data.Meta,
+		data.Copilot,
 	}
 	for _, models := range allModels {
 		for _, m := range models {
