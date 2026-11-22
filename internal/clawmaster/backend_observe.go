@@ -188,6 +188,10 @@ func (s *backendSeriesSelector) switchReasonLocked(fromID, toID string) string {
 			return "weekly_exhausted"
 		}
 		return "rate_limited"
+	case s.reservedLocked(fromID):
+		return "reserved"
+	case s.lastResortLocked(fromID):
+		return "last_resort"
 	}
 	return "rebalanced"
 }
@@ -211,6 +215,7 @@ func (s *backendSeriesSelector) noteQuotaLocked(authID string, q backendWeeklyQu
 	s.quotaBands[authID] = band
 	name := s.profileNameLocked(authID)
 	lg().Debug("quota observed", "profile", name, "used_pct", usedPct(q), "resets_in", s.resetsIn(q))
+	s.reservedLocked(authID) // a new weekly figure can take a subscription past its reserve: logged now, not at the next request
 	if previous != band {
 		delete(s.overPoll, authID) // a new band: the next request Anthropic accepts above the poll is logged again
 	}
@@ -318,10 +323,14 @@ func (s *backendSeriesSelector) logSnapshot(interval time.Duration) {
 				fableResets = fable.ResetsAt.Sub(s.nowOrReal()).Round(time.Minute).String()
 			}
 		}
-		lg().Info("quota", "profile", s.profileNameLocked(id), "used_pct", usedPct(q), "band", quotaBand(q),
+		fields := []any{"profile", s.profileNameLocked(id), "used_pct", usedPct(q), "band", quotaBand(q),
 			"resets_in", s.resetsIn(q), "rate_limited_for", blocked,
 			"five_hour_used_pct", fiveHourPct, "five_hour_resets_in", fiveHourResets,
-			"fable_used_pct", fablePct, "fable_resets_in", fableResets, "fable_rate_limited_for", fableBlocked)
+			"fable_used_pct", fablePct, "fable_resets_in", fableResets, "fable_rate_limited_for", fableBlocked}
+		if reserve := s.profileReserveLocked(id); reserve.Percent > 0 {
+			fields = append(fields, "reserve_pct", reserve.Percent, "reserved", s.reservedLocked(id), "last_resort", s.lastResortLocked(id))
+		}
+		lg().Info("quota", fields...)
 	}
 	stats := s.statsLocked()
 	names := make([]string, 0, len(stats.picks))
@@ -418,6 +427,9 @@ func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSna
 		}
 		if s.quotaBlockedLocked(id) {
 			p.BlockedSeconds = max(s.quotaBlockedUntil[id].Sub(now).Seconds(), 0)
+		}
+		if s.profileReserveLocked(id).Percent > 0 {
+			p.ReserveConfigured, p.Reserved, p.LastResort = true, s.reservedLocked(id), s.lastResortLocked(id)
 		}
 		if five, known := s.fiveHourNowLocked(id, now); known {
 			p.FiveHourKnown, p.FiveHourUsed = true, five.UsedFraction

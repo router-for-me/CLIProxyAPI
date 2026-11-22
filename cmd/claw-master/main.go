@@ -186,6 +186,7 @@ func run(args []string) (int, error) {
 	var listen, stateDir, openLoopback string
 	var balanced bool
 	var drainTimeout time.Duration
+	var profileReserveFile string
 	var logLevel, logFile, logFormat string
 	var logMaxMB, logKeep int
 	var quotaLogInterval, otlpInterval time.Duration
@@ -214,6 +215,7 @@ func run(args []string) (int, error) {
 		flags.StringVar(&openLoopback, "open-loopback", "", "also serve plain HTTP with NO client certificate on this loopback ADDRESS:PORT, for an authenticating tunnel")
 		flags.BoolVar(&balanced, "balanced", false, "a load balancer in front stops sending new connections here once a rollout begins: a stopping server serves its existing connections, closing each, instead of refusing their requests")
 		flags.DurationVar(&drainTimeout, "drain-timeout", 0, "how long a stopping server lets running requests finish (default 60s; keep systemd's TimeoutStopSec above it)")
+		flags.StringVar(&profileReserveFile, "profile-reserve-file", "", "a file of PROFILE=N or PROFILE=N last-resort lines: hold the last N% (0-100) of that subscription's weekly allowance out of the pool, or with last-resort use it only when every other subscription is out; re-read when it changes")
 	case "probe":
 		flags.StringVar(&model, "model", "", "diagnostic model")
 	case "run":
@@ -267,6 +269,10 @@ func run(args []string) (int, error) {
 			go clawmaster.WatchAccountLabels(ctx, accountLabelsFile, accountLabelsCheckInterval, func() (map[string]string, error) {
 				return loadAccountLabels(accountLabels, accountLabelsFile)
 			})
+		}
+		// A missing or bad reserve file holds nothing back and is logged; the server starts anyway.
+		if command == "serve" && profileReserveFile != "" {
+			clawmaster.StartProfileReserves(ctx, profileReserveFile, profileReserveCheckInterval)
 		}
 		defer func() {
 			// No deadline of ours (repository policy). If a collector hangs the final export, the service
@@ -588,6 +594,9 @@ func loadAccountLabels(pairs []string, file string) (map[string]string, error) {
 
 // accountLabelsCheckInterval is how often serve looks at --account-labels-file for a change.
 const accountLabelsCheckInterval = time.Minute
+
+// profileReserveCheckInterval is how often serve looks at --profile-reserve-file for a change.
+const profileReserveCheckInterval = time.Minute
 
 // runAccountKey prints the key the dashboards use for an Anthropic account id, so a label can be written
 // for it: claw-master account-key UUID...

@@ -690,6 +690,8 @@ type backendSeriesCandidate struct {
 	quota     backendWeeklyQuota
 	order     int
 	fableBand int // for a Fable request, backendSeriesSelector.fableBandRankLocked
+	// lastResort: past its last-resort reserve, so after every other candidate whatever its band
+	lastResort bool
 }
 
 // backendSeriesSelector picks the subscription for a request. The usage poll (and the weekly
@@ -732,6 +734,14 @@ type backendSeriesSelector struct {
 	usagePollAfter    map[string]time.Time // an account's usage poll waits until then after a 429
 	stopped           bool
 
+	// reserveFor is the configured reserve of a profile name (profile_reserve.go); nil reads the reserves
+	// loaded from --profile-reserve-file. reserveState is what a reserve does to each subscription now
+	// ("out" or "last-resort"), for the once-per-change log line; lastResortInUse, which last-resort
+	// subscriptions have taken requests since that was last logged.
+	reserveFor      func(profile string) ProfileReserve
+	reserveState    map[string]string
+	lastResortInUse map[string]bool
+
 	names       map[string]string // runtime auth id -> the profile's own name, for logs and metrics
 	quotaBands  map[string]string
 	rateLimited map[string]bool
@@ -753,6 +763,9 @@ func (s *backendSeriesSelector) Pick(ctx context.Context, provider, model string
 	picked, err := s.pick(ctx, provider, model, opts, auths)
 	sessionID, _ := backendSeriesSessionIDs(opts)
 	s.noteSelection(sessionID, model, picked, err, time.Since(started))
+	if err == nil {
+		s.noteLastResortUse(sessionID, picked)
+	}
 	if err != nil {
 		noteBackendRefusal(ctx, err)
 	}
@@ -842,6 +855,13 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 				return picked, err
 			}
 			if bound := backendSeriesAuthByID(auths, s.provider, boundID); bound != nil {
+				// A self-contained request leaves a subscription past its last-resort reserve as soon as a
+				// better-ranked one is usable; opaque state stays while the subscription can serve it.
+				if switchable && s.lastResortLocked(boundID) {
+					if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil && !s.lastResortLocked(next.ID) {
+						return s.bindSessionLocked(ctx, sessionID, next)
+					}
+				}
 				picked, err := s.pickAuthLocked(ctx, model, opts, bound)
 				if err == nil && picked != nil {
 					if inheritedParent && opaque {
@@ -853,9 +873,11 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 					if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil {
 						return s.bindSessionLocked(ctx, sessionID, next)
 					}
-					// A portable conversation is not stuck on its subscription: say what the pool has.
+					// A portable conversation is not stuck on its subscription: say what the pool has. That
+					// includes one whose subscription its reserve holds out: the reserved subscription's own
+					// refusal (its weekly reset, state that "cannot move") is for opaque state only.
 					var held *backendRefusalError
-					if errors.As(err, &held) && held.fable {
+					if errors.As(err, &held) && held.fable || s.reservedLocked(boundID) {
 						return nil, s.noSubscriptionRefusalLocked(ctx, "", availabilityModel)
 					}
 				}
@@ -874,7 +896,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 			if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil {
 				return s.bindSessionLocked(ctx, sessionID, next)
 			}
-			if s.quotaBlockedLocked(boundID) || fable && s.fableBlockedLocked(boundID) {
+			if s.heldLocked(boundID) || fable && s.fableBlockedLocked(boundID) {
 				return nil, s.noSubscriptionRefusalLocked(ctx, boundID, availabilityModel)
 			}
 			return nil, s.boundUnavailableErrorLocked(ctx, boundID, availabilityModel)
@@ -975,13 +997,14 @@ func backendSeriesSessionIDs(opts coreexecutor.Options) (sessionID, parentSessio
 }
 
 // subscriptionsExhaustedLocked: every subscription is held back by Anthropic's own rejection of a real
-// request (a 429 whose retry-after or unified reset has not passed). A polled 100% does not count.
+// request (a 429 whose retry-after or unified reset has not passed) or by its configured reserve. A polled
+// 100% alone does not count.
 func (s *backendSeriesSelector) subscriptionsExhaustedLocked() bool {
 	if len(s.authIDs) == 0 {
 		return false
 	}
 	for _, authID := range s.authIDs {
-		if !s.quotaBlockedLocked(authID) {
+		if !s.heldLocked(authID) {
 			return false
 		}
 	}
@@ -1001,12 +1024,12 @@ func (s *backendSeriesSelector) noSubscriptionRefusalLocked(ctx context.Context,
 	if len(ranked) == 0 && fable {
 		// Some held back from Fable, the rest rate limited: an ordinary refusal, retried when the first can
 		// take Fable again, whichever hold that is.
-		refusal := s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429) or out of their Fable allowance; no fallback is configured").(*backendRefusalError)
+		refusal := s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429)" + s.reservedNoteLocked() + " or out of their Fable allowance; no fallback is configured").(*backendRefusalError)
 		refusal.resetAt = s.fableAvailableAtLocked()
 		return refusal
 	}
 	if len(ranked) == 0 {
-		return s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429); no fallback is configured")
+		return s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429)" + s.reservedNoteLocked() + "; no fallback is configured")
 	}
 	return s.boundUnavailableErrorLocked(ctx, ranked[0].auth.ID, model)
 }
@@ -1020,7 +1043,7 @@ func (s *backendSeriesSelector) pickBackupLocked(ctx context.Context, model stri
 		s.limiter = newEvery(time.Minute)
 	}
 	if s.limiter.allow("backup") {
-		lg().Warn("every subscription is rate limited by Anthropic: using the paid API-key backup", "session", sessionTag(sessionID))
+		lg().Warn("every subscription is rate limited by Anthropic"+s.reservedNoteLocked()+": using the paid API-key backup", "session", sessionTag(sessionID))
 	}
 	picked, err := s.pickAuthLocked(ctx, model, opts, backup)
 	if err == nil && sessionID != "" && picked != nil {
@@ -1066,10 +1089,21 @@ func (s *backendSeriesSelector) Stop() {
 }
 
 func (s *backendSeriesSelector) pickAuthLocked(ctx context.Context, model string, opts coreexecutor.Options, auth *coreauth.Auth) (*coreauth.Auth, error) {
-	// Only Anthropic's own rejection of a real request holds a subscription back. A polled weekly 100%
-	// does not: the request goes to Anthropic, which decides (it served at that figure on 2026-10-11).
-	if auth != nil && auth.ID != s.backupAuthID && s.quotaBlockedLocked(auth.ID) {
-		return nil, s.blockedRefusalLocked(auth.ID)
+	// Only Anthropic's own rejection of a real request holds a subscription back, or the owner's reserve.
+	// A polled weekly 100% does not: the request goes to Anthropic, which decides (it served at that
+	// figure on 2026-10-11).
+	if auth != nil && auth.ID != s.backupAuthID {
+		blocked := s.quotaBlockedLocked(auth.ID)
+		if s.reservedLocked(auth.ID) {
+			refusal := s.reserveRefusalLocked(auth.ID)
+			if until := s.quotaBlockedUntil[auth.ID]; blocked && until.After(refusal.resetAt) {
+				refusal.resetAt = until
+			}
+			return nil, refusal
+		}
+		if blocked {
+			return nil, s.blockedRefusalLocked(auth.ID)
+		}
 	}
 	// A used-up Fable allowance holds a subscription back from Fable requests only.
 	if auth != nil && auth.ID != s.backupAuthID && (isFableModel(model) || isFableModel(backendAvailabilityModel(model, opts))) && s.fableBlockedLocked(auth.ID) {
@@ -1127,26 +1161,29 @@ func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*cor
 }
 
 // rankedCandidatesLocked is every configured subscription that Anthropic has not rejected (no real 429
-// in force), best first. The poll orders them and excludes none: ok band, then unknown, then reserve,
-// then what the poll calls exhausted; within a band, the earliest weekly reset first, then the
-// configured order. For a Fable request, a subscription Anthropic refused Fable is left out too, and the
+// in force) and no profile reserve holds out, best first. The poll orders them and excludes none: ok
+// band, then unknown, then reserve, then what the poll calls exhausted; within a band, the earliest weekly reset first, then the
+// configured order. A subscription past its last-resort reserve comes after every other one. For a Fable request, a subscription Anthropic refused Fable is left out too, and the
 // Fable allowance ranks alongside the week: the worse of the two bands first, then the Fable band.
 func (s *backendSeriesSelector) rankedCandidatesLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly, fable bool) []backendSeriesCandidate {
 	ranked := make([]backendSeriesCandidate, 0, len(s.authIDs))
 	for order, authID := range s.authIDs {
-		if authID == excludedAuthID || s.quotaBlockedLocked(authID) || fable && s.fableBlockedLocked(authID) {
+		if authID == excludedAuthID || s.heldLocked(authID) || fable && s.fableBlockedLocked(authID) {
 			continue
 		}
 		if availableOnly && backendSeriesAuthByID(auths, s.provider, authID) == nil {
 			continue
 		}
-		candidate := backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order}
+		candidate := backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order, lastResort: s.lastResortLocked(authID)}
 		if fable {
 			candidate.fableBand = s.fableBandRankLocked(authID)
 		}
 		ranked = append(ranked, candidate)
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].lastResort != ranked[j].lastResort {
+			return ranked[j].lastResort
+		}
 		bi, bj := backendQuotaBandRank(ranked[i].quota), backendQuotaBandRank(ranked[j].quota)
 		if fable {
 			if wi, wj := max(bi, ranked[i].fableBand), max(bj, ranked[j].fableBand); wi != wj {

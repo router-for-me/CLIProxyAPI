@@ -182,13 +182,19 @@ func (s *backendSeriesSelector) fableBlockedRefusalLocked(authID string) error {
 	}
 }
 
-// fableAvailableAtLocked: the earliest a subscription can take a Fable request again, counting both its
-// Fable hold and an ordinary rate limit; zero when none is held back by either.
+// fableAvailableAtLocked: the earliest a subscription can take a Fable request again, counting its Fable
+// hold, an ordinary rate limit and its reserve (one reserved at 100 never comes back); zero when none is
+// held back by any.
 func (s *backendSeriesSelector) fableAvailableAtLocked() time.Time {
 	var earliest time.Time
 	for _, authID := range s.authIDs {
 		var until time.Time
-		if s.fableBlockedLocked(authID) {
+		if s.reservedLocked(authID) {
+			if until = s.reserveBackLocked(authID); until.IsZero() {
+				continue
+			}
+		}
+		if s.fableBlockedLocked(authID) && s.fableBlockedUntil[authID].After(until) {
 			until = s.fableBlockedUntil[authID]
 		}
 		if s.quotaBlockedLocked(authID) && s.quotaBlockedUntil[authID].After(until) {

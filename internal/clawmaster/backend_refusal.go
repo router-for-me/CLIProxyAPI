@@ -574,13 +574,33 @@ func backendAnthropicError(w http.ResponseWriter, status int, errorType, message
 // earliestResetLocked: when the first of the pool's subscriptions can be asked again. A subscription
 // Anthropic rejected comes back when Anthropic said (its retry-after or unified reset), whatever the
 // poll's weekly reset says; one not rejected is available now, so the polled reset only answers when no
-// subscription is under a rejection at all.
+// subscription is under a rejection at all. A subscription its reserve holds out comes back at its weekly
+// reset (and not before Anthropic's time, when it is rejected too); one reserved at 100 never does, so
+// when nothing else can come back the answer is profileReserveRetryAfter from now.
 func (s *backendSeriesSelector) earliestResetLocked() time.Time {
 	var earliest, earliestPolled time.Time
+	reservedForGood := false
 	for _, authID := range s.authIDs {
+		reserved := s.reservedLocked(authID)
+		var back time.Time
+		if reserved {
+			if back = s.reserveBackLocked(authID); back.IsZero() {
+				reservedForGood = true
+				continue
+			}
+		}
 		if until, blocked := s.quotaBlockedUntil[authID]; blocked && !until.IsZero() {
+			if back.After(until) {
+				until = back
+			}
 			if earliest.IsZero() || until.Before(earliest) {
 				earliest = until
+			}
+			continue
+		}
+		if reserved {
+			if earliest.IsZero() || back.Before(earliest) {
+				earliest = back
 			}
 			continue
 		}
@@ -589,7 +609,10 @@ func (s *backendSeriesSelector) earliestResetLocked() time.Time {
 		}
 	}
 	if earliest.IsZero() {
-		return earliestPolled
+		earliest = earliestPolled
+	}
+	if earliest.IsZero() && reservedForGood {
+		earliest = s.nowOrReal().Add(profileReserveRetryAfter)
 	}
 	return earliest
 }
