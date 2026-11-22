@@ -146,6 +146,8 @@ Same flow in `../proxx-panel` (`bun run verify` afterwards).
 | `internal/managementasset/updater.go` | `proxxPanelCompatible(data)` in `fetchLatestAsset` | skip panel releases that declare `proxx-min-backend-api` above our `api_level` |
 | `.github/workflows/release.yaml` | `--prerelease` for `-rc` tags (3 lines in `prepare-release`); checkout + setup-go + sign/verify/upload `checksums.txt.sig` in `publish-checksums` (all marked `# proxx:`) | signed releases for self-update; rc prereleases |
 | `config.example.yaml` | `# proxx: 0 (unset) drains for up to 120s` under `shutdown-timeout` | documentation only |
+| `internal/runtime/executor/claude_executor_auth.go` | `claudeauth.ReadMetadataBool(...)` for the three setup-token flags in `isClaudeSetupToken` (helper in `internal/auth/claude/identity_proxx.go`) | race fix: locked reads of the shared `Auth.Metadata` map |
+| `sdk/api/handlers/handlers.go` | `parentCtx = proxxEnsureDeferredAPICapture(c, parentCtx)` in `GetContextWithCancel` (helper in `deferred_capture_proxx.go`) | race fix: executor goroutines that outlive the handler use a request-scoped capture, never the pooled gin context |
 | `sdk/cliproxy/service_home.go` | `proxxHomeRetryJitter(rand.Float64())` in `runHomeSubscriber` retry delay (`service_home_proxx.go`) | tests pin Home retry jitter; unset keeps the random jitter |
 
 Fork-owned files that other proxx features also touch: `internal/api/server_management_proxx.go`
