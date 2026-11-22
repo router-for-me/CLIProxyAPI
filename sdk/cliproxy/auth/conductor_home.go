@@ -1952,6 +1952,11 @@ func (m *Manager) tryAntigravityCreditsExecuteCandidates(ctx context.Context, re
 			execReq := req
 			execReq.Model = upstreamModel
 			execOpts := creditsOpts
+			payload := execOpts.OriginalRequest
+			if len(payload) == 0 {
+				payload = execReq.Payload
+			}
+			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
 			execReq, execOpts, errIntercept = prepareRequestAfterAuth(creditsCtx, c.executor, c.auth, c.provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
