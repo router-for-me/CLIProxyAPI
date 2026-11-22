@@ -30,6 +30,35 @@ var quotaCooldownDisabled atomic.Bool
 
 var transientErrorCooldownSeconds atomic.Int64
 
+var maxRetryAfterSeconds atomic.Int64
+
+// SetMaxRetryAfterSeconds caps cooldowns derived from upstream retry hints.
+// Non-positive values keep honoring the full upstream hint.
+func SetMaxRetryAfterSeconds(seconds int) {
+	maxRetryAfterSeconds.Store(int64(seconds))
+}
+
+// capResultRetryAfter clamps an upstream retry hint to the configured maximum so a
+// long announced reset (for example "Resets in 132h") is re-probed periodically by
+// regular traffic instead of blocking the credential until the announced time.
+// Cooldowns requested by explicit -and-cooldown rules are left untouched.
+func capResultRetryAfter(result Result) Result {
+	limit := maxRetryAfterSeconds.Load()
+	if limit <= 0 || result.RetryAfter == nil {
+		return result
+	}
+	if result.Error != nil && result.Error.Code == ErrorCodeForceCooldown {
+		return result
+	}
+	maxWait := time.Duration(limit) * time.Second
+	if *result.RetryAfter <= maxWait {
+		return result
+	}
+	capped := maxWait
+	result.RetryAfter = &capped
+	return result
+}
+
 // SetQuotaCooldownDisabled toggles auth/model cooldown scheduling globally.
 func SetQuotaCooldownDisabled(disable bool) {
 	quotaCooldownDisabled.Store(disable)
@@ -1648,6 +1677,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	result = capResultRetryAfter(result)
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth

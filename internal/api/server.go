@@ -246,6 +246,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+	auth.SetMaxRetryAfterSeconds(cfg.MaxRetryAfterSeconds)
 	applySignatureCacheConfig(nil, cfg)
 	applyClaudeToolSearchConfig(cfg)
 	// Initialize management handler

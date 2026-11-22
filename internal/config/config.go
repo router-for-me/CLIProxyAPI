@@ -111,6 +111,13 @@ type Config struct {
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
 
+	// MaxRetryAfterSeconds caps how long an upstream retry hint (Retry-After header or a
+	// parsed "resets in" duration) may keep a credential or model in cooldown. Once the
+	// capped cooldown expires the credential is tried again, so an upstream quota that is
+	// reset earlier than announced is picked up automatically. 0 or negative keeps the
+	// legacy behavior of honoring the full upstream hint.
+	MaxRetryAfterSeconds int `yaml:"max-retry-after-seconds" json:"max-retry-after-seconds"`
+
 	// AuthAutoRefreshWorkers overrides the size of the core auth auto-refresh and manual refresh-all worker pool.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`

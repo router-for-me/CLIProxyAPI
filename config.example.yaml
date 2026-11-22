@@ -272,6 +272,10 @@ routing:
     # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
+    # Upper bound in seconds for cooldowns derived from upstream retry hints (Retry-After header or
+    # "Resets in 132h..." quota messages). After the capped cooldown the credential is retried, so a
+    # quota that the upstream resets early is used again automatically. 0 honors the full hint (legacy).
+    max-retry-after-seconds: 0
 
 # Shared request/response behavior.
 requests:

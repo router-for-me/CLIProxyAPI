@@ -72,6 +72,7 @@ func validateStartupConfig(data []byte, optional bool) (*startupConfig, error) {
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
 	cfg.TransientErrorCooldownSeconds = 0
+	cfg.MaxRetryAfterSeconds = 0
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.WebsocketAuth = true
 	cfg.Pprof.Enable = false
