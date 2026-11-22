@@ -169,38 +169,40 @@ func TestClassifyClaudeUpstreamError_SharedOrAmbiguousRejectionRemainsCredential
 }
 
 func TestClassifyClaudeUpstreamError_FableRetryDuration(t *testing.T) {
-	t.Run("retry-after header is skipped for overage rejection to avoid global cooldown", func(t *testing.T) {
+	t.Run("retry-after header is preserved for exhausted Fable overage", func(t *testing.T) {
 		headers := http.Header{
-			"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
-			"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
-			"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed"},
-			"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
-			"Anthropic-Ratelimit-Unified-7d_oi-Reset":  []string{strconv.FormatInt(time.Now().Add(7*24*time.Hour).Unix(), 10)},
+			"Anthropic-Ratelimit-Unified-Status":            []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":         []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Status":         []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Status":      []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Utilization": []string{"1.0"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Reset":       []string{strconv.FormatInt(time.Now().Add(7*24*time.Hour).Unix(), 10)},
 			"Retry-After": []string{"120"},
 		}
 
 		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fable usage window rejected."}}`))
 
 		var retry retryAfterProvider
-		if errors.As(err, &retry) && retry != nil && retry.RetryAfter() != nil {
-			t.Fatalf("expected overage Retry-After to yield nil RetryAfter for exponential backoff, got %v", *retry.RetryAfter())
+		if !errors.As(err, &retry) || retry == nil || retry.RetryAfter() == nil || *retry.RetryAfter() < 120*time.Second {
+			t.Fatalf("expected provider Retry-After to be preserved, got %v", err)
 		}
 	})
 
-	t.Run("7d_oi reset only does not set week-long retry duration", func(t *testing.T) {
+	t.Run("7d_oi reset sets the model cooldown", func(t *testing.T) {
 		headers := http.Header{
-			"Anthropic-Ratelimit-Unified-Status":       []string{"rejected"},
-			"Anthropic-Ratelimit-Unified-5h-Status":    []string{"allowed"},
-			"Anthropic-Ratelimit-Unified-7d-Status":    []string{"allowed"},
-			"Anthropic-Ratelimit-Unified-7d_oi-Status": []string{"rejected"},
-			"Anthropic-Ratelimit-Unified-7d_oi-Reset":  []string{strconv.FormatInt(time.Now().Add(7*24*time.Hour).Unix(), 10)},
+			"Anthropic-Ratelimit-Unified-Status":            []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":         []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Status":         []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Status":      []string{"rejected"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Utilization": []string{"1.0"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Reset":       []string{strconv.FormatInt(time.Now().Add(7*24*time.Hour).Unix(), 10)},
 		}
 
 		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, headers, []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fable usage window rejected."}}`))
 
 		var retry retryAfterProvider
-		if errors.As(err, &retry) && retry != nil && retry.RetryAfter() != nil {
-			t.Fatalf("expected Fable 7d_oi-only reset to yield nil RetryAfter, got %v", *retry.RetryAfter())
+		if !errors.As(err, &retry) || retry == nil || retry.RetryAfter() == nil || *retry.RetryAfter() < 7*24*time.Hour-2*time.Second {
+			t.Fatalf("expected Fable 7d_oi reset to be preserved, got %v", err)
 		}
 	})
 }
@@ -802,6 +804,7 @@ func TestClaudeExecutor_AuthManager_OverageSpendCapFirstRequestAllowsOpus_Issue5
 func TestClaudeExecutor_AuthManager_FableOnlyRejectionWithout5hHeadersAllowsOpus_Issue7197(t *testing.T) {
 	var fableAttempts, opusAttempts atomic.Int32
 	weeklyReset := strconv.FormatInt(time.Now().Add(6*24*time.Hour).Unix(), 10)
+	weeklyResetUnix, _ := strconv.ParseInt(weeklyReset, 10, 64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, errRead := io.ReadAll(r.Body)
 		if errRead != nil {
@@ -887,10 +890,10 @@ func TestClaudeExecutor_AuthManager_FableOnlyRejectionWithout5hHeadersAllowsOpus
 		t.Fatal("fable model state not found")
 	}
 	if fableState.Quota.NextRecoverAt.IsZero() || !fableState.Quota.NextRecoverAt.After(time.Now()) {
-		t.Fatal("fable model cooldown should be set in the future via exponential backoff")
+		t.Fatal("fable model cooldown should preserve the provider reset")
 	}
-	if fableState.Quota.NextRecoverAt.After(time.Now().Add(10 * time.Minute)) {
-		t.Fatalf("fable model cooldown was %v; want exponential backoff (<10m), not ~6d weekly reset", fableState.Quota.NextRecoverAt)
+	if fableState.Quota.NextRecoverAt.Before(time.Unix(weeklyResetUnix, 0)) {
+		t.Fatalf("fable model cooldown was %v; want the provider weekly reset at %v", fableState.Quota.NextRecoverAt, time.Unix(weeklyResetUnix, 0))
 	}
 
 	payloadOpus := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":[{"type":"text","text":"test"}]}]}`)
