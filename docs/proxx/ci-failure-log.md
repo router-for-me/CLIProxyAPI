@@ -24,7 +24,21 @@ Review on 2026-12-06, after two weeks of entries.
 | 2026-11-21 | sdk/cliproxy same-revision batch wait test | test bug | race inside the test on which auth reached the hook | #26 |
 | 2026-11-21 | sdk/cliproxy `TestServiceApplyKVStoreConfig_HomeModeNeverOpensBBolt` | test bug | leaked global Home client | #26 |
 | 2026-11-21 | sdk/cliproxy `TestServiceHeartbeatFailoverDoesNotDrainBlockingScope` | test bug | random retry jitter against a fixed 1s wait | #26 |
+| 2026-11-22 | internal/wstunnel `TestHubAuth_MethodAndCredentials` | test bug | read one server_list frame right after the handshake, before the second server was published | this PR |
+| 2026-11-22 | sdk/api/handlers/openai `TestResponsesWebsocketSameSessionLaterCreate429DoesNotReplayAfterDownstreamCommit` | open | the 429 error frame is dropped when a data write still holds the writer lock; the code closes without waiting by design, so a fix needs a decision (see below) | open |
 
 Change detectors so far: one, and it was rewritten to test behavior rather than deleted.
 Candidate AGENTS.md ban, if the pattern recurs: "tests must not assert on vendor catalog contents."
 Six more tests pin vendor catalog data. They are listed in #19.
+
+## Open: dropped terminal error frame on the responses websocket
+
+`closeWithPayload` in `sdk/api/handlers/openai/openai_responses_websocket.go` hard-closes the
+connection when another goroutine holds `writeMu`, so the client sees an abnormal closure
+instead of the 429. Under load it fails about 1 in 200 runs. A probe showed the holder is the
+writer of the previous frame, after its bytes reached the client but before `WriteMessage`
+returned. That state cannot be told apart from a write blocked on a client that stopped
+reading without a clock, and AGENTS.md forbids timeouts there. The choices are a short bounded
+wait (an AGENTS.md exception), or relaxing the test to assert only its stated purpose (no
+replay to the second credential).
+
