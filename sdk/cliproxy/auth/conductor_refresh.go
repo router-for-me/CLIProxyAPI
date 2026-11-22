@@ -1618,6 +1618,15 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 		return nil, errors.New("auth is unauthorized")
 	}
 
+	if clientHeaders, onDemand := freshTokenForPickFromContext(ctx); onDemand {
+		if settled, errSettled := m.freshTokenForPickSettled(ctx, id, clientHeaders, time.Now()); settled {
+			if errSettled != nil {
+				return nil, errSettled
+			}
+			return auth.Clone(), nil
+		}
+	}
+
 	// Another request may already have refreshed this credential.
 	if failedAccessToken != "" {
 		if !authMatchesTokenPartition(auth, failedAccessToken) && (authAccessToken(auth) != "" || authOuterAccessToken(auth) != "") {
