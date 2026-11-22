@@ -501,19 +501,58 @@ func (e *AntigravityExecutor) applyAntigravityTOSState(cfg *config.Config, auth 
 }
 
 // applyAntigravityForbiddenState performs executor-side bookkeeping for an
-// Antigravity 403 response: terminal TOS_VIOLATION closes idle pooled
-// transports and arms the optional pool-wide pause, while 403
-// VALIDATION_REQUIRED closes idle pooled transports so verification-locked
-// accounts stop reusing keep-alive sockets.
+// Antigravity 403 response: it evicts idle pooled transports so flagged
+// keep-alive sockets are not reused, and arms the optional pool-wide pause on
+// terminal TOS_VIOLATION.
 func (e *AntigravityExecutor) applyAntigravityForbiddenState(cfg *config.Config, auth *cliproxyauth.Auth, body []byte) {
+	closeAntigravityAuthIdleTransports(auth)
 	if parseAntigravityTOSViolation(body) != nil {
-		closeAntigravityAuthIdleTransports(auth)
 		e.applyAntigravityTOSState(cfg, auth, body)
-		return
 	}
-	if cliproxyauth.IsAntigravityValidationRequiredError(statusErr{code: http.StatusForbidden, msg: string(body)}) {
+}
+
+func antigravityInBandErrorStatusCode(errorResult ojson.Result) int {
+	statusCode := int(errorResult.Get("code").Int())
+	if statusCode < http.StatusBadRequest || statusCode > 599 {
+		return http.StatusBadGateway
+	}
+	return statusCode
+}
+
+// applyAntigravityUpstreamError performs shared executor-side bookkeeping for
+// an Antigravity upstream error (either an HTTP non-2xx response or an HTTP 2xx
+// in-band JSON error frame): 429 cooldown/credits handling, invalid-signature
+// replay invalidation, 403 TOS/pool eviction, and 401 idle transport eviction.
+func (e *AntigravityExecutor) applyAntigravityUpstreamError(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	baseModel string,
+	useCredits bool,
+	replayScope antigravityReasoningReplayScope,
+	statusCode int,
+	headers http.Header,
+	body []byte,
+) error {
+	if statusCode == http.StatusTooManyRequests {
+		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, headers, body); err429 != nil {
+			return err429
+		}
+	}
+	if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, body); errClear != nil {
+		// Report the upstream failure rather than the cleanup failure.
+		logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
+	}
+	var cfg *config.Config
+	if e != nil {
+		cfg = e.cfg
+	}
+	switch statusCode {
+	case http.StatusForbidden:
+		e.applyAntigravityForbiddenState(cfg, auth, body)
+	case http.StatusUnauthorized:
 		closeAntigravityAuthIdleTransports(auth)
 	}
+	return newAntigravityStatusErrWithHeaders(statusCode, headers, body)
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || isAntigravityAuthDisabled(auth) || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {

@@ -186,8 +186,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			return cliproxyexecutor.Response{}, err429
 		}
 	}
-	if httpResp.StatusCode == http.StatusForbidden {
+	switch httpResp.StatusCode {
+	case http.StatusForbidden:
 		e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
+	case http.StatusUnauthorized:
+		closeAntigravityAuthIdleTransports(auth)
 	}
 	sErr := newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 	return cliproxyexecutor.Response{}, sErr
