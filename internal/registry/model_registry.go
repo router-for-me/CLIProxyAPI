@@ -40,8 +40,9 @@ type NativeCapabilities struct {
 type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
-	// MetadataModelID identifies the canonical model used to resolve client metadata.
-	// For Copilot it is also the route's upstream model ID. It is never exposed in model lists.
+	// SourceModelID identifies the provider model behind this published route.
+	SourceModelID string `json:"-"`
+	// MetadataModelID identifies the catalog key used to resolve client metadata.
 	MetadataModelID string `json:"-"`
 	// OAuthAlias is the configured alias that produced this route, before adding any auth prefix.
 	OAuthAlias string `json:"-"`
@@ -287,7 +288,8 @@ func (r *ModelRegistry) RegistrationEpoch() uint64 {
 
 // LookupModelInfo looks up ModelInfo by checking dynamic registrations first
 // (strictly scoped to provider when non-empty, or global when empty) and then
-// falling back to channel-specific and global static definitions.
+// falling back to channel-specific and shared static definitions. A channel or
+// qualified model ID selects an independent provider catalog.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -307,7 +309,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 			return cloneModelInfo(info)
 		}
 	}
-	return cloneModelInfo(LookupStaticModelInfo(modelID))
+	return lookupStaticModelInfo(modelID, nil)
 }
 
 // NativeCapabilityRoute describes one registered route to a public model.
@@ -1479,7 +1481,7 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
-// ClientModelRoute returns the native model and alias for the first matching client route.
+// ClientModelRoute returns the metadata key and alias for the first matching client route.
 func (r *ModelRegistry) ClientModelRoute(clientID string, modelIDs ...string) (metadataModelID, oauthAlias string) {
 	route := r.LookupClientModelRoute(clientID, modelIDs...)
 	return route.MetadataModelID, route.OAuthAlias
@@ -1487,6 +1489,8 @@ func (r *ModelRegistry) ClientModelRoute(clientID string, modelIDs ...string) (m
 
 // ClientModelRouteInfo describes the source and alias of a registered route.
 type ClientModelRouteInfo struct {
+	ID               string
+	SourceModelID    string
 	MetadataModelID  string
 	OAuthAlias       string
 	OAuthAliasSource string
@@ -1503,12 +1507,24 @@ func (r *ModelRegistry) LookupClientModelRoute(clientID string, modelIDs ...stri
 		if modelID == "" {
 			continue
 		}
-		if info := models[modelID]; info != nil {
-			return ClientModelRouteInfo{info.MetadataModelID, info.OAuthAlias, info.OAuthAliasSource}
+		info := models[modelID]
+		if info == nil {
+			for _, id := range r.clientModels[clientID] {
+				if strings.EqualFold(id, modelID) {
+					info = models[id]
+					if info != nil {
+						break
+					}
+				}
+			}
 		}
-		for _, id := range r.clientModels[clientID] {
-			if info := models[id]; info != nil && strings.EqualFold(id, modelID) {
-				return ClientModelRouteInfo{info.MetadataModelID, info.OAuthAlias, info.OAuthAliasSource}
+		if info != nil {
+			return ClientModelRouteInfo{
+				ID:               info.ID,
+				SourceModelID:    info.SourceModelID,
+				MetadataModelID:  info.MetadataModelID,
+				OAuthAlias:       info.OAuthAlias,
+				OAuthAliasSource: info.OAuthAliasSource,
 			}
 		}
 	}

@@ -20,20 +20,28 @@ import (
 	tr "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-type copilotHomeDispatcher struct{}
+type copilotHomeDispatcher struct{ qualified bool }
 
 func (copilotHomeDispatcher) HeartbeatOK() bool       { return true }
 func (copilotHomeDispatcher) AbortAmbiguousDispatch() {}
 
-func (copilotHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
-	return []byte(`{
+func (d copilotHomeDispatcher) RPopAuth(context.Context, string, string, http.Header, int) ([]byte, error) {
+	doc := ojson.NewDocString(`{
 		"provider":"copilot","model":"gpt-5.3-codex","auth_index":"copilot-home-mock",
 		"request_retry":0,"selection_id":"copilot-home-test-selection",
 		"auth":{"id":"copilot-home-mock","provider":"copilot","metadata":{
 			"base_url":"https://api.enterprise.githubcopilot.com","access_token":"mock-short-token"
 		}},
 		"model_info":{"id":"gpt-5.3-codex","type":"copilot","context_length":32768,"thinking":{"levels":["low","medium"]}}
-	}`), nil
+	}`)
+	if d.qualified {
+		for _, path := range []string{"model", "model_info.id"} {
+			if errSet := doc.Set(path, "copilot/gpt-5.3-codex"); errSet != nil {
+				return nil, errSet
+			}
+		}
+	}
+	return doc.Bytes(), nil
 }
 
 func TestCopilotHomeExecutionWithoutLocalModel(t *testing.T) {
@@ -90,11 +98,16 @@ func TestCopilotHomeExecutionWithoutLocalModel(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		stream       bool
+		qualified    bool
 		countPayload string
 		status       int
 	}{
 		{name: "ordinary", status: 200},
 		{name: "stream", stream: true, status: 200},
+		{name: "qualified ordinary", qualified: true, status: 200},
+		{name: "qualified stream", qualified: true, stream: true, status: 200},
+		{name: "qualified count", qualified: true, countPayload: `{"input":"Hello"}`, status: 200},
+		{name: "qualified rate limited", qualified: true, status: 429},
 		{name: "count/string", countPayload: `{"input":"Hello"}`, status: 200},
 		{name: "count/message string", countPayload: `{"input":[{"type":"message","role":"user","content":"Hello"}]}`, status: 200},
 		{name: "count/role string", countPayload: `{"input":[{"role":"user","content":"Hello"}]}`, status: 200},
@@ -104,6 +117,11 @@ func TestCopilotHomeExecutionWithoutLocalModel(t *testing.T) {
 		{name: "unavailable", status: 503},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			manager.PublishHomeDispatch(copilotHomeDispatcher{qualified: test.qualified}, executionregistry.New(), 1)
+			executionModel := model
+			if test.qualified {
+				executionModel = "copilot/" + model
+			}
 			calls := 0
 			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", roundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
@@ -135,7 +153,7 @@ func TestCopilotHomeExecutionWithoutLocalModel(t *testing.T) {
 					intercepted = true
 					plan, ok := req.Metadata[copilotRouteKey].(copilotAttemptRoute)
 					if !ok || plan.route.Info == nil || plan.route.Info.ContextLength != 32768 ||
-						req.ToFormat != tr.FormatOpenAIResponse || req.Model != model {
+						req.ToFormat != tr.FormatOpenAIResponse || req.Model != executionModel {
 						t.Error("route planner did not see the Home model information before interception")
 					}
 					return cliproxyexecutor.RequestAfterAuthInterceptResponse{}
@@ -200,7 +218,7 @@ func TestCopilotHomeExecutionWithoutLocalModel(t *testing.T) {
 						if record.Get("fail.status_code").Int() != int64(test.status) {
 							continue
 						}
-						if record.Get("provider").String() != "copilot" || record.Get("model").String() != model ||
+						if record.Get("provider").String() != "copilot" || record.Get("model").String() != executionModel ||
 							record.Get("auth_index").String() != "copilot-home-mock" {
 							t.Fatal("failure usage is missing the dispatched credential or native model")
 						}

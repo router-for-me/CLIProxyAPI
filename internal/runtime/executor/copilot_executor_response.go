@@ -8,6 +8,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -19,7 +20,7 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.route.Info.ID, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, thinking.ParseSuffix(req.Model).ModelName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	resp, err := e.send(ctx, auth, opts, &prepared, reporter)
 	if err != nil {
@@ -75,7 +76,7 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return nil, err
 	}
-	reporter := helps.NewExecutorUsageReporter(ctx, e, prepared.route.Info.ID, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, thinking.ParseSuffix(req.Model).ModelName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	resp, err := e.send(ctx, auth, opts, &prepared, reporter)
 	if err != nil {
