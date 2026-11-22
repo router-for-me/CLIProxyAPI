@@ -75,8 +75,7 @@ func TestOAuthSessionStoreCompleteProviderSkipsCompletedSessions(t *testing.T) {
 }
 
 func TestGetOAuthSessionHidesCompletedSession(t *testing.T) {
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 	store.Register("completed-state", "codex")
 	store.Complete("completed-state")
 
@@ -92,8 +91,7 @@ func TestGetOAuthSessionHidesCompletedSession(t *testing.T) {
 }
 
 func TestGetAuthStatusRejectsUnknownStateAndAcceptsCompletedState(t *testing.T) {
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 
 	handler := &Handler{}
 	router := gin.New()
@@ -113,8 +111,7 @@ func TestGetAuthStatusRejectsUnknownStateAndAcceptsCompletedState(t *testing.T) 
 }
 
 func TestOAuthCallbackRejectsCompletedSession(t *testing.T) {
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 	store.Register("completed-state", "codex")
 	store.Complete("completed-state")
 
@@ -205,8 +202,7 @@ func TestOAuthSessionStoreCancelIgnoresErrorSession(t *testing.T) {
 }
 
 func TestCancelOAuthSessionAndCallbackRejectAfterCancel(t *testing.T) {
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 	store.Register("callback-state", "anthropic")
 
 	if !CancelOAuthSession("callback-state") {
@@ -226,8 +222,7 @@ func TestCancelOAuthSessionAndCallbackRejectAfterCancel(t *testing.T) {
 }
 
 func TestGuardOAuthSessionPendingForSave(t *testing.T) {
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 
 	providers := []string{"anthropic", "codex", "antigravity", "xai", "kimi", "kimi-ai", "kimi.ai", "meta"}
 	for _, provider := range providers {
@@ -261,8 +256,7 @@ func TestGuardOAuthSessionPendingForSave(t *testing.T) {
 }
 
 func TestCancelAuthSessionHandler(t *testing.T) {
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 	store.Register("device-state", "xai")
 
 	handler := &Handler{}
@@ -334,11 +328,23 @@ func performOAuthCancelRequest(t *testing.T, router http.Handler, state string) 
 	}
 }
 
-func replaceOAuthSessionStoreForTest(t *testing.T, store *oauthSessionStore) {
+// useOAuthSessionStoreForTest gives the test an empty OAuth session store with the
+// given TTL and returns it. It swaps the contents of the package store under its
+// own lock instead of reassigning the oauthSessions variable: OAuth pollers
+// started by other tests can still be running and read that variable, so
+// reassigning it is a data race.
+func useOAuthSessionStoreForTest(t *testing.T, ttl time.Duration) *oauthSessionStore {
 	t.Helper()
-	original := oauthSessions
-	oauthSessions = store
+	fresh := newOAuthSessionStore(ttl)
+	store := oauthSessions
+	store.mu.Lock()
+	origTTL, origCompletedTTL, origSessions := store.ttl, store.completedTTL, store.sessions
+	store.ttl, store.completedTTL, store.sessions = fresh.ttl, fresh.completedTTL, fresh.sessions
+	store.mu.Unlock()
 	t.Cleanup(func() {
-		oauthSessions = original
+		store.mu.Lock()
+		store.ttl, store.completedTTL, store.sessions = origTTL, origCompletedTTL, origSessions
+		store.mu.Unlock()
 	})
+	return store
 }
