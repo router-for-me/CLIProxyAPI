@@ -4,10 +4,15 @@ name: proxx-e2e
 # GitHub release API and upgrades a supervised proxx in place under load.
 on:
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: proxx-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   selfupdate:
@@ -20,13 +25,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          filter: blob:none
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Refresh models catalog
-        run: bash .github/scripts/refresh-model-catalogs.sh
+      # Tests use the committed catalog, so a result does not depend on router-for-me/models@main
+      # at run time. release.yaml still refreshes it for shipped binaries.
+      - name: Validate committed models catalog
+        run: go run ./cmd/validate_codex_models --file internal/registry/models/codex_client_models.json
       - name: Unit tests
         run: go test -race -count=1 ./internal/proxx/... ./internal/managementasset/ ./cmd/proxx-sign/
       - name: Self-update e2e
