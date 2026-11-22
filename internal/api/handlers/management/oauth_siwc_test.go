@@ -67,8 +67,7 @@ type siwcFixture struct {
 
 func setupSIWCFlow(t *testing.T, blocked bool) *siwcFixture {
 	t.Helper()
-	store := newOAuthSessionStore(time.Minute)
-	replaceOAuthSessionStoreForTest(t, store)
+	store := useOAuthSessionStoreForTest(t, time.Minute)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "codex.json")
 	metadata := map[string]any{"type": "codex", "access_token": "outer", "refresh_token": "outer-refresh", "account_id": "account", "note": "keep", "siwc": map[string]any{"device_id": "e61bbe28-07ef-466d-8e5d-a344f94ab305"}}
@@ -828,8 +827,7 @@ func startSIWCConnectCountingProxy(t *testing.T, hits *atomic.Int32) *httptest.S
 
 func TestSIWCBindUsesAccountProxyPrecedence(t *testing.T) {
 	t.Run("account_proxy_overrides_global_proxy", func(t *testing.T) {
-		store := newOAuthSessionStore(time.Minute)
-		replaceOAuthSessionStoreForTest(t, store)
+		store := useOAuthSessionStoreForTest(t, time.Minute)
 
 		var globalHits atomic.Int32
 		var accountHits atomic.Int32
@@ -903,8 +901,7 @@ func TestSIWCBindUsesAccountProxyPrecedence(t *testing.T) {
 	t.Run("unreachable_account_proxy_fails_without_global_fallback", func(t *testing.T) {
 		for _, scheme := range []string{"http", "socks5h"} {
 			t.Run(scheme, func(t *testing.T) {
-				store := newOAuthSessionStore(time.Minute)
-				replaceOAuthSessionStoreForTest(t, store)
+				store := useOAuthSessionStoreForTest(t, time.Minute)
 
 				var globalHits atomic.Int32
 				globalProxy := startSIWCConnectCountingProxy(t, &globalHits)
@@ -1053,8 +1050,7 @@ func TestSIWCBindProxyEndToEndAndValidation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			store := newOAuthSessionStore(time.Minute)
-			replaceOAuthSessionStoreForTest(t, store)
+			store := useOAuthSessionStoreForTest(t, time.Minute)
 
 			var directHits atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1215,8 +1211,7 @@ func TestSIWCBindProxyEndToEndAndValidation(t *testing.T) {
 
 	t.Run("rejects_invalid_account_proxy_url", func(t *testing.T) {
 		for _, badProxy := range []any{"://bad-proxy", "ftp://127.0.0.1:21", 12345} {
-			store := newOAuthSessionStore(time.Minute)
-			replaceOAuthSessionStoreForTest(t, store)
+			useOAuthSessionStoreForTest(t, time.Minute)
 
 			dir := t.TempDir()
 			path := filepath.Join(dir, "codex.json")

@@ -1608,7 +1608,9 @@ func TestOAuthCallbackRouteSkipsManagementKeyMiddleware(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	server := newTestServer(t)
-	state := "server-plugin-oauth-state"
+	// Completed sessions stay in the global store until they expire, so a
+	// fixed state would collide when the test runs again (-count > 1).
+	state := "server-plugin-oauth-state-" + uuid.NewString()
 	if errRegister := managementHandlers.RegisterPluginOAuthSession(state, "gemini-cli", nil); errRegister != nil {
 		t.Fatalf("register plugin oauth session: %v", errRegister)
 	}
@@ -2129,9 +2131,26 @@ func TestClaudeModelListCloakingConfigHotReload(t *testing.T) {
 }
 
 func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
+	// service_tiers come from vendor catalog data that changes outside this
+	// repo, so expectations are read from the active templates. A template
+	// with non-empty tiers is also registered so the pass-through check never
+	// degenerates to comparing [] with [].
+	templates := codexClientTestTemplates(t)
+	tieredSlug := ""
+	for _, template := range templates {
+		slug, _ := template["slug"].(string)
+		if tiers, _ := template["service_tiers"].([]any); len(tiers) > 0 && slug != "gpt-5.5" {
+			tieredSlug = slug
+			break
+		}
+	}
+	if tieredSlug == "" {
+		t.Fatal("Codex client model templates have no model with service_tiers; cannot check pass-through")
+	}
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-client-version-catalog"
 	modelRegistry.RegisterClient(clientID, "codex", []*registry.ModelInfo{
+		{ID: tieredSlug, Object: "model", OwnedBy: "openai", Type: "openai"},
 		{
 			ID:                  "gpt-5.5",
 			Object:              "model",
@@ -2205,12 +2224,15 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 
 	var gpt55 map[string]any
 	var custom map[string]any
+	var tiered map[string]any
 	for _, model := range resp.Models {
 		switch slug, _ := model["slug"].(string); slug {
 		case "gpt-5.5":
 			gpt55 = model
 		case "custom-codex-model-test":
 			custom = model
+		case tieredSlug:
+			tiered = model
 		}
 	}
 	if gpt55 == nil {
@@ -2225,9 +2247,15 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := gpt55["max_tokens"].(float64); got != 64000 {
 		t.Fatalf("gpt-5.5 max_tokens = %v, want 64000", gpt55["max_tokens"])
 	}
-	serviceTiers, ok := gpt55["service_tiers"].([]any)
-	if !ok || len(serviceTiers) != 1 {
-		t.Fatalf("expected gpt-5.5 priority service tier, got %#v", gpt55["service_tiers"])
+	// Pure Codex routes pass the template's service_tiers through unchanged.
+	for slug, model := range map[string]map[string]any{"gpt-5.5": gpt55, tieredSlug: tiered} {
+		if model == nil {
+			t.Fatalf("expected %s codex catalog entry", slug)
+		}
+		want := codexClientTestTemplate(t, templates, slug)["service_tiers"]
+		if got := model["service_tiers"]; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s service_tiers = %#v, want template value %#v", slug, got, want)
+		}
 	}
 	if custom == nil {
 		t.Fatal("expected custom model codex catalog entry")
@@ -2562,6 +2590,28 @@ func codexClientTestPriority(raw any) int {
 	default:
 		return -1
 	}
+}
+
+func codexClientTestTemplates(t *testing.T) []map[string]any {
+	t.Helper()
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
+		t.Fatalf("parse Codex client model templates: %v", err)
+	}
+	return payload.Models
+}
+
+func codexClientTestTemplate(t *testing.T, templates []map[string]any, slug string) map[string]any {
+	t.Helper()
+	for _, template := range templates {
+		if template["slug"] == slug {
+			return template
+		}
+	}
+	t.Fatalf("missing Codex client model template %q", slug)
+	return nil
 }
 
 func codexClientTestMaxTemplatePriority(t *testing.T) int {

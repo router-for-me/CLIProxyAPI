@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"mime/multipart"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -483,93 +483,127 @@ func TestNormalizeXAIImageRefsDocArbitraryNestedExtensionPath(t *testing.T) {
 	}
 }
 
+// TestClaudeCacheControlDocChecksDoNotMaterializeLargeMessagesArray checks that the
+// cache_control doc helpers stream over the messages array in a single pass instead of
+// materializing it. The checks use heap allocation counts, not wall-clock time, so they
+// are deterministic under -race and on loaded CI runners:
+//   - byte bound: at both N and 4N messages (1-4 MiB payloads) the helpers allocate
+//     under 64 KiB, so the messages array is never copied or materialized;
+//   - count bound: 4x more messages adds at most a few heap objects (amortized slice
+//     growth), i.e. there is no per-message allocating work. Re-resolving each message
+//     by path (doc.Get("messages.<i>...") in a loop, which is O(N^2) on an unsplit
+//     tail) allocates per message and fails here.
 func TestClaudeCacheControlDocChecksDoNotMaterializeLargeMessagesArray(t *testing.T) {
+	const (
+		maxAllocBytes   = 64 * 1024
+		scale           = 4
+		allocCountSlack = 8
+	)
+
+	checkScaling := func(t *testing.T, name string, baseN int, build func(n int) *ojson.Doc, run func(t *testing.T, doc *ojson.Doc)) {
+		t.Helper()
+		baseCount, baseBytes := minDocHelperAllocs(t, func() *ojson.Doc { return build(baseN) }, run)
+		bigCount, bigBytes := minDocHelperAllocs(t, func() *ojson.Doc { return build(scale * baseN) }, run)
+		t.Logf("%s: n=%d allocs=%d bytes=%d; n=%d allocs=%d bytes=%d", name, baseN, baseCount, baseBytes, scale*baseN, bigCount, bigBytes)
+		if bigCount > baseCount+allocCountSlack {
+			t.Fatalf("%s: allocations grew from %d to %d objects when messages grew %dx; expected a single pass with no per-message allocation", name, baseCount, bigCount, scale)
+		}
+		if baseBytes > maxAllocBytes || bigBytes > maxAllocBytes {
+			t.Fatalf("%s: cache control doc helpers allocated %d / %d bytes (> %d); the messages array must not be copied or materialized", name, baseBytes, bigBytes, maxAllocBytes)
+		}
+	}
+
 	t.Run("split messages container avoids 1MiB materialization", func(t *testing.T) {
 		chunk := strings.Repeat("a", 64*1024)
-		var b strings.Builder
-		b.Grow(16*len(chunk) + 1024)
-		b.WriteString(`{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"sys"}],"messages":[`)
-		for i := 0; i < 16; i++ {
-			if i > 0 {
-				b.WriteByte(',')
+		build := func(n int) *ojson.Doc {
+			var b strings.Builder
+			b.Grow(n*len(chunk) + 1024)
+			b.WriteString(`{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"sys"}],"messages":[`)
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.WriteString(`{"role":"user","content":[{"type":"text","text":"`)
+				b.WriteString(chunk)
+				b.WriteString(`"}]}`)
 			}
-			b.WriteString(`{"role":"user","content":[{"type":"text","text":"`)
-			b.WriteString(chunk)
-			b.WriteString(`"}]}`)
+			b.WriteString(`]}`)
+			doc := ojson.NewDoc([]byte(b.String()))
+			// Mutate messages.0 so "messages" splits into an ojson container (v.c != nil).
+			_ = doc.Set("messages.0.content.0.text", "short")
+			return doc
 		}
-		b.WriteString(`]}`)
-		raw := []byte(b.String())
-
-		doc := ojson.NewDoc(raw)
-		// Mutate messages.0 so "messages" splits into an ojson container (v.c != nil).
-		_ = doc.Set("messages.0.content.0.text", "short")
-
-		var mBefore, mAfter runtime.MemStats
-		runtime.ReadMemStats(&mBefore)
-		start := time.Now()
-		ensureCacheControlDoc(doc)
-		if got := countCacheControlsDoc(doc); got != 2 {
-			t.Fatalf("countCacheControlsDoc = %d, want 2", got)
-		}
-		enforceCacheControlLimitDoc(doc, 4)
-		upgradeClaudeCacheControlTTLDoc(doc, claudeCacheControlTTL1h)
-		normalizeCacheControlTTLDoc(doc)
-		stripClaudeCacheControlTTLDoc(doc)
-		elapsed := time.Since(start)
-		runtime.ReadMemStats(&mAfter)
-
-		allocated := mAfter.TotalAlloc - mBefore.TotalAlloc
-		if allocated > 64*1024 {
-			t.Fatalf("split messages: cache control doc helpers allocated %d bytes (> 64 KiB)", allocated)
-		}
-		if elapsed > 20*time.Millisecond {
-			t.Fatalf("split messages took %v (> 20ms); expected O(N) single-pass traversal", elapsed)
-		}
+		checkScaling(t, "split messages", 16, build, func(t *testing.T, doc *ojson.Doc) {
+			ensureCacheControlDoc(doc)
+			if got := countCacheControlsDoc(doc); got != 2 {
+				t.Fatalf("countCacheControlsDoc = %d, want 2", got)
+			}
+			enforceCacheControlLimitDoc(doc, 4)
+			upgradeClaudeCacheControlTTLDoc(doc, claudeCacheControlTTL1h)
+			normalizeCacheControlTTLDoc(doc)
+			stripClaudeCacheControlTTLDoc(doc)
+		})
 	})
 
 	t.Run("unsplit 1024 messages runs in single-pass O(N) time and <64KiB allocs", func(t *testing.T) {
 		chunk := strings.Repeat("b", 1024)
-		var b strings.Builder
-		b.Grow(1024*(len(chunk)+64) + 256)
-		b.WriteString(`{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[`)
-		for i := 0; i < 1024; i++ {
-			if i > 0 {
-				b.WriteByte(',')
+		build := func(n int) *ojson.Doc {
+			var b strings.Builder
+			b.Grow(n*(len(chunk)+64) + 256)
+			b.WriteString(`{"model":"claude-sonnet-4-5","system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[`)
+			for i := 0; i < n; i++ {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				b.WriteString(`{"role":"user","content":[{"type":"text","text":"`)
+				b.WriteString(chunk)
+				if i == n-1 {
+					b.WriteString(`","cache_control":{"type":"ephemeral"}}]}`)
+				} else {
+					b.WriteString(`"}]}`)
+				}
 			}
-			b.WriteString(`{"role":"user","content":[{"type":"text","text":"`)
-			b.WriteString(chunk)
-			if i == 1023 {
-				b.WriteString(`","cache_control":{"type":"ephemeral"}}]}`)
-			} else {
-				b.WriteString(`"}]}`)
+			b.WriteString(`]}`)
+			doc := ojson.NewDoc([]byte(b.String()))
+			// Mutate only "model" so "messages" remains unsplit in root tail.
+			_ = doc.Set("model", "claude-sonnet-4-5-20250929")
+			return doc
+		}
+		checkScaling(t, "unsplit messages", 1024, build, func(t *testing.T, doc *ojson.Doc) {
+			if got := countCacheControlsDoc(doc); got != 2 {
+				t.Fatalf("countCacheControlsDoc = %d, want 2", got)
 			}
-		}
-		b.WriteString(`]}`)
-		raw := []byte(b.String())
-
-		doc := ojson.NewDoc(raw)
-		// Mutate only "model" so "messages" remains unsplit in root tail.
-		_ = doc.Set("model", "claude-sonnet-4-5-20250929")
-
-		var mBefore, mAfter runtime.MemStats
-		runtime.ReadMemStats(&mBefore)
-		start := time.Now()
-		if got := countCacheControlsDoc(doc); got != 2 {
-			t.Fatalf("countCacheControlsDoc = %d, want 2", got)
-		}
-		enforceCacheControlLimitDoc(doc, 4)
-		normalizeCacheControlTTLDoc(doc)
-		elapsed := time.Since(start)
-		runtime.ReadMemStats(&mAfter)
-
-		allocated := mAfter.TotalAlloc - mBefore.TotalAlloc
-		if allocated > 64*1024 {
-			t.Fatalf("unsplit 1024 messages: allocated %d bytes (> 64 KiB)", allocated)
-		}
-		if elapsed > 20*time.Millisecond {
-			t.Fatalf("unsplit 1024 messages took %v (> 20ms); expected O(N) single-pass traversal", elapsed)
-		}
+			enforceCacheControlLimitDoc(doc, 4)
+			normalizeCacheControlTTLDoc(doc)
+		})
 	})
+}
+
+// minDocHelperAllocs runs fn on a freshly built doc several times and returns the
+// smallest heap allocation delta observed. MemStats are process-wide, so taking the
+// minimum filters out allocations made concurrently by unrelated goroutines. GC is
+// paused while measuring so sync.Pool contents are not dropped between trials, which
+// would otherwise make the allocation count vary from run to run.
+func minDocHelperAllocs(t *testing.T, build func() *ojson.Doc, fn func(t *testing.T, doc *ojson.Doc)) (count, bytes uint64) {
+	t.Helper()
+	const trials = 5
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	for i := 0; i < trials; i++ {
+		doc := build()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		fn(t, doc)
+		runtime.ReadMemStats(&after)
+		c, b := after.Mallocs-before.Mallocs, after.TotalAlloc-before.TotalAlloc
+		if i == 0 || c < count {
+			count = c
+		}
+		if i == 0 || b < bytes {
+			bytes = b
+		}
+	}
+	return count, bytes
 }
 
 func TestStripClaudeCacheControlTTLThenInjectMessagesPreservesExistingCacheControl(t *testing.T) {
