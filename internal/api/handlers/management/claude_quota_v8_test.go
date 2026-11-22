@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,9 +33,14 @@ func TestObserveClaudeQuotaV8(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetRetryConfig(0, 0, 0)
 	modelRegistry := registry.GetGlobalRegistry()
-	target := &coreauth.Auth{ID: t.Name() + "-target", Index: "target", Provider: "claude", Prefix: "test", Status: coreauth.StatusActive, Metadata: map[string]any{"access_token": "test-token"}}
+	target := &coreauth.Auth{
+		ID: t.Name() + "-target", Index: "target", Provider: "claude", Prefix: "test", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"access_token": "test-token", "is_setup_token": true},
+	}
 	other := &coreauth.Auth{ID: t.Name() + "-other", Index: "other", Provider: "claude", Status: coreauth.StatusActive, Metadata: map[string]any{"access_token": "other-token"}}
+	authDir := t.TempDir()
 	for _, auth := range []*coreauth.Auth{target, other} {
+		auth.Attributes = map[string]string{"path": filepath.Join(authDir, auth.ID+".json")}
 		modelRegistry.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}, {ID: "test/" + model}})
 		t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
 		registerAuthForLookupTest(t, manager, auth)
@@ -67,6 +73,11 @@ func TestObserveClaudeQuotaV8(t *testing.T) {
 		return response, nil
 	}})
 	h := &Handler{authManager: manager}
+	if h.buildAuthFileEntry(target, authFileQuotaContext{v8: true})["claude_setup_token"] != true ||
+		h.buildAuthFileEntry(other, authFileQuotaContext{v8: true})["claude_setup_token"] != nil ||
+		h.buildAuthFileEntry(target, authFileQuotaContext{})["claude_setup_token"] != nil {
+		t.Fatal("expected setup-token marker only on the v8 entry for the marked credential")
+	}
 	request := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		w := httptest.NewRecorder()

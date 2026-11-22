@@ -204,6 +204,8 @@ It sends a Haiku inference request with a one-token output budget using that Cla
 credential. It returns `{"quota":{"observed_at":"<timestamp>","signals":{...}}}` from the
 response headers. The available quota windows depend on the headers Anthropic returns.
 Use this route for an explicit refresh because the probe uses subscription quota.
+`GET /v8/management/credentials` includes `claude_setup_token: true` for Claude
+credentials explicitly marked as setup tokens, so clients can skip OAuth usage reads.
 
 ## OAuth
 

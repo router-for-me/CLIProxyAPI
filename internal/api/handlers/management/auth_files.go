@@ -688,6 +688,13 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	if quota.v8 && auth.Provider == "claude" && auth.AuthKind() == coreauth.AuthKindOAuth {
+		setupToken, _ := auth.Metadata["is_setup_token"].(bool)
+		legacySetupToken, _ := auth.Metadata["setup_token"].(bool)
+		if setupToken || legacySetupToken {
+			entry["claude_setup_token"] = true
+		}
+	}
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}
