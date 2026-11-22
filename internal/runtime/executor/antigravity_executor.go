@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"sync"
 	"time"
@@ -497,14 +496,7 @@ func antigravityCredentialScope(prefix, secret string) string {
 // The underlying Transport is always shared so keep-alive connections survive across
 // requests instead of forcing a fresh TCP + TLS handshake every time.
 func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
-	defer func() {
-		var attrs map[string]string
-		if auth != nil {
-			attrs = auth.Attributes
-		}
-		installAntigravityHTTPRequestRedirectPolicy(clientOut, attrs)
-		clientOut = httptransport.Decorate(ctx, clientOut)
-	}()
+	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
 	// existing lifecycle and different OAuth identities remain isolated.
@@ -1061,15 +1053,7 @@ func (e *AntigravityExecutor) prepareRequestWithAuth(req *http.Request, auth *cl
 	if strings.TrimSpace(token) == "" {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-	if req.Header == nil {
-		req.Header = make(http.Header)
-	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	if projectID := antigravityProjectIDFromAuth(auth); projectID != "" && isAntigravityCloudCodeEndpoint(req.URL, auth) {
-		req.Header.Set("X-Goog-User-Project", projectID)
-	} else {
-		req.Header.Del("X-Goog-User-Project")
-	}
 	return auth, nil
 }
 
@@ -1130,46 +1114,8 @@ func (e *AntigravityExecutor) HttpRequest(ctx context.Context, auth *cliproxyaut
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
 	httpClient := helps.WithAntigravityHTTPClientTrace(newAntigravityHTTPClient(ctx, e.cfg, auth, 0), auth, "http_request")
+	installAntigravityHTTPRequestRedirectPolicy(httpClient, attrs)
 	return httpClient.Do(httpReq)
-}
-
-var antigravityCloudCodeBaseURLs = []*url.URL{
-	mustParseAntigravityURL(antigravityBaseURLDaily),
-	mustParseAntigravityURL(antigravitySandboxBaseURLDaily),
-	mustParseAntigravityURL(antigravityBaseURLProd),
-}
-
-func mustParseAntigravityURL(raw string) *url.URL {
-	parsed, errParse := url.Parse(raw)
-	if errParse != nil {
-		return nil
-	}
-	return parsed
-}
-
-func isAntigravityCloudCodeEndpoint(targetURL *url.URL, auth *cliproxyauth.Auth) bool {
-	if targetURL == nil || targetURL.Hostname() == "" {
-		return false
-	}
-	for _, base := range antigravityCloudCodeBaseURLs {
-		if antigravitySameRedirectOrigin(base, targetURL) {
-			return true
-		}
-	}
-	customBase := resolveCustomAntigravityBaseURL(auth)
-	if customBase == "" {
-		return false
-	}
-	parsedCustom, errParse := url.Parse(customBase)
-	if errParse != nil || !antigravitySameRedirectOrigin(parsedCustom, targetURL) {
-		return false
-	}
-	basePath := strings.TrimRight(path.Clean("/"+parsedCustom.Path), "/")
-	if basePath == "" {
-		return true
-	}
-	targetPath := path.Clean("/" + targetURL.Path)
-	return targetPath == basePath || strings.HasPrefix(targetPath, basePath+"/")
 }
 
 func installAntigravityHTTPRequestRedirectPolicy(client *http.Client, attrs map[string]string) {
@@ -1220,7 +1166,7 @@ func stripAntigravityCrossOriginHeaders(req *http.Request, customNames map[strin
 	req.Host = ""
 	for name := range req.Header {
 		lower := strings.ToLower(name)
-		if lower == "authorization" || lower == "host" || lower == "x-goog-user-project" {
+		if lower == "authorization" || lower == "host" {
 			delete(req.Header, name)
 			continue
 		}

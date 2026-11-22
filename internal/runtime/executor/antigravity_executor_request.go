@@ -113,9 +113,6 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	if projectID != "" {
-		httpReq.Header.Set("X-Goog-User-Project", projectID)
-	}
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}

@@ -119,8 +119,7 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	}
 
 	doc := ojson.NewDoc([]byte("{}"))
-	projectID := strings.TrimSpace(req.ProjectID)
-	if projectID != "" {
+	if projectID := strings.TrimSpace(req.ProjectID); projectID != "" {
 		doc.Set("project", projectID)
 	}
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+AntigravityModelsPath, bytes.NewReader(doc.Bytes()))
@@ -134,9 +133,6 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 	httpReq.Header.Set("User-Agent", userAgent)
-	if projectID != "" {
-		httpReq.Header.Set("X-Goog-User-Project", projectID)
-	}
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {

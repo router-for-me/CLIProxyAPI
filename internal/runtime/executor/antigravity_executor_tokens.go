@@ -124,9 +124,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("User-Agent", resolveUserAgent(auth))
-	if projectID := antigravityProjectIDFromAuth(auth); projectID != "" {
-		httpReq.Header.Set("X-Goog-User-Project", projectID)
-	}
 	if host := resolveHost(base); host != "" {
 		httpReq.Host = host
 	}
