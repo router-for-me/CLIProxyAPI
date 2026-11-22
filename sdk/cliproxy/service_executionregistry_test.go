@@ -1410,6 +1410,11 @@ func TestServiceHeartbeatFailoverDoesNotDrainBlockingScope(t *testing.T) {
 	cfg.Home.Host = host
 	cfg.Home.Port = port
 	cfg.Home.DisableClusterDiscovery = true
+	// Zero jitter pins the post-failover retry delay to homeSubscriberRetryInitial/2;
+	// random jitter could stretch it to the full second the test waits below.
+	zeroJitter := 0.0
+	proxxHomeRetryJitterOverride.Store(&zeroJitter)
+	t.Cleanup(func() { proxxHomeRetryJitterOverride.Store(nil) })
 	service := &Service{cfg: cfg}
 	serviceCtx, cancelService := context.WithCancel(context.Background())
 	t.Cleanup(cancelService)
@@ -3025,6 +3030,9 @@ func TestServiceSerializesHomeAndWatcherConfigRuntimeApply(t *testing.T) {
 		return true
 	}
 	client, _ := newHomePluginTaskTestClient(t, nil, 0)
+	// The worker publishes client as home.Current(); the subscriber that owns
+	// it in production would detach it, so clear it here.
+	t.Cleanup(func() { home.ClearCurrentIf(client) })
 	queue := newHomeConfigWorkQueue()
 	queue.enqueue([]byte("routing:\n  strategy: fill-first\n"))
 	ready := make(chan struct{})
