@@ -373,7 +373,15 @@ func TestAntigravityBuildRequest_RejectsMissingProjectID(t *testing.T) {
 func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T) {
 	sseResponse := "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"OK\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":1,\"totalTokenCount\":2}}}\n\n"
 	for _, model := range []string{"claude-sonnet-5-5-high", "claude-opus-5-5-high"} {
-		for _, level := range []string{"low", "medium", "high"} {
+		for _, tc := range []struct {
+			level string
+			want  string
+		}{
+			{level: "low", want: "LOW"},
+			{level: "medium", want: "MEDIUM"},
+			{level: "high", want: "HIGH"},
+		} {
+			level := tc.level
 			for _, stream := range []bool{false, true} {
 				modeName := "non_stream"
 				if stream {
@@ -433,8 +441,8 @@ func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T
 						}
 					}
 
-					if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
-						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, capturedBody)
+					if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.want {
+						t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, tc.want, capturedBody)
 					}
 					if budget := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
 						t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
@@ -445,6 +453,103 @@ func TestAntigravityExecutor_Claude55ExplicitThinkingLevelPreserved(t *testing.T
 				})
 			}
 		}
+	}
+}
+
+func TestAntigravityExecutor_Gemini4EmitsUppercaseThinkingLevelAndRespectsPayloadOverride(t *testing.T) {
+	nonStreamResponse := `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`
+	sseResponse := "data: " + nonStreamResponse + "\n\n"
+
+	cases := []struct {
+		name     string
+		model    string
+		level    string
+		stream   bool
+		override string
+		want     string
+	}{
+		{name: "neon_xhigh_non_stream", model: "gemini-4-neon-xhigh", level: "xhigh", stream: false, want: "XHIGH"},
+		{name: "neon_xhigh_stream", model: "gemini-4-neon-xhigh", level: "xhigh", stream: true, want: "XHIGH"},
+		{name: "argon_high_non_stream", model: "gemini-4-argon-high", level: "high", stream: false, want: "HIGH"},
+		{name: "argon_high_stream", model: "gemini-4-argon-high", level: "high", stream: true, want: "HIGH"},
+		{name: "payload_override_wins_over_uppercase", model: "gemini-4-neon-xhigh", level: "xhigh", stream: false, override: "medium", want: "medium"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBody []byte
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				raw, errRead := io.ReadAll(req.Body)
+				if errRead != nil {
+					return nil, errRead
+				}
+				if errClose := req.Body.Close(); errClose != nil {
+					return nil, errClose
+				}
+				capturedBody = raw
+				contentType := "application/json"
+				bodyText := nonStreamResponse
+				if tc.stream {
+					contentType = "text/event-stream"
+					bodyText = sseResponse
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {contentType}},
+					Body:       io.NopCloser(strings.NewReader(bodyText)),
+					Request:    req,
+				}, nil
+			}))
+
+			cfg := &config.Config{}
+			if tc.override != "" {
+				cfg.Payload.Override = []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "*"}},
+					Params: map[string]any{"generationConfig.thinkingConfig.thinkingLevel": tc.override},
+				}}
+			}
+			executor := NewAntigravityExecutor(cfg)
+			auth := &cliproxyauth.Auth{
+				ID:       "ag-gemini4-thinking-level-test",
+				Provider: "antigravity",
+				Metadata: map[string]any{
+					"access_token": "token",
+					"project_id":   "project-1",
+					"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+				},
+			}
+			payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"Reply OK"}]}],"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"` + tc.level + `"}}}`)
+			req := cliproxyexecutor.Request{Model: tc.model, Payload: payload}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    sdktranslator.FormatGemini,
+				ResponseFormat:  sdktranslator.FormatGemini,
+				OriginalRequest: payload,
+				Stream:          tc.stream,
+			}
+
+			if tc.stream {
+				res, errStream := executor.ExecuteStream(ctx, auth, req, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range res.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else {
+				if _, errExec := executor.Execute(ctx, auth, req, opts); errExec != nil {
+					t.Fatalf("Execute() error = %v", errExec)
+				}
+			}
+
+			if got := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.want {
+				t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, tc.want, capturedBody)
+			}
+			if budget := ojson.GetBytes(capturedBody, "request.generationConfig.thinkingConfig.thinkingBudget"); budget.Exists() {
+				t.Fatalf("thinkingBudget should be absent, got %s; body=%s", budget.Raw, capturedBody)
+			}
+		})
 	}
 }
 
