@@ -216,6 +216,9 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 	var pendingRole string
 	var pendingParts [][]byte
 	var pendingToolUseParts [][]byte
+	// Claude response origin of the trailing thinking block in pendingParts.
+	var pendingThinkingResponseID string
+	pendingThinkingBlockIndex := -1
 	var turnHasEmptyWebSearchResult bool
 	// Anthropic accepts a role=system turn only after a user message and before
 	// an assistant message or the end of messages. Mid-session system items are
@@ -276,6 +279,8 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 		pendingRole = ""
 		pendingParts = nil
 		pendingToolUseParts = nil
+		pendingThinkingResponseID = ""
+		pendingThinkingBlockIndex = -1
 	}
 	appendParts := func(role string, parts ...[]byte) {
 		if role == "" || len(parts) == 0 {
@@ -286,6 +291,8 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 		}
 		pendingRole = role
 		pendingParts = append(pendingParts, parts...)
+		pendingThinkingResponseID = ""
+		pendingThinkingBlockIndex = -1
 	}
 	appendToolUse := func(toolUse []byte) {
 		if len(toolUse) == 0 {
@@ -297,7 +304,7 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 		pendingRole = "assistant"
 		pendingToolUseParts = append(pendingToolUseParts, toolUse)
 	}
-	appendReasoning := func(reasoningPart []byte) {
+	appendReasoning := func(reasoningPart []byte, responseID string, blockIndex int, hasOrigin bool) {
 		if len(reasoningPart) == 0 {
 			return
 		}
@@ -311,17 +318,36 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 		if len(pendingToolUseParts) > 0 {
 			pendingParts = append(pendingParts, pendingToolUseParts...)
 			pendingToolUseParts = nil
+			pendingThinkingResponseID = ""
+			pendingThinkingBlockIndex = -1
 		}
 
+		// Adjacent thinking blocks from different responses are rejected by
+		// Anthropic, so only the latest is kept. Blocks from the same response
+		// in ascending block index order, such as a reasoning block followed by
+		// a progress-update block, are replayed unchanged as Anthropic requires.
 		currentType := ojson.GetBytesNoCopy(reasoningPart, "type").String()
-		if currentType == "thinking" && len(pendingParts) > 0 {
-			lastIdx := len(pendingParts) - 1
-			if ojson.GetBytesNoCopy(pendingParts[lastIdx], "type").String() == "thinking" {
-				pendingParts[lastIdx] = reasoningPart
+		sameResponse := hasOrigin && responseID == pendingThinkingResponseID
+		if currentType == "thinking" {
+			if sameResponse && blockIndex == pendingThinkingBlockIndex && len(pendingParts) > 0 && ojson.GetBytesNoCopy(pendingParts[len(pendingParts)-1], "type").String() == "thinking" {
+				// Replaying the same trailing block index replaces only that block.
+				pendingParts[len(pendingParts)-1] = reasoningPart
 				return
+			}
+			if !(sameResponse && blockIndex > pendingThinkingBlockIndex) {
+				for len(pendingParts) > 0 && ojson.GetBytesNoCopy(pendingParts[len(pendingParts)-1], "type").String() == "thinking" {
+					pendingParts = pendingParts[:len(pendingParts)-1]
+				}
 			}
 		}
 		pendingParts = append(pendingParts, reasoningPart)
+		if currentType == "thinking" && hasOrigin {
+			pendingThinkingResponseID = responseID
+			pendingThinkingBlockIndex = blockIndex
+		} else {
+			pendingThinkingResponseID = ""
+			pendingThinkingBlockIndex = -1
+		}
 	}
 
 	var inputItems []ojson.Result
@@ -513,7 +539,8 @@ func convertOpenAIResponsesRequestToClaude(ctx context.Context, modelName string
 			}
 
 		case "reasoning":
-			appendReasoning(convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks))
+			responseID, blockIndex, hasOrigin := parseClaudeReasoningItemID(item.Get("id").String())
+			appendReasoning(convertResponsesReasoningToClaudeThinking(item, preserveEmptyThinkingBlocks), responseID, blockIndex, hasOrigin)
 
 		case "function_call", "custom_tool_call":
 			// Map to assistant tool_use. Freeform custom input is wrapped in an
@@ -1172,6 +1199,38 @@ func convertResponsesReasoningToClaudeThinking(item ojson.Result, preserveEmptyT
 	_ = thinkingPartDoc.Set("thinking", thinkingText)
 	_ = thinkingPartDoc.Set("signature", signature)
 	return thinkingPartDoc.Bytes()
+}
+
+// parseClaudeReasoningItemID extracts the Claude response ID and content block
+// index from a reasoning item id formatted as rs_<response id>_<block index>
+// by the Claude -> Responses translator. Other ids return ok=false.
+func parseClaudeReasoningItemID(itemID string) (string, int, bool) {
+	rest, ok := strings.CutPrefix(itemID, "rs_")
+	if !ok {
+		return "", -1, false
+	}
+	sep := strings.LastIndexByte(rest, '_')
+	if sep <= 0 {
+		return "", -1, false
+	}
+	responseID := rest[:sep]
+	if strings.TrimSpace(responseID) == "" {
+		return "", -1, false
+	}
+	indexStr := rest[sep+1:]
+	if indexStr == "" {
+		return "", -1, false
+	}
+	for i := 0; i < len(indexStr); i++ {
+		if indexStr[i] < '0' || indexStr[i] > '9' {
+			return "", -1, false
+		}
+	}
+	blockIndex, errAtoi := strconv.Atoi(indexStr)
+	if errAtoi != nil {
+		return "", -1, false
+	}
+	return responseID, blockIndex, true
 }
 
 // responsesRedactedThinkingData reports whether encrypted_content carries an
