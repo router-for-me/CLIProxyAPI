@@ -106,6 +106,7 @@ type instruments struct {
 	fiveHourResets    metric.Float64ObservableGauge
 	fableUsed         metric.Float64ObservableGauge
 	fableResets       metric.Float64ObservableGauge
+	fableBlocked      metric.Float64ObservableGauge
 	tokenExpires      metric.Float64ObservableGauge
 	profileInfo       metric.Int64ObservableGauge
 	quotaBand         metric.Int64ObservableGauge
@@ -221,6 +222,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.fiveHourResets, _ = m.Float64ObservableGauge("claw_master.quota.five_hour.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the five-hour window resets; absent while no window is open"))
 	i.fableUsed, _ = m.Float64ObservableGauge("claw_master.quota.fable.used_fraction", metric.WithDescription("Weekly Fable allowance used, 0 to 1 (on Max and Ultra, Fable may use up to half the weekly limit), from the usage poll and the 7d_oi response headers; 0 once the week has reset"))
 	i.fableResets, _ = m.Float64ObservableGauge("claw_master.quota.fable.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the weekly Fable allowance resets; absent when no reset is known"))
+	i.fableBlocked, _ = m.Float64ObservableGauge("claw_master.quota.fable.rate_limited_for_seconds", metric.WithUnit("s"), metric.WithDescription("How long Anthropic still refuses this subscription Fable (its Fable allowance is used up); 0 when it does not. Other models are unaffected"))
 	i.quotaBand, _ = m.Int64ObservableGauge("claw_master.quota.band", metric.WithDescription("0 ok, 1 reserve (last tenth), 2 exhausted, -1 unknown"))
 	i.tokenExpires, _ = m.Float64ObservableGauge("claw_master.auth.token_expires_in_seconds", metric.WithUnit("s"))
 	i.profileInfo, _ = m.Int64ObservableGauge("claw_master.profile.info", metric.WithDescription("1 per subscription profile, carrying the email of the account it is logged in to: the one metric with an account identifier"))
@@ -233,7 +235,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.heap, _ = m.Int64ObservableGauge("claw_master.process.heap_bytes", metric.WithUnit("By"))
 
 	i.registration, _ = m.RegisterCallback(i.observe,
-		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.quotaBand, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
+		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
 		i.upstreamLimit, i.latencyQuantile, i.uptime, i.goroutines, i.heap)
 	return i
 }
@@ -261,6 +263,8 @@ type profileState struct {
 	FableKnown       bool
 	FableResetsIn    float64
 	FableResetsKnown bool
+	// How long Anthropic still refuses this subscription Fable.
+	FableBlockedSeconds float64
 	// The email of the account the profile is logged in to, from its saved credential; empty when unknown.
 	Email string
 }
@@ -298,6 +302,7 @@ func (i *instruments) observe(_ context.Context, o metric.Observer) error {
 			if p.FiveHourResetsKnown {
 				o.ObserveFloat64(i.fiveHourResets, p.FiveHourResetsIn, attrs)
 			}
+			o.ObserveFloat64(i.fableBlocked, p.FableBlockedSeconds, attrs)
 			if p.FableKnown {
 				o.ObserveFloat64(i.fableUsed, p.FableUsed, attrs)
 			}

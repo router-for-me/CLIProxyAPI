@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 )
 
 // ClaudeFableQuota is a subscription's weekly Fable allowance: on Max and Ultra, Fable may use up to half
@@ -140,4 +142,39 @@ func ParseClaudeFableQuotaHeaders(headers http.Header) (ClaudeFableQuota, bool) 
 		return ClaudeFableQuota{}, false
 	}
 	return ClaudeFableQuota{UsedFraction: min(used, 1), ResetsAt: reset}, true
+}
+
+// isFableModel reports whether a request's model draws on the Fable allowance.
+func isFableModel(model string) bool {
+	return strings.Contains(strings.ToLower(backendBlockedModelKey(model)), "fable")
+}
+
+// backendFableRejection reports Anthropic refusing a Fable request because the subscription's weekly Fable
+// allowance is used up, while its five-hour and weekly windows are not: the subscription still serves every
+// other model. It takes a rejection, not a claim: the 7d_oi window rejected, or the unified status rejected
+// with the claim seven_day_overage_included. The claim alone names the window nearest its limit and comes
+// with other 429s (a per-minute limit) too.
+func backendFableRejection(status int, credentialScope bool, model string, headers http.Header) bool {
+	if status != http.StatusTooManyRequests || credentialScope || !isFableModel(model) || len(headers) == 0 {
+		return false
+	}
+	claim := strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim")))
+	window := strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-7d_oi-Status")))
+	unified := strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Status")))
+	if window != "rejected" && (claim != "seven_day_overage_included" || unified != "rejected") {
+		return false
+	}
+	return !helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers)
+}
+
+// fableRejectionUntil is when a Fable rejection ends: the 7d_oi reset Anthropic sent, else the Fable reset
+// the selector already knows. With neither, ok is false and the caller backs off instead.
+func fableRejectionUntil(headers http.Header, known time.Time, now time.Time) (until time.Time, ok bool) {
+	if reset, okReset := parseQuotaTime(headers.Get("Anthropic-Ratelimit-Unified-7d_oi-Reset")); okReset && reset.After(now) && reset.Sub(now) <= 8*24*time.Hour {
+		return reset, true
+	}
+	if known.After(now) && known.Sub(now) <= 8*24*time.Hour {
+		return known, true
+	}
+	return time.Time{}, false
 }

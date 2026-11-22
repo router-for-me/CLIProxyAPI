@@ -48,6 +48,7 @@ type backendRefusalError struct {
 	resetAt time.Time // quota: when the earliest subscription resets, for retry-after
 	authID  string    // bound-subscription refusals: which subscription, for the remembered upstream error
 	relayed bool      // Anthropic answered this request with an error, and the session receives that error as sent
+	fable   bool      // quota: the weekly Fable allowance, not the subscription, is used up
 	model   string
 	cause   error
 }
@@ -460,7 +461,9 @@ func writeBackendFailure(ctx context.Context, w http.ResponseWriter, fallbackSta
 	}
 	var refusal *backendRefusalError
 	if err := backendRefusalErrorFrom(ctx); errors.As(err, &refusal) && refusal != nil {
-		if refusal.kind == backendRefusalQuota {
+		if refusal.kind == backendRefusalQuota && refusal.fable {
+			writeBackendFableQuotaHeaders(w.Header(), refusal.resetAt)
+		} else if refusal.kind == backendRefusalQuota {
 			writeBackendQuotaHeaders(w.Header(), refusal.resetAt)
 		}
 		w.Header().Set("Claw-Master-Reason", refusal.reason)
@@ -501,6 +504,26 @@ func writeBackendQuotaHeaders(dst http.Header, resetAt time.Time) {
 	if wait := time.Until(resetAt); wait > 0 {
 		dst.Set("Retry-After", strconv.FormatInt(int64(wait/time.Second)+1, 10))
 	}
+}
+
+// writeBackendFableQuotaHeaders: the headers of Anthropic's refusal of a Fable request at a used-up Fable
+// allowance (claim seven_day_overage_included, the 7d_oi window rejected, the 5-hour and weekly windows
+// allowed), so Claude Code says the Fable limit is reached and offers another model. Retrying the same
+// model does not help before the reset, so the client is told not to.
+func writeBackendFableQuotaHeaders(dst http.Header, resetAt time.Time) {
+	dst.Set("X-Should-Retry", "false")
+	dst.Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+	dst.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+	dst.Set("Anthropic-Ratelimit-Unified-7d-Status", "allowed")
+	dst.Set("Anthropic-Ratelimit-Unified-7d_oi-Status", "rejected")
+	dst.Set("Anthropic-Ratelimit-Unified-7d_oi-Utilization", "1.0")
+	dst.Set("Anthropic-Ratelimit-Unified-Representative-Claim", "seven_day_overage_included")
+	if resetAt.IsZero() {
+		return
+	}
+	epoch := strconv.FormatInt(resetAt.Unix(), 10)
+	dst.Set("Anthropic-Ratelimit-Unified-Reset", epoch)
+	dst.Set("Anthropic-Ratelimit-Unified-7d_oi-Reset", epoch)
 }
 
 // writeBackendCancelled answers a request whose context was cancelled (the core reports 499).

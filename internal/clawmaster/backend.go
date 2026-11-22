@@ -686,9 +686,10 @@ type backendWeeklyQuota struct {
 }
 
 type backendSeriesCandidate struct {
-	auth  *coreauth.Auth
-	quota backendWeeklyQuota
-	order int
+	auth      *coreauth.Auth
+	quota     backendWeeklyQuota
+	order     int
+	fableBand int // for a Fable request, backendSeriesSelector.fableBandRankLocked
 }
 
 // backendSeriesSelector picks the subscription for a request. The usage poll (and the weekly
@@ -711,8 +712,14 @@ type backendSeriesSelector struct {
 	fiveHour map[string]ClaudeFiveHourQuota
 	// fable is each account's weekly Fable allowance (backend_quota_fable.go), from the usage poll and the
 	// 7d_oi response headers; fableRevision orders a poll against headers that arrived while it was in flight.
-	fable             map[string]ClaudeFableQuota
-	fableRevision     map[string]uint64
+	fable         map[string]ClaudeFableQuota
+	fableRevision map[string]uint64
+	// fableBlockedUntil: Anthropic refused a Fable request because the subscription's Fable allowance is
+	// used up (a 429 on the 7d_oi window alone). Until then Fable requests go elsewhere; others are unaffected.
+	fableBlockedUntil map[string]time.Time
+	fableBackoffLevel map[string]int       // refusals in a row with no reset known, for the backoff
+	fableHoldGuessed  map[string]bool      // the hold is a backoff, not a reset: a reset learned later ends it sooner
+	fableHoldFloor    map[string]time.Time // the last reset Anthropic gave for a refusal: no hold ends before it
 	quotaBackoffLevel map[string]int
 	sessions          *coreauth.SessionCache
 	routes            *backendSessionStore
@@ -768,6 +775,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 	}
 	s.initializeLocked()
 	availabilityModel := backendAvailabilityModel(model, opts)
+	fable := isFableModel(availabilityModel) || isFableModel(model)
 	// An unavailable subscription may be skipped before a portable request is sent.
 	// Preserve an error from an actual non-quota attempt instead of replaying it
 	// on another account, where a server-side tool could run a second time.
@@ -818,6 +826,9 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 				// Return clean work to subscriptions as soon as capacity resets.
 				// Opaque API continuations still take the ordinary bound path below.
 				selected := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, "")
+				if selected == nil && fable {
+					return nil, s.noSubscriptionRefusalLocked(ctx, "", availabilityModel)
+				}
 				if selected == nil {
 					return nil, s.quotaRefusalLocked("subscription capacity is unavailable; no quota handoff to the API-key backup is permitted")
 				}
@@ -839,6 +850,11 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 					if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil {
 						return s.bindSessionLocked(ctx, sessionID, next)
 					}
+					// A portable conversation is not stuck on its subscription: say what the pool has.
+					var held *backendRefusalError
+					if errors.As(err, &held) && held.fable {
+						return nil, s.noSubscriptionRefusalLocked(ctx, "", availabilityModel)
+					}
 				}
 				if err != nil && backendGenericRefusal(err) {
 					explained := s.boundUnavailableErrorLocked(ctx, boundID, availabilityModel).(*backendRefusalError)
@@ -855,7 +871,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 			if next := s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, boundID); next != nil {
 				return s.bindSessionLocked(ctx, sessionID, next)
 			}
-			if s.quotaBlockedLocked(boundID) {
+			if s.quotaBlockedLocked(boundID) || fable && s.fableBlockedLocked(boundID) {
 				return nil, s.noSubscriptionRefusalLocked(ctx, boundID, availabilityModel)
 			}
 			return nil, s.boundUnavailableErrorLocked(ctx, boundID, availabilityModel)
@@ -869,7 +885,7 @@ func (s *backendSeriesSelector) pick(ctx context.Context, provider, model string
 	if switchable {
 		selected = s.preferredUsableAuthLocked(ctx, availabilityModel, opts, auths, "")
 	} else {
-		selected = s.preferredAuthLocked(auths, "")
+		selected = s.preferredAuthLocked(auths, "", fable)
 	}
 	if selected == nil {
 		return nil, s.noSubscriptionRefusalLocked(ctx, "", availabilityModel)
@@ -974,7 +990,18 @@ func (s *backendSeriesSelector) subscriptionsExhaustedLocked() bool {
 // back. Or the first candidate is held back by this request (an attempt that already failed, which the
 // session receives as Anthropic sent it) or by a cooldown: said as that, never as "exhausted".
 func (s *backendSeriesSelector) noSubscriptionRefusalLocked(ctx context.Context, excludedAuthID, model string) error {
-	ranked := s.rankedCandidatesLocked(nil, excludedAuthID, false)
+	fable := isFableModel(model)
+	ranked := s.rankedCandidatesLocked(nil, excludedAuthID, false, fable)
+	if len(ranked) == 0 && fable && s.allFableBlockedLocked() {
+		return s.fableRefusalLocked()
+	}
+	if len(ranked) == 0 && fable {
+		// Some held back from Fable, the rest rate limited: an ordinary refusal, retried when the first can
+		// take Fable again, whichever hold that is.
+		refusal := s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429) or out of their Fable allowance; no fallback is configured").(*backendRefusalError)
+		refusal.resetAt = s.fableAvailableAtLocked()
+		return refusal
+	}
 	if len(ranked) == 0 {
 		return s.quotaRefusalLocked("ordered inference subscriptions are all rate limited by Anthropic (HTTP 429); no fallback is configured")
 	}
@@ -1041,6 +1068,10 @@ func (s *backendSeriesSelector) pickAuthLocked(ctx context.Context, model string
 	if auth != nil && auth.ID != s.backupAuthID && s.quotaBlockedLocked(auth.ID) {
 		return nil, s.blockedRefusalLocked(auth.ID)
 	}
+	// A used-up Fable allowance holds a subscription back from Fable requests only.
+	if auth != nil && auth.ID != s.backupAuthID && (isFableModel(model) || isFableModel(backendAvailabilityModel(model, opts))) && s.fableBlockedLocked(auth.ID) {
+		return nil, s.fableBlockedRefusalLocked(auth.ID)
+	}
 	return (&coreauth.FillFirstSelector{}).Pick(ctx, s.provider, backendAvailabilityModel(model, opts), opts, []*coreauth.Auth{auth})
 }
 
@@ -1057,7 +1088,7 @@ func backendSeriesAuthByID(auths []*coreauth.Auth, provider, authID string) *cor
 // request. The paid backup is never in the subscription ranking.
 func (s *backendSeriesSelector) preferredUsableAuthLocked(ctx context.Context, model string, opts coreexecutor.Options, auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
 	available := backendSeriesAvailableAuths(ctx, s.provider, model, opts, auths)
-	return s.preferredAvailableAuthLocked(available, excludedAuthID)
+	return s.preferredAvailableAuthLocked(available, excludedAuthID, isFableModel(model))
 }
 
 func backendSeriesAvailableAuths(ctx context.Context, provider, model string, opts coreexecutor.Options, auths []*coreauth.Auth) []*coreauth.Auth {
@@ -1073,19 +1104,19 @@ func backendSeriesAvailableAuths(ctx context.Context, provider, model string, op
 	return available
 }
 
-func (s *backendSeriesSelector) preferredAuthLocked(auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
+func (s *backendSeriesSelector) preferredAuthLocked(auths []*coreauth.Auth, excludedAuthID string, fable bool) *coreauth.Auth {
 	// Rank against the complete configured series. If the quota-preferred account
 	// is absent from auths because of a request/model/auth failure, return nil
 	// instead of rotating subscriptions for a non-weekly-quota condition.
-	return s.preferredAuthWithAvailabilityLocked(auths, excludedAuthID, false)
+	return s.preferredAuthWithAvailabilityLocked(auths, excludedAuthID, false, fable)
 }
 
-func (s *backendSeriesSelector) preferredAvailableAuthLocked(auths []*coreauth.Auth, excludedAuthID string) *coreauth.Auth {
-	return s.preferredAuthWithAvailabilityLocked(auths, excludedAuthID, true)
+func (s *backendSeriesSelector) preferredAvailableAuthLocked(auths []*coreauth.Auth, excludedAuthID string, fable bool) *coreauth.Auth {
+	return s.preferredAuthWithAvailabilityLocked(auths, excludedAuthID, true, fable)
 }
 
-func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly bool) *coreauth.Auth {
-	ranked := s.rankedCandidatesLocked(auths, excludedAuthID, availableOnly)
+func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly, fable bool) *coreauth.Auth {
+	ranked := s.rankedCandidatesLocked(auths, excludedAuthID, availableOnly, fable)
 	if len(ranked) == 0 {
 		return nil
 	}
@@ -1095,20 +1126,34 @@ func (s *backendSeriesSelector) preferredAuthWithAvailabilityLocked(auths []*cor
 // rankedCandidatesLocked is every configured subscription that Anthropic has not rejected (no real 429
 // in force), best first. The poll orders them and excludes none: ok band, then unknown, then reserve,
 // then what the poll calls exhausted; within a band, the earliest weekly reset first, then the
-// configured order.
-func (s *backendSeriesSelector) rankedCandidatesLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly bool) []backendSeriesCandidate {
+// configured order. For a Fable request, a subscription Anthropic refused Fable is left out too, and the
+// Fable allowance ranks alongside the week: the worse of the two bands first, then the Fable band.
+func (s *backendSeriesSelector) rankedCandidatesLocked(auths []*coreauth.Auth, excludedAuthID string, availableOnly, fable bool) []backendSeriesCandidate {
 	ranked := make([]backendSeriesCandidate, 0, len(s.authIDs))
 	for order, authID := range s.authIDs {
-		if authID == excludedAuthID || s.quotaBlockedLocked(authID) {
+		if authID == excludedAuthID || s.quotaBlockedLocked(authID) || fable && s.fableBlockedLocked(authID) {
 			continue
 		}
 		if availableOnly && backendSeriesAuthByID(auths, s.provider, authID) == nil {
 			continue
 		}
-		ranked = append(ranked, backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order})
+		candidate := backendSeriesCandidate{auth: &coreauth.Auth{ID: authID, Provider: s.provider}, quota: s.currentQuotaLocked(authID), order: order}
+		if fable {
+			candidate.fableBand = s.fableBandRankLocked(authID)
+		}
+		ranked = append(ranked, candidate)
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
-		if bi, bj := backendQuotaBandRank(ranked[i].quota), backendQuotaBandRank(ranked[j].quota); bi != bj {
+		bi, bj := backendQuotaBandRank(ranked[i].quota), backendQuotaBandRank(ranked[j].quota)
+		if fable {
+			if wi, wj := max(bi, ranked[i].fableBand), max(bj, ranked[j].fableBand); wi != wj {
+				return wi < wj
+			}
+			if ranked[i].fableBand != ranked[j].fableBand {
+				return ranked[i].fableBand < ranked[j].fableBand
+			}
+		}
+		if bi != bj {
 			return bi < bj
 		}
 		return backendQuotaBefore(ranked[i], ranked[j])
@@ -1307,7 +1352,14 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 		// 401, which the shared executor refreshes itself). Every other failure is this request's,
 		// relayed to the session exactly as Anthropic sent it, for the client to retry or not.
 		backendScopeFailureToRequest(&result)
-		recordBackendAttempt(ctx, result)
+		// A used-up Fable allowance refuses Fable on this subscription only, before anything ran: like a
+		// quota 429, the request may go to another subscription, so it is not this request's failure.
+		headers := internallogging.GetResponseHeaders(ctx)
+		fableRefused := !result.Success && result.Error != nil &&
+			backendFableRejection(result.Error.HTTPStatus, result.CredentialScope, result.Model, headers)
+		if !fableRefused {
+			recordBackendAttempt(ctx, result)
+		}
 		if result.Success {
 			commitBackendRouteAttempt(ctx, result.AuthID)
 		} else {
@@ -1318,13 +1370,17 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 		// cursor after the active credential has already become unavailable.
 		if selector != nil {
 			if !result.SkipQuotaObservation {
-				headers := internallogging.GetResponseHeaders(ctx)
 				if quota, ok := parseBackendWeeklyQuotaHeaders(headers); ok {
 					selector.observeQuota(result.AuthID, quota)
 				}
 				if fable, ok := ParseClaudeFableQuotaHeaders(headers); ok {
 					selector.observeFableHeaders(result.AuthID, fable)
 				}
+			}
+			if fableRefused {
+				selector.observeFableRejection(result.AuthID, headers)
+			} else if result.Success && !result.SkipQuotaObservation && isFableModel(result.Model) {
+				selector.noteFableServed(result.AuthID)
 			}
 			selector.OnResult(result)
 		}

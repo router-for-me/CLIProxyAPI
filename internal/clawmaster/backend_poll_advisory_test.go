@@ -233,7 +233,7 @@ func TestThePollOrdersCandidatesWithoutExcludingAny(t *testing.T) {
 	selector.observeQuota("rejected", backendWeeklyQuota{known: true, used: 0, resetsAt: reset})
 	rejectByAnthropic(selector, "rejected", time.Hour)
 	selector.mu.Lock()
-	ranked := selector.rankedCandidatesLocked(nil, "", false)
+	ranked := selector.rankedCandidatesLocked(nil, "", false, false)
 	selector.mu.Unlock()
 	got := make([]string, 0, len(ranked))
 	for _, c := range ranked {
