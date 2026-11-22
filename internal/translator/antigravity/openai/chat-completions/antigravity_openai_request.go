@@ -176,13 +176,13 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						case "image_url":
 							// Only a base64 data URL can be inlined; a remote URL has no equivalent here.
 							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String()); ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							} else {
 								drops.Drop("image_url")
 							}
 						case "video_url":
 							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("video_url.url").String()); ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							} else {
 								drops.Drop("video_url")
 							}
@@ -190,7 +190,7 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							filename := item.Get("file.filename").String()
 							fileData := item.Get("file.file_data").String()
 							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							} else {
 								log.Warn("Invalid file data or unknown file name extension in user message, skip")
 								drops.Drop("file")
@@ -199,7 +199,7 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							audioData := item.Get("input_audio.data").String()
 							if audioData != "" {
 								mimeType := antigravityOpenAIAudioMIMEType(item.Get("input_audio.format").String())
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, audioData, true))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, audioData))
 							} else {
 								drops.Drop("input_audio")
 							}
@@ -233,7 +233,7 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							if len(imageURL) > 5 {
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
+									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:])
 									partItems = append(partItems, part)
 								}
 							}
@@ -445,13 +445,7 @@ func antigravityOpenAITextPart(text string) []byte {
 	return part
 }
 
-func antigravityOpenAIInlineDataPart(mimeType, data string, snakeCase bool) []byte {
-	if snakeCase {
-		partDoc := ojson.NewDoc([]byte(`{"inlineData":{"mime_type":"","data":""}}`))
-		_ = partDoc.Set("inlineData.mime_type", mimeType)
-		_ = partDoc.Set("inlineData.data", data)
-		return partDoc.Bytes()
-	}
+func antigravityOpenAIInlineDataPart(mimeType, data string) []byte {
 	partDoc := ojson.NewDoc([]byte(`{"inlineData":{"mimeType":"","data":""}}`))
 	_ = partDoc.Set("inlineData.mimeType", mimeType)
 	_ = partDoc.Set("inlineData.data", data)
