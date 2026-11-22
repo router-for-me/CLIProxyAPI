@@ -23,6 +23,7 @@ type backendAttempt struct {
 	refusalGeneric   bool                      // the refusal is a bare core error; a specific one replaces it
 	upstream         *backendUpstreamError     // the latest upstream error response of this request, exactly
 	notFoundRetried  bool                      // the one same-subscription retry of a 404 with no Anthropic error was spent
+	movedPastFable   bool                      // a subscription refused Fable and the request went on to another
 	route            *backendRouteAttempt
 	pickedAt         time.Time // when an account was chosen: claw-master's own time ends here
 	count            bool
@@ -235,6 +236,25 @@ func noteBackendRefusal(ctx context.Context, err error) {
 		state.refusal, state.refusalGeneric = err, false
 	}
 	state.mu.Unlock()
+}
+
+// noteBackendMovedPastFable: a subscription refused this request Fable and the request went on.
+func noteBackendMovedPastFable(ctx context.Context) {
+	if state := backendRequestAttempt(ctx); state != nil {
+		state.mu.Lock()
+		state.movedPastFable = true
+		state.mu.Unlock()
+	}
+}
+
+func backendMovedPastFable(ctx context.Context) bool {
+	state := backendRequestAttempt(ctx)
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.movedPastFable
 }
 
 func backendRefusalErrorFrom(ctx context.Context) error {

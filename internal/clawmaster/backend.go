@@ -1357,7 +1357,13 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 		headers := internallogging.GetResponseHeaders(ctx)
 		fableRefused := !result.Success && result.Error != nil &&
 			backendFableRejection(result.Error.HTTPStatus, result.CredentialScope, result.Model, headers)
-		if !fableRefused {
+		if fableRefused {
+			// The selector holds the subscription back from Fable (observeFableRejection) until the reset or
+			// its backoff ends, and shortens that when a reset is learned: the core keeps no model cooldown of
+			// its own beside it, which nothing would shorten.
+			result.Error.Code = coreauth.ErrorCodeRequestScoped
+			noteBackendMovedPastFable(ctx)
+		} else {
 			recordBackendAttempt(ctx, result)
 		}
 		if result.Success {
@@ -2112,6 +2118,9 @@ func streamBackendProtocolResponse(ctx context.Context, w http.ResponseWriter, f
 }
 
 func writeBackendUpstreamError(ctx context.Context, w http.ResponseWriter, errMsg *interfaces.ErrorMessage) {
+	if writeBackendSupersededFable(ctx, w, errMsg) {
+		return
+	}
 	if status, headers, body, ok := backendDirectErrorResponse(errMsg); ok {
 		writeBackendProtocolHeaders(w.Header(), headers)
 		w.WriteHeader(status)
@@ -2135,6 +2144,9 @@ func writeBackendUpstreamError(ctx context.Context, w http.ResponseWriter, errMs
 }
 
 func writeBackendNativeUpstreamError(ctx context.Context, w http.ResponseWriter, errMsg *interfaces.ErrorMessage) {
+	if writeBackendSupersededFable(ctx, w, errMsg) {
+		return
+	}
 	if status, headers, body, ok := backendDirectErrorResponse(errMsg); ok {
 		writeBackendNativeHeaders(w.Header(), headers)
 		w.WriteHeader(status)

@@ -18,6 +18,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 	"github.com/klauspost/compress/zstd"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -461,13 +462,7 @@ func writeBackendFailure(ctx context.Context, w http.ResponseWriter, fallbackSta
 	}
 	var refusal *backendRefusalError
 	if err := backendRefusalErrorFrom(ctx); errors.As(err, &refusal) && refusal != nil {
-		if refusal.kind == backendRefusalQuota && refusal.fable {
-			writeBackendFableQuotaHeaders(w.Header(), refusal.resetAt)
-		} else if refusal.kind == backendRefusalQuota {
-			writeBackendQuotaHeaders(w.Header(), refusal.resetAt)
-		}
-		w.Header().Set("Claw-Master-Reason", refusal.reason)
-		backendAnthropicError(w, refusal.kind.status(), refusal.kind.errorType(), backendRefusalMessage(refusal))
+		writeBackendRefusal(w, refusal)
 		return
 	}
 	if reason := backendRefusal(ctx); reason != "" {
@@ -475,6 +470,41 @@ func writeBackendFailure(ctx context.Context, w http.ResponseWriter, fallbackSta
 		return
 	}
 	backendAnthropicError(w, fallbackStatus, "api_error", "Configured inference failed; no fallback to the native master was attempted")
+}
+
+func writeBackendRefusal(w http.ResponseWriter, refusal *backendRefusalError) {
+	if refusal.kind == backendRefusalQuota && refusal.fable {
+		writeBackendFableQuotaHeaders(w.Header(), refusal.resetAt)
+	} else if refusal.kind == backendRefusalQuota {
+		writeBackendQuotaHeaders(w.Header(), refusal.resetAt)
+	}
+	w.Header().Set("Claw-Master-Reason", refusal.reason)
+	backendAnthropicError(w, refusal.kind.status(), refusal.kind.errorType(), backendRefusalMessage(refusal))
+}
+
+// writeBackendSupersededFable: a subscription refused this request Fable, the request went on, and the pool
+// then refused it for quota (the rest rate limited, or out of Fable too). The pool's refusal says when the
+// first subscription can take Fable again, and whether the client should retry; the first subscription's
+// own Fable 429, which the core hands back as its last error, says neither. It reports whether it wrote.
+func writeBackendSupersededFable(ctx context.Context, w http.ResponseWriter, errMsg *interfaces.ErrorMessage) bool {
+	if !backendMovedPastFable(ctx) {
+		return false
+	}
+	var refusal *backendRefusalError
+	if err := backendRefusalErrorFrom(ctx); !errors.As(err, &refusal) || refusal == nil || refusal.kind != backendRefusalQuota {
+		return false
+	}
+	status, upstream, _, direct := backendDirectErrorResponse(errMsg)
+	if !direct {
+		if remembered := backendUpstreamErrorFrom(ctx); remembered != nil {
+			status, upstream = remembered.status, remembered.headers
+		}
+	}
+	if status != http.StatusTooManyRequests || !fableRejectionHeaders(upstream) {
+		return false
+	}
+	writeBackendRefusal(w, refusal)
+	return true
 }
 
 // backendRefusalMessage: a quota refusal carries Anthropic's own rate-limit text, so the client

@@ -155,7 +155,16 @@ func isFableModel(model string) bool {
 // with the claim seven_day_overage_included. The claim alone names the window nearest its limit and comes
 // with other 429s (a per-minute limit) too.
 func backendFableRejection(status int, credentialScope bool, model string, headers http.Header) bool {
-	if status != http.StatusTooManyRequests || credentialScope || !isFableModel(model) || len(headers) == 0 {
+	if status != http.StatusTooManyRequests || credentialScope || !isFableModel(model) {
+		return false
+	}
+	return fableRejectionHeaders(headers)
+}
+
+// fableRejectionHeaders reports headers of Anthropic's refusal at a used-up Fable allowance (see
+// backendFableRejection), whatever the request's model.
+func fableRejectionHeaders(headers http.Header) bool {
+	if len(headers) == 0 {
 		return false
 	}
 	claim := strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-Representative-Claim")))
