@@ -126,15 +126,39 @@ type responsesWebsocketWriter struct {
 	conn    *websocket.Conn
 	writeMu sync.Mutex
 	closing atomic.Bool
+	// closeMu is held by whichever close wins `closing` until the socket is closed, so a later
+	// close (the session's own teardown) never closes the socket under a terminal frame.
+	closeMu sync.Mutex
 }
+
+const (
+	// A terminal close waits this long for a write in flight to finish, so its frame is not
+	// dropped behind a writer that is only finishing. A writer still blocked after it is cut off.
+	responsesWebsocketCloseLockWait = 250 * time.Millisecond
+	// The terminal frame's own write gives up after this, so a client that stopped reading
+	// cannot hold the session open.
+	responsesWebsocketCloseWriteTimeout = time.Second
+)
 
 func newResponsesWebsocketWriter(conn *websocket.Conn) *responsesWebsocketWriter {
 	return &responsesWebsocketWriter{conn: conn}
 }
 
-// closeForUpstreamError sends a best-effort close frame without waiting behind
-// an active downstream writer. If a data or Ping write already owns writeMu,
-// the connection is closed immediately so the blocked writer and session can exit.
+// lockForClose takes writeMu for a terminal close within responsesWebsocketCloseLockWait.
+func (w *responsesWebsocketWriter) lockForClose() bool {
+	deadline := time.Now().Add(responsesWebsocketCloseLockWait)
+	for !w.writeMu.TryLock() {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// closeForUpstreamError sends a best-effort close frame without waiting long behind
+// an active downstream writer. If a data or Ping write still owns writeMu after
+// responsesWebsocketCloseLockWait, the connection is closed so the blocked writer and session can exit.
 func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
@@ -143,15 +167,17 @@ func (w *responsesWebsocketWriter) closeForUpstreamError(err error) (bool, error
 	if !matched {
 		return false, nil
 	}
+	w.closeMu.Lock()
+	defer w.closeMu.Unlock()
 	if !w.closing.CompareAndSwap(false, true) {
 		return true, nil
 	}
-	if !w.writeMu.TryLock() {
+	if !w.lockForClose() {
 		return true, w.conn.Close()
 	}
 	defer w.writeMu.Unlock()
 
-	errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, time.Time{})
+	errWrite := w.conn.WriteControl(websocket.CloseMessage, payload, time.Now().Add(responsesWebsocketCloseWriteTimeout))
 	errClose := w.conn.Close()
 	if errWrite != nil {
 		return true, errWrite
@@ -163,6 +189,8 @@ func (w *responsesWebsocketWriter) closeWithoutError() (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
 	}
+	w.closeMu.Lock()
+	defer w.closeMu.Unlock()
 	if !w.closing.CompareAndSwap(false, true) {
 		return false, nil
 	}
@@ -279,14 +307,17 @@ func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error
 	if w == nil || w.conn == nil {
 		return false, nil
 	}
+	w.closeMu.Lock()
+	defer w.closeMu.Unlock()
 	if !w.closing.CompareAndSwap(false, true) {
 		return false, nil
 	}
-	if !w.writeMu.TryLock() {
+	if !w.lockForClose() {
 		return false, w.conn.Close()
 	}
 	defer w.writeMu.Unlock()
 
+	_ = w.conn.SetWriteDeadline(time.Now().Add(responsesWebsocketCloseWriteTimeout))
 	errWrite := w.conn.WriteMessage(websocket.TextMessage, payload)
 	errClose := w.conn.Close()
 	if errWrite != nil {
