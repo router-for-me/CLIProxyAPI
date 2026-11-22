@@ -122,12 +122,7 @@ func antigravityRequestIsSymmetricForReasoningReplay(opts cliproxyexecutor.Optio
 func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromPayload(payload)
 	if sessionID == "" {
-		if stable := strings.TrimSpace(generateStableSessionID(payload)); stable != "" {
-			sessionID = strings.TrimPrefix(stable, "-")
-			if sessionID == "" {
-				sessionID = stable
-			}
-		}
+		sessionID = strings.TrimSpace(generateStableSessionID(payload))
 	}
 	if sessionID == "" {
 		return antigravityReasoningReplayScope{}
@@ -141,12 +136,7 @@ func antigravityReasoningReplayScopeFromPayload(modelName string, payload []byte
 func antigravityReasoningReplayScopeFromDoc(modelName string, doc *ojson.Doc) antigravityReasoningReplayScope {
 	sessionID := antigravityReplaySessionIDFromDoc(doc)
 	if sessionID == "" {
-		if stable := strings.TrimSpace(generateStableSessionIDDoc(doc)); stable != "" {
-			sessionID = strings.TrimPrefix(stable, "-")
-			if sessionID == "" {
-				sessionID = stable
-			}
-		}
+		sessionID = strings.TrimSpace(generateStableSessionIDDoc(doc))
 	}
 	if sessionID == "" {
 		return antigravityReasoningReplayScope{}

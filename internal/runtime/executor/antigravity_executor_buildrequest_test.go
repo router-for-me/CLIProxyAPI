@@ -3,8 +3,10 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -12,8 +14,8 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
-	"github.com/MoeForge/moego/regexp"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
@@ -740,10 +742,18 @@ func assertSchemaSanitizedAndPropertyPreserved(t *testing.T, params map[string]a
 	}
 }
 
+func assertSignedInt64RequestSessionID(t *testing.T, sessionID string) int64 {
+	t.Helper()
+	parsed, errParse := strconv.ParseInt(sessionID, 10, 64)
+	if errParse != nil || strconv.FormatInt(parsed, 10) != sessionID {
+		t.Fatalf("request.sessionId = %q, want canonical signed int64 decimal (err=%v)", sessionID, errParse)
+	}
+	return parsed
+}
+
 func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T) {
 	t.Parallel()
 
-	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
 	executor := NewAntigravityExecutor(&config.Config{})
 
 	captureSessionID := func(t *testing.T, authID, kind, model, userText string, metadata map[string]any) string {
@@ -790,9 +800,7 @@ func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T
 			t.Fatalf("expected upstream request body to be captured for auth=%s kind=%s model=%s", authID, kind, model)
 		}
 		sessionID := ojson.GetBytes(capturedBody, "request.sessionId").String()
-		if !negativeDecimal.MatchString(sessionID) {
-			t.Fatalf("request.sessionId = %q, want negative int63 decimal", sessionID)
-		}
+		assertSignedInt64RequestSessionID(t, sessionID)
 		return sessionID
 	}
 
@@ -849,7 +857,6 @@ func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T
 func TestAntigravityExecutorIncomingSessionIDScopedPerCredentialAndSubagent(t *testing.T) {
 	t.Parallel()
 
-	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
 	executor := NewAntigravityExecutor(&config.Config{})
 
 	captureSessionID := func(t *testing.T, authID, kind, model string, sourceFormat sdktranslator.Format, payload []byte, enrich bool, metadata map[string]any) string {
@@ -899,9 +906,7 @@ func TestAntigravityExecutorIncomingSessionIDScopedPerCredentialAndSubagent(t *t
 			t.Fatalf("expected upstream request body to be captured for auth=%s kind=%s model=%s", authID, kind, model)
 		}
 		sessionID := ojson.GetBytes(capturedBody, "request.sessionId").String()
-		if !negativeDecimal.MatchString(sessionID) {
-			t.Fatalf("request.sessionId = %q, want negative int63 decimal", sessionID)
-		}
+		assertSignedInt64RequestSessionID(t, sessionID)
 		return sessionID
 	}
 
@@ -1796,5 +1801,66 @@ func TestAntigravityRequests_StripUserProjectHeaderOnCrossOriginRedirect(t *test
 			t.Fatalf("CountTokens() error = %v", errCount)
 		}
 		assertRedirectHops(t, hops)
+	})
+}
+
+func TestAntigravitySessionIDDistributionIncludesPositiveAndNegative(t *testing.T) {
+	t.Parallel()
+
+	t.Run("generateSessionID emits signed int64 values with both signs", func(t *testing.T) {
+		var pos, neg int
+		for i := 0; i < 128; i++ {
+			val := assertSignedInt64RequestSessionID(t, generateSessionID())
+			if val > 0 {
+				pos++
+			} else if val < 0 {
+				neg++
+			}
+		}
+		if pos == 0 || neg == 0 {
+			t.Fatalf("generateSessionID produced skewed signs: pos=%d neg=%d", pos, neg)
+		}
+	})
+
+	t.Run("generateStableSessionIDFromContentsForAuth matches FNV-1a signed int64 with both signs", func(t *testing.T) {
+		var unauthPos, unauthNeg int
+		var authPos, authNeg int
+		for i := 0; i < 64; i++ {
+			unauthPrompt := fmt.Sprintf("conversation-%d: explain topic", i)
+			unauthDoc := ojson.NewDoc([]byte(fmt.Sprintf(`{"request":{"contents":[{"role":"user","parts":[{"text":%q}]}]}}`, unauthPrompt)))
+
+			unauthID := generateStableSessionIDDocForAuth(unauthDoc, "")
+			wantUnauth := helps.HashAntigravitySessionID([]byte(unauthPrompt))
+			if unauthID != wantUnauth {
+				t.Fatalf("unauthenticated stable sessionId = %q, want %q", unauthID, wantUnauth)
+			}
+			unauthVal := assertSignedInt64RequestSessionID(t, unauthID)
+			if unauthVal > 0 {
+				unauthPos++
+			} else if unauthVal < 0 {
+				unauthNeg++
+			}
+
+			// Sequential trailing-digit prompts still avalanche across both signs when auth-scoped.
+			authPrompt := fmt.Sprintf("user prompt %d", i)
+			authDoc := ojson.NewDoc([]byte(fmt.Sprintf(`{"request":{"contents":[{"role":"user","parts":[{"text":%q}]}]}}`, authPrompt)))
+			authID := generateStableSessionIDDocForAuth(authDoc, "auth-a")
+			wantAuth := helps.HashAntigravitySessionID([]byte(authPrompt + "\x00auth-a\x00cli-proxy-api:antigravity:content-session"))
+			if authID != wantAuth {
+				t.Fatalf("auth-scoped stable sessionId = %q, want %q", authID, wantAuth)
+			}
+			authVal := assertSignedInt64RequestSessionID(t, authID)
+			if authVal > 0 {
+				authPos++
+			} else if authVal < 0 {
+				authNeg++
+			}
+		}
+		if unauthPos == 0 || unauthNeg == 0 {
+			t.Fatalf("unauthenticated generateStableSessionIDDocForAuth produced skewed signs: pos=%d neg=%d", unauthPos, unauthNeg)
+		}
+		if authPos == 0 || authNeg == 0 {
+			t.Fatalf("auth-scoped generateStableSessionIDDocForAuth produced skewed signs: pos=%d neg=%d", authPos, authNeg)
+		}
 	})
 }

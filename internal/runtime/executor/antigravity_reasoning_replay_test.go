@@ -1367,8 +1367,28 @@ func TestAntigravityReasoningReplayScopeUsesStableSessionWithoutSessionId(t *tes
 	if !scope.valid() {
 		t.Fatal("scope should be valid from stable session hash")
 	}
-	if !strings.HasPrefix(scope.sessionKey, "session:") {
-		t.Fatalf("sessionKey = %q", scope.sessionKey)
+	wantKey := "session:" + generateStableSessionID(payload)
+	if scope.sessionKey != wantKey {
+		t.Fatalf("sessionKey = %q, want %q", scope.sessionKey, wantKey)
+	}
+	docScope := antigravityReasoningReplayScopeFromDoc("gemini-3-flash-agent", ojson.NewDoc(payload))
+	if docScope.sessionKey != wantKey {
+		t.Fatalf("doc sessionKey = %q, want %q", docScope.sessionKey, wantKey)
+	}
+
+	// Verify negative signed FNV-1a session IDs keep their leading minus sign in replay keys.
+	negPayload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"a"}]}]}}`)
+	negStable := generateStableSessionID(negPayload)
+	if !strings.HasPrefix(negStable, "-") {
+		t.Fatalf("expected negative signed FNV-1a ID for test fixture, got %q", negStable)
+	}
+	negScope := antigravityReasoningReplayScopeFromPayload("gemini-3-flash-agent", negPayload)
+	if negScope.sessionKey != "session:"+negStable {
+		t.Fatalf("negative payload sessionKey = %q, want %q", negScope.sessionKey, "session:"+negStable)
+	}
+	negDocScope := antigravityReasoningReplayScopeFromDoc("gemini-3-flash-agent", ojson.NewDoc(negPayload))
+	if negDocScope.sessionKey != "session:"+negStable {
+		t.Fatalf("negative doc sessionKey = %q, want %q", negDocScope.sessionKey, "session:"+negStable)
 	}
 }
 

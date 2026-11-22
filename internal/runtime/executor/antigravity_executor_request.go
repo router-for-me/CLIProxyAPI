@@ -3,8 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
@@ -860,9 +858,9 @@ func generateImageGenRequestID() string {
 
 func generateSessionID() string {
 	randSourceMutex.Lock()
-	n := randSource.Int63n(9_000_000_000_000_000_000)
+	n := int64(randSource.Uint64())
 	randSourceMutex.Unlock()
-	return "-" + strconv.FormatInt(n, 10)
+	return strconv.FormatInt(n, 10)
 }
 
 func generateStableSessionID(payload []byte) string {
@@ -918,13 +916,13 @@ func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID st
 		}
 		var hashInput []byte
 		if authID != "" {
-			hashInput = []byte("cli-proxy-api:antigravity:content-session\x00" + authID + "\x00" + text)
+			// Place variable text and authID before the fixed domain suffix so trailing-byte
+			// changes avalanche into the sign bit of FNV-1a.
+			hashInput = []byte(text + "\x00" + authID + "\x00cli-proxy-api:antigravity:content-session")
 		} else {
 			hashInput = []byte(text)
 		}
-		hash := sha256.Sum256(hashInput)
-		value := int64(binary.BigEndian.Uint64(hash[:8])) & 0x7FFFFFFFFFFFFFFF
-		stableID = "-" + strconv.FormatInt(value, 10)
+		stableID = helps.HashAntigravitySessionID(hashInput)
 		return false
 	})
 	if stableID != "" {
