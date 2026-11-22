@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1097,6 +1098,240 @@ func TestUpdateAntigravityCreditsBalanceForTask_EmptyAndNonMatchingAvailableCred
 			}
 			if hasCredits {
 				t.Fatal("antigravityAuthHasCreditsRequired() = true, want false")
+			}
+		})
+	}
+}
+
+func TestUpdateAntigravityCreditsBalanceForTask_MissingAndZeroMinimumCreditAmountForUsage(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseBody   string
+		seedDisabled   bool
+		wantAvailable  bool
+		wantStoredBal  bool
+		wantCredit     float64
+		wantMinCredit  float64
+		wantPaidTierID string
+	}{
+		{
+			name:           "omitted minimumCreditAmountForUsage defaults to zero and marks positive balance available",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000"}]}}`,
+			seedDisabled:   true,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "null minimumCreditAmountForUsage defaults to zero",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":null}]}}`,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "empty string minimumCreditAmountForUsage defaults to zero",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":""}]}}`,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "whitespace minimumCreditAmountForUsage defaults to zero",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"   "}]}}`,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "omitted minimumCreditAmountForUsage with zero creditAmount marks unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"0"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  true,
+			wantCredit:     0,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "explicit zero minimumCreditAmountForUsage with zero creditAmount marks unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"0","minimumCreditAmountForUsage":"0"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  true,
+			wantCredit:     0,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "omitted minimumCreditAmountForUsage with negative creditAmount marks unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"-5"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  true,
+			wantCredit:     -5,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "invalid non-empty minimumCreditAmountForUsage skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"not-a-number"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "negative minimumCreditAmountForUsage skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"-10"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "non-finite creditAmount skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"Inf","minimumCreditAmountForUsage":"50"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "non-finite minimumCreditAmountForUsage skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"NaN"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			authID := fmt.Sprintf("auth-issue7798-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			auth := &cliproxyauth.Auth{ID: authID}
+			if tc.seedDisabled {
+				markAntigravityCreditsPermanentlyDisabled(auth)
+			}
+
+			exec := NewAntigravityExecutor(&config.Config{
+				QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+			})
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tc.responseBody)),
+				}, nil
+			}))
+
+			exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+			hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+			if !ok || !hint.Known {
+				t.Fatalf("GetAntigravityCreditsHint() = (%#v, %v), want Known=true", hint, ok)
+			}
+			if hint.Available != tc.wantAvailable {
+				t.Fatalf("hint.Available = %v, want %v", hint.Available, tc.wantAvailable)
+			}
+			if hint.PaidTierID != tc.wantPaidTierID {
+				t.Fatalf("hint.PaidTierID = %q, want %q", hint.PaidTierID, tc.wantPaidTierID)
+			}
+			if hint.UpdatedAt.IsZero() {
+				t.Fatal("hint.UpdatedAt is zero, want non-zero timestamp")
+			}
+			if tc.wantStoredBal {
+				if hint.CreditAmount != tc.wantCredit || hint.MinCreditAmount != tc.wantMinCredit {
+					t.Fatalf("hint amounts = (%v, %v), want (%v, %v)", hint.CreditAmount, hint.MinCreditAmount, tc.wantCredit, tc.wantMinCredit)
+				}
+				rawBal, foundBal := antigravityCreditsBalanceByAuth.Load(auth.ID)
+				if !foundBal {
+					t.Fatal("antigravityCreditsBalanceByAuth missing stored balance, want present")
+				}
+				bal, validBal := rawBal.(antigravityCreditsBalance)
+				if !validBal || !bal.Known || bal.CreditAmount != tc.wantCredit || bal.MinCreditAmount != tc.wantMinCredit {
+					t.Fatalf("stored balance = %#v, want Known=true CreditAmount=%v MinCreditAmount=%v", bal, tc.wantCredit, tc.wantMinCredit)
+				}
+			} else if _, foundBal := antigravityCreditsBalanceByAuth.Load(auth.ID); foundBal {
+				t.Fatal("antigravityCreditsBalanceByAuth stored balance for skipped entry, want absent")
+			}
+			if tc.seedDisabled && tc.wantAvailable {
+				if _, stillDisabled := antigravityCreditsFailureByAuth.Load(auth.ID); stillDisabled {
+					t.Fatal("antigravityCreditsFailureByAuth still present after positive balance recovery, want cleared")
+				}
+			}
+
+			hasCredits, errCredits := antigravityAuthHasCreditsRequired(ctx, auth)
+			if errCredits != nil {
+				t.Fatalf("antigravityAuthHasCreditsRequired() error = %v", errCredits)
+			}
+			if hasCredits != tc.wantAvailable {
+				t.Fatalf("antigravityAuthHasCreditsRequired() = %v, want %v", hasCredits, tc.wantAvailable)
+			}
+		})
+	}
+}
+
+func TestAntigravityAuthHasCredits_ZeroAndNonFiniteBalances(t *testing.T) {
+	tests := []struct {
+		name string
+		bal  antigravityCreditsBalance
+		want bool
+	}{
+		{
+			name: "positive balance with zero minimum is available",
+			bal:  antigravityCreditsBalance{CreditAmount: 1000, MinCreditAmount: 0, Known: true},
+			want: true,
+		},
+		{
+			name: "zero balance with zero minimum is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: 0, MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+		{
+			name: "negative balance with zero minimum is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: -5, MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+		{
+			name: "positive balance with negative minimum is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: 100, MinCreditAmount: -1, Known: true},
+			want: false,
+		},
+		{
+			name: "infinite credit amount is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: math.Inf(1), MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+		{
+			name: "NaN credit amount is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: math.NaN(), MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			authID := fmt.Sprintf("auth-issue7798-bal-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			antigravityCreditsBalanceByAuth.Store(authID, tc.bal)
+			if got := antigravityAuthHasCredits(&cliproxyauth.Auth{ID: authID}); got != tc.want {
+				t.Fatalf("antigravityAuthHasCredits() = %v, want %v", got, tc.want)
 			}
 		})
 	}

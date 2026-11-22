@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -157,11 +158,18 @@ func antigravityAuthHasCreditsRequired(ctx context.Context, auth *cliproxyauth.A
 	return antigravityCreditsBalanceAvailable(authID, bal), nil
 }
 
+func antigravityCreditsAmountsAvailable(creditAmount, minAmount float64) bool {
+	if math.IsNaN(creditAmount) || math.IsInf(creditAmount, 0) || math.IsNaN(minAmount) || math.IsInf(minAmount, 0) || minAmount < 0 {
+		return false
+	}
+	return creditAmount > 0 && creditAmount >= minAmount
+}
+
 func antigravityCreditsBalanceAvailable(authID string, bal antigravityCreditsBalance) bool {
 	if !bal.Known {
 		return false
 	}
-	available := bal.CreditAmount >= bal.MinCreditAmount
+	available := antigravityCreditsAmountsAvailable(bal.CreditAmount, bal.MinCreditAmount)
 	cliproxyauth.SetAntigravityCreditsHint(strings.TrimSpace(authID), cliproxyauth.AntigravityCreditsHint{
 		Known:           true,
 		Available:       available,
@@ -766,12 +774,18 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 				continue
 			}
 			creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
-			if errCA != nil {
+			if errCA != nil || math.IsNaN(creditAmount) || math.IsInf(creditAmount, 0) {
 				continue
 			}
-			minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
-			if errMA != nil {
-				continue
+			minField := credit.Get("minimumCreditAmountForUsage")
+			rawMin := strings.TrimSpace(minField.String())
+			minAmount := 0.0
+			if minField.Type != ojson.Null && rawMin != "" {
+				parsedMin, errMA := strconv.ParseFloat(rawMin, 64)
+				if errMA != nil || math.IsNaN(parsedMin) || math.IsInf(parsedMin, 0) || parsedMin < 0 {
+					continue
+				}
+				minAmount = parsedMin
 			}
 			bal := antigravityCreditsBalance{
 				CreditAmount:    creditAmount,
@@ -781,7 +795,7 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 			}
 			publish(&bal, cliproxyauth.AntigravityCreditsHint{
 				Known:           true,
-				Available:       creditAmount >= minAmount,
+				Available:       antigravityCreditsAmountsAvailable(creditAmount, minAmount),
 				CreditAmount:    creditAmount,
 				MinCreditAmount: minAmount,
 				PaidTierID:      paidTierID,
