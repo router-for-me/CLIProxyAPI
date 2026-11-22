@@ -27,6 +27,19 @@ import (
 
 type antigravity429Category string
 
+type antigravityCreditsCacheScope struct {
+	authID string
+	scope  string
+}
+
+type antigravityCreditsScopeState struct {
+	mu                sync.Mutex
+	registrationEpoch uint64
+	createdAt         time.Time
+	updatedAt         time.Time
+	scope             string
+}
+
 type antigravityCreditsFailureState struct {
 	PermanentlyDisabled      bool
 	ExplicitBalanceExhausted bool
@@ -54,14 +67,16 @@ type antigravity429Decision struct {
 }
 
 var (
-	randSource                        = rand.New(rand.NewSource(time.Now().UnixNano()))
-	randSourceMutex                   sync.Mutex
-	antigravityCreditsFailureByAuth   sync.Map
-	antigravityShortCooldownByAuth    sync.Map
-	antigravityCreditsBalanceByAuth   sync.Map // auth.ID → antigravityCreditsBalance
-	antigravityCreditsHintRefreshByID sync.Map // auth.ID → *antigravityCreditsHintRefreshState
-	antigravityRefreshGroup           singleflight.Group
-	antigravityQuotaExhaustedKeywords = []string{
+	randSource                          = rand.New(rand.NewSource(time.Now().UnixNano()))
+	randSourceMutex                     sync.Mutex
+	antigravityCreditsFailureByAuth     sync.Map
+	antigravityShortCooldownByAuth      sync.Map
+	antigravityCreditsBalanceByAuth     sync.Map // credential-scoped auth key → antigravityCreditsBalance
+	antigravityCreditsCurrentScope      sync.Map
+	antigravityCreditsHintRefreshByID   sync.Map // auth.ID → *antigravityCreditsHintRefreshState
+	antigravityCreditsRefreshRegistries sync.Map // auth.ID → *antigravityCreditsRefreshRegistry
+	antigravityRefreshGroup             singleflight.Group
+	antigravityQuotaExhaustedKeywords   = []string{
 		"quota_exhausted",
 		"quota exhausted",
 	}
@@ -85,9 +100,17 @@ type antigravityCreditsBalance struct {
 	Known           bool
 }
 
+type antigravityCreditsRefreshRegistry struct {
+	mu           sync.Mutex
+	currentEpoch uint64
+}
+
 type antigravityCreditsHintRefreshState struct {
 	mu                sync.Mutex
 	registrationEpoch uint64
+	createdAt         time.Time
+	updatedAt         time.Time
+	scope             string
 	lastAttempt       time.Time
 	task              *antigravityCreditsRefreshTask
 }
@@ -121,7 +144,7 @@ func antigravityAuthHasCreditsRequired(ctx context.Context, auth *cliproxyauth.A
 		return false, nil
 	}
 	authID := strings.TrimSpace(auth.ID)
-	if hint, ok, errHint := cliproxyauth.GetAntigravityCreditsHintRequired(ctx, authID); errHint != nil {
+	if hint, ok, errHint := cliproxyauth.GetAntigravityCreditsHintForAuthRequired(ctx, auth); errHint != nil {
 		return false, errHint
 	} else if ok && hint.Known {
 		return hint.Available, nil
@@ -132,7 +155,7 @@ func antigravityAuthHasCreditsRequired(ctx context.Context, auth *cliproxyauth.A
 		if errClient != nil {
 			return false, errClient
 		}
-		raw, found, errBalance := client.KVGet(ctx, antigravityCreditsBalanceKey(authID))
+		raw, found, errBalance := client.KVGet(ctx, antigravityCreditsBalanceKey(authID, cliproxyauth.AntigravityCreditsScope(auth)))
 		if errBalance != nil {
 			return false, errBalance
 		}
@@ -143,19 +166,24 @@ func antigravityAuthHasCreditsRequired(ctx context.Context, auth *cliproxyauth.A
 		if errUnmarshal := json.Unmarshal(raw, &homeBalance); errUnmarshal != nil {
 			return false, errUnmarshal
 		}
-		return antigravityCreditsBalanceAvailable(authID, homeBalance), nil
+		return antigravityCreditsBalanceAvailable(auth, homeBalance), nil
 	}
 
-	val, ok := antigravityCreditsBalanceByAuth.Load(authID)
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return true, nil
+	}
+	defer unlock()
+	val, ok := antigravityCreditsBalanceByAuth.Load(key)
 	if !ok {
 		return true, nil // optimistic: assume credits available when balance unknown
 	}
 	bal, valid := val.(antigravityCreditsBalance)
 	if !valid {
-		antigravityCreditsBalanceByAuth.Delete(authID)
+		antigravityCreditsBalanceByAuth.Delete(key)
 		return false, nil
 	}
-	return antigravityCreditsBalanceAvailable(authID, bal), nil
+	return antigravityCreditsBalanceAvailable(auth, bal), nil
 }
 
 func antigravityCreditsAmountsAvailable(creditAmount, minAmount float64) bool {
@@ -165,12 +193,12 @@ func antigravityCreditsAmountsAvailable(creditAmount, minAmount float64) bool {
 	return creditAmount > 0 && creditAmount >= minAmount
 }
 
-func antigravityCreditsBalanceAvailable(authID string, bal antigravityCreditsBalance) bool {
-	if !bal.Known {
+func antigravityCreditsBalanceAvailable(auth *cliproxyauth.Auth, bal antigravityCreditsBalance) bool {
+	if auth == nil || !bal.Known {
 		return false
 	}
 	available := antigravityCreditsAmountsAvailable(bal.CreditAmount, bal.MinCreditAmount)
-	cliproxyauth.SetAntigravityCreditsHint(strings.TrimSpace(authID), cliproxyauth.AntigravityCreditsHint{
+	cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{
 		Known:           true,
 		Available:       available,
 		CreditAmount:    bal.CreditAmount,
@@ -314,11 +342,15 @@ func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
-	authID := strings.TrimSpace(auth.ID)
-	_, hadFailure := antigravityCreditsFailureByAuth.LoadAndDelete(authID)
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known && !hint.Available {
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return
+	}
+	defer unlock()
+	_, hadFailure := antigravityCreditsFailureByAuth.LoadAndDelete(key)
+	if hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth); ok && hint.Known && !hint.Available {
 		if hadFailure || !cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
-			cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{})
 		}
 	}
 }
@@ -326,19 +358,23 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" || antigravityCoolingDisabled(auth, nil) {
 		return
 	}
-	authID := strings.TrimSpace(auth.ID)
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return
+	}
 	state := antigravityCreditsFailureState{
 		PermanentlyDisabled:      true,
 		ExplicitBalanceExhausted: true,
 	}
-	antigravityCreditsFailureByAuth.Store(authID, state)
+	antigravityCreditsFailureByAuth.Store(key, state)
+	unlock()
 	bal := antigravityCreditsBalance{
 		CreditAmount:    0,
 		MinCreditAmount: 1,
 		Known:           true,
 	}
-	storeAntigravityCreditsBalanceBestEffort(authID, bal)
-	cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+	storeAntigravityCreditsBalanceBestEffort(auth, bal)
+	cliproxyauth.SetAntigravityCreditsHintForAuth(auth, cliproxyauth.AntigravityCreditsHint{
 		Known:           true,
 		Available:       false,
 		CreditAmount:    0,
@@ -351,7 +387,11 @@ func clearAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
-	antigravityCreditsFailureByAuth.Delete(strings.TrimSpace(auth.ID))
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if current {
+		defer unlock()
+		antigravityCreditsFailureByAuth.Delete(key)
+	}
 }
 
 func antigravityHasExplicitCreditsBalanceExhaustedReason(body []byte) bool {
@@ -565,7 +605,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 	if authID == "" {
 		return
 	}
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
+	if hint, ok := cliproxyauth.GetAntigravityCreditsHintForAuth(auth); ok && cliproxyauth.IsAntigravityCreditsHintFresh(hint, time.Now()) {
 		return
 	}
 	if strings.TrimSpace(accessToken) == "" {
@@ -580,7 +620,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 			log.Errorf("antigravity executor: home kv best-effort refresh lock failed prefix=cpa:antigravity:*: %v", errClient)
 			return
 		}
-		written, errSetNX := client.KVSetNX(context.Background(), antigravityCreditsRefreshLockKey(authID), []byte("1"), antigravityCreditsHintRefreshInterval)
+		written, errSetNX := client.KVSetNX(context.Background(), antigravityCreditsRefreshLockKey(authID, cliproxyauth.AntigravityCreditsScope(auth)), []byte("1"), antigravityCreditsHintRefreshInterval)
 		if errSetNX != nil {
 			log.Errorf("antigravity executor: home kv best-effort refresh lock failed prefix=cpa:antigravity:*: %v", errSetNX)
 			return
@@ -588,12 +628,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 		if !written {
 			return
 		}
-		refreshCtx, cancel := context.WithTimeout(detachedAntigravityCredentialContext(ctx), antigravityCreditsHintRefreshTimeout)
-		authCopy := auth.Clone()
-		go func(auth *cliproxyauth.Auth, token string) {
-			defer cancel()
-			e.updateAntigravityCreditsBalance(refreshCtx, auth, token)
-		}(authCopy, accessToken)
+		e.queueAntigravityCreditsRefresh(ctx, auth, accessToken, antigravityCreditsHintRefreshTimeout)
 		return
 	}
 
@@ -608,30 +643,78 @@ func (e *AntigravityExecutor) queueAntigravityCreditsRefresh(ctx context.Context
 	if authID == "" || strings.TrimSpace(accessToken) == "" {
 		return
 	}
-	state := &antigravityCreditsHintRefreshState{}
-	if existing, loaded := antigravityCreditsHintRefreshByID.LoadOrStore(authID, state); loaded {
+	refreshScope := cliproxyauth.AntigravityCreditsScope(auth)
+	refreshKey := authID
+	if refreshScope != "" {
+		refreshKey += "|" + refreshScope
+	}
+	registryValue, _ := antigravityCreditsRefreshRegistries.LoadOrStore(authID, &antigravityCreditsRefreshRegistry{})
+	registry, okRegistry := registryValue.(*antigravityCreditsRefreshRegistry)
+	if !okRegistry || registry == nil {
+		antigravityCreditsRefreshRegistries.Delete(authID)
+		return
+	}
+	registry.mu.Lock()
+	if auth.RegistrationEpoch < registry.currentEpoch {
+		registry.mu.Unlock()
+		return
+	}
+	registry.currentEpoch = auth.RegistrationEpoch
+	state := &antigravityCreditsHintRefreshState{
+		registrationEpoch: auth.RegistrationEpoch,
+		createdAt:         auth.CreatedAt,
+		updatedAt:         auth.UpdatedAt,
+		scope:             refreshScope,
+	}
+	antigravityCreditsHintRefreshByID.Range(func(key, value any) bool {
+		text, okKey := key.(string)
+		if !okKey || (text != authID && !strings.HasPrefix(text, authID+"|")) || text == refreshKey {
+			return true
+		}
+		oldState, okState := value.(*antigravityCreditsHintRefreshState)
+		if !okState || oldState == nil {
+			return true
+		}
+		oldState.mu.Lock()
+		if auth.RegistrationEpoch > oldState.registrationEpoch {
+			if oldState.task != nil {
+				oldState.task.cancel()
+			}
+			antigravityCreditsHintRefreshByID.CompareAndDelete(key, value)
+			oldState.registrationEpoch = auth.RegistrationEpoch
+		}
+		oldState.mu.Unlock()
+		return true
+	})
+	if existing, loaded := antigravityCreditsHintRefreshByID.LoadOrStore(refreshKey, state); loaded {
 		if cast, ok := existing.(*antigravityCreditsHintRefreshState); ok && cast != nil {
 			state = cast
 		} else {
-			antigravityCreditsHintRefreshByID.Delete(authID)
-			antigravityCreditsHintRefreshByID.Store(authID, state)
+			antigravityCreditsHintRefreshByID.Delete(refreshKey)
+			antigravityCreditsHintRefreshByID.Store(refreshKey, state)
 		}
 	}
+	registry.mu.Unlock()
 
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	now := time.Now()
 	state.mu.Lock()
-	if ctx.Err() != nil || auth.RegistrationEpoch < state.registrationEpoch {
+	scope := cliproxyauth.AntigravityCreditsScope(auth)
+	if ctx.Err() != nil {
 		state.mu.Unlock()
 		return
 	}
 	oldTask := state.task
-	if auth.RegistrationEpoch != state.registrationEpoch {
+	if state.scope == "" {
 		state.registrationEpoch = auth.RegistrationEpoch
-		state.lastAttempt = time.Time{}
-		state.task = nil
+		state.createdAt = auth.CreatedAt
+		state.updatedAt = auth.UpdatedAt
+		state.scope = scope
+	} else if state.scope != scope {
+		state.mu.Unlock()
+		return
 	} else if oldTask != nil {
 		if oldTask.ctx.Err() == nil {
 			state.mu.Unlock()
@@ -763,8 +846,12 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 			state := task.state
 			state.mu.Lock()
 			defer state.mu.Unlock()
-			current, _ := antigravityCreditsHintRefreshByID.Load(authID)
-			if current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch {
+			refreshKey := authID
+			if state.scope != "" {
+				refreshKey += "|" + state.scope
+			}
+			current, _ := antigravityCreditsHintRefreshByID.Load(refreshKey)
+			if current != state || state.task != task || state.registrationEpoch != auth.RegistrationEpoch || state.scope != cliproxyauth.AntigravityCreditsScope(auth) {
 				return
 			}
 		}
@@ -796,9 +883,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	publish := func(balance *antigravityCreditsBalance, hint cliproxyauth.AntigravityCreditsHint) {
 		runIfCurrentTask(func() {
 			if balance != nil {
-				storeAntigravityCreditsBalanceBestEffort(authID, *balance)
+				storeAntigravityCreditsBalanceBestEffort(auth, *balance)
 			}
-			cliproxyauth.SetAntigravityCreditsHint(authID, hint)
+			cliproxyauth.SetAntigravityCreditsHintForAuth(auth, hint)
 			if balance != nil && hint.Available {
 				clearAntigravityCreditsPermanentlyDisabled(auth)
 			}
@@ -863,15 +950,77 @@ func antigravityShortCooldownKey(auth *cliproxyauth.Auth, modelName string) stri
 	if authID == "" || modelName == "" {
 		return ""
 	}
-	return authID + "|" + modelName + "|sc"
+	return authID + "|" + cliproxyauth.AntigravityCreditsScope(auth) + "|" + modelName + "|sc"
 }
 
-func antigravityCreditsBalanceKey(authID string) string {
-	return "cpa:antigravity:credits-balance:" + strings.TrimSpace(authID)
+func newAntigravityCreditsCacheKey(authID, scope string) any {
+	authID = strings.TrimSpace(authID)
+	if scope == "" {
+		return authID
+	}
+	return antigravityCreditsCacheScope{authID: authID, scope: scope}
 }
 
-func antigravityCreditsRefreshLockKey(authID string) string {
-	return "cpa:antigravity:credits-refresh-lock:" + strings.TrimSpace(authID)
+func lockAntigravityCreditsScope(auth *cliproxyauth.Auth) (any, func(), bool) {
+	noop := func() {}
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return nil, noop, false
+	}
+	authID := strings.TrimSpace(auth.ID)
+	value, _ := antigravityCreditsCurrentScope.LoadOrStore(authID, &antigravityCreditsScopeState{})
+	state, okState := value.(*antigravityCreditsScopeState)
+	if !okState || state == nil {
+		antigravityCreditsCurrentScope.Delete(authID)
+		return lockAntigravityCreditsScope(auth)
+	}
+	state.mu.Lock()
+	scope := cliproxyauth.AntigravityCreditsScope(auth)
+	if state.scope != "" && state.scope != scope {
+		if state.registrationEpoch > auth.RegistrationEpoch || (state.registrationEpoch == auth.RegistrationEpoch && state.createdAt.After(auth.CreatedAt)) || (state.registrationEpoch == auth.RegistrationEpoch && state.createdAt.Equal(auth.CreatedAt) && state.updatedAt.After(auth.UpdatedAt)) {
+			state.mu.Unlock()
+			return nil, noop, false
+		}
+	}
+	if state.scope != scope {
+		state.registrationEpoch = auth.RegistrationEpoch
+		state.createdAt = auth.CreatedAt
+		state.updatedAt = auth.UpdatedAt
+		state.scope = scope
+		for _, cache := range []*sync.Map{&antigravityCreditsFailureByAuth, &antigravityCreditsBalanceByAuth} {
+			cache.Range(func(key, _ any) bool {
+				if scoped, ok := key.(antigravityCreditsCacheScope); ok && scoped.authID == authID && scoped.scope != scope {
+					cache.Delete(key)
+				}
+				if legacy, ok := key.(string); ok && legacy == authID {
+					cache.Delete(key)
+				}
+				return true
+			})
+		}
+		antigravityShortCooldownByAuth.Range(func(key, _ any) bool {
+			if text, ok := key.(string); ok && strings.HasPrefix(text, authID+"|") {
+				antigravityShortCooldownByAuth.Delete(key)
+			}
+			return true
+		})
+	}
+	return newAntigravityCreditsCacheKey(authID, scope), state.mu.Unlock, true
+}
+
+func antigravityCreditsBalanceKey(authID string, scope ...string) string {
+	key := "cpa:antigravity:credits-balance:" + strings.TrimSpace(authID)
+	if len(scope) == 0 || scope[0] == "" {
+		return key
+	}
+	return key + ":" + strings.ReplaceAll(scope[0], ":", "-")
+}
+
+func antigravityCreditsRefreshLockKey(authID string, scope ...string) string {
+	key := "cpa:antigravity:credits-refresh-lock:" + strings.TrimSpace(authID)
+	if len(scope) == 0 || scope[0] == "" {
+		return key
+	}
+	return key + ":" + strings.ReplaceAll(scope[0], ":", "-")
 }
 
 func antigravityShortCooldownKVKey(auth *cliproxyauth.Auth, modelName string) string {
@@ -882,6 +1031,10 @@ func antigravityShortCooldownKVKey(auth *cliproxyauth.Auth, modelName string) st
 	modelName = strings.TrimSpace(modelName)
 	if authID == "" || modelName == "" {
 		return ""
+	}
+	scope := cliproxyauth.AntigravityCreditsScope(auth)
+	if scope != "" {
+		authID += ":" + strings.ReplaceAll(scope, ":", "-")
 	}
 	return "cpa:antigravity:short-cooldown:" + authID + ":" + homekv.HashKeyPart(modelName)
 }
@@ -903,6 +1056,11 @@ func antigravityIsInShortCooldownRequired(ctx context.Context, auth *cliproxyaut
 	if antigravityCoolingDisabled(auth, nil) {
 		return false, 0, nil
 	}
+	_, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return false, 0, nil
+	}
+	defer unlock()
 	kvKey := antigravityShortCooldownKVKey(auth, modelName)
 	client, homeMode, errClient := currentAntigravityKVClient()
 	if homeMode {
@@ -961,6 +1119,11 @@ func markAntigravityShortCooldownRequired(ctx context.Context, auth *cliproxyaut
 	if antigravityCoolingDisabled(auth, nil) {
 		return nil
 	}
+	_, unlock, current := lockAntigravityCreditsScope(auth)
+	if !current {
+		return nil
+	}
+	defer unlock()
 	kvKey := antigravityShortCooldownKVKey(auth, modelName)
 	client, homeMode, errClient := currentAntigravityKVClient()
 	if homeMode {
@@ -989,8 +1152,11 @@ func markAntigravityShortCooldownRequired(ctx context.Context, auth *cliproxyaut
 	return nil
 }
 
-func storeAntigravityCreditsBalanceBestEffort(authID string, bal antigravityCreditsBalance) {
-	authID = strings.TrimSpace(authID)
+func storeAntigravityCreditsBalanceBestEffort(auth *cliproxyauth.Auth, bal antigravityCreditsBalance) {
+	if auth == nil {
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
 	if authID == "" {
 		return
 	}
@@ -1004,12 +1170,16 @@ func storeAntigravityCreditsBalanceBestEffort(authID string, bal antigravityCred
 			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errMarshal)
 			return
 		}
-		if _, errSet := client.KVSet(context.Background(), antigravityCreditsBalanceKey(authID), raw, homekv.KVSetOptions{EX: 30 * time.Minute}); errSet != nil {
+		if _, errSet := client.KVSet(context.Background(), antigravityCreditsBalanceKey(authID, cliproxyauth.AntigravityCreditsScope(auth)), raw, homekv.KVSetOptions{EX: 30 * time.Minute}); errSet != nil {
 			log.Errorf("antigravity executor: home kv best-effort credits balance set failed prefix=cpa:antigravity:*: %v", errSet)
 		}
 		return
 	}
-	antigravityCreditsBalanceByAuth.Store(authID, bal)
+	key, unlock, current := lockAntigravityCreditsScope(auth)
+	if current {
+		defer unlock()
+		antigravityCreditsBalanceByAuth.Store(key, bal)
+	}
 }
 
 func homeKVUnavailableStatusErr(cause error) statusErr {

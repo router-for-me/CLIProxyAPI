@@ -96,6 +96,6 @@ func TestIssue7702AntigravityPostRefreshCreditsHasBoundedTimeout(t *testing.T) {
 		recovered := issue6199AntigravityAuth(t.Name(), t.Name()+"-refresh")
 		issue6199RefreshForCreditsLifecycle(t, executor, ctx, recovered)
 		synctest.Wait()
-		issue6199AssertCreditsBalance(t, auth.ID, 900)
+		issue6199AssertCreditsBalance(t, updated, 900)
 	})
 }

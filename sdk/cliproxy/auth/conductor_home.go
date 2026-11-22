@@ -1430,7 +1430,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
 	for _, candidate := range candidates {
-		hint, okHint, errHint := GetAntigravityCreditsHintRequired(ctx, candidate.auth.ID)
+		hint, okHint, errHint := GetAntigravityCreditsHintForAuthRequired(ctx, candidate.auth)
 		if errHint != nil {
 			return nil, antigravityCreditsKVUnavailableError(errHint)
 		}
