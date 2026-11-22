@@ -1137,15 +1137,21 @@ oauth:
   #       alias: "muse-latest"
   #   copilot:
   #     - name: "copilot/claude-sonnet-5" # use the listed Copilot model ID, before any auth prefix
-  #       alias: "copilot-sonnet"
+  #       alias: "copilot-sonnet" # published verbatim; no automatic copilot/ prefix
   #   sample-provider:                  # plugin provider keys are supported for OAuth plugins
   #     - name: "sample-model-latest"
   #       alias: "sample-latest"
 
   # OAuth provider model settings (per channel)
   # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
-  # Supported channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
   # settings:
+  #   copilot:
+  #     - name: "copilot/gpt-5.3-codex" # canonical source ID, shared by its aliases
+  #       max-context-length: 131072
+  #     - name: "copilot/gpt-5.3-codex"
+  #       alias: "coding" # exact public alias before any credential prefix
+  #       max-context-length: 262144
   #   codex:
   #     - name: "gpt-6-sol"
   #       max-context-length: 524288 # overrides context window advertised to Codex clients

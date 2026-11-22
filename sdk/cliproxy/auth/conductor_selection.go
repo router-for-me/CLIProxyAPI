@@ -8,12 +8,12 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -390,28 +390,34 @@ func isSameUnderlyingModelSpelling(a, b string) bool {
 }
 
 func isCopilotAuth(auth *Auth) bool {
-	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), copilot.Provider)
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "copilot")
 }
 
-func buildCopilotMigrationMaps(supportedModels []*registry.ModelInfo) (authoritativeTargets, routeToTarget map[string]string) {
+func (m *Manager) buildPublishedModelMigrationMaps(auth *Auth, supportedModels []*registry.ModelInfo) (authoritativeTargets, routeToTarget map[string]string) {
 	authoritativeTargets = make(map[string]string, len(supportedModels))
 	routeToTarget = make(map[string]string, len(supportedModels))
-	// Unsuffixed copilot/ state keys are native IDs, even when a new alias
+	providerPrefix := strings.ToLower(strings.TrimSpace(auth.Provider)) + "/"
+	isCopilot := isCopilotAuth(auth)
+	// Unsuffixed provider-qualified state keys are source IDs, even when a new alias
 	// reuses one. Other legacy keys can still follow exact published routes.
 	isLegacyKey := func(key string) bool {
-		return !strings.HasPrefix(key, copilot.ModelPrefix) || thinking.ParseSuffix(key).HasSuffix
+		return !strings.HasPrefix(key, providerPrefix) || thinking.ParseSuffix(key).HasSuffix
 	}
 	for _, model := range supportedModels {
 		if model == nil || strings.TrimSpace(model.ID) == "" {
 			continue
 		}
 		routeID := strings.TrimSpace(model.ID)
-		targetKey := routeID
-		// Use the published native ID, not configured aliases that may not be registered.
-		if nativeID := strings.TrimSpace(model.MetadataModelID); nativeID != "" {
-			targetKey = copilot.ModelPrefix + nativeID
+		targetKey := publishedSourceModelID(model.SourceModelID, model.MetadataModelID, isCopilot)
+		if targetKey == "" && !isCopilot {
+			targetKey = m.selectionModelKeyForAuth(auth, routeID)
+		}
+		if targetKey == "" {
+			targetKey = routeID
+		}
+		if nativeID, qualified := strings.CutPrefix(targetKey, providerPrefix); qualified {
 			legacyLookup := strings.ToLower(nativeID)
-			if _, exists := routeToTarget[legacyLookup]; !exists && isLegacyKey(legacyLookup) {
+			if _, exists := routeToTarget[legacyLookup]; !exists {
 				routeToTarget[legacyLookup] = targetKey
 			}
 		}
@@ -427,8 +433,10 @@ func (m *Manager) buildAliasMigrationMapsLocked(auth *Auth, supportedModels []*r
 	if m == nil || auth == nil {
 		return nil, nil
 	}
-	if isCopilotAuth(auth) {
-		return buildCopilotMigrationMaps(supportedModels)
+	if isCopilotAuth(auth) || (m.usesPublishedModelRoutes(auth) && slices.ContainsFunc(supportedModels, func(model *registry.ModelInfo) bool {
+		return model != nil && model.SourceModelID != ""
+	})) {
+		return m.buildPublishedModelMigrationMaps(auth, supportedModels)
 	}
 
 	allRegistered := make(map[string]struct{}, len(supportedModels))
@@ -526,7 +534,7 @@ func (m *Manager) resolveMarkResultModelKeyLocked(auth *Auth, modelKey, routeMod
 		return authTarget
 	}
 	targetKey := routeToTarget[lookupKey]
-	if targetKey == "" && !isCopilotAuth(auth) {
+	if targetKey == "" && !isCopilotAuth(auth) && !m.usesPublishedModelRoutes(auth) {
 		targetKey = m.selectionModelKeyForAuth(auth, canonicalModel)
 	}
 	if targetLookup := modelStateLookupKey(auth, targetKey); targetKey != "" && lookupKey != targetLookup {
@@ -546,6 +554,7 @@ func (m *Manager) migrateAuthAliasModelStatesLocked(auth *Auth, supportedModels 
 		supportedModels = registry.GetGlobalRegistry().GetModelsForClient(auth.ID)
 	}
 	isCopilot := isCopilotAuth(auth)
+	useConfigFallback := !isCopilot && !m.usesPublishedModelRoutes(auth)
 	if isCopilot && len(supportedModels) == 0 {
 		return false
 	}
@@ -581,7 +590,7 @@ func (m *Manager) migrateAuthAliasModelStatesLocked(auth *Auth, supportedModels 
 			continue
 		}
 		targetKey := routeToTarget[routeLookup]
-		if targetKey == "" && !isCopilot {
+		if targetKey == "" && useConfigFallback {
 			targetKey = m.selectionModelKeyForAuth(auth, stateKey)
 		}
 		targetLookup := modelStateLookupKey(auth, targetKey)
@@ -1468,9 +1477,9 @@ func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, au
 	if registryRef == nil || auth == nil {
 		return true
 	}
-	if m.usesPublishedCopilotRoutes(auth) {
-		model, _ := copilotRouteForAuth(registryRef, auth.ID, routeModel)
-		return strings.TrimSpace(routeModel) == "" || model != ""
+	if m.usesPublishedModelRoutes(auth) {
+		route := publishedModelRouteForAuth(registryRef, auth, routeModel)
+		return strings.TrimSpace(routeModel) == "" || route.ID != ""
 	}
 	routeKey := canonicalModelKey(routeModel)
 	if routeKey == "" {
@@ -2383,9 +2392,25 @@ func (m *Manager) routeAwareSelectionRequired(auth *Auth, routeModel string) boo
 	if auth == nil || strings.TrimSpace(routeModel) == "" {
 		return false
 	}
-	// The scheduler's base-model shards cannot distinguish exact Copilot routes
-	// that contain suffixes from requests that fall back to their base route.
-	return m.usesPublishedCopilotRoutes(auth) || !sameCanonicalModelKey(m.selectionModelForAuth(auth, routeModel), routeModel)
+	if m.usesPublishedModelRoutes(auth) {
+		if isCopilotAuth(auth) {
+			// Copilot's suffix validation and exact plugin routes require per-credential selection.
+			return true
+		}
+		registryRef := registry.GetGlobalRegistry()
+		route := publishedModelRouteForAuth(registryRef, auth, routeModel)
+		if route.ID == "" {
+			// An exact route with a suffix can still put this credential in the base-model shard.
+			return slices.ContainsFunc(registryRef.GetModelsForClient(auth.ID), func(model *registry.ModelInfo) bool {
+				return model != nil && sameCanonicalModelKey(model.ID, routeModel)
+			})
+		}
+		if route.SourceModelID != "" {
+			// The base-model shard can handle routes whose public and state keys agree.
+			return thinking.ParseSuffix(route.ID).HasSuffix || !sameCanonicalModelKey(route.SourceModelID, routeModel)
+		}
+	}
+	return !sameCanonicalModelKey(m.selectionModelForAuth(auth, routeModel), routeModel)
 }
 
 func requestAwareCredSelectionRequired(ctx context.Context, auth *Auth, clientHeaders ...http.Header) bool {
