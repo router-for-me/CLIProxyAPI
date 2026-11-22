@@ -7,9 +7,55 @@ import (
 	"testing"
 	"time"
 
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
+
+func TestAntigravityUnsupportedSummaryPreservesSharedBackoff(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			resetAntigravityCapabilityCache()
+			t.Cleanup(resetAntigravityCapabilityCache)
+			now := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+			oldClock := antigravityNowFunc
+			antigravityNowFunc = func() time.Time { return now }
+			t.Cleanup(func() { antigravityNowFunc = oldClock })
+			var summaryCalls, catalogCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+					summaryCalls.Add(1)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				catalogCalls.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer server.Close()
+			svc := &Service{}
+			auth := antigravityTestAuth("shared-backoff", server.URL)
+			key := svc.antigravityCapabilityKey(auth)
+			if status == http.StatusUnauthorized {
+				key = antigravityTokenFailureKey(key, auth.Metadata["access_token"].(string))
+			}
+			for _, wantFailures := range []uint8{1, 2} {
+				if _, _, err := svc.fetchAntigravityModelHints(t.Context(), auth, true); err == nil {
+					t.Fatal("expected catalog fallback to fail")
+				}
+				antigravityCapabilityMu.RLock()
+				failure := antigravityAuthFailureCache[key]
+				antigravityCapabilityMu.RUnlock()
+				if failure.failures != wantFailures || !failure.nextRetry.After(now) {
+					t.Fatalf("shared backoff = %+v, want %d consecutive failures", failure, wantFailures)
+				}
+				now = failure.nextRetry
+			}
+			if summaryCalls.Load() != 2 || catalogCalls.Load() != 2 {
+				t.Fatalf("summary calls = %d, catalog calls = %d, want two each", summaryCalls.Load(), catalogCalls.Load())
+			}
+		})
+	}
+}
 
 func TestAntigravityFailureBackoffWindowsAndCap(t *testing.T) {
 	for _, sample := range []struct {
@@ -132,6 +178,10 @@ func TestAntigravityFailureBackoffIntegration(t *testing.T) {
 	var status atomic.Int32
 	status.Store(503)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		calls.Add(1)
 		w.WriteHeader(int(status.Load()))
 		_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
@@ -251,7 +301,7 @@ func TestAntigravityForbiddenBackoffPersistsAcrossTokenRotationAndCapsAt60Minute
 	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
 
 	// Prime a successful catalog first to confirm 403 preserves it during backoff.
-	svc.refreshAntigravityModels(t.Context())
+	svc.registerModelsForAuth(t.Context(), auth)
 	svc.WaitAntigravityProbes()
 	if calls.Load() != 1 || len(GlobalModelRegistry().GetModelsForClient(auth.ID)) != 1 {
 		t.Fatalf("initial registration failed: calls=%d models=%d", calls.Load(), len(GlobalModelRegistry().GetModelsForClient(auth.ID)))

@@ -13,6 +13,34 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+func TestAntigravitySummarySupersedesNewerCatalogSnapshot(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	svc := &Service{coreManager: manager}
+	auth, err := manager.Register(t.Context(), antigravityTestAuth("summary-publication", "https://quota.invalid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := svc.antigravityCapabilityKey(auth)
+	summaryAt := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	catalogAt := summaryAt.Add(time.Second)
+	catalog := AntigravityQuotaWindows(map[string]sdkauth.AntigravityModelQuota{
+		"gemini-pro": {RemainingFraction: 0.25},
+	})
+	summary := antigravitySummaryWindows([]sdkauth.AntigravityQuotaBucket{
+		{ID: "gemini-5h", Window: sdkauth.AntigravityQuotaWindowFiveHour, RemainingFraction: 0.5},
+	}, summaryAt)
+	if err := svc.recordAntigravityQuota(t.Context(), auth, key, catalog, catalogAt, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.recordAntigravityQuota(t.Context(), auth, key, summary, summaryAt, false); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := manager.GetByID(auth.ID)
+	if !reflect.DeepEqual(current.Quota.LookupWindows, summary) || !current.Quota.LookedUpAt.Equal(catalogAt) {
+		t.Fatalf("stored quota = %+v, want summary windows with timestamp %s", current.Quota, catalogAt)
+	}
+}
+
 func TestAntigravityQuotaWindows(t *testing.T) {
 	reset := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
 	quotas := map[string]sdkauth.AntigravityModelQuota{
@@ -97,7 +125,7 @@ func TestAntigravityUsageLookup(t *testing.T) {
 	}{
 		{http.StatusUnauthorized, "401"},
 		{http.StatusForbidden, "403"},
-		{http.StatusServiceUnavailable, "did not return a catalog"},
+		{http.StatusServiceUnavailable, "quota summary probe failed"},
 	} {
 		t.Run(http.StatusText(scenario.status), func(t *testing.T) {
 			resetAntigravityCapabilityCache()
@@ -106,16 +134,24 @@ func TestAntigravityUsageLookup(t *testing.T) {
 			oldClock := antigravityNowFunc
 			antigravityNowFunc = func() time.Time { return now }
 			t.Cleanup(func() { antigravityNowFunc = oldClock })
-			var calls atomic.Int32
+			var catalogCalls, summaryCalls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != antigravityModelsPath || r.Header.Get("Authorization") != "Bearer token-usage" {
-					t.Errorf("unexpected model probe %s %s", r.Method, r.URL.Path)
+				if r.Method != http.MethodPost || r.Header.Get("Authorization") != "Bearer token-usage" {
+					t.Errorf("unexpected probe %s %s", r.Method, r.URL.Path)
 				}
-				if calls.Add(1) > 2 {
-					w.WriteHeader(scenario.status)
-					return
+				switch r.URL.Path {
+				case antigravityModelsPath:
+					catalogCalls.Add(1)
+					_, _ = w.Write([]byte(`{"models":{"gemini-pro":{"quotaInfo":{"remainingFraction":0.2}}}}`))
+				case sdkauth.AntigravityQuotaSummaryPath:
+					if summaryCalls.Add(1) == 1 {
+						w.WriteHeader(http.StatusNotFound)
+					} else {
+						w.WriteHeader(scenario.status)
+					}
+				default:
+					t.Errorf("unexpected probe path %s", r.URL.Path)
 				}
-				_, _ = w.Write([]byte(`{"models":{"gemini-pro":{"quotaInfo":{"remainingFraction":0.2}}}}`))
 			}))
 			defer server.Close()
 			manager := coreauth.NewManager(nil, nil, nil)
@@ -135,8 +171,8 @@ func TestAntigravityUsageLookup(t *testing.T) {
 				t.Fatal(err)
 			}
 			svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), auth)
-			if failures := lookup.RefreshAll(t.Context()); len(failures) != 0 || calls.Load() != 2 {
-				t.Fatalf("expected usage to bypass fresh catalog only for OAuth, calls=%d failures=%v", calls.Load(), failures)
+			if failures := lookup.RefreshAll(t.Context()); len(failures) != 0 || catalogCalls.Load() != 2 || summaryCalls.Load() != 1 {
+				t.Fatalf("expected OAuth usage to try summary then bypass fresh catalog, catalog=%d summary=%d failures=%v", catalogCalls.Load(), summaryCalls.Load(), failures)
 			}
 			stored, _ := manager.GetByID(auth.ID)
 			if !stored.Quota.LookedUpAt.Equal(now) {
@@ -146,8 +182,8 @@ func TestAntigravityUsageLookup(t *testing.T) {
 			if err := lookup.Refresh(t.Context(), auth); err == nil || !strings.Contains(err.Error(), scenario.message) {
 				t.Fatalf("expected %s failure, got %v", scenario.message, err)
 			}
-			if err := lookup.Refresh(t.Context(), auth); err == nil || !strings.Contains(err.Error(), "backoff") || calls.Load() != 3 {
-				t.Fatalf("expected backoff with no new request, calls=%d error=%v", calls.Load(), err)
+			if err := lookup.Refresh(t.Context(), auth); err == nil || !strings.Contains(err.Error(), "backoff") || catalogCalls.Load() != 2 || summaryCalls.Load() != 2 {
+				t.Fatalf("expected backoff with no new request, catalog=%d summary=%d error=%v", catalogCalls.Load(), summaryCalls.Load(), err)
 			}
 			latest, _ := manager.GetByID(auth.ID)
 			if !latest.Quota.LookedUpAt.Equal(stored.Quota.LookedUpAt) {
@@ -169,11 +205,14 @@ func TestAntigravityUsageLookupSharesProbeTimestamp(t *testing.T) {
 	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != sdkauth.AntigravityQuotaSummaryPath {
+			t.Errorf("unexpected probe path %s", r.URL.Path)
+		}
 		if calls.Add(1) == 1 {
 			close(started)
 			<-release
 		}
-		_, _ = w.Write([]byte(`{"models":{"gemini-pro":{"quotaInfo":{"remainingFraction":0.2}}}}`))
+		_, _ = w.Write([]byte(`{"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":1,"resetTime":"2026-11-22T22:59:00Z"}]}`))
 	}))
 	defer server.Close()
 	manager := coreauth.NewManager(nil, nil, nil)
@@ -182,10 +221,9 @@ func TestAntigravityUsageLookupSharesProbeTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	leaderDone := make(chan struct{})
+	leaderDone := make(chan error, 1)
 	go func() {
-		defer close(leaderDone)
-		svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), auth)
+		leaderDone <- svc.NewAntigravityUsageLookup().Refresh(t.Context(), auth)
 	}()
 	<-started
 	elapsed.Store(int64(time.Second))
@@ -195,13 +233,18 @@ func TestAntigravityUsageLookupSharesProbeTimestamp(t *testing.T) {
 	go func() { followerDone <- svc.NewAntigravityUsageLookup().Refresh(followerCtx, auth) }()
 	<-followerCtx.waiting
 	close(release)
-	<-leaderDone
+	if err := <-leaderDone; err != nil {
+		t.Fatal(err)
+	}
 	if err := <-followerDone; err != nil {
 		t.Fatal(err)
 	}
 	stored, _ := manager.GetByID(auth.ID)
 	if got := stored.Quota.LookedUpAt; calls.Load() != 1 || !got.Equal(start) {
 		t.Fatalf("probe calls = %d, lookup timestamp = %v, want one probe at %v", calls.Load(), got, start)
+	}
+	if len(stored.Quota.LookupWindows) != 1 || !stored.Quota.LookupWindows[0].ResetsAt.IsZero() {
+		t.Fatalf("unstarted window = %+v", stored.Quota.LookupWindows)
 	}
 }
 
@@ -214,8 +257,10 @@ func TestAntigravityUsageLookupKeepsSnapshotWithoutQuota(t *testing.T) {
 	t.Cleanup(func() { antigravityNowFunc = oldClock })
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			_, _ = w.Write([]byte(`{"models":{"gemini-pro":{"quotaInfo":{"remainingFraction":0.2}}}}`))
+		if r.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+			if calls.Add(1) == 1 {
+				_, _ = w.Write([]byte(`{"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.2}]}`))
+			}
 			return
 		}
 		_, _ = w.Write([]byte(`{"models":{"gemini-pro":{}}}`))

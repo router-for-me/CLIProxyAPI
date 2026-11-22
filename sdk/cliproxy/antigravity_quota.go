@@ -21,7 +21,77 @@ const (
 	antigravityQuotaPercentScale   = 100
 	antigravityQuotaFractionScale  = antigravityQuotaPercentMax * antigravityQuotaPercentScale
 	antigravityQuotaRefreshSpacing = 2 * time.Second
+	antigravityFiveHourWindow      = 5 * time.Hour
+	antigravityWeeklyWindow        = 7 * 24 * time.Hour
+	antigravityUnstartedTolerance  = time.Minute
+	antigravitySummaryWindowPrefix = "ag_summary:"
 )
+
+func (h antigravityModelCapabilityHints) quotaWindows() []coreauth.QuotaWindow {
+	if len(h.quotaBuckets) > 0 {
+		return antigravitySummaryWindows(h.quotaBuckets, h.lookedUpAt)
+	}
+	windows := AntigravityQuotaWindows(h.ModelQuotas)
+	weekly := AntigravityQuotaWindows(h.weeklyModelQuotas)
+	for i := range weekly {
+		weekly[i].Key = "weekly:" + weekly[i].Key
+		weekly[i].Label += " · Weekly"
+		weekly[i].Duration = antigravityWeeklyWindow
+	}
+	return append(windows, weekly...)
+}
+
+func antigravitySummaryWindows(buckets []sdkauth.AntigravityQuotaBucket, requestedAt time.Time) []coreauth.QuotaWindow {
+	windows := make([]coreauth.QuotaWindow, 0, len(buckets))
+	for _, bucket := range buckets {
+		remaining := bucket.RemainingFraction
+		used := min(antigravityQuotaPercentMax, max(0, (1-remaining)*antigravityQuotaPercentMax))
+		window := coreauth.QuotaWindow{
+			Key: antigravitySummaryWindowPrefix + bucket.ID, UsedPercent: &used, ResetsAt: bucket.ResetTime.UTC(),
+			Status: "allowed",
+		}
+		if remaining <= 0 {
+			window.Status = "rejected"
+		} else {
+			// Routing also treats 100% usage as exhausted. Keep positive quota below it.
+			used = min(used, math.Nextafter(antigravityQuotaPercentMax, 0))
+		}
+		switch bucket.Window {
+		case sdkauth.AntigravityQuotaWindowFiveHour:
+			window.Label, window.Duration, window.Cadence = "5-hour", antigravityFiveHourWindow, coreauth.ResetCadenceOnUse
+			window.Scoped = bucket.ID != "gemini-5h"
+			if remaining == 1 && bucket.Description == "" &&
+				window.ResetsAt.Sub(requestedAt.Add(window.Duration)).Abs() <= antigravityUnstartedTolerance {
+				window.ResetsAt = time.Time{}
+			}
+		case sdkauth.AntigravityQuotaWindowWeekly:
+			window.Label, window.Duration, window.Cadence = "Weekly", antigravityWeeklyWindow, coreauth.ResetCadenceFixed
+			window.Scoped = bucket.ID != "gemini-weekly"
+		default:
+			continue
+		}
+		if window.Scoped {
+			window.Label = antigravitySummaryFamily(bucket) + " · " + window.Label
+		}
+		windows = append(windows, window)
+	}
+	return windows
+}
+
+func antigravitySummaryFamily(bucket sdkauth.AntigravityQuotaBucket) string {
+	switch {
+	case strings.HasPrefix(bucket.ID, "gemini-argon-"):
+		return cmp.Or(bucket.GroupDisplayName, "Gemini Argon")
+	case strings.HasPrefix(bucket.ID, "gemini-carbon-"):
+		return cmp.Or(bucket.GroupDisplayName, "Gemini Carbon")
+	case strings.HasPrefix(bucket.ID, "gemini-"):
+		return "Gemini"
+	case strings.HasPrefix(bucket.ID, "3p-"):
+		return "Claude & GPT"
+	default:
+		return cmp.Or(bucket.GroupDisplayName, bucket.ID)
+	}
+}
 
 // AntigravityQuotaWindows converts per-model quotas into distinct quota buckets.
 func AntigravityQuotaWindows(quotas map[string]sdkauth.AntigravityModelQuota) []coreauth.QuotaWindow {
@@ -145,7 +215,7 @@ type AntigravityUsageLookup struct {
 	service *Service
 }
 
-// NewAntigravityUsageLookup returns a usage lookup backed by the service's model probe.
+// NewAntigravityUsageLookup returns a usage lookup with model catalog fallback.
 func (s *Service) NewAntigravityUsageLookup() *AntigravityUsageLookup {
 	return &AntigravityUsageLookup{service: s}
 }
@@ -172,11 +242,11 @@ func (l *AntigravityUsageLookup) Refresh(ctx context.Context, auth *coreauth.Aut
 	if err != nil {
 		return err
 	}
-	windows := AntigravityQuotaWindows(hints.ModelQuotas)
+	windows := hints.quotaWindows()
 	if len(windows) == 0 {
 		return errors.New("antigravity model probe returned no quota information")
 	}
-	return l.service.recordAntigravityQuota(ctx, auth, key, windows, hints.lookedUpAt)
+	return l.service.recordAntigravityQuota(ctx, auth, key, windows, hints.lookedUpAt, false)
 }
 
 // RefreshAll fetches usage for every eligible credential and returns failures by ID.
@@ -210,17 +280,25 @@ func (l *AntigravityUsageLookup) RefreshAll(ctx context.Context) map[string]erro
 	return failures
 }
 
-func (s *Service) recordAntigravityQuota(ctx context.Context, auth *coreauth.Auth, key string, windows []coreauth.QuotaWindow, lookedUpAt time.Time) error {
+func (s *Service) recordAntigravityQuota(ctx context.Context, auth *coreauth.Auth, key string, windows []coreauth.QuotaWindow, lookedUpAt time.Time, catalogOnly bool) error {
 	errCredentialChanged := errors.New("antigravity usage lookup credential is no longer current")
 	updated := false
 	_, recorded, err := s.coreManager.Modify(coreauth.WithSkipPersist(ctx), auth.ID, auth.RegistrationEpoch, func(current *coreauth.Auth) error {
 		if !antigravityAuthModelSettingsEqual(current, auth) || s.antigravityCapabilityKey(current) != key {
 			return errCredentialChanged
 		}
-		if lookedUpAt.After(current.Quota.LookedUpAt) {
+		currentSummary := hasAntigravitySummaryWindows(current.Quota.LookupWindows)
+		if catalogOnly && currentSummary {
+			return nil
+		}
+		summarySupersedesCatalog := !currentSummary && hasAntigravitySummaryWindows(windows)
+		newer := lookedUpAt.After(current.Quota.LookedUpAt)
+		if newer || summarySupersedesCatalog {
 			current.Quota.LookupWindows = windows
 			current.Quota.LookupSignals = nil
-			current.Quota.LookedUpAt = lookedUpAt
+			if newer {
+				current.Quota.LookedUpAt = lookedUpAt
+			}
 			updated = true
 		}
 		return nil
@@ -235,4 +313,10 @@ func (s *Service) recordAntigravityQuota(ctx context.Context, auth *coreauth.Aut
 		s.coreManager.NotifyQuotaUpdated()
 	}
 	return nil
+}
+
+func hasAntigravitySummaryWindows(windows []coreauth.QuotaWindow) bool {
+	return slices.ContainsFunc(windows, func(window coreauth.QuotaWindow) bool {
+		return strings.HasPrefix(window.Key, antigravitySummaryWindowPrefix)
+	})
 }

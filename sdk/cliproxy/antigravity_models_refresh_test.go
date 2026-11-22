@@ -12,9 +12,68 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
+
+func TestAntigravityMissingSummaryKeepsRefreshDueAfterFailedFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"empty", http.StatusOK},
+		{"unsupported", http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCapabilityCache()
+			t.Cleanup(resetAntigravityCapabilityCache)
+			now := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+			oldClock := antigravityNowFunc
+			antigravityNowFunc = func() time.Time { return now }
+			t.Cleanup(func() { antigravityNowFunc = oldClock })
+			var summaryCalls atomic.Int32
+			transport := http.DefaultTransport
+			http.DefaultTransport = antigravityReviewTransport(func(r *http.Request) (*http.Response, error) {
+				status, body := http.StatusServiceUnavailable, ""
+				if r.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+					status = tc.status
+					if summaryCalls.Add(1) == 1 {
+						status = http.StatusOK
+						body = `{"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.5}]}`
+					}
+				}
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = transport })
+			manager := coreauth.NewManager(nil, nil, nil)
+			svc := &Service{coreManager: manager}
+			auth, err := manager.Register(t.Context(), antigravityTestAuth("summary-retry", "https://quota.invalid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lookup := svc.NewAntigravityUsageLookup()
+			if err := lookup.Refresh(t.Context(), auth); err != nil {
+				t.Fatal(err)
+			}
+			originalExpiry := now.Add(antigravityCapabilityCacheTTL)
+			now = originalExpiry
+			if err := lookup.Refresh(t.Context(), auth); err == nil {
+				t.Fatal("expected transient catalog fallback failure")
+			}
+			key := svc.antigravityCapabilityKey(auth)
+			tokenKey := antigravityTokenFailureKey(key, auth.Metadata["access_token"].(string))
+			antigravityCapabilityMu.RLock()
+			expiry := antigravityCapabilityCache[key].summaryExpiresAt
+			refreshAt := antigravitySummaryRefreshAtLocked(key, tokenKey)
+			catalogRetry := antigravityFailureNextRetryLocked(key, tokenKey, antigravityModelsPath)
+			antigravityCapabilityMu.RUnlock()
+			if !expiry.Equal(originalExpiry) || !catalogRetry.After(now) || refreshAt.After(catalogRetry) {
+				t.Fatalf("summary expiry = %s, refresh due = %s, catalog retry = %s; want expiry %s and summary due by catalog retry", expiry, refreshAt, catalogRetry, originalExpiry)
+			}
+		})
+	}
+}
 
 func TestAntigravityStalledAccountDoesNotBlockOtherRetries(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

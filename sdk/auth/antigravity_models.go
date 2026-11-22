@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"io"
 	"maps"
-	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -52,8 +51,9 @@ type AntigravityModelQuota struct {
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs    map[string]struct{}
-	ModelQuotas map[string]AntigravityModelQuota
+	ModelIDs          map[string]struct{}
+	ModelQuotas       map[string]AntigravityModelQuota
+	WeeklyModelQuotas map[string]AntigravityModelQuota
 }
 
 // Clone returns a deep copy of the capability hints.
@@ -62,10 +62,11 @@ func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
 		ModelQuotas:       maps.Clone(h.ModelQuotas),
+		WeeklyModelQuotas: maps.Clone(h.WeeklyModelQuotas),
 	}
 }
 
-// AntigravityModelProbeRequest configures a single-shot fetchAvailableModels probe.
+// AntigravityModelProbeRequest configures a single Antigravity Cloud Code probe.
 type AntigravityModelProbeRequest struct {
 	BaseURLs    []string
 	ProxyURL    string
@@ -77,6 +78,18 @@ type AntigravityModelProbeRequest struct {
 // FetchAntigravityAvailableModels performs a single-shot POST /v1internal:fetchAvailableModels request
 // and parses the returned per-account model catalog and webSearchModelIds.
 func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelProbeRequest) (AntigravityModelCapabilityHints, AntigravityProbeStatus) {
+	data, status := fetchAntigravityProbe(ctx, req, AntigravityModelsPath)
+	if status != AntigravityProbeStatusSuccess {
+		return AntigravityModelCapabilityHints{}, status
+	}
+	hints, ok := ParseAntigravityModelCapabilityHints(data)
+	if !ok {
+		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+	}
+	return hints, AntigravityProbeStatusSuccess
+}
+
+func fetchAntigravityProbe(ctx context.Context, req AntigravityModelProbeRequest, path string) ([]byte, AntigravityProbeStatus) {
 	baseURL := ""
 	for _, candidate := range req.BaseURLs {
 		if trimmed := strings.TrimRight(strings.TrimSpace(candidate), "/"); trimmed != "" {
@@ -85,11 +98,11 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 		}
 	}
 	if baseURL == "" {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+		return nil, AntigravityProbeStatusTransientError
 	}
 	accessToken := strings.TrimSpace(req.AccessToken)
 	if accessToken == "" {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusAuthError
+		return nil, AntigravityProbeStatusAuthError
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -102,7 +115,7 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	}
 	transport, errProxy := newAntigravityProbeTransport(req.ProxyURL)
 	if errProxy != nil {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+		return nil, AntigravityProbeStatusTransientError
 	}
 	if transport != nil {
 		client.Transport = transport
@@ -111,9 +124,9 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 
 	doc := ojson.NewDoc([]byte("{}"))
 	doc.Set("project", strings.TrimSpace(req.ProjectID))
-	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+AntigravityModelsPath, bytes.NewReader(doc.Bytes()))
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(doc.Bytes()))
 	if errReq != nil {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+		return nil, AntigravityProbeStatusTransientError
 	}
 	userAgent := strings.TrimSpace(req.UserAgent)
 	if userAgent == "" {
@@ -125,32 +138,32 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+		return nil, AntigravityProbeStatusTransientError
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Debug("antigravity model fetch: response close failed")
+			log.Debug("antigravity probe: response close failed")
 		}
 	}()
-	if resp.StatusCode == http.StatusUnauthorized {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusAuthError
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusForbidden
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return nil, AntigravityProbeStatusAuthError
+	case http.StatusForbidden:
+		return nil, AntigravityProbeStatusForbidden
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		if path == AntigravityQuotaSummaryPath {
+			return nil, AntigravityProbeStatusSuccess
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+		return nil, AntigravityProbeStatusTransientError
 	}
 	const maxCatalogBytes = 8 << 20
 	data, errRead := io.ReadAll(io.LimitReader(resp.Body, maxCatalogBytes+1))
 	if errRead != nil || len(data) > maxCatalogBytes {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
+		return nil, AntigravityProbeStatusTransientError
 	}
-	hints, ok := ParseAntigravityModelCapabilityHints(data)
-	if !ok {
-		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
-	}
-	return hints, AntigravityProbeStatusSuccess
+	return data, AntigravityProbeStatusSuccess
 }
 
 func newAntigravityProbeTransport(proxyURL string) (*http.Transport, error) {
@@ -249,6 +262,7 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 	modelsResult := top.Get("models")
 	var modelIDs map[string]struct{}
 	var modelQuotas map[string]AntigravityModelQuota
+	var weeklyModelQuotas map[string]AntigravityModelQuota
 	if modelsResult.Exists() && modelsResult.Type != ojson.Null {
 		if !modelsResult.IsObject() {
 			return AntigravityModelCapabilityHints{}, false
@@ -261,15 +275,9 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 		for _, id := range slices.Sorted(maps.Keys(modelMap)) {
 			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
 				modelIDs[normalized] = struct{}{}
-				if _, exists := modelQuotas[normalized]; exists {
-					continue
-				}
-				if quota, ok := parseAntigravityModelQuota(normalized, modelMap[id]); ok {
-					if modelQuotas == nil {
-						modelQuotas = make(map[string]AntigravityModelQuota)
-					}
-					modelQuotas[normalized] = quota
-				}
+				model := modelMap[id]
+				modelQuotas = addAntigravityModelQuota(modelQuotas, normalized, model, "quotaInfo")
+				weeklyModelQuotas = addAntigravityModelQuota(weeklyModelQuotas, normalized, model, "weeklyQuotaInfo")
 			}
 		}
 	}
@@ -278,32 +286,8 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 		WebSearchModelIDs: webSearchModels,
 		ModelIDs:          modelIDs,
 		ModelQuotas:       modelQuotas,
+		WeeklyModelQuotas: weeklyModelQuotas,
 	}, true
-}
-
-func parseAntigravityModelQuota(id string, model ojson.Result) (AntigravityModelQuota, bool) {
-	info := model.Get("quotaInfo")
-	if !info.IsObject() || model.Get("disabled").Type == ojson.True {
-		return AntigravityModelQuota{}, false
-	}
-	quota := AntigravityModelQuota{ModelID: id}
-	if reset := info.Get("resetTime"); reset.Type == ojson.String {
-		quota.ResetTime, _ = time.Parse(time.RFC3339Nano, reset.Str)
-	}
-	remaining := info.Get("remainingFraction")
-	if remaining.Exists() {
-		if remaining.Type != ojson.Number || math.IsNaN(remaining.Num) || remaining.Num < 0 || remaining.Num > 1 {
-			return AntigravityModelQuota{}, false
-		}
-		quota.RemainingFraction = remaining.Num
-	} else if quota.ResetTime.IsZero() {
-		// Proto3 omits the zero fraction. A valid reset distinguishes it from missing quota.
-		return AntigravityModelQuota{}, false
-	}
-	if name := model.Get("displayName"); name.Type == ojson.String {
-		quota.DisplayName = strings.Clone(name.Str)
-	}
-	return quota, true
 }
 
 // BuildPersistedAntigravityCapabilityHints serializes capability hints for storage in auth metadata.

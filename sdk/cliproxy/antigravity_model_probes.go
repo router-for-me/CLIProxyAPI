@@ -14,6 +14,7 @@ type antigravityModelRefreshRequest struct {
 	auth          *coreauth.Auth
 	provider      string
 	registryEpoch uint64
+	refreshUsage  bool
 }
 
 type antigravityHintPersistRequest struct {
@@ -28,7 +29,7 @@ type antigravityHintPersistRequest struct {
 // queueAntigravityModelRefresh coalesces registration and periodic probes into
 // one worker per account. Repeated updates replace a single queued successor,
 // rather than accumulating singleflight followers while an upstream is stalled.
-func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string) {
+func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string, refreshUsage bool) {
 	if s == nil || auth == nil || auth.ID == "" || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() {
 		return
 	}
@@ -47,6 +48,7 @@ func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreau
 	request := &antigravityModelRefreshRequest{
 		ctx: ctx, auth: auth.Clone(), provider: provider,
 		registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(auth.ID),
+		refreshUsage:  refreshUsage,
 	}
 	token, _ := request.auth.Metadata["access_token"].(string)
 	probe := &antigravityAccountProbe{
@@ -66,6 +68,9 @@ func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreau
 		// Concurrent registration callers can reach admission out of order.
 		s.antigravityProbeMu.Unlock()
 		return
+	}
+	if queued != nil {
+		request.refreshUsage = request.refreshUsage || queued.refreshUsage
 	}
 	s.antigravityRefreshPending[auth.ID] = request
 	if !running {
@@ -108,6 +113,20 @@ func (s *Service) executeAntigravityModelRefresh(request *antigravityModelRefres
 		defer stop()
 		if lifetime.Err() != nil {
 			return
+		}
+	}
+	if request.refreshUsage {
+		usage := s.NewAntigravityUsageLookup()
+		if usage.Eligible(request.auth) {
+			key := s.antigravityCapabilityKey(request.auth)
+			token, _ := request.auth.Metadata["access_token"].(string)
+			failureKey := antigravityTokenFailureKey(key, strings.TrimSpace(token))
+			antigravityCapabilityMu.RLock()
+			due := !antigravityNowFunc().Before(antigravitySummaryRefreshAtLocked(key, failureKey))
+			antigravityCapabilityMu.RUnlock()
+			if due {
+				_ = usage.Refresh(probeCtx, request.auth)
+			}
 		}
 	}
 	expectedKey, hints := s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)

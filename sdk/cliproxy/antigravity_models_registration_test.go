@@ -143,12 +143,17 @@ func TestAntigravityDynamicRegistrationBatches(t *testing.T) {
 	t.Cleanup(resetAntigravityCapabilityCache)
 	const workers = modelRegistrationMaxWorkersPerCategory
 	var active, peak, calls atomic.Int32
-	started := make(chan struct{}, workers*2+3)
+	const accounts = workers*2 + 3
+	started := make(chan struct{}, accounts)
 	release := make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	defer unblock()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sdkAuth.AntigravityQuotaSummaryPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		current := active.Add(1)
 		defer active.Add(-1)
 		calls.Add(1)
@@ -168,7 +173,7 @@ func TestAntigravityDynamicRegistrationBatches(t *testing.T) {
 	defer server.Close()
 	manager := coreauth.NewManager(nil, nil, nil)
 	svc := &Service{cfg: &config.Config{}, coreManager: manager}
-	for i := range workers*2 + 3 {
+	for i := range accounts {
 		auth := antigravityTestAuth(fmt.Sprint("batch-", i), server.URL)
 		if _, err := manager.Register(t.Context(), auth); err != nil {
 			t.Fatal(err)
@@ -186,7 +191,7 @@ func TestAntigravityDynamicRegistrationBatches(t *testing.T) {
 	unblock()
 	<-done
 	svc.WaitAntigravityProbes()
-	if calls.Load() != workers*2+3 || peak.Load() > workers {
+	if calls.Load() != accounts || peak.Load() > workers {
 		t.Fatalf("calls=%d peak=%d", calls.Load(), peak.Load())
 	}
 	for _, auth := range manager.List() {
@@ -658,6 +663,10 @@ func TestAntigravityBlockedHintPersistenceDoesNotBlockPublicationOrOtherAccounts
 	authBProbed := make(chan struct{}, 2)
 	authARefreshed := make(chan struct{}, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sdkAuth.AntigravityQuotaSummaryPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Header.Get("Authorization") == "Bearer token-slow-b" {
 			_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
 			authBProbed <- struct{}{}

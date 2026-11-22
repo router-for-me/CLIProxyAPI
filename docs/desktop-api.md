@@ -175,10 +175,10 @@ The legacy setting name is retained for existing configurations.
   unscoped windows describe the account and drive `soonest-reset`.
   `reset_cadence`: `"fixed"` (next period starts at the reset), `"on_use"` (starts
   with the first request after the reset) or `null` (unknown: Codex, Devin).
-  Claude reports `on_use` for 5-hour and `fixed` for weekly windows; Codex
-  reports `on_use` for its account-wide 5-hour window. An `on_use` window that
-  has not started has `resets_at: null` (Codex: unused, with a reset a full
-  window away; one started under a minute ago reads the same). Credentials
+  Claude and Antigravity report `on_use` for 5-hour and `fixed` for weekly
+  summary windows. Codex reports `on_use` for its account-wide 5-hour window.
+  An unstarted `on_use` window has `resets_at: null`. Codex and Antigravity
+  can report a reset a full window away before the window starts. Credentials
   without reported windows return `[]`.
 
 Config-backed API keys are listed, disabled ones included, with
@@ -189,10 +189,16 @@ have `"windows": []`. Usage lookups and login renewal don't apply to API keys.
 ## POST /usage/refresh
 
 Body `{"auth_index": "3f2a9c"}` refreshes one eligible credential. An empty
-body runs all registered lookups. The built-in Claude and Codex lookups
+body runs all registered lookups. The built-in Claude, Codex and Antigravity lookups
 refresh enabled OAuth credentials, with 2s between requests within each lookup.
 A Codex lookup reads ChatGPT's usage document, so its windows and reset credits
-appear without Codex traffic. Returns the `GET /usage/windows` shape, plus
+appear without Codex traffic. Antigravity reads `retrieveUserQuotaSummary`.
+The primary Gemini buckets are account-wide and use the labels `5-hour`
+(18,000 seconds) and `Weekly` (604,800 seconds). Other buckets are scoped.
+When the summary is empty or unsupported, `fetchAvailableModels` supplies
+scoped model quotas, including weekly quotas when available.
+
+Returns the `GET /usage/windows` shape, plus
 `"errors": {"<id>": "<message>"}` for failed lookups.
 
 - `404`: unknown `auth_index`.
