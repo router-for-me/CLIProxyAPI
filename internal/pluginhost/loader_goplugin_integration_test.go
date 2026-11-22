@@ -355,7 +355,7 @@ func buildGoPluginOKTestPluginVariant(t *testing.T, outPath string) {
 		}
 		if name == "main.go" {
 			content = bytes.Replace(content, []byte(`return "ok"`), []byte(`return "ok-two"`), 1)
-			if bytes.Equal(content, []byte(`return "ok"`)) || !bytes.Contains(content, []byte(`return "ok-two"`)) {
+			if bytes.Contains(content, []byte(`return "ok"`)) || !bytes.Contains(content, []byte(`return "ok-two"`)) {
 				t.Fatal("the marker value of the variant build was not changed")
 			}
 		}
