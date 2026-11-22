@@ -87,12 +87,15 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 	ensureAntigravityGeminiLeadingUserContentDoc(baseModel, doc)
 
+	populateAntigravityCountTokensModelDoc(doc, baseModel)
+
 	_ = doc.Delete("project")
 	_ = doc.Delete("model")
 	_ = doc.Delete("request.safetySettings")
 	_ = doc.Delete("request.toolConfig")
 	_ = doc.Delete("request.labels")
 	_ = doc.Delete("request.sessionId")
+	_ = doc.Delete("request.stream")
 	sanitizeAntigravityRequestSchemasForModelIfNeededDoc(baseModel, doc)
 
 	base := resolveAntigravityRequestBaseURL(auth)
@@ -188,4 +191,40 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 	sErr := newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
 	return cliproxyexecutor.Response{}, sErr
+}
+
+// populateAntigravityCountTokensModelDoc sets request.model when absent or blank
+// so v1internal:countTokens receives the target tokenizer model after top-level
+// model is removed.
+func populateAntigravityCountTokensModelDoc(doc *ojson.Doc, baseModel string) {
+	if doc == nil {
+		return
+	}
+	if existing := doc.Get("request.model"); existing.Exists() && existing.Type == ojson.String && strings.TrimSpace(existing.String()) != "" {
+		return
+	}
+	candidate := strings.TrimSpace(baseModel)
+	if candidate == "" {
+		if topModel := doc.Get("model"); topModel.Exists() && topModel.Type == ojson.String {
+			candidate = strings.TrimSpace(thinking.ParseSuffix(topModel.String()).ModelName)
+		}
+	}
+	formatted := formatAntigravityCountTokensModel(candidate)
+	if formatted == "" {
+		return
+	}
+	_ = doc.Set("request.model", formatted)
+}
+
+func formatAntigravityCountTokensModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	if strings.HasPrefix(model, "models/") ||
+		strings.HasPrefix(model, "projects/") ||
+		strings.HasPrefix(model, "publishers/") {
+		return model
+	}
+	return "models/" + model
 }
