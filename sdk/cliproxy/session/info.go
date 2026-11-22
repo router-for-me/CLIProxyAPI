@@ -448,199 +448,38 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 
 	// 4. Antigravity CLI (agy) Headers
 	if sid := sessionHeaderValue(headers, "X-Http-Session-Id"); sid != "" {
-		info.ClientType = "agy"
-		info.SessionID = "agy:" + sid
-		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Session-Id")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentSID != "" && parentSID != sid {
-			info.ParentSessionID = "agy:" + parentSID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "agy:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+		parentSID := firstSessionHeaderValue(headers, "X-Parent-Session-ID", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "agy", "agy:", sid, parentSID, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 
 	// 5. OpenCode / Pi Slot / Task / Generic Headers
 	if sid := sessionHeaderValue(headers, "X-Session-ID"); sid != "" {
-		info.ClientType = "generic"
-		info.SessionID = "header:" + sid
-		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Session-Id")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentSID != "" && parentSID != sid {
-			info.ParentSessionID = "header:" + parentSID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "header:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+		parentSID := firstSessionHeaderValue(headers, "X-Parent-Session-ID", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "generic", "header:", sid, parentSID, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 	if sid := sessionHeaderValue(headers, "X-Session-Affinity"); sid != "" {
-		info.ClientType = "opencode"
-		info.SessionID = "affinity:" + sid
-		parentAffinity := sessionHeaderValue(headers, "X-Parent-Session-Affinity")
-		if parentAffinity == "" {
-			parentAffinity = sessionHeaderValue(headers, "X-Parent-Session-ID")
-		}
-		if parentAffinity == "" {
-			parentAffinity = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentAffinity == "" {
-			parentAffinity = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentAffinity != "" && parentAffinity != sid {
-			info.ParentSessionID = "affinity:" + parentAffinity
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "affinity:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+		parentAffinity := firstSessionHeaderValue(headers, "X-Parent-Session-Affinity", "X-Parent-Session-ID", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "opencode", "affinity:", sid, parentAffinity, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 	if sid := sessionHeaderValue(headers, "X-Slot-Session-Id"); sid != "" {
-		info.ClientType = "pi"
-		info.SessionID = "slot:" + sid
-		parentSID := sessionHeaderValue(headers, "X-Parent-Slot-Session-Id")
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Session-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Session-Id")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentSID != "" && parentSID != sid {
-			info.ParentSessionID = "slot:" + parentSID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "slot:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "slot"
-		}
-		return finalizeSessionInfo(info)
+		parentSID := firstSessionHeaderValue(headers, "X-Parent-Slot-Session-Id", "X-Parent-Session-ID", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "pi", "slot:", sid, parentSID, parentCandidate, "slot", headers, root, reqRoot, hasNestedReq)
 	}
-	taskID := sessionHeaderValue(headers, "X-Task-ID")
-	if taskID == "" {
-		taskID = sessionHeaderValue(headers, "X-Task-Id")
-	}
-	if taskID == "" {
-		taskID = sessionHeaderValue(headers, "X-Task_ID")
-	}
-	if taskID != "" {
-		info.ClientType = "task"
-		info.SessionID = "task:" + taskID
-		parentTaskID := sessionHeaderValue(headers, "X-Parent-Task-ID")
-		if parentTaskID == "" {
-			parentTaskID = sessionHeaderValue(headers, "X-Parent-Task-Id")
-		}
-		if parentTaskID == "" {
-			parentTaskID = sessionHeaderValue(headers, "X-Parent-Session-ID")
-		}
-		if parentTaskID == "" {
-			parentTaskID = sessionHeaderValue(headers, "X-Parent-Session-Id")
-		}
-		if parentTaskID == "" {
-			parentTaskID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentTaskID == "" {
-			parentTaskID = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentTaskID != "" && parentTaskID != taskID {
-			info.ParentSessionID = "task:" + parentTaskID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != taskID {
-			info.ParentSessionID = "task:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+	if taskID := firstSessionHeaderValue(headers, "X-Task-ID", "X-Task_ID"); taskID != "" {
+		parentTaskID := firstSessionHeaderValue(headers, "X-Parent-Task-ID", "X-Parent-Session-ID", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "task", "task:", taskID, parentTaskID, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 	if sid := sessionHeaderValue(headers, "X-Conversation-Id"); sid != "" {
-		info.ClientType = "conv"
-		info.SessionID = "conv:" + sid
-		parentCID := sessionHeaderValue(headers, "X-Parent-Conversation-Id")
-		if parentCID == "" {
-			parentCID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentCID != "" && parentCID != sid {
-			info.ParentSessionID = "conv:" + parentCID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "conv:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+		parentCID := firstSessionHeaderValue(headers, "X-Parent-Conversation-Id", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "conv", "conv:", sid, parentCID, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 	if sid := sessionHeaderValue(headers, "X-Thread-Id"); sid != "" {
-		info.ClientType = "openai-thread"
-		info.SessionID = "thread:" + sid
-		parentTID := sessionHeaderValue(headers, "X-Parent-Thread-Id")
-		if parentTID == "" {
-			parentTID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentTID != "" && parentTID != sid {
-			info.ParentSessionID = "thread:" + parentTID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "thread:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+		parentTID := firstSessionHeaderValue(headers, "X-Parent-Thread-Id", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "openai-thread", "thread:", sid, parentTID, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 	if sid := sessionHeaderValue(headers, "X-Client-Request-Id"); sid != "" {
-		info.ClientType = "generic"
-		info.SessionID = "clientreq:" + sid
-		parentSID := sessionHeaderValue(headers, "X-Parent-Session-ID")
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-ID")
-		}
-		if parentSID == "" {
-			parentSID = sessionHeaderValue(headers, "X-Parent-Id")
-		}
-		if parentSID != "" && parentSID != sid {
-			info.ParentSessionID = "clientreq:" + parentSID
-			info.AgentName = "subagent"
-		} else if parentCandidate != "" && parentCandidate != sid {
-			info.ParentSessionID = "clientreq:" + parentCandidate
-			info.AgentName = "subagent"
-		} else {
-			info.AgentName = "main"
-		}
-		return finalizeSessionInfo(info)
+		parentSID := firstSessionHeaderValue(headers, "X-Parent-Session-ID", "X-Parent-ID")
+		return applyHeaderSessionInfo(info, "generic", "clientreq:", sid, parentSID, parentCandidate, "main", headers, root, reqRoot, hasNestedReq)
 	}
 
 	// 6. Payload inspection
@@ -672,9 +511,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 			if tid != "" {
 				info.ClientType = "openai-thread"
-				info.SessionID = "thread:" + tid
+				info.SessionID = "thread:" + encodeSessionSegment(tid)
 				if parentCandidate != "" && parentCandidate != tid {
-					info.ParentSessionID = "thread:" + parentCandidate
+					info.ParentSessionID = "thread:" + encodeSessionSegment(parentCandidate)
 					if isBodyForkCandidate(root, reqRoot, hasNestedReq) {
 						info.IsFork = true
 						info.IsSubagent = false
@@ -691,22 +530,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 
 		// Generic session in payload
-		agentID := normalizedSessionCandidate(root.Get("metadata.agent_id").String())
-		if agentID == "" {
-			agentID = normalizedSessionCandidate(root.Get("metadata.subagent_id").String())
-		}
-		if agentID == "" {
-			agentID = sessionHeaderValue(headers, "X-Claude-Code-Agent-Id")
-		}
-		if agentID == "" {
-			agentID = sessionHeaderValue(headers, "x-agent-id")
-		}
-		if agentID == "" && hasNestedReq {
-			agentID = normalizedSessionCandidate(reqRoot.Get("metadata.agent_id").String())
-			if agentID == "" {
-				agentID = normalizedSessionCandidate(reqRoot.Get("metadata.subagent_id").String())
-			}
-		}
+		agentID := extractSubagentID(headers, root, reqRoot, hasNestedReq)
 
 		for _, path := range []string{
 			"session_id", "sessionId", "sessionID",
@@ -721,17 +545,18 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 			if sid != "" {
 				info.ClientType = "generic"
-				if agentID != "" && agentID != "main" {
-					info.SessionID = "session:" + sid + ":agent:" + agentID
-					info.ParentSessionID = "session:" + sid
+				encodedSID := encodeSessionSegment(sid)
+				if agentID != "" {
+					info.SessionID = "session:" + encodedSID + ":agent:" + encodeSessionSegment(agentID)
+					info.ParentSessionID = "session:" + encodedSID
 					if parentCandidate != "" && parentCandidate != sid {
-						info.ParentSessionID = "session:" + parentCandidate
+						info.ParentSessionID = "session:" + encodeSessionSegment(parentCandidate)
 					}
 					info.AgentName = agentID
 				} else {
-					info.SessionID = "session:" + sid
+					info.SessionID = "session:" + encodedSID
 					if parentCandidate != "" && parentCandidate != sid {
-						info.ParentSessionID = "session:" + parentCandidate
+						info.ParentSessionID = "session:" + encodeSessionSegment(parentCandidate)
 						if isBodyForkCandidate(root, reqRoot, hasNestedReq) {
 							info.IsFork = true
 							info.IsSubagent = false
@@ -762,9 +587,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 			if tid != "" {
 				info.ClientType = "task"
-				info.SessionID = "task:" + tid
+				info.SessionID = "task:" + encodeSessionSegment(tid)
 				if parentCandidate != "" && parentCandidate != tid {
-					info.ParentSessionID = "task:" + parentCandidate
+					info.ParentSessionID = "task:" + encodeSessionSegment(parentCandidate)
 					if isBodyForkCandidate(root, reqRoot, hasNestedReq) {
 						info.IsFork = true
 						info.IsSubagent = false
@@ -781,16 +606,19 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		}
 
 		// Prompt cache key & Conversation object
+		var conversationRawID string
 		var conversationID string
 		conversation := root.Get("conversation")
 		if !conversation.Exists() && hasNestedReq {
 			conversation = reqRoot.Get("conversation")
 		}
 		if sid := normalizedSessionCandidate(conversation.Get("id").String()); sid != "" {
-			conversationID = "conv:" + sid
+			conversationRawID = sid
+			conversationID = "conv:" + encodeSessionSegment(sid)
 		} else if conversation.Type == ojson.String {
 			if sid := normalizedSessionCandidate(conversation.String()); sid != "" {
-				conversationID = "conv:" + sid
+				conversationRawID = sid
+				conversationID = "conv:" + encodeSessionSegment(sid)
 			}
 		}
 		pck := normalizedSessionCandidate(root.Get("prompt_cache_key").String())
@@ -817,8 +645,8 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 		if conversationID != "" {
 			info.ClientType = "conv"
 			info.SessionID = conversationID
-			if parentCandidate != "" && ("conv:"+parentCandidate) != conversationID {
-				info.ParentSessionID = "conv:" + parentCandidate
+			if parentCandidate != "" && parentCandidate != conversationRawID {
+				info.ParentSessionID = "conv:" + encodeSessionSegment(parentCandidate)
 				info.AgentName = "subagent"
 			} else {
 				info.AgentName = "main"
@@ -846,9 +674,9 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 			}
 			if cid != "" {
 				info.ClientType = "conv"
-				info.SessionID = "conv:" + cid
-				if parentCandidate != "" && ("conv:"+parentCandidate) != ("conv:"+cid) {
-					info.ParentSessionID = "conv:" + parentCandidate
+				info.SessionID = "conv:" + encodeSessionSegment(cid)
+				if parentCandidate != "" && parentCandidate != cid {
+					info.ParentSessionID = "conv:" + encodeSessionSegment(parentCandidate)
 					info.AgentName = "subagent"
 				} else {
 					info.AgentName = "main"
@@ -972,6 +800,131 @@ func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 // ExtractTreeInfo is an alias for ExtractSessionInfo for backward compatibility.
 func ExtractTreeInfo(headers http.Header, payload []byte, metadata map[string]any) (SessionInfo, bool) {
 	return ExtractSessionInfo(headers, payload, metadata)
+}
+
+var sessionSegmentReplacer = strings.NewReplacer(
+	":agent~", ":agent~~",
+	":agent:", ":agent~;",
+)
+
+// encodeSessionSegment escapes the reserved ":agent:" delimiter so raw
+// session IDs containing it cannot collide with composed "<sid>:agent:<agent>" IDs
+// while leaving ordinary identifiers unchanged.
+func encodeSessionSegment(raw string) string {
+	if !strings.Contains(raw, ":agent") {
+		return raw
+	}
+	return sessionSegmentReplacer.Replace(raw)
+}
+
+func applyHeaderSessionInfo(
+	info SessionInfo,
+	clientType, prefix, sid, parentSID, parentCandidate, defaultAgentName string,
+	headers http.Header,
+	root, reqRoot sessionObject,
+	hasNestedReq bool,
+) (SessionInfo, bool) {
+	info.ClientType = clientType
+	encodedSID := encodeSessionSegment(sid)
+	info.SessionID = prefix + encodedSID
+	agentID := extractSubagentID(headers, root, reqRoot, hasNestedReq)
+	if parentSID != "" && parentSID != sid {
+		info.ParentSessionID = prefix + encodeSessionSegment(parentSID)
+		info.IsSubagent = true
+		if agentID != "" {
+			info.AgentName = agentID
+		} else {
+			info.AgentName = "subagent"
+		}
+		return finalizeSessionInfo(info)
+	}
+	if agentID != "" {
+		info.SessionID = prefix + encodedSID + ":agent:" + encodeSessionSegment(agentID)
+		info.ParentSessionID = prefix + encodedSID
+		parentAgentID, bodyParentAgentID := extractHeaderParentAgentID(headers, root, reqRoot, hasNestedReq)
+		if parentAgentID != "" && parentAgentID != agentID {
+			info.ParentSessionID = prefix + encodedSID + ":agent:" + encodeSessionSegment(parentAgentID)
+		} else if parentCandidate != "" && parentCandidate != sid && parentCandidate != bodyParentAgentID {
+			info.ParentSessionID = prefix + encodeSessionSegment(parentCandidate)
+		}
+		info.AgentName = agentID
+		info.IsSubagent = true
+		return finalizeSessionInfo(info)
+	}
+	if parentCandidate != "" && parentCandidate != sid {
+		info.ParentSessionID = prefix + encodeSessionSegment(parentCandidate)
+		info.AgentName = "subagent"
+	} else {
+		info.AgentName = defaultAgentName
+	}
+	return finalizeSessionInfo(info)
+}
+
+// extractSubagentID resolves the first concrete (non-empty, non-"main") subagent
+// identifier using the same candidate precedence across header and body session branches.
+func extractSubagentID(headers http.Header, root, reqRoot sessionObject, hasNestedReq bool) string {
+	if root.Exists() {
+		for _, path := range []string{"metadata.agent_id", "metadata.subagent_id"} {
+			if agentID := normalizedSessionCandidate(root.Get(path).String()); agentID != "" && agentID != "main" {
+				return agentID
+			}
+		}
+	}
+	for _, name := range []string{"X-Claude-Code-Agent-Id", "X-Agent-Id"} {
+		if agentID := sessionHeaderValue(headers, name); agentID != "" && agentID != "main" {
+			return agentID
+		}
+	}
+	if hasNestedReq {
+		for _, path := range []string{"metadata.agent_id", "metadata.subagent_id"} {
+			if agentID := normalizedSessionCandidate(reqRoot.Get(path).String()); agentID != "" && agentID != "main" {
+				return agentID
+			}
+		}
+	}
+	return ""
+}
+
+func extractHeaderParentAgentID(headers http.Header, root, reqRoot sessionObject, hasNestedReq bool) (parentAgentID, bodyParentAgentID string) {
+	if root.Exists() {
+		for _, path := range []string{"metadata.parent_agent_id", "metadata.parentAgentId"} {
+			if val := normalizedSessionCandidate(root.Get(path).String()); val != "" {
+				if bodyParentAgentID == "" {
+					bodyParentAgentID = val
+				}
+				if val != "main" {
+					return val, val
+				}
+			}
+		}
+	}
+	for _, name := range []string{"X-Claude-Code-Parent-Agent-Id", "X-Parent-Agent-Id"} {
+		if val := sessionHeaderValue(headers, name); val != "" && val != "main" {
+			return val, bodyParentAgentID
+		}
+	}
+	if hasNestedReq {
+		for _, path := range []string{"metadata.parent_agent_id", "metadata.parentAgentId"} {
+			if val := normalizedSessionCandidate(reqRoot.Get(path).String()); val != "" {
+				if bodyParentAgentID == "" {
+					bodyParentAgentID = val
+				}
+				if val != "main" {
+					return val, val
+				}
+			}
+		}
+	}
+	return "", bodyParentAgentID
+}
+
+func firstSessionHeaderValue(headers http.Header, names ...string) string {
+	for _, name := range names {
+		if value := sessionHeaderValue(headers, name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func sessionHeaderValue(headers http.Header, name string) string {

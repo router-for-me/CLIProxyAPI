@@ -163,30 +163,24 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		return resp, err
 	}
 
-	if httpResp.StatusCode == http.StatusTooManyRequests {
-		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
-			err = err429
-			return resp, err
-		}
-	}
-
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
-		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
-			// Report the upstream failure rather than the cleanup failure.
-			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
-		}
-		if httpResp.StatusCode == http.StatusForbidden {
-			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
-		}
-		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
+		err = e.applyAntigravityUpstreamError(ctx, auth, baseModel, useCredits, replayScope, httpResp.StatusCode, httpResp.Header, bodyBytes)
+		return resp, err
+	}
+
+	// Surface any in-band JSON error payload on HTTP 2xx immediately with its
+	// upstream status and 429/403/401/replay bookkeeping instead of clearing
+	// credits failure state or falling through to translation.
+	if errorResult := ojson.GetBytesNoCopy(bodyBytes, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
+		statusCode := antigravityInBandErrorStatusCode(errorResult)
+		log.Debugf("antigravity executor: upstream in-band error status: %d", statusCode)
+		err = e.applyAntigravityUpstreamError(ctx, auth, baseModel, useCredits, replayScope, statusCode, httpResp.Header, bodyBytes)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 
 	// Success
-	if useCredits {
-		clearAntigravityCreditsFailureState(auth)
-	}
 	reporter.ObserveResponseModel(bodyBytes)
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, bodyBytes, true); zeroOutput {
 		antiDetail := helps.ParseAntigravityUsage(bodyBytes)
@@ -196,10 +190,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	if len(replayRequestPayload) == 0 {
-		replayRequestPayload = requestPayload
-	}
-	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, replayRequestPayload, bodyBytes)
+	rawResponseBody := bodyBytes
 	bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
 	var param any
 	converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, helps.ApplyPatchOriginalRequest(req, opts), translated, bodyBytes, &param)
@@ -212,6 +203,13 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
+	}
+	if len(replayRequestPayload) == 0 {
+		replayRequestPayload = requestPayload
+	}
+	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, replayRequestPayload, rawResponseBody)
+	if useCredits {
+		clearAntigravityCreditsFailureState(auth)
 	}
 	antiDetail := helps.ParseAntigravityUsage(bodyBytes)
 	helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
@@ -398,21 +396,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			err = errRead
 			return resp, err
 		}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
-				err = err429
-				return resp, err
-			}
-		}
-
-		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
-			// Report the upstream failure rather than the cleanup failure.
-			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
-		}
-		if httpResp.StatusCode == http.StatusForbidden {
-			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
-		}
-		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
+		err = e.applyAntigravityUpstreamError(ctx, auth, baseModel, useCredits, replayScope, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return resp, err
 	}
 
@@ -437,29 +421,11 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		// upstream status and 429/TOS/replay bookkeeping instead of letting it
 		// degrade into a synthetic zero-output 502 or truncated HTTP 200 response.
 		if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
-			statusCode := int(errorResult.Get("code").Int())
-			if statusCode < http.StatusBadRequest || statusCode > 599 {
-				statusCode = http.StatusBadGateway
-			}
+			statusCode := antigravityInBandErrorStatusCode(errorResult)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
 			}
-			var midStreamErr error
-			if statusCode == http.StatusTooManyRequests {
-				if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, nil, payload); err429 != nil {
-					midStreamErr = err429
-				}
-			}
-			if midStreamErr == nil {
-				if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, payload); errClear != nil {
-					logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
-				}
-				if statusCode == http.StatusForbidden {
-					e.applyAntigravityForbiddenState(e.cfg, auth, payload)
-				}
-				midStreamErr = newAntigravityStatusErr(statusCode, payload)
-			}
-			err = midStreamErr
+			err = e.applyAntigravityUpstreamError(ctx, auth, baseModel, useCredits, replayScope, statusCode, nil, payload)
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 			reporter.PublishFailure(ctx, err)
 			return resp, err
@@ -506,9 +472,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	if replayAccumulator != nil {
-		replayAccumulator.Commit(ctx)
-	}
 	resp = cliproxyexecutor.Response{Payload: aggregatedPayload}
 
 	resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, resp.Payload)
@@ -524,6 +487,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		helps.ApplyGeminiRequestImageConfig(&antiDetail, requestPayload)
 		reporter.PublishFailureWithDetail(ctx, antiDetail, err)
 		return cliproxyexecutor.Response{}, err
+	}
+	if replayAccumulator != nil {
+		replayAccumulator.Commit(ctx)
 	}
 	if useCredits {
 		clearAntigravityCreditsFailureState(auth)

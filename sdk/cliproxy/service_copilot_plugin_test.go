@@ -146,7 +146,7 @@ func TestCopilotPluginCatalogPublishesExecutableRoutes(t *testing.T) {
 				{"team/copilot/" + beta, "beta", "Plugin Beta (Copilot)", strings.Trim(tc.betaSuffix, "()"), "beta"},
 			} {
 				if !slices.ContainsFunc(registered, func(info *ModelInfo) bool {
-					return info.ID == want.id && info.MetadataModelID == want.native && info.DisplayName == want.displayName
+					return info.ID == want.id && info.SourceModelID == copilot.ModelPrefix+want.native && info.MetadataModelID == want.native && info.DisplayName == want.displayName
 				}) {
 					t.Fatalf("missing published route %+v", want)
 				}

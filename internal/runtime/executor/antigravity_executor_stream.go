@@ -168,21 +168,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			err = errRead
 			return nil, err
 		}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, httpResp.Header, bodyBytes); err429 != nil {
-				err = err429
-				return nil, err
-			}
-		}
-
-		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
-			// Report the upstream failure rather than the cleanup failure.
-			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
-		}
-		if httpResp.StatusCode == http.StatusForbidden {
-			e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
-		}
-		err = newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
+		err = e.applyAntigravityUpstreamError(ctx, auth, baseModel, useCredits, replayScope, httpResp.StatusCode, httpResp.Header, bodyBytes)
 		return nil, err
 	}
 	if len(replayRequestPayload) == 0 {
@@ -210,7 +196,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var terminalDelivered bool
 		var param any
 		commitReplay := func() {
-			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamErr == nil && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil {
+			streamOK := streamErr == nil || (terminalDelivered && errors.Is(streamErr, context.Canceled) && errors.Is(ctx.Err(), context.Canceled))
+			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamOK && !translatedErrorStopped && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil {
 				replayAccumulator.Commit(ctx)
 				replayCommitted = true
 			}
@@ -287,24 +274,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			streamUsage.ObserveAntigravityStream(payload)
 
 			if errorResult := ojson.GetBytesNoCopy(payload, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
-				statusCode := int(errorResult.Get("code").Int())
-				if statusCode < http.StatusBadRequest || statusCode > 599 {
-					statusCode = http.StatusBadGateway
-				}
-				if statusCode == http.StatusTooManyRequests {
-					if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, nil, payload); err429 != nil {
-						streamErr = err429
-					}
-				}
-				if streamErr == nil {
-					if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, statusCode, payload); errClear != nil {
-						logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)
-					}
-					if statusCode == http.StatusForbidden {
-						e.applyAntigravityForbiddenState(e.cfg, auth, payload)
-					}
-					streamErr = newAntigravityStatusErr(statusCode, payload)
-				}
+				statusCode := antigravityInBandErrorStatusCode(errorResult)
+				streamErr = e.applyAntigravityUpstreamError(ctx, auth, baseModel, useCredits, replayScope, statusCode, nil, payload)
 				stopDeliverySupport()
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 				select {

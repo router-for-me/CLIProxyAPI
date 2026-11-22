@@ -236,7 +236,7 @@ func (e *AntigravityExecutor) refreshTokenWithOptions(ctx context.Context, auth 
 	auth.Metadata["timestamp"] = now.UnixMilli()
 	auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	auth.Metadata["type"] = antigravityAuthType
-	if discoverProject {
+	if discoverProject && !isAntigravityAuthDisabled(auth) {
 		if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 			log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
 		}
@@ -382,7 +382,7 @@ func newAntigravityProjectDiscoveryHTTPClient(ctx context.Context, cfg *config.C
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
-	if auth == nil {
+	if isAntigravityAuthDisabled(auth) {
 		return nil
 	}
 

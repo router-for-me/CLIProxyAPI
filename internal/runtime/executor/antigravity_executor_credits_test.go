@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -37,7 +39,9 @@ func resetAntigravityCreditsRetryState() {
 	antigravityCreditsFailureByAuth.Clear()
 	antigravityShortCooldownByAuth.Clear()
 	antigravityCreditsBalanceByAuth.Clear()
+	antigravityCreditsCurrentScope.Clear()
 	antigravityCreditsHintRefreshByID.Clear()
+	antigravityCreditsRefreshRegistries.Clear()
 }
 
 type closeSignalReadCloser struct {
@@ -115,6 +119,15 @@ func (c *fakeAntigravityKVClient) KVSetNX(_ context.Context, key string, value [
 	return false, nil
 }
 
+func (c *fakeAntigravityKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, value []byte, _ time.Duration) (bool, error) {
+	current, ok := c.values[key]
+	if ok != expectedExists || (expectedExists && string(current) != string(expected)) {
+		return false, nil
+	}
+	c.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
 func (c *fakeAntigravityKVClient) KVDel(_ context.Context, keys ...string) (int64, error) {
 	c.delCount++
 	if c.delErr != nil {
@@ -130,14 +143,38 @@ func (c *fakeAntigravityKVClient) KVDel(_ context.Context, keys ...string) (int6
 	return deleted, nil
 }
 
+func (c *fakeAntigravityKVClient) KVExpire(context.Context, string, time.Duration) (bool, error) {
+	return false, nil
+}
+
+func (c *fakeAntigravityKVClient) KVTTL(context.Context, string) (time.Duration, bool, error) {
+	return 0, false, nil
+}
+
+func (c *fakeAntigravityKVClient) KVIncrBy(context.Context, string, int64) (int64, error) {
+	return 0, nil
+}
+
+func (c *fakeAntigravityKVClient) KVMGet(context.Context, ...string) ([][]byte, []bool, error) {
+	return nil, nil, nil
+}
+
+func (c *fakeAntigravityKVClient) KVMSet(context.Context, map[string][]byte) error {
+	return nil
+}
+
 func useFakeAntigravityKVClient(t *testing.T, client *fakeAntigravityKVClient, homeMode bool, errClient error) {
 	t.Helper()
 	previous := currentAntigravityKVClient
 	currentAntigravityKVClient = func() (antigravityKVClient, bool, error) {
 		return client, homeMode, errClient
 	}
+	kvstore.RegisterHomeProvider(func() (kvstore.KVClient, bool, error) {
+		return client, homeMode, errClient
+	})
 	t.Cleanup(func() {
 		currentAntigravityKVClient = previous
+		kvstore.RegisterHomeProvider(func() (kvstore.KVClient, bool, error) { return nil, false, nil })
 	})
 }
 
@@ -508,8 +545,8 @@ func TestAntigravityAuthHasCreditsRequiredHomeBalanceUsesKV(t *testing.T) {
 	if ok {
 		t.Fatalf("antigravityAuthHasCreditsRequired() = true, want Home KV balance to win over local cache")
 	}
-	if client.getCount != 1 {
-		t.Fatalf("KVGet count = %d, want 1", client.getCount)
+	if client.getCount != 2 {
+		t.Fatalf("KVGet count = %d, want 2 (hint then balance)", client.getCount)
 	}
 }
 
@@ -520,7 +557,7 @@ func TestStoreAntigravityCreditsBalanceBestEffortHomeKV(t *testing.T) {
 	client := newFakeAntigravityKVClient()
 	useFakeAntigravityKVClient(t, client, true, nil)
 
-	storeAntigravityCreditsBalanceBestEffort(authID, antigravityCreditsBalance{
+	storeAntigravityCreditsBalanceBestEffort(&cliproxyauth.Auth{ID: authID}, antigravityCreditsBalance{
 		CreditAmount:    25000,
 		MinCreditAmount: 50,
 		Known:           true,
@@ -836,7 +873,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
 			})
 
-			if _, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
+			registered, errRegister := manager.Register(context.Background(), &cliproxyauth.Auth{
 				ID:       authID,
 				Provider: "antigravity",
 				Attributes: map[string]string{
@@ -847,7 +884,8 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 					"project_id":   "project-1",
 					"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
 				},
-			}); errRegister != nil {
+			})
+			if errRegister != nil {
 				t.Fatalf("register auth: %v", errRegister)
 			}
 
@@ -867,7 +905,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 				CreditAmount:    100,
 				MinCreditAmount: 50,
 				UpdatedAt:       time.Now(),
-			})
+			}, registered.RegistrationEpoch)
 			if stream {
 				if _, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, req, opts); errStream == nil {
 					t.Fatal("initial ExecuteStream() succeeded, want 429 after quota and credits exhaustion")
@@ -882,10 +920,10 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 					waitForAntigravityCreditsRefresh(t, state)
 				}
 			}
-			if _, failed := antigravityCreditsFailureByAuth.Load(authID); !failed {
+			if _, failed := antigravityCreditsFailureByAuth.Load(newAntigravityCreditsCacheKey(authID, cliproxyauth.AntigravityCreditsScope(registered))); !failed {
 				t.Fatal("expected auth to be marked permanently disabled after INSUFFICIENT_G1_CREDITS_BALANCE")
 			}
-			hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID)
+			hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID, registered.RegistrationEpoch)
 			if !ok || !hint.Known || hint.Available {
 				t.Fatalf("hint after exhaustion = %#v (ok=%v), want Known=true Available=false", hint, ok)
 			}
@@ -906,7 +944,7 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 				CreditAmount:    0,
 				MinCreditAmount: 1,
 				UpdatedAt:       time.Now().Add(-antigravityCreditsHintRefreshInterval - time.Second),
-			})
+			}, registered.RegistrationEpoch)
 
 			// Step 3: Request recovers via credits fallback while model cooldown is active and triggers loadCodeAssist refresh.
 			if stream {
@@ -942,11 +980,11 @@ func TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCoo
 			if loadCodeAssistCalls.Load() <= callsBeforeTopUp {
 				t.Fatalf("loadCodeAssist calls after top-up = %d, want > %d", loadCodeAssistCalls.Load(), callsBeforeTopUp)
 			}
-			hint, ok = cliproxyauth.GetAntigravityCreditsHint(authID)
+			hint, ok = cliproxyauth.GetAntigravityCreditsHint(authID, registered.RegistrationEpoch)
 			if !ok || !hint.Known || !hint.Available || hint.CreditAmount != 2516 {
 				t.Fatalf("hint after recovery = %#v (ok=%v), want Known=true Available=true CreditAmount=2516", hint, ok)
 			}
-			if _, failed := antigravityCreditsFailureByAuth.Load(authID); failed {
+			if _, failed := antigravityCreditsFailureByAuth.Load(newAntigravityCreditsCacheKey(authID, cliproxyauth.AntigravityCreditsScope(registered))); failed {
 				t.Fatal("expected permanently disabled credits state to be cleared after recovery")
 			}
 		})
@@ -957,7 +995,9 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistUserAgent(t *testing.T) {
 	resetAntigravityCreditsRetryState()
 	t.Cleanup(resetAntigravityCreditsRetryState)
 
-	exec := NewAntigravityExecutor(&config.Config{})
+	exec := NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	})
 	const configuredUserAgent = "antigravity/hub/1.23.2 windows/amd64 google-api-nodejs-client/10.3.0"
 	const loadCodeAssistUserAgent = "antigravity/hub/1.23.2 windows/amd64"
 	auth := &cliproxyauth.Auth{
@@ -1100,6 +1140,240 @@ func TestUpdateAntigravityCreditsBalanceForTask_EmptyAndNonMatchingAvailableCred
 	}
 }
 
+func TestUpdateAntigravityCreditsBalanceForTask_MissingAndZeroMinimumCreditAmountForUsage(t *testing.T) {
+	tests := []struct {
+		name           string
+		responseBody   string
+		seedDisabled   bool
+		wantAvailable  bool
+		wantStoredBal  bool
+		wantCredit     float64
+		wantMinCredit  float64
+		wantPaidTierID string
+	}{
+		{
+			name:           "omitted minimumCreditAmountForUsage defaults to zero and marks positive balance available",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000"}]}}`,
+			seedDisabled:   true,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "null minimumCreditAmountForUsage defaults to zero",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":null}]}}`,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "empty string minimumCreditAmountForUsage defaults to zero",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":""}]}}`,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "whitespace minimumCreditAmountForUsage defaults to zero",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"   "}]}}`,
+			wantAvailable:  true,
+			wantStoredBal:  true,
+			wantCredit:     1000,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "omitted minimumCreditAmountForUsage with zero creditAmount marks unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"0"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  true,
+			wantCredit:     0,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "explicit zero minimumCreditAmountForUsage with zero creditAmount marks unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"0","minimumCreditAmountForUsage":"0"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  true,
+			wantCredit:     0,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "omitted minimumCreditAmountForUsage with negative creditAmount marks unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"-5"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  true,
+			wantCredit:     -5,
+			wantMinCredit:  0,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "invalid non-empty minimumCreditAmountForUsage skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"not-a-number"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "negative minimumCreditAmountForUsage skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"-10"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "non-finite creditAmount skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"Inf","minimumCreditAmountForUsage":"50"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+		{
+			name:           "non-finite minimumCreditAmountForUsage skips entry and publishes unavailable",
+			responseBody:   `{"paidTier":{"id":"g1-pro-tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1000","minimumCreditAmountForUsage":"NaN"}]}}`,
+			wantAvailable:  false,
+			wantStoredBal:  false,
+			wantPaidTierID: "g1-pro-tier",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			authID := fmt.Sprintf("auth-issue7798-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			auth := &cliproxyauth.Auth{ID: authID}
+			if tc.seedDisabled {
+				markAntigravityCreditsPermanentlyDisabled(auth)
+			}
+
+			exec := NewAntigravityExecutor(&config.Config{
+				QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+			})
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(tc.responseBody)),
+				}, nil
+			}))
+
+			exec.updateAntigravityCreditsBalanceForTask(ctx, auth, "token", nil)
+
+			hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+			if !ok || !hint.Known {
+				t.Fatalf("GetAntigravityCreditsHint() = (%#v, %v), want Known=true", hint, ok)
+			}
+			if hint.Available != tc.wantAvailable {
+				t.Fatalf("hint.Available = %v, want %v", hint.Available, tc.wantAvailable)
+			}
+			if hint.PaidTierID != tc.wantPaidTierID {
+				t.Fatalf("hint.PaidTierID = %q, want %q", hint.PaidTierID, tc.wantPaidTierID)
+			}
+			if hint.UpdatedAt.IsZero() {
+				t.Fatal("hint.UpdatedAt is zero, want non-zero timestamp")
+			}
+			if tc.wantStoredBal {
+				if hint.CreditAmount != tc.wantCredit || hint.MinCreditAmount != tc.wantMinCredit {
+					t.Fatalf("hint amounts = (%v, %v), want (%v, %v)", hint.CreditAmount, hint.MinCreditAmount, tc.wantCredit, tc.wantMinCredit)
+				}
+				rawBal, foundBal := antigravityCreditsBalanceByAuth.Load(auth.ID)
+				if !foundBal {
+					t.Fatal("antigravityCreditsBalanceByAuth missing stored balance, want present")
+				}
+				bal, validBal := rawBal.(antigravityCreditsBalance)
+				if !validBal || !bal.Known || bal.CreditAmount != tc.wantCredit || bal.MinCreditAmount != tc.wantMinCredit {
+					t.Fatalf("stored balance = %#v, want Known=true CreditAmount=%v MinCreditAmount=%v", bal, tc.wantCredit, tc.wantMinCredit)
+				}
+			} else if _, foundBal := antigravityCreditsBalanceByAuth.Load(auth.ID); foundBal {
+				t.Fatal("antigravityCreditsBalanceByAuth stored balance for skipped entry, want absent")
+			}
+			if tc.seedDisabled && tc.wantAvailable {
+				if _, stillDisabled := antigravityCreditsFailureByAuth.Load(auth.ID); stillDisabled {
+					t.Fatal("antigravityCreditsFailureByAuth still present after positive balance recovery, want cleared")
+				}
+			}
+
+			hasCredits, errCredits := antigravityAuthHasCreditsRequired(ctx, auth)
+			if errCredits != nil {
+				t.Fatalf("antigravityAuthHasCreditsRequired() error = %v", errCredits)
+			}
+			if hasCredits != tc.wantAvailable {
+				t.Fatalf("antigravityAuthHasCreditsRequired() = %v, want %v", hasCredits, tc.wantAvailable)
+			}
+		})
+	}
+}
+
+func TestAntigravityAuthHasCredits_ZeroAndNonFiniteBalances(t *testing.T) {
+	tests := []struct {
+		name string
+		bal  antigravityCreditsBalance
+		want bool
+	}{
+		{
+			name: "positive balance with zero minimum is available",
+			bal:  antigravityCreditsBalance{CreditAmount: 1000, MinCreditAmount: 0, Known: true},
+			want: true,
+		},
+		{
+			name: "zero balance with zero minimum is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: 0, MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+		{
+			name: "negative balance with zero minimum is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: -5, MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+		{
+			name: "positive balance with negative minimum is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: 100, MinCreditAmount: -1, Known: true},
+			want: false,
+		},
+		{
+			name: "infinite credit amount is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: math.Inf(1), MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+		{
+			name: "NaN credit amount is unavailable",
+			bal:  antigravityCreditsBalance{CreditAmount: math.NaN(), MinCreditAmount: 0, Known: true},
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			authID := fmt.Sprintf("auth-issue7798-bal-%s-%d", strings.ReplaceAll(tc.name, " ", "-"), time.Now().UnixNano())
+			t.Cleanup(func() {
+				cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+			})
+
+			antigravityCreditsBalanceByAuth.Store(authID, tc.bal)
+			if got := antigravityAuthHasCredits(&cliproxyauth.Auth{ID: authID}); got != tc.want {
+				t.Fatalf("antigravityAuthHasCredits() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUpdateAntigravityCreditsBalanceForTask_BoundsResponseBodyRead(t *testing.T) {
 	t.Run("rejects oversized response without unbounded read", func(t *testing.T) {
 		resetAntigravityCreditsRetryState()
@@ -1221,7 +1495,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.
 		var gotCustom string
 		var gotURL string
 
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		auth := &cliproxyauth.Auth{
 			ID: "auth-issue7820-custom-headers",
 			Attributes: map[string]string{
@@ -1263,7 +1539,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.
 		var gotHost string
 		var gotCustom string
 
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		auth := &cliproxyauth.Auth{
 			ID: "auth-issue7820-host-override",
 			Attributes: map[string]string{
@@ -1331,7 +1609,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_HostAndCustomHeaders(t *testing.
 			wg.Wait()
 		})
 
-		exec := NewAntigravityExecutor(&config.Config{})
+		exec := NewAntigravityExecutor(&config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		})
 		auth := &cliproxyauth.Auth{
 			ID: "auth-issue7820-detached-gin",
 			Attributes: map[string]string{
@@ -1388,7 +1668,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 			logger.SetOutput(oldOutput)
 		})
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1424,7 +1706,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1454,7 +1738,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		oversizedTOS := strings.TrimSuffix(strings.TrimSpace(antigravityTOSBody), "}") + `,"padding":"` + strings.Repeat("a", antigravityLoadCodeAssistMaxResponseBytes+1024) + `"}`
 		body := &countingReadCloser{reader: strings.NewReader(oversizedTOS)}
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1483,7 +1769,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{
@@ -1522,7 +1810,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 			logger.SetOutput(oldOutput)
 		})
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 
@@ -1555,7 +1845,7 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		exec.queueAntigravityCreditsRefresh(oldCtx, oldAuth, "old-token", 0)
 		<-oldStarted
 
-		rawState, ok := antigravityCreditsHintRefreshByID.Load(authID)
+		rawState, ok := antigravityCreditsHintRefreshByID.Load(authID + "|" + cliproxyauth.AntigravityCreditsScope(oldAuth))
 		if !ok {
 			t.Fatal("expected queued credits refresh state to exist")
 		}
@@ -1581,9 +1871,14 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 			}, nil
 		}))
 		exec.queueAntigravityCreditsRefresh(newCtx, newAuth, "new-token", 0)
-		state.mu.Lock()
-		newTask := state.task
-		state.mu.Unlock()
+		newStateValue, okNewState := antigravityCreditsHintRefreshByID.Load(authID + "|" + cliproxyauth.AntigravityCreditsScope(newAuth))
+		if !okNewState {
+			t.Fatal("expected replacement queued refresh state to exist")
+		}
+		newState := newStateValue.(*antigravityCreditsHintRefreshState)
+		newState.mu.Lock()
+		newTask := newState.task
+		newState.mu.Unlock()
 		if newTask != nil {
 			<-newTask.done
 		}
@@ -1606,7 +1901,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 
@@ -1634,7 +1931,7 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		exec.queueAntigravityCreditsRefresh(ctx, auth, "token", 0)
 		<-started
 
-		rawState, ok := antigravityCreditsHintRefreshByID.Load(authID)
+		rawState, ok := antigravityCreditsHintRefreshByID.Load(authID + "|" + cliproxyauth.AntigravityCreditsScope(auth))
 		if !ok {
 			t.Fatal("expected queued credits refresh state to exist")
 		}
@@ -1658,7 +1955,9 @@ func TestUpdateAntigravityCreditsBalanceForTask_ForbiddenTOSViolation(t *testing
 		resetAntigravityCreditsRetryState()
 		t.Cleanup(resetAntigravityCreditsRetryState)
 
-		cfg := &config.Config{}
+		cfg := &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		}
 		cfg.Antigravity.TOSPauseWindow = "1h"
 		exec := NewAntigravityExecutor(cfg)
 		auth := &cliproxyauth.Auth{

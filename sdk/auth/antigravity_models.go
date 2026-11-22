@@ -119,7 +119,9 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 	}
 
 	doc := ojson.NewDoc([]byte("{}"))
-	doc.Set("project", strings.TrimSpace(req.ProjectID))
+	if projectID := strings.TrimSpace(req.ProjectID); projectID != "" {
+		doc.Set("project", projectID)
+	}
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+AntigravityModelsPath, bytes.NewReader(doc.Bytes()))
 	if errReq != nil {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError

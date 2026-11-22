@@ -164,34 +164,62 @@ func preserveRequestedModelSuffix(requestedModel, resolved string) string {
 	return preserveResolvedModelSuffix(resolved, thinking.ParseSuffix(requestedModel))
 }
 
-func (m *Manager) usesPublishedCopilotRoutes(auth *Auth) bool {
-	return isCopilotAuth(auth) && !m.HomeEnabled() && strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) == ""
+func (m *Manager) usesPublishedModelRoutes(auth *Auth) bool {
+	if auth == nil || strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) != "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(auth.Provider)) {
+	case "copilot", "devin":
+		return !m.HomeEnabled()
+	default:
+		return false
+	}
 }
 
-func copilotRouteForAuth(reg *registry.ModelRegistry, authID, routeModel string) (string, registry.ClientModelRouteInfo) {
+func publishedModelRouteForAuth(reg *registry.ModelRegistry, auth *Auth, routeModel string) registry.ClientModelRouteInfo {
 	routeModel = strings.TrimSpace(routeModel)
+	parsed := thinking.ParseSuffix(routeModel)
+	isCopilot := isCopilotAuth(auth)
 	var fallback string
-	if thinking.HasThinkingSuffix(routeModel) {
-		fallback = strings.TrimSpace(thinking.ParseSuffix(routeModel).ModelName)
+	if parsed.HasSuffix && (!isCopilot || thinking.HasThinkingSuffix(routeModel)) {
+		fallback = strings.TrimSpace(parsed.ModelName)
 	}
-	route := reg.LookupClientModelRoute(authID, routeModel, fallback)
-	if native := strings.TrimSpace(route.MetadataModelID); native != "" {
-		return copilot.ModelPrefix + native, route
+	route := reg.LookupClientModelRoute(auth.ID, routeModel, fallback)
+	route.SourceModelID = publishedSourceModelID(route.SourceModelID, route.MetadataModelID, isCopilot)
+	if isCopilot && route.SourceModelID == "" {
+		return registry.ClientModelRouteInfo{}
 	}
-	return "", route
+	return route
 }
 
-func (m *Manager) copilotExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {
-	model, route := copilotRouteForAuth(registry.GetGlobalRegistry(), auth.ID, routeModel)
-	if model == "" {
-		return OAuthModelAliasResult{}
+func publishedSourceModelID(sourceID, metadataID string, legacyCopilot bool) string {
+	// Older Copilot registrations stored the source in the metadata field.
+	if sourceID == "" && legacyCopilot {
+		if metadataID = strings.TrimSpace(metadataID); metadataID != "" {
+			return copilot.ModelPrefix + strings.TrimPrefix(metadataID, copilot.ModelPrefix)
+		}
 	}
-	// Like other OAuth aliases, a suffix on the published source takes precedence over the request suffix.
-	model = preserveRequestedModelSuffix(route.OAuthAliasSource, model)
-	routeModel = strings.TrimSpace(routeModel)
-	result := OAuthModelAliasResult{UpstreamModel: preserveRequestedModelSuffix(routeModel, model)}
+	return sourceID
+}
+
+func (m *Manager) publishedModelExecutionAliasResult(auth *Auth, routeModel string) (OAuthModelAliasResult, bool) {
+	if !m.usesPublishedModelRoutes(auth) {
+		return OAuthModelAliasResult{}, false
+	}
+	route := publishedModelRouteForAuth(registry.GetGlobalRegistry(), auth, routeModel)
+	if route.SourceModelID == "" {
+		// Devin plugin and SDK registrations without a source keep their existing execution mapping.
+		return OAuthModelAliasResult{}, route.ID == ""
+	}
+	// A suffix on a special registered source takes precedence over the request suffix.
+	model := preserveRequestedModelSuffix(route.OAuthAliasSource, route.SourceModelID)
+	request := thinking.ParseSuffix(strings.TrimSpace(routeModel))
+	if request.HasSuffix && !thinking.ParseSuffix(model).HasSuffix {
+		model += "(" + request.RawSuffix + ")"
+	}
+	result := OAuthModelAliasResult{UpstreamModel: model}
 	if route.OAuthAliasSource == "" {
-		return result
+		return result, true
 	}
 	// Use the current response mapping only if it still describes the exact published alias and source.
 	entry := m.lookupExactOAuthModelAlias(auth, route.OAuthAlias)
@@ -202,12 +230,11 @@ func (m *Manager) copilotExecutionAliasResult(auth *Auth, routeModel string) OAu
 			result.OriginalAlias = preserveRequestedModelSuffix(routeModel, route.OAuthAlias)
 		}
 	}
-	return result
+	return result, true
 }
 
 func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
-	if m.usesPublishedCopilotRoutes(auth) {
-		result := m.copilotExecutionAliasResult(auth, routeModel)
+	if result, published := m.publishedModelExecutionAliasResult(auth, routeModel); published {
 		if result.UpstreamModel == "" {
 			return nil
 		}
@@ -236,7 +263,7 @@ func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []stri
 
 // ResolveExecutionModel returns the credential-aware upstream model used by
 // normal execution. It prefers Home-dispatched upstream models when present.
-// For local Copilot credentials, it returns an empty string if no route is published.
+// For local Copilot and Devin credentials, it returns an empty string if no route is published.
 func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 	routeModel = strings.TrimSpace(routeModel)
 	if m == nil {
@@ -244,7 +271,7 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 	}
 	candidates := m.executionModelCandidates(auth, routeModel)
 	if len(candidates) == 0 {
-		if m.usesPublishedCopilotRoutes(auth) {
+		if m.usesPublishedModelRoutes(auth) {
 			return ""
 		}
 		return routeModel
@@ -256,9 +283,11 @@ func (m *Manager) ResolveExecutionModel(auth *Auth, routeModel string) string {
 }
 
 func (m *Manager) selectionModelForAuth(auth *Auth, routeModel string) string {
-	if m.usesPublishedCopilotRoutes(auth) {
-		model, _ := copilotRouteForAuth(registry.GetGlobalRegistry(), auth.ID, routeModel)
-		return model
+	if m.usesPublishedModelRoutes(auth) {
+		route := publishedModelRouteForAuth(registry.GetGlobalRegistry(), auth, routeModel)
+		if route.SourceModelID != "" || route.ID == "" {
+			return route.SourceModelID
+		}
 	}
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	if strings.TrimSpace(requestedModel) == "" {
@@ -411,7 +440,7 @@ func (m *Manager) clientModelProjectionForAuth(auth *Auth, routeModel string, no
 }
 
 func (m *Manager) stateModelForExecution(auth *Auth, routeModel, upstreamModel string, pooled bool) string {
-	if m.usesPublishedCopilotRoutes(auth) {
+	if m.usesPublishedModelRoutes(auth) {
 		return canonicalModelKey(upstreamModel)
 	}
 	if auth != nil && auth.Attributes != nil {
@@ -480,8 +509,7 @@ func (m *Manager) preparedExecutionModelsWithAliasForRequest(ctx context.Context
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
-	if m.usesPublishedCopilotRoutes(auth) {
-		result := m.copilotExecutionAliasResult(auth, routeModel)
+	if result, published := m.publishedModelExecutionAliasResult(auth, routeModel); published {
 		if result.UpstreamModel == "" {
 			return nil, false, result, routing
 		}
@@ -518,11 +546,6 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 	}
 	pooled := len(candidates) > 1
 	return candidates, pooled, aliasResult, routing
-}
-
-func (m *Manager) resolveExecutionAliasResult(auth *Auth, routeModel string) OAuthModelAliasResult {
-	requestedModel := rewriteModelForAuth(routeModel, auth)
-	return m.resolveExecutionAliasResultForRequested(auth, requestedModel)
 }
 
 func (m *Manager) resolveExecutionAliasResultForRequested(auth *Auth, requestedModel string) OAuthModelAliasResult {

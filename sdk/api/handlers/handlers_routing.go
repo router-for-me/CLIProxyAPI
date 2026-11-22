@@ -9,7 +9,6 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -200,15 +199,7 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		return []string{"home"}, resolvedModelName, nil
 	}
 
-	providers = util.GetProviderName(baseModel)
-	if baseModel != resolvedModelName {
-		exactProviders := util.GetProviderName(resolvedModelName)
-		// An explicitly registered Copilot route takes precedence over base
-		// inference. Otherwise retain base-first routing for existing providers.
-		if len(providers) == 0 || slices.Contains(exactProviders, copilot.Provider) {
-			providers = exactProviders
-		}
-	}
+	providers = RegisteredModelProviders(resolvedModelName, baseModel)
 
 	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request
@@ -232,6 +223,19 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+// RegisteredModelProviders resolves a model and its suffix-free base against
+// the registry. Exact Copilot routes take precedence over base-model inference.
+func RegisteredModelProviders(modelName, baseModel string) []string {
+	providers := util.GetProviderName(baseModel)
+	if baseModel != modelName {
+		exactProviders := util.GetProviderName(modelName)
+		if len(providers) == 0 || slices.Contains(exactProviders, "copilot") {
+			return exactProviders
+		}
+	}
+	return providers
 }
 
 func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageModel bool) *interfaces.ErrorMessage {

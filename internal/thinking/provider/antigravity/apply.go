@@ -94,12 +94,13 @@ func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingCo
 	_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig.include_thoughts")
 
 	if config.Mode == thinking.ModeNone {
-		if config.Budget == 0 && config.Level == "" {
+		level := formatAntigravityThinkingLevel(config.Level)
+		if config.Budget == 0 && level == "" {
 			_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
 			return nil
 		}
-		if config.Level != "" {
-			_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+		if level != "" {
+			_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", level)
 		}
 		if hasIncludeThoughts {
 			_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
@@ -111,11 +112,15 @@ func (a *Applier) applyLevelFormatDoc(doc *ojson.Doc, config thinking.ThinkingCo
 		return nil
 	}
 
-	_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
+	_ = doc.Set("request.generationConfig.thinkingConfig.thinkingLevel", formatAntigravityThinkingLevel(config.Level))
 	if hasIncludeThoughts {
 		_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
 	}
 	return nil
+}
+
+func formatAntigravityThinkingLevel(level thinking.ThinkingLevel) string {
+	return strings.ToUpper(strings.TrimSpace(string(level)))
 }
 
 func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) error {
@@ -130,9 +135,6 @@ func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingC
 	if isClaude && modelInfo != nil {
 		budget = a.normalizeClaudeBudgetDoc(budget, doc, modelInfo)
 		if budget == -2 {
-			if hasIncludeThoughts {
-				_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-			}
 			return nil
 		}
 	}
@@ -175,6 +177,7 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 	}
 	if minBudget > 0 && budget >= 0 && budget < minBudget {
 		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
+		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
 		return -2
 	}
 
