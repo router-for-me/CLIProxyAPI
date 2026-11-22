@@ -210,7 +210,8 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		var terminalDelivered bool
 		var param any
 		commitReplay := func() {
-			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamErr == nil && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil {
+			streamOK := streamErr == nil || (terminalDelivered && errors.Is(streamErr, context.Canceled) && errors.Is(ctx.Err(), context.Canceled))
+			if !replayCommitted && replayAccumulator != nil && replayAccumulator.terminal && streamOK && !translatedErrorStopped && translatedClaudeErr == nil && helps.ApplyPatchTranslationError(param) == nil {
 				replayAccumulator.Commit(ctx)
 				replayCommitted = true
 			}

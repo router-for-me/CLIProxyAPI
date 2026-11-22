@@ -3650,21 +3650,27 @@ func (a *antigravityReasoningReplayAccumulator) Commit(ctx context.Context) {
 		// nothing to the ledger and its tool IDs become unresolvable.
 		return
 	}
+	// Detach caller cancellation so a client disconnect after terminal
+	// completion cannot abort KV persistence.
+	commitCtx := context.Background()
+	if ctx != nil {
+		commitCtx = context.WithoutCancel(ctx)
+	}
 	if a.overflow {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 		return
 	}
 	a.appendPendingThoughtSignatures()
 	if a.overflow {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 		return
 	}
 	if len(a.items) == 0 {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 		return
 	}
-	if _, errReplace := internalcache.ReplaceAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot, a.items); errReplace != nil {
-		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
+	if _, errReplace := internalcache.ReplaceAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot, a.items); errReplace != nil {
+		_, _ = internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(commitCtx, a.scope.modelName, a.scope.sessionKey, a.scope.cacheSnapshot)
 	}
 }
 
