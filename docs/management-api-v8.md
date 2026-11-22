@@ -185,6 +185,7 @@ retain the corresponding business operation's fields.
 | `/credentials/fields` | PATCH | Change credential fields. |
 | `/credentials/refresh` | POST | Refresh credentials. |
 | `/credentials/verify` | POST | Run an operator-triggered, account-pinned inference verification using an isolated session and minimal 1-token prompt. |
+| `/credentials/claude-quota` | POST | Observe the selected Claude OAuth credential's quota headers with a minimal Haiku request. |
 | `/oauth/import?provider=vertex` | POST | Import a Vertex service account using a multipart `file` upload. |
 | `/oauth/auth-url?provider=<provider>` | GET, POST | Start built-in or plugin OAuth (supports `name`/`auth_index` for targeted credential recovery and optional `verify` opt-in). |
 | `/oauth/siwc/bind` | POST | Start SIWC binding to an existing file-backed Codex OAuth credential. |
@@ -197,6 +198,12 @@ retain the corresponding business operation's fields.
 | `/plugins/store` | GET | List the plugin store (supports optional `?refresh=true` to bypass cached release checks). |
 | `/plugins/store/<id>/install` | POST | Install or update a plugin. |
 | `/plugins/<id>/quota` | GET, POST, DELETE | Read, fetch, or reset plugin quota. |
+
+`POST /v8/management/credentials/claude-quota` accepts `{"auth_index":"<credential index>"}`.
+It sends a Haiku inference request with a one-token output budget using that Claude OAuth
+credential. It returns `{"quota":{"observed_at":"<timestamp>","signals":{...}}}` from the
+response headers. The available quota windows depend on the headers Anthropic returns.
+Use this route for an explicit refresh because the probe uses subscription quota.
 
 ## OAuth
 
