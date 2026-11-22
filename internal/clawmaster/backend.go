@@ -708,7 +708,11 @@ type backendSeriesSelector struct {
 	quotaRevision     map[string]uint64
 	quotaBlockedUntil map[string]time.Time
 	// fiveHour is the last polled five-hour window per account; it is reported, not used to route.
-	fiveHour          map[string]ClaudeFiveHourQuota
+	fiveHour map[string]ClaudeFiveHourQuota
+	// fable is each account's weekly Fable allowance (backend_quota_fable.go), from the usage poll and the
+	// 7d_oi response headers; fableRevision orders a poll against headers that arrived while it was in flight.
+	fable             map[string]ClaudeFableQuota
+	fableRevision     map[string]uint64
 	quotaBackoffLevel map[string]int
 	sessions          *coreauth.SessionCache
 	routes            *backendSessionStore
@@ -1314,8 +1318,12 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 		// cursor after the active credential has already become unavailable.
 		if selector != nil {
 			if !result.SkipQuotaObservation {
-				if quota, ok := parseBackendWeeklyQuotaHeaders(internallogging.GetResponseHeaders(ctx)); ok {
+				headers := internallogging.GetResponseHeaders(ctx)
+				if quota, ok := parseBackendWeeklyQuotaHeaders(headers); ok {
 					selector.observeQuota(result.AuthID, quota)
+				}
+				if fable, ok := ParseClaudeFableQuotaHeaders(headers); ok {
+					selector.observeFableHeaders(result.AuthID, fable)
 				}
 			}
 			selector.OnResult(result)
@@ -1355,6 +1363,7 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 		go func() {
 			defer group.Done()
 			revision := selector.quotaPollRevision(authID)
+			fableRevision := selector.fablePollRevision(authID)
 			auth, ok := manager.GetByID(authID)
 			if !ok || auth == nil || auth.AuthKind() != coreauth.AuthKindOAuth {
 				return
@@ -1379,6 +1388,9 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 			if errFetch == nil {
 				if fiveHour, okFiveHour, errFiveHour := ParseClaudeFiveHourQuota(payload); errFiveHour == nil && okFiveHour {
 					selector.observeFiveHourQuota(authID, fiveHour)
+				}
+				if fable, okFable, errFable := ParseClaudeFableQuota(payload); errFable == nil && okFable {
+					selector.observePolledFable(authID, fable, fableRevision)
 				}
 			}
 			quota, known, errQuota := ClaudeWeeklyQuota{}, false, errFetch

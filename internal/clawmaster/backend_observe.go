@@ -308,9 +308,17 @@ func (s *backendSeriesSelector) logSnapshot(interval time.Duration) {
 				fiveHourResets = five.ResetsAt.Sub(s.nowOrReal()).Round(time.Minute).String()
 			}
 		}
+		fablePct, fableResets := "unknown", "unknown"
+		if fable, known := s.fableNowLocked(id, s.nowOrReal()); known {
+			fablePct, fableResets = fmt.Sprintf("%.0f", fable.UsedFraction*100), "no window"
+			if !fable.ResetsAt.IsZero() {
+				fableResets = fable.ResetsAt.Sub(s.nowOrReal()).Round(time.Minute).String()
+			}
+		}
 		lg().Info("quota", "profile", s.profileNameLocked(id), "used_pct", usedPct(q), "band", quotaBand(q),
 			"resets_in", s.resetsIn(q), "rate_limited_for", blocked,
-			"five_hour_used_pct", fiveHourPct, "five_hour_resets_in", fiveHourResets)
+			"five_hour_used_pct", fiveHourPct, "five_hour_resets_in", fiveHourResets,
+			"fable_used_pct", fablePct, "fable_resets_in", fableResets)
 	}
 	stats := s.statsLocked()
 	names := make([]string, 0, len(stats.picks))
@@ -412,6 +420,12 @@ func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSna
 			p.FiveHourKnown, p.FiveHourUsed = true, five.UsedFraction
 			if !five.ResetsAt.IsZero() {
 				p.FiveHourResetsKnown, p.FiveHourResetsIn = true, max(five.ResetsAt.Sub(now).Seconds(), 0)
+			}
+		}
+		if fable, known := s.fableNowLocked(id, now); known {
+			p.FableKnown, p.FableUsed = true, fable.UsedFraction
+			if !fable.ResetsAt.IsZero() {
+				p.FableResetsKnown, p.FableResetsIn = true, max(fable.ResetsAt.Sub(now).Seconds(), 0)
 			}
 		}
 		if v, ok := expiry[id]; ok {
