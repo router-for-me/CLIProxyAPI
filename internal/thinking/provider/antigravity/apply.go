@@ -130,9 +130,6 @@ func (a *Applier) applyBudgetFormatDoc(doc *ojson.Doc, config thinking.ThinkingC
 	if isClaude && modelInfo != nil {
 		budget = a.normalizeClaudeBudgetDoc(budget, doc, modelInfo)
 		if budget == -2 {
-			if hasIncludeThoughts {
-				_ = doc.Set("request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-			}
 			return nil
 		}
 	}
@@ -175,6 +172,7 @@ func (a *Applier) normalizeClaudeBudgetDoc(budget int, doc *ojson.Doc, modelInfo
 	}
 	if minBudget > 0 && budget >= 0 && budget < minBudget {
 		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinkingConfig")
+		_ = util.DeleteJSONDocIfExists(doc, "request.generationConfig.thinking_config")
 		return -2
 	}
 
