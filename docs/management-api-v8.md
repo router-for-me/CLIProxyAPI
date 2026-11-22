@@ -202,7 +202,7 @@ retain the corresponding business operation's fields.
 
 The login URL is shared by all providers. Set the required `provider` query
 parameter to `claude`, `codex`, `antigravity`, `kimi`, `kimi-ai`, `xai`, `devin`,
-`meta`, or a registered plugin provider ID. For example:
+`copilot`, `meta`, or a registered plugin provider ID. For example:
 
 ```http
 GET /v8/management/oauth/auth-url?provider=codex
