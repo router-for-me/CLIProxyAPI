@@ -62,6 +62,27 @@ func DerivedAntigravitySessionID(metadataSets ...map[string]any) string {
 // Antigravity's negative int63 decimal format ("-<int63>").
 func AntigravitySessionIDForAuth(authID string, metadataSets ...map[string]any) string {
 	kind, identityValue := antigravitySessionIdentity(metadataSets...)
+	return formatAntigravitySessionIDForAuth(kind, authID, identityValue)
+}
+
+// ScopeAntigravitySessionIDForAuth deterministically scopes an explicit
+// incoming request.sessionId to a specific credential in Antigravity's
+// negative int63 decimal format ("-<int63>"). When authID is empty, the
+// trimmed incoming sessionId is returned unchanged.
+func ScopeAntigravitySessionIDForAuth(authID, sessionID string) string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return sessionID
+	}
+	return formatAntigravitySessionIDForAuth("explicit-session", authID, sessionID)
+}
+
+func formatAntigravitySessionIDForAuth(kind, authID, identityValue string) string {
+	identityValue = strings.TrimSpace(identityValue)
 	if identityValue == "" {
 		return ""
 	}

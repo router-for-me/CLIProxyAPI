@@ -800,13 +800,35 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 		_ = doc.Delete("project")
 	}
 
-	if isImageModel {
+	authID = strings.TrimSpace(authID)
+	incomingSessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
+	derivedSessionID := ""
+	if len(derivedSessionIDs) > 0 {
+		derivedSessionID = strings.TrimSpace(derivedSessionIDs[0])
+	}
+
+	switch {
+	case isImageModel:
 		_ = doc.Set("requestId", generateImageGenRequestID())
-	} else if reqType != "web_search" {
+		if incomingSessionID != "" && authID != "" {
+			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
+		}
+	case reqType == "web_search":
+		if incomingSessionID != "" && authID != "" {
+			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
+		}
+	default:
 		_ = doc.Set("requestId", generateRequestID())
-		sessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
-		if sessionID == "" && len(derivedSessionIDs) > 0 {
-			sessionID = strings.TrimSpace(derivedSessionIDs[0])
+		var sessionID string
+		if authID != "" {
+			if derivedSessionID != "" || incomingSessionID != "" {
+				sessionID = scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID)
+			}
+		} else {
+			sessionID = incomingSessionID
+			if sessionID == "" {
+				sessionID = derivedSessionID
+			}
 		}
 		if sessionID == "" {
 			sessionID = generateStableSessionIDDocForAuth(doc, authID)
@@ -819,6 +841,13 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 		_ = doc.SetRawBytes("request.toolConfig", []byte(toolConfig.Raw))
 		_ = doc.Delete("toolConfig")
 	}
+}
+
+func scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID string) string {
+	if derivedSessionID != "" {
+		return derivedSessionID
+	}
+	return helps.ScopeAntigravitySessionIDForAuth(authID, incomingSessionID)
 }
 
 func generateRequestID() string {

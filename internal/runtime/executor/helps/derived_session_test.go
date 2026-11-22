@@ -118,3 +118,29 @@ func TestAntigravitySessionIDForAuth(t *testing.T) {
 		t.Fatalf("session kinds did not produce distinct non-empty IDs: canonical=%q exec=%q derived=%q", authAFirst, execID, derivedID)
 	}
 }
+
+func TestScopeAntigravitySessionIDForAuth(t *testing.T) {
+	t.Parallel()
+
+	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
+
+	if got := ScopeAntigravitySessionIDForAuth("auth-a", "   "); got != "" {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(empty) = %q, want empty", got)
+	}
+	if got := ScopeAntigravitySessionIDForAuth("", "  -987654321  "); got != "-987654321" {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(empty authID) = %q, want -987654321", got)
+	}
+
+	authA := ScopeAntigravitySessionIDForAuth("auth-a", "-987654321")
+	if !negativeDecimal.MatchString(authA) || authA == "-987654321" {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(auth-a) = %q, want scoped negative decimal", authA)
+	}
+	if repeated := ScopeAntigravitySessionIDForAuth("  auth-a  ", " -987654321 "); repeated != authA {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth not stable across whitespace: first=%q repeated=%q", authA, repeated)
+	}
+
+	authB := ScopeAntigravitySessionIDForAuth("auth-b", "-987654321")
+	if !negativeDecimal.MatchString(authB) || authB == "-987654321" || authB == authA {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(auth-b) = %q, want distinct scoped negative decimal (authA=%q)", authB, authA)
+	}
+}

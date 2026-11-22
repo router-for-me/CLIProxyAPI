@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
@@ -736,6 +737,260 @@ func TestAntigravityExecutorSynthesizedSessionIDScopedPerCredential(t *testing.T
 		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", "shared first prompt", nil)
 		if authB == authAFirst {
 			t.Fatalf("failover credential auth-b reused auth-a content-fallback request.sessionId %q", authB)
+		}
+	})
+}
+
+func TestAntigravityExecutorIncomingSessionIDScopedPerCredentialAndSubagent(t *testing.T) {
+	t.Parallel()
+
+	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
+	executor := NewAntigravityExecutor(&config.Config{})
+
+	captureSessionID := func(t *testing.T, authID, kind, model string, sourceFormat sdktranslator.Format, payload []byte, enrich bool, metadata map[string]any) string {
+		t.Helper()
+		var capturedBody []byte
+		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			var errRead error
+			capturedBody, errRead = io.ReadAll(req.Body)
+			if errRead != nil {
+				return nil, errRead
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"captured"}}`)),
+			}, nil
+		}))
+		auth := &cliproxyauth.Auth{
+			ID: authID,
+			Metadata: map[string]any{
+				"access_token": "token",
+				"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+				"project_id":   "project-1",
+			},
+		}
+		req := cliproxyexecutor.Request{
+			Model:   model,
+			Payload: payload,
+		}
+		opts := cliproxyexecutor.Options{
+			SourceFormat:   sourceFormat,
+			ResponseFormat: sourceFormat,
+			Metadata:       metadata,
+		}
+		if enrich {
+			req, opts = cliproxysession.Enrich(req, opts)
+		}
+		switch kind {
+		case "execute":
+			_, _ = executor.Execute(ctx, auth, req, opts)
+		case "stream":
+			_, _ = executor.ExecuteStream(ctx, auth, req, opts)
+		default:
+			t.Fatalf("unknown route kind %q", kind)
+		}
+		if len(capturedBody) == 0 {
+			t.Fatalf("expected upstream request body to be captured for auth=%s kind=%s model=%s", authID, kind, model)
+		}
+		sessionID := ojson.GetBytes(capturedBody, "request.sessionId").String()
+		if !negativeDecimal.MatchString(sessionID) {
+			t.Fatalf("request.sessionId = %q, want negative int63 decimal", sessionID)
+		}
+		return sessionID
+	}
+
+	const rawSessionID = "-987654321"
+	parentGeminiPayload := []byte(`{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	workerGeminiPayload := []byte(`{"sessionId":"-987654321","metadata":{"agent_id":"swarm-worker-1"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	nestedAntigravityPayload := []byte(`{"request":{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	nestedWorkerPayload := []byte(`{"request":{"sessionId":"-987654321","metadata":{"agent_id":"swarm-worker-1"},"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+
+	t.Run("gemini incoming sessionId scopes per credential and isolates subagents", func(t *testing.T) {
+		authAGemini := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authAClaude := captureSessionID(t, "auth-a", "execute", "claude-sonnet-4-6", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authAStream := captureSessionID(t, "auth-a", "stream", "gemini-3.7-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		if authAGemini == rawSessionID {
+			t.Fatalf("auth-a emitted raw incoming request.sessionId %q without credential scoping", authAGemini)
+		}
+		if authAGemini != authAClaude || authAGemini != authAStream {
+			t.Fatalf("same credential + incoming sessionId unstable across paths: gemini=%q claude=%q stream=%q", authAGemini, authAClaude, authAStream)
+		}
+
+		authBFailover := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authBFailoverStream := captureSessionID(t, "auth-b", "stream", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		if authBFailover == rawSessionID || authBFailover == authAGemini {
+			t.Fatalf("failover credential auth-b leaked parent sessionId: got=%q authA=%q raw=%q", authBFailover, authAGemini, rawSessionID)
+		}
+		if authBFailover != authBFailoverStream {
+			t.Fatalf("failover credential auth-b unstable across execute/stream: exec=%q stream=%q", authBFailover, authBFailoverStream)
+		}
+
+		workerOnB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		workerOnBStream := captureSessionID(t, "auth-b", "stream", "claude-sonnet-4-6", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		if workerOnB == rawSessionID || workerOnB == authAGemini || workerOnB == authBFailover {
+			t.Fatalf("subagent on auth-b leaked parent sessionId: worker=%q authA=%q authB=%q raw=%q", workerOnB, authAGemini, authBFailover, rawSessionID)
+		}
+		if workerOnB != workerOnBStream {
+			t.Fatalf("subagent on auth-b unstable across execute/stream: exec=%q stream=%q", workerOnB, workerOnBStream)
+		}
+
+		workerOnA := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		if workerOnA == rawSessionID || workerOnA == authAGemini || workerOnA == workerOnB {
+			t.Fatalf("subagent on auth-a collided with parent or auth-b worker: workerOnA=%q authA=%q workerOnB=%q", workerOnA, authAGemini, workerOnB)
+		}
+	})
+
+	t.Run("native antigravity incoming request.sessionId scopes per credential and subagent", func(t *testing.T) {
+		authA := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatAntigravity, nestedAntigravityPayload, true, nil)
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatAntigravity, nestedAntigravityPayload, true, nil)
+		workerB := captureSessionID(t, "auth-b", "stream", "gemini-3.6-flash-high", sdktranslator.FormatAntigravity, nestedWorkerPayload, true, nil)
+		if authA == rawSessionID || authB == rawSessionID || workerB == rawSessionID {
+			t.Fatalf("native antigravity emitted raw incoming sessionId: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+		if authA == authB || workerB == authA || workerB == authB {
+			t.Fatalf("native antigravity failed to isolate credentials/subagent: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+	})
+
+	t.Run("unenriched direct call with auth ID still scopes incoming sessionId per credential", func(t *testing.T) {
+		authAFirst := captureSessionID(t, "auth-a", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		authASecond := captureSessionID(t, "auth-a", "stream", "claude-sonnet-4-6", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		if authAFirst == rawSessionID {
+			t.Fatalf("unenriched auth-a emitted raw incoming sessionId %q", authAFirst)
+		}
+		if authAFirst != authASecond {
+			t.Fatalf("unenriched auth-a unstable across paths: first=%q second=%q", authAFirst, authASecond)
+		}
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		if authB == rawSessionID || authB == authAFirst {
+			t.Fatalf("unenriched failover credential auth-b leaked auth-a sessionId: authA=%q authB=%q", authAFirst, authB)
+		}
+	})
+
+	t.Run("anonymous auth ID preserves explicit request.sessionId verbatim", func(t *testing.T) {
+		got := captureSessionID(t, "", "execute", "gemini-3.6-flash-high", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		if got != rawSessionID {
+			t.Fatalf("anonymous auth ID request.sessionId = %q, want verbatim %q", got, rawSessionID)
+		}
+	})
+
+	t.Run("image model scopes incoming sessionId per credential and subagent without synthesizing when absent", func(t *testing.T) {
+		authA := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, true, nil)
+		workerB := captureSessionID(t, "auth-b", "stream", "gemini-3.1-flash-image", sdktranslator.FormatGemini, workerGeminiPayload, true, nil)
+		if authA == rawSessionID || authB == rawSessionID || workerB == rawSessionID {
+			t.Fatalf("image model emitted raw incoming sessionId: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+		if authA == authB || workerB == authA || workerB == authB {
+			t.Fatalf("image model failed to isolate credentials/subagent: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+
+		authAUnenriched := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		authBUnenriched := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-image", sdktranslator.FormatGemini, parentGeminiPayload, false, nil)
+		if authAUnenriched == rawSessionID || authBUnenriched == rawSessionID || authAUnenriched == authBUnenriched {
+			t.Fatalf("unenriched image model leaked incoming sessionId: authA=%q authB=%q", authAUnenriched, authBUnenriched)
+		}
+
+		authNoSession := &cliproxyauth.Auth{ID: "auth-a", Metadata: map[string]any{"project_id": "project-1"}}
+		docNoSession := ojson.NewDoc([]byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"draw"}]}]}}`))
+		_, finalNoSession, errNoSession := executor.buildRequestDoc(context.Background(), authNoSession, "token", "gemini-3.1-flash-image", docNoSession, false, "", "https://example.com", "-123456789")
+		if errNoSession != nil {
+			t.Fatalf("buildRequestDoc image without incoming sessionId error: %v", errNoSession)
+		}
+		if ojson.GetBytes(finalNoSession, "request.sessionId").Exists() {
+			t.Fatalf("image model without incoming sessionId should not synthesize request.sessionId: %s", string(finalNoSession))
+		}
+	})
+
+	t.Run("web_search request scopes incoming sessionId per credential and subagent without synthesizing when absent", func(t *testing.T) {
+		webSearchParent := []byte(`{"requestType":"web_search","request":{"sessionId":"-987654321","contents":[{"role":"user","parts":[{"text":"weather"}]}],"tools":[{"googleSearch":{}}]}}`)
+		webSearchWorker := []byte(`{"requestType":"web_search","request":{"sessionId":"-987654321","metadata":{"agent_id":"swarm-worker-1"},"contents":[{"role":"user","parts":[{"text":"weather"}]}],"tools":[{"googleSearch":{}}]}}`)
+
+		authA := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, true, nil)
+		authB := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, true, nil)
+		workerB := captureSessionID(t, "auth-b", "stream", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchWorker, true, nil)
+		if authA == rawSessionID || authB == rawSessionID || workerB == rawSessionID {
+			t.Fatalf("web_search emitted raw incoming sessionId: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+		if authA == authB || workerB == authA || workerB == authB {
+			t.Fatalf("web_search failed to isolate credentials/subagent: authA=%q authB=%q workerB=%q", authA, authB, workerB)
+		}
+
+		authAUnenriched := captureSessionID(t, "auth-a", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, false, nil)
+		authBUnenriched := captureSessionID(t, "auth-b", "execute", "gemini-3.1-flash-lite", sdktranslator.FormatAntigravity, webSearchParent, false, nil)
+		if authAUnenriched == rawSessionID || authBUnenriched == rawSessionID || authAUnenriched == authBUnenriched {
+			t.Fatalf("unenriched web_search leaked incoming sessionId: authA=%q authB=%q", authAUnenriched, authBUnenriched)
+		}
+
+		authNoSession := &cliproxyauth.Auth{ID: "auth-a", Metadata: map[string]any{"project_id": "project-1"}}
+		docNoSession := ojson.NewDoc([]byte(`{"requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":"weather"}]}],"tools":[{"googleSearch":{}}]}}`))
+		_, finalNoSession, errNoSession := executor.buildRequestDoc(context.Background(), authNoSession, "token", "gemini-3.1-flash-lite", docNoSession, false, "", "https://example.com", "-123456789")
+		if errNoSession != nil {
+			t.Fatalf("buildRequestDoc web_search without incoming sessionId error: %v", errNoSession)
+		}
+		if ojson.GetBytes(finalNoSession, "request.sessionId").Exists() {
+			t.Fatalf("web_search without incoming sessionId should not synthesize request.sessionId: %s", string(finalNoSession))
+		}
+	})
+
+	t.Run("payload override and filter remain final barrier with auth ID", func(t *testing.T) {
+		captureWithConfig := func(t *testing.T, cfg *config.Config) []byte {
+			t.Helper()
+			execWithCfg := NewAntigravityExecutor(cfg)
+			var capturedBody []byte
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				var errRead error
+				capturedBody, errRead = io.ReadAll(req.Body)
+				if errRead != nil {
+					return nil, errRead
+				}
+				return &http.Response{
+					StatusCode: http.StatusBadRequest,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"captured"}}`)),
+				}, nil
+			}))
+			auth := &cliproxyauth.Auth{
+				ID: "auth-a",
+				Metadata: map[string]any{
+					"access_token": "token",
+					"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+					"project_id":   "project-1",
+				},
+			}
+			req, opts := cliproxysession.Enrich(
+				cliproxyexecutor.Request{Model: "gemini-3.6-flash-high", Payload: parentGeminiPayload},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini},
+			)
+			_, _ = execWithCfg.Execute(ctx, auth, req, opts)
+			if len(capturedBody) == 0 {
+				t.Fatalf("expected upstream request body to be captured")
+			}
+			return capturedBody
+		}
+
+		overrideBody := captureWithConfig(t, &config.Config{Payload: config.PayloadConfig{
+			Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "gemini-*"}},
+				Params: map[string]any{"sessionId": "-42"},
+			}},
+		}})
+		if got := ojson.GetBytes(overrideBody, "request.sessionId").String(); got != "-42" {
+			t.Fatalf("payload override request.sessionId = %q, want -42", got)
+		}
+
+		filterBody := captureWithConfig(t, &config.Config{Payload: config.PayloadConfig{
+			Filter: []config.PayloadFilterRule{{
+				Models: []config.PayloadModelRule{{Name: "gemini-*"}},
+				Params: []string{"sessionId"},
+			}},
+		}})
+		if !ojson.GetBytes(filterBody, "request.contents").Exists() {
+			t.Fatalf("expected filtered upstream request to retain request.contents: %s", string(filterBody))
+		}
+		if ojson.GetBytes(filterBody, "request.sessionId").Exists() {
+			t.Fatalf("payload filter did not remove request.sessionId: %s", string(filterBody))
 		}
 	})
 }
