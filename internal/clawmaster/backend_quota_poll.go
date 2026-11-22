@@ -2,6 +2,8 @@ package clawmaster
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -146,22 +148,65 @@ func (s *backendSeriesSelector) quotaPollRevision(authID string) uint64 {
 // Weekly capacity alone does not prove a five-hour cooldown has cleared, so
 // polling never erases credential cooldowns, non-quota failures, or bindings.
 func (s *backendSeriesSelector) observePolledQuota(authID string, quota backendWeeklyQuota, revision uint64) bool {
+	applied, _ := s.observePolledQuotaLifting(authID, quota, revision)
+	return applied
+}
+
+// observePolledQuotaLifting is observePolledQuota, also reporting whether it lifted a weekly hold
+// (liftResetWeeklyHoldLocked), so the caller clears the core's cooldown for the same rejection.
+func (s *backendSeriesSelector) observePolledQuotaLifting(authID string, quota backendWeeklyQuota, revision uint64) (applied, lifted bool) {
 	if strings.TrimSpace(authID) == "" || authID == s.backupAuthID || !quota.known {
-		return false
+		return false, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.stopped {
-		return false
+		return false, false
 	}
 	s.initializeLocked()
 	if s.quotaRevision[authID] != revision {
-		return false
+		return false, false
 	}
 	quota.used = min(max(quota.used, 0), 1)
+	lifted = s.liftResetWeeklyHoldLocked(authID, s.currentQuotaLocked(authID), quota)
 	s.quota[authID] = quota
 	s.quotaRevision[authID]++
 	s.noteQuotaLocked(authID, quota)
 	observeUsagePoll(s.profileNameLocked(authID), "ok")
+	return true, lifted
+}
+
+// noteCredentialRejection records which limit a credential-wide 429 rejected: the week alone, or another
+// (five hours, or both), for liftResetWeeklyHoldLocked.
+func (s *backendSeriesSelector) noteCredentialRejection(authID string, headers http.Header) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.quotaHoldWeekly == nil {
+		s.quotaHoldWeekly = make(map[string]bool, len(s.authIDs))
+	}
+	status := func(window string) string {
+		return strings.ToLower(strings.TrimSpace(headers.Get("Anthropic-Ratelimit-Unified-" + window + "-Status")))
+	}
+	s.quotaHoldWeekly[authID] = status("7d") == "rejected" && status("5h") != "rejected"
+}
+
+// liftResetWeeklyHoldLocked: Anthropic refused the subscription for its week alone (7d rejected, 5h not)
+// and the poll, which read the week used up, now reads it well below that, with the five-hour window not
+// full: the week's usage was reset (a limit reset on claude.ai, seen 2026-11-22). Without this the hold
+// strands the whole week until the old reset. The hold is lifted so the next request asks Anthropic, which
+// decides; a refusal holds the subscription again and the request moves on. It reports a lift, so the
+// caller clears the core's cooldown for the same rejection.
+func (s *backendSeriesSelector) liftResetWeeklyHoldLocked(authID string, previous, polled backendWeeklyQuota) bool {
+	if !s.quotaBlockedLocked(authID) || !s.quotaHoldWeekly[authID] || !previous.known || previous.used < 1 || polled.used > 0.9 {
+		return false
+	}
+	if five, known := s.fiveHourNowLocked(authID, s.nowOrReal()); known && five.UsedFraction >= 1 {
+		return false
+	}
+	delete(s.quotaBlockedUntil, authID)
+	delete(s.quotaBackoffLevel, authID)
+	delete(s.quotaHoldWeekly, authID)
+	lg().Info("weekly usage reset while Anthropic refused the subscription; asking Anthropic again",
+		"profile", s.profileNameLocked(authID), "used_pct", fmt.Sprintf("%.0f", polled.used*100))
 	return true
 }

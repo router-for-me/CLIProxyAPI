@@ -717,6 +717,9 @@ type backendSeriesSelector struct {
 	// fableBlockedUntil: Anthropic refused a Fable request because the subscription's Fable allowance is
 	// used up (a 429 on the 7d_oi window alone). Until then Fable requests go elsewhere; others are unaffected.
 	fableBlockedUntil map[string]time.Time
+	// quotaHoldWeekly: the hold in quotaBlockedUntil is Anthropic's rejection of the week alone (7d rejected,
+	// 5h not), the only kind a poll showing the week reset may lift (liftResetWeeklyHoldLocked).
+	quotaHoldWeekly   map[string]bool
 	fableBackoffLevel map[string]int       // refusals in a row with no reset known, for the backoff
 	fableHoldGuessed  map[string]bool      // the hold is a backoff, not a reset: a reset learned later ends it sooner
 	fableHoldFloor    map[string]time.Time // the last reset Anthropic gave for a refusal: no hold ends before it
@@ -1383,6 +1386,10 @@ func setBackendResultPolicy(manager *coreauth.Manager, selector *backendSeriesSe
 					selector.observeFableHeaders(result.AuthID, fable)
 				}
 			}
+			if !result.Success && result.Error != nil && result.Error.HTTPStatus == http.StatusTooManyRequests && result.CredentialScope &&
+				result.Error.Code != coreauth.ErrorCodeRequestScoped && result.Error.Code != coreauth.ErrorCodeForceCooldown {
+				selector.noteCredentialRejection(result.AuthID, headers)
+			}
 			if fableRefused {
 				selector.observeFableRejection(result.AuthID, headers)
 			} else if result.Success && !result.SkipQuotaObservation && isFableModel(result.Model) {
@@ -1465,7 +1472,13 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 				}
 				return
 			}
-			selector.observePolledQuota(authID, backendWeeklyQuota{known: true, used: quota.UsedFraction, resetsAt: quota.ResetsAt}, revision)
+			if _, lifted := selector.observePolledQuotaLifting(authID, backendWeeklyQuota{known: true, used: quota.UsedFraction, resetsAt: quota.ResetsAt}, revision); lifted {
+				// The core holds its own cooldown for the same 429: clear it too, or the subscription stays
+				// unusable (and, with every subscription held, the paid backup stops being used).
+				if _, _, errReset := manager.ResetQuota(ctx, authID); errReset != nil {
+					selector.noteUsagePoll(authID, "could not clear the cooldown after the week was reset")
+				}
+			}
 		}()
 	}
 	group.Wait()
