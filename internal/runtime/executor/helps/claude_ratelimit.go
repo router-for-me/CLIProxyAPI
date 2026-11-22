@@ -259,8 +259,11 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		rejectedWindows = append(rejectedWindows, "7d_oi")
 	}
 
-	// 1. Retry-After header (skipped for an overage/Fable-only rejection, which does not describe the credential)
-	if !overageOnlyRejection {
+	fableWindowExhausted := claudeFableWindowIsExhausted(headers)
+	// 1. Retry-After header. Overage-only responses normally do not describe a
+	// credential-wide cooldown, but an explicitly exhausted Fable 7d_oi window
+	// is a model-scoped provider deadline and must be preserved.
+	if !overageOnlyRejection || fableWindowExhausted {
 		if rawRetryAfter := getHeaderCaseInsensitive(headers, "Retry-After"); rawRetryAfter != "" {
 			if !containsString(rejectedWindows, "retry-after") {
 				rejectedWindows = append(rejectedWindows, "retry-after")
@@ -289,8 +292,9 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 		}
 	}
 
-	// 4. Fable-specific 7-day window reset (only when rejected and not an overage/Fable-only rejection)
-	if status7dOI == "rejected" && !overageOnlyRejection {
+	// 4. Fable-specific 7-day window reset. Preserve it for an explicitly
+	// exhausted overage/Fable window while keeping the cooldown model-scoped.
+	if status7dOI == "rejected" && (!overageOnlyRejection || fableWindowExhausted) {
 		if raw := getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset"); raw != "" {
 			if t, ok := parseUnixOrTimestamp(raw); ok && t.After(now) {
 				candidateDeadlines = append(candidateDeadlines, t)
@@ -360,6 +364,26 @@ func parseClaudeRateLimitResetWithFuzz(headers http.Header, now time.Time, minFu
 	}).Info("parsed Anthropic rate limit reset headers")
 
 	return &effectiveDuration
+}
+
+func claudeFableWindowIsExhausted(headers http.Header) bool {
+	if headers == nil || strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status"))) != "rejected" {
+		return false
+	}
+	for _, name := range []string{
+		"Anthropic-Ratelimit-Unified-7d_oi-Utilization",
+		"Anthropic-Ratelimit-Unified-7d_oi-Surpassed-Threshold",
+	} {
+		raw := strings.TrimSpace(getHeaderCaseInsensitive(headers, name))
+		if raw == "" {
+			continue
+		}
+		value, errParse := strconv.ParseFloat(raw, 64)
+		if errParse == nil && !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 1.0 {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeUnifiedResetIsOverageBillingBoundary(headers http.Header, unifiedReset string) bool {
