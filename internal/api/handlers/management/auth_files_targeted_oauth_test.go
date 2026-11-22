@@ -23,12 +23,6 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return f(req)
-}
-
 type targetedTestAntigravityOAuthService struct {
 	email       string
 	accessToken string
@@ -238,24 +232,52 @@ func (s *targetedTestMetaOAuthService) CreateTokenStorage(bundle *metaauth.MetaA
 	}
 }
 
+// pendingTest* device-flow services never authorize: WaitForAuthorization blocks
+// until the session is cancelled, so the OAuth session stays pending.
+type pendingTestKimiOAuthService struct{ targetedTestKimiOAuthService }
+
+func (s *pendingTestKimiOAuthService) WaitForAuthorization(ctx context.Context, _ *kimi.DeviceCodeResponse) (*kimi.KimiAuthBundle, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type pendingTestXAIOAuthService struct{ targetedTestXAIOAuthService }
+
+func (s *pendingTestXAIOAuthService) WaitForAuthorization(ctx context.Context, _ *xaiauth.DeviceCodeResponse) (*xaiauth.AuthBundle, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+type pendingTestMetaOAuthService struct{ targetedTestMetaOAuthService }
+
+func (s *pendingTestMetaOAuthService) WaitForAuthorization(ctx context.Context, _ *metaauth.DeviceCodeResponse) (*metaauth.MetaAuthBundle, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func TestStartOAuthV8TargetedSessionRegistrationAcrossBuiltinProviders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	origTransport := http.DefaultTransport
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		rec := httptest.NewRecorder()
-		rec.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(req.URL.Path, "openid-configuration"):
-			_, _ = rec.WriteString(`{"device_authorization_endpoint":"https://auth.x.ai/device","token_endpoint":"https://auth.x.ai/token"}`)
-		case strings.Contains(req.URL.Path, "device"):
-			_, _ = rec.WriteString(`{"device_code":"dev-code","user_code":"ABCD-1234","verification_uri":"https://example.test/verify","verification_uri_complete":"https://example.test/verify?code=ABCD-1234","expires_in":600,"interval":5}`)
-		default:
-			_, _ = rec.WriteString(`{"error":"authorization_pending"}`)
-		}
-		return rec.Result(), nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = origTransport })
+	// Device-flow providers get fakes that stay pending until the session is
+	// cancelled. Swapping http.DefaultTransport instead races the real pollers'
+	// background goroutines, which keep reading it after the test restores it.
+	origKimiFactory := newKimiOAuthService
+	newKimiOAuthService = func(_ *config.Config, domain string) kimiOAuthService {
+		return &pendingTestKimiOAuthService{targetedTestKimiOAuthService{domain: domain}}
+	}
+	t.Cleanup(func() { newKimiOAuthService = origKimiFactory })
+
+	origXAIFactory := newXAIOAuthService
+	newXAIOAuthService = func(*config.Config, string) xaiOAuthService {
+		return &pendingTestXAIOAuthService{}
+	}
+	t.Cleanup(func() { newXAIOAuthService = origXAIFactory })
+
+	origMetaFactory := newMetaOAuthService
+	newMetaOAuthService = func(*config.Config, string) metaOAuthService {
+		return &pendingTestMetaOAuthService{}
+	}
+	t.Cleanup(func() { newMetaOAuthService = origMetaFactory })
 
 	origCodexFactory := newCodexOAuthService
 	newCodexOAuthService = func(*config.Config) codexOAuthService {

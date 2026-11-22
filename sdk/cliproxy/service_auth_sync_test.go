@@ -1017,10 +1017,6 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 	authBID := "codex-batch-wait-b-auth"
 	reg.UnregisterClient(authAID)
 	reg.UnregisterClient(authBID)
-	t.Cleanup(func() {
-		reg.UnregisterClient(authAID)
-		reg.UnregisterClient(authBID)
-	})
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&syncTestExecutor{})
@@ -1044,6 +1040,10 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 
+	// The batch registers A and B on parallel workers, so the hook cannot tell
+	// which auth reaches it second. It holds the second one ("blocked"); the
+	// other one ("free") must finish and serve a same-revision wait without
+	// waiting for the held registration.
 	bStarted := make(chan struct{})
 	bBlock := make(chan struct{})
 	var started atomic.Int32
@@ -1053,14 +1053,6 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 			<-bBlock
 		}
 	}
-	t.Cleanup(func() {
-		modelRegistrationTaskHook = nil
-		select {
-		case <-bBlock:
-		default:
-			close(bBlock)
-		}
-	})
 
 	updateA := watcher.AuthUpdate{Action: watcher.AuthUpdateActionModify, ID: authAID, Auth: authA}
 	updateA.SetRevision(1)
@@ -1072,6 +1064,19 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		defer close(finishedBatch)
 		service.handleAuthUpdates(context.Background(), []watcher.AuthUpdate{updateA, updateB})
 	}()
+	// Release the held registration and wait for the batch before unregistering,
+	// so a failed run cannot register these auths after cleanup.
+	t.Cleanup(func() {
+		select {
+		case <-bBlock:
+		default:
+			close(bBlock)
+		}
+		<-finishedBatch
+		modelRegistrationTaskHook = nil
+		reg.UnregisterClient(authAID)
+		reg.UnregisterClient(authBID)
+	})
 
 	select {
 	case <-bStarted:
@@ -1079,9 +1084,28 @@ func TestHandleAuthUpdates_SameRevisionWaitDoesNotWaitForOtherAuthInBatch(t *tes
 		t.Fatal("second auth registration in batch did not start")
 	}
 
+	// Both waiters were created before any task ran; a nil channel means that
+	// auth's registration already finished.
+	chA := service.authRegistrationWaitCh(authAID)
+	chB := service.authRegistrationWaitCh(authBID)
+	freeUpdate := updateA
+	switch {
+	case chA == nil:
+	case chB == nil:
+		freeUpdate = updateB
+	default:
+		select {
+		case <-chA:
+		case <-chB:
+			freeUpdate = updateB
+		case <-time.After(2 * time.Second):
+			t.Fatal("unblocked auth registration did not finish while the other auth was held")
+		}
+	}
+
 	doneA := make(chan struct{})
 	go func() {
-		service.handleAuthUpdate(context.Background(), updateA)
+		service.handleAuthUpdate(context.Background(), freeUpdate)
 		close(doneA)
 	}()
 	select {
