@@ -20,6 +20,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kimi"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/kiro"
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -664,6 +665,14 @@ func authGrantFingerprint(auth *coreauth.Auth) string {
 	case *metaauth.MetaTokenStorage:
 		if storage != nil {
 			accessToken = strings.TrimSpace(storage.AccessToken)
+			if email == "" {
+				email = strings.TrimSpace(storage.Email)
+			}
+		}
+	case *kiro.TokenStorage:
+		if storage != nil {
+			accessToken = strings.TrimSpace(storage.AccessToken)
+			refreshToken = strings.TrimSpace(storage.RefreshToken)
 			if email == "" {
 				email = strings.TrimSpace(storage.Email)
 			}

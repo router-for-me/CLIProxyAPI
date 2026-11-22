@@ -697,6 +697,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		if quota.v8 {
 			entry["quota_plugin_id"] = pluginID
 		}
+	} else if isKiroAuth(auth) {
+		// Built-in Kiro quota (GetUsageLimits) served via /plugins/kiro/quota.
+		entry["supports_quota"] = true
+		entry["quota_provider"] = auth.Provider
+		entry["quota_plugin_id"] = kiroQuotaPluginID
 	}
 	// Surface a TOS appeal link for operator action when the credential was
 	// deactivated by an Antigravity TOS_VIOLATION (issue #7515). Only exposed on

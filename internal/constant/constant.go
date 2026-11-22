@@ -27,4 +27,7 @@ const (
 
 	// Interactions represents the Google Interactions API format identifier.
 	Interactions = "interactions"
+
+	// Kiro represents the Kiro CLI provider identifier.
+	Kiro = "kiro"
 )

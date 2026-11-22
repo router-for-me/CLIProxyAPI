@@ -858,6 +858,10 @@ func formatHomeCodexModel(entry homeModelEntry) map[string]any {
 			model["type"] = "devin"
 			break
 		}
+		if strings.EqualFold(p, "kiro") {
+			model["type"] = "kiro"
+			break
+		}
 	}
 	if entry.displayName != "" {
 		model["display_name"] = entry.displayName

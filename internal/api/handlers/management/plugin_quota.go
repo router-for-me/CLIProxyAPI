@@ -113,6 +113,11 @@ func (h *Handler) FetchCredentialQuota(c *gin.Context) {
 		}
 	}
 
+	if isKiroAuth(auth) {
+		h.fetchKiroQuota(c, auth)
+		return
+	}
+
 	// Fallback to declarative quota probe if configured in metadata
 	if auth.Metadata != nil {
 		if rawProbe, okProbe := auth.Metadata["quota_probe"]; okProbe && rawProbe != nil {
@@ -275,6 +280,12 @@ func (h *Handler) fetchQuotaForPlugin(c *gin.Context, pluginID, authIndex string
 	h.mu.Lock()
 	host := h.pluginHost
 	h.mu.Unlock()
+
+	if strings.EqualFold(pluginID, kiroQuotaPluginID) && isKiroAuth(auth) &&
+		(host == nil || !host.HasQuotaProviderForPlugin(pluginID)) {
+		h.fetchKiroQuota(c, auth)
+		return
+	}
 
 	if host == nil || !host.HasQuotaProviderForPlugin(pluginID) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "quota provider not found for plugin"})

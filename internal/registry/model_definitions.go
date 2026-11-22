@@ -600,6 +600,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetDevinModels()
 	case "meta", "muse":
 		return GetMetaModels()
+	case "kiro":
+		return GetKiroModels()
 	default:
 		return nil
 	}
@@ -663,6 +665,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.XAI,
 		GetDevinModels(),
 		GetMetaModels(),
+		GetKiroModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
