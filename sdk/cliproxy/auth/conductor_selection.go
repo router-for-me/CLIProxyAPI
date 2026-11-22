@@ -1454,7 +1454,11 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		if rejectMessage == "" {
 			rejectMessage = "scheduler rejected candidate selection"
 		}
-		return nil, true, nil, wrapSchedulerRejectError(&Error{Code: rejectCode, Message: rejectMessage})
+		return nil, true, nil, wrapSchedulerRejectError(&Error{
+			Code:       rejectCode,
+			Message:    rejectMessage,
+			HTTPStatus: schedulerRejectHTTPStatus(rejectCode),
+		})
 	}
 	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
 		keepSelectionID = true
@@ -1471,6 +1475,15 @@ func (m *Manager) pickViaPluginScheduler(ctx context.Context, scheduler PluginSc
 		keepSelectionID = true
 	}
 	return selected, handledBuiltin, excluded, errBuiltin
+}
+
+func schedulerRejectHTTPStatus(code string) int {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "rate_limit_error", "rate_limit_exceeded":
+		return http.StatusTooManyRequests
+	default:
+		return 0
+	}
 }
 
 func (m *Manager) authSupportsRouteModel(registryRef *registry.ModelRegistry, auth *Auth, routeModel string) bool {

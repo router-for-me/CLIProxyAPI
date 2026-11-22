@@ -2490,6 +2490,17 @@ func TestManagerPluginSchedulerTerminalRejection(t *testing.T) {
 			wantCode:    "quota_reserve_exhausted",
 			wantMessage: "rejected despite auth present",
 		},
+		{
+			name: "rate_limit_error sets HTTP 429",
+			resp: pluginapi.SchedulerPickResponse{
+				Handled:      true,
+				Reject:       true,
+				RejectCode:   "rate_limit_error",
+				RejectReason: "Usage rate limited. Please try again later.",
+			},
+			wantCode:    "rate_limit_error",
+			wantMessage: "Usage rate limited. Please try again later.",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager := NewManager(nil, &FillFirstSelector{}, nil)
@@ -2520,6 +2531,13 @@ func TestManagerPluginSchedulerTerminalRejection(t *testing.T) {
 			}
 			if authErr.Message != tc.wantMessage {
 				t.Fatalf("SelectAuth() error message = %q, want %q", authErr.Message, tc.wantMessage)
+			}
+			wantStatus := 0
+			if tc.wantCode == "rate_limit_error" {
+				wantStatus = http.StatusTooManyRequests
+			}
+			if authErr.HTTPStatus != wantStatus {
+				t.Fatalf("SelectAuth() HTTPStatus = %d, want %d", authErr.HTTPStatus, wantStatus)
 			}
 
 			gotMixed, _, _, errMixed := manager.pickNextMixed(context.Background(), []string{"gemini"}, "", cliproxyexecutor.Options{}, nil)
