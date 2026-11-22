@@ -89,6 +89,37 @@ func waitServersVisible(t *testing.T, conn *websocket.Conn, want ...string) {
 	}
 }
 
+// waitServerTypes is waitServersVisible that also returns each server's type.
+func waitServerTypes(t *testing.T, conn *websocket.Conn, want ...string) map[string]string {
+	t.Helper()
+	types := make(map[string]string, len(want))
+	missing := func() bool {
+		for _, uuid := range want {
+			if _, ok := types[uuid]; !ok {
+				return true
+			}
+		}
+		return false
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for missing() && time.Now().Before(deadline) {
+		frame := readTextJSONFrame(t, conn)
+		switch frame.Get("type").String() {
+		case ControlTypeServerList:
+			count := int(frame.Get("servers.#").Int())
+			for i := 0; i < count; i++ {
+				types[frame.Get(fmt.Sprintf("servers.%d.uuid", i)).String()] = frame.Get(fmt.Sprintf("servers.%d.type", i)).String()
+			}
+		case ControlTypeServerOnline:
+			types[frame.Get("server.uuid").String()] = frame.Get("server.type").String()
+		}
+	}
+	if missing() {
+		t.Fatalf("timed out waiting for servers %v, saw %v", want, types)
+	}
+	return types
+}
+
 func TestHubAuth_MethodAndCredentials(t *testing.T) {
 	hub := NewHub(Options{})
 	t.Cleanup(hub.Close)
@@ -242,13 +273,11 @@ func TestHubAuth_MethodAndCredentials(t *testing.T) {
 			t.Fatalf("Dial client without type error = %v", errCli)
 		}
 		registerCleanupConn(t, cliCheck)
-		listFrame := readTextJSONFrame(t, cliCheck)
-		if listFrame.Get("servers.#").Int() != 2 ||
-			listFrame.Get("servers.0.uuid").String() != "hdr-srv-1" ||
-			listFrame.Get("servers.0.type").String() != "Header-Type-01" ||
-			listFrame.Get("servers.1.uuid").String() != "hdr-srv-2" ||
-			listFrame.Get("servers.1.type").String() != "Query-Type" {
-			t.Fatalf("unexpected server_list types: %s", listFrame.Raw)
+		// The handshake completing does not guarantee hdr-srv-2 is already published,
+		// so collect types from the initial server_list and any server_online events.
+		types := waitServerTypes(t, cliCheck, "hdr-srv-1", "hdr-srv-2")
+		if types["hdr-srv-1"] != "Header-Type-01" || types["hdr-srv-2"] != "Query-Type" {
+			t.Fatalf("unexpected server types: %v", types)
 		}
 
 		cliWithBlankType, cliBlankResp, errCliBlank := websocket.DefaultDialer.Dial(
