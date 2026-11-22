@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"plugin"
+	"strings"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -58,9 +59,13 @@ func newGoPluginLoader() goPluginLoader {
 // not "did the initializer panic" but "did plugin.Open fail": every failure
 // of plugin.Open marks the path as unusable for the rest of the process.
 //
-// The load path is content-addressed, so a plugin that is fixed gets a
-// different digest and therefore a different path: only the unchanged broken
-// build stays blocked, and a host restart is enough to pick up the fix.
+// The load path is content-addressed, so a fixed plugin build gets a
+// different digest and therefore a different path. That does not make it
+// loadable in the same process, though: Go identifies plugins by the
+// package identity embedded at build time and refuses a second copy of the
+// same identity with "plugin already loaded". Only the unchanged broken
+// build stays blocked by the path record, but a fixed build becomes active
+// only after a host restart as well.
 var goPluginFailedPaths sync.Map
 
 // goPluginOpenAttempts holds the in-flight plugin.Open attempts per load
@@ -69,6 +74,20 @@ var goPluginFailedPaths sync.Map
 // concurrent callers have to share the first attempt instead of opening the
 // path again.
 var goPluginOpenAttempts sync.Map
+
+// goPluginOpenedByDigest remembers the successfully opened plugin handles
+// keyed by the digest of the opened build.
+//
+// Go identifies plugins by the package identity embedded at build time
+// rather than by path and refuses a second copy of the same identity in one
+// process ("plugin already loaded"), even when the two files are byte
+// identical. Two hosts that load the same build from different directories
+// or under different file names therefore cannot both call plugin.Open: the
+// second open would fail. A build that was opened successfully is instead
+// shared here by its content digest, so a later host reuses the already
+// loaded image. Each host still calls the plugin's New with its own caller
+// and gets its own plugin instance; only the image itself is loaded once.
+var goPluginOpenedByDigest sync.Map
 
 // goPluginFallbackPaths remembers the load paths whose local shadow copy
 // could not be opened but that are loaded from the executable fallback.
@@ -334,6 +353,42 @@ func (e *goPluginPreviouslyFailedError) Error() string {
 	return fmt.Sprintf("go plugin %s previously failed to initialize and cannot be retried in this process; fix the plugin and restart the host", e.path)
 }
 
+// openGoPluginImage opens the plugin build behind file, either by reusing an
+// already opened handle for the same build digest or by opening the
+// content-addressed shadow copy (with the executable fallback) through
+// openWithFallback.
+//
+// Reusing the handle skips the shadow copy as well: the image is already in
+// the process, so there is nothing to copy or to open. Each caller still
+// resolves the plugin's New symbol on the returned handle and gets its own
+// plugin instance, so only the image itself is shared.
+func (l goPluginLoader) openGoPluginImage(file pluginFile, open func(string) (*plugin.Plugin, error), shadow func(pluginFile) (string, func(), error), digest string) (*plugin.Plugin, error) {
+	if digest != "" {
+		if cached, okCache := goPluginOpenedByDigest.Load(digest); okCache {
+			if opened, okPlugin := cached.(*plugin.Plugin); okPlugin && opened != nil {
+				return opened, nil
+			}
+		}
+	}
+
+	// openWithFallback owns the shadow coordination guard: it releases the
+	// guard before the fallback lock is taken, because both locks live in the
+	// same lock file.
+	loadPath, releaseGuard, errShadow := shadow(file)
+	if errShadow != nil {
+		return nil, errShadow
+	}
+	loadPath = canonicalizePluginPath(loadPath)
+	p, err := l.openWithFallback(file, open, loadPath, releaseGuard)
+	if err != nil {
+		return nil, err
+	}
+	if p != nil && digest != "" {
+		goPluginOpenedByDigest.Store(digest, p)
+	}
+	return p, nil
+}
+
 func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
 	open := l.open
 	if open == nil {
@@ -350,22 +405,28 @@ func (l goPluginLoader) Open(file pluginFile, host *Host) (pluginClient, error) 
 
 	// Go's plugin package caches by path, so the plugin is opened from the
 	// same content-addressed shadow copy the C ABI loader uses. Every distinct
-	// plugin build therefore gets its own path and its own plugin image, and
-	// the original artifact stays replaceable.
-	loadPath, releaseGuard, errShadow := shadow(file)
-	if errShadow != nil {
-		return nil, errShadow
+	// plugin build therefore gets its own path, and the original artifact
+	// stays replaceable. A build whose digest was already opened in this
+	// process is reused instead: Go refuses a second copy of the same plugin
+	// identity ("plugin already loaded") regardless of the path, so sharing
+	// the opened handle is the only way a second host can load the same
+	// build.
+	digest := ""
+	if _, buildDigest, errHash := cachedOrHashPluginFile(file.Path); errHash == nil {
+		digest = buildDigest
 	}
-	loadPath = canonicalizePluginPath(loadPath)
-
-	// openWithFallback owns the shadow coordination guard: it releases the
-	// guard before the fallback lock is taken, because both locks live in the
-	// same lock file.
-	p, err := l.openWithFallback(file, open, loadPath, releaseGuard)
+	p, err := l.openGoPluginImage(file, open, shadow, digest)
 	if err != nil {
 		var failedErr *goPluginPreviouslyFailedError
 		if errors.As(err, &failedErr) {
 			return nil, failedErr
+		}
+		if strings.Contains(err.Error(), "plugin already loaded") {
+			// Go refused the plugin because its build identity is already
+			// present in this process. That is not a buildmode or toolchain
+			// mismatch, and no path can work around it: report the actual
+			// condition instead of the generic open failure hint.
+			return nil, fmt.Errorf("a Go plugin with the same package identity is already loaded in this process (Go identifies plugins by their build identity, not by path): replacing a Go-native plugin requires restarting the host, and hosts in one process must share the opened plugin: %w", err)
 		}
 		return nil, fmt.Errorf("go plugin open %s: %w (hint: build the plugin with -buildmode=plugin, and make sure the host and the plugin share the same Go toolchain, GOOS/GOARCH, build tags and dependency graph; building both inside one go.work is the supported layout)", file.Path, err)
 	}

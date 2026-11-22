@@ -440,9 +440,11 @@ func resetGoPluginFailures(t *testing.T) {
 	t.Helper()
 	goPluginFailedPaths.Clear()
 	goPluginFallbackPaths.Clear()
+	goPluginOpenedByDigest.Clear()
 	t.Cleanup(func() {
 		goPluginFailedPaths.Clear()
 		goPluginFallbackPaths.Clear()
+		goPluginOpenedByDigest.Clear()
 	})
 }
 
@@ -921,6 +923,8 @@ func TestGoPluginLoaderCanonicalizesFailurePath(t *testing.T) {
 func TestGoPluginLoaderFallsBackToExecutableShadow(t *testing.T) {
 	resetGoPluginFailures(t)
 
+	resetGoPluginFailures(t)
+
 	dir := t.TempDir()
 	target := filepath.Join(dir, "probe.so")
 	if err := os.WriteFile(target, []byte("plugin"), 0o600); err != nil {
@@ -966,6 +970,8 @@ func TestGoPluginLoaderFallsBackToExecutableShadow(t *testing.T) {
 // shadow copy is recorded as unusable, not as a failed path, so a later load
 // of the same build goes straight to the fallback instead of being rejected.
 func TestGoPluginLoaderFallbackStaysUsable(t *testing.T) {
+	resetGoPluginFailures(t)
+
 	resetGoPluginFailures(t)
 
 	dir := t.TempDir()
@@ -1019,6 +1025,8 @@ func TestGoPluginLoaderFallbackStaysUsable(t *testing.T) {
 // failing executable fallback is reported instead of being swallowed behind
 // the primary failure of the local shadow copy.
 func TestGoPluginLoaderReportsFallbackFailure(t *testing.T) {
+	resetGoPluginFailures(t)
+
 	resetGoPluginFailures(t)
 
 	dir := t.TempDir()
@@ -1109,6 +1117,7 @@ func TestGoPluginLoaderReleasesPrimaryGuardBeforeFallback(t *testing.T) {
 	}
 
 	t.Run("a failing primary load releases the guard before the fallback", func(t *testing.T) {
+		resetGoPluginFailures(t)
 		target := writePlugin(t)
 		localPath := canonicalizePluginPath(target)
 		guard := &countingGuard{}
@@ -1143,6 +1152,7 @@ func TestGoPluginLoaderReleasesPrimaryGuardBeforeFallback(t *testing.T) {
 	})
 
 	t.Run("a successful primary load releases the guard exactly once", func(t *testing.T) {
+		resetGoPluginFailures(t)
 		target := writePlugin(t)
 		localPath := canonicalizePluginPath(target)
 		guard := &countingGuard{}
@@ -1172,6 +1182,7 @@ func TestGoPluginLoaderReleasesPrimaryGuardBeforeFallback(t *testing.T) {
 	})
 
 	t.Run("a failing fallback releases the guard exactly once", func(t *testing.T) {
+		resetGoPluginFailures(t)
 		target := writePlugin(t)
 		guard := &countingGuard{}
 		loader := goPluginLoader{
@@ -1196,6 +1207,7 @@ func TestGoPluginLoaderReleasesPrimaryGuardBeforeFallback(t *testing.T) {
 	})
 
 	t.Run("a fallback-only path releases the guard before the fallback", func(t *testing.T) {
+		resetGoPluginFailures(t)
 		target := writePlugin(t)
 		localPath := canonicalizePluginPath(target)
 		// Mark the load path as fallback-only, the way a previous load that

@@ -23,12 +23,13 @@ type GoPlugin interface {
 
 	// Shutdown releases plugin-side resources.
 	//
-	// A Go plugin cannot be unloaded from a running process, so replacing a
-	// plugin does not require a host restart: the host opens the replacement
-	// from a content-addressed copy of the new build, which Go's plugin
-	// package loads as a separate image, and retires the previous instance
-	// once the replacement is in place. The retired instance is released
-	// through this method.
+	// A Go plugin cannot be unloaded from a running process, and Go identifies
+	// plugins by the package identity embedded at build time rather than by
+	// path, so a second build of the same plugin cannot be opened in the same
+	// process either: replacing a Go-native plugin requires restarting the
+	// host. (The C ABI path does not have this restriction, because dlopen
+	// loads distinct files as distinct images.) This method releases
+	// plugin-side resources when the plugin is detached.
 	Shutdown()
 }
 
