@@ -233,10 +233,12 @@ func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs 
 	for _, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
 
+		var projectID string
 		var payload []byte
 		if auth != nil && auth.Metadata != nil {
 			if pid, ok := auth.Metadata["project_id"].(string); ok && strings.TrimSpace(pid) != "" {
-				payload = []byte(fmt.Sprintf(`{"project": "%s"}`, strings.TrimSpace(pid)))
+				projectID = strings.TrimSpace(pid)
+				payload = []byte(fmt.Sprintf(`{"project": "%s"}`, projectID))
 			}
 		}
 		if len(payload) == 0 {
@@ -252,6 +254,9 @@ func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs 
 			httpReq.Header.Set("Content-Type", "application/json")
 			httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 			httpReq.Header.Set("User-Agent", misc.AntigravityUserAgent())
+			if projectID != "" {
+				httpReq.Header.Set("X-Goog-User-Project", projectID)
+			}
 
 			httpClient := client
 			if httpClient == nil {
@@ -261,6 +266,12 @@ func fetchModelsFromBaseURLs(ctx context.Context, auth *coreauth.Auth, baseURLs 
 						httpClient.Transport = transport
 					}
 				}
+			} else {
+				cloned := *httpClient
+				httpClient = &cloned
+			}
+			httpClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
 			}
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {

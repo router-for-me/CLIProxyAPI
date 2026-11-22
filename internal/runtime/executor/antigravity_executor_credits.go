@@ -701,6 +701,9 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", userAgent)
+	if projectID := antigravityProjectIDFromAuth(auth); projectID != "" {
+		httpReq.Header.Set("X-Goog-User-Project", projectID)
+	}
 	if host := resolveHost(baseURL); host != "" {
 		httpReq.Host = host
 	}

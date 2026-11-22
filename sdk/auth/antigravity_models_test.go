@@ -752,3 +752,44 @@ func TestFetchAntigravityAvailableModels_OmitsEmptyProject(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchAntigravityAvailableModels_UserProjectHeader(t *testing.T) {
+	cases := []struct {
+		name       string
+		projectID  string
+		wantHeader string
+		wantExists bool
+	}{
+		{name: "empty project id omits header", projectID: "", wantHeader: "", wantExists: false},
+		{name: "whitespace project id omits header", projectID: "  \t\n ", wantHeader: "", wantExists: false},
+		{name: "non-empty project id sets trimmed header", projectID: "  aicode-consumers  ", wantHeader: "aicode-consumers", wantExists: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+			}))
+			defer server.Close()
+
+			_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+				BaseURLs:    []string{server.URL},
+				AccessToken: "test-token",
+				ProjectID:   tc.projectID,
+			})
+			if status != AntigravityProbeStatusSuccess {
+				t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+			}
+			_, exists := gotHeaders["X-Goog-User-Project"]
+			if exists != tc.wantExists {
+				t.Fatalf("X-Goog-User-Project exists = %v, want %v (headers=%v)", exists, tc.wantExists, gotHeaders)
+			}
+			if got := gotHeaders.Get("X-Goog-User-Project"); got != tc.wantHeader {
+				t.Fatalf("X-Goog-User-Project = %q, want %q", got, tc.wantHeader)
+			}
+		})
+	}
+}
