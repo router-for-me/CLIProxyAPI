@@ -701,6 +701,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			}
 		}
 	}
+	parentCtx = proxxEnsureDeferredAPICapture(c, parentCtx) // proxx: request-scoped capture so executor goroutines never touch the pooled gin context
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
