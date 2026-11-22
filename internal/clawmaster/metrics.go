@@ -80,6 +80,7 @@ type instruments struct {
 	tokensByAccount   metric.Int64Counter
 	tokensByClient    metric.Int64Counter
 	tokensByProject   metric.Int64Counter
+	tokensByModel     metric.Int64Counter
 	picks             metric.Int64Counter
 	switches          metric.Int64Counter
 	backup            metric.Int64Counter
@@ -198,6 +199,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.tokensByAccount = counter("claw_master.inference.tokens.by_client_account", "Tokens by client account and type")
 	i.tokensByClient = counter("claw_master.inference.tokens.by_client", "Tokens by client (the connecting box) and type")
 	i.tokensByProject = counter("claw_master.inference.tokens.by_project", "Tokens by project (the launch directory's repository name) and type")
+	i.tokensByModel = counter("claw_master.inference.tokens.by_model", "Tokens by model (the request's) and type")
 	i.picks = counter("claw_master.routing.picks", "Routing decisions by chosen profile")
 	i.switches = counter("claw_master.routing.switches", "Conversations moved to another account, by from, to and reason")
 	i.backup = counter("claw_master.routing.backup_requests", "Requests served by the paid API-key backup")
@@ -450,9 +452,10 @@ type requestObservation struct {
 }
 
 // observeTokens counts one request's tokens. Like the request metrics, each axis (profile, user
-// account, client, project) is its own projection with the token type.
-func observeTokens(profile, client, account, project string, counts tokenCounts) {
+// account, client, project, model) is its own projection with the token type.
+func observeTokens(profile, client, account, project, model string, counts tokenCounts) {
 	projectAttr := attribute.String("project", projectMetricLabel(project))
+	modelAttr := attribute.String("model", model)
 	t := tm()
 	ctx := context.Background()
 	for _, kind := range []struct {
@@ -472,6 +475,7 @@ func observeTokens(profile, client, account, project string, counts tokenCounts)
 		t.tokensByAccount.Add(ctx, kind.count, claudeAttrs(attribute.String("client_account", account), typ))
 		t.tokensByClient.Add(ctx, kind.count, claudeAttrs(attribute.String("client", client), typ))
 		t.tokensByProject.Add(ctx, kind.count, claudeAttrs(projectAttr, typ))
+		t.tokensByModel.Add(ctx, kind.count, claudeAttrs(modelAttr, typ))
 	}
 }
 
@@ -500,7 +504,7 @@ func observeRequest(o requestObservation) {
 	t.inferenceByModel.Add(ctx, 1, claudeAttrs(model, class))
 	t.inferenceByClient.Add(ctx, 1, claudeAttrs(client, account))
 	if o.HasTokens {
-		observeTokens(o.Profile, o.Client, o.Account, o.Project, o.Tokens)
+		observeTokens(o.Profile, o.Client, o.Account, o.Project, o.Model, o.Tokens)
 	}
 	if o.Status >= 400 || o.Status == 0 {
 		t.inferenceErrors.Add(ctx, 1, claudeAttrs(profile, attribute.String("status", strconv.Itoa(o.Status)), account))

@@ -149,6 +149,9 @@ func TestTokensOfAnInferenceRequestAreCounted(t *testing.T) {
 				if got := sumOf(rm, "claw_master.inference.tokens.by_client", map[string]string{"client": "unknown", "type": typ}); got != n {
 					t.Errorf("tokens.by_client{type=%s} = %d, want %d", typ, got, n)
 				}
+				if got := sumOf(rm, "claw_master.inference.tokens.by_model", map[string]string{"type": typ}); got != n {
+					t.Errorf("tokens.by_model{type=%s} = %d, want %d", typ, got, n)
+				}
 				// No tunnel named a project.
 				if got := sumOf(rm, "claw_master.inference.tokens.by_project", map[string]string{"project": "none", "type": typ}); got != n {
 					t.Errorf("tokens.by_project{project=none,type=%s} = %d, want %d", typ, got, n)
@@ -163,12 +166,16 @@ func TestTokensAreCountedByTheProjectTheTunnelNamed(t *testing.T) {
 	reader := startMetrics(t, nil)
 	observeRequest(requestObservation{
 		Route: "inference", Profile: "claude-test", Client: "box", Account: "unknown", Project: "my-app",
-		Status: http.StatusOK, Tokens: tokenCounts{input: 7, output: 3}, HasTokens: true,
+		Model: "claude-test-model", Status: http.StatusOK, Tokens: tokenCounts{input: 7, output: 3}, HasTokens: true,
 	})
 	rm := collect(t, reader)
 	for typ, n := range map[string]int64{"input": 7, "output": 3} {
 		if got := sumOf(rm, "claw_master.inference.tokens.by_project", map[string]string{"project": "my-app", "type": typ}); got != n {
 			t.Errorf("tokens.by_project{project=my-app,type=%s} = %d, want %d", typ, got, n)
+		}
+		// And by the request's model, so the dashboard can split tokens by model.
+		if got := sumOf(rm, "claw_master.inference.tokens.by_model", map[string]string{"model": "claude-test-model", "type": typ}); got != n {
+			t.Errorf("tokens.by_model{model=claude-test-model,type=%s} = %d, want %d", typ, got, n)
 		}
 	}
 }
