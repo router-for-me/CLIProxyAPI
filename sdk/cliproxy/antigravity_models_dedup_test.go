@@ -2,7 +2,6 @@ package cliproxy
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -188,7 +188,12 @@ func TestAntigravityCapabilityProbe_FailuresAreAccountScoped(t *testing.T) {
 				t.Fatalf("calls=%d", calls.Load())
 			}
 			bad.Metadata["access_token"] = "refreshed"
-			if hints := svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), bad); len(hints.ModelIDs) != 1 {
+			hints := svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), bad)
+			if status == http.StatusForbidden {
+				if hints.ModelIDs != nil || calls.Load() != 2 {
+					t.Fatalf("403 backoff reset on token rotation: hints=%v calls=%d", hints, calls.Load())
+				}
+			} else if len(hints.ModelIDs) != 1 {
 				t.Fatal("new token blocked")
 			}
 		})

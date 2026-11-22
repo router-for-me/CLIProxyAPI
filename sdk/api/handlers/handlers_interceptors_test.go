@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -1695,6 +1696,87 @@ func TestWriteModelListResponse_ExposesResponseToPluginInterceptors(t *testing.T
 	}
 }
 
+func TestWriteModelListResponse_ForwardsCallerIdentityToInterceptors(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var capturedReq pluginapi.ResponseInterceptRequest
+	var completion pluginapi.RequestCompletion
+
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			capturedReq = req
+			return pluginapi.ResponseInterceptResponse{}
+		},
+		completeRequest: func(_ context.Context, comp pluginapi.RequestCompletion) {
+			completion = comp
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1beta/models?key=query-credential", nil)
+	ctx.Set("userApiKey", "plugin-principal-123")
+	ctx.Set("accessProvider", "plugin-frontend-auth")
+	ctx.Set("accessMetadata", map[string]string{"source": "query-key", "team": "alpha"})
+
+	payload := gin.H{"models": []map[string]any{{"name": "models/gemini-3-pro"}}}
+	handler.WriteModelListResponse(ctx, "gemini", payload)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	wantScope := coresession.CallerScope("plugin-principal-123")
+	if got := capturedReq.Metadata[pluginapi.CallerScopeMetadataKey]; got != wantScope {
+		t.Fatalf("Metadata[%q] = %v, want %q", pluginapi.CallerScopeMetadataKey, got, wantScope)
+	}
+	if got := capturedReq.Metadata["access_provider"]; got != "plugin-frontend-auth" {
+		t.Fatalf("Metadata[access_provider] = %v, want plugin-frontend-auth", got)
+	}
+	rawAuthMeta, ok := capturedReq.Metadata["frontend_auth_metadata"].(map[string]string)
+	if !ok {
+		t.Fatalf("Metadata[frontend_auth_metadata] type = %T, want map[string]string", capturedReq.Metadata["frontend_auth_metadata"])
+	}
+	if rawAuthMeta["source"] != "query-key" || rawAuthMeta["team"] != "alpha" {
+		t.Fatalf("frontend_auth_metadata = %#v, want source=query-key team=alpha", rawAuthMeta)
+	}
+	if got := completion.Metadata[pluginapi.CallerScopeMetadataKey]; got != wantScope {
+		t.Fatalf("completion Metadata[%q] = %v, want %q", pluginapi.CallerScopeMetadataKey, got, wantScope)
+	}
+
+	// The forwarded auth metadata must be a clone: mutating the interceptor-visible
+	// map must not corrupt the gin context copy shared with other consumers.
+	rawAuthMeta["source"] = "mutated-by-plugin"
+	ctxMeta, _ := ctx.Get("accessMetadata")
+	if got := ctxMeta.(map[string]string)["source"]; got != "query-key" {
+		t.Fatalf("accessMetadata[source] in context = %q, want query-key (interceptor metadata must be isolated)", got)
+	}
+}
+
+func TestWriteModelListResponse_MetadataNilWithoutAuthContext(t *testing.T) {
+	handler := &BaseAPIHandler{}
+	var capturedReq pluginapi.ResponseInterceptRequest
+
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			capturedReq = req
+			return pluginapi.ResponseInterceptResponse{}
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+
+	handler.WriteModelListResponse(ctx, "openai", gin.H{"object": "list", "data": []map[string]any{}})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if capturedReq.Metadata != nil {
+		t.Fatalf("Metadata = %#v, want nil for unauthenticated context", capturedReq.Metadata)
+	}
+}
+
 func TestRequestAfterAuthCapture_ReadOnlyInterceptorDoesNotReallocatePayload_Issue6101(t *testing.T) {
 	capture := &requestAfterAuthCapture{}
 	payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
@@ -1752,5 +1834,174 @@ func TestApplyRequestInterceptors_ReadOnlyInterceptorDoesNotReallocatePayload_Is
 	}
 	if unsafe.SliceData(gotOpts.OriginalRequest) != unsafe.SliceData(opts.OriginalRequest) {
 		t.Fatal("applyRequestInterceptorsBeforeAuth reallocated opts.OriginalRequest when interceptor did not mutate body")
+	}
+}
+
+func TestResponseInterceptRequest_SetsKindAcrossAuthManagerAndModelListPaths(t *testing.T) {
+	t.Run("auth_manager_execution", func(t *testing.T) {
+		model := "handler-interceptor-kind-exec"
+		executor := &interceptorCaptureExecutor{}
+		handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+		var capturedReq pluginapi.ResponseInterceptRequest
+		handler.SetPluginHost(&handlerInterceptorTestHost{
+			interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				capturedReq = req
+				return pluginapi.ResponseInterceptResponse{}
+			},
+		})
+
+		body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+		if errMsg != nil || string(body) != "ok" {
+			t.Fatalf("ExecuteWithAuthManager() body = %q, error = %#v", body, errMsg)
+		}
+		if capturedReq.Kind != pluginapi.ResponseInterceptKindExecution {
+			t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindExecution)
+		}
+	})
+
+	t.Run("auth_manager_count_tokens", func(t *testing.T) {
+		model := "handler-interceptor-kind-count"
+		executor := &interceptorCaptureExecutor{}
+		handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+		var capturedReq pluginapi.ResponseInterceptRequest
+		handler.SetPluginHost(&handlerInterceptorTestHost{
+			interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				capturedReq = req
+				return pluginapi.ResponseInterceptResponse{}
+			},
+		})
+
+		body, _, errMsg := handler.ExecuteCountWithAuthManager(context.Background(), "claude", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+		if errMsg != nil || string(body) != "0" {
+			t.Fatalf("ExecuteCountWithAuthManager() body = %q, error = %#v", body, errMsg)
+		}
+		if capturedReq.Kind != pluginapi.ResponseInterceptKindCountTokens {
+			t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindCountTokens)
+		}
+	})
+
+	t.Run("model_list_with_populated_metadata", func(t *testing.T) {
+		handler := &BaseAPIHandler{}
+		var capturedReq pluginapi.ResponseInterceptRequest
+		handler.SetPluginHost(&handlerInterceptorTestHost{
+			interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+				capturedReq = req
+				return pluginapi.ResponseInterceptResponse{}
+			},
+		})
+
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req = req.WithContext(logging.WithRequestID(req.Context(), "trace-7655"))
+		ctx.Request = req
+		ctx.Set("userApiKey", "caller-principal-7655")
+		ctx.Set("accessProvider", "plugin-frontend-auth")
+		ctx.Set("accessMetadata", map[string]string{"tier": "restricted"})
+
+		handler.WriteModelListResponse(ctx, "openai", gin.H{
+			"object": "list",
+			"data":   []map[string]any{{"id": "gpt-5"}},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		reqID, okReqID := capturedReq.Metadata[coreexecutor.RequestIDMetadataKey].(string)
+		traceID, okTraceID := capturedReq.Metadata[coreexecutor.TraceIDMetadataKey].(string)
+		if !okReqID || reqID == "" || reqID != capturedReq.RequestID || !okTraceID || traceID != "trace-7655" {
+			t.Fatalf("expected lifecycle request_id (%q) and trace_id in metadata, got %#v", capturedReq.RequestID, capturedReq.Metadata)
+		}
+		if capturedReq.Kind != pluginapi.ResponseInterceptKindModelList {
+			t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindModelList)
+		}
+	})
+}
+
+func TestHandlerAfterAuthCredentialTerminateFailover(t *testing.T) {
+	model := "handler-after-auth-cred-terminate"
+	var executedAuths []string
+	executor := &interceptorCaptureExecutor{
+		execute: func(_ context.Context, auth *coreauth.Auth, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+			executedAuths = append(executedAuths, auth.ID)
+			return coreexecutor.Response{Payload: []byte("ok:" + auth.ID)}, nil
+		},
+	}
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.RegisterExecutor(executor)
+	for _, id := range []string{"handler-cred-a", "handler-cred-b"} {
+		registry.GetGlobalRegistry().RegisterClient(id, executor.Identifier(), []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+		if _, errReg := manager.Register(context.Background(), &coreauth.Auth{
+			ID:       id,
+			Provider: executor.Identifier(),
+			Status:   coreauth.StatusActive,
+		}); errReg != nil {
+			t.Fatal(errReg)
+		}
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	var responseReqBody []byte
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestAfterAuth: func(_ context.Context, req pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			authID, _ := req.Metadata[coreexecutor.SelectedAuthMetadataKey].(string)
+			if authID == "handler-cred-a" {
+				return pluginapi.RequestInterceptResponse{
+					Headers:        http.Header{"X-Refused-Mutation": {"should-not-leak"}},
+					Body:           []byte(`{"leaked":true}`),
+					Terminate:      true,
+					TerminateScope: "credential",
+					StatusCode:     http.StatusForbidden,
+					ResponseBody:   []byte(`{"error":"cred-a refused"}`),
+				}
+			}
+			return pluginapi.RequestInterceptResponse{}
+		},
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			responseReqBody = cloneBytes(req.RequestBody)
+			return pluginapi.ResponseInterceptResponse{}
+		},
+	})
+
+	body, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
+	if errMsg != nil {
+		t.Fatalf("ExecuteWithAuthManager() errMsg = %#v", errMsg)
+	}
+	if string(body) != "ok:handler-cred-b" {
+		t.Fatalf("body = %q, want ok:handler-cred-b", string(body))
+	}
+	if len(executedAuths) != 1 || executedAuths[0] != "handler-cred-b" {
+		t.Fatalf("executedAuths = %v, want [handler-cred-b]", executedAuths)
+	}
+	if strings.Contains(string(responseReqBody), "leaked") {
+		t.Fatalf("refused credential body leaked into response interceptor: %s", string(responseReqBody))
+	}
+}
+
+func TestHandlerBeforeAuthIgnoresCredentialTerminateScope(t *testing.T) {
+	model := "handler-before-auth-ignores-scope"
+	executor := &interceptorCaptureExecutor{}
+	handler := newInterceptorHandler(t, model, executor, &sdkconfig.SDKConfig{})
+	afterCalls := 0
+	handler.SetPluginHost(&handlerInterceptorTestHost{
+		interceptRequestBeforeAuth: func(_ context.Context, _ pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			return pluginapi.RequestInterceptResponse{
+				Terminate:      true,
+				TerminateScope: "credential",
+				StatusCode:     http.StatusForbidden,
+				ResponseBody:   []byte(`{"error":"before-auth blocked"}`),
+			}
+		},
+		interceptRequestAfterAuth: func(_ context.Context, _ pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+			afterCalls++
+			return pluginapi.RequestInterceptResponse{}
+		},
+	})
+
+	_, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", model, []byte(`{"model":"`+model+`"}`), "")
+	if errMsg == nil || !errMsg.DirectResponse || errMsg.StatusCode != http.StatusForbidden {
+		t.Fatalf("termination error = %#v, want 403 direct response", errMsg)
+	}
+	if afterCalls != 0 {
+		t.Fatalf("after-auth interceptor called %d times, want 0", afterCalls)
 	}
 }

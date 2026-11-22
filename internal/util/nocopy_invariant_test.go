@@ -3,9 +3,10 @@ package util
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/MoeForge/moego/regexp"
 )
 
 // inPlaceSJSONTokens are the sjson knobs that let a write reuse the caller's

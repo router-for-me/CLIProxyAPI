@@ -94,6 +94,7 @@ func TestIsAIAPIPathIncludesPublicAPIGroups(t *testing.T) {
 		"/v1beta/interactions",
 		"/openai/v1/videos",
 		"/backend-api/codex/responses",
+		"/muse-code/models",
 	} {
 		if !isAIAPIPath(path) {
 			t.Fatalf("expected %s to be treated as AI API path", path)
@@ -104,6 +105,7 @@ func TestIsAIAPIPathIncludesPublicAPIGroups(t *testing.T) {
 		"/v10/models",
 		"/openai/v10/videos",
 		"/backend-api/codex-status",
+		"/muse-code-status",
 	} {
 		if isAIAPIPath(path) {
 			t.Fatalf("expected %s not to be treated as AI API path", path)

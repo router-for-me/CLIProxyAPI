@@ -9,7 +9,6 @@ import (
 	"math"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
+	"github.com/MoeForge/moego/regexp"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -43,6 +43,15 @@ var (
 	siwcTokenEndpointURL = SIWCTokenURL
 	siwcRefreshGroup     singleflight.Group
 )
+
+// OverrideSIWCTokenEndpointURLForTest overrides the SIWC token endpoint URL for tests and returns a restore function.
+func OverrideSIWCTokenEndpointURLForTest(endpoint string) func() {
+	previous := siwcTokenEndpointURL
+	siwcTokenEndpointURL = endpoint
+	return func() {
+		siwcTokenEndpointURL = previous
+	}
+}
 
 // IsValidUUID reports whether raw is a canonical 36-char UUID string.
 func IsValidUUID(raw string) bool {

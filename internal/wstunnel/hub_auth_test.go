@@ -2,6 +2,7 @@ package wstunnel
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +57,36 @@ func readTextJSONFrame(t *testing.T, conn *websocket.Conn) ojson.Result {
 		t.Fatalf("invalid json frame: %s", string(raw))
 	}
 	return ojson.ParseBytes(raw)
+}
+
+// waitServersVisible drains control frames on conn until every uuid in want
+// has been observed on the client (via an initial server_list or incremental
+// server_online events). The WebSocket handshake completing does not guarantee
+// commitPeer has published a concurrently-dialing server, and a server already
+// present in the initial list produces no server_online, so all pending uuids
+// must be collected across a single drain rather than one frame per uuid.
+func waitServersVisible(t *testing.T, conn *websocket.Conn, want ...string) {
+	t.Helper()
+	pending := make(map[string]struct{}, len(want))
+	for _, uuid := range want {
+		pending[uuid] = struct{}{}
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(pending) > 0 && time.Now().Before(deadline) {
+		frame := readTextJSONFrame(t, conn)
+		switch frame.Get("type").String() {
+		case ControlTypeServerList:
+			count := int(frame.Get("servers.#").Int())
+			for i := 0; i < count; i++ {
+				delete(pending, frame.Get(fmt.Sprintf("servers.%d.uuid", i)).String())
+			}
+		case ControlTypeServerOnline:
+			delete(pending, frame.Get("server.uuid").String())
+		}
+	}
+	if len(pending) > 0 {
+		t.Fatalf("timed out waiting for servers to become visible: %v", pending)
+	}
 }
 
 func TestHubAuth_MethodAndCredentials(t *testing.T) {
@@ -211,8 +242,16 @@ func TestHubAuth_MethodAndCredentials(t *testing.T) {
 			t.Fatalf("Dial client without type error = %v", errCli)
 		}
 		registerCleanupConn(t, cliCheck)
+		// Drain the topology stream until both pre-connected servers are visible;
+		// their commitPeer may not have run before cliCheck's initial snapshot.
+		waitServersVisible(t, cliCheck, "hdr-srv-1", "hdr-srv-2")
+		if errWrite := cliCheck.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"hdr-types"}`)); errWrite != nil {
+			t.Fatalf("cliCheck list_servers error = %v", errWrite)
+		}
 		listFrame := readTextJSONFrame(t, cliCheck)
-		if listFrame.Get("servers.#").Int() != 2 ||
+		if listFrame.Get("type").String() != ControlTypeServerList ||
+			listFrame.Get("request_id").String() != "hdr-types" ||
+			listFrame.Get("servers.#").Int() != 2 ||
 			listFrame.Get("servers.0.uuid").String() != "hdr-srv-1" ||
 			listFrame.Get("servers.0.type").String() != "Header-Type-01" ||
 			listFrame.Get("servers.1.uuid").String() != "hdr-srv-2" ||

@@ -1,6 +1,6 @@
 package util
 
-import "encoding/json"
+import "github.com/MoeForge/moego/json"
 
 const emptyClaudeToolInputSchema = `{"type":"object","properties":{}}`
 

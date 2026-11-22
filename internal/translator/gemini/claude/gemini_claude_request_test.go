@@ -1011,3 +1011,68 @@ func TestConvertClaudeRequestToGemini_ImageURLAndRedactedThinkingStaySkipped(t *
 		t.Fatalf("old skip paths changed the turn: %s", output)
 	}
 }
+
+func TestConvertClaudeRequestToGemini_ToolResultDocumentNestedInFunctionResponseParts(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		wantResult string
+	}{
+		{
+			name:       "array text and pdf document",
+			content:    `[{"type":"text","text":"Loaded sample.pdf"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]`,
+			wantResult: "Loaded sample.pdf",
+		},
+		{
+			name:       "array pdf document only",
+			content:    `[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}]`,
+			wantResult: "",
+		},
+		{
+			name:       "object pdf document",
+			content:    `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}`,
+			wantResult: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inputJSON := []byte(fmt.Sprintf(`{
+				"model": "gemini-3.1-pro-preview",
+				"messages": [
+					{"role": "assistant", "content": [{"type": "tool_use", "id": "call_pdf", "name": "read_file", "input": {}}]},
+					{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_pdf", "content": %s}]}
+				]
+			}`, tt.content))
+
+			output, err := ConvertClaudeRequestToGemini("gemini-3.1-pro-preview", inputJSON, false)
+			if err != nil {
+				t.Fatalf("ConvertClaudeRequestToGemini failed: %v", err)
+			}
+			fr := ojson.GetBytesNoCopy(output, "contents.1.parts.0.functionResponse")
+			if !fr.Exists() {
+				t.Fatalf("functionResponse missing: %s", output)
+			}
+			pdf := fr.Get("parts.0.inlineData")
+			if !pdf.Exists() {
+				t.Fatalf("expected functionResponse.parts.0.inlineData to exist, got %s", fr.Raw)
+			}
+			if got := pdf.Get("mimeType").String(); got != "application/pdf" {
+				t.Fatalf("mimeType = %q, want application/pdf", got)
+			}
+			if got := pdf.Get("data").String(); got != "JVBERi0xLjQK" {
+				t.Fatalf("data = %q, want JVBERi0xLjQK", got)
+			}
+			if strings.Contains(fr.Get("response.result").Raw, "JVBERi0xLjQK") {
+				t.Fatalf("base64 PDF leaked into response.result: %s", fr.Get("response.result").Raw)
+			}
+			if tt.wantResult == "" {
+				if got := fr.Get("response.result").String(); got != "" {
+					t.Fatalf("response.result = %q, want empty", got)
+				}
+			} else if got := fr.Get("response.result.text").String(); got != tt.wantResult {
+				t.Fatalf("response.result.text = %q, want %q (raw=%s)", got, tt.wantResult, fr.Get("response.result").Raw)
+			}
+		})
+	}
+}

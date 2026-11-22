@@ -123,6 +123,7 @@ The legacy setting name is retained for existing configurations.
       "reset_credits": null,
       "observed_at": "2026-10-25T12:00:00Z",
       "next_pick": true,
+      "can_refresh": true,
       "windows": [
         {"key": "five_hour", "label": "5-hour", "used_percent": 12, "resets_at": "2026-10-25T18:00:00Z", "status": "allowed", "duration_seconds": 18000, "scoped": false, "reset_cadence": "on_use"},
         {"key": "seven_day", "label": "Weekly", "used_percent": 41, "resets_at": "2026-10-29T09:00:00Z", "status": "allowed_warning", "duration_seconds": 604800, "scoped": false, "reset_cadence": "fixed"},
@@ -166,6 +167,8 @@ The legacy setting name is retained for existing configurations.
   within its provider. Rotating strategies (`round-robin`) mark none.
   Config-file credentials are ranked but not listed, so a provider may have no
   listed `next_pick`.
+- `can_refresh` is `true` when a registered usage lookup can refresh this
+  credential. It is always `false` for config-backed API keys.
 - `windows`: account-wide first, shorter before longer. `used_percent`,
   `resets_at`, `status` and `duration_seconds` (window length) are `null` when
   unknown. `scoped: true` marks model-, feature- or spend-specific windows; only
@@ -175,8 +178,8 @@ The legacy setting name is retained for existing configurations.
   Claude reports `on_use` for 5-hour and `fixed` for weekly windows; Codex
   reports `on_use` for its account-wide 5-hour window. An `on_use` window that
   has not started has `resets_at: null` (Codex: unused, with a reset a full
-  window away; one started under a minute ago reads the same). Only Claude,
-  Codex and Devin report windows; other providers return `[]`.
+  window away; one started under a minute ago reads the same). Credentials
+  without reported windows return `[]`.
 
 Config-backed API keys are listed, disabled ones included, with
 `"api_key": {"masked": "sk-a…1234", "success": 7, "failed": 2}` (counts since
@@ -185,14 +188,15 @@ have `"windows": []`. Usage lookups and login renewal don't apply to API keys.
 
 ## POST /usage/refresh
 
-Body `{"auth_index": "3f2a9c"}` refreshes one Claude or Codex credential; an
-empty body refreshes every enabled Claude and Codex OAuth credential, 2s apart.
+Body `{"auth_index": "3f2a9c"}` refreshes one eligible credential. An empty
+body runs all registered lookups. The built-in Claude and Codex lookups
+refresh enabled OAuth credentials, with 2s between requests within each lookup.
 A Codex lookup reads ChatGPT's usage document, so its windows and reset credits
 appear without Codex traffic. Returns the `GET /usage/windows` shape, plus
 `"errors": {"<id>": "<message>"}` for failed lookups.
 
 - `404`: unknown `auth_index`.
-- `400`: not an enabled Claude or Codex OAuth credential, or invalid body.
+- `400` if the credential is ineligible for usage lookup or the body is invalid.
 
 ## POST /usage/reset-credit
 

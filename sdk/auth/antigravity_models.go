@@ -3,12 +3,15 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -34,13 +37,23 @@ const (
 	AntigravityProbeStatusSuccess AntigravityProbeStatus = iota
 	AntigravityProbeStatusAuthError
 	AntigravityProbeStatusTransientError
+	AntigravityProbeStatusForbidden
 )
 
-// AntigravityModelCapabilityHints holds normalized per-account model IDs and web-search capability IDs.
+// AntigravityModelQuota holds the quota reported for one available model.
+type AntigravityModelQuota struct {
+	ModelID           string
+	DisplayName       string
+	RemainingFraction float64
+	ResetTime         time.Time
+}
+
+// AntigravityModelCapabilityHints holds the per-account model catalog, capabilities, and quotas.
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs map[string]struct{}
+	ModelIDs    map[string]struct{}
+	ModelQuotas map[string]AntigravityModelQuota
 }
 
 // Clone returns a deep copy of the capability hints.
@@ -48,6 +61,7 @@ func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
+		ModelQuotas:       maps.Clone(h.ModelQuotas),
 	}
 }
 
@@ -86,7 +100,7 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 			return http.ErrUseLastResponse
 		},
 	}
-	transport, _, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(req.ProxyURL))
+	transport, errProxy := newAntigravityProbeTransport(req.ProxyURL)
 	if errProxy != nil {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
@@ -118,8 +132,11 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 			log.Debug("antigravity model fetch: response close failed")
 		}
 	}()
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if resp.StatusCode == http.StatusUnauthorized {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusAuthError
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusForbidden
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
@@ -134,6 +151,48 @@ func FetchAntigravityAvailableModels(ctx context.Context, req AntigravityModelPr
 		return AntigravityModelCapabilityHints{}, AntigravityProbeStatusTransientError
 	}
 	return hints, AntigravityProbeStatusSuccess
+}
+
+func newAntigravityProbeTransport(proxyURL string) (*http.Transport, error) {
+	transport, mode, errProxy := proxyutil.BuildHTTPTransport(strings.TrimSpace(proxyURL))
+	if errProxy != nil {
+		return nil, errProxy
+	}
+	if transport == nil {
+		if mode != proxyutil.ModeInherit || http.DefaultTransport == nil {
+			transport = &http.Transport{}
+		} else if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			if base == nil {
+				transport = &http.Transport{}
+			} else {
+				transport = base.Clone()
+			}
+		} else {
+			// A custom non-*http.Transport RoundTripper installed on http.DefaultTransport
+			// owns its own protocol behavior.
+			return nil, nil
+		}
+	}
+	return configureAntigravityHTTP11Transport(transport), nil
+}
+
+func configureAntigravityHTTP11Transport(transport *http.Transport) *http.Transport {
+	if transport == nil {
+		return nil
+	}
+	transport.Protocols = nil
+	transport.ForceAttemptHTTP2 = false
+	// Wipe TLSNextProto to prevent implicit HTTP/2 upgrade.
+	transport.TLSNextProto = make(map[string]func(authority string, c *tls.Conn) http.RoundTripper)
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	// Native Antigravity sends no ALPN extension. With HTTP/2 disabled above,
+	// an empty NextProtos keeps the wire shape aligned while using HTTP/1.1.
+	transport.TLSClientConfig.NextProtos = nil
+	return transport
 }
 
 // NormalizeAntigravityModelID normalizes an Antigravity model identifier for case-insensitive matching.
@@ -189,6 +248,7 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 
 	modelsResult := top.Get("models")
 	var modelIDs map[string]struct{}
+	var modelQuotas map[string]AntigravityModelQuota
 	if modelsResult.Exists() && modelsResult.Type != ojson.Null {
 		if !modelsResult.IsObject() {
 			return AntigravityModelCapabilityHints{}, false
@@ -198,9 +258,18 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 			return AntigravityModelCapabilityHints{}, false
 		}
 		modelIDs = make(map[string]struct{}, len(modelMap))
-		for id := range modelMap {
+		for _, id := range slices.Sorted(maps.Keys(modelMap)) {
 			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
 				modelIDs[normalized] = struct{}{}
+				if _, exists := modelQuotas[normalized]; exists {
+					continue
+				}
+				if quota, ok := parseAntigravityModelQuota(normalized, modelMap[id]); ok {
+					if modelQuotas == nil {
+						modelQuotas = make(map[string]AntigravityModelQuota)
+					}
+					modelQuotas[normalized] = quota
+				}
 			}
 		}
 	}
@@ -208,7 +277,33 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: webSearchModels,
 		ModelIDs:          modelIDs,
+		ModelQuotas:       modelQuotas,
 	}, true
+}
+
+func parseAntigravityModelQuota(id string, model ojson.Result) (AntigravityModelQuota, bool) {
+	info := model.Get("quotaInfo")
+	if !info.IsObject() || model.Get("disabled").Type == ojson.True {
+		return AntigravityModelQuota{}, false
+	}
+	quota := AntigravityModelQuota{ModelID: id}
+	if reset := info.Get("resetTime"); reset.Type == ojson.String {
+		quota.ResetTime, _ = time.Parse(time.RFC3339Nano, reset.Str)
+	}
+	remaining := info.Get("remainingFraction")
+	if remaining.Exists() {
+		if remaining.Type != ojson.Number || math.IsNaN(remaining.Num) || remaining.Num < 0 || remaining.Num > 1 {
+			return AntigravityModelQuota{}, false
+		}
+		quota.RemainingFraction = remaining.Num
+	} else if quota.ResetTime.IsZero() {
+		// Proto3 omits the zero fraction. A valid reset distinguishes it from missing quota.
+		return AntigravityModelQuota{}, false
+	}
+	if name := model.Get("displayName"); name.Type == ojson.String {
+		quota.DisplayName = strings.Clone(name.Str)
+	}
+	return quota, true
 }
 
 // BuildPersistedAntigravityCapabilityHints serializes capability hints for storage in auth metadata.

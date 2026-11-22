@@ -1,7 +1,6 @@
 package management
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
@@ -381,5 +381,80 @@ func TestConfigV8FieldUpdatesKeepComments(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestConfigV8ClaudeOAuthIncludeCreateAPIKey(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "config-version: 8\nserver: {port: 8317}\nupstream: {claude: {}}\n"
+	if err := os.WriteFile(file, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{cfg: cfg, configFilePath: file}
+	router := gin.New()
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		router.Handle(method, "/v8/management/config/*path", h.ConfigV8)
+	}
+
+	putRec := httptest.NewRecorder()
+	router.ServeHTTP(putRec, httptest.NewRequest(http.MethodPut, "/v8/management/config/oauth/providers/claude/oauth-include-create-api-key", strings.NewReader("false")))
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200: %s", putRec.Code, putRec.Body.String())
+	}
+
+	getField := httptest.NewRecorder()
+	router.ServeHTTP(getField, httptest.NewRequest(http.MethodGet, "/v8/management/config/oauth/providers/claude/oauth-include-create-api-key", nil))
+	if getField.Code != http.StatusOK || getField.Body.String() != "false" {
+		t.Fatalf("GET field = (%d, %s), want (200, false)", getField.Code, getField.Body.String())
+	}
+
+	getProvider := httptest.NewRecorder()
+	router.ServeHTTP(getProvider, httptest.NewRequest(http.MethodGet, "/v8/management/config/oauth/providers/claude", nil))
+	var providerBody map[string]any
+	if getProvider.Code != http.StatusOK || json.Unmarshal(getProvider.Body.Bytes(), &providerBody) != nil || providerBody["oauth-include-create-api-key"] != false {
+		t.Fatalf("GET provider = (%d, %s), want oauth-include-create-api-key=false", getProvider.Code, getProvider.Body.String())
+	}
+
+	loaded, errLoad := config.LoadConfig(file)
+	if errLoad != nil || loaded.Claude.OAuthIncludeCreateAPIKeyEnabled() {
+		t.Fatalf("LoadConfig() = (%v, %v), want disabled", loaded, errLoad)
+	}
+	data, errRead := os.ReadFile(file)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if errValidate := config.ValidateV8Config(data); errValidate != nil {
+		t.Fatalf("ValidateV8Config() error = %v\n%s", errValidate, data)
+	}
+
+	delRec := httptest.NewRecorder()
+	router.ServeHTTP(delRec, httptest.NewRequest(http.MethodDelete, "/v8/management/config/oauth/providers/claude/oauth-include-create-api-key", nil))
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200: %s", delRec.Code, delRec.Body.String())
+	}
+	reloaded, errReload := config.LoadConfig(file)
+	if errReload != nil || !reloaded.Claude.OAuthIncludeCreateAPIKeyEnabled() {
+		t.Fatalf("reloaded after delete = (%v, %v), want default enabled", reloaded, errReload)
+	}
+
+	// Root PATCH with {"oauth":{"providers":{"claude":null}}} must also reset oauth-include-create-api-key.
+	putAgain := httptest.NewRecorder()
+	router.ServeHTTP(putAgain, httptest.NewRequest(http.MethodPut, "/v8/management/config/oauth/providers/claude/oauth-include-create-api-key", strings.NewReader("false")))
+	if putAgain.Code != http.StatusOK {
+		t.Fatalf("PUT again status = %d, want 200: %s", putAgain.Code, putAgain.Body.String())
+	}
+	patchNull := httptest.NewRecorder()
+	router.ServeHTTP(patchNull, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"oauth":{"providers":{"claude":null}}}`)))
+	if patchNull.Code != http.StatusOK {
+		t.Fatalf("root PATCH null status = %d, want 200: %s", patchNull.Code, patchNull.Body.String())
+	}
+	afterNull, errAfterNull := config.LoadConfig(file)
+	if errAfterNull != nil || !afterNull.Claude.OAuthIncludeCreateAPIKeyEnabled() {
+		t.Fatalf("after root PATCH null = (%v, %v), want default enabled", afterNull, errAfterNull)
 	}
 }

@@ -3,10 +3,13 @@ package pluginapi
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Plugin is the host-side representation produced from a dynamic plugin registration.
@@ -99,13 +102,19 @@ type Capabilities struct {
 	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
 	// credentials from the highest available priority tier.
 	SchedulerAcrossPriorities bool
+	// SchedulerContinuity optionally evaluates bounded pre-admission continuity when
+	// eligible Codex credentials are waiting for quota recovery or after a pre-output 429.
+	SchedulerContinuity SchedulerContinuity
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
-	// Empty defaults to ExecutorModelScopeBoth for backward compatibility.
+	// Empty defaults to ExecutorModelScopeOAuth when AuthProvider/AuthProviders is declared,
+	// and ExecutorModelScopeBoth otherwise for backward compatibility.
+	// When AuthProvider/AuthProviders is declared, only ExecutorModelScopeStatic registers an
+	// unauthenticated static model client in ModelRegistry.
 	ExecutorModelScope ExecutorModelScope
 	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
 	ExecutorInputFormats []string
@@ -147,7 +156,7 @@ type Capabilities struct {
 	RequestInterceptorPatchBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
-	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	// ResponseInterceptor rewrites successful non-streaming HTTP responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
@@ -169,7 +178,8 @@ type Capabilities struct {
 type ExecutorModelScope string
 
 const (
-	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models.
+	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models
+	// when no AuthProvider/AuthProviders is declared, or OAuth auth-bound models when credential-bound.
 	ExecutorModelScopeBoth ExecutorModelScope = "both"
 	// ExecutorModelScopeStatic means the executor supports only non-OAuth static models.
 	ExecutorModelScopeStatic ExecutorModelScope = "static"
@@ -635,23 +645,28 @@ type SchedulerPickResponse struct {
 	RejectReason string
 	// RejectCode is an optional machine-readable error code for the rejection (defaults to "auth_unavailable").
 	RejectCode string
+	// ExcludeCandidates optionally lists auth IDs to exclude for the current selection pass
+	// when the scheduler declines handling (Handled: false) or delegates to a built-in scheduler.
+	ExcludeCandidates []string
 }
 
 // UnmarshalJSON supports both Go struct field names and snake_case field names.
 func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 	type rawResponse struct {
-		AuthID          *string `json:"AuthID"`
-		AltAuthID       *string `json:"auth_id"`
-		DelegateBuiltin *string `json:"DelegateBuiltin"`
-		AltDelegate     *string `json:"delegate_builtin"`
-		Handled         *bool   `json:"Handled"`
-		AltHandled      *bool   `json:"handled"`
-		Reject          *bool   `json:"Reject"`
-		AltReject       *bool   `json:"reject"`
-		RejectReason    *string `json:"RejectReason"`
-		AltRejectReason *string `json:"reject_reason"`
-		RejectCode      *string `json:"RejectCode"`
-		AltRejectCode   *string `json:"reject_code"`
+		AuthID               *string         `json:"AuthID"`
+		AltAuthID            *string         `json:"auth_id"`
+		DelegateBuiltin      *string         `json:"DelegateBuiltin"`
+		AltDelegate          *string         `json:"delegate_builtin"`
+		Handled              *bool           `json:"Handled"`
+		AltHandled           *bool           `json:"handled"`
+		Reject               *bool           `json:"Reject"`
+		AltReject            *bool           `json:"reject"`
+		RejectReason         *string         `json:"RejectReason"`
+		AltRejectReason      *string         `json:"reject_reason"`
+		RejectCode           *string         `json:"RejectCode"`
+		AltRejectCode        *string         `json:"reject_code"`
+		ExcludeCandidates    json.RawMessage `json:"ExcludeCandidates"`
+		AltExcludeCandidates json.RawMessage `json:"exclude_candidates"`
 	}
 	var raw rawResponse
 	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
@@ -686,6 +701,167 @@ func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
 		r.RejectCode = *raw.RejectCode
 	} else if raw.AltRejectCode != nil {
 		r.RejectCode = *raw.AltRejectCode
+	}
+	if len(raw.ExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.ExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	} else if len(raw.AltExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.AltExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	}
+	return nil
+}
+
+func parseExcludeCandidatesJSON(raw []byte) ([]string, error) {
+	if !ojson.ValidBytes(raw) {
+		return nil, fmt.Errorf("exclude_candidates contains invalid JSON")
+	}
+	parsed := ojson.ParseBytes(raw)
+	if parsed.Type == ojson.Null {
+		return nil, nil
+	}
+	if !parsed.IsArray() {
+		return nil, fmt.Errorf("exclude_candidates must be a JSON array")
+	}
+	items := parsed.Array()
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type != ojson.String {
+			return nil, fmt.Errorf("exclude_candidates entries must be strings")
+		}
+		out = append(out, item.String())
+	}
+	return out, nil
+}
+
+// SchedulerContinuityDecision selects the host action returned by SchedulerContinuity.
+type SchedulerContinuityDecision string
+
+const (
+	// SchedulerContinuityReady allows normal admission or redispatch to proceed immediately.
+	SchedulerContinuityReady SchedulerContinuityDecision = "ready"
+	// SchedulerContinuityWait requests a bounded host-owned pause before re-evaluating candidates.
+	SchedulerContinuityWait SchedulerContinuityDecision = "wait"
+	// SchedulerContinuityDisabled disables continuity waiting for this request.
+	SchedulerContinuityDisabled SchedulerContinuityDecision = "disabled"
+)
+
+// SchedulerContinuity evaluates bounded pre-admission and pre-output-429 continuity
+// for Codex requests. Implementations must be nonblocking.
+type SchedulerContinuity interface {
+	Continuity(context.Context, SchedulerContinuityRequest) (SchedulerContinuityResponse, error)
+}
+
+// SchedulerContinuityCandidate describes one model/request-eligible auth candidate
+// passed to SchedulerContinuity without credential documents.
+type SchedulerContinuityCandidate struct {
+	// ID identifies the auth record.
+	ID string `json:"id"`
+	// Provider identifies the auth provider.
+	Provider string `json:"provider"`
+	// Priority is the host priority assigned to the auth record.
+	Priority int `json:"priority,omitempty"`
+	// Status is the current host-visible auth status.
+	Status string `json:"status,omitempty"`
+	// InCooldown reports whether the candidate is currently in quota cooldown for the request.
+	InCooldown bool `json:"in_cooldown,omitempty"`
+	// CooldownReason describes the quota/cooldown reason when available.
+	CooldownReason string `json:"cooldown_reason,omitempty"`
+	// CooldownUntil is the host's earliest recorded recovery timestamp when known.
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	// Attributes contains sanitized non-secret routing attributes.
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// SchedulerContinuityRequest describes request lifecycle identity and current
+// model/request-eligible candidates offered to SchedulerContinuity.
+type SchedulerContinuityRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata `json:"plugin,omitempty"`
+	// RequestID uniquely identifies the inbound execution request lifecycle.
+	RequestID string `json:"request_id,omitempty"`
+	// TraceID identifies the parent inbound request trace when available.
+	TraceID string `json:"trace_id,omitempty"`
+	// ExecutionSessionID identifies the downstream execution session when present.
+	ExecutionSessionID string `json:"execution_session_id,omitempty"`
+	// CanonicalSessionID identifies the reconciled canonical session when present.
+	CanonicalSessionID string `json:"canonical_session_id,omitempty"`
+	// Provider is the primary provider key requested by the route.
+	Provider string `json:"provider,omitempty"`
+	// Providers lists provider keys accepted by the route.
+	Providers []string `json:"providers,omitempty"`
+	// Model is the normalized route model identifier.
+	Model string `json:"model,omitempty"`
+	// RequestedModel is the client-requested model before normalization.
+	RequestedModel string `json:"requested_model,omitempty"`
+	// Stream reports whether the request expects streaming output.
+	Stream bool `json:"stream,omitempty"`
+	// Phase identifies the continuity check phase ("pre_admission" or "pre_output_429").
+	Phase string `json:"phase,omitempty"`
+	// Attempt is the zero-based continuity poll counter within the current gate.
+	Attempt int `json:"attempt,omitempty"`
+	// ElapsedMs reports elapsed milliseconds since continuity waiting began for this request.
+	ElapsedMs int64 `json:"elapsed_ms,omitempty"`
+	// Options carries request headers and sanitized metadata.
+	Options SchedulerOptions `json:"options,omitempty"`
+	// Candidates lists current model/request-eligible candidates without credential documents.
+	Candidates []SchedulerContinuityCandidate `json:"candidates,omitempty"`
+}
+
+// SchedulerContinuityResponse returns a continuity decision from a scheduler plugin.
+type SchedulerContinuityResponse struct {
+	// Decision selects "ready", "wait", or "disabled". Empty defaults to "disabled".
+	Decision SchedulerContinuityDecision `json:"decision,omitempty"`
+	// PollIntervalMs specifies the bounded poll interval in milliseconds when Decision is "wait".
+	PollIntervalMs int64 `json:"poll_interval_ms,omitempty"`
+	// WaitBudgetMs specifies the request-wide total wait budget in milliseconds when Decision is "wait".
+	// Subsequent poll responses may shorten but not extend the first request-wide deadline.
+	WaitBudgetMs int64 `json:"wait_budget_ms,omitempty"`
+	// Reason is an optional diagnostic explanation.
+	Reason string `json:"reason,omitempty"`
+}
+
+// UnmarshalJSON supports both Go struct field names and snake_case field names.
+func (r *SchedulerContinuityResponse) UnmarshalJSON(data []byte) error {
+	type rawResponse struct {
+		Decision          *string `json:"Decision"`
+		AltDecision       *string `json:"decision"`
+		PollIntervalMs    *int64  `json:"PollIntervalMs"`
+		AltPollIntervalMs *int64  `json:"poll_interval_ms"`
+		WaitBudgetMs      *int64  `json:"WaitBudgetMs"`
+		AltWaitBudgetMs   *int64  `json:"wait_budget_ms"`
+		Reason            *string `json:"Reason"`
+		AltReason         *string `json:"reason"`
+	}
+	var raw rawResponse
+	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	if raw.Decision != nil {
+		r.Decision = SchedulerContinuityDecision(*raw.Decision)
+	} else if raw.AltDecision != nil {
+		r.Decision = SchedulerContinuityDecision(*raw.AltDecision)
+	}
+	if raw.PollIntervalMs != nil {
+		r.PollIntervalMs = *raw.PollIntervalMs
+	} else if raw.AltPollIntervalMs != nil {
+		r.PollIntervalMs = *raw.AltPollIntervalMs
+	}
+	if raw.WaitBudgetMs != nil {
+		r.WaitBudgetMs = *raw.WaitBudgetMs
+	} else if raw.AltWaitBudgetMs != nil {
+		r.WaitBudgetMs = *raw.AltWaitBudgetMs
+	}
+	if raw.Reason != nil {
+		r.Reason = *raw.Reason
+	} else if raw.AltReason != nil {
+		r.Reason = *raw.AltReason
 	}
 	return nil
 }
@@ -1143,6 +1319,17 @@ type ExecutorRequest struct {
 	HTTPClient HostHTTPClient `json:"-"`
 }
 
+// UsageAttribution reports optional upstream credential identity
+// resolved by a plugin executor when no built-in credential was selected upfront.
+type UsageAttribution struct {
+	// AuthIndex identifies the selected credential index.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// AuthType identifies the selected credential type (e.g. "oauth", "api_key").
+	AuthType string `json:"auth_type,omitempty"`
+	// Source identifies the upstream account, project, or credential label.
+	Source string `json:"source,omitempty"`
+}
+
 // ExecutorResponse returns a non-streaming executor result.
 type ExecutorResponse struct {
 	// Payload contains the raw response body.
@@ -1151,6 +1338,8 @@ type ExecutorResponse struct {
 	Headers http.Header
 	// Metadata is an extension bag for executor-specific response data.
 	Metadata map[string]any
+	// Attribution reports optional upstream credential identity for usage tracking.
+	Attribution *UsageAttribution `json:"attribution,omitempty"`
 }
 
 // ExecutorStreamResponse returns a streaming executor result.
@@ -1159,6 +1348,8 @@ type ExecutorStreamResponse struct {
 	Headers http.Header
 	// Chunks yields streaming payload chunks until the channel closes.
 	Chunks <-chan ExecutorStreamChunk
+	// Attribution reports optional upstream credential identity for usage tracking.
+	Attribution *UsageAttribution `json:"attribution,omitempty"`
 }
 
 // ExecutorStreamChunk carries one streaming payload chunk or an error.
@@ -1200,7 +1391,7 @@ type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
 }
 
-// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+// ResponseInterceptor rewrites successful non-streaming responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
 }
@@ -1296,6 +1487,13 @@ type RequestInterceptResponse struct {
 	ClearHeaders []string
 	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
 	Terminate bool
+	// TerminateScope narrows Terminate for after-auth interceptors. Empty or
+	// "request" keeps request-final behavior. "credential" means the selected
+	// credential is unusable for this request only: no cooldown, no failure
+	// counting, no usage record, and selection continues with the next
+	// candidate. If no candidate is left, the interceptor's response is returned.
+	// Unknown values behave as "request". Before-auth interceptors ignore it.
+	TerminateScope string
 	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
 	StatusCode int
 	// ResponseHeaders contains downstream response headers used when Terminate is true.
@@ -1359,8 +1557,23 @@ type RequestCompletion struct {
 	Metadata       map[string]any
 }
 
+// ResponseInterceptRequest.Kind values identifying the intercepted response category.
+const (
+	// ResponseInterceptKindModelList identifies model-directory and model-detail catalog responses.
+	ResponseInterceptKindModelList = "model_list"
+	// ResponseInterceptKindExecution identifies non-streaming model execution responses.
+	ResponseInterceptKindExecution = "execution"
+	// ResponseInterceptKindCountTokens identifies non-streaming token-counting responses.
+	ResponseInterceptKindCountTokens = "count_tokens"
+)
+
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	// Kind identifies the response being intercepted ("model_list", "execution", or "count_tokens").
+	// Empty means unknown (older hosts); plugins must then fall back to their own detection.
+	// Kept as the first struct field without a JSON tag so plugins can read it from the leading
+	// bytes of the RPC frame without decoding a large response body.
+	Kind            string
 	RequestID       string
 	SourceFormat    string
 	Model           string
@@ -1372,7 +1585,10 @@ type ResponseInterceptRequest struct {
 	RequestBody     []byte
 	Body            []byte
 	StatusCode      int
-	Metadata        map[string]any
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only, JSON-like,
+	// and an open map: plugins must ignore keys they do not recognize, and the host may add
+	// keys in any release without a schema bump.
+	Metadata map[string]any
 }
 
 // ResponseInterceptResponse returns non-streaming response modifications.
@@ -1733,6 +1949,10 @@ type UsageDetail struct {
 	// TotalTokens is the total token count.
 	TotalTokens int64
 
+	// CacheCreation5mTokens is the optional 5-minute TTL cache creation token count.
+	CacheCreation5mTokens *int64
+	// CacheCreation1hTokens is the optional 1-hour TTL cache creation token count.
+	CacheCreation1hTokens *int64
 	// TextInputTokens is the optional text input token count.
 	TextInputTokens *int64
 	// ImageInputTokens is the optional image input token count.

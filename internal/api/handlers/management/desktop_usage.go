@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -12,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudeusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexusage"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/lifecycle"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resetcredits"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -47,6 +47,55 @@ type desktopUsageRefreshRequest struct {
 	AuthIndex string `json:"auth_index"`
 }
 
+// UsageLookup refreshes usage windows for eligible credentials.
+type UsageLookup interface {
+	Eligible(auth *coreauth.Auth) bool
+	Refresh(ctx context.Context, auth *coreauth.Auth) error
+	RefreshAll(ctx context.Context) map[string]error
+}
+
+type usageRefresher interface {
+	Refresh(ctx context.Context, auth *coreauth.Auth) error
+	RefreshAll(ctx context.Context) map[string]error
+}
+
+type usageLookupAdapter struct {
+	usageRefresher
+	eligible func(*coreauth.Auth) bool
+}
+
+func (lookup usageLookupAdapter) Eligible(auth *coreauth.Auth) bool {
+	return lookup.eligible(auth)
+}
+
+// RegisterUsageLookup appends a lookup after the built-in lookups.
+func (h *Handler) RegisterUsageLookup(lookup UsageLookup) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.usageLookups = append(h.usageLookups, lookup)
+}
+
+func (h *Handler) usageLookupsSnapshot() []UsageLookup {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]UsageLookup{
+		usageLookupAdapter{claudeusage.NewPoller(h.authManager, h.configSnapshot), claudeusage.Eligible},
+		usageLookupAdapter{codexusage.NewTracker(h.authManager, h.configSnapshot), codexusage.Eligible},
+	}, h.usageLookups...)
+}
+
+func firstEligibleUsageLookup(lookups []UsageLookup, auth *coreauth.Auth) UsageLookup {
+	if auth.AuthKind() == coreauth.AuthKindAPIKey {
+		return nil
+	}
+	for _, lookup := range lookups {
+		if lookup.Eligible(auth) {
+			return lookup
+		}
+	}
+	return nil
+}
+
 // GetUsageWindows lists every credential with its normalized usage windows and
 // the credential the routing strategy would pick for a new conversation.
 func (h *Handler) GetUsageWindows(c *gin.Context) {
@@ -57,7 +106,7 @@ func (h *Handler) GetUsageWindows(c *gin.Context) {
 	c.JSON(http.StatusOK, h.usageWindowsPayload(time.Now()))
 }
 
-// RefreshUsageWindows looks up Claude usage now, for one credential when
+// RefreshUsageWindows looks up usage now, for one credential when
 // auth_index is given or for every eligible credential otherwise.
 func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 	if h.authManager == nil {
@@ -69,9 +118,8 @@ func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	cfg := func() *config.Config { return h.configSnapshot() }
-	poller := claudeusage.NewPoller(h.authManager, cfg)
-	tracker := codexusage.NewTracker(h.authManager, cfg)
+	lookups := h.usageLookupsSnapshot()
+	ctx := c.Request.Context()
 	failures := map[string]string{}
 	if authIndex := strings.TrimSpace(body.AuthIndex); authIndex != "" {
 		auth := h.authByIndex(authIndex)
@@ -79,25 +127,19 @@ func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
 			return
 		}
-		var errRefresh error
-		switch {
-		case claudeusage.Eligible(auth):
-			errRefresh = poller.Refresh(c.Request.Context(), auth)
-		case codexusage.Eligible(auth):
-			errRefresh = tracker.Refresh(c.Request.Context(), auth)
-		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": "usage lookup supports enabled Claude and Codex OAuth credentials only"})
+		lookup := firstEligibleUsageLookup(lookups, auth)
+		if lookup == nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "credential is not eligible for usage lookup"})
 			return
 		}
-		if errRefresh != nil {
+		if errRefresh := lookup.Refresh(ctx, auth); errRefresh != nil {
 			failures[auth.ID] = errRefresh.Error()
 		}
 	} else {
-		for id, errRefresh := range poller.RefreshAll(c.Request.Context()) {
-			failures[id] = errRefresh.Error()
-		}
-		for id, errRefresh := range tracker.RefreshAll(c.Request.Context()) {
-			failures[id] = errRefresh.Error()
+		for _, lookup := range lookups {
+			for id, errRefresh := range lookup.RefreshAll(ctx) {
+				failures[id] = errRefresh.Error()
+			}
 		}
 	}
 	payload := h.usageWindowsPayload(time.Now())
@@ -169,6 +211,7 @@ func (h *Handler) usageWindowsPayload(now time.Time) gin.H {
 		nextPick[provider] = coreauth.PreviewNextPick(strategy, group, now)
 	}
 	credentials := make([]gin.H, 0, len(auths))
+	lookups := h.usageLookupsSnapshot()
 	for _, auth := range auths {
 		entry := h.desktopCredentialEntry(auth, now)
 		if entry == nil {
@@ -180,6 +223,7 @@ func (h *Handler) usageWindowsPayload(now time.Time) gin.H {
 				credential[key] = value
 			}
 		}
+		credential["can_refresh"] = firstEligibleUsageLookup(lookups, auth) != nil
 		if apiKey, ok := entry["api_key"]; ok {
 			credential["api_key"] = apiKey
 		}

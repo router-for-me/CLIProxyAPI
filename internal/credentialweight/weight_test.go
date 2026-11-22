@@ -1,8 +1,9 @@
 package credentialweight
 
 import (
-	"encoding/json"
 	"testing"
+
+	"github.com/MoeForge/moego/json"
 )
 
 func TestParseValueValidation(t *testing.T) {

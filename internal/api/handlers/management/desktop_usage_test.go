@@ -1,7 +1,8 @@
 package management
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -25,6 +27,7 @@ type desktopUsageResponse struct {
 		Provider      string     `json:"provider"`
 		Note          string     `json:"note"`
 		Disabled      bool       `json:"disabled"`
+		CanRefresh    *bool      `json:"can_refresh"`
 		NextPick      bool       `json:"next_pick"`
 		ObservedAt    *time.Time `json:"observed_at"`
 		CooldownUntil *time.Time `json:"cooldown_until"`
@@ -190,6 +193,60 @@ func TestRefreshUsageWindowsValidation(t *testing.T) {
 	payload := decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", "127.0.0.1:1"))
 	if len(payload.Credentials) != 3 || len(payload.Errors) != 0 {
 		t.Fatalf("refresh-all payload = %+v", payload)
+	}
+}
+
+type desktopTestUsageLookup struct {
+	singleID string
+	failures map[string]error
+}
+
+func (lookup *desktopTestUsageLookup) Eligible(auth *coreauth.Auth) bool {
+	return auth.Provider == "codex"
+}
+
+func (lookup *desktopTestUsageLookup) Refresh(_ context.Context, auth *coreauth.Auth) error {
+	lookup.singleID = auth.ID
+	return lookup.failures[auth.ID]
+}
+
+func (lookup *desktopTestUsageLookup) RefreshAll(context.Context) map[string]error {
+	return lookup.failures
+}
+
+func TestDesktopUsageRegisteredLookups(t *testing.T) {
+	h := newDesktopUsageHandler(t, "soonest-reset")
+	registerAuthForLookupTest(t, h.authManager, &coreauth.Auth{
+		ID: "codex-key", Index: "idx-codex-key", Provider: "codex", Attributes: map[string]string{"api_key": "test-value"},
+	})
+	first := &desktopTestUsageLookup{failures: map[string]error{"codex-a": errors.New("first lookup failed")}}
+	second := &desktopTestUsageLookup{failures: map[string]error{"another-credential": errors.New("second lookup failed")}}
+	h.RegisterUsageLookup(first)
+	h.RegisterUsageLookup(second)
+
+	payload := decodeDesktopUsage(t, serveDesktop(t, h.GetUsageWindows, http.MethodGet, "", "127.0.0.1:1"))
+	if len(payload.Credentials) != 4 {
+		t.Fatalf("credentials = %+v", payload.Credentials)
+	}
+	for _, credential := range payload.Credentials {
+		if want := credential.ID == "codex-a"; credential.CanRefresh == nil || *credential.CanRefresh != want {
+			t.Errorf("%s can_refresh = %v, want %t", credential.ID, credential.CanRefresh, want)
+		}
+	}
+
+	rec := serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, `{"auth_index":"idx-codex-key"}`, "127.0.0.1:1")
+	if rec.Code != http.StatusBadRequest || first.singleID != "" || second.singleID != "" {
+		t.Fatalf("API key refresh status = %d, dispatched to %q, %q", rec.Code, first.singleID, second.singleID)
+	}
+
+	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, `{"auth_index":"idx-codex"}`, "127.0.0.1:1"))
+	if first.singleID != "codex-a" || second.singleID != "" || payload.Errors["codex-a"] != "first lookup failed" {
+		t.Fatalf("single refresh = %q, %q, errors %v", first.singleID, second.singleID, payload.Errors)
+	}
+
+	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", "127.0.0.1:1"))
+	if len(payload.Errors) != 2 || payload.Errors["codex-a"] != "first lookup failed" || payload.Errors["another-credential"] != "second lookup failed" {
+		t.Fatalf("refresh-all errors = %v", payload.Errors)
 	}
 }
 

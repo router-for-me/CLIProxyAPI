@@ -35,8 +35,7 @@ func ProviderSupportsQuotaObservation(provider string) bool {
 // A snapshot older than the current one is ignored, so a long stream that
 // finishes after a newer response cannot restore its outdated watermark.
 //
-// This function only ever touches ObservedAt and Signals. Cooldown and
-// scheduling fields are never read or written here.
+// Providers without quota headers discard stale header signals.
 func (q *QuotaState) ObserveResponseHeadersForProvider(provider string, headers http.Header, observedAt time.Time) bool {
 	if q == nil {
 		return false
@@ -73,20 +72,26 @@ func (q *QuotaState) ObserveLookupForProvider(provider string, headers http.Head
 		lookedUpAt = time.Now()
 	}
 	q.LookupSignals = next
+	q.LookupWindows = nil
 	q.LookedUpAt = lookedUpAt
 	return true
 }
 
-// ClearObservationSignals removes only passive observation data. It leaves
-// cooldown and scheduler state untouched.
+// ClearObservationSignals removes header snapshots and preserves normalized lookup windows.
 func (q *QuotaState) ClearObservationSignals() bool {
-	if q == nil || (len(q.Signals) == 0 && q.ObservedAt.IsZero() && len(q.LookupSignals) == 0 && q.LookedUpAt.IsZero()) {
+	if q == nil {
+		return false
+	}
+	clearLookupTime := len(q.LookupWindows) == 0 && !q.LookedUpAt.IsZero()
+	if len(q.Signals) == 0 && q.ObservedAt.IsZero() && len(q.LookupSignals) == 0 && !clearLookupTime {
 		return false
 	}
 	q.Signals = nil
 	q.ObservedAt = time.Time{}
 	q.LookupSignals = nil
-	q.LookedUpAt = time.Time{}
+	if clearLookupTime {
+		q.LookedUpAt = time.Time{}
+	}
 	return true
 }
 
@@ -99,6 +104,7 @@ func applyObservationFields(dst *QuotaState, observation QuotaState) {
 	dst.Signals = observation.Signals
 	dst.LookedUpAt = observation.LookedUpAt
 	dst.LookupSignals = observation.LookupSignals
+	dst.LookupWindows = observation.LookupWindows
 }
 
 // cooldownFieldsOf copies only scheduler cooldown fields. Observation data is
@@ -288,6 +294,7 @@ func mergeQuotaObservation(target, source QuotaState) QuotaState {
 	if !source.LookedUpAt.IsZero() && !source.LookedUpAt.Before(target.LookedUpAt) {
 		target.LookedUpAt = source.LookedUpAt
 		target.LookupSignals = cloneSignals(source.LookupSignals)
+		target.LookupWindows = cloneQuotaWindows(source.LookupWindows)
 	}
 	return target
 }

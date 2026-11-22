@@ -504,3 +504,101 @@ func TestApplyOAuthModelAliasWithResult_NoForceMappingPreservesRequestedModelInO
 		t.Fatalf("OriginalAlias = %q want requested model when force-mapping off", res.OriginalAlias)
 	}
 }
+
+func TestApplyOAuthModelAlias_CaseOnlyAlias(t *testing.T) {
+	t.Parallel()
+
+	t.Run("global alias without force-mapping resolves upstream spelling", func(t *testing.T) {
+		t.Parallel()
+		mgr := NewManager(nil, nil, nil)
+		mgr.SetConfig(&internalconfig.Config{})
+		mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+			"opencode-go": {{
+				Name:  "minimax-m3.1-flash",
+				Alias: "MiniMax-M3.1-Flash",
+			}},
+		})
+		auth := &Auth{ID: "opencode-go-auth", Provider: "opencode-go", Attributes: map[string]string{"auth_kind": "oauth"}}
+
+		if got := mgr.applyOAuthModelAlias(auth, "MiniMax-M3.1-Flash"); got != "minimax-m3.1-flash" {
+			t.Fatalf("applyOAuthModelAlias(MiniMax-M3.1-Flash) = %q, want %q", got, "minimax-m3.1-flash")
+		}
+		if got := mgr.applyOAuthModelAlias(auth, "MiniMax-M3.1-Flash(high)"); got != "minimax-m3.1-flash(high)" {
+			t.Fatalf("applyOAuthModelAlias(MiniMax-M3.1-Flash(high)) = %q, want %q", got, "minimax-m3.1-flash(high)")
+		}
+		res := mgr.applyOAuthModelAliasWithResult(auth, "MiniMax-M3.1-Flash(high)")
+		if res.UpstreamModel != "minimax-m3.1-flash(high)" || res.ForceMapping {
+			t.Fatalf("unexpected alias result: %+v", res)
+		}
+	})
+
+	t.Run("global alias with force-mapping rewrites response alias", func(t *testing.T) {
+		t.Parallel()
+		mgr := NewManager(nil, nil, nil)
+		mgr.SetConfig(&internalconfig.Config{})
+		mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+			"opencode-go": {{
+				Name:         "minimax-m3.1-flash",
+				Alias:        "MiniMax-M3.1-Flash",
+				ForceMapping: true,
+			}},
+		})
+		auth := &Auth{ID: "opencode-go-auth", Provider: "opencode-go", Attributes: map[string]string{"auth_kind": "oauth"}}
+
+		res := mgr.applyOAuthModelAliasWithResult(auth, "MiniMax-M3.1-Flash(high)")
+		if res.UpstreamModel != "minimax-m3.1-flash(high)" || !res.ForceMapping || res.OriginalAlias != "MiniMax-M3.1-Flash" {
+			t.Fatalf("unexpected force-mapping alias result: %+v", res)
+		}
+	})
+
+	t.Run("per-auth case-only alias resolves upstream spelling", func(t *testing.T) {
+		t.Parallel()
+		mgr := NewManager(nil, nil, nil)
+		mgr.SetConfig(&internalconfig.Config{})
+		auth := &Auth{
+			ID:         "opencode-go-per-auth",
+			Provider:   "opencode-go",
+			Attributes: map[string]string{"auth_kind": "oauth"},
+		}
+		SetOAuthModelAliasesAttribute(auth, []internalconfig.OAuthModelAlias{{
+			Name:  "minimax-m3.1-flash",
+			Alias: "MiniMax-M3.1-Flash",
+		}})
+
+		if got := mgr.applyOAuthModelAlias(auth, "MiniMax-M3.1-Flash"); got != "minimax-m3.1-flash" {
+			t.Fatalf("applyOAuthModelAlias(MiniMax-M3.1-Flash) = %q, want %q", got, "minimax-m3.1-flash")
+		}
+	})
+
+	t.Run("per-auth case-only fork does not fall back to global alias on original name", func(t *testing.T) {
+		t.Parallel()
+		mgr := NewManager(nil, nil, nil)
+		mgr.SetConfig(&internalconfig.Config{})
+		mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+			"opencode-go": {{
+				Name:  "another-model",
+				Alias: "MiniMax-M3.1-Flash",
+			}},
+		})
+		auth := &Auth{
+			ID:         "opencode-go-per-auth-fork",
+			Provider:   "opencode-go",
+			Attributes: map[string]string{"auth_kind": "oauth"},
+		}
+		SetOAuthModelAliasesAttribute(auth, []internalconfig.OAuthModelAlias{{
+			Name:  "minimax-m3.1-flash",
+			Alias: "MiniMax-M3.1-Flash",
+			Fork:  true,
+		}})
+
+		if got := mgr.applyOAuthModelAlias(auth, "MiniMax-M3.1-Flash"); got != "minimax-m3.1-flash" {
+			t.Fatalf("applyOAuthModelAlias(MiniMax-M3.1-Flash) = %q, want %q", got, "minimax-m3.1-flash")
+		}
+		if got := mgr.applyOAuthModelAlias(auth, "minimax-m3.1-flash"); got != "minimax-m3.1-flash" {
+			t.Fatalf("applyOAuthModelAlias(minimax-m3.1-flash) = %q, want %q", got, "minimax-m3.1-flash")
+		}
+		if got := mgr.applyOAuthModelAlias(auth, "minimax-m3.1-flash(high)"); got != "minimax-m3.1-flash(high)" {
+			t.Fatalf("applyOAuthModelAlias(minimax-m3.1-flash(high)) = %q, want %q", got, "minimax-m3.1-flash(high)")
+		}
+	})
+}

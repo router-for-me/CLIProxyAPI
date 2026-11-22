@@ -76,9 +76,24 @@ func TestHubExchange_TenantIsolation(t *testing.T) {
 	cli1 := dialRole(t, srv.URL, "key-1", RoleClient, "shared-cli-uuid", "Tenant1-Client")
 	cli2 := dialRole(t, srv.URL, "key-2", RoleClient, "shared-cli-uuid", "Tenant2-Client")
 
+	// The client Dial returns as soon as the WebSocket handshake finishes, but
+	// commitPeer may not yet have published every registered server. Drain the
+	// topology stream until each expected server is observable; an initial
+	// server_list is followed only by incremental server_online events, so each
+	// uuid must be awaited rather than assuming one snapshot has all of them.
+	waitServersVisible(t, cli1, "shared-srv-uuid")
+	waitServersVisible(t, cli2, "shared-srv-uuid", "only-in-tenant-2")
+
+	// Verify no cross-tenant leak with explicit list_servers snapshots.
+	if errWrite := cli1.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"t1"}`)); errWrite != nil {
+		t.Fatalf("cli1 list_servers error = %v", errWrite)
+	}
 	list1 := readTextJSONFrame(t, cli1)
 	if list1.Get("servers.#").Int() != 1 || list1.Get("servers.0.name").String() != "Tenant1-Server" {
 		t.Fatalf("tenant 1 server_list leaked or wrong: %s", list1.Raw)
+	}
+	if errWrite := cli2.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"t2"}`)); errWrite != nil {
+		t.Fatalf("cli2 list_servers error = %v", errWrite)
 	}
 	list2 := readTextJSONFrame(t, cli2)
 	if list2.Get("servers.#").Int() != 2 {
@@ -125,6 +140,12 @@ func TestHubExchange_DiscoveryEventsAndControlCommands(t *testing.T) {
 	_ = dialRoleWithType(t, srv.URL, "key-disc", RoleServer, "srv-a", "Server A", "cpa-desktop")
 
 	cli := dialRole(t, srv.URL, "key-disc", RoleClient, "cli-1", "Client 1")
+	// Drain the topology stream until both pre-connected servers are visible;
+	// their commitPeer may not have run before the client's snapshot was taken.
+	waitServersVisible(t, cli, "srv-a", "srv-b")
+	if errWrite := cli.WriteMessage(websocket.TextMessage, []byte(`{"type":"list_servers","request_id":"init"}`)); errWrite != nil {
+		t.Fatalf("cli list_servers error = %v", errWrite)
+	}
 	initial := readTextJSONFrame(t, cli)
 	if initial.Get("type").String() != ControlTypeServerList ||
 		initial.Get("servers.#").Int() != 2 ||
@@ -391,14 +412,17 @@ func TestHubExchange_SecurityGuardsAndBackpressureIsolation(t *testing.T) {
 	const sendQueueCapacity = 2
 	hub := NewHub(Options{SendQueueSize: sendQueueCapacity})
 	hub.UpdateAllowedAPIKeys([]string{"key-sec"})
+	t.Cleanup(hub.Close)
 	srv := newGatedTunnelServer(t, hub)
 
 	srvSlow := dialRole(t, srv.URL, "key-sec", RoleServer, "srv-slow", "Slow Server")
 	srvFast := dialRole(t, srv.URL, "key-sec", RoleServer, "srv-fast", "Fast Server")
 	cli1 := dialRole(t, srv.URL, "key-sec", RoleClient, "cli-1", "Client 1")
 	cli2 := dialRole(t, srv.URL, "key-sec", RoleClient, "cli-2", "Client 2")
-	_ = readTextJSONFrame(t, cli1)
-	_ = readTextJSONFrame(t, cli2)
+	// Drain the topology stream until both servers are observable so a delayed
+	// server_online cannot be mistaken for the error/data frames read below.
+	waitServersVisible(t, cli1, "srv-slow", "srv-fast")
+	waitServersVisible(t, cli2, "srv-slow", "srv-fast")
 
 	// 1. Source UUID spoofing rejected.
 	spoof, _ := EncodeDataFrame(PayloadTypeBinary, "cli-2", "srv-fast", []byte("spoof"))

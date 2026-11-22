@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
@@ -233,6 +233,14 @@ func decodeHomeDispatchError(raw []byte) error {
 		message = "home returned error"
 	}
 
+	if code == "scheduler_rejected" {
+		rejectCode := strings.TrimSpace(detail.Code)
+		if rejectCode == "" {
+			rejectCode = "auth_unavailable"
+		}
+		return wrapSchedulerRejectError(&Error{Code: rejectCode, Message: message})
+	}
+
 	result := &Error{Code: code, Message: message, Retryable: detail.Retryable, HTTPStatus: http.StatusBadGateway}
 	switch strings.ToLower(code) {
 	case "model_not_found":
@@ -304,6 +312,15 @@ func SafeResponseHeaders(err error) http.Header {
 			return safeRetryAfterHeader(*retryAfter)
 		}
 		return nil
+	}
+	var poolCooldown *poolCooldownTerminalError
+	if errors.As(err, &poolCooldown) && poolCooldown != nil {
+		return poolCooldown.SafeResponseHeaders()
+	}
+	// A pool usage limit owns the pool reset; the wrapped attempt's own hint must not replace it.
+	var usageLimit *modelCooldownError
+	if errors.As(err, &usageLimit) && usageLimit != nil && usageLimit.IsUsageLimit() {
+		return usageLimit.SafeResponseHeaders()
 	}
 	var trusted *trustedRetryAfterError
 	if errors.As(err, &trusted) && trusted != nil {

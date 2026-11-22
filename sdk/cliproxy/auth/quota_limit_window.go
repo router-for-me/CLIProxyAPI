@@ -5,14 +5,14 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// QuotaWindow is one usage limit derived from a credential's passive quota
-// signals, normalized across providers.
+// QuotaWindow is one credential usage limit, normalized across providers.
 type QuotaWindow struct {
 	// Key identifies the window, e.g. "five_hour", "seven_day", "primary".
 	Key string
@@ -70,7 +70,7 @@ var codexWindowSignal = regexp.MustCompile(`^X-Codex-(?:(.+)-)?(Primary|Secondar
 // QuotaWindows returns the credential's known usage windows, sorted with
 // unscoped windows first and shorter windows before longer ones.
 func QuotaWindows(auth *Auth, now time.Time) []QuotaWindow {
-	if auth == nil || (len(auth.Quota.Signals) == 0 && len(auth.Quota.LookupSignals) == 0) {
+	if auth == nil || (len(auth.Quota.Signals) == 0 && len(auth.Quota.LookupSignals) == 0 && len(auth.Quota.LookupWindows) == 0) {
 		return nil
 	}
 	var windows []QuotaWindow
@@ -88,6 +88,9 @@ func QuotaWindows(auth *Auth, now time.Time) []QuotaWindow {
 	case "devin":
 		windows = devinQuotaWindows(auth.Quota.Signals)
 	}
+	if len(windows) == 0 && len(auth.Quota.LookupWindows) > 0 {
+		windows = cloneQuotaWindows(auth.Quota.LookupWindows)
+	}
 	sort.SliceStable(windows, func(i, j int) bool {
 		if windows[i].Scoped != windows[j].Scoped {
 			return !windows[i].Scoped
@@ -98,6 +101,17 @@ func QuotaWindows(auth *Auth, now time.Time) []QuotaWindow {
 		return windows[i].Key < windows[j].Key
 	})
 	return windows
+}
+
+func cloneQuotaWindows(windows []QuotaWindow) []QuotaWindow {
+	cloned := slices.Clone(windows)
+	for i := range cloned {
+		if cloned[i].UsedPercent != nil {
+			percent := *cloned[i].UsedPercent
+			cloned[i].UsedPercent = &percent
+		}
+	}
+	return cloned
 }
 
 func claudeQuotaWindows(signals map[string]string) []QuotaWindow {

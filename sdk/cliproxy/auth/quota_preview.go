@@ -59,7 +59,7 @@ func (m *Manager) ObserveQuotaLookup(authID string, headers http.Header, lookedU
 	if drift != "" {
 		log.Info(drift)
 	}
-	m.quotaListeners.notify()
+	m.NotifyQuotaUpdated()
 	return true
 }
 
@@ -82,6 +82,12 @@ func (m *Manager) recordQuotaLookup(authID string, headers http.Header, lookedUp
 // The callback runs outside manager locks and must not block.
 func (m *Manager) SubscribeQuotaUpdates(fn func()) (unsubscribe func()) {
 	return m.quotaListeners.add(fn)
+}
+
+// NotifyQuotaUpdated calls quota subscribers after a snapshot has been committed.
+// Call it outside manager locks.
+func (m *Manager) NotifyQuotaUpdated() {
+	m.quotaListeners.notify()
 }
 
 type quotaUpdateListeners struct {

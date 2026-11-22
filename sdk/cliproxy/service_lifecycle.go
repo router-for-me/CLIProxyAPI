@@ -173,6 +173,10 @@ func (s *Service) Run(ctx context.Context) error {
 		})
 	}
 
+	if s.server != nil && !homeEnabled {
+		s.server.RegisterUsageLookup(s.NewAntigravityUsageLookup())
+	}
+
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.currentConfig())
 	}

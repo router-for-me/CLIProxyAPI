@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +14,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
@@ -8655,8 +8656,8 @@ func TestXAIExecutorPreservesPartialUpstreamBodyOnReadErrorWhenRequestLogDisable
 			if !strings.Contains(rendered, tc.partial) {
 				t.Fatalf("deferred API response dropped partial body %q on read error:\n%s", tc.partial, rendered)
 			}
-			if !strings.Contains(rendered, "Error: unexpected EOF") {
-				t.Fatalf("deferred API response missing read error:\n%s", rendered)
+			if strings.Contains(rendered, "Error: unexpected EOF") {
+				t.Fatalf("local read error polluted upstream response:\n%s", rendered)
 			}
 		})
 	}

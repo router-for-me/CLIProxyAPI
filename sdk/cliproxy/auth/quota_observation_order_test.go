@@ -22,6 +22,37 @@ func TestQuotaStateObserveResponseHeadersIgnoresOlderSnapshot(t *testing.T) {
 	}
 }
 
+func TestAntigravityQuotaLookupSurvivesResponseAndObservationMerge(t *testing.T) {
+	lookedUpAt := time.Unix(2_000, 0)
+	window := QuotaWindow{Key: "ag_gemini", Scoped: true}
+	manager := NewManager(nil, nil, nil)
+	auth, err := manager.Register(t.Context(), &Auth{
+		ID: "quota-antigravity", Provider: "antigravity", Status: StatusActive,
+		Quota: QuotaState{LookedUpAt: lookedUpAt, LookupWindows: []QuotaWindow{window}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.MarkResult(t.Context(), Result{AuthID: auth.ID, Provider: auth.Provider, Model: "gemini-pro", Success: true})
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok || !stored.Quota.LookedUpAt.Equal(lookedUpAt) || len(stored.Quota.LookupWindows) != 1 || stored.Quota.LookupWindows[0] != window {
+		t.Fatalf("response changed the lookup snapshot: %+v", stored)
+	}
+
+	stale := QuotaState{
+		LookedUpAt: lookedUpAt.Add(-time.Second), LookupWindows: []QuotaWindow{{Key: "stale"}},
+		Exceeded: true,
+	}
+	applyObservationFields(&stale, mergeQuotaObservation(stale, stored.Quota))
+	if !stale.LookedUpAt.Equal(lookedUpAt) || len(stale.LookupWindows) != 1 || stale.LookupWindows[0] != window || !stale.Exceeded {
+		t.Fatalf("expected complete newer snapshot and preserved cooldown, got %+v", stale)
+	}
+	stale.LookupWindows[0].Key = "modified"
+	if stored.Quota.LookupWindows[0] != window {
+		t.Fatal("merged lookup windows alias the source")
+	}
+}
+
 // A stream whose headers arrived before the credential's 429 finishes after it. Its success must
 // not restore the pre-limit snapshot, or the spent pool stops answering as a usage limit and
 // clients lose the reset time.
