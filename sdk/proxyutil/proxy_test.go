@@ -19,9 +19,14 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func isPeerClosedReadError(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
+}
 
 func mustDefaultTransport(t *testing.T) *http.Transport {
 	t.Helper()
@@ -1043,5 +1048,521 @@ func TestBuildHTTPTransportHTTPSProxyClonedTransport(t *testing.T) {
 
 	if errProxy := <-proxyDone; errProxy != nil {
 		t.Fatalf("proxy returned error: %v", errProxy)
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5DialContextHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+
+			listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+			if errListen != nil {
+				t.Fatalf("net.Listen returned error: %v", errListen)
+			}
+			defer func() {
+				if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+					t.Errorf("listener.Close returned error: %v", errClose)
+				}
+			}()
+
+			greetingRead := make(chan struct{})
+			serverDone := make(chan error, 1)
+			stopServer := make(chan struct{})
+			defer close(stopServer)
+
+			go func() {
+				conn, errAccept := listener.Accept()
+				if errAccept != nil {
+					serverDone <- errAccept
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				go func() {
+					<-stopServer
+					_ = conn.Close()
+				}()
+				if errDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+					serverDone <- errDeadline
+					return
+				}
+				// Read the 3-byte SOCKS5 greeting, then stall without replying so
+				// only context cancellation can abort the dial.
+				var greeting [3]byte
+				if _, errRead := io.ReadFull(conn, greeting[:]); errRead != nil {
+					serverDone <- errRead
+					return
+				}
+				if greeting != [3]byte{0x05, 0x01, 0x00} {
+					serverDone <- fmt.Errorf("unexpected SOCKS5 greeting: %x", greeting)
+					return
+				}
+				close(greetingRead)
+				var buf [1]byte
+				_, errEOF := conn.Read(buf[:])
+				serverDone <- errEOF
+			}()
+
+			transport, mode, errBuild := BuildHTTPTransport(scheme + "://" + listener.Addr().String())
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			if mode != ModeProxy {
+				t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			dialDone := make(chan error, 1)
+			go func() {
+				conn, errDial := transport.DialContext(ctx, "tcp", "daily-cloudcode-pa.googleapis.com:443")
+				if conn != nil {
+					_ = conn.Close()
+				}
+				dialDone <- errDial
+			}()
+
+			select {
+			case <-greetingRead:
+			case <-time.After(time.Second):
+				t.Fatal("SOCKS5 proxy did not receive greeting")
+			}
+
+			cancel()
+
+			select {
+			case errDial := <-dialDone:
+				if errDial == nil {
+					t.Fatal("canceled SOCKS5 DialContext returned nil error")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled SOCKS5 DialContext did not return")
+			}
+
+			select {
+			case errServer := <-serverDone:
+				if !isPeerClosedReadError(errServer) {
+					t.Fatalf("SOCKS5 proxy read error = %v, want peer close (io.EOF or ECONNRESET)", errServer)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("SOCKS5 proxy connection was not closed after cancellation")
+			}
+		})
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5DialContextHonorsDeadline(t *testing.T) {
+	t.Parallel()
+
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+
+			listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+			if errListen != nil {
+				t.Fatalf("net.Listen returned error: %v", errListen)
+			}
+			defer func() {
+				if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+					t.Errorf("listener.Close returned error: %v", errClose)
+				}
+			}()
+
+			greetingRead := make(chan struct{})
+			serverDone := make(chan error, 1)
+			stopServer := make(chan struct{})
+			defer close(stopServer)
+
+			go func() {
+				conn, errAccept := listener.Accept()
+				if errAccept != nil {
+					serverDone <- fmt.Errorf("accept: %w", errAccept)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				go func() {
+					<-stopServer
+					_ = conn.Close()
+				}()
+				if errDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+					serverDone <- errDeadline
+					return
+				}
+				var greeting [3]byte
+				if _, errRead := io.ReadFull(conn, greeting[:]); errRead != nil {
+					serverDone <- fmt.Errorf("read greeting: %w", errRead)
+					return
+				}
+				if greeting != [3]byte{0x05, 0x01, 0x00} {
+					serverDone <- fmt.Errorf("unexpected SOCKS5 greeting: %x", greeting)
+					return
+				}
+				close(greetingRead)
+				var buf [1]byte
+				_, errEOF := conn.Read(buf[:])
+				serverDone <- errEOF
+			}()
+
+			transport, mode, errBuild := BuildHTTPTransport(scheme + "://" + listener.Addr().String())
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			if mode != ModeProxy {
+				t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+
+			dialDone := make(chan error, 1)
+			go func() {
+				conn, errDial := transport.DialContext(ctx, "tcp", "daily-cloudcode-pa.googleapis.com:443")
+				if conn != nil {
+					_ = conn.Close()
+				}
+				dialDone <- errDial
+			}()
+
+			// Ensure the dial actually reached SOCKS5 negotiation before verifying
+			// that the context deadline aborts the stalled handshake and closes the peer socket.
+			select {
+			case <-greetingRead:
+			case <-time.After(time.Second):
+				t.Fatal("SOCKS5 proxy did not receive greeting")
+			}
+
+			select {
+			case errDial := <-dialDone:
+				if errDial == nil {
+					t.Fatal("timed-out SOCKS5 DialContext returned nil error")
+				}
+				var netErr net.Error
+				if !errors.Is(errDial, context.DeadlineExceeded) && (!errors.As(errDial, &netErr) || !netErr.Timeout()) {
+					t.Fatalf("DialContext error = %v, want timeout/deadline error", errDial)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 DialContext ignored context deadline")
+			}
+
+			select {
+			case errServer := <-serverDone:
+				if !isPeerClosedReadError(errServer) {
+					t.Fatalf("SOCKS5 proxy read error = %v, want peer close (io.EOF or ECONNRESET)", errServer)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("SOCKS5 proxy connection was not closed after deadline")
+			}
+		})
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5HTTPClientDoCancellationClosesProxyConn(t *testing.T) {
+	t.Parallel()
+
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+
+			listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+			if errListen != nil {
+				t.Fatalf("net.Listen returned error: %v", errListen)
+			}
+			defer func() {
+				if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+					t.Errorf("listener.Close returned error: %v", errClose)
+				}
+			}()
+
+			greetingRead := make(chan struct{})
+			serverDone := make(chan error, 1)
+			stopServer := make(chan struct{})
+			defer close(stopServer)
+
+			go func() {
+				conn, errAccept := listener.Accept()
+				if errAccept != nil {
+					serverDone <- fmt.Errorf("accept: %w", errAccept)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				go func() {
+					<-stopServer
+					_ = conn.Close()
+				}()
+				if errDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+					serverDone <- errDeadline
+					return
+				}
+				var greeting [3]byte
+				if _, errRead := io.ReadFull(conn, greeting[:]); errRead != nil {
+					serverDone <- fmt.Errorf("read greeting: %w", errRead)
+					return
+				}
+				if greeting != [3]byte{0x05, 0x01, 0x00} {
+					serverDone <- fmt.Errorf("unexpected SOCKS5 greeting: %x", greeting)
+					return
+				}
+				close(greetingRead)
+				var buf [1]byte
+				_, errEOF := conn.Read(buf[:])
+				serverDone <- errEOF
+			}()
+
+			transport, mode, errBuild := BuildHTTPTransport(scheme + "://" + listener.Addr().String())
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			if mode != ModeProxy {
+				t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+			}
+
+			client := &http.Client{Transport: transport}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			req, errReq := http.NewRequestWithContext(ctx, http.MethodGet, "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", nil)
+			if errReq != nil {
+				t.Fatalf("http.NewRequestWithContext returned error: %v", errReq)
+			}
+
+			reqDone := make(chan error, 1)
+			go func() {
+				resp, errDo := client.Do(req)
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				transport.CloseIdleConnections()
+				reqDone <- errDo
+			}()
+
+			select {
+			case <-greetingRead:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 proxy did not receive greeting")
+			}
+
+			cancel()
+
+			select {
+			case errDo := <-reqDone:
+				if errDo == nil {
+					t.Fatal("canceled HTTP request returned nil error")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("canceled HTTP request did not return")
+			}
+
+			select {
+			case errServer := <-serverDone:
+				if !isPeerClosedReadError(errServer) {
+					t.Fatalf("SOCKS5 proxy read error = %v, want peer close (io.EOF or ECONNRESET)", errServer)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 proxy connection was not closed after HTTP request cancellation")
+			}
+		})
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5DialContextPreCanceled(t *testing.T) {
+	t.Parallel()
+
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+
+			listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+			if errListen != nil {
+				t.Fatalf("net.Listen returned error: %v", errListen)
+			}
+			defer func() {
+				if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+					t.Errorf("listener.Close returned error: %v", errClose)
+				}
+			}()
+
+			accepted := make(chan struct{}, 1)
+			go func() {
+				conn, errAccept := listener.Accept()
+				if errAccept != nil {
+					return
+				}
+				_ = conn.Close()
+				accepted <- struct{}{}
+			}()
+
+			transport, mode, errBuild := BuildHTTPTransport(scheme + "://" + listener.Addr().String())
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			if mode != ModeProxy {
+				t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			conn, errDial := transport.DialContext(ctx, "tcp", "daily-cloudcode-pa.googleapis.com:443")
+			if conn != nil {
+				_ = conn.Close()
+			}
+			if !errors.Is(errDial, context.Canceled) {
+				t.Fatalf("DialContext error = %v, want %v", errDial, context.Canceled)
+			}
+
+			select {
+			case <-accepted:
+				t.Fatal("pre-canceled SOCKS5 DialContext dialed proxy unexpectedly")
+			default:
+			}
+		})
+	}
+}
+
+func TestBuildHTTPTransportSOCKS5DialContextTunnel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		scheme string
+		nilCtx bool
+	}{
+		{name: "socks5", scheme: "socks5"},
+		{name: "socks5h", scheme: "socks5h"},
+		{name: "socks5h nil context", scheme: "socks5h", nilCtx: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+			if errListen != nil {
+				t.Fatalf("net.Listen returned error: %v", errListen)
+			}
+			defer func() {
+				if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+					t.Errorf("listener.Close returned error: %v", errClose)
+				}
+			}()
+
+			serverDone := make(chan error, 1)
+			go func() {
+				conn, errAccept := listener.Accept()
+				if errAccept != nil {
+					serverDone <- errAccept
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				if errDeadline := conn.SetDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+					serverDone <- errDeadline
+					return
+				}
+
+				// Greeting: VER=5, NMETHODS=1, METHODS=[0x00]
+				var greeting [3]byte
+				if _, errRead := io.ReadFull(conn, greeting[:]); errRead != nil {
+					serverDone <- fmt.Errorf("read greeting: %w", errRead)
+					return
+				}
+				if greeting != [3]byte{0x05, 0x01, 0x00} {
+					serverDone <- fmt.Errorf("greeting = %x, want 050100", greeting)
+					return
+				}
+				if _, errWrite := conn.Write([]byte{0x05, 0x00}); errWrite != nil {
+					serverDone <- fmt.Errorf("write method selection: %w", errWrite)
+					return
+				}
+
+				// CONNECT request: VER=5, CMD=1, RSV=0, ATYP=3 (FQDN)
+				var header [5]byte
+				if _, errRead := io.ReadFull(conn, header[:]); errRead != nil {
+					serverDone <- fmt.Errorf("read CONNECT header: %w", errRead)
+					return
+				}
+				if header[0] != 0x05 || header[1] != 0x01 || header[2] != 0x00 || header[3] != 0x03 {
+					serverDone <- fmt.Errorf("CONNECT header = %x, want 05010003", header[:4])
+					return
+				}
+				addrBuf := make([]byte, int(header[4])+2)
+				if _, errRead := io.ReadFull(conn, addrBuf); errRead != nil {
+					serverDone <- fmt.Errorf("read CONNECT addr: %w", errRead)
+					return
+				}
+				gotHost := string(addrBuf[:len(addrBuf)-2])
+				gotPort := int(addrBuf[len(addrBuf)-2])<<8 | int(addrBuf[len(addrBuf)-1])
+				if gotHost != "target.example.com" || gotPort != 443 {
+					serverDone <- fmt.Errorf("CONNECT target = %s:%d, want target.example.com:443", gotHost, gotPort)
+					return
+				}
+
+				// Reply: succeeded, bound 127.0.0.1:0
+				if _, errWrite := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0}); errWrite != nil {
+					serverDone <- fmt.Errorf("write CONNECT reply: %w", errWrite)
+					return
+				}
+				if _, errWrite := io.WriteString(conn, "ok"); errWrite != nil {
+					serverDone <- fmt.Errorf("write tunnel payload: %w", errWrite)
+					return
+				}
+				var ping [4]byte
+				if _, errRead := io.ReadFull(conn, ping[:]); errRead != nil {
+					serverDone <- fmt.Errorf("read tunnel payload: %w", errRead)
+					return
+				}
+				if string(ping[:]) != "ping" {
+					serverDone <- fmt.Errorf("tunnel payload = %q, want ping", string(ping[:]))
+					return
+				}
+				serverDone <- nil
+			}()
+
+			transport, mode, errBuild := BuildHTTPTransport(tt.scheme + "://" + listener.Addr().String())
+			if errBuild != nil {
+				t.Fatalf("BuildHTTPTransport returned error: %v", errBuild)
+			}
+			if mode != ModeProxy {
+				t.Fatalf("mode = %d, want %d", mode, ModeProxy)
+			}
+
+			var dialCtx context.Context
+			if !tt.nilCtx {
+				var cancel context.CancelFunc
+				dialCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+			}
+
+			conn, errDial := transport.DialContext(dialCtx, "tcp", "target.example.com:443")
+			if errDial != nil {
+				t.Fatalf("DialContext returned error: %v", errDial)
+			}
+			defer func() {
+				if errClose := conn.Close(); errClose != nil {
+					t.Errorf("conn.Close returned error: %v", errClose)
+				}
+			}()
+
+			var resp [2]byte
+			if _, errRead := io.ReadFull(conn, resp[:]); errRead != nil {
+				t.Fatalf("conn.Read returned error: %v", errRead)
+			}
+			if string(resp[:]) != "ok" {
+				t.Fatalf("tunnel payload = %q, want ok", string(resp[:]))
+			}
+			if _, errWrite := conn.Write([]byte("ping")); errWrite != nil {
+				t.Fatalf("conn.Write returned error: %v", errWrite)
+			}
+			if errServer := <-serverDone; errServer != nil {
+				t.Fatalf("proxy server returned error: %v", errServer)
+			}
+		})
 	}
 }

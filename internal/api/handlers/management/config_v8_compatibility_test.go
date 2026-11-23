@@ -114,7 +114,7 @@ func TestConfigV8HistoricalProviderSubtrees(t *testing.T) {
 			if view.Code != http.StatusOK || json.Unmarshal(view.Body.Bytes(), &provider) != nil || provider["response-steering"] != true || provider["optimize-multi-agent-v2"] != true {
 				t.Fatalf("historical provider view omitted shared/client values: %s", view.Body.String())
 			}
-			if data, errRead := os.ReadFile(file); errRead != nil || string(data) != raw {
+			if data, errRead := os.ReadFile(file); errRead != nil || config.ComputeSourceHash(data) != cfg.SourceHash {
 				t.Fatalf("historical GET changed the file: %v", errRead)
 			}
 			response := httptest.NewRecorder()
@@ -198,7 +198,7 @@ func TestLegacyConfigYAMLSavesBySubmittedVersion(t *testing.T) {
 		steering   bool
 		v8         bool
 	}{
-		{"legacy", "# Keep this comment\ncodex: {response-steering: true}\n", true, false},
+		{"legacy", "# Keep this comment\ncodex: {response-steering: true}\nserver: {server-id: " + previousServerID + "}\n", true, false},
 		{"historical v8", "# Keep this comment\noauth: {providers: {codex: {response-steering: true}}}\n", true, true},
 		{"latest v8", "# Keep this comment\nconfig-version: 8\nupstream: {codex: {response-steering: false}}\n", false, true},
 		{"mixed", "# Keep this comment\nrequest-retry: 3\nupstream: {codex: {response-steering: false}}\n", false, true},

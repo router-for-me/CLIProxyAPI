@@ -173,3 +173,158 @@ func TestCopilotChatCrossProtocolReplay(t *testing.T) {
 		})
 	}
 }
+
+func TestCopilotNativeChatAssistantHistory(t *testing.T) {
+	const model = "gemini-4-neon"
+	const configured = `[{"type":"text","text":"configured"}]`
+	auth := copilotTestAuth(t, "account", model, copilot.Chat)
+	req := x.Request{Model: model, Payload: []byte(`{"messages":[
+		{"role":"user","content":"Give me a code."},
+		{"role":"assistant","content":[{"type":"text","text":"Code: "},{"type":"text","text":"0731"}]},
+		{"role":"user","content":"Repeat the code."}
+	]}`)}
+	opts := x.Options{SourceFormat: tr.FormatOpenAI}
+	for _, tc := range []struct {
+		name     string
+		stream   bool
+		override []config.PayloadRule
+		wantRaw  string
+	}{
+		{name: "buffered", wantRaw: `"Code: 0731"`},
+		{name: "streaming", stream: true, wantRaw: `"Code: 0731"`},
+		{
+			name: "payload override",
+			override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: model}},
+				Params: map[string]any{"messages.1.content": configured},
+			}},
+			wantRaw: configured,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Payload.OverrideRaw = tc.override
+			p, err := NewCopilotExecutor(cfg).prepare(t.Context(), auth, req, opts, tc.stream, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ojson.GetBytesNoCopy(p.body, "messages.1.content"); got.Raw != tc.wantRaw {
+				t.Fatalf("upstream assistant content = %s, want %s", got.Raw, tc.wantRaw)
+			}
+		})
+	}
+}
+
+func TestCopilotChatAssistantTextFlatteningAndReplay(t *testing.T) {
+	const model = "gemini-4-neon"
+	const turn1Resp = `{"id":"chat-t1","model":"gemini-4-neon","choices":[{"index":0,"message":{"role":"assistant","content":"Triage report with Plan A and Plan B.","reasoning_text":"trace-1","reasoning_opaque":"OPAQUE-1"},"finish_reason":"stop"}]}`
+	const turn2Resp = `{"id":"chat-t2","model":"gemini-4-neon","choices":[{"index":0,"message":{"role":"assistant","content":"Confirming Plan A before closing.","reasoning_text":"trace-2","reasoning_opaque":"OPAQUE-2","tool_calls":[{"id":"call_ask","type":"function","function":{"name":"ask","arguments":"{\"question\":\"Confirm?\"}"},"extra_content":{"google":{"thought_signature":"SIG-2"}}}]},"finish_reason":"tool_calls"}]}`
+	const turn3Resp = `{"id":"chat-t3","model":"gemini-4-neon","choices":[{"index":0,"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}]}`
+
+	for _, from := range []tr.Format{tr.FormatOpenAIResponse, tr.FormatClaude} {
+		t.Run(from.String(), func(t *testing.T) {
+			e := NewCopilotExecutor(&config.Config{})
+			auth := copilotTestAuth(t, "account", model, copilot.Chat)
+			opts := x.Options{
+				SourceFormat: from,
+				Metadata: map[string]any{
+					x.CanonicalSessionIDMetadataKey: "session-assistant-text",
+					x.CallerScopeMetadataKey:        "caller",
+				},
+			}
+			doc := ojson.NewDocString(`{"messages":[{"role":"user","content":"triage issue 7810"}]}`)
+			if from == tr.FormatOpenAIResponse {
+				doc = ojson.NewDocString(`{"input":[{"role":"user","content":[{"type":"input_text","text":"triage issue 7810"}]}]}`)
+			}
+
+			var bodies [][]byte
+			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				raw, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					return nil, errRead
+				}
+				bodies = append(bodies, raw)
+				answer := turn3Resp
+				switch len(bodies) {
+				case 1:
+					answer = turn1Resp
+				case 2:
+					answer = turn2Resp
+				}
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(answer)), Request: r}, nil
+			}))
+
+			// Turn 1: text-only assistant reply.
+			resp1, errExec1 := e.Execute(ctx, auth, x.Request{Model: model, Payload: doc.Bytes()}, opts)
+			if errExec1 != nil {
+				t.Fatal(errExec1)
+			}
+			out1 := ojson.ParseBytes(resp1.Payload)
+			if from == tr.FormatClaude {
+				_ = doc.Set("messages.-1", map[string]any{"role": "assistant", "content": out1.Get("content").Value()})
+				_ = doc.SetRaw("messages.-1", `{"role":"user","content":"Plan A"}`)
+			} else {
+				for _, item := range out1.Get("output").Array() {
+					_ = doc.SetRaw("input.-1", item.Raw)
+				}
+				_ = doc.SetRaw("input.-1", `{"role":"user","content":[{"type":"input_text","text":"Plan A"}]}`)
+			}
+
+			// Turn 2: client replays Turn 1 assistant text and sends user follow-up.
+			resp2, errExec2 := e.Execute(ctx, auth, x.Request{Model: model, Payload: doc.Bytes()}, opts)
+			if errExec2 != nil {
+				t.Fatal(errExec2)
+			}
+			turn2Req := ojson.ParseBytes(bodies[1])
+			msg1 := turn2Req.Get("messages.1")
+			if msg1.Get("role").String() != "assistant" || msg1.Get("content").Type != ojson.String || msg1.Get("content").String() != "Triage report with Plan A and Plan B." {
+				t.Fatalf("turn 2 assistant content not flattened to string: %s", msg1.Raw)
+			}
+			if msg1.Get("reasoning_text").String() != "trace-1" || msg1.Get("reasoning_opaque").String() != "OPAQUE-1" || msg1.Get("reasoning_content").Exists() {
+				t.Fatalf("turn 2 assistant reasoning replay mismatch: %s", msg1.Raw)
+			}
+
+			out2 := ojson.ParseBytes(resp2.Payload)
+			if from == tr.FormatClaude {
+				_ = doc.Set("messages.-1", map[string]any{"role": "assistant", "content": out2.Get("content").Value()})
+				_ = doc.SetRaw("messages.-1", `{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_ask","content":"Confirmed"}]}`)
+			} else {
+				for _, item := range out2.Get("output").Array() {
+					_ = doc.SetRaw("input.-1", item.Raw)
+				}
+				_ = doc.SetRaw("input.-1", `{"type":"function_call_output","call_id":"call_ask","output":"Confirmed"}`)
+			}
+
+			// Turn 3: client replays Turn 2 assistant text + tool call and tool output.
+			if _, errExec3 := e.Execute(ctx, auth, x.Request{Model: model, Payload: doc.Bytes()}, opts); errExec3 != nil {
+				t.Fatal(errExec3)
+			}
+			turn3Req := ojson.ParseBytes(bodies[2])
+			msg3 := turn3Req.Get("messages.3")
+			if msg3.Get("role").String() != "assistant" || msg3.Get("content").Type != ojson.String || msg3.Get("content").String() != "Confirming Plan A before closing." {
+				t.Fatalf("turn 3 assistant text+tool_calls content not flattened to string: %s", msg3.Raw)
+			}
+			if msg3.Get("reasoning_text").String() != "trace-2" || msg3.Get("reasoning_opaque").String() != "OPAQUE-2" || msg3.Get("reasoning_content").Exists() || msg3.Get("tool_calls.0.extra_content.google.thought_signature").String() != "SIG-2" {
+				t.Fatalf("turn 3 assistant replay metadata mismatch: %s", msg3.Raw)
+			}
+
+			// Payload override must remain the final semantic barrier after assistant content flattening.
+			// Override with a single plain-text array to catch any ordering regression that flattens after payload rules.
+			cfg := &config.Config{}
+			cfg.Payload.Override = []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: model}},
+				Params: map[string]any{
+					"messages.1.content": []map[string]any{{"type": "text", "text": "user-configured-override"}},
+				},
+			}}
+			prepared, errPrep := e.WithConfig(cfg).prepare(ctx, auth, x.Request{Model: model, Payload: doc.Bytes()}, opts, true, false)
+			if errPrep != nil {
+				t.Fatal(errPrep)
+			}
+			got := ojson.GetBytesNoCopy(prepared.body, "messages.1.content")
+			if !got.IsArray() || got.Get("#").Int() != 1 || got.Get("0.text").String() != "user-configured-override" {
+				t.Fatalf("payload override did not stay final after flattening: %s", got.Raw)
+			}
+		})
+	}
+}

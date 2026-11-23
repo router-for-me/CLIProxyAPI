@@ -275,8 +275,8 @@ func TestAntigravityExecutorExecuteStreamTranslatesInteractionsRequest(t *testin
 	if got := ojson.GetBytes(upstreamBody, "request.toolConfig.functionCallingConfig.mode").String(); got != "AUTO" {
 		t.Fatalf("request.toolConfig.functionCallingConfig.mode = %q, want AUTO. Body: %s", got, string(upstreamBody))
 	}
-	if got := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
-		t.Fatalf("request.generationConfig.thinkingConfig.thinkingLevel = %q, want high. Body: %s", got, string(upstreamBody))
+	if got := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "HIGH" {
+		t.Fatalf("request.generationConfig.thinkingConfig.thinkingLevel = %q, want HIGH. Body: %s", got, string(upstreamBody))
 	}
 	if got := ojson.GetBytes(upstreamBody, "request.generationConfig.thinkingConfig.includeThoughts").Bool(); !got {
 		t.Fatalf("request.generationConfig.thinkingConfig.includeThoughts = false, want true. Body: %s", string(upstreamBody))

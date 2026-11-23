@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -284,5 +285,78 @@ func TestPrepareRequestAuthStopPreservesRetryAfterHeader(t *testing.T) {
 	}
 	if hdr := SafeResponseHeaders(errExecute).Get("Retry-After"); hdr == "" {
 		t.Fatalf("expected Retry-After header on stop error, headers=%v", SafeResponseHeaders(errExecute))
+	}
+}
+
+type wrappedPrepareTransportTimeoutError struct {
+	msg   string
+	cause error
+}
+
+func (e wrappedPrepareTransportTimeoutError) Error() string     { return e.msg }
+func (e wrappedPrepareTransportTimeoutError) StatusCode() int   { return 0 }
+func (e wrappedPrepareTransportTimeoutError) ErrorCode() string { return ErrorCodeTransientTransport }
+func (e wrappedPrepareTransportTimeoutError) Unwrap() error     { return e.cause }
+
+type prepareNetTimeoutError struct{}
+
+func (prepareNetTimeoutError) Error() string   { return "dial tcp: i/o timeout" }
+func (prepareNetTimeoutError) Timeout() bool   { return true }
+func (prepareNetTimeoutError) Temporary() bool { return true }
+
+func TestPrepareRequestAuthMissingProjectIDAndNetTimeoutClassification_Issue7751(t *testing.T) {
+	previous := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
+
+	missingErr := credentialScopedStatusError{
+		code: http.StatusServiceUnavailable,
+		msg:  "antigravity auth missing project_id",
+	}
+	if isRequestInvalidError(missingErr) {
+		t.Fatal("isRequestInvalidError(missing project_id 503) = true, want false")
+	}
+	missingResultErr := resultErrorFromError(missingErr)
+	if shouldSkipCredentialCooldown(missingResultErr) {
+		t.Fatalf("shouldSkipCredentialCooldown(%+v) = true, want false so broken credential is cooled", missingResultErr)
+	}
+	if missingResultErr.Code == ErrorCodeCredentialQuota || missingResultErr.Code == ErrorCodeTransientTransport {
+		t.Fatalf("missingResultErr.Code = %q, want empty", missingResultErr.Code)
+	}
+
+	timeoutErr := wrappedPrepareTransportTimeoutError{
+		msg:   "antigravity auth missing project_id: execute request: dial tcp: i/o timeout",
+		cause: prepareNetTimeoutError{},
+	}
+	if isRequestInvalidError(timeoutErr) {
+		t.Fatal("isRequestInvalidError(transport timeout) = true, want false")
+	}
+	if !isTransientTransportError(timeoutErr) {
+		t.Fatal("isTransientTransportError(transport timeout) = false, want true")
+	}
+	var netErr net.Error
+	if !errors.As(timeoutErr, &netErr) || !netErr.Timeout() {
+		t.Fatal("expected errors.As to unwrap net.Error timeout")
+	}
+	timeoutResultErr := resultErrorFromError(timeoutErr)
+	if timeoutResultErr.Code != ErrorCodeTransientTransport {
+		t.Fatalf("timeoutResultErr.Code = %q, want %q", timeoutResultErr.Code, ErrorCodeTransientTransport)
+	}
+	if !shouldSkipCredentialCooldown(timeoutResultErr) {
+		t.Fatalf("shouldSkipCredentialCooldown(%+v) = false, want true for transient transport timeout", timeoutResultErr)
+	}
+
+	internalDeadlineErr := wrappedPrepareTransportTimeoutError{
+		msg:   "antigravity auth missing project_id: execute request: context deadline exceeded",
+		cause: context.DeadlineExceeded,
+	}
+	if !isRequestRetryRoundError(internalDeadlineErr) {
+		t.Fatal("isRequestRetryRoundError(transient_transport wrapping internal deadline) = false, want true")
+	}
+	if isRequestRetryRoundError(context.DeadlineExceeded) {
+		t.Fatal("isRequestRetryRoundError(raw context.DeadlineExceeded) = true, want false")
+	}
+	if isRequestRetryRoundError(context.Canceled) {
+		t.Fatal("isRequestRetryRoundError(raw context.Canceled) = true, want false")
 	}
 }

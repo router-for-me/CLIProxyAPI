@@ -148,6 +148,10 @@ func (s *GitTokenStore) withRefreshRepository(ctx context.Context, run func(*git
 	if _, errRemote := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{s.remote}}); errRemote != nil {
 		return errRemote
 	}
+	return s.withGitRemoteFileLock(func() error { return run(repo) })
+}
+
+func (s *GitTokenStore) withGitRemoteFileLock(run func() error) (errResult error) {
 	// go-git's in-process file receive-pack does not serialize competing
 	// reference updates. Lock on the shared remote itself for that transport.
 	endpoint, errParse := transport.ParseURL(s.remote)
@@ -163,16 +167,16 @@ func (s *GitTokenStore) withRefreshRepository(ctx context.Context, run func(*git
 		}
 		remoteFilesystem, ok := remoteStorage.(*filesystem.Storage)
 		if !ok {
-			return fmt.Errorf("local git refresh journal requires filesystem storage")
+			return fmt.Errorf("local git remote requires filesystem storage")
 		}
 		defer func() { errResult = errors.Join(errResult, remoteFilesystem.Close()) }()
 		canonical, errCanonical := filepath.EvalSymlinks(remoteFilesystem.Filesystem().Root())
 		if errCanonical != nil {
 			return errCanonical
 		}
-		return codex.WithFileLock(filepath.Join(canonical, ".cliproxy-refresh"), func() error { return run(repo) })
+		return codex.WithFileLock(filepath.Join(canonical, ".cliproxy-refresh"), run)
 	}
-	return run(repo)
+	return run()
 }
 
 func (s *GitTokenStore) refreshRemoteRef(ctx context.Context, repo *git.Repository, name plumbing.ReferenceName) (plumbing.Hash, error) {

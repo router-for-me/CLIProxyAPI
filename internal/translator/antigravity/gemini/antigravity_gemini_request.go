@@ -167,6 +167,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		signature.SanitizeGeminiRequestThoughtSignaturesDoc(reqDoc, "contents")
 	}
 
+	normalizeAntigravityMediaFieldsDocAt(reqDoc, "")
 	common.AttachDefaultSafetySettingsDoc(reqDoc, "safetySettings")
 
 	modelJSON, _ := json.Marshal(modelName)
@@ -177,6 +178,74 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	out = append(out, modelJSON...)
 	out = append(out, '}')
 	return out, nil
+}
+
+func normalizeAntigravityMediaFieldsDocAt(doc *ojson.Doc, prefix string) {
+	contentsPath := prefix + "contents"
+	for contentIndex, content := range doc.Get(contentsPath).Array() {
+		partsPath := fmt.Sprintf("%s.%d.parts", contentsPath, contentIndex)
+		normalizeAntigravityPartsDocAt(doc, content.Get("parts"), partsPath)
+	}
+
+	systemPartsPath := prefix + "systemInstruction.parts"
+	normalizeAntigravityPartsDocAt(doc, doc.Get(systemPartsPath), systemPartsPath)
+}
+
+func normalizeAntigravityPartsDocAt(doc *ojson.Doc, parts ojson.Result, partsPath string) {
+	if !parts.IsArray() {
+		return
+	}
+	for partIndex, part := range parts.Array() {
+		partPath := fmt.Sprintf("%s.%d", partsPath, partIndex)
+		if antigravityMediaFieldNeedsNormalization(part, "inline_data", "inlineData") {
+			normalizeAntigravityMediaFieldDoc(doc, partPath, "inline_data", "inlineData")
+		}
+		if antigravityMediaFieldNeedsNormalization(part, "file_data", "fileData") {
+			normalizeAntigravityMediaFieldDoc(doc, partPath, "file_data", "fileData")
+		}
+		if functionParts := part.Get("functionResponse.parts"); functionParts.IsArray() {
+			normalizeAntigravityPartsDocAt(doc, functionParts, partPath+".functionResponse.parts")
+		}
+	}
+}
+
+func antigravityMediaFieldNeedsNormalization(part ojson.Result, snakeName, camelName string) bool {
+	if part.Get(snakeName).Exists() {
+		return true
+	}
+	media := part.Get(camelName)
+	if !media.Exists() {
+		return false
+	}
+	return media.Get("mime_type").Exists() || (camelName == "fileData" && media.Get("file_uri").Exists())
+}
+
+func normalizeAntigravityMediaFieldDoc(doc *ojson.Doc, partPath, snakeName, camelName string) {
+	snakePath := partPath + "." + snakeName
+	camelPath := partPath + "." + camelName
+	if snake := doc.Get(snakePath); snake.Exists() {
+		if !doc.Get(camelPath).Exists() {
+			_ = doc.SetRaw(camelPath, snake.Raw)
+		}
+		_ = doc.Delete(snakePath)
+	}
+
+	if media := doc.Get(camelPath); media.Exists() {
+		normalizeAntigravityMediaKeyDoc(doc, camelPath, "mime_type", "mimeType")
+		if camelName == "fileData" {
+			normalizeAntigravityMediaKeyDoc(doc, camelPath, "file_uri", "fileUri")
+		}
+	}
+}
+
+func normalizeAntigravityMediaKeyDoc(doc *ojson.Doc, basePath, snakeName, camelName string) {
+	snakePath := basePath + "." + snakeName
+	if snake := doc.Get(snakePath); snake.Exists() {
+		if !doc.Get(basePath + "." + camelName).Exists() {
+			_ = doc.SetRaw(basePath+"."+camelName, snake.Raw)
+		}
+		_ = doc.Delete(snakePath)
+	}
 }
 
 // normalizeGeminiGenerationConfigResponseSchema converts generationConfig.responseJsonSchema

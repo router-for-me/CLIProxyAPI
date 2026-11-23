@@ -324,6 +324,65 @@ func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegist
 	}
 }
 
+func TestManager_DevinPublishedRoutesRequireExactSelectionWhenNeeded(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	auth := &Auth{ID: t.Name(), Provider: "devin"}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{
+		{ID: "devin/swe-2", SourceModelID: "devin/swe-2"},
+		{ID: "exact(high)", SourceModelID: "devin/swe-2"},
+	})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	for _, tc := range []struct {
+		model      string
+		routeAware bool
+		supported  bool
+	}{
+		{model: "devin/swe-2(medium-fast)", supported: true},
+		{model: "exact(high)", routeAware: true, supported: true},
+		{model: "exact", routeAware: true},
+		{model: "exact(low)", routeAware: true},
+		{model: "unrelated"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			if got := manager.routeAwareSelectionRequired(auth, tc.model); got != tc.routeAware {
+				t.Fatalf("route-aware selection = %t, want %t", got, tc.routeAware)
+			}
+			if got := manager.authSupportsRouteModel(reg, auth, tc.model); got != tc.supported {
+				t.Fatalf("credential supports request = %t, want %t", got, tc.supported)
+			}
+		})
+	}
+}
+
+func TestManager_DevinNativeRoutePreservesMixedSchedulerOrder(t *testing.T) {
+	const model = "devin/swe-2"
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	reg := registry.GetGlobalRegistry()
+	for _, provider := range []string{"devin", "claude"} {
+		manager.executors[provider] = schedulerTestExecutor{provider: provider}
+		id := t.Name() + "/" + provider
+		info := &registry.ModelInfo{ID: model}
+		if provider == "devin" {
+			info.SourceModelID = model
+		}
+		reg.RegisterClient(id, provider, []*registry.ModelInfo{info})
+		t.Cleanup(func() { reg.UnregisterClient(id) })
+		if _, errRegister := manager.Register(t.Context(), &Auth{ID: id, Provider: provider}); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+
+	providers := []string{"devin", "claude"}
+	for _, want := range providers {
+		_, _, got, errPick := manager.pickNextMixed(t.Context(), providers, model+"(high)", cliproxyexecutor.Options{}, nil)
+		if errPick != nil || got != want {
+			t.Fatalf("selected provider = %q, error = %v, want %q", got, errPick, want)
+		}
+	}
+}
+
 func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)

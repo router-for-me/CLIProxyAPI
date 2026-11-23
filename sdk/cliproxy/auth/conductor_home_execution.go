@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -252,10 +253,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
 		})
 		execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), selection.Provider)
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		// Home owns credential availability; execute its dispatch without local state filtering.
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
@@ -352,6 +350,10 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
+			if !restoreExecutionModel {
+				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
+			}
 			var errIntercept error
 			execReq, execOpts, errIntercept = prepareRequestAfterAuth(execCtx, selection.Executor, preparedAuth, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
@@ -362,10 +364,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				releaseAttempt()
 				selection.End("request_intercepted")
 				return cliproxyexecutor.Response{}, errIntercept
-			}
-			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
-			if !restoreExecutionModel {
-				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
@@ -392,7 +390,17 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
 			}
-			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(preparedAuth)
+			execCtx = m.withExecutionAuthRefresh(syncMetadataSessionToContext(execCtx, execOpts.Metadata), executionAuthRefreshOptions{
+				ephemeral: true,
+				onAuthUpdated: func(updated *Auth) {
+					if updated != nil {
+						activeAuth.Store(updated.Clone())
+						setEffectiveAuth(updated)
+					}
+				},
+			})
 			executorCtx := execCtx
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
@@ -406,6 +414,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()
+			if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != preparedAuth {
+				preparedAuth = currentAuth
+			}
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
 			if errCtx := execCtx.Err(); errCtx != nil {
