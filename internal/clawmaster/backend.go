@@ -1721,6 +1721,7 @@ func newBackendHandler(lifetime context.Context, opts BackendOptions, base *hand
 			}
 		}
 		started := time.Now()
+		noteClaudeCodeUserAgent(c.Request.Header.Get("User-Agent"))
 		metered := newMeteredWriter(c.Writer)
 		c.Writer = metered
 		var raw []byte

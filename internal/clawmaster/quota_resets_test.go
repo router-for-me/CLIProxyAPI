@@ -124,7 +124,7 @@ func TestThePollAsksAsClaudeCodeAndLogsTheGrantBlock(t *testing.T) {
 	}
 	poll()
 	poll()
-	if !strings.HasPrefix(agent, "claude-cli/") || !strings.Contains(agent, "(external, cli)") {
+	if !strings.HasPrefix(agent, "claude-cli/") || !strings.HasSuffix(agent, " (external, cli)") || agent != claudeCodeUserAgent() {
 		t.Fatalf("User-Agent %q, want Claude Code's form", agent)
 	}
 	text := logs.String()
