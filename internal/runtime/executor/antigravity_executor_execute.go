@@ -433,7 +433,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if replayAccumulator != nil {
 			replayAccumulator.ObserveSSELine(payload)
 		}
-		if len(pendingFilterPayload) > 0 {
+		if len(pendingFilterPayload) > 0 && geminiPayloadHasContentParts(payload) {
 			reporter.ObserveResponseModel(pendingFilterPayload)
 			rawPayloads = append(rawPayloads, pendingFilterPayload)
 			pendingFilterPayload = nil
@@ -504,6 +504,32 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	reporter.EnsurePublished(ctx)
 
 	return resp, nil
+}
+
+func geminiPayloadHasContentParts(payload []byte) bool {
+	for _, path := range []string{"candidates", "response.candidates"} {
+		candidates := ojson.GetBytesNoCopy(payload, path)
+		if !candidates.IsArray() {
+			continue
+		}
+		for _, candidate := range candidates.Array() {
+			parts := candidate.Get("content.parts")
+			if !parts.IsArray() {
+				continue
+			}
+			for _, part := range parts.Array() {
+				if strings.TrimSpace(part.Get("text").String()) != "" ||
+					part.Get("thoughtSignature").Exists() ||
+					part.Get("thought_signature").Exists() ||
+					part.Get("functionCall").Exists() ||
+					part.Get("inlineData").Exists() ||
+					part.Get("inline_data").Exists() {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 const antigravityPartsPlaceholder = `"__cpa_parts_placeholder__"`
