@@ -72,6 +72,17 @@ func translateCodexRequestPairWithUpdateIntentContext(ctx context.Context, from,
 // Codex backend accepts; smaller integers are rejected with invalid_request_error.
 const codexMinOutputTokens = 16
 
+// shouldPreserveFullCodexOpenAIInclude reports whether the target Codex upstream
+// is a non-ChatGPT OpenAI Responses API endpoint (SIWC or custom codex-api-key)
+// that should preserve the full official OpenAI ResponseIncludable set in
+// addition to Codex's opt-in output.encrypted_content.
+func shouldPreserveFullCodexOpenAIInclude(ctx context.Context, auth *cliproxyauth.Auth, baseURL string, headers http.Header) bool {
+	if !codexUseSIWCForRequest(ctx, auth, headers) && !codexAuthUsesAPIKey(auth) {
+		return false
+	}
+	return !helps.IsChatGPTCodexBackendBaseURL(baseURL)
+}
+
 // normalizeCodexOutputBudgetDoc raises small positive integer output budgets to the
 // Codex minimum. It judges the translated payload (max_output_tokens) rather than the
 // client payload so every source format and budget field (max_tokens,

@@ -91,9 +91,19 @@ func payloadRawString(value any) ([]byte, bool) {
 	}
 }
 
-// looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
+// looksLikeBcrypt recognizes supported bcrypt encodings without treating an
+// arbitrary plaintext string with a bcrypt prefix as safe to upload.
 func looksLikeBcrypt(s string) bool {
-	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
+	if len(s) != 60 || (s[:4] != "$2a$" && s[:4] != "$2b$" && s[:4] != "$2y$") || s[6] != '$' {
+		return false
+	}
+	for _, c := range s[7:] {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '.' && c != '/' {
+			return false
+		}
+	}
+	_, errCost := bcrypt.Cost([]byte(s))
+	return errCost == nil
 }
 
 // hashSecret hashes the given secret using bcrypt.

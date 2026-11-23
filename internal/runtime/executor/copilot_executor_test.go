@@ -20,20 +20,16 @@ import (
 
 func copilotTestAuth(t *testing.T, id, model, endpoint string) *cliproxyauth.Auth {
 	t.Helper()
-	data, err := json.Marshal(copilot.Catalog{FetchedAt: time.Now(), Models: []copilot.Model{{ID: model, Endpoints: []string{endpoint}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &cliproxyauth.Auth{ID: id, Provider: copilot.Provider, Metadata: map[string]any{"access_token": "test-credential", "base_url": "https://api.individual.githubcopilot.com", copilot.CatalogKey: string(data)}}
+	return &cliproxyauth.Auth{ID: id, Provider: copilot.Provider, Metadata: map[string]any{"access_token": "test-credential", "base_url": "https://api.individual.githubcopilot.com"}, CopilotCatalog: copilot.NewCatalog([]copilot.Model{{ID: model, Endpoints: []string{endpoint}}}, time.Now())}
 }
 
 // The default registry is also used by SDK callers and plugin capability discovery.
 func TestCopilotResponsesRoutesArePrivate(t *testing.T) {
-	const model = "test-model"
+	const model = "claude-opus-5"
 	e := NewCopilotExecutor(nil)
 	auth := copilotTestAuth(t, "account", model, copilot.Responses)
 	for _, source := range []tr.Format{tr.FormatOpenAI, tr.FormatClaude} {
-		const input = `{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`
+		const input = `{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`
 		req := cliproxyexecutor.Request{Model: model, Payload: []byte(input)}
 		p, err := e.prepare(context.Background(), auth, req, cliproxyexecutor.Options{SourceFormat: source}, false, false)
 		if err != nil || !ojson.GetBytesNoCopy(p.body, "input.0").Exists() {
@@ -63,7 +59,7 @@ func TestDefaultChatToClaudeStreamUsesOriginalFlag(t *testing.T) {
 }
 
 func TestCopilotChatToClaudeExecuteStreamUsesExecutionMode(t *testing.T) {
-	const model = "test-model"
+	const model = "claude-opus-5"
 	const upstream = "data: " + `{"id":"chat-1","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}` + "\n\n" +
 		"data: " + `{"id":"chat-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
 	e := NewCopilotExecutor(nil)
@@ -106,19 +102,19 @@ func TestCopilotChatToClaudeExecuteStreamUsesExecutionMode(t *testing.T) {
 
 func TestCopilotProtocolMatrix(t *testing.T) {
 	executor := NewCopilotExecutor(&config.Config{})
-	const model = "test-model"
+	const model = "claude-opus-5"
 	versions := []struct {
 		format                   tr.Format
 		path, req, response, sse string
 	}{
 		{tr.FormatOpenAI, copilot.Chat, `{"messages":[{"role":"user","content":"hello"}]}`,
-			`{"id":"chat-1","model":"test-model","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"success"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
+			`{"id":"chat-1","model":"claude-opus-5","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"success"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`,
 			"data: {\"id\":\"chat-1\",\"model\":\"test-model\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"success\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chat-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"},
 		{tr.FormatClaude, copilot.Messages, `{"max_tokens":128,"messages":[{"role":"user","content":"hello"}]}`,
-			`{"id":"msg_1","type":"message","model":"test-model","role":"assistant","content":[{"type":"text","text":"success"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`,
+			`{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"success"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`,
 			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"test-model\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":3}}}\n\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"success\"}}\n\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\ndata: {\"type\":\"message_stop\"}\n\n"},
 		{tr.FormatOpenAIResponse, copilot.Responses, `{"input":"hello"}`,
-			`{"id":"resp_1","object":"response","model":"test-model","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"success"}]}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}`,
+			`{"id":"resp_1","object":"response","model":"claude-opus-5","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"success"}]}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}`,
 			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"test-model\",\"status\":\"in_progress\"}}\n\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"success\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"test-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n"},
 	}
 	for _, from := range versions {
@@ -198,7 +194,7 @@ func TestCopilotProtocolMatrix(t *testing.T) {
 }
 
 func TestCopilotCountTokensGeminiResponse(t *testing.T) {
-	const model = "test-model"
+	const model = "claude-opus-5"
 	const geminiBody = `{"contents":[{"role":"user","parts":[{"text":"Hello there"}]}]}`
 	e := NewCopilotExecutor(nil)
 	for _, tc := range []struct {
@@ -353,11 +349,7 @@ func TestCopilotMessagesTransportLimit(t *testing.T) {
 	model := copilot.Model{ID: id}
 	model.Capabilities.Limits.Output = 128000
 	model.Capabilities.Limits.NonStreamingOutput = 16000
-	b, err := json.Marshal(copilot.Catalog{FetchedAt: time.Now(), Models: []copilot.Model{model}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	auth.Metadata[copilot.CatalogKey] = string(b)
+	auth.CopilotCatalog = copilot.NewCatalog([]copilot.Model{model}, time.Now())
 	for _, tc := range []struct {
 		name                     string
 		stream                   bool
@@ -404,12 +396,8 @@ func TestCopilotCLIGeminiEfforts(t *testing.T) {
 			auth := copilotTestAuth(t, "a", id, copilot.Chat)
 			m := copilot.Model{ID: id}
 			m.Capabilities.Supports.Reasoning = json.RawMessage(`["low","high","xhigh"]`)
-			b, err := json.Marshal(copilot.Catalog{FetchedAt: time.Now(), Models: []copilot.Model{m}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			auth.Metadata[copilot.CatalogKey] = string(b)
-			r, _ := copilot.ReadCatalog(string(b), time.Now()).Route(id)
+			auth.CopilotCatalog = copilot.NewCatalog([]copilot.Model{m}, time.Now())
+			r, _ := auth.CopilotCatalog.Route(id)
 			if r.Info.Thinking == nil || strings.Join(r.Info.Thinking.Levels, ",") != "low,high" || r.DefaultEffort != "" {
 				t.Fatalf("account/CLI intersection lost: %+v", r)
 			}
@@ -523,5 +511,39 @@ func TestCopilotPayloadCompatibilityRunsBeforeUserRules(t *testing.T) {
 	doc := ojson.NewDoc(prepared.body)
 	if !doc.Get("store").Bool() || doc.Get("reasoning_effort").String() != "high" || doc.Get("messages.0.role").String() != "system" || doc.Get("stream_options").Exists() {
 		t.Fatalf("unexpected outgoing payload: %s", prepared.body)
+	}
+}
+
+func TestCopilotColdRouteUsesPresetCapabilitiesAndDefaults(t *testing.T) {
+	e := NewCopilotExecutor(nil)
+	const id = "claude-haiku-4.5"
+	auth := &cliproxyauth.Auth{ID: "cold", Provider: copilot.Provider, Metadata: map[string]any{"base_url": "https://api.business.githubcopilot.com", "access_token": "account-token"}}
+	req := cliproxyexecutor.Request{Model: copilot.ModelPrefix + id, Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+	opts := e.PlanRequestRoute(auth, req, cliproxyexecutor.Options{SourceFormat: tr.FormatClaude})
+	if e.RequestToFormat(req, opts) != tr.FormatClaude {
+		t.Fatal("cold start did not plan the Messages route")
+	}
+	p, err := e.prepare(t.Context(), auth, req, opts, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.route.NonStreamingOutput != 16000 || ojson.GetBytesNoCopy(p.body, "thinking.budget_tokens").Int() != 1024 || ojson.GetBytesNoCopy(p.body, "max_tokens").Int() != 8192 {
+		t.Fatal("lost cold Messages budget or output limits")
+	}
+	for _, tc := range []struct {
+		name    string
+		catalog *copilot.Catalog
+	}{
+		{"denied", copilot.UnavailableCatalog}, {"empty", copilot.NewCatalog(nil, time.Now())},
+		{"expired", copilot.NewCatalog([]copilot.Model{{ID: id}}, time.Now().Add(-copilot.CatalogMaxAge))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := auth.Clone()
+			a.CopilotCatalog = tc.catalog
+			_, err := e.prepare(t.Context(), a, req, opts, false, false)
+			if se, ok := err.(cliproxyexecutor.StatusError); !ok || se.StatusCode() != http.StatusNotFound {
+				t.Fatalf("previously planned cold route survived %s: %v", tc.name, err)
+			}
+		})
 	}
 }

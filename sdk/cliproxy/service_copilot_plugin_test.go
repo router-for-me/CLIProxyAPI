@@ -85,16 +85,13 @@ func TestCopilotPluginCatalogPublishesExecutableRoutes(t *testing.T) {
 			host.RegisterExecutors(manager, reg)
 			service := &Service{cfg: cfg, coreManager: manager, pluginHost: host}
 			auth := registerCopilotRoutingTestAuth(t, manager, "team", "alpha", "beta", "hidden")
-			raw, _ := auth.Metadata[copilot.CatalogKey].(string)
-			account := copilot.ReadCatalog(raw, time.Now())
-			for i := range account.Models {
-				account.Models[i].Capabilities.Supports.Reasoning = json.RawMessage(`["low","high"]`)
+			var entries []copilot.Model
+			for _, id := range []string{"alpha", "beta", "hidden"} {
+				entry := copilot.Model{ID: id, Endpoints: []string{copilot.Chat}}
+				entry.Capabilities.Supports.Reasoning = json.RawMessage(`["low","high"]`)
+				entries = append(entries, entry)
 			}
-			data, errMarshal := json.Marshal(account)
-			if errMarshal != nil {
-				t.Fatal(errMarshal)
-			}
-			auth.Metadata[copilot.CatalogKey] = string(data)
+			auth.CopilotCatalog = copilot.NewCatalog(entries, time.Now())
 			auth, errUpdate := manager.Update(ctx, auth)
 			if errUpdate != nil {
 				t.Fatal(errUpdate)
@@ -149,7 +146,7 @@ func TestCopilotPluginCatalogPublishesExecutableRoutes(t *testing.T) {
 				{"team/copilot/" + beta, "beta", "Plugin Beta (Copilot)", strings.Trim(tc.betaSuffix, "()"), "beta"},
 			} {
 				if !slices.ContainsFunc(registered, func(info *ModelInfo) bool {
-					return info.ID == want.id && info.MetadataModelID == want.native && info.DisplayName == want.displayName
+					return info.ID == want.id && info.SourceModelID == copilot.ModelPrefix+want.native && info.MetadataModelID == want.native && info.DisplayName == want.displayName
 				}) {
 					t.Fatalf("missing published route %+v", want)
 				}

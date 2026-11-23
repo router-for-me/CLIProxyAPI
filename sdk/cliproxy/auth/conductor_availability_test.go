@@ -33,6 +33,118 @@ func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAut
 	}
 }
 
+func TestUpdateAggregatedAvailability_DisabledPreservesUnavailable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name string
+		auth *Auth
+	}{
+		{
+			name: "disabled flag with active sibling model",
+			auth: &Auth{
+				ID:          "disabled-flag",
+				Disabled:    true,
+				Status:      StatusActive,
+				Unavailable: false,
+				ModelStates: map[string]*ModelState{
+					"gemini-3.8-flash": {Status: StatusActive, Unavailable: false},
+					"gemini-4-neon":    {Status: StatusDisabled, Unavailable: true},
+				},
+			},
+		},
+		{
+			name: "status disabled with active sibling model",
+			auth: &Auth{
+				ID:          "status-disabled",
+				Disabled:    false,
+				Status:      StatusDisabled,
+				Unavailable: false,
+				ModelStates: map[string]*ModelState{
+					"gemini-3.8-flash": {Status: StatusActive, Unavailable: false},
+				},
+			},
+		},
+		{
+			name: "disabled with empty model states",
+			auth: &Auth{
+				ID:          "disabled-empty",
+				Disabled:    true,
+				Status:      StatusDisabled,
+				Unavailable: true,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			updateAggregatedAvailability(tc.auth, now)
+			if !tc.auth.Unavailable {
+				t.Fatalf("auth.Unavailable = false, want true")
+			}
+		})
+	}
+}
+
+func TestClearCooldownStateForAuth_DisabledPreservesUnavailableWithoutChurn(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	next := now.Add(5 * time.Minute)
+
+	t.Run("disabled with model states", func(t *testing.T) {
+		auth := &Auth{
+			ID:             "disabled-models",
+			Disabled:       true,
+			Status:         StatusDisabled,
+			Unavailable:    true,
+			NextRetryAfter: next,
+			Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+			ModelStates: map[string]*ModelState{
+				"gemini-3.8-flash": {Status: StatusActive, Unavailable: false},
+				"gemini-4-neon":    {Status: StatusDisabled, Unavailable: true, StatusMessage: "tos_violation"},
+			},
+		}
+
+		if !clearCooldownStateForAuth(auth, now) {
+			t.Fatal("first clearCooldownStateForAuth = false, want true when clearing timed cooldown")
+		}
+		if !auth.Unavailable {
+			t.Fatal("auth.Unavailable = false, want true")
+		}
+		if !auth.NextRetryAfter.IsZero() || auth.Quota.Exceeded {
+			t.Fatalf("timed cooldown not cleared: next=%v quota=%+v", auth.NextRetryAfter, auth.Quota)
+		}
+		if state := auth.ModelStates["gemini-4-neon"]; state == nil || state.Status != StatusDisabled || !state.Unavailable {
+			t.Fatalf("disabled model state mutated unexpectedly: %+v", state)
+		}
+
+		// A subsequent call with no remaining cooldown timers must not churn state.
+		if clearCooldownStateForAuth(auth, now) {
+			t.Fatal("second clearCooldownStateForAuth = true, want false (no churn)")
+		}
+		if !auth.Unavailable {
+			t.Fatal("auth.Unavailable = false after second call, want true")
+		}
+	})
+
+	t.Run("disabled without model states", func(t *testing.T) {
+		auth := &Auth{
+			ID:          "disabled-empty",
+			Disabled:    true,
+			Status:      StatusDisabled,
+			Unavailable: true,
+		}
+		if clearCooldownStateForAuth(auth, now) {
+			t.Fatal("clearCooldownStateForAuth = true with no timers, want false")
+		}
+		if !auth.Unavailable {
+			t.Fatal("auth.Unavailable = false, want true")
+		}
+	})
+}
+
 func TestUpdateAggregatedAvailability_FutureNextRetryBlocksAuth(t *testing.T) {
 	t.Parallel()
 

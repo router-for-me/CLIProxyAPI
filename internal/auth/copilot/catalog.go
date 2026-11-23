@@ -5,16 +5,18 @@ import (
 	_ "embed"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 const (
-	CatalogKey    = "copilot_catalog"
 	ModelPrefix   = Provider + "/"
 	Chat          = "/chat/completions"
 	Messages      = "/v1/messages"
@@ -37,18 +39,18 @@ var compatibility = func() map[string]Compatibility {
 }()
 
 type Compatibility struct {
-	SystemPrompt      string   `json:"system_prompt"`
-	Endpoint          string   `json:"endpoint"`
-	AdaptiveMode      string   `json:"adaptive_mode"`
-	Efforts           []string `json:"efforts"`
-	LimitEfforts      bool     `json:"limit_efforts"`
-	DefaultVerbosity  string   `json:"default_verbosity"`
-	DefaultToolChoice string   `json:"default_tool_choice"`
-	DisableSnippy     bool     `json:"disable_snippy"`
-	DefaultEffort     string   `json:"default_effort"`
-	DefaultBudget     int      `json:"default_budget"`
-	DefaultMaxTokens  int      `json:"default_max_tokens"`
-	AnthropicBetas    []string `json:"anthropic_betas"`
+	SystemPrompt       string   `json:"system_prompt"`
+	Endpoint           string   `json:"endpoint"`
+	AdaptiveMode       string   `json:"adaptive_mode"`
+	NonStreamingOutput int      `json:"max_non_streaming_output_tokens"`
+	LimitEfforts       bool     `json:"limit_efforts"`
+	DefaultVerbosity   string   `json:"default_verbosity"`
+	DefaultToolChoice  string   `json:"default_tool_choice"`
+	DisableSnippy      bool     `json:"disable_snippy"`
+	DefaultEffort      string   `json:"default_effort"`
+	DefaultBudget      int      `json:"default_budget"`
+	DefaultMaxTokens   int      `json:"default_max_tokens"`
+	AnthropicBetas     []string `json:"anthropic_betas"`
 }
 
 type Model struct {
@@ -80,57 +82,121 @@ type Model struct {
 	} `json:"capabilities"`
 }
 
+// Catalog is an immutable account snapshot shared by runtime auth clones.
 type Catalog struct {
-	FetchedAt time.Time `json:"fetched_at"`
-	Models    []Model   `json:"data"`
+	fetchedAt time.Time
+	models    map[string]Model
 }
 
-func FetchCatalog(ctx context.Context, client *http.Client, base, token string) (string, error) {
-	if !TrustedAPI(base) {
-		return "", fmt.Errorf("copilot: untrusted models endpoint")
-	}
-	var catalog Catalog
-	if err := RequestJSON(ctx, client, base+"/models", token, nil, &catalog); err != nil {
-		return "", err
-	}
-	if catalog.Models == nil {
-		return "", fmt.Errorf("copilot: missing models array")
-	}
-	catalog.FetchedAt = time.Now().UTC()
-	data, err := json.Marshal(catalog)
-	return string(data), err
-}
+// PresetCatalog is used only while a usable credential awaits its first discovery.
+var PresetCatalog = &Catalog{}
 
-func ReadCatalog(raw string, now time.Time) Catalog {
-	var catalog Catalog
-	if raw == "" || json.Unmarshal([]byte(raw), &catalog) != nil || catalog.FetchedAt.IsZero() || catalog.FetchedAt.After(now) || !now.Before(catalog.FetchedAt.Add(CatalogMaxAge)) {
-		return Catalog{}
-	}
-	return catalog
-}
+// UnavailableCatalog records a revoked account until discovery succeeds again.
+var UnavailableCatalog = &Catalog{}
 
-func (c Catalog) Routes() []Route {
-	var routes []Route
-	seen := make(map[string]bool, len(c.Models))
-	for _, model := range c.Models {
-		if model.ID == "" || seen[model.ID] {
-			continue
+// NewCatalog takes ownership of the nested model fields. The first entry for an ID wins.
+func NewCatalog(models []Model, fetchedAt time.Time) *Catalog {
+	byID := make(map[string]Model, len(models))
+	for _, model := range models {
+		if _, exists := byID[model.ID]; !exists {
+			byID[model.ID] = model
 		}
-		seen[model.ID] = true
-		if route, ok := model.route(); ok {
+	}
+	return &Catalog{models: byID, fetchedAt: fetchedAt}
+}
+
+// FetchModels returns the complete upstream response, including unknown fields.
+func FetchModels(ctx context.Context, client *http.Client, base, token string) (json.RawMessage, error) {
+	if !TrustedAPI(base) {
+		return nil, fmt.Errorf("copilot: untrusted models endpoint")
+	}
+	var raw json.RawMessage
+	if err := RequestJSON(ctx, client, strings.TrimRight(base, "/")+"/models", token, nil, &raw); err != nil {
+		return nil, err
+	}
+	if !ojson.GetBytesNoCopy(raw, "data").IsArray() {
+		return nil, fmt.Errorf("copilot: missing models array")
+	}
+	return raw, nil
+}
+
+func FetchCatalog(ctx context.Context, client *http.Client, base, token string) (*Catalog, error) {
+	raw, err := FetchModels(ctx, client, base, token)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Models []Model `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("copilot: invalid model directory: %w", err)
+	}
+	return NewCatalog(payload.Models, time.Now()), nil
+}
+
+func (c *Catalog) Active(now time.Time) *Catalog {
+	if c == nil || now.Before(c.fetchedAt) || !now.Before(c.ExpiresAt()) {
+		return nil
+	}
+	return c
+}
+
+func (c *Catalog) ExpiresAt() time.Time {
+	if c == nil || c.fetchedAt.IsZero() {
+		return time.Time{}
+	}
+	return c.fetchedAt.Add(CatalogMaxAge)
+}
+
+func (c *Catalog) SameModels(other *Catalog) bool {
+	return c == other || (c != nil && other != nil && c != PresetCatalog && other != PresetCatalog && reflect.DeepEqual(c.models, other.models))
+}
+
+func (c *Catalog) Routes() []Route {
+	if c == nil {
+		return nil
+	}
+	var routes []Route
+	for _, preset := range registry.GetCopilotModels() {
+		if route, ok := c.resolve(preset); ok {
 			routes = append(routes, route)
 		}
 	}
 	return routes
 }
 
-func (c Catalog) Route(modelID string) (Route, bool) {
-	for _, model := range c.Models {
-		if model.ID == modelID {
-			return model.route()
-		}
+func (c *Catalog) Route(modelID string) (Route, bool) {
+	if c == nil {
+		return Route{}, false
 	}
-	return Route{}, false
+	return c.resolve(registry.LookupStaticModelInfoByChannel(modelID, Provider))
+}
+
+// resolve combines a detached preset with the selected account's capabilities.
+func (c *Catalog) resolve(preset *registry.ModelInfo) (Route, bool) {
+	if preset == nil {
+		return Route{}, false
+	}
+	if c == PresetCatalog {
+		return (Model{ID: preset.ID}).route(preset, true)
+	}
+	model, ok := c.models[preset.ID]
+	if !ok {
+		return Route{}, false
+	}
+	return model.route(preset, false)
+}
+
+// HomeRoute applies CLI compatibility to the model selected by Home.
+func HomeRoute(modelID string, info *registry.ModelInfo) (Route, bool) {
+	selected := registry.ModelInfo{ID: modelID}
+	// Older Homes send native IDs; newer Homes send canonical provider-qualified IDs.
+	if info != nil && strings.TrimPrefix(info.ID, ModelPrefix) == modelID {
+		selected = *info
+		selected.ID = modelID
+		selected.SupportedInputModalities = slices.Clone(info.SupportedInputModalities)
+	}
+	return (Model{ID: modelID}).route(&selected, true)
 }
 
 type Route struct {
@@ -148,7 +214,7 @@ type Route struct {
 	AnthropicBetas     []string
 }
 
-func (m Model) route() (Route, bool) {
+func (m Model) route(info *registry.ModelInfo, cold bool) (Route, bool) {
 	if m.ID == "auto" || (m.Policy.State != "" && m.Policy.State != "enabled") || (m.Picker != nil && !*m.Picker) || (m.Capabilities.Type != "" && m.Capabilities.Type != "chat") {
 		return Route{}, false
 	}
@@ -178,21 +244,63 @@ func (m Model) route() (Route, bool) {
 	if route.Format == "" {
 		return Route{}, false
 	}
-	if route.Endpoint != profile.Endpoint {
+	var presetEfforts []string
+	if info.Thinking != nil {
+		presetEfforts = info.Thinking.Levels
+	}
+	if profile.Endpoint != "" && route.Endpoint != profile.Endpoint {
+		// These CLI defaults and fallback levels were verified for the preferred protocol.
 		profile = Compatibility{}
+		presetEfforts = nil
 	}
-	info := &registry.ModelInfo{ID: m.ID, Object: "model", OwnedBy: Provider, Type: Provider, DisplayName: m.Name, ContextLength: m.Capabilities.Limits.Context, InputTokenLimit: m.Capabilities.Limits.Input, OutputTokenLimit: m.Capabilities.Limits.Output, MaxCompletionTokens: m.Capabilities.Limits.Output}
+	info.Type, info.OwnedBy, info.Object = Provider, Provider, "model"
+	if cold {
+		route.NonStreamingOutput = profile.NonStreamingOutput
+		for i, modality := range info.SupportedInputModalities {
+			info.SupportedInputModalities[i] = strings.ToUpper(modality)
+		}
+	} else {
+		if m.Name != "" {
+			info.DisplayName = m.Name
+		}
+		info.ContextLength, info.InputTokenLimit = m.Capabilities.Limits.Context, m.Capabilities.Limits.Input
+		info.OutputTokenLimit, info.MaxCompletionTokens = m.Capabilities.Limits.Output, m.Capabilities.Limits.Output
+		info.SupportedInputModalities = []string{"TEXT"}
+		if vision := m.Capabilities.Supports.Vision; vision != nil && *vision {
+			info.SupportedInputModalities = append(info.SupportedInputModalities, "IMAGE")
+		}
+		info.Thinking = m.accountThinking(route.Endpoint, profile, presetEfforts)
+		route.NonStreamingOutput = m.Capabilities.Limits.NonStreamingOutput
+	}
+	if thinking := info.Thinking; thinking != nil {
+		switch {
+		case slices.Contains(thinking.Levels, m.DefaultEffort):
+			route.DefaultEffort = m.DefaultEffort
+		case slices.Contains(thinking.Levels, profile.DefaultEffort):
+			route.DefaultEffort = profile.DefaultEffort
+		case len(thinking.Levels) == 0 && profile.DefaultBudget > 0 && thinking.Max > 0:
+			route.DefaultBudget = min(max(profile.DefaultBudget, thinking.Min), thinking.Max)
+		}
+	}
+	route.Info = info
+	route.SystemPrompt = profile.SystemPrompt
+	route.DefaultVerbosity = profile.DefaultVerbosity
+	route.DefaultToolChoice = profile.DefaultToolChoice
+	route.DisableSnippy = profile.DisableSnippy
+	route.DefaultMaxTokens = profile.DefaultMaxTokens
+	route.AnthropicBetas = profile.AnthropicBetas
+	return route, true
+}
+
+func (m Model) accountThinking(endpoint string, profile Compatibility, presetEfforts []string) *registry.ThinkingSupport {
 	supports := m.Capabilities.Supports
-	info.SupportedInputModalities = []string{"TEXT"}
-	if supports.Vision != nil && *supports.Vision {
-		info.SupportedInputModalities = append(info.SupportedInputModalities, "IMAGE")
-	}
+	minBudget, maxBudget := supports.MinBudget, supports.MaxBudget
 	var efforts []string
 	if len(supports.Reasoning) > 0 {
 		var enabled bool
 		if err := json.Unmarshal(supports.Reasoning, &efforts); err != nil && json.Unmarshal(supports.Reasoning, &enabled) == nil {
 			if enabled {
-				efforts = profile.Efforts
+				efforts = presetEfforts
 				if len(efforts) == 0 {
 					efforts = []string{"low", "medium", "high"}
 				}
@@ -202,10 +310,10 @@ func (m Model) route() (Route, bool) {
 		}
 	}
 	if efforts == nil {
-		efforts = profile.Efforts
+		efforts = presetEfforts
 	} else if profile.LimitEfforts {
 		// The CLI accepts only a subset of these accounts' advertised Chat levels.
-		efforts = slices.DeleteFunc(slices.Clone(efforts), func(level string) bool { return !slices.Contains(profile.Efforts, level) })
+		efforts = slices.DeleteFunc(slices.Clone(efforts), func(level string) bool { return !slices.Contains(presetEfforts, level) })
 	}
 	adaptiveMode := profile.AdaptiveMode
 	switch string(supports.Adaptive) {
@@ -218,7 +326,7 @@ func (m Model) route() (Route, bool) {
 	case `"optional"`, `"required"`, `"adaptive_only"`:
 		adaptiveMode = string(supports.Adaptive[1 : len(supports.Adaptive)-1])
 	}
-	if route.Endpoint == Messages {
+	if endpoint == Messages {
 		if adaptiveMode != "" && efforts == nil {
 			efforts = []string{"low", "medium", "high"}
 		}
@@ -226,30 +334,13 @@ func (m Model) route() (Route, bool) {
 			efforts = nil
 		}
 	}
-	minBudget, maxBudget := supports.MinBudget, supports.MaxBudget
-	if route.Endpoint == Messages && (adaptiveMode == "required" || adaptiveMode == "adaptive_only") {
+	if endpoint == Messages && (adaptiveMode == "required" || adaptiveMode == "adaptive_only") {
 		minBudget, maxBudget = 0, 0
 	}
 	if supports.Thinking == nil || *supports.Thinking {
-		if len(efforts) > 0 || (route.Endpoint == Messages && maxBudget > 0) {
-			info.Thinking = &registry.ThinkingSupport{Levels: efforts, Min: minBudget, Max: maxBudget, ZeroAllowed: (route.Endpoint == Messages && adaptiveMode != "adaptive_only") || (route.Endpoint != Messages && slices.Contains(efforts, "none"))}
-			if slices.Contains(efforts, m.DefaultEffort) {
-				route.DefaultEffort = m.DefaultEffort
-			} else if slices.Contains(efforts, profile.DefaultEffort) {
-				route.DefaultEffort = profile.DefaultEffort
-			}
-			if len(efforts) == 0 && profile.DefaultBudget > 0 && maxBudget > 0 {
-				route.DefaultBudget = min(max(profile.DefaultBudget, minBudget), maxBudget)
-			}
+		if len(efforts) > 0 || (endpoint == Messages && maxBudget > 0) {
+			return &registry.ThinkingSupport{Levels: efforts, Min: minBudget, Max: maxBudget, ZeroAllowed: (endpoint == Messages && adaptiveMode != "adaptive_only") || (endpoint != Messages && slices.Contains(efforts, "none"))}
 		}
 	}
-	route.Info = info
-	route.NonStreamingOutput = m.Capabilities.Limits.NonStreamingOutput
-	route.SystemPrompt = profile.SystemPrompt
-	route.DefaultVerbosity = profile.DefaultVerbosity
-	route.DefaultToolChoice = profile.DefaultToolChoice
-	route.DisableSnippy = profile.DisableSnippy
-	route.DefaultMaxTokens = profile.DefaultMaxTokens
-	route.AnthropicBetas = profile.AnthropicBetas
-	return route, true
+	return nil
 }
