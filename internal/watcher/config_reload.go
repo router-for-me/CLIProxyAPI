@@ -3,9 +3,6 @@
 package watcher
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -57,7 +54,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 	w.configApplyMu.Lock()
 	defer w.configApplyMu.Unlock()
 
-	data, err := os.ReadFile(w.configPath)
+	data, err := config.ReadConfigFile(w.configPath)
 	if err != nil {
 		log.Errorf("failed to read config file for hash check: %v", err)
 		return
@@ -66,8 +63,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 		log.Debugf("ignoring empty config file write event")
 		return
 	}
-	sum := sha256.Sum256(data)
-	newHash := hex.EncodeToString(sum[:])
+	newHash := config.ComputeSourceHash(data)
 
 	w.clientsMutex.RLock()
 	currentHash := w.lastConfigHash

@@ -19,15 +19,8 @@ func ValidateCredentialWeight(weight *int) error {
 	return errNormalize
 }
 
-func validateCredentialWeightYAML(data []byte) error {
-	var document yaml.Node
-	if errUnmarshal := yaml.Unmarshal(data, &document); errUnmarshal != nil {
-		return nil
-	}
-	if len(document.Content) == 0 {
-		return nil
-	}
-	root, err := flattenV8(document.Content[0])
+func validateCredentialWeightsNode(node *yaml.Node) error {
+	root, err := flattenV8(node)
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -45,6 +46,7 @@ type UpstreamRequestLog struct {
 }
 
 type upstreamAttempt struct {
+	mu                   sync.Mutex
 	index                int
 	request              string
 	response             *strings.Builder
@@ -133,6 +135,9 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
+	if mem := memoryResponseCaptureFrom(ginCtx); mem != nil {
+		mem.setAttempts(attempts)
+	}
 	if requestText != "" {
 		updateAggregatedRequest(ginCtx, attempts)
 	}
@@ -299,6 +304,11 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if ginCtx == nil {
 		return
 	}
+	mem := memoryResponseCaptureFrom(ginCtx)
+	if mem != nil {
+		mem.mu.Lock()
+		defer mem.mu.Unlock()
+	}
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(ginCtx, attempt)
 
@@ -313,6 +323,9 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 		writeAttemptResponse(ginCtx, attempt, []byte(builder.String()))
 		attempt.headersWritten = true
 		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
+	}
+	if mem != nil && !mem.closed {
+		mem.attempts = append(mem.attempts[:0], attempts...)
 	}
 
 	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
@@ -341,6 +354,205 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	ginCtx.Set(logging.APIResponseCapturedContextKey, true)
 }
 
+// apiResponseMemoryCapture synchronizes in-memory upstream response attempts for
+// a single HTTP request so asynchronous stream workers write only to request-owned
+// buffers and response finalization snapshots and closes them without touching a
+// reused pooled Gin context.
+type apiResponseMemoryCapture struct {
+	mu       sync.Mutex
+	closed   bool
+	attempts []*upstreamAttempt
+}
+
+func (c *apiResponseMemoryCapture) setAttempts(attempts []*upstreamAttempt) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.attempts = append(c.attempts[:0], attempts...)
+}
+
+func (c *apiResponseMemoryCapture) SnapshotAPIResponse() []byte {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	return renderAggregatedResponse(c.attempts)
+}
+
+func (c *apiResponseMemoryCapture) Close() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	c.attempts = nil
+}
+
+func memoryResponseCaptureFrom(ginCtx *gin.Context) *apiResponseMemoryCapture {
+	if ginCtx == nil {
+		return nil
+	}
+	value, exists := ginCtx.Get(logging.APIResponseSnapshotterContextKey)
+	if !exists {
+		return nil
+	}
+	capture, _ := value.(*apiResponseMemoryCapture)
+	return capture
+}
+
+// APIResponseStreamLogger binds upstream response chunk and error logging to the
+// current HTTP request and attempt before an asynchronous stream goroutine starts.
+// It retains no *gin.Context reference, so late callbacks after request cancellation
+// or Gin context reuse can never race with or pollute a subsequent request.
+type APIResponseStreamLogger struct {
+	mu             sync.Mutex
+	ctx            context.Context
+	capture        *logging.DeferredAPICapture
+	deferredOnly   bool
+	attempt        *upstreamAttempt
+	responseSource *logging.FileBodySource
+	memoryCapture  *apiResponseMemoryCapture
+}
+
+// BindAPIResponseStreamLogger captures the current request's logging targets synchronously
+// so an asynchronous stream worker never reads or mutates a pooled Gin context.
+func BindAPIResponseStreamLogger(ctx context.Context, cfg *config.Config) *APIResponseStreamLogger {
+	if cfg == nil || cfg.CommercialMode {
+		return nil
+	}
+	if !requestLogCaptureEnabled(cfg) {
+		capture := resolveDeferredAPICapture(ctx, cfg)
+		if capture == nil {
+			return nil
+		}
+		return &APIResponseStreamLogger{
+			ctx:          ctx,
+			capture:      capture,
+			deferredOnly: true,
+		}
+	}
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx == nil {
+		return nil
+	}
+	mem := memoryResponseCaptureFrom(ginCtx)
+	if mem != nil {
+		mem.mu.Lock()
+	}
+	attempts, attempt := ensureAttempt(ginCtx)
+	ensureResponseIntro(ginCtx, attempt)
+	capture := logging.DeferredAPICaptureFromContext(ctx)
+	if capture == nil {
+		capture = deferredResponseCaptureFrom(ginCtx)
+	}
+	ginCtx.Set(logging.APIResponseCapturedContextKey, true)
+	responseSource := attempt.responseSource
+	if responseSource == nil {
+		responseSource = apiResponseSourceOrNil(ginCtx)
+		attempt.responseSource = responseSource
+	}
+	if responseSource != nil {
+		if mem != nil {
+			mem.mu.Unlock()
+		}
+		return &APIResponseStreamLogger{
+			ctx:            ctx,
+			capture:        capture,
+			attempt:        attempt,
+			responseSource: responseSource,
+		}
+	}
+	if mem == nil {
+		mem = &apiResponseMemoryCapture{
+			attempts: append([]*upstreamAttempt(nil), attempts...),
+		}
+		ginCtx.Set(logging.APIResponseSnapshotterContextKey, mem)
+	} else {
+		if !mem.closed {
+			mem.attempts = append(mem.attempts[:0], attempts...)
+		}
+		mem.mu.Unlock()
+	}
+	return &APIResponseStreamLogger{
+		ctx:           ctx,
+		capture:       capture,
+		attempt:       attempt,
+		memoryCapture: mem,
+	}
+}
+
+// AppendChunk appends an upstream response chunk to the bound request attempt.
+func (l *APIResponseStreamLogger) AppendChunk(chunk []byte) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.capture != nil && l.capture.IsClosed() {
+		return
+	}
+	if l.ctx != nil && l.ctx.Err() != nil {
+		return
+	}
+	if l.deferredOnly {
+		l.capture.AppendResponseChunk(chunk)
+		return
+	}
+	data := bytes.TrimSpace(chunk)
+	if len(data) == 0 {
+		return
+	}
+	if l.responseSource != nil {
+		l.attempt.mu.Lock()
+		defer l.attempt.mu.Unlock()
+		appendChunkToAttempt(l.attempt, data, func(payload []byte) bool {
+			updateTrailingNewlines(l.attempt, payload)
+			if errWrite := l.responseSource.AppendBytes(payload); errWrite != nil {
+				if (l.capture == nil || !l.capture.IsClosed()) && (l.ctx == nil || l.ctx.Err() == nil) {
+					log.WithError(errWrite).Warn("failed to append api response log part")
+				}
+				return false
+			}
+			return true
+		})
+		return
+	}
+	if l.memoryCapture == nil {
+		return
+	}
+	l.memoryCapture.mu.Lock()
+	defer l.memoryCapture.mu.Unlock()
+	if l.memoryCapture.closed {
+		return
+	}
+	appendChunkToAttempt(l.attempt, data, func(payload []byte) bool {
+		updateTrailingNewlines(l.attempt, payload)
+		if l.attempt.response == nil {
+			l.attempt.response = &strings.Builder{}
+		}
+		l.attempt.response.Write(payload)
+		return true
+	})
+}
+
+// RecordError retains a local stream failure on the bound request capture.
+func (l *APIResponseStreamLogger) RecordError(err error) {
+	if l == nil || err == nil || l.capture == nil {
+		return
+	}
+	l.capture.RecordResponseError(err)
+}
+
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
 	if !requestLogCaptureEnabled(cfg) {
@@ -355,19 +567,45 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
+	mem := memoryResponseCaptureFrom(ginCtx)
+	if mem != nil {
+		mem.mu.Lock()
+		defer mem.mu.Unlock()
+	}
 	attempts, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(ginCtx, attempt)
 
+	appendChunkToAttempt(attempt, data, func(payload []byte) bool {
+		writeAttemptResponse(ginCtx, attempt, payload)
+		return true
+	})
+	if mem != nil && !mem.closed {
+		mem.attempts = append(mem.attempts[:0], attempts...)
+	}
+
+	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
+}
+
+func appendChunkToAttempt(attempt *upstreamAttempt, data []byte, write func([]byte) bool) {
+	if attempt == nil || len(data) == 0 {
+		return
+	}
 	if !attempt.headersWritten {
 		builder := &strings.Builder{}
 		builder.WriteString("Headers:\n")
 		writeHeaders(builder, nil)
-		writeAttemptResponse(ginCtx, attempt, []byte(builder.String()))
+		if !write([]byte(builder.String())) {
+			return
+		}
 		attempt.headersWritten = true
-		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
+		if !write([]byte("\n")) {
+			return
+		}
 	}
 	if !attempt.bodyStarted {
-		writeAttemptResponse(ginCtx, attempt, []byte("Body:\n"))
+		if !write([]byte("Body:\n")) {
+			return
+		}
 		attempt.bodyStarted = true
 	}
 	currentChunkIsSSEEvent := bytes.HasPrefix(data, []byte("event:"))
@@ -377,13 +615,15 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 		if attempt.prevWasSSEEvent && currentChunkIsSSEData {
 			separator = "\n"
 		}
-		writeAttemptResponse(ginCtx, attempt, []byte(separator))
+		if !write([]byte(separator)) {
+			return
+		}
 	}
-	writeAttemptResponse(ginCtx, attempt, data)
+	if !write(data) {
+		return
+	}
 	attempt.bodyHasContent = true
 	attempt.prevWasSSEEvent = currentChunkIsSSEEvent
-
-	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
 }
 
 // RecordAPIWebsocketRequest stores an upstream websocket request event in Gin context.
@@ -603,10 +843,17 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	attempts := getAttempts(ginCtx)
 	for i := len(attempts) - 1; i >= 0; i-- {
 		previousAttempt := attempts[i]
-		if previousAttempt == nil || previousAttempt == attempt || !previousAttempt.responseIntroWritten {
+		if previousAttempt == nil || previousAttempt == attempt {
 			continue
 		}
-		if missingNewlines := 2 - previousAttempt.trailingNewlines; missingNewlines > 0 {
+		previousAttempt.mu.Lock()
+		introWritten := previousAttempt.responseIntroWritten
+		trailingNewlines := previousAttempt.trailingNewlines
+		previousAttempt.mu.Unlock()
+		if !introWritten {
+			continue
+		}
+		if missingNewlines := 2 - trailingNewlines; missingNewlines > 0 {
 			writeAttemptResponse(ginCtx, attempt, []byte(strings.Repeat("\n", missingNewlines)))
 		}
 		break
@@ -617,7 +864,7 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	attempt.responseIntroWritten = true
 }
 
-func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload []byte) {
+func updateTrailingNewlines(attempt *upstreamAttempt, payload []byte) {
 	if attempt == nil || len(payload) == 0 {
 		return
 	}
@@ -629,6 +876,13 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 		trailingNewlines += attempt.trailingNewlines
 	}
 	attempt.trailingNewlines = trailingNewlines
+}
+
+func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload []byte) {
+	if attempt == nil || len(payload) == 0 {
+		return
+	}
+	updateTrailingNewlines(attempt, payload)
 	if attempt.responseSource == nil {
 		attempt.responseSource = apiResponseSourceOrNil(ginCtx)
 	}
@@ -670,10 +924,7 @@ func updateAggregatedResponseIfMemoryBacked(ginCtx *gin.Context, attempts []*ups
 	updateAggregatedResponse(ginCtx, attempts)
 }
 
-func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
+func renderAggregatedResponse(attempts []*upstreamAttempt) []byte {
 	var builder strings.Builder
 	for _, attempt := range attempts {
 		if attempt == nil || attempt.response == nil {
@@ -688,7 +939,17 @@ func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) 
 	if responseText := builder.String(); responseText != "" && !strings.HasSuffix(responseText, "\n") {
 		builder.WriteString("\n")
 	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	if builder.Len() == 0 {
+		return nil
+	}
+	return []byte(builder.String())
+}
+
+func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
+	if ginCtx == nil {
+		return
+	}
+	ginCtx.Set(apiResponseKey, renderAggregatedResponse(attempts))
 }
 
 func apiRequestSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {

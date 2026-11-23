@@ -106,9 +106,8 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}
 
-	s.startCopilotCatalogRefresh(ctx)
-
 	if !homeEnabled {
+		s.startCopilotCatalogRefresh(ctx)
 		tokenResult, err := s.tokenProvider.Load(ctx, cfg)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
@@ -452,4 +451,13 @@ func (s *Service) startModelCatalogUpdaters(ctx context.Context) {
 		proxyURL = cfg.ProxyURL
 	}
 	executor.StartXAIVersionUpdater(ctx, proxyURL)
+	sdkAuth.StartAntigravityVersionUpdaterWithProxyProvider(ctx, s.antigravityVersionProxyURL)
+}
+
+func (s *Service) antigravityVersionProxyURL() string {
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.ProxyURL
 }
