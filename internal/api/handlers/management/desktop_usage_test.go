@@ -398,3 +398,112 @@ func TestDesktopResetCreditsIncludesGrantScopeAndNullableExpiry(t *testing.T) {
 		t.Fatalf("payload = %s", doc.String())
 	}
 }
+
+type failingRefreshExecutor struct {
+	refreshRecordExecutor
+	err error
+}
+
+func (e *failingRefreshExecutor) Refresh(_ context.Context, _ *coreauth.Auth) (*coreauth.Auth, error) {
+	e.refreshCnt.Add(1)
+	return nil, e.err
+}
+
+type tokenCapturingUsageLookup struct {
+	provider   string
+	manager    *coreauth.Manager
+	seenTokens map[string]string
+	allErr     error
+}
+
+func (l *tokenCapturingUsageLookup) Eligible(auth *coreauth.Auth) bool {
+	return auth != nil && !auth.Disabled && auth.Provider == l.provider
+}
+
+func (l *tokenCapturingUsageLookup) Refresh(_ context.Context, auth *coreauth.Auth) error {
+	tok, _ := auth.Metadata["access_token"].(string)
+	l.seenTokens[auth.ID] = tok
+	return nil
+}
+
+func (l *tokenCapturingUsageLookup) RefreshAll(ctx context.Context) map[string]error {
+	failures := map[string]error{}
+	for _, auth := range l.manager.List() {
+		if !l.Eligible(auth) {
+			continue
+		}
+		if l.allErr != nil {
+			failures[auth.ID] = l.allErr
+			continue
+		}
+		_ = l.Refresh(ctx, auth)
+	}
+	return failures
+}
+
+func TestRefreshUsageWindowsRenewsExpiredToken(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	exec := &refreshRecordExecutor{provider: "custom-oauth"}
+	manager.RegisterExecutor(exec)
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	manager.SetConfig(cfg)
+	expired := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID: "cred-single", Index: "idx-single", Provider: "custom-oauth",
+		Attributes: map[string]string{"runtime_only": "true"},
+		Metadata:   map[string]any{"access_token": "stale-1", "refresh_token": "rt-1", "expired": expired},
+	})
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID: "cred-all", Index: "idx-all", Provider: "custom-oauth",
+		Attributes: map[string]string{"runtime_only": "true"},
+		Metadata:   map[string]any{"access_token": "stale-2", "refresh_token": "rt-2", "expired": expired},
+	})
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+	lookup := &tokenCapturingUsageLookup{provider: "custom-oauth", manager: manager, seenTokens: map[string]string{}}
+	h.RegisterUsageLookup(lookup, manager)
+
+	payload := decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, `{"auth_index":"idx-single"}`, "127.0.0.1:1"))
+	if len(payload.Errors) != 0 || lookup.seenTokens["cred-single"] != "refreshed-token" || exec.refreshCnt.Load() != 1 {
+		t.Fatalf("single refresh: errors=%v seen=%v refreshes=%d", payload.Errors, lookup.seenTokens, exec.refreshCnt.Load())
+	}
+
+	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", "127.0.0.1:1"))
+	if len(payload.Errors) != 0 || lookup.seenTokens["cred-all"] != "refreshed-token" || exec.refreshCnt.Load() != 2 {
+		t.Fatalf("refresh-all: errors=%v seen=%v refreshes=%d", payload.Errors, lookup.seenTokens, exec.refreshCnt.Load())
+	}
+}
+
+func TestRefreshUsageWindowsSurfacesRenewalFailure(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	exec := &failingRefreshExecutor{
+		refreshRecordExecutor: refreshRecordExecutor{provider: "custom-oauth"},
+		err:                   errors.New("invalid_grant: token revoked"),
+	}
+	manager.RegisterExecutor(exec)
+	cfg := &config.Config{AuthDir: t.TempDir()}
+	manager.SetConfig(cfg)
+	expired := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	registerAuthForLookupTest(t, manager, &coreauth.Auth{
+		ID: "cred-dead", Index: "idx-dead", Provider: "custom-oauth",
+		Attributes: map[string]string{"runtime_only": "true"},
+		Metadata:   map[string]any{"access_token": "stale", "refresh_token": "rt", "expired": expired},
+	})
+	h := NewHandlerWithoutConfigFilePath(cfg, manager)
+	lookup := &tokenCapturingUsageLookup{
+		provider:   "custom-oauth",
+		manager:    manager,
+		seenTokens: map[string]string{},
+		allErr:     errors.New("access token expired; waiting for refresh"),
+	}
+	h.RegisterUsageLookup(lookup, manager)
+
+	payload := decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, `{"auth_index":"idx-dead"}`, "127.0.0.1:1"))
+	if !strings.Contains(payload.Errors["cred-dead"], "invalid_grant: token revoked") || len(lookup.seenTokens) != 0 {
+		t.Fatalf("single failure: errors=%v seen=%v", payload.Errors, lookup.seenTokens)
+	}
+
+	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", "127.0.0.1:1"))
+	if !strings.Contains(payload.Errors["cred-dead"], "invalid_grant: token revoked") {
+		t.Fatalf("refresh-all failure should preserve renewal error, got errors=%v", payload.Errors)
+	}
+}

@@ -150,8 +150,18 @@ func (h *Handler) GetUsageWindows(c *gin.Context) {
 	c.JSON(http.StatusOK, h.usageWindowsPayloadForManager(time.Now(), manager, lookups))
 }
 
+func accessTokenExpired(auth *coreauth.Auth, now time.Time) bool {
+	if auth == nil {
+		return false
+	}
+	exp, ok := auth.AccessTokenExpirationTime()
+	return ok && !exp.IsZero() && !exp.After(now)
+}
+
 // RefreshUsageWindows looks up usage now, for one credential when
 // auth_index is given or for every eligible credential otherwise.
+// Expired access tokens are renewed on demand before lookup so callers
+// get fresh usage or the underlying renewal error instead of waiting.
 func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 	manager, lookups := h.usageLookupsSnapshot()
 	if manager == nil {
@@ -164,6 +174,7 @@ func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	now := time.Now()
 	failures := map[string]string{}
 	if authIndex := strings.TrimSpace(body.AuthIndex); authIndex != "" {
 		auth := authByIndex(manager, authIndex)
@@ -176,13 +187,45 @@ func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "credential is not eligible for usage lookup"})
 			return
 		}
-		if errRefresh := lookup.Refresh(ctx, auth); errRefresh != nil {
-			failures[auth.ID] = errRefresh.Error()
+		if accessTokenExpired(auth, now) {
+			refreshed, errRenew := manager.ForceRefreshAuth(ctx, auth.ID)
+			if errRenew != nil {
+				failures[auth.ID] = errRenew.Error()
+				auth = nil
+			} else if refreshed != nil {
+				auth = refreshed
+			}
+		}
+		if auth != nil {
+			if errRefresh := lookup.Refresh(ctx, auth); errRefresh != nil {
+				failures[auth.ID] = errRefresh.Error()
+			}
 		}
 	} else {
+		renewFailures := map[string]string{}
+		for _, auth := range manager.List() {
+			if ctx.Err() != nil {
+				break
+			}
+			if firstEligibleUsageLookup(lookups, auth) == nil || !accessTokenExpired(auth, now) {
+				continue
+			}
+			if _, errRenew := manager.ForceRefreshAuth(ctx, auth.ID); errRenew != nil {
+				renewFailures[auth.ID] = errRenew.Error()
+			}
+		}
 		for _, lookup := range lookups {
 			for id, errRefresh := range lookup.RefreshAll(ctx) {
+				if renewErr, failed := renewFailures[id]; failed {
+					failures[id] = renewErr
+					continue
+				}
 				failures[id] = errRefresh.Error()
+			}
+		}
+		for id, renewErr := range renewFailures {
+			if _, recorded := failures[id]; !recorded {
+				failures[id] = renewErr
 			}
 		}
 	}
