@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -90,16 +91,16 @@ func antigravitySummaryFamily(bucket sdkauth.AntigravityQuotaBucket) string {
 	}
 }
 
-// AntigravityQuotaWindows converts model quotas to scoped windows.
+// AntigravityQuotaWindows reports the most constrained quota in each known model family.
 func AntigravityQuotaWindows(quotas map[string]sdkauth.AntigravityModelQuota) []coreauth.QuotaWindow {
 	if len(quotas) == 0 {
 		return nil
 	}
-	windows := make([]coreauth.QuotaWindow, 0, len(quotas))
+	families := make(map[string]coreauth.QuotaWindow)
 	for id, quota := range quotas {
-		label := strings.TrimSpace(quota.DisplayName)
-		if label == "" {
-			label = id
+		key, label := antigravityCatalogFamily(id, quota.ModelProvider)
+		if key == "" {
+			continue
 		}
 		used := (1 - quota.RemainingFraction) * antigravityQuotaPercentMax
 		used = math.Round(used*antigravityQuotaPercentScale) / antigravityQuotaPercentScale
@@ -110,24 +111,55 @@ func AntigravityQuotaWindows(quotas map[string]sdkauth.AntigravityModelQuota) []
 		} else {
 			used = min(used, antigravityQuotaPositiveMax)
 		}
-		var resetsAt time.Time
-		if !quota.ResetTime.IsZero() {
-			resetsAt = quota.ResetTime.UTC()
+		window := coreauth.QuotaWindow{
+			Key: key, Label: label, UsedPercent: &used, ResetsAt: quota.ResetTime.UTC(), Status: status, Scoped: true,
 		}
-		windows = append(windows, coreauth.QuotaWindow{
-			Key: "ag:" + id, Label: label, UsedPercent: &used, ResetsAt: resetsAt, Status: status, Scoped: true,
-		})
+		if prior, ok := families[key]; !ok || compareAntigravityCatalogWindows(window, prior) < 0 {
+			families[key] = window
+		}
 	}
-	slices.SortFunc(windows, func(a, b coreauth.QuotaWindow) int {
-		if order := cmp.Compare(*b.UsedPercent, *a.UsedPercent); order != 0 {
-			return order
-		}
-		if order := a.ResetsAt.Compare(b.ResetsAt); order != 0 {
-			return order
-		}
-		return cmp.Compare(a.Key, b.Key)
-	})
+	windows := slices.Collect(maps.Values(families))
+	slices.SortFunc(windows, compareAntigravityCatalogWindows)
 	return windows
+}
+
+func compareAntigravityCatalogWindows(a, b coreauth.QuotaWindow) int {
+	if order := cmp.Compare(*b.UsedPercent, *a.UsedPercent); order != 0 {
+		return order
+	}
+	if a.ResetsAt.IsZero() != b.ResetsAt.IsZero() {
+		if a.ResetsAt.IsZero() {
+			return 1
+		}
+		return -1
+	}
+	if order := a.ResetsAt.Compare(b.ResetsAt); order != 0 {
+		return order
+	}
+	return cmp.Compare(a.Key, b.Key)
+}
+
+func antigravityCatalogFamily(id, provider string) (key, label string) {
+	if strings.HasPrefix(id, "tab_") {
+		return "", ""
+	}
+	switch provider {
+	case "MODEL_PROVIDER_GOOGLE":
+		return "ag:gemini", "Gemini"
+	case "MODEL_PROVIDER_ANTHROPIC":
+		return "ag:claude", "Claude"
+	case "MODEL_PROVIDER_OPENAI":
+		return "ag:gpt", "GPT"
+	}
+	switch {
+	case strings.HasPrefix(id, "gemini-"):
+		return "ag:gemini", "Gemini"
+	case strings.HasPrefix(id, "claude-"):
+		return "ag:claude", "Claude"
+	case strings.HasPrefix(id, "gpt-"):
+		return "ag:gpt", "GPT"
+	}
+	return "", ""
 }
 
 // AntigravityUsageLookup fetches per-account Antigravity quotas on demand.

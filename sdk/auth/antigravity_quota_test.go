@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 )
@@ -98,9 +100,80 @@ func TestFetchAntigravityQuotaSummaryOutcomes(t *testing.T) {
 	}
 }
 
+func TestFetchAntigravityQuotaSummaryMergesHosts(t *testing.T) {
+	const daily = `{"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.7}]}`
+	const prod = `{"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.1},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.3}]}`
+	mu := sync.Mutex{}
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != "{}" {
+			t.Errorf("empty project request body = %q, error = %v", body, err)
+		}
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/daily" + AntigravityQuotaSummaryPath:
+			_, _ = io.WriteString(w, daily)
+		case "/prod" + AntigravityQuotaSummaryPath:
+			_, _ = io.WriteString(w, prod)
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer server.Close()
+	buckets, status := FetchAntigravityQuotaSummary(t.Context(), AntigravityModelProbeRequest{
+		BaseURLs:    []string{server.URL + "/daily", server.URL + "/prod", server.URL + "/err"},
+		AccessToken: "test-token", ProjectID: "  ",
+	})
+	if status != AntigravityProbeStatusSuccess || len(buckets) != 2 ||
+		buckets[0].ID != "gemini-5h" || buckets[0].RemainingFraction != 0.7 || buckets[1].ID != "3p-weekly" {
+		t.Fatalf("merged status = %v, buckets = %+v", status, buckets)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(paths, []string{"/daily" + AntigravityQuotaSummaryPath, "/prod" + AntigravityQuotaSummaryPath, "/err" + AntigravityQuotaSummaryPath}) {
+		t.Fatalf("unexpected host order: %v", paths)
+	}
+}
+
+func TestFetchAntigravityQuotaSummaryCombinesHostFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  int
+		second int
+		want   AntigravityProbeStatus
+	}{
+		{"missing does not mask unauthorized", http.StatusNotFound, http.StatusUnauthorized, AntigravityProbeStatusAuthError},
+		{"missing does not mask forbidden", http.StatusNotFound, http.StatusForbidden, AntigravityProbeStatusForbidden},
+		{"missing does not mask transient", http.StatusNotFound, http.StatusServiceUnavailable, AntigravityProbeStatusTransientError},
+		{"both missing permits fallback", http.StatusNotFound, http.StatusNoContent, AntigravityProbeStatusSuccess},
+		{"unauthorized overrides forbidden", http.StatusForbidden, http.StatusUnauthorized, AntigravityProbeStatusAuthError},
+		{"forbidden overrides transient", http.StatusForbidden, http.StatusServiceUnavailable, AntigravityProbeStatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/first"+AntigravityQuotaSummaryPath {
+					w.WriteHeader(tc.first)
+					return
+				}
+				w.WriteHeader(tc.second)
+			}))
+			defer server.Close()
+			buckets, status := FetchAntigravityQuotaSummary(t.Context(), AntigravityModelProbeRequest{
+				BaseURLs: []string{server.URL + "/first", server.URL + "/second"}, AccessToken: "test-token",
+			})
+			if buckets != nil || status != tc.want {
+				t.Fatalf("combined status = %v, buckets = %+v, want status %v and no buckets", status, buckets, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseAntigravityWeeklyModelQuotas(t *testing.T) {
 	hints, ok := ParseAntigravityModelCapabilityHints([]byte(`{"models":{
-		"gemini-pro":{"quotaInfo":{"remainingFraction":0.8},"weeklyQuotaInfo":{"remainingFraction":0.2}},
+		"gemini-pro":{"modelProvider":"MODEL_PROVIDER_GOOGLE","quotaInfo":{"remainingFraction":0.8},"weeklyQuotaInfo":{"remainingFraction":0.2}},
 		"claude":{"weeklyQuotaInfo":{"resetTime":"2026-11-29T18:00:00Z"}},
 		"disabled":{"disabled":true,"weeklyQuotaInfo":{"remainingFraction":0}},
 		"invalid":{"weeklyQuotaInfo":{"remainingFraction":null}}
@@ -110,6 +183,8 @@ func TestParseAntigravityWeeklyModelQuotas(t *testing.T) {
 	}
 	claude := hints.WeeklyModelQuotas["claude"]
 	if hints.ModelQuotas["gemini-pro"].RemainingFraction != 0.8 || hints.WeeklyModelQuotas["gemini-pro"].RemainingFraction != 0.2 ||
+		hints.ModelQuotas["gemini-pro"].ModelProvider != "MODEL_PROVIDER_GOOGLE" ||
+		hints.WeeklyModelQuotas["gemini-pro"].ModelProvider != "MODEL_PROVIDER_GOOGLE" ||
 		claude.ModelID != "claude" || claude.RemainingFraction != 0 || claude.ResetTime.IsZero() {
 		t.Fatalf("unexpected quota values %+v", hints)
 	}

@@ -88,7 +88,7 @@ func TestAntigravityCachedRegistrationPreservesCooldownWhileProbePending(t *test
 			started, release := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(antigravityCatalogHandler(func(w http.ResponseWriter, r *http.Request) {
 				close(started)
 				select {
 				case <-release:

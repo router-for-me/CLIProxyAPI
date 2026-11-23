@@ -114,7 +114,7 @@ func TestAntigravityAsyncProbe_DiscardsStaleProbeWhenAuthReRegistered(t *testing
 	probeStarted := make(chan struct{})
 	releaseProbe := make(chan struct{})
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(antigravityCatalogHandler(func(w http.ResponseWriter, r *http.Request) {
 		close(probeStarted)
 		<-releaseProbe
 		w.WriteHeader(http.StatusOK)
@@ -389,7 +389,7 @@ func TestAntigravityAsyncProbe_NormalRequestsDoNotDiscardProbe(t *testing.T) {
 	probeStarted := make(chan struct{})
 	releaseProbe := make(chan struct{})
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(antigravityCatalogHandler(func(w http.ResponseWriter, r *http.Request) {
 		close(probeStarted)
 		<-releaseProbe
 		w.WriteHeader(http.StatusOK)

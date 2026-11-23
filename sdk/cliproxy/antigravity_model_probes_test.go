@@ -17,7 +17,7 @@ func TestAntigravityAccountChangesCancelConnectedProbe(t *testing.T) {
 			resetAntigravityCapabilityCache()
 			t.Cleanup(resetAntigravityCapabilityCache)
 			started, cancelled := make(chan struct{}), make(chan struct{})
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewServer(antigravityCatalogHandler(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(200)
 				w.(http.Flusher).Flush()
 				close(started)

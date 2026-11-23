@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -27,6 +29,16 @@ func antigravityTestAuth(id, endpoint string) *coreauth.Auth {
 	return &coreauth.Auth{ID: id, Provider: "antigravity", Attributes: map[string]string{"base_url": endpoint}, Metadata: map[string]any{"access_token": "token-" + id, "project_id": "project-" + id}}
 }
 
+func antigravityCatalogHandler(catalog http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		catalog(w, r)
+	}
+}
+
 func TestAntigravityModelBaseURLs_DefaultDaily(t *testing.T) {
 	urls := antigravityModelBaseURLs(&coreauth.Auth{})
 	if len(urls) != 1 || urls[0] != antigravityModelBaseURLDaily {
@@ -34,6 +46,21 @@ func TestAntigravityModelBaseURLs_DefaultDaily(t *testing.T) {
 	}
 	if antigravityCapabilityCacheTTL != registry.ModelsRefreshInterval {
 		t.Fatal("catalog and entitlement cache must share cadence")
+	}
+}
+
+func TestAntigravityQuotaSummaryBaseURLs(t *testing.T) {
+	auth := &coreauth.Auth{Attributes: map[string]string{}}
+	if got := antigravityQuotaSummaryBaseURLs(auth); !slices.Equal(got, []string{antigravityModelBaseURLDaily, sdkauth.AntigravityModelBaseURLProd}) {
+		t.Fatalf("default summary endpoints = %v", got)
+	}
+	auth.Attributes["base_url"] = antigravityModelBaseURLDaily
+	if got := antigravityQuotaSummaryBaseURLs(auth); !slices.Equal(got, []string{antigravityModelBaseURLDaily}) {
+		t.Fatalf("explicit daily summary endpoint = %v", got)
+	}
+	auth.Attributes["base_urls"] = "https://first.invalid, https://second.invalid/"
+	if got := antigravityQuotaSummaryBaseURLs(auth); !slices.Equal(got, []string{"https://first.invalid", "https://second.invalid"}) {
+		t.Fatalf("configured summary endpoints = %v", got)
 	}
 }
 

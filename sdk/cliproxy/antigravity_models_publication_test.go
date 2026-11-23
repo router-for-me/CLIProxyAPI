@@ -22,7 +22,7 @@ func TestAntigravityPublishedCacheDoesNotReconcileEmptyRegistry(t *testing.T) {
 	key := svc.antigravityCapabilityKey(auth)
 	hints := antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{model: {}}, revision: 1}
 	antigravityCapabilityMu.Lock()
-	antigravityCapabilityCache[key] = antigravityCapabilityCacheEntry{hints: hints, probeRevision: 1, expiresAt: time.Now().Add(antigravityCapabilityCacheTTL)}
+	antigravityCapabilityCache[key] = antigravityCapabilityCacheEntry{hints: hints, expiresAt: time.Now().Add(antigravityCapabilityCacheTTL)}
 	antigravityCapabilityMu.Unlock()
 	// Cache published, but the async publisher has not registered any model yet.
 	svc.reconcileRegisteredModelStates(t.Context(), auth)
@@ -51,7 +51,7 @@ func TestAntigravityRegistryPublicationFencesCacheRevision(t *testing.T) {
 	old := antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-3.1-flash-lite": {}}, revision: 1}
 	newer := antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{}, revision: 2}
 	antigravityCapabilityMu.Lock()
-	antigravityCapabilityCache[key] = antigravityCapabilityCacheEntry{hints: newer, probeRevision: 2, expiresAt: time.Now().Add(antigravityCapabilityCacheTTL)}
+	antigravityCapabilityCache[key] = antigravityCapabilityCacheEntry{hints: newer, expiresAt: time.Now().Add(antigravityCapabilityCacheTTL)}
 	antigravityCapabilityMu.Unlock()
 	// The old caller resumes after the newer cache publication, with the same registry epoch.
 	svc.applyAntigravityModelHints(t.Context(), auth, "antigravity", old, key, auth.RegistrationEpoch, epoch)
@@ -68,7 +68,7 @@ func TestAntigravityRegistryPublicationFencesCacheRevision(t *testing.T) {
 	antigravityCapabilityMu.Lock()
 	entry := antigravityCapabilityCache[key]
 	entry.hints = newest
-	entry.probeRevision = 3
+	entry.catalogProbe.revision = 3
 	antigravityCapabilityCache[key] = entry
 	antigravityCapabilityMu.Unlock()
 	svc.applyAntigravityModelHints(t.Context(), auth, "antigravity", newest, key, auth.RegistrationEpoch, epoch)

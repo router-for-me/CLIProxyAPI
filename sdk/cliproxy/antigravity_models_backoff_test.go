@@ -37,6 +37,8 @@ func TestAntigravityUnsupportedSummaryPreservesSharedBackoff(t *testing.T) {
 			key := svc.antigravityCapabilityKey(auth)
 			if status == http.StatusUnauthorized {
 				key = antigravityTokenFailureKey(key, auth.Metadata["access_token"].(string))
+			} else {
+				key += antigravityModelsPath
 			}
 			for _, wantFailures := range []uint8{1, 2} {
 				if _, _, err := svc.fetchAntigravityModelHints(t.Context(), auth, true); err == nil {
@@ -284,7 +286,7 @@ func TestAntigravityForbiddenBackoffPersistsAcrossTokenRotationAndCapsAt60Minute
 	var calls atomic.Int32
 	var status atomic.Int32
 	status.Store(http.StatusOK)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(antigravityCatalogHandler(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(int(status.Load()))
 		_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
@@ -320,7 +322,7 @@ func TestAntigravityForbiddenBackoffPersistsAcrossTokenRotationAndCapsAt60Minute
 		}
 		cacheKey := svc.antigravityCapabilityKey(auth)
 		antigravityCapabilityMu.RLock()
-		state, okKey := antigravityAuthFailureCache[cacheKey]
+		state, okKey := antigravityAuthFailureCache[cacheKey+antigravityModelsPath]
 		entryCount := len(antigravityAuthFailureCache)
 		antigravityCapabilityMu.RUnlock()
 		if !okKey || entryCount != 1 {
@@ -396,7 +398,7 @@ func TestAntigravityForbiddenBackoffPersistsAcrossTokenRotationAndCapsAt60Minute
 	svc.refreshAntigravityModels(t.Context())
 	svc.WaitAntigravityProbes()
 	antigravityCapabilityMu.RLock()
-	_, stillFailed := antigravityAuthFailureCache[svc.antigravityCapabilityKey(auth)]
+	_, stillFailed := antigravityAuthFailureCache[svc.antigravityCapabilityKey(auth)+antigravityModelsPath]
 	antigravityCapabilityMu.RUnlock()
 	if stillFailed {
 		t.Fatal("successful recovery did not clear 403 cacheKey failure state")
@@ -503,7 +505,7 @@ func TestAntigravityDisabledAuthSkipsModelCapabilityProbe(t *testing.T) {
 			// Pre-seed a short retry deadline so nextAntigravityModelRefreshDelay would shorten if it failed to skip.
 			cacheKey := svc.antigravityCapabilityKey(registered)
 			antigravityCapabilityMu.Lock()
-			antigravityAuthFailureCache[cacheKey] = antigravityFailureState{
+			antigravityAuthFailureCache[cacheKey+antigravityModelsPath] = antigravityFailureState{
 				failures:    1,
 				lastFailure: now,
 				nextRetry:   now.Add(10 * time.Second),

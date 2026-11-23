@@ -54,13 +54,14 @@ func TestAntigravitySummarySupersedesNewerCatalogSnapshot(t *testing.T) {
 func TestAntigravityQuotaWindows(t *testing.T) {
 	reset := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
 	quotas := map[string]sdkauth.AntigravityModelQuota{
-		"gemini-pro":   {ResetTime: reset.Add(time.Second), RemainingFraction: 0.12501},
-		"gemini-flash": {ResetTime: reset.Add(30 * time.Second).In(time.FixedZone("PST", -8*60*60)), RemainingFraction: 0.12504},
-		"claude":       {ResetTime: reset.Add(time.Minute), RemainingFraction: -0.1},
-		"claude-lite":  {ResetTime: reset.Add(2 * time.Minute), RemainingFraction: 0.00001},
-		"a-b":          {ResetTime: reset, RemainingFraction: 0.5, DisplayName: " Shared "},
-		"a_b":          {ResetTime: reset, RemainingFraction: 0.5, DisplayName: " Shared "},
-		"other":        {RemainingFraction: 1.1},
+		"gemini-pro":             {ResetTime: reset.Add(time.Second).In(time.FixedZone("PST", -8*60*60)), RemainingFraction: 0.12501},
+		"gemini-flash":           {ResetTime: reset.Add(30 * time.Second), RemainingFraction: 0.12504},
+		"gemini-no-reset":        {RemainingFraction: 0.12501},
+		"claude":                 {ResetTime: reset.Add(time.Minute), RemainingFraction: -0.1, ModelProvider: "MODEL_PROVIDER_ANTHROPIC"},
+		"claude-lite":            {ResetTime: reset, RemainingFraction: 0.00001},
+		"legacy-openai":          {ResetTime: reset, RemainingFraction: 0.5, ModelProvider: "MODEL_PROVIDER_OPENAI"},
+		"tab_flash_lite_preview": {ModelProvider: "MODEL_PROVIDER_GOOGLE"},
+		"other":                  {},
 	}
 	windows := AntigravityQuotaWindows(quotas)
 	want := []struct {
@@ -68,13 +69,9 @@ func TestAntigravityQuotaWindows(t *testing.T) {
 		used               float64
 		reset              time.Time
 	}{
-		{"ag:claude", "claude", coreauth.QuotaWindowStatusRejected, 100, reset.Add(time.Minute)},
-		{"ag:claude-lite", "claude-lite", coreauth.QuotaWindowStatusAllowed, 99.99, reset.Add(2 * time.Minute)},
-		{"ag:gemini-pro", "gemini-pro", coreauth.QuotaWindowStatusAllowed, 87.5, reset.Add(time.Second)},
-		{"ag:gemini-flash", "gemini-flash", coreauth.QuotaWindowStatusAllowed, 87.5, reset.Add(30 * time.Second)},
-		{"ag:a-b", "Shared", coreauth.QuotaWindowStatusAllowed, 50, reset},
-		{"ag:a_b", "Shared", coreauth.QuotaWindowStatusAllowed, 50, reset},
-		{"ag:other", "other", coreauth.QuotaWindowStatusAllowed, 0, time.Time{}},
+		{"ag:claude", "Claude", coreauth.QuotaWindowStatusRejected, 100, reset.Add(time.Minute)},
+		{"ag:gemini", "Gemini", coreauth.QuotaWindowStatusAllowed, 87.5, reset.Add(time.Second)},
+		{"ag:gpt", "GPT", coreauth.QuotaWindowStatusAllowed, 50, reset},
 	}
 	if len(windows) != len(want) {
 		t.Fatalf("got %d windows, want %d", len(windows), len(want))
@@ -96,11 +93,12 @@ func TestAntigravityQuotaWindowsKeepKeysWhenUsageChanges(t *testing.T) {
 	before := AntigravityQuotaWindows(quotas)
 	quotas["gemini-flash"] = sdkauth.AntigravityModelQuota{DisplayName: "Renamed Flash", RemainingFraction: 0.9}
 	after := AntigravityQuotaWindows(quotas)
-	if len(before) != 2 || len(after) != 2 {
-		t.Fatalf("expected two windows before and after update, got %v and %v", before, after)
+	if len(before) != 1 || len(after) != 1 {
+		t.Fatalf("expected one window before and after update, got %v and %v", before, after)
 	}
-	if before[0].Key != "ag:gemini-flash" || after[1].Key != before[0].Key || after[0].Key != before[1].Key {
-		t.Fatalf("quota update changed model keys: %v to %v", before, after)
+	if before[0].Key != "ag:gemini" || after[0].Key != before[0].Key ||
+		*before[0].UsedPercent != 80 || *after[0].UsedPercent != 20 {
+		t.Fatalf("unexpected family quota update: %v to %v", before, after)
 	}
 }
 

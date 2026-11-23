@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -41,6 +42,9 @@ func TestAntigravityRefreshSkipsPluginOwnedModels(t *testing.T) {
 		var calls atomic.Int32
 		transport := http.DefaultTransport
 		http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+				return antigravityVersionTestResponse(req, http.StatusNotFound, ""), nil
+			}
 			calls.Add(1)
 			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":{"gemini-3.1-flash-lite":{}}}`)), Request: req}, nil
 		})
@@ -85,6 +89,9 @@ func TestAntigravityRegistrationCoalescesLatestPublication(t *testing.T) {
 				release := make(chan struct{})
 				transport := http.DefaultTransport
 				http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+					if req.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+						return antigravityVersionTestResponse(req, http.StatusNotFound, ""), nil
+					}
 					calls.Add(1)
 					select {
 					case <-release:
@@ -158,6 +165,9 @@ func TestAntigravityQueuedAuthUpdateRejectsLateStaleCaller(t *testing.T) {
 		var oldCalls, newCalls atomic.Int32
 		transport := http.DefaultTransport
 		http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+				return antigravityVersionTestResponse(req, http.StatusNotFound, ""), nil
+			}
 			if req.Header.Get("Authorization") != "Bearer updated-token" {
 				oldCalls.Add(1)
 				<-req.Context().Done()

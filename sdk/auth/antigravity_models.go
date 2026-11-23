@@ -20,6 +20,8 @@ import (
 const (
 	// AntigravityModelBaseURLDaily is the default Cloud Code endpoint for Antigravity model discovery.
 	AntigravityModelBaseURLDaily = "https://daily-cloudcode-pa.googleapis.com"
+	// AntigravityModelBaseURLProd also serves quota summary buckets.
+	AntigravityModelBaseURLProd = "https://cloudcode-pa.googleapis.com"
 	// AntigravityModelsPath is the upstream path for per-account model capability discovery.
 	AntigravityModelsPath = "/v1internal:fetchAvailableModels"
 	// AntigravityPersistedHintsMetaKey is the auth metadata key storing persisted model capability hints.
@@ -43,6 +45,7 @@ const (
 type AntigravityModelQuota struct {
 	ModelID           string
 	DisplayName       string
+	ModelProvider     string
 	RemainingFraction float64
 	ResetTime         time.Time
 }
@@ -123,7 +126,9 @@ func fetchAntigravityProbe(ctx context.Context, req AntigravityModelProbeRequest
 	}
 
 	doc := ojson.NewDoc([]byte("{}"))
-	doc.Set("project", strings.TrimSpace(req.ProjectID))
+	if project := strings.TrimSpace(req.ProjectID); project != "" {
+		doc.Set("project", project)
+	}
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(doc.Bytes()))
 	if errReq != nil {
 		return nil, AntigravityProbeStatusTransientError
@@ -145,6 +150,9 @@ func fetchAntigravityProbe(ctx context.Context, req AntigravityModelProbeRequest
 			log.Debug("antigravity probe: response close failed")
 		}
 	}()
+	if path == AntigravityQuotaSummaryPath && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		log.WithField("status", resp.StatusCode).Debug("antigravity quota summary probe returned a non-success HTTP status")
+	}
 	switch resp.StatusCode {
 	case http.StatusUnauthorized:
 		return nil, AntigravityProbeStatusAuthError

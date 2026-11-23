@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -168,6 +169,9 @@ func TestAntigravityVersionChangeUnblocksAccountRefresh(t *testing.T) {
 		var oldCancelled atomic.Bool
 		var calls atomic.Int32
 		http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path == sdkauth.AntigravityQuotaSummaryPath {
+				return antigravityVersionTestResponse(req, http.StatusNotFound, ""), nil
+			}
 			calls.Add(1)
 			if req.Header.Get("User-Agent") == antigravityOldTestUA {
 				<-req.Context().Done()

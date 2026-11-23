@@ -115,24 +115,15 @@ func (s *Service) executeAntigravityModelRefresh(request *antigravityModelRefres
 			return
 		}
 	}
-	if request.refreshUsage {
-		usage := s.NewAntigravityUsageLookup()
-		if usage.Eligible(request.auth) {
-			key := s.antigravityCapabilityKey(request.auth)
-			token, _ := request.auth.Metadata["access_token"].(string)
-			failureKey := antigravityTokenFailureKey(key, strings.TrimSpace(token))
-			antigravityCapabilityMu.RLock()
-			due := !antigravityNowFunc().Before(antigravitySummaryRefreshAtLocked(key, failureKey))
-			antigravityCapabilityMu.RUnlock()
-			if due {
-				_ = usage.Refresh(probeCtx, request.auth)
-			}
-		}
-	}
+	key := s.antigravityCapabilityKey(request.auth)
 	expectedKey, hints := s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)
 	if hints.ModelIDs != nil {
 		s.queueAntigravityHintPersistence(request.ctx, request.auth, expectedKey, antigravityModelBaseURLs(request.auth)[0], hints)
 	}
+	if !request.refreshUsage || s.antigravityCapabilityKey(request.auth) != key {
+		return
+	}
+	s.refreshAntigravityBackgroundUsage(probeCtx, request.auth, expectedKey, hints)
 }
 
 // antigravityAccountProbe owns both queued and connected work for one auth snapshot.

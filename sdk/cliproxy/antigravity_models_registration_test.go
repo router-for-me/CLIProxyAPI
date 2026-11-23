@@ -43,7 +43,7 @@ func TestAntigravityDynamicRegistrationLifecycle(t *testing.T) {
 	var status atomic.Int32
 	status.Store(200)
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(antigravityCatalogHandler(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.WriteHeader(int(status.Load()))
 		_ = json.NewEncoder(w).Encode(response.Load())

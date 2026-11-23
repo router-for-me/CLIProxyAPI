@@ -26,8 +26,51 @@ type AntigravityQuotaBucket struct {
 	ResetTime         time.Time
 }
 
-// FetchAntigravityQuotaSummary fetches quota buckets. An empty result permits catalog fallback.
+// FetchAntigravityQuotaSummary merges quota buckets in host order. An empty success permits catalog fallback.
 func FetchAntigravityQuotaSummary(ctx context.Context, req AntigravityModelProbeRequest) ([]AntigravityQuotaBucket, AntigravityProbeStatus) {
+	var merged []AntigravityQuotaBucket
+	seen := make(map[string]struct{})
+	hasSuccess := false
+	hasFailure := false
+	failureStatus := AntigravityProbeStatusTransientError
+	for _, baseURL := range req.BaseURLs {
+		hostReq := req
+		hostReq.BaseURLs = []string{baseURL}
+		buckets, hostStatus := fetchAntigravityQuotaSummary(ctx, hostReq)
+		switch hostStatus {
+		case AntigravityProbeStatusSuccess:
+			hasSuccess = true
+		case AntigravityProbeStatusAuthError:
+			hasFailure = true
+			failureStatus = hostStatus
+		case AntigravityProbeStatusForbidden:
+			hasFailure = true
+			if failureStatus == AntigravityProbeStatusTransientError {
+				failureStatus = hostStatus
+			}
+		default:
+			hasFailure = true
+		}
+		for _, bucket := range buckets {
+			if _, exists := seen[bucket.ID]; !exists {
+				seen[bucket.ID] = struct{}{}
+				merged = append(merged, bucket)
+			}
+		}
+	}
+	if len(merged) > 0 {
+		return merged, AntigravityProbeStatusSuccess
+	}
+	if hasFailure {
+		return nil, failureStatus
+	}
+	if hasSuccess {
+		return nil, AntigravityProbeStatusSuccess
+	}
+	return nil, AntigravityProbeStatusTransientError
+}
+
+func fetchAntigravityQuotaSummary(ctx context.Context, req AntigravityModelProbeRequest) ([]AntigravityQuotaBucket, AntigravityProbeStatus) {
 	data, status := fetchAntigravityProbe(ctx, req, AntigravityQuotaSummaryPath)
 	if status != AntigravityProbeStatusSuccess || len(bytes.TrimSpace(data)) == 0 {
 		return nil, status
@@ -98,6 +141,7 @@ func addAntigravityModelQuota(quotas map[string]AntigravityModelQuota, id string
 	}
 	quotas[id] = AntigravityModelQuota{
 		ModelID: id, DisplayName: strings.Clone(model.Get("displayName").Str),
+		ModelProvider:     strings.Clone(model.Get("modelProvider").Str),
 		RemainingFraction: fraction, ResetTime: reset,
 	}
 	return quotas
