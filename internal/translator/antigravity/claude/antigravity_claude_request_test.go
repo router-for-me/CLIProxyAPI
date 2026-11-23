@@ -4203,3 +4203,61 @@ func TestConvertClaudeRequestToAntigravity_ToolResultDocumentExtractedToParts(t 
 		})
 	}
 }
+
+func TestConvertClaudeRequestToAntigravity_SanitizesGenerationConstraints(t *testing.T) {
+	t.Run("sanitizes float max_tokens and mixed stop_sequences", func(t *testing.T) {
+		inputJSON := []byte(`{
+			"model": "gemini-3.8-flash",
+			"max_tokens": 1024.9,
+			"stop_sequences": ["STOP", "\n", " ", "", 42, null],
+			"messages": [{"role": "user", "content": "hi"}]
+		}`)
+		output, errConvert := ConvertClaudeRequestToAntigravity("gemini-3.8-flash", inputJSON, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+		}
+		genConfig := ojson.GetBytesNoCopy(output, "request.generationConfig")
+		if got := genConfig.Get("maxOutputTokens").Raw; got != "1024" {
+			t.Fatalf("maxOutputTokens raw = %q, want 1024; output=%s", got, output)
+		}
+		stops := genConfig.Get("stopSequences").Array()
+		wantStops := []string{"STOP", "\n", " "}
+		if len(stops) != len(wantStops) {
+			t.Fatalf("stopSequences = %s, want %v", genConfig.Get("stopSequences").Raw, wantStops)
+		}
+		for i, want := range wantStops {
+			if got := stops[i].String(); got != want {
+				t.Fatalf("stopSequences[%d] = %q, want %q", i, got, want)
+			}
+		}
+	})
+
+	t.Run("omits non-positive max_tokens, empty stop_sequences, and invalid output_config.format", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			payload string
+		}{
+			{
+				name:    "zero max_tokens and empty stop_sequences",
+				payload: `{"model":"claude-sonnet-5-5-high","max_tokens":0,"stop_sequences":["",false],"output_config":{"effort":"high"},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+			{
+				name:    "negative max_tokens and json_schema without schema object",
+				payload: `{"model":"claude-sonnet-5-5-high","max_tokens":-5,"stop_sequences":[],"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				output, errConvert := ConvertClaudeRequestToAntigravity("claude-sonnet-5-5-high", []byte(tc.payload), false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "request.generationConfig")
+				for _, key := range []string{"maxOutputTokens", "stopSequences", "responseMimeType", "responseSchema", "responseJsonSchema"} {
+					if genConfig.Get(key).Exists() {
+						t.Fatalf("request.generationConfig.%s should be omitted, got %s; output=%s", key, genConfig.Get(key).Raw, output)
+					}
+				}
+			})
+		}
+	})
+}
