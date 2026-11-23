@@ -213,7 +213,9 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 				return cliproxyexecutor.Response{}, errSystem
 			}
 		}
+		callerBlocks := takeCallerSystemForReminderDoc(doc, callerSystemAsReminder(e.cfg, policy.OAuth, settings.strictMode))
 		relocateClaudeSystemPromptForCountTokensWithPolicyDoc(doc, settings.strictMode, explicitCacheMode, !policy.OAuth)
+		placeCallerSystemAsReminderDoc(doc, callerBlocks, explicitCacheMode)
 		if matcher := settings.buildSensitiveWordMatcher(); matcher != nil {
 			helps.ObfuscateSensitiveWordsDoc(doc, matcher)
 		}

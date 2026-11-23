@@ -577,6 +577,14 @@ upstream:
     # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
     disable-cloaking-model-list: false
 
+    # When true, a cloaked OAuth caller's system prompt is delivered as a <system-reminder> block with
+    # Claude Code's CLAUDE.md wording at the front of the first user message. For models that accept a
+    # role=system turn this replaces the role=system turn after the first user message; legacy-reminder
+    # models already get a first-message reminder and only gain the wording. The first user message never
+    # moves, so the prompt-cache prefix stays stable from a conversation's first request. API keys keep the
+    # caller prompt top-level and strict mode still drops it. Default false.
+    caller-system-as-reminder: false
+
     # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
     # Claude Code: context-1m sits right after claude-code, mid-conversation-system
     # is added only for models that accept a role=system turn, advanced-tool-use only when

@@ -2750,6 +2750,9 @@ func applyCloakingInternalDoc(
 	if isExplicit {
 		turnOriginArgs = append(turnOriginArgs, "explicit_cache_mode")
 	}
+	// With claude-code.caller-system-as-reminder, take the caller system blocks out
+	// before cloaking; they go back into the first user message below.
+	callerBlocks := takeCallerSystemForReminderDoc(doc, callerSystemAsReminder(cfg, policy.OAuth, settings.strictMode))
 	checkSystemInstructionsWithSigningModeAtDoc(
 		doc,
 		settings.strictMode,
@@ -2764,6 +2767,7 @@ func applyCloakingInternalDoc(
 		!policy.OAuth, // OAuth top-level caller prompts trigger Anthropic's third-party classifier (#6432).
 		turnOriginArgs...,
 	)
+	placeCallerSystemAsReminderDoc(doc, callerBlocks, isExplicit)
 
 	// Inject cross-model server-side refusal fallbacks only when explicitly
 	// enabled via upstream.claude.server-side-fallback.

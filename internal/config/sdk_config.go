@@ -361,6 +361,15 @@ func parseCodexWebSearchResultCacheTTL(raw string) (time.Duration, error) {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+
+	// CallerSystemAsReminder delivers a cloaked OAuth caller's system prompt as a
+	// <system-reminder> block with Claude Code's CLAUDE.md wording in the first
+	// user message. For models that accept a role=system turn it replaces that
+	// turn: on a conversation's first request the turn ends the messages array,
+	// and it is encoded differently once a new user prompt follows, so the first
+	// follow-up re-writes the whole prompt cache. Legacy-reminder models already
+	// get a first-message reminder and only gain the wording. Default false.
+	CallerSystemAsReminder bool `yaml:"caller-system-as-reminder" json:"caller-system-as-reminder"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
