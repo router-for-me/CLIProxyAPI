@@ -156,7 +156,7 @@ type Capabilities struct {
 	RequestInterceptorPatchBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
-	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	// ResponseInterceptor rewrites successful non-streaming HTTP responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
@@ -1391,7 +1391,7 @@ type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
 }
 
-// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+// ResponseInterceptor rewrites successful non-streaming responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
 }
@@ -1487,6 +1487,13 @@ type RequestInterceptResponse struct {
 	ClearHeaders []string
 	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
 	Terminate bool
+	// TerminateScope narrows Terminate for after-auth interceptors. Empty or
+	// "request" keeps request-final behavior. "credential" means the selected
+	// credential is unusable for this request only: no cooldown, no failure
+	// counting, no usage record, and selection continues with the next
+	// candidate. If no candidate is left, the interceptor's response is returned.
+	// Unknown values behave as "request". Before-auth interceptors ignore it.
+	TerminateScope string
 	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
 	StatusCode int
 	// ResponseHeaders contains downstream response headers used when Terminate is true.
@@ -1550,8 +1557,23 @@ type RequestCompletion struct {
 	Metadata       map[string]any
 }
 
+// ResponseInterceptRequest.Kind values identifying the intercepted response category.
+const (
+	// ResponseInterceptKindModelList identifies model-directory and model-detail catalog responses.
+	ResponseInterceptKindModelList = "model_list"
+	// ResponseInterceptKindExecution identifies non-streaming model execution responses.
+	ResponseInterceptKindExecution = "execution"
+	// ResponseInterceptKindCountTokens identifies non-streaming token-counting responses.
+	ResponseInterceptKindCountTokens = "count_tokens"
+)
+
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	// Kind identifies the response being intercepted ("model_list", "execution", or "count_tokens").
+	// Empty means unknown (older hosts); plugins must then fall back to their own detection.
+	// Kept as the first struct field without a JSON tag so plugins can read it from the leading
+	// bytes of the RPC frame without decoding a large response body.
+	Kind            string
 	RequestID       string
 	SourceFormat    string
 	Model           string
@@ -1563,7 +1585,10 @@ type ResponseInterceptRequest struct {
 	RequestBody     []byte
 	Body            []byte
 	StatusCode      int
-	Metadata        map[string]any
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only, JSON-like,
+	// and an open map: plugins must ignore keys they do not recognize, and the host may add
+	// keys in any release without a schema bump.
+	Metadata map[string]any
 }
 
 // ResponseInterceptResponse returns non-streaming response modifications.

@@ -6,6 +6,52 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
+// HasAntigravityResponsePayload reports whether a chunk carries actual generated
+// content or non-zero output token accounting. Presence alone is not enough: an
+// envelope such as `{}`, `{"response":{}}`, `{"response":{"candidates":[]}}`, or
+// a signature-only empty-text part with zero output tokens must not count as a
+// started stream, otherwise a keepalive or zero-output event would be enough to
+// finalize a stream that produced nothing.
+func HasAntigravityResponsePayload(rawJSON []byte) bool {
+	for _, path := range []string{"response.candidates", "candidates"} {
+		if candidates := ojson.GetBytesNoCopy(rawJSON, path); candidates.IsArray() {
+			for _, cand := range candidates.Array() {
+				if strings.TrimSpace(cand.Get("finishReason").String()) != "" {
+					return true
+				}
+				if chunks := cand.Get("groundingMetadata.groundingChunks"); chunks.IsArray() && len(chunks.Array()) > 0 {
+					return true
+				}
+				for _, part := range cand.Get("content.parts").Array() {
+					hasVisibleInlineData := !part.Get("thought").Bool() &&
+						(part.Get("inlineData.data").String() != "" || part.Get("inline_data.data").String() != "")
+					if part.Get("text").String() != "" ||
+						part.Get("functionCall").Exists() || part.Get("function_call").Exists() ||
+						hasVisibleInlineData ||
+						part.Get("fileData").Exists() || part.Get("file_data").Exists() ||
+						part.Get("executableCode").Exists() || part.Get("executable_code").Exists() ||
+						part.Get("codeExecutionResult").Exists() || part.Get("code_execution_result").Exists() {
+						return true
+					}
+				}
+			}
+		}
+	}
+	// FilterSSEUsageMetadata renames non-terminal usage to cpaUsageMetadata before
+	// the translator sees it, so both spellings must be accepted.
+	for _, path := range []string{
+		"response.usageMetadata", "response.cpaUsageMetadata",
+		"usageMetadata", "cpaUsageMetadata",
+	} {
+		if usage := ojson.GetBytesNoCopy(rawJSON, path); usage.IsObject() {
+			if usage.Get("candidatesTokenCount").Int() > 0 || usage.Get("thoughtsTokenCount").Int() > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // IsGeminiThoughtPart reports whether a Gemini part contains hidden model thought.
 func IsGeminiThoughtPart(part ojson.Result) bool {
 	return part.Get("thought").Bool()

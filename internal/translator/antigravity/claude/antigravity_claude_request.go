@@ -311,12 +311,16 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, st
 
 // convertClaudeRequestToAntigravity also reports an attachment Antigravity
 // cannot receive when it leaves a user turn with nothing to send.
-func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToAntigravityWithWebSearch(modelName, inputRawJSON, stream, nil)
+}
+
+func convertClaudeRequestToAntigravityWithWebSearch(modelName string, inputRawJSON []byte, _ bool, webSearch *bool) ([]byte, error) {
 	enableThoughtTranslate := true
 	// The internal commentary marker must be restored as assistant text before
 	// any thinking handling, so it is never dropped or treated as reasoning.
 	rawJSON, _ := sigcompat.RestoreCodexCommentaryMarkers(inputRawJSON)
-	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
+	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON, webSearch) {
 		return buildAntigravityWebSearchRequest(modelName, rawJSON), nil
 	}
 	var drops translatorcommon.UserTurnDrops

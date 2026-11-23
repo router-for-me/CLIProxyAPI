@@ -162,6 +162,14 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
+// SetAttemptModel changes the usage model to the actual scheduling target while
+// preserving the caller alias. Call only before publishing or starting a stream.
+func (r *UsageReporter) SetAttemptModel(model string) {
+	if r != nil {
+		r.model = model
+	}
+}
+
 // SetStream records whether the request was executed in streaming mode.
 func (r *UsageReporter) SetStream(stream bool) {
 	if r == nil {

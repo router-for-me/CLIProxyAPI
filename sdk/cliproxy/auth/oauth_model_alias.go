@@ -319,6 +319,23 @@ func (m *Manager) resolveOAuthModelAliasWithResult(auth *Auth, requestedModel st
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, channel)
 }
 
+// lookupExactOAuthModelAlias reads the configured entry without suffix fallback or inheritance.
+func (m *Manager) lookupExactOAuthModelAlias(auth *Auth, alias string) oauthModelAliasEntry {
+	channel := modelAliasChannel(auth)
+	if channel == "" || alias == "" {
+		return oauthModelAliasEntry{}
+	}
+	for _, entry := range OAuthModelAliasesFromAttributes(auth.Attributes) {
+		if strings.EqualFold(entry.Alias, alias) {
+			return oauthModelAliasEntry{upstreamModel: entry.Name, configAlias: entry.Alias, forceMapping: entry.ForceMapping}
+		}
+	}
+	if table, _ := m.oauthModelAlias.Load().(*oauthModelAliasTable); table != nil {
+		return table.reverse[channel][strings.ToLower(alias)]
+	}
+	return oauthModelAliasEntry{}
+}
+
 func authAttributes(auth *Auth) map[string]string {
 	if auth == nil {
 		return nil
@@ -519,7 +536,7 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Built-in channels: vertex, aistudio, antigravity, claude, codex, kimi, xai, meta.
+// Built-in channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
 // Plugin OAuth providers use their normalized provider key as the channel.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))

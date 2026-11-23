@@ -222,10 +222,16 @@ func (h *Host) HasScheduler() bool {
 	return h != nil && h.inner != nil && h.inner.HasScheduler()
 }
 
-// SchedulerWantsAcrossPriorities reports whether the active scheduler opted into receiving
+// SchedulerWantsAcrossPriorities reports whether any active scheduler opted into receiving
 // candidates across all priority tiers.
 func (h *Host) SchedulerWantsAcrossPriorities() bool {
 	return h != nil && h.inner != nil && h.inner.SchedulerWantsAcrossPriorities()
+}
+
+// SchedulerWantsAllPriorityCandidates reports whether PickAuth needs candidates across all
+// priority tiers, including when multiple active schedulers may chain across excluded tiers.
+func (h *Host) SchedulerWantsAllPriorityCandidates() bool {
+	return h != nil && h.inner != nil && h.inner.SchedulerWantsAllPriorityCandidates()
 }
 
 // HasSchedulerContinuity reports whether the active scheduler supports bounded continuity evaluation.

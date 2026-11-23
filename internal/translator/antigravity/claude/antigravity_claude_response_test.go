@@ -197,6 +197,33 @@ func TestConvertAntigravityResponseToClaudeNonStream_EmptyCandidateReturnsConten
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeNonStream_ExcludesCachedTokensFromInput(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": "ok"}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 50, "totalTokenCount": 1050},
+			"modelVersion": "gemini-3.8-flash-high",
+			"responseId": "resp_cached_usage"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.8-flash-high", requestJSON, requestJSON, responseJSON, nil)
+
+	if got := ojson.GetBytesNoCopy(output, "usage.input_tokens").Int(); got != 200 {
+		t.Fatalf("input_tokens = %d, want 200: %s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "usage.output_tokens").Int(); got != 50 {
+		t.Fatalf("output_tokens = %d, want 50: %s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "usage.cache_read_input_tokens").Int(); got != 800 {
+		t.Fatalf("cache_read_input_tokens = %d, want 800: %s", got, output)
+	}
+}
+
 func TestConvertAntigravityResponseToClaudeStream_EmptyCandidateClosesMessage(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
 	responseJSON := testEmptyAntigravityResponse()
@@ -1691,6 +1718,61 @@ func TestConvertAntigravityResponseToClaude_ParameterlessContinuationDoesNotDupl
 	}
 	if strings.Contains(streamText, `"name":""`) {
 		t.Fatalf("continuation must not open an unnamed tool_use block: %s", streamText)
+	}
+}
+
+func TestConvertAntigravityResponseToClaude_SignedContinuationKeepsOpenToolBlock(t *testing.T) {
+	origRequest := []byte(`{"model":"claude-sonnet-4-6","tools":[{"name":"read_file","input_schema":{"type":"object","properties":{"path":{"type":"string"},"line":{"type":"integer"}}}}]}`)
+	translatedRequest := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	firstChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.go"}}}]}}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+	continuationSignature := testGeminiEPrefixSignature(t)
+	continuationChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"line":1}},"thoughtSignature":"` + continuationSignature + `"}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.8-flash-high","responseId":"resp-1"}}`)
+
+	var param any
+	streamBytes := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, firstChunk, &param), nil)
+	streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, continuationChunk, &param), nil)...)
+	streamBytes = append(streamBytes, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", origRequest, translatedRequest, []byte("[DONE]"), &param), nil)...)
+	streamText := string(streamBytes)
+
+	toolUseStarts := 0
+	var toolInput strings.Builder
+	var toolIndex int64 = -1
+	for _, line := range strings.Split(streamText, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if ojson.Get(payload, "type").String() == "content_block_start" && ojson.Get(payload, "content_block.type").String() == "tool_use" {
+			toolUseStarts++
+			toolIndex = ojson.Get(payload, "index").Int()
+		}
+		if ojson.Get(payload, "delta.type").String() == "input_json_delta" && ojson.Get(payload, "index").Int() == toolIndex {
+			toolInput.WriteString(ojson.Get(payload, "delta.partial_json").String())
+		}
+	}
+	if toolUseStarts != 1 {
+		t.Fatalf("expected continuation to keep one tool_use block, got %d (full output: %s)", toolUseStarts, streamText)
+	}
+	if strings.Contains(streamText, `"name":""`) {
+		t.Fatalf("continuation must not open an unnamed tool_use block: %s", streamText)
+	}
+	parsedInput := ojson.Parse(toolInput.String())
+	if !parsedInput.IsObject() || parsedInput.Get("path").String() != "a.go" || parsedInput.Get("line").Int() != 1 {
+		t.Fatalf("continuation arguments must form one object, got %q (full output: %s)", toolInput.String(), streamText)
+	}
+	carrierSignature := encodeGeminiClaudeCarrierSignature(continuationSignature, geminiClaudeCarrierPrevious, geminiClaudeCarrierFunction)
+	if !strings.Contains(streamText, `"signature":"`+carrierSignature+`"`) {
+		t.Fatalf("continuation signature was lost: %s", streamText)
+	}
+
+	roundTripRequest := []byte(`{"model":"gemini-3.8-flash-high","messages":[{"role":"assistant","content":[{"type":"tool_use","id":"read-file-1","name":"read_file","input":{"path":"a.go","line":1}},{"type":"thinking","thinking":"","signature":"` + carrierSignature + `"}]}]}`)
+	roundTrip, errConvert := ConvertClaudeRequestToAntigravity("gemini-3.8-flash-high", roundTripRequest, false)
+	if errConvert != nil {
+		t.Fatalf("round-trip conversion failed: %v", errConvert)
+	}
+	parts := ojson.GetBytesNoCopy(roundTrip, "request.contents.0.parts").Array()
+	if len(parts) != 1 || parts[0].Get("functionCall.name").String() != "read_file" || parts[0].Get("thoughtSignature").String() != continuationSignature {
+		t.Fatalf("continuation signature did not remain attached to read_file: %s", roundTrip)
 	}
 }
 

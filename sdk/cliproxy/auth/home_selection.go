@@ -152,6 +152,7 @@ type HomeDispatchSelection struct {
 	Auth                       *Auth
 	Executor                   ProviderExecutor
 	Provider                   string
+	SelectionID                string
 	CanonicalSessionID         string
 	ParentSessionID            string
 	modelInfo                  *registry.ModelInfo

@@ -72,6 +72,20 @@ func IsUpstreamWebsocketTurnError(err error) bool {
 	return errors.As(err, &turnErr)
 }
 
+type inheritedWebsocketInstructionsKey struct{}
+
+// WithInheritedWebsocketInstructions distinguishes legacy transcript inheritance
+// from instructions supplied by the current frame. Only opt-in consumers use it.
+func WithInheritedWebsocketInstructions(ctx context.Context, raw string) context.Context {
+	return context.WithValue(ctx, inheritedWebsocketInstructionsKey{}, raw)
+}
+
+// InheritedWebsocketInstructions returns the JSON value added by transcript rebuilding.
+func InheritedWebsocketInstructions(ctx context.Context) string {
+	raw, _ := ctx.Value(inheritedWebsocketInstructionsKey{}).(string)
+	return raw
+}
+
 type websocketInputLossState struct {
 	epoch        *atomic.Uint64
 	messageEpoch uint64

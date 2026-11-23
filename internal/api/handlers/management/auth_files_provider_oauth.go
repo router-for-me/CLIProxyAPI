@@ -837,21 +837,19 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 			return
 		}
 
-		projectID := ""
-		if accessToken != "" {
-			fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
-			if errProject != nil {
-				if sessionProxyURL != "" {
-					log.Errorf("antigravity: failed to fetch project ID: %s", redactSessionProxyInString(errProject.Error(), sessionProxyURL))
-					SetOAuthSessionError(state, "Failed to fetch project ID")
-					return
-				}
-				log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
-			} else {
-				projectID = fetchedProjectID
-				log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
-			}
+		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
+		if errProject != nil {
+			log.Errorf("antigravity: failed to fetch project ID: %s", redactSessionProxyInString(errProject.Error(), sessionProxyURL))
+			SetOAuthSessionError(state, "Failed to fetch project ID")
+			return
 		}
+		projectID := strings.TrimSpace(fetchedProjectID)
+		if projectID == "" {
+			log.Error("antigravity: project ID discovery returned empty project")
+			SetOAuthSessionError(state, "Failed to fetch project ID")
+			return
+		}
+		log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
 
 		now := time.Now()
 		metadata := map[string]any{

@@ -63,6 +63,37 @@ func hasCall(calls []string, want string) bool {
 	return false
 }
 
+func TestPrivateRegistryUsesLiveDefaultHooks(t *testing.T) {
+	local := NewRegistryWithDefaultPluginHooks()
+	const from, to Format = "local-client", "local-upstream"
+	local.Register(from, to, func(_ string, _ []byte, _ bool) ([]byte, error) { return []byte(`{"native":true}`), nil }, ResponseTransform{})
+	if Default().HasRequestTransformer(from, to) {
+		t.Fatal("private registration reached default registry")
+	}
+	previous := Default().hooks
+	t.Cleanup(func() { SetPluginHooks(previous) })
+	for _, label := range []string{"first", "reloaded"} {
+		hooks := &fakePluginHooks{normalizeRequest: func(body []byte) []byte {
+			if !ojson.GetBytesNoCopy(body, "native").Bool() {
+				t.Fatal("hook ran before native translation")
+			}
+			return []byte(label)
+		}, requestTranslateBody: []byte("plugin fallback"), requestTranslateOK: true}
+		SetPluginHooks(hooks)
+		if !local.HasPluginHooks() || string(local.TranslateRequest(from, to, "m", nil, false)) != label || hasCall(hooks.calls, "translate-request") {
+			t.Fatal("private route did not use current normalizer after native translation")
+		}
+		hooks.normalizeRequest = nil
+		if string(TranslateRequest(from, to, "m", []byte("{}"), false)) != "plugin fallback" {
+			t.Fatal("private route displaced default plugin translator")
+		}
+	}
+	SetPluginHooks(nil)
+	if local.HasPluginHooks() || !ojson.GetBytesNoCopy(local.TranslateRequest(from, to, "m", nil, false), "native").Bool() {
+		t.Fatal("unloading hooks affected the private route")
+	}
+}
+
 func TestHasPluginHooks(t *testing.T) {
 	registry := NewRegistry()
 	if registry.HasPluginHooks() {

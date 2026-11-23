@@ -2,10 +2,17 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNormalizeAntigravityModelID(t *testing.T) {
@@ -106,6 +113,30 @@ func TestParseAntigravityModelCapabilityHints(t *testing.T) {
 }
 
 func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	expiresAt := updatedAt.Add(3 * time.Hour)
+	userAgent := "antigravity/hub/2.34.0 (aidev_client; os_type=darwin; arch=arm64; cl=1026637980)"
+	proxyWithCreds := "http://proxy-user:proxy-secret@proxy.example.com:8080"
+	routeFingerprint := AntigravityCapabilityRouteFingerprint(proxyWithCreds, userAgent)
+	if routeFingerprint == "" {
+		t.Fatal("expected non-empty route fingerprint")
+	}
+	if strings.Contains(routeFingerprint, "proxy-user") || strings.Contains(routeFingerprint, "proxy-secret") || strings.Contains(routeFingerprint, "proxy.example.com") {
+		t.Fatalf("route fingerprint leaked proxy details: %q", routeFingerprint)
+	}
+	if AntigravityCapabilityRouteFingerprint("", userAgent) == routeFingerprint {
+		t.Fatal("expected different route fingerprints for direct vs proxy routes")
+	}
+	if AntigravityCapabilityRouteFingerprint("http://other-proxy:8080", userAgent) == routeFingerprint {
+		t.Fatal("expected different route fingerprints for distinct proxy URLs")
+	}
+	if AntigravityCapabilityRouteFingerprint(proxyWithCreds, "antigravity/hub/2.35.0") == routeFingerprint {
+		t.Fatal("expected different route fingerprints for distinct user agents")
+	}
+	if gotEmpty := AntigravityCapabilityRouteFingerprint(proxyWithCreds, "   "); gotEmpty != "" {
+		t.Fatalf("expected empty fingerprint for empty user agent, got %q", gotEmpty)
+	}
+
 	hints := AntigravityModelCapabilityHints{
 		ModelIDs: map[string]struct{}{
 			"gemini-3-flash": {},
@@ -114,7 +145,15 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 		WebSearchModelIDs: map[string]struct{}{
 			"gemini-3-flash": {},
 		},
+		UpdatedAt:        updatedAt,
+		ExpiresAt:        expiresAt,
+		RouteFingerprint: routeFingerprint,
 	}
+	cloned := hints.Clone()
+	if !cloned.UpdatedAt.Equal(updatedAt) || !cloned.ExpiresAt.Equal(expiresAt) || cloned.RouteFingerprint != routeFingerprint {
+		t.Fatalf("Clone() did not preserve freshness metadata: %+v", cloned)
+	}
+
 	project := "aicode-consumers"
 	endpointWithUser := "https://user:password@cloudcode-pa.googleapis.com"
 	expectedEndpoint := "https://cloudcode-pa.googleapis.com"
@@ -122,6 +161,15 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 	serialized := BuildPersistedAntigravityCapabilityHints(project, endpointWithUser, hints)
 	if ep, ok := serialized["endpoint"].(string); !ok || ep != expectedEndpoint {
 		t.Errorf("expected endpoint %q, got %q", expectedEndpoint, ep)
+	}
+	if gotFP, ok := serialized["route_fingerprint"].(string); !ok || gotFP != routeFingerprint {
+		t.Errorf("expected route_fingerprint %q, got %q", routeFingerprint, gotFP)
+	}
+	if gotUpdated, ok := serialized["updated_at"].(string); !ok || gotUpdated != updatedAt.Format(time.RFC3339) {
+		t.Errorf("expected updated_at %q, got %q", updatedAt.Format(time.RFC3339), gotUpdated)
+	}
+	if gotExpires, ok := serialized["expires_at"].(string); !ok || gotExpires != expiresAt.Format(time.RFC3339) {
+		t.Errorf("expected expires_at %q, got %q", expiresAt.Format(time.RFC3339), gotExpires)
 	}
 
 	metadata := map[string]any{
@@ -137,6 +185,49 @@ func TestPersistedAntigravityCapabilityHintsRoundTrip(t *testing.T) {
 	}
 	if len(parsed.WebSearchModelIDs) != 1 {
 		t.Errorf("got %d web search models, want 1", len(parsed.WebSearchModelIDs))
+	}
+	if !parsed.UpdatedAt.Equal(updatedAt) {
+		t.Errorf("parsed.UpdatedAt = %v, want %v", parsed.UpdatedAt, updatedAt)
+	}
+	if !parsed.ExpiresAt.Equal(expiresAt) {
+		t.Errorf("parsed.ExpiresAt = %v, want %v", parsed.ExpiresAt, expiresAt)
+	}
+	if parsed.RouteFingerprint != routeFingerprint {
+		t.Errorf("parsed.RouteFingerprint = %q, want %q", parsed.RouteFingerprint, routeFingerprint)
+	}
+
+	// Legacy persisted entries without freshness fields remain valid as stale fallback.
+	legacyMetadata := map[string]any{
+		AntigravityPersistedHintsMetaKey: map[string]any{
+			"project_id": project,
+			"endpoint":   expectedEndpoint,
+			"model_ids":  []any{"gemini-3-flash"},
+		},
+	}
+	legacyParsed, okLegacy := ParsePersistedAntigravityCapabilityHints(legacyMetadata, project, expectedEndpoint)
+	if !okLegacy {
+		t.Fatal("expected legacy persisted metadata without timestamps to parse")
+	}
+	if !legacyParsed.UpdatedAt.IsZero() || !legacyParsed.ExpiresAt.IsZero() || legacyParsed.RouteFingerprint != "" {
+		t.Errorf("expected zero freshness fields for legacy metadata, got %+v", legacyParsed)
+	}
+
+	// Malformed timestamp fields degrade to zero time without discarding valid model_ids.
+	malformedMetadata := map[string]any{
+		AntigravityPersistedHintsMetaKey: map[string]any{
+			"project_id": project,
+			"endpoint":   expectedEndpoint,
+			"model_ids":  []any{"gemini-3-flash"},
+			"updated_at": "not-a-timestamp",
+			"expires_at": 12345,
+		},
+	}
+	malformedParsed, okMalformed := ParsePersistedAntigravityCapabilityHints(malformedMetadata, project, expectedEndpoint)
+	if !okMalformed {
+		t.Fatal("expected persisted metadata with malformed timestamps to keep model catalog")
+	}
+	if !malformedParsed.UpdatedAt.IsZero() || !malformedParsed.ExpiresAt.IsZero() {
+		t.Errorf("expected malformed timestamps to parse as zero time, got %+v", malformedParsed)
 	}
 
 	// Mismatched project
@@ -201,6 +292,21 @@ func TestFetchAntigravityAvailableModels(t *testing.T) {
 		}
 	})
 
+	t.Run("forbidden 403 distinct from 401 auth error", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+		}))
+		defer server.Close()
+
+		_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+			BaseURLs:    []string{server.URL},
+			AccessToken: "forbidden-token",
+		})
+		if status != AntigravityProbeStatusForbidden {
+			t.Fatalf("expected forbidden status, got %v", status)
+		}
+	})
+
 	t.Run("empty base urls returns transient error", func(t *testing.T) {
 		_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
 			BaseURLs:    nil,
@@ -245,4 +351,404 @@ func TestFetchAntigravityAvailableModels(t *testing.T) {
 			t.Fatalf("expected transient error for 302 without redirect, got %v", status)
 		}
 	})
+}
+
+func TestFetchAntigravityAvailableModels_EnforcesHTTP11WithoutALPN(t *testing.T) {
+	var mu sync.Mutex
+	var clientHelloProtos []string
+	var requestProto string
+	var tlsVersion uint16
+	var negotiatedProtocol string
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestProto = r.Proto
+		if r.TLS != nil {
+			tlsVersion = r.TLS.Version
+			negotiatedProtocol = r.TLS.NegotiatedProtocol
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+	}))
+	server.EnableHTTP2 = true
+	server.TLS = &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13,
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			mu.Lock()
+			clientHelloProtos = append([]string(nil), hello.SupportedProtos...)
+			mu.Unlock()
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	var proxyConnCount int
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "expected CONNECT", http.StatusMethodNotAllowed)
+			return
+		}
+		targetConn, errDial := net.Dial("tcp", r.Host)
+		if errDial != nil {
+			http.Error(w, errDial.Error(), http.StatusBadGateway)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			if errClose := targetConn.Close(); errClose != nil {
+				t.Logf("close target conn error: %v", errClose)
+			}
+			http.Error(w, "hijack unsupported", http.StatusInternalServerError)
+			return
+		}
+		clientConn, bufRW, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			if errClose := targetConn.Close(); errClose != nil {
+				t.Logf("close target conn error: %v", errClose)
+			}
+			return
+		}
+		mu.Lock()
+		proxyConnCount++
+		mu.Unlock()
+		if _, errWrite := io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			if errClose := clientConn.Close(); errClose != nil {
+				t.Logf("close client conn error: %v", errClose)
+			}
+			if errClose := targetConn.Close(); errClose != nil {
+				t.Logf("close target conn error: %v", errClose)
+			}
+			return
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(targetConn, bufRW)
+			if tcpConn, okTCP := targetConn.(*net.TCPConn); okTCP {
+				_ = tcpConn.CloseWrite()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = io.Copy(clientConn, targetConn)
+			if tcpConn, okTCP := clientConn.(*net.TCPConn); okTCP {
+				_ = tcpConn.CloseWrite()
+			}
+		}()
+		wg.Wait()
+		if errClose := targetConn.Close(); errClose != nil {
+			t.Logf("close target conn error: %v", errClose)
+		}
+		if errClose := clientConn.Close(); errClose != nil {
+			t.Logf("close client conn error: %v", errClose)
+		}
+	}))
+	defer proxyServer.Close()
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(server.Certificate())
+
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = origDefault
+	})
+
+	baseDefault, ok := origDefault.(*http.Transport)
+	if !ok || baseDefault == nil {
+		t.Fatal("expected http.DefaultTransport to be *http.Transport")
+	}
+	baseTransport := baseDefault.Clone()
+	baseTransport.TLSClientConfig = &tls.Config{
+		RootCAs:    certPool,
+		NextProtos: []string{"h2", "http/1.1"},
+	}
+	http.DefaultTransport = baseTransport
+
+	cases := []struct {
+		name      string
+		proxyURL  string
+		wantProxy int
+	}{
+		{name: "empty proxy inherits default transport", proxyURL: "", wantProxy: 0},
+		{name: "direct proxy", proxyURL: "direct", wantProxy: 0},
+		{name: "http connect proxy", proxyURL: proxyServer.URL, wantProxy: 1},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			clientHelloProtos = nil
+			requestProto = ""
+			tlsVersion = 0
+			negotiatedProtocol = ""
+			proxyConnCount = 0
+			mu.Unlock()
+
+			hints, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+				BaseURLs:    []string{server.URL},
+				ProxyURL:    tc.proxyURL,
+				AccessToken: "test-token",
+				ProjectID:   "aicode-consumers",
+			})
+			if status != AntigravityProbeStatusSuccess {
+				t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+			}
+			if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+				t.Fatalf("missing gemini-3-flash in hints: %+v", hints)
+			}
+
+			mu.Lock()
+			gotHelloProtos := slices.Clone(clientHelloProtos)
+			gotProto := requestProto
+			gotTLSVersion := tlsVersion
+			gotNegotiated := negotiatedProtocol
+			gotProxyCount := proxyConnCount
+			mu.Unlock()
+
+			if len(gotHelloProtos) != 0 {
+				t.Fatalf("ClientHello ALPN = %v, want no ALPN extension", gotHelloProtos)
+			}
+			if gotProto != "HTTP/1.1" {
+				t.Fatalf("request protocol = %q, want HTTP/1.1", gotProto)
+			}
+			if gotTLSVersion != tls.VersionTLS13 {
+				t.Fatalf("TLS version = %#x, want TLS 1.3", gotTLSVersion)
+			}
+			if gotNegotiated != "" {
+				t.Fatalf("negotiated ALPN = %q, want empty", gotNegotiated)
+			}
+			if gotProxyCount != tc.wantProxy {
+				t.Fatalf("proxy CONNECT count = %d, want %d", gotProxyCount, tc.wantProxy)
+			}
+			if !slices.Equal(baseTransport.TLSClientConfig.NextProtos, []string{"h2", "http/1.1"}) {
+				t.Fatalf("default transport TLSClientConfig.NextProtos mutated: %v", baseTransport.TLSClientConfig.NextProtos)
+			}
+		})
+	}
+}
+
+type stubRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f stubRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestFetchAntigravityAvailableModels_PreservesCustomDefaultRoundTripper(t *testing.T) {
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = origDefault
+	})
+
+	called := false
+	http.DefaultTransport = stubRoundTripper(func(r *http.Request) (*http.Response, error) {
+		called = true
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"models":{"gemini-3-flash":{}}}`)),
+			Request:    r,
+		}, nil
+	})
+
+	hints, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+		BaseURLs:    []string{"https://custom-roundtripper.invalid"},
+		AccessToken: "test-token",
+	})
+	if !called {
+		t.Fatal("expected custom http.DefaultTransport RoundTripper to be called")
+	}
+	if status != AntigravityProbeStatusSuccess {
+		t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+	}
+	if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+		t.Fatalf("missing gemini-3-flash in hints: %+v", hints)
+	}
+}
+
+func TestNewAntigravityProbeTransport_HTTP11AndNoALPN(t *testing.T) {
+	origDefault := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = origDefault
+	})
+
+	t.Run("handles typed-nil DefaultTransport", func(t *testing.T) {
+		var typedNil *http.Transport
+		http.DefaultTransport = typedNil
+
+		tr, errTr := newAntigravityProbeTransport("")
+		if errTr != nil {
+			t.Fatalf("unexpected error: %v", errTr)
+		}
+		if tr == nil {
+			t.Fatal("expected non-nil fallback *http.Transport")
+		}
+		if tr.ForceAttemptHTTP2 {
+			t.Fatal("ForceAttemptHTTP2 = true, want false")
+		}
+		if tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+			t.Fatalf("TLSNextProto = %#v, want non-nil empty map", tr.TLSNextProto)
+		}
+		if tr.TLSClientConfig == nil || len(tr.TLSClientConfig.NextProtos) != 0 {
+			t.Fatalf("TLSClientConfig = %#v, want non-nil config with empty NextProtos", tr.TLSClientConfig)
+		}
+	})
+
+	t.Run("configures all proxy modes", func(t *testing.T) {
+		http.DefaultTransport = origDefault
+		for _, proxyURL := range []string{
+			"",
+			"direct",
+			"http://127.0.0.1:8080",
+			"https://127.0.0.1:8443",
+			"socks5://127.0.0.1:1080",
+			"socks5h://127.0.0.1:1080",
+		} {
+			tr, errTr := newAntigravityProbeTransport(proxyURL)
+			if errTr != nil {
+				t.Fatalf("proxy %q unexpected error: %v", proxyURL, errTr)
+			}
+			if tr == nil {
+				t.Fatalf("proxy %q returned nil transport", proxyURL)
+			}
+			if tr.Protocols != nil {
+				t.Fatalf("proxy %q Protocols = %v, want nil", proxyURL, tr.Protocols)
+			}
+			if tr.ForceAttemptHTTP2 {
+				t.Fatalf("proxy %q ForceAttemptHTTP2 = true, want false", proxyURL)
+			}
+			if tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+				t.Fatalf("proxy %q TLSNextProto = %#v, want non-nil empty map", proxyURL, tr.TLSNextProto)
+			}
+			if tr.TLSClientConfig == nil || len(tr.TLSClientConfig.NextProtos) != 0 {
+				t.Fatalf("proxy %q TLSClientConfig = %#v, want non-nil config with empty NextProtos", proxyURL, tr.TLSClientConfig)
+			}
+			tr.CloseIdleConnections()
+		}
+	})
+
+	t.Run("strips explicit DefaultTransport Protocols HTTP/2 over real TLS", func(t *testing.T) {
+		var mu sync.Mutex
+		var clientHelloProtos []string
+		var requestProto string
+		var negotiatedProtocol string
+
+		server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			requestProto = r.Proto
+			if r.TLS != nil {
+				negotiatedProtocol = r.TLS.NegotiatedProtocol
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+		}))
+		server.EnableHTTP2 = true
+		server.TLS = &tls.Config{
+			MinVersion: tls.VersionTLS13,
+			MaxVersion: tls.VersionTLS13,
+			GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+				mu.Lock()
+				clientHelloProtos = append([]string(nil), hello.SupportedProtos...)
+				mu.Unlock()
+				return nil, nil
+			},
+		}
+		server.StartTLS()
+		defer server.Close()
+
+		certPool := x509.NewCertPool()
+		certPool.AddCert(server.Certificate())
+
+		baseDefault, ok := origDefault.(*http.Transport)
+		if !ok || baseDefault == nil {
+			t.Fatal("expected http.DefaultTransport to be *http.Transport")
+		}
+		explicitProtocols := &http.Protocols{}
+		explicitProtocols.SetHTTP1(true)
+		explicitProtocols.SetHTTP2(true)
+
+		baseTransport := baseDefault.Clone()
+		baseTransport.Protocols = explicitProtocols
+		baseTransport.TLSClientConfig = &tls.Config{
+			RootCAs: certPool,
+		}
+		http.DefaultTransport = baseTransport
+
+		hints, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+			BaseURLs:    []string{server.URL},
+			AccessToken: "test-token",
+			ProjectID:   "aicode-consumers",
+		})
+		if status != AntigravityProbeStatusSuccess {
+			t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+		}
+		if _, exists := hints.ModelIDs["gemini-3-flash"]; !exists {
+			t.Fatalf("missing gemini-3-flash in hints: %+v", hints)
+		}
+
+		mu.Lock()
+		gotHelloProtos := slices.Clone(clientHelloProtos)
+		gotProto := requestProto
+		gotNegotiated := negotiatedProtocol
+		mu.Unlock()
+
+		if len(gotHelloProtos) != 0 {
+			t.Fatalf("ClientHello ALPN = %v, want no ALPN extension", gotHelloProtos)
+		}
+		if gotProto != "HTTP/1.1" {
+			t.Fatalf("request protocol = %q, want HTTP/1.1", gotProto)
+		}
+		if gotNegotiated != "" {
+			t.Fatalf("negotiated ALPN = %q, want empty", gotNegotiated)
+		}
+		if baseTransport.Protocols == nil || !baseTransport.Protocols.HTTP2() {
+			t.Fatalf("default transport Protocols mutated: %v", baseTransport.Protocols)
+		}
+	})
+}
+
+func TestFetchAntigravityAvailableModels_OmitsEmptyProject(t *testing.T) {
+	cases := []struct {
+		name      string
+		projectID string
+		wantBody  string
+	}{
+		{name: "empty project id", projectID: "", wantBody: `{}`},
+		{name: "whitespace project id", projectID: "  \t\n ", wantBody: `{}`},
+		{name: "non-empty project id", projectID: "  aicode-consumers  ", wantBody: `{"project":"aicode-consumers"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				data, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Errorf("read request body: %v", errRead)
+				}
+				gotBody = strings.TrimSpace(string(data))
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"models":{"gemini-3-flash":{}}}`))
+			}))
+			defer server.Close()
+
+			_, status := FetchAntigravityAvailableModels(context.Background(), AntigravityModelProbeRequest{
+				BaseURLs:    []string{server.URL},
+				AccessToken: "test-token",
+				ProjectID:   tc.projectID,
+			})
+			if status != AntigravityProbeStatusSuccess {
+				t.Fatalf("status = %v, want %v", status, AntigravityProbeStatusSuccess)
+			}
+			if gotBody != tc.wantBody {
+				t.Fatalf("request body = %q, want %q", gotBody, tc.wantBody)
+			}
+		})
+	}
 }

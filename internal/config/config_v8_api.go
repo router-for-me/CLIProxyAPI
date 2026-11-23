@@ -27,6 +27,9 @@ func ProjectV8ConfigAliases(root *yaml.Node, path string) {
 		if value.Kind == yaml.MappingNode && len(value.Content) != 0 {
 			continue
 		}
+		if value.Kind == yaml.MappingNode && len(value.Content) == 0 && yamlPath(root, alias.old) != nil {
+			continue
+		}
 		copy := copyYAMLPathValue(root, alias.current)
 		setYAMLPathWithComments(root, alias.old, copy)
 		deleteYAMLPath(root, alias.current)
@@ -38,8 +41,7 @@ func ProjectV8ConfigAliases(root *yaml.Node, path string) {
 // Normalize request bodies before merging so an alias update can replace a
 // canonical value already present in the stored configuration.
 func NormalizeV8ConfigAliases(root *yaml.Node) error {
-	var shape any
-	if err := root.Decode(&shape); err != nil {
+	if err := validateConfigYAMLShape(root); err != nil {
 		return err
 	}
 	*root = *expandConfigAliases(root)
@@ -58,6 +60,12 @@ func NormalizeV8ConfigAliases(root *yaml.Node) error {
 			}
 		}
 		deleteYAMLPath(root, container.old)
+		for _, path := range v8Paths {
+			if strings.HasPrefix(path.current, container.old+".") && yamlPath(root, path.current) == nil {
+				setYAMLPathWithComments(root, path.current, copy)
+				copy.HeadComment = ""
+			}
+		}
 	}
 	for _, alias := range v8Aliases {
 		if yamlPath(root, alias.old) == nil {
