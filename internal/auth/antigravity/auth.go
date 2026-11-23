@@ -3,12 +3,15 @@ package antigravity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -30,10 +33,64 @@ type userInfo struct {
 	Email string `json:"email"`
 }
 
+const (
+	maxAntigravityAuthResponseBytes     = 1 << 20  // 1 MiB cap for 2xx JSON responses
+	maxAntigravityAuthErrorBodyBytes    = 64 << 10 // 64 KiB cap for non-2xx raw error bodies
+	maxAntigravityAuthErrorMessageBytes = 8 << 10  // 8 KiB cap for formatted HTTPStatusError messages
+)
+
+// readBoundedResponseBody reads up to maxBytes from body and returns an error
+// if the upstream response exceeds the limit.
+func readBoundedResponseBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	data, errRead := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if errRead != nil {
+		return nil, errRead
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("response body exceeds %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
+// truncateUTF8Bytes caps s to at most maxBytes without splitting a multi-byte
+// UTF-8 rune, and strips any trailing incomplete UTF-8 sequence.
+func truncateUTF8Bytes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) > maxBytes {
+		s = s[:maxBytes]
+	}
+	return trimIncompleteTrailingUTF8(s)
+}
+
+func trimIncompleteTrailingUTF8(s string) string {
+	if len(s) == 0 {
+		return s
+	}
+	i := len(s) - 1
+	for i >= 0 && len(s)-1-i < utf8.UTFMax-1 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	if i < 0 || !utf8.RuneStart(s[i]) {
+		return s
+	}
+	if utf8.FullRuneInString(s[i:]) {
+		return s
+	}
+	return s[:i]
+}
+
+// ErrProjectIDNotFound indicates that project discovery completed without
+// yielding a usable project_id for the credential.
+var ErrProjectIDNotFound = errors.New("antigravity: project id not found")
+
 // HTTPStatusError represents an HTTP error response with status code.
 type HTTPStatusError struct {
 	StatusCodeValue int
 	Message         string
+	RetryAfterValue *time.Duration
+	Body            []byte
 }
 
 func (e *HTTPStatusError) Error() string {
@@ -48,6 +105,24 @@ func (e *HTTPStatusError) StatusCode() int {
 		return 0
 	}
 	return e.StatusCodeValue
+}
+
+// RetryAfter exposes the upstream Retry-After hint so the conductor can record
+// the provider-supplied recovery deadline on the result.
+func (e *HTTPStatusError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return e.RetryAfterValue
+}
+
+// ResponseBody exposes the raw upstream HTTP response body when captured so
+// callers can inspect structured error details without preview truncation.
+func (e *HTTPStatusError) ResponseBody() []byte {
+	if e == nil || len(e.Body) == 0 {
+		return nil
+	}
+	return e.Body
 }
 
 // AntigravityAuth handles Antigravity OAuth authentication
@@ -245,6 +320,34 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 	return email, nil
 }
 
+// retryAfterFromHeaders parses the Retry-After response header. It accepts both
+// the delta-seconds form and the absolute HTTP-date form, returning nil when the
+// header is absent or unparsable.
+func retryAfterFromHeaders(header http.Header) *time.Duration {
+	if len(header) == 0 {
+		return nil
+	}
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	if raw == "" {
+		return nil
+	}
+	if seconds, errParse := strconv.Atoi(raw); errParse == nil {
+		if seconds < 0 {
+			return nil
+		}
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+	if when, errParse := http.ParseTime(raw); errParse == nil {
+		d := time.Until(when)
+		if d <= 0 {
+			return nil
+		}
+		return &d
+	}
+	return nil
+}
+
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
 func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
 	userAgent := o.shortUserAgent()
@@ -276,16 +379,23 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
-	if errRead != nil {
-		return "", fmt.Errorf("read response: %w", errRead)
-	}
-
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, maxAntigravityAuthErrorBodyBytes))
+		if errRead != nil {
+			return "", fmt.Errorf("read response: %w", errRead)
+		}
+		responseErr := truncateUTF8Bytes(strings.TrimSpace(string(bodyBytes)), maxAntigravityAuthErrorMessageBytes)
 		return "", &HTTPStatusError{
 			StatusCodeValue: resp.StatusCode,
-			Message:         fmt.Sprintf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes))),
+			Message:         fmt.Sprintf("request failed with status %d: %s", resp.StatusCode, responseErr),
+			RetryAfterValue: retryAfterFromHeaders(resp.Header),
+			Body:            append([]byte(nil), bodyBytes...),
 		}
+	}
+
+	bodyBytes, errRead := readBoundedResponseBody(resp.Body, maxAntigravityAuthResponseBytes)
+	if errRead != nil {
+		return "", fmt.Errorf("read response: %w", errRead)
 	}
 
 	var loadResp map[string]any
@@ -301,7 +411,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 			return "", err
 		}
 		if projectID == "" {
-			return "", fmt.Errorf("project id not found in loadCodeAssist or onboardUser response")
+			return "", fmt.Errorf("%w in loadCodeAssist or onboardUser response", ErrProjectIDNotFound)
 		}
 		return projectID, nil
 	}
@@ -311,6 +421,9 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 
 // OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
 	userAgent := o.nodeUserAgent()
 	requestBody := map[string]any{
@@ -327,12 +440,7 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		log.Debugf("Polling attempt %d/%d", attempt, maxAttempts)
 
-		reqCtx := ctx
-		var cancel context.CancelFunc
-		if reqCtx == nil {
-			reqCtx = context.Background()
-		}
-		reqCtx, cancel = context.WithTimeout(reqCtx, 30*time.Second)
+		reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 
 		endpointURL := fmt.Sprintf("%s/%s:onboardUser", DailyAPIEndpoint, APIVersion)
 		req, errRequest := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
@@ -352,7 +460,13 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			return "", fmt.Errorf("execute request: %w", errDo)
 		}
 
-		bodyBytes, errRead := io.ReadAll(resp.Body)
+		var bodyBytes []byte
+		var errRead error
+		if resp.StatusCode == http.StatusOK {
+			bodyBytes, errRead = readBoundedResponseBody(resp.Body, maxAntigravityAuthResponseBytes)
+		} else {
+			bodyBytes, errRead = io.ReadAll(io.LimitReader(resp.Body, maxAntigravityAuthErrorBodyBytes))
+		}
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("close body error: %v", errClose)
 		}
@@ -369,6 +483,10 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			}
 
 			if done, okDone := data["done"].(bool); okDone && done {
+				if errOp := onboardOperationError(data["error"], bodyBytes); errOp != nil {
+					return "", errOp
+				}
+
 				projectID := ""
 				if responseData, okResp := data["response"].(map[string]any); okResp {
 					projectID = extractCloudaicompanionProject(responseData)
@@ -379,27 +497,98 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 					return projectID, nil
 				}
 
-				return "", fmt.Errorf("no project_id in response")
+				return "", fmt.Errorf("%w: no project_id in response", ErrProjectIDNotFound)
 			}
 
-			time.Sleep(2 * time.Second)
+			if attempt == maxAttempts {
+				break
+			}
+			if errCtx := ctx.Err(); errCtx != nil {
+				return "", errCtx
+			}
+			timer := time.NewTimer(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", ctx.Err()
+			case <-timer.C:
+			}
 			continue
 		}
 
-		responsePreview := strings.TrimSpace(string(bodyBytes))
-		if len(responsePreview) > 500 {
-			responsePreview = responsePreview[:500]
-		}
-
-		responseErr := responsePreview
-		if len(responseErr) > 200 {
-			responseErr = responseErr[:200]
-		}
+		responseErr := truncateUTF8Bytes(strings.TrimSpace(string(bodyBytes)), maxAntigravityAuthErrorMessageBytes)
 		return "", &HTTPStatusError{
 			StatusCodeValue: resp.StatusCode,
 			Message:         fmt.Sprintf("http %d: %s", resp.StatusCode, responseErr),
+			RetryAfterValue: retryAfterFromHeaders(resp.Header),
+			Body:            append([]byte(nil), bodyBytes...),
 		}
 	}
 
 	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)
+}
+
+func onboardOperationError(raw any, bodyBytes []byte) error {
+	if raw == nil {
+		return nil
+	}
+	switch v := raw.(type) {
+	case string:
+		msg := strings.TrimSpace(v)
+		if msg == "" {
+			return nil
+		}
+		return fmt.Errorf("onboard user operation error: %s", msg)
+	case map[string]any:
+		if len(v) == 0 {
+			return nil
+		}
+		var code int
+		var status string
+		var parts []string
+		if codeVal, okCode := v["code"].(float64); okCode && codeVal != 0 {
+			code = int(codeVal)
+			parts = append(parts, fmt.Sprintf("code %d", code))
+		}
+		if statusVal, okStatus := v["status"].(string); okStatus {
+			if trimmed := strings.TrimSpace(statusVal); trimmed != "" {
+				status = trimmed
+				parts = append(parts, trimmed)
+			}
+		}
+		if msgVal, okMsg := v["message"].(string); okMsg {
+			if trimmed := strings.TrimSpace(msgVal); trimmed != "" {
+				parts = append(parts, trimmed)
+			}
+		}
+		msg := "onboard user operation error"
+		if len(parts) > 0 {
+			msg = fmt.Sprintf("onboard user operation error (%s)", strings.Join(parts, ": "))
+		} else if encoded, errMarshal := json.Marshal(v); errMarshal == nil && len(encoded) > 0 {
+			msg = fmt.Sprintf("onboard user operation error: %s", strings.TrimSpace(string(encoded)))
+		}
+		if httpStatus := onboardOperationHTTPStatus(code, status); httpStatus > 0 {
+			return &HTTPStatusError{
+				StatusCodeValue: httpStatus,
+				Message:         msg,
+				Body:            append([]byte(nil), bodyBytes...),
+			}
+		}
+		return fmt.Errorf("%s", msg)
+	default:
+		return fmt.Errorf("onboard user operation error: %v", raw)
+	}
+}
+
+func onboardOperationHTTPStatus(code int, status string) int {
+	switch {
+	case code == 7 || code == http.StatusForbidden || strings.EqualFold(status, "PERMISSION_DENIED"):
+		return http.StatusForbidden
+	case code == 8 || code == http.StatusTooManyRequests || strings.EqualFold(status, "RESOURCE_EXHAUSTED"):
+		return http.StatusTooManyRequests
+	case code == 16 || code == http.StatusUnauthorized || strings.EqualFold(status, "UNAUTHENTICATED"):
+		return http.StatusUnauthorized
+	default:
+		return 0
+	}
 }

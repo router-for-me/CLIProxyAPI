@@ -9,6 +9,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // APIKeyModelIsCompat reports whether the selected API-key model enables
@@ -78,7 +79,7 @@ func ApplyRequestThinkingWithModelInfoDoc(doc *ojson.Doc, req cliproxyexecutor.R
 	if len(source) == 0 {
 		source = opts.OriginalRequest
 	}
-	summaryConfig := translatedRequestSummaryConfigDoc(doc, req.Payload, originalSource, req.Model, fromFormat, toFormat)
+	summaryConfig := translatedRequestSummaryConfigDoc(sdktranslator.Default(), doc, req.Payload, originalSource, req.Model, fromFormat, toFormat)
 	var err error
 	if modelInfo, ok := cliproxyauth.ResolvedModelInfo(req); ok {
 		err = thinking.ApplyThinkingWithModelInfoAndSummaryDoc(doc, source, req.Model, fromFormat, toFormat, provider, modelInfo, summaryConfig, normalizedUpdatesChanged...)

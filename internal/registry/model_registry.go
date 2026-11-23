@@ -40,9 +40,14 @@ type NativeCapabilities struct {
 type ModelInfo struct {
 	// ID is the unique identifier for the model
 	ID string `json:"id"`
-	// MetadataModelID identifies the canonical model used to resolve client metadata.
-	// It is internal and must not be exposed in model-list responses.
+	// SourceModelID identifies the provider model behind this published route.
+	SourceModelID string `json:"-"`
+	// MetadataModelID identifies the catalog key used to resolve client metadata.
 	MetadataModelID string `json:"-"`
+	// OAuthAlias is the configured alias that produced this route, before adding any auth prefix.
+	OAuthAlias string `json:"-"`
+	// OAuthAliasSource is the exact published source of that alias, including any suffix.
+	OAuthAliasSource string `json:"-"`
 	// ExplicitThinking indicates thinking/reasoning configuration was explicitly configured for this model.
 	ExplicitThinking bool `json:"-"`
 	// ExplicitInputModalities indicates input modalities were explicitly configured for this model.
@@ -283,7 +288,8 @@ func (r *ModelRegistry) RegistrationEpoch() uint64 {
 
 // LookupModelInfo looks up ModelInfo by checking dynamic registrations first
 // (strictly scoped to provider when non-empty, or global when empty) and then
-// falling back to channel-specific and global static definitions.
+// falling back to channel-specific and shared static definitions. A channel or
+// qualified model ID selects an independent provider catalog.
 func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
@@ -303,7 +309,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 			return cloneModelInfo(info)
 		}
 	}
-	return cloneModelInfo(LookupStaticModelInfo(modelID))
+	return lookupStaticModelInfo(modelID, nil)
 }
 
 // NativeCapabilityRoute describes one registered route to a public model.
@@ -1473,6 +1479,56 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	}
 
 	return false
+}
+
+// ClientModelRoute returns the metadata key and alias for the first matching client route.
+func (r *ModelRegistry) ClientModelRoute(clientID string, modelIDs ...string) (metadataModelID, oauthAlias string) {
+	route := r.LookupClientModelRoute(clientID, modelIDs...)
+	return route.MetadataModelID, route.OAuthAlias
+}
+
+// ClientModelRouteInfo describes the source and alias of a registered route.
+type ClientModelRouteInfo struct {
+	ID               string
+	SourceModelID    string
+	MetadataModelID  string
+	OAuthAlias       string
+	OAuthAliasSource string
+}
+
+// LookupClientModelRoute returns the first matching route registered by this client.
+// Candidates are tried in order, preferring exact spelling within each candidate.
+func (r *ModelRegistry) LookupClientModelRoute(clientID string, modelIDs ...string) ClientModelRouteInfo {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	models := r.clientModelInfos[clientID]
+	for _, modelID := range modelIDs {
+		if modelID == "" {
+			continue
+		}
+		info := models[modelID]
+		if info == nil {
+			for _, id := range r.clientModels[clientID] {
+				if strings.EqualFold(id, modelID) {
+					info = models[id]
+					if info != nil {
+						break
+					}
+				}
+			}
+		}
+		if info != nil {
+			return ClientModelRouteInfo{
+				ID:               info.ID,
+				SourceModelID:    info.SourceModelID,
+				MetadataModelID:  info.MetadataModelID,
+				OAuthAlias:       info.OAuthAlias,
+				OAuthAliasSource: info.OAuthAliasSource,
+			}
+		}
+	}
+	return ClientModelRouteInfo{}
 }
 
 // IsModelSuspendedForClient reports whether a model is currently suspended for a specific client.

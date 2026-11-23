@@ -15,6 +15,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,12 +51,12 @@ func TestConfigV8MigrationAndLegacyAPI(t *testing.T) {
 	}
 	request(http.MethodGet, "/v8/management/config", "", 200)
 	saved, _ := os.ReadFile(path)
-	if string(saved) != raw {
+	if config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatal("GET migrated the config")
 	}
 	request(http.MethodPatch, "/v8/management/config", `{"server":{"port":"invalid"}}`, 422)
 	saved, _ = os.ReadFile(path)
-	if string(saved) != raw {
+	if config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatal("failed write migrated the config")
 	}
 	request(http.MethodPut, "/v0/management/request-retry", `{"value":2}`, 200)
@@ -145,7 +147,7 @@ func TestConfigV8CommentsUnknownLegacySectionsOnWrite(t *testing.T) {
 	request(http.MethodPatch, "/v8/management/config", `{"home":{"enabled":true}}`, http.StatusBadRequest)
 	request(http.MethodPatch, "/v8/management/config", `{"unknown-setting":true}`, http.StatusBadRequest)
 	saved, err := os.ReadFile(path)
-	if err != nil || string(saved) != raw {
+	if err != nil || config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatalf("read or failed write changed the config: %v", err)
 	}
 	request(http.MethodPut, "/v8/management/config/requests/proxy-url", `"direct"`, http.StatusOK)
@@ -210,7 +212,7 @@ func TestConfigV8CommentsUnknownNestedFieldsOnWrite(t *testing.T) {
 		}
 	}
 	request(http.MethodGet, "/v8/management/config", "", http.StatusOK)
-	if saved, errRead := os.ReadFile(path); errRead != nil || string(saved) != raw {
+	if saved, errRead := config.ReadConfigFile(path); errRead != nil || config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatalf("GET changed existing config: %v", errRead)
 	}
 	request(http.MethodPatch, "/v8/management/config", `{"server":{"port":8318}}`, http.StatusOK)
@@ -685,8 +687,6 @@ plugins:
 			t.Fatal(errLoad)
 		}
 		loaded.Home = cfg.Home
-		// SourceHash is runtime-only metadata of a file load, not persisted config.
-		loaded.SourceHash = ""
 		select {
 		case snapshot := <-reloads:
 			if !reflect.DeepEqual(snapshot, loaded) || !reflect.DeepEqual(h.cfg, loaded) {
@@ -702,7 +702,7 @@ plugins:
 	// Simulate a new sibling written on the server after the first deletion.
 	// The next request must use the latest file, not a stale runtime projection.
 	data, _ := read()
-	data = []byte(strings.Replace(string(data), "max-retry-interval: 30", "max-retry-interval: 30\n        max-retry-credentials: 7 # Keep new sibling", 1))
+	data = []byte(strings.Replace(string(data), "    max-retry-interval: 30\n", "    max-retry-interval: 30\n    max-retry-credentials: 7 # Keep new sibling\n", 1))
 	if err = os.WriteFile(file, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1071,5 +1071,320 @@ func TestConfigV8_SensitivePatternsReplace(t *testing.T) {
 	))
 	if claudePut.Code != http.StatusOK {
 		t.Fatalf("PUT api-keys/claude: status=%d body=%s", claudePut.Code, claudePut.Body.String())
+	}
+}
+
+func TestConfigV8ReadOnlyGetDoesNotWarnOnMigration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	previousOut := logger.Out
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.WarnLevel)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		logger.SetOutput(previousOut)
+	})
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := `host: 127.0.0.1
+port: 18317
+auth-dir: ./repro-auth
+remote-management:
+  secret-key: local-repro-only
+  disable-control-panel: true
+codex:
+  identity-confuse: false
+`
+	if errWrite := os.WriteFile(path, []byte(raw), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	// Startup LoadConfig hashes plaintext secret-key on disk; snapshot after startup.
+	diskBefore, errBefore := os.ReadFile(path)
+	if errBefore != nil {
+		t.Fatal(errBefore)
+	}
+	h := &Handler{cfg: cfg, configFilePath: path}
+	router := gin.New()
+	router.GET("/v8/management/config", h.ConfigV8)
+	router.GET("/v8/management/config.yaml", h.ConfigV8)
+	router.PATCH("/v8/management/config", h.ConfigV8)
+	router.PUT("/v8/management/config/*path", h.ConfigV8)
+
+	doReq := func(method, target, body, ifMatch string, wantStatus int) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		if ifMatch != "" {
+			req.Header.Set("If-Match", ifMatch)
+		}
+		router.ServeHTTP(rec, req)
+		if rec.Code != wantStatus {
+			t.Fatalf("%s %s: status=%d want %d body=%s", method, target, rec.Code, wantStatus, rec.Body.String())
+		}
+		return rec
+	}
+
+	migrationWarnings := func() []string {
+		var out []string
+		for _, entry := range hook.AllEntries() {
+			if entry.Level <= log.WarnLevel && strings.Contains(entry.Message, "commented out during v8 migration") {
+				out = append(out, entry.Message)
+			}
+		}
+		return out
+	}
+
+	firstYAML := doReq(http.MethodGet, "/v8/management/config.yaml", "", "", http.StatusOK)
+	secondYAML := doReq(http.MethodGet, "/v8/management/config.yaml", "", "", http.StatusOK)
+	firstJSON := doReq(http.MethodGet, "/v8/management/config", "", "", http.StatusOK)
+
+	if firstYAML.Header().Get("ETag") == "" || firstYAML.Header().Get("ETag") != secondYAML.Header().Get("ETag") {
+		t.Fatalf("unexpected ETags: %q vs %q", firstYAML.Header().Get("ETag"), secondYAML.Header().Get("ETag"))
+	}
+	if !strings.Contains(firstYAML.Body.String(), "config-version: 8") || !strings.Contains(firstJSON.Body.String(), `"config-version":8`) {
+		t.Fatalf("expected projected v8 config in GET responses, got yaml=%s json=%s", firstYAML.Body.String(), firstJSON.Body.String())
+	}
+	if diskBytes, errRead := os.ReadFile(path); errRead != nil || string(diskBytes) != string(diskBefore) {
+		t.Fatalf("GET modified config on disk: err=%v", errRead)
+	}
+	if warnings := migrationWarnings(); len(warnings) != 0 {
+		t.Fatalf("expected no migration warnings during read-only GETs, got %d: %v", len(warnings), warnings)
+	}
+
+	// Failed writes must not log migration warnings because nothing is persisted.
+	doReq(http.MethodPatch, "/v8/management/config", `{"server":{"port":"invalid"}}`, "", http.StatusUnprocessableEntity)
+	doReq(http.MethodPatch, "/v8/management/config", `{"server":{"port":18318}}`, `"stale-etag"`, http.StatusPreconditionFailed)
+	if warnings := migrationWarnings(); len(warnings) != 0 {
+		t.Fatalf("expected no migration warnings during failed writes, got %d: %v", len(warnings), warnings)
+	}
+
+	// A persisted migration logs the warning once.
+	doReq(http.MethodPatch, "/v8/management/config", `{"server":{"port":18318}}`, firstYAML.Header().Get("ETag"), http.StatusOK)
+	warnings := migrationWarnings()
+	if len(warnings) != 1 || !strings.Contains(warnings[0], `"codex"`) {
+		t.Fatalf("expected exactly one migration warning for \"codex\" on persisted write, got %d: %v", len(warnings), warnings)
+	}
+
+	hook.Reset()
+	doReq(http.MethodGet, "/v8/management/config.yaml", "", "", http.StatusOK)
+	if after := migrationWarnings(); len(after) != 0 {
+		t.Fatalf("expected no migration warnings on GET after migration, got %v", after)
+	}
+
+	// Replacing the entire document with PUT discards legacy unknown sections
+	// instead of commenting them out, so no comment-out warning should be logged.
+	replacePath := filepath.Join(t.TempDir(), "replace-config.yaml")
+	if errWriteReplace := os.WriteFile(replacePath, []byte(raw), 0o600); errWriteReplace != nil {
+		t.Fatal(errWriteReplace)
+	}
+	replaceCfg, errLoadReplace := config.LoadConfig(replacePath)
+	if errLoadReplace != nil {
+		t.Fatal(errLoadReplace)
+	}
+	replaceHandler := &Handler{cfg: replaceCfg, configFilePath: replacePath}
+	replaceRouter := gin.New()
+	replaceRouter.GET("/v8/management/config.yaml", replaceHandler.ConfigV8)
+	replaceRouter.PUT("/v8/management/config.yaml", replaceHandler.ConfigV8)
+	hook.Reset()
+	replaceRec := httptest.NewRecorder()
+	replaceRouter.ServeHTTP(replaceRec, httptest.NewRequest(http.MethodPut, "/v8/management/config.yaml", strings.NewReader("server:\n  port: 18319\n")))
+	if replaceRec.Code != http.StatusOK {
+		t.Fatalf("PUT /v8/management/config.yaml: status=%d body=%s", replaceRec.Code, replaceRec.Body.String())
+	}
+	if replaceDisk, errReplaceDisk := os.ReadFile(replacePath); errReplaceDisk != nil || strings.Contains(string(replaceDisk), "# codex:") {
+		t.Fatalf("expected whole-document PUT to discard # codex: comment on disk, err=%v content=%s", errReplaceDisk, string(replaceDisk))
+	}
+	if warningsAfterPut := migrationWarnings(); len(warningsAfterPut) != 0 {
+		t.Fatalf("expected no migration warnings when whole-document PUT discards legacy sections, got %v", warningsAfterPut)
+	}
+
+	// Whole-document PUT that sends back the projected GET YAML (retaining the
+	// archived # codex: comment) persists the commented-out migration and must warn once.
+	roundTripPath := filepath.Join(t.TempDir(), "roundtrip-config.yaml")
+	if errWriteRT := os.WriteFile(roundTripPath, []byte(raw), 0o600); errWriteRT != nil {
+		t.Fatal(errWriteRT)
+	}
+	roundTripCfg, errLoadRT := config.LoadConfig(roundTripPath)
+	if errLoadRT != nil {
+		t.Fatal(errLoadRT)
+	}
+	roundTripHandler := &Handler{cfg: roundTripCfg, configFilePath: roundTripPath}
+	roundTripRouter := gin.New()
+	roundTripRouter.GET("/v8/management/config.yaml", roundTripHandler.ConfigV8)
+	roundTripRouter.PUT("/v8/management/config.yaml", roundTripHandler.ConfigV8)
+	hook.Reset()
+	rtGet := httptest.NewRecorder()
+	roundTripRouter.ServeHTTP(rtGet, httptest.NewRequest(http.MethodGet, "/v8/management/config.yaml", nil))
+	if rtGet.Code != http.StatusOK {
+		t.Fatalf("GET /v8/management/config.yaml: status=%d body=%s", rtGet.Code, rtGet.Body.String())
+	}
+	if warningsAfterRTGet := migrationWarnings(); len(warningsAfterRTGet) != 0 {
+		t.Fatalf("expected no warnings on GET before round-trip PUT, got %v", warningsAfterRTGet)
+	}
+	editedYAML := strings.Replace(rtGet.Body.String(), "18317", "18320", 1)
+	rtPut := httptest.NewRecorder()
+	roundTripRouter.ServeHTTP(rtPut, httptest.NewRequest(http.MethodPut, "/v8/management/config.yaml", strings.NewReader(editedYAML)))
+	if rtPut.Code != http.StatusOK {
+		t.Fatalf("round-trip PUT /v8/management/config.yaml: status=%d body=%s", rtPut.Code, rtPut.Body.String())
+	}
+	rtDisk, errRTDisk := os.ReadFile(roundTripPath)
+	if errRTDisk != nil || !strings.Contains(string(rtDisk), "# codex:") {
+		t.Fatalf("expected archived # codex: comment on disk after round-trip PUT, err=%v content=%s", errRTDisk, string(rtDisk))
+	}
+	if warningsAfterRTPut := migrationWarnings(); len(warningsAfterRTPut) != 1 || !strings.Contains(warningsAfterRTPut[0], `"codex"`) {
+		t.Fatalf("expected one migration warning for \"codex\" on round-trip PUT, got %d: %v", len(warningsAfterRTPut), warningsAfterRTPut)
+	}
+
+	// WriteConfig failing on disk I/O must not log migration warnings.
+	hook.Reset()
+	errDirWrite := WriteConfig(t.TempDir(), []byte("server:\n  port: 8317\nlegacy-extra:\n  enabled: true\n"))
+	if errDirWrite == nil {
+		t.Fatal("expected WriteConfig to fail when target path is a directory")
+	}
+	if warningsAfterWriteErr := migrationWarnings(); len(warningsAfterWriteErr) != 0 {
+		t.Fatalf("expected no migration warnings when WriteConfig fails on I/O, got %v", warningsAfterWriteErr)
+	}
+
+	// Quoted YAML section key ("codex":) must still emit a warning on persisted PATCH.
+	quotedPath := filepath.Join(t.TempDir(), "quoted-config.yaml")
+	quotedRaw := "port: 18317\n\"codex\":\n  identity-confuse: false\n"
+	if errWriteQuoted := os.WriteFile(quotedPath, []byte(quotedRaw), 0o600); errWriteQuoted != nil {
+		t.Fatal(errWriteQuoted)
+	}
+	quotedCfg, errLoadQuoted := config.LoadConfig(quotedPath)
+	if errLoadQuoted != nil {
+		t.Fatal(errLoadQuoted)
+	}
+	quotedHandler := &Handler{cfg: quotedCfg, configFilePath: quotedPath}
+	quotedRouter := gin.New()
+	quotedRouter.PATCH("/v8/management/config", quotedHandler.ConfigV8)
+	hook.Reset()
+	quotedRec := httptest.NewRecorder()
+	quotedRouter.ServeHTTP(quotedRec, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"server":{"port":18321}}`)))
+	if quotedRec.Code != http.StatusOK {
+		t.Fatalf("PATCH quoted key config: status=%d body=%s", quotedRec.Code, quotedRec.Body.String())
+	}
+	if warningsQuoted := migrationWarnings(); len(warningsQuoted) != 1 || !strings.Contains(warningsQuoted[0], `"codex"`) {
+		t.Fatalf("expected one migration warning for quoted \"codex\" key on PATCH, got %d: %v", len(warningsQuoted), warningsQuoted)
+	}
+
+	// Whole-document PUT discarding codex while adding an unrelated "# codex: ..."
+	// comment must not falsely trigger a migration warning.
+	notePath := filepath.Join(t.TempDir(), "note-config.yaml")
+	if errWriteNote := os.WriteFile(notePath, []byte(raw), 0o600); errWriteNote != nil {
+		t.Fatal(errWriteNote)
+	}
+	noteCfg, errLoadNote := config.LoadConfig(notePath)
+	if errLoadNote != nil {
+		t.Fatal(errLoadNote)
+	}
+	noteHandler := &Handler{cfg: noteCfg, configFilePath: notePath}
+	noteRouter := gin.New()
+	noteRouter.PUT("/v8/management/config.yaml", noteHandler.ConfigV8)
+	hook.Reset()
+	noteRec := httptest.NewRecorder()
+	noteRouter.ServeHTTP(noteRec, httptest.NewRequest(http.MethodPut, "/v8/management/config.yaml", strings.NewReader("server:\n  port: 18322\n# codex: see provider documentation\n")))
+	if noteRec.Code != http.StatusOK {
+		t.Fatalf("PUT note config.yaml: status=%d body=%s", noteRec.Code, noteRec.Body.String())
+	}
+	if warningsNote := migrationWarnings(); len(warningsNote) != 0 {
+		t.Fatalf("expected no migration warnings when whole-document PUT only has unrelated # codex: comment, got %v", warningsNote)
+	}
+
+	// Trailing whitespace (including Unicode spaces such as U+00A0) on an inline
+	// comment inside an unknown section is trimmed when archiving FootComment;
+	// PATCH must still emit one migration warning.
+	trailingPath := filepath.Join(t.TempDir(), "trailing-ws-config.yaml")
+	trailingRaw := "port: 18317\ncodex:\n  identity-confuse: false # note  \u00a0\n"
+	if errWriteTrailing := os.WriteFile(trailingPath, []byte(trailingRaw), 0o600); errWriteTrailing != nil {
+		t.Fatal(errWriteTrailing)
+	}
+	trailingCfg, errLoadTrailing := config.LoadConfig(trailingPath)
+	if errLoadTrailing != nil {
+		t.Fatal(errLoadTrailing)
+	}
+	trailingHandler := &Handler{cfg: trailingCfg, configFilePath: trailingPath}
+	trailingRouter := gin.New()
+	trailingRouter.PATCH("/v8/management/config", trailingHandler.ConfigV8)
+	hook.Reset()
+	trailingRec := httptest.NewRecorder()
+	trailingRouter.ServeHTTP(trailingRec, httptest.NewRequest(http.MethodPatch, "/v8/management/config", strings.NewReader(`{"server":{"port":18323}}`)))
+	if trailingRec.Code != http.StatusOK {
+		t.Fatalf("PATCH trailing whitespace config: status=%d body=%s", trailingRec.Code, trailingRec.Body.String())
+	}
+	if warningsTrailing := migrationWarnings(); len(warningsTrailing) != 1 || !strings.Contains(warningsTrailing[0], `"codex"`) {
+		t.Fatalf("expected one migration warning for \"codex\" with trailing whitespace on PATCH, got %d: %v", len(warningsTrailing), warningsTrailing)
+	}
+
+	// Whole-document PUT discarding a null-valued unknown key ("retired-option:")
+	// while including documentation comment blocks starting with "# retired-option:"
+	// must not falsely match the single-line archive marker.
+	for _, docComment := range []struct {
+		name, body string
+	}{
+		{"indented", "server:\n  port: 18324\n# retired-option:\n#     example: documentation only\n"},
+		{"sequence", "server:\n  port: 18325\n# retired-option:\n# - documentation example\n"},
+		{"blank-then-indented", "server:\n  port: 18326\n# retired-option:\n#\n#     example: documentation only\n"},
+		{"nested-comment", "server:\n  # Documentation for older versions:\n  # retired-option:\n  port: 18324\n"},
+	} {
+		nullKeyPath := filepath.Join(t.TempDir(), "null-key-"+docComment.name+".yaml")
+		if errWriteNull := os.WriteFile(nullKeyPath, []byte("port: 18317\nretired-option:\n"), 0o600); errWriteNull != nil {
+			t.Fatal(errWriteNull)
+		}
+		nullKeyCfg, errLoadNull := config.LoadConfig(nullKeyPath)
+		if errLoadNull != nil {
+			t.Fatal(errLoadNull)
+		}
+		nullKeyHandler := &Handler{cfg: nullKeyCfg, configFilePath: nullKeyPath}
+		nullKeyRouter := gin.New()
+		nullKeyRouter.PUT("/v8/management/config.yaml", nullKeyHandler.ConfigV8)
+		hook.Reset()
+		nullKeyRec := httptest.NewRecorder()
+		nullKeyRouter.ServeHTTP(nullKeyRec, httptest.NewRequest(http.MethodPut, "/v8/management/config.yaml", strings.NewReader(docComment.body)))
+		if nullKeyRec.Code != http.StatusOK {
+			t.Fatalf("PUT null-key (%s) config.yaml: status=%d body=%s", docComment.name, nullKeyRec.Code, nullKeyRec.Body.String())
+		}
+		if warningsNull := migrationWarnings(); len(warningsNull) != 0 {
+			t.Fatalf("expected no migration warnings for %s doc comment, got %v", docComment.name, warningsNull)
+		}
+	}
+
+	// Whole-document PUT that genuinely round-trips a single-line null-key
+	// archive ("# retired-option:") from GET must emit one migration warning.
+	nullRTPath := filepath.Join(t.TempDir(), "null-key-roundtrip.yaml")
+	if errWriteNullRT := os.WriteFile(nullRTPath, []byte("port: 18317\nretired-option:\n"), 0o600); errWriteNullRT != nil {
+		t.Fatal(errWriteNullRT)
+	}
+	nullRTCfg, errLoadNullRT := config.LoadConfig(nullRTPath)
+	if errLoadNullRT != nil {
+		t.Fatal(errLoadNullRT)
+	}
+	nullRTHandler := &Handler{cfg: nullRTCfg, configFilePath: nullRTPath}
+	nullRTRouter := gin.New()
+	nullRTRouter.GET("/v8/management/config.yaml", nullRTHandler.ConfigV8)
+	nullRTRouter.PUT("/v8/management/config.yaml", nullRTHandler.ConfigV8)
+	hook.Reset()
+	nullRTGet := httptest.NewRecorder()
+	nullRTRouter.ServeHTTP(nullRTGet, httptest.NewRequest(http.MethodGet, "/v8/management/config.yaml", nil))
+	if nullRTGet.Code != http.StatusOK {
+		t.Fatalf("GET null-key config.yaml: status=%d body=%s", nullRTGet.Code, nullRTGet.Body.String())
+	}
+	if warningsNullGet := migrationWarnings(); len(warningsNullGet) != 0 {
+		t.Fatalf("expected no warnings on GET for null-key config, got %v", warningsNullGet)
+	}
+	nullRTPut := httptest.NewRecorder()
+	nullRTRouter.ServeHTTP(nullRTPut, httptest.NewRequest(http.MethodPut, "/v8/management/config.yaml", strings.NewReader(strings.Replace(nullRTGet.Body.String(), "18317", "18327", 1))))
+	if nullRTPut.Code != http.StatusOK {
+		t.Fatalf("PUT round-trip null-key config.yaml: status=%d body=%s", nullRTPut.Code, nullRTPut.Body.String())
+	}
+	if warningsNullRT := migrationWarnings(); len(warningsNullRT) != 1 || !strings.Contains(warningsNullRT[0], `"retired-option"`) {
+		t.Fatalf("expected one migration warning for round-tripped \"retired-option\", got %d: %v", len(warningsNullRT), warningsNullRT)
 	}
 }

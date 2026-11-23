@@ -60,3 +60,16 @@ func TestInspectGPTReasoningSignature_RouterSuffixed(t *testing.T) {
 		}
 	}
 }
+
+func TestDevinOpenAIReasoningSignature(t *testing.T) {
+	item := `{"type":"reasoning","encrypted_content":"` + testGPTReasoningSignature() + `"}`
+	good := "[" + item + "," + item + "]"
+	if !IsDevinOpenAIReasoningSignature(good) || IsRecognizedReasoningSignature(good) {
+		t.Fatal("array must be valid only for Devin, not native GPT")
+	}
+	for _, bad := range []string{"[]", item, "[" + item + ",{}]", "[" + item + ",]", `[{"type":"reasoning","encrypted_content":"not a signature"}]`, strings.Replace(good, "reasoning", "message", 1)} {
+		if IsDevinOpenAIReasoningSignature(bad) {
+			t.Errorf("accepted invalid Devin signature: %s", bad)
+		}
+	}
+}

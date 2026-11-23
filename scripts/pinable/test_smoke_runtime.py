@@ -130,7 +130,8 @@ class NativePluginSmokeTests(unittest.TestCase):
             library = smoke_runtime.build_native_plugin(Path(tmp), "darwin", "arm64", {})
             command = run.call_args_list[0].args[0]
             self.assertEqual(command[:5], ["/usr/bin/xcrun", "clang", "-dynamiclib", "-arch", "arm64"])
-            self.assertTrue(command[-1].endswith("/examples/plugin/management-api/c/src/plugin.c"))
+            expected_source = Path(smoke_runtime.__file__).resolve().parents[2] / "examples/plugin/management-api/c/src/plugin.c"
+            self.assertEqual(Path(command[-1]), expected_source)
             self.assertEqual(library.name, "management-api-c.dylib")
             self.assertEqual(library.parent.parts[-2:], ("darwin", "arm64"))
             self.assertEqual(len(run.call_args_list), 3)
@@ -170,18 +171,19 @@ class NativePluginSmokeTests(unittest.TestCase):
             request.side_effect = reply
             popen.return_value.returncode = 0
             with tempfile.TemporaryDirectory() as tmp:
+                binary = Path(tmp) / "trusted" / "released-binary"
                 if resource_status == 200:
-                    smoke_runtime.smoke_native_plugin(Path("/trusted/released-binary"), Path(tmp), target, "arm64", {})
+                    smoke_runtime.smoke_native_plugin(binary, Path(tmp), target, "arm64", {})
                 else:
                     with self.assertRaisesRegex(ValueError, "callback"):
-                        smoke_runtime.smoke_native_plugin(Path("/trusted/released-binary"), Path(tmp), target, "arm64", {})
+                        smoke_runtime.smoke_native_plugin(binary, Path(tmp), target, "arm64", {})
                 build.assert_called_with(Path(tmp) / "native-plugin", target, "arm64", {})
                 cfg = (Path(tmp) / "native-plugin/config.yaml").read_text()
                 self.assertIn('host: "127.0.0.1"', cfg)
                 self.assertIn('allow-remote: false', cfg)
                 self.assertIn('management-api-c:', cfg)
                 self.assertIn('disable-auto-update-panel: true', cfg)
-                self.assertEqual(popen.call_args.args[0][0], "/trusted/released-binary")
+                self.assertEqual(popen.call_args.args[0][0], str(binary))
                 self.assertIn("--local-model", popen.call_args.args[0])
             stop.assert_called_with(popen.return_value)
 

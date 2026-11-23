@@ -2,8 +2,6 @@ package watcher
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,10 +21,13 @@ func TestRuntimeConfigReloadSurvivesRepeatedAtomicReplacement(t *testing.T) {
 		t.Fatal(errMkdir)
 	}
 	configPath := filepath.Join(root, "config.yaml")
+	const serverID = "e8bd1fce-3d81-4e40-9589-17b8709159eb"
 	writeConfig := func(path string, port int) []byte {
 		t.Helper()
-		// Omitted options use the real loader defaults instead of marshaled zero values.
-		data := []byte(fmt.Sprintf("auth-dir: %q\nport: %d\n", authDir, port))
+		// Keep a stable server identity in the fixture so automatic startup
+		// rewrites cannot change the exact bytes this file-event test asserts.
+		// Other omitted options use the real loader defaults.
+		data := []byte(fmt.Sprintf("auth-dir: %q\nport: %d\nserver: {server-id: %s}\n", authDir, port, serverID))
 		if errWrite := os.WriteFile(path, data, 0o600); errWrite != nil {
 			t.Fatal(errWrite)
 		}
@@ -75,15 +76,14 @@ func TestRuntimeConfigReloadSurvivesRepeatedAtomicReplacement(t *testing.T) {
 					t.Fatal(errRename)
 				}
 			}
-			sum := sha256.Sum256(data)
-			wantHash := hex.EncodeToString(sum[:])
+			wantHash := config.ComputeSourceHash(data)
 			deadline := time.NewTimer(10 * time.Second)
 			defer deadline.Stop()
 			ticker := time.NewTicker(10 * time.Millisecond)
 			defer ticker.Stop()
 			for {
 				w.clientsMutex.RLock()
-				done := w.config != nil && w.config.Port == step.port && w.lastConfigHash == wantHash
+				done := w.config != nil && w.config.Port == step.port && w.config.ServerID == serverID && w.lastConfigHash == wantHash
 				w.clientsMutex.RUnlock()
 				if done {
 					return

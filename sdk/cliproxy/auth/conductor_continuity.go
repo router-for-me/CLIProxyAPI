@@ -130,6 +130,10 @@ func (m *Manager) waitForContinuityBoundedCooldown(ctx context.Context, session 
 
 // HasSchedulerContinuity reports whether the active plugin scheduler supports bounded continuity.
 func (m *Manager) HasSchedulerContinuity() bool {
+	if m != nil && m.HomeEnabled() {
+		_, supported := m.canRunCodexContinuity(context.Background(), []string{"codex"})
+		return supported
+	}
 	return m.snapshotSchedulerContinuity() != nil
 }
 
@@ -345,7 +349,7 @@ func ensureContinuitySession(ctx context.Context, opts *cliproxyexecutor.Options
 }
 
 func (m *Manager) canRunCodexContinuity(ctx context.Context, providers []string) (PluginSchedulerContinuity, bool) {
-	if m == nil || m.HomeEnabled() {
+	if m == nil {
 		return nil, false
 	}
 	if cliproxyexecutor.RequiredUpstreamWebsocket(ctx) {
@@ -353,6 +357,17 @@ func (m *Manager) canRunCodexContinuity(ctx context.Context, providers []string)
 	}
 	if !providersIncludeCodex(providers) {
 		return nil, false
+	}
+	if m.HomeEnabled() {
+		bundle := m.HomeDispatchBundle()
+		if bundle == nil {
+			return nil, false
+		}
+		client, ok := bundle.client.(homeContinuityClient)
+		if !ok || client.SchedulerProtocol() < 1 {
+			return nil, false
+		}
+		return &homeSchedulerContinuity{client: client, manager: m}, true
 	}
 	continuity := m.snapshotSchedulerContinuity()
 	if continuity == nil {
@@ -396,7 +411,7 @@ func (m *Manager) isCodexAttemptFailure(err error, attempted map[string]struct{}
 }
 
 func isPreAdmissionContinuityError(err error) bool {
-	if err == nil || IsTerminalAuthError(err) || isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) {
+	if err == nil || IsTerminalAuthError(err) || isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) || isCredentialTerminatedError(err) {
 		return false
 	}
 	if isSchedulerRejectError(err) {
@@ -420,7 +435,7 @@ func isPositiveQuotaRejectionError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) ||
+	if isRequestInvalidError(err) || isRequestStopError(err) || isRequestTerminatedError(err) || isCredentialTerminatedError(err) ||
 		isStreamTruncatedError(err) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err) ||
 		IsTerminalAuthError(err) {
 		return false
@@ -528,8 +543,11 @@ func (m *Manager) runCodexContinuityGate(
 			return continuityOutcomeDisabled, nil
 		}
 
-		candidates := m.buildCodexContinuityCandidates(ctx, providers, model, opts, retryRound, applyRetryRoundExclusions, defaultRequestRetry, now)
-		if len(candidates) == 0 {
+		var candidates []pluginapi.SchedulerContinuityCandidate
+		if !m.HomeEnabled() {
+			candidates = m.buildCodexContinuityCandidates(ctx, providers, model, opts, retryRound, applyRetryRoundExclusions, defaultRequestRetry, now)
+		}
+		if len(candidates) == 0 && !m.HomeEnabled() {
 			if pollAttempt > 0 || phase == "pre_output_429" {
 				session.terminated = true
 			}
@@ -557,11 +575,27 @@ func (m *Manager) runCodexContinuityGate(
 			Options:            schedulerOptions(opts),
 			Candidates:         candidates,
 		}
+		if m.HomeEnabled() {
+			req.Options.Metadata = cloneRequestMetadata(req.Options.Metadata)
+			req.Options.Metadata[homeRetryRoundMetadataKey] = retryRound
+			req.Options.Metadata["apply_retry_round_exclusions"] = applyRetryRoundExclusions
+		}
 		resp, handled, errEval := continuity.EvaluateSchedulerContinuity(ctx, req)
 		if ctx != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				return continuityOutcomeCanceled, errCtx
 			}
+		}
+		if errEval != nil && m.HomeEnabled() {
+			return continuityOutcomeDisabled, wrapRequestStopError(errEval)
+		}
+		if !handled && m.HomeEnabled() {
+			// Home can report no eligible observation candidates before a gate starts.
+			// Preserve ordinary retry behavior just as the local empty-candidate path does.
+			if pollAttempt > 0 || phase == "pre_output_429" {
+				session.terminated = true
+			}
+			return continuityOutcomeDisabled, nil
 		}
 		if errEval != nil || !handled {
 			session.terminated = true
@@ -881,7 +915,8 @@ func (m *Manager) evaluatePreOutputStreamQuotaGate(
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	defaultRequestRetry, _, _ := m.retrySettings()
-	if !m.retryAllowedForRequest(ctx, session.codexAttemptsUsed, normalized, retryModel, eligibility, pinnedAuthID, defaultRequestRetry, opts.Headers) {
+	// Home applies its authoritative per-credential retry limits to observation candidates.
+	if !m.HomeEnabled() && !m.retryAllowedForRequest(ctx, session.codexAttemptsUsed, normalized, retryModel, eligibility, pinnedAuthID, defaultRequestRetry, opts.Headers) {
 		session.terminated = true
 		return false, markContinuityTerminatedError(err)
 	}
@@ -935,7 +970,7 @@ func isQuotaCooldownBlock(auth *Auth, checkModel string, now time.Time) bool {
 		if checkModel != "" && len(auth.ModelStates) > 0 {
 			modelKey := canonicalModelLookupKey(checkModel)
 			for stateModel, state := range auth.ModelStates {
-				if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+				if state == nil || modelStateLookupKey(auth, stateModel) != modelKey {
 					continue
 				}
 				if state.nonQuotaCooldownUntil.After(now) {
@@ -966,7 +1001,7 @@ func isQuotaCooldownBlock(auth *Auth, checkModel string, now time.Time) bool {
 		matched := false
 		hasQuota := false
 		for stateModel, state := range auth.ModelStates {
-			if state == nil || canonicalModelLookupKey(stateModel) != modelKey {
+			if state == nil || modelStateLookupKey(auth, stateModel) != modelKey {
 				continue
 			}
 			matched = true

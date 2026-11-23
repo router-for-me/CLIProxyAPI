@@ -120,7 +120,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 		status = msg.StatusCode
 	}
 	if msg != nil && msg.DirectResponse {
-		writeDirectErrorResponse(c, status, msg)
+		h.writeDirectErrorResponse(c, status, msg)
 		return
 	}
 	if msg != nil && msg.Error != nil {
@@ -181,7 +181,35 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	_, _ = c.Writer.Write(body)
 }
 
-func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
+func hasHeaderIgnoreCase(headers http.Header, target string) bool {
+	for key, values := range headers {
+		if strings.EqualFold(key, target) && len(values) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *BaseAPIHandler) writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
+	if msg != nil && msg.Error != nil && !hasHeaderIgnoreCase(msg.Headers, "Retry-After") {
+		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
+	}
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
+		for key, values := range FilterUpstreamHeaders(msg.Addon) {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) || hasHeaderIgnoreCase(msg.Headers, key) {
+				continue
+			}
+			if coreauth.HasTrustedRetryDeadline(msg.Error) && http.CanonicalHeaderKey(key) == "Retry-After" {
+				continue
+			}
+			c.Writer.Header().Del(key)
+			for _, value := range values {
+				c.Writer.Header().Add(key, value)
+			}
+		}
+	}
 	for key, values := range FilterUpstreamHeaders(msg.Headers) {
 		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
 			continue
