@@ -279,3 +279,64 @@ func TestSessionAffinitySelector_LookupAffinity_ModelWithColons(t *testing.T) {
 		t.Fatalf("team lookup unexpectedly matched: status=%s auth=%s, want unbound", statusOther, authIDOther)
 	}
 }
+
+type statefulTestPluginScheduler struct {
+	fakePluginScheduler
+	active bool
+}
+
+func (s *statefulTestPluginScheduler) HasScheduler() bool {
+	return s.active
+}
+
+func TestManager_LookupSessionAffinity_PluginSchedulerState(t *testing.T) {
+	authA := &Auth{
+		ID:       "auth-plugin-state",
+		Provider: "anthropic",
+	}
+	authA.EnsureIndex()
+
+	setupManager := func(t *testing.T, scheduler PluginScheduler) *Manager {
+		t.Helper()
+		manager := NewManager(nil, nil, nil)
+		selector := NewSessionAffinitySelector(nil)
+		t.Cleanup(selector.Stop)
+		manager.SetSelector(selector)
+		if _, errReg := manager.Register(context.Background(), authA.Clone()); errReg != nil {
+			t.Fatalf("register auth: %v", errReg)
+		}
+		opts := cliproxyexecutor.Options{
+			Headers:  map[string][]string{"X-Claude-Code-Session-Id": {"sess-plugin-state"}},
+			Metadata: make(map[string]any),
+		}
+		if picked, errPick := selector.Pick(context.Background(), "anthropic", "claude-3-7-sonnet", opts, []*Auth{authA}); errPick != nil || picked == nil || picked.ID != authA.ID {
+			t.Fatalf("seed affinity binding failed: auth=%v err=%v", picked, errPick)
+		}
+		manager.SetPluginScheduler(scheduler)
+		return manager
+	}
+
+	t.Run("bound when plugin scheduler reports HasScheduler false", func(t *testing.T) {
+		manager := setupManager(t, &statefulTestPluginScheduler{active: false})
+		found, status := manager.LookupSessionAffinity("anthropic", "claude-3-7-sonnet", "sess-plugin-state")
+		if status != "bound" || found == nil || found.ID != authA.ID {
+			t.Fatalf("LookupSessionAffinity() = (%v, %q), want (%q, %q)", found, status, authA.ID, "bound")
+		}
+	})
+
+	t.Run("unsupported when plugin scheduler reports HasScheduler true", func(t *testing.T) {
+		manager := setupManager(t, &statefulTestPluginScheduler{active: true})
+		found, status := manager.LookupSessionAffinity("anthropic", "claude-3-7-sonnet", "sess-plugin-state")
+		if status != "unsupported" || found != nil {
+			t.Fatalf("LookupSessionAffinity() = (%v, %q), want (nil, %q)", found, status, "unsupported")
+		}
+	})
+
+	t.Run("unsupported when plugin scheduler does not implement pluginSchedulerState", func(t *testing.T) {
+		manager := setupManager(t, &fakePluginScheduler{})
+		found, status := manager.LookupSessionAffinity("anthropic", "claude-3-7-sonnet", "sess-plugin-state")
+		if status != "unsupported" || found != nil {
+			t.Fatalf("LookupSessionAffinity() = (%v, %q), want (nil, %q)", found, status, "unsupported")
+		}
+	})
+}

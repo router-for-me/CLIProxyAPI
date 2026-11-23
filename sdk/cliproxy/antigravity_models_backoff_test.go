@@ -1,10 +1,14 @@
 package cliproxy
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -499,4 +503,433 @@ func TestAntigravityDisabledAuthSkipsModelCapabilityProbe(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAntigravityUnauthenticatedAuthSkipsModelCapabilityProbe(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*coreauth.Auth)
+	}{
+		{
+			name: "RequiresSignInStatusErrorExpiredToken",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusError
+				a.Unavailable = true
+				a.RequiresSignIn = true
+				a.RejectedRefreshToken = "dead-rt"
+				a.Metadata["refresh_token"] = "dead-rt"
+				a.Metadata["expired"] = now.Add(-time.Hour).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "TerminalUnauthorizedFailure",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusError
+				a.Unavailable = true
+				a.LastError = &coreauth.Error{
+					Code:       "unauthorized",
+					Message:    "unauthorized (refresh token invalid)",
+					HTTPStatus: http.StatusUnauthorized,
+				}
+			},
+		},
+		{
+			name: "RejectedAccessToken",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusActive
+				a.RejectedAccessToken = a.Metadata["access_token"].(string)
+				a.Metadata["expired"] = now.Add(time.Hour).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "ExpiredAccessTokenWhileRetryingRefresh",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusError
+				a.Unavailable = true
+				a.NextRefreshAfter = now.Add(30 * time.Minute)
+				a.Metadata["expired"] = now.Add(-time.Minute).Format(time.RFC3339)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCapabilityCache()
+			t.Cleanup(resetAntigravityCapabilityCache)
+			antigravityNowFunc = func() time.Time { return now }
+			t.Cleanup(func() { antigravityNowFunc = time.Now })
+
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Header.Get("Authorization") == "Bearer recovered-token" {
+					_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
+					return
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer server.Close()
+
+			manager := coreauth.NewManager(nil, nil, nil)
+			svc := &Service{cfg: &config.Config{}, coreManager: manager}
+			auth := antigravityTestAuth("unauth-"+tc.name, server.URL)
+			auth.Metadata[antigravityPersistedHintsMetaKey] = buildPersistedAntigravityCapabilityHintsValue(
+				"project-unauth-"+tc.name, server.URL,
+				antigravityModelCapabilityHints{ModelIDs: map[string]struct{}{"gemini-3.1-flash-lite": {}}},
+			)
+			tc.mutate(auth)
+			registered, errRegister := manager.Register(t.Context(), auth)
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(registered.ID) })
+
+			wake := svc.antigravityModelRefreshWake()
+			select {
+			case <-wake:
+			default:
+			}
+
+			// Without any pre-seeded backoff, direct fetch, queue, and refresh must all skip network probes.
+			gotKey, gotHints := svc.fetchAntigravityModelCapabilityHints(t.Context(), registered)
+			if gotKey != "" || gotHints.ModelIDs != nil {
+				t.Fatalf("unauthenticated auth did not short-circuit fetch: key=%q hints=%v", gotKey, gotHints)
+			}
+			svc.queueAntigravityModelRefresh(t.Context(), registered, "antigravity")
+			svc.WaitAntigravityProbes()
+			select {
+			case <-wake:
+				t.Fatal("unauthenticated auth fetch/queue triggered refresh wakeup")
+			default:
+			}
+			svc.refreshAntigravityModels(t.Context())
+			svc.WaitAntigravityProbes()
+			if calls.Load() != 0 {
+				t.Fatalf("unauthenticated auth issued %d network probes, want 0", calls.Load())
+			}
+
+			// Pre-seed a short retry deadline so nextAntigravityModelRefreshDelay would shorten if it failed to skip.
+			cacheKey := svc.antigravityCapabilityKey(registered)
+			token, _ := registered.Metadata["access_token"].(string)
+			failureKey := antigravityTokenFailureKey(cacheKey, token)
+			antigravityCapabilityMu.Lock()
+			antigravityAuthFailureCache[failureKey] = antigravityFailureState{
+				failures:    1,
+				lastFailure: now,
+				nextRetry:   now.Add(10 * time.Second),
+			}
+			antigravityCapabilityMu.Unlock()
+			if delay := svc.nextAntigravityModelRefreshDelay(); delay != antigravityRefreshScanInterval {
+				t.Fatalf("nextAntigravityModelRefreshDelay=%s want %s (unauthenticated auth must be skipped)", delay, antigravityRefreshScanInterval)
+			}
+
+			// Persisted capability hints remain readable for non-disabled credentials.
+			if cached := svc.cachedAntigravityHints(registered); len(cached.ModelIDs) != 1 {
+				t.Fatalf("cachedAntigravityHints=%v, want persisted fallback preserved", cached.ModelIDs)
+			}
+
+			// Once credentials recover with a valid fresh token, probing resumes cleanly.
+			recovered := registered.Clone()
+			recovered.Status = coreauth.StatusActive
+			recovered.Unavailable = false
+			recovered.RequiresSignIn = false
+			recovered.RejectedRefreshToken = ""
+			recovered.RejectedAccessToken = ""
+			recovered.LastError = nil
+			recovered.NextRefreshAfter = time.Time{}
+			recovered.Metadata["access_token"] = "recovered-token"
+			recovered.Metadata["refresh_token"] = "fresh-rt"
+			recovered.Metadata["expired"] = now.Add(time.Hour).Format(time.RFC3339)
+			if _, errUpdate := manager.Update(t.Context(), recovered); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			svc.refreshAntigravityModels(t.Context())
+			svc.WaitAntigravityProbes()
+			if calls.Load() != 1 {
+				t.Fatalf("recovered auth issued %d probes, want 1", calls.Load())
+			}
+		})
+	}
+}
+
+func TestAntigravityProbeStillRunsForValidTokenStates(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*coreauth.Auth)
+	}{
+		{
+			name: "RequiresSignInWithValidUnexpiredAccessToken",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusActive
+				a.Unavailable = false
+				a.RequiresSignIn = true
+				a.RejectedRefreshToken = "dead-rt"
+				a.Metadata["refresh_token"] = "dead-rt"
+				a.Metadata["expired"] = now.Add(time.Hour).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "TemporaryQuotaStatusErrorWithValidAccessToken",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusError
+				a.Unavailable = true
+				a.NextRetryAfter = now.Add(10 * time.Minute)
+				a.Quota = coreauth.QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: now.Add(10 * time.Minute),
+				}
+				a.Metadata["expired"] = now.Add(time.Hour).Format(time.RFC3339)
+			},
+		},
+		{
+			name: "RequiresSignInWithValidAccessTokenAndTemporaryQuotaStatusError",
+			mutate: func(a *coreauth.Auth) {
+				a.Status = coreauth.StatusError
+				a.Unavailable = true
+				a.RequiresSignIn = true
+				a.RejectedRefreshToken = "dead-rt"
+				a.Metadata["refresh_token"] = "dead-rt"
+				a.NextRetryAfter = now.Add(10 * time.Minute)
+				a.LastError = &coreauth.Error{
+					Code:       "rate_limit_exceeded",
+					Message:    "quota exceeded",
+					HTTPStatus: http.StatusTooManyRequests,
+				}
+				a.Quota = coreauth.QuotaState{
+					Exceeded:      true,
+					NextRecoverAt: now.Add(10 * time.Minute),
+				}
+				a.Metadata["expired"] = now.Add(time.Hour).Format(time.RFC3339)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCapabilityCache()
+			t.Cleanup(resetAntigravityCapabilityCache)
+			antigravityNowFunc = func() time.Time { return now }
+			t.Cleanup(func() { antigravityNowFunc = time.Now })
+
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
+			}))
+			defer server.Close()
+
+			manager := coreauth.NewManager(nil, nil, nil)
+			svc := &Service{cfg: &config.Config{}, coreManager: manager}
+			auth := antigravityTestAuth("valid-"+tc.name, server.URL)
+			tc.mutate(auth)
+			registered, errRegister := manager.Register(t.Context(), auth)
+			if errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(registered.ID) })
+
+			svc.refreshAntigravityModels(t.Context())
+			svc.WaitAntigravityProbes()
+			if calls.Load() != 1 {
+				t.Fatalf("valid-token auth issued %d probes, want 1", calls.Load())
+			}
+		})
+	}
+}
+
+func TestAntigravityTerminalRefreshUnknownExpirySuppressesAfter401(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+
+	var clockMu sync.Mutex
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	userAgent := "antigravity/hub/2.34.0 (aidev_client; os_type=darwin; arch=arm64)"
+	antigravityNowFunc = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	t.Cleanup(func() { antigravityNowFunc = time.Now })
+	prevUserAgent := antigravityModelUserAgent
+	antigravityModelUserAgent = func() string {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return userAgent
+	}
+	t.Cleanup(func() { antigravityModelUserAgent = prevUserAgent })
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+
+	var deadCalls, healthyCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("Authorization") {
+		case "Bearer token-dead-no-exp":
+			deadCalls.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "Bearer token-healthy-sibling":
+			healthyCalls.Add(1)
+			_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
+		case "Bearer recovered-no-exp-token":
+			deadCalls.Add(1)
+			_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}}}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	svc := &Service{cfg: &config.Config{}, coreManager: manager}
+
+	dead := antigravityTestAuth("dead-no-exp", server.URL)
+	dead.Status = coreauth.StatusActive
+	dead.RequiresSignIn = true
+	dead.RejectedRefreshToken = "dead-rt"
+	dead.Metadata["refresh_token"] = "dead-rt"
+	registeredDead, errRegister := manager.Register(t.Context(), dead)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(registeredDead.ID) })
+
+	healthy := antigravityTestAuth("healthy-sibling", server.URL)
+	healthy.Status = coreauth.StatusActive
+	registeredHealthy, errRegisterHealthy := manager.Register(t.Context(), healthy)
+	if errRegisterHealthy != nil {
+		t.Fatal(errRegisterHealthy)
+	}
+	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(registeredHealthy.ID) })
+
+	// First probe discovers the unknown-expiry access_token is rejected with 401.
+	svc.refreshAntigravityModels(t.Context())
+	svc.WaitAntigravityProbes()
+	if deadCalls.Load() != 1 || healthyCalls.Load() != 1 {
+		t.Fatalf("initial probes dead=%d healthy=%d, want 1 and 1", deadCalls.Load(), healthyCalls.Load())
+	}
+
+	// Advancing past max 401 retry cap and beyond cache eviction horizon must not re-probe the dead token,
+	// even while healthy siblings run probes and trigger cache cleanup.
+	advance(antigravityCapabilityRetryMax + time.Minute)
+	svc.refreshAntigravityModels(t.Context())
+	svc.WaitAntigravityProbes()
+	if deadCalls.Load() != 1 {
+		t.Fatalf("dead unknown-expiry auth retried after max backoff: calls=%d want 1", deadCalls.Load())
+	}
+
+	advance(3 * antigravityCapabilityCacheTTL)
+	svc.refreshAntigravityModels(t.Context())
+	svc.WaitAntigravityProbes()
+	if deadCalls.Load() != 1 {
+		t.Fatalf("dead unknown-expiry auth retried after eviction window: calls=%d want 1", deadCalls.Load())
+	}
+	if healthyCalls.Load() != 2 {
+		t.Fatalf("healthy sibling calls=%d want 2", healthyCalls.Load())
+	}
+	if delay := svc.nextAntigravityModelRefreshDelay(); delay != antigravityRefreshScanInterval {
+		t.Fatalf("nextAntigravityModelRefreshDelay=%s want %s", delay, antigravityRefreshScanInterval)
+	}
+
+	// Updating client User-Agent (or proxy) must not bypass terminal suppression for the same credential+token.
+	clockMu.Lock()
+	userAgent = "antigravity/hub/2.35.0 (aidev_client; os_type=darwin; arch=arm64)"
+	clockMu.Unlock()
+	svc.refreshAntigravityModels(t.Context())
+	svc.WaitAntigravityProbes()
+	if deadCalls.Load() != 1 {
+		t.Fatalf("dead unknown-expiry auth retried after User-Agent change: calls=%d want 1", deadCalls.Load())
+	}
+	if healthyCalls.Load() != 3 {
+		t.Fatalf("healthy sibling calls after User-Agent change=%d want 3", healthyCalls.Load())
+	}
+
+	// Replacing credentials clears terminal suppression and resumes probing cleanly.
+	recovered := registeredDead.Clone()
+	recovered.RequiresSignIn = false
+	recovered.RejectedRefreshToken = ""
+	recovered.Metadata["access_token"] = "recovered-no-exp-token"
+	recovered.Metadata["refresh_token"] = "fresh-rt"
+	if _, errUpdate := manager.Update(t.Context(), recovered); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	svc.refreshAntigravityModels(t.Context())
+	svc.WaitAntigravityProbes()
+	if deadCalls.Load() != 2 {
+		t.Fatalf("recovered auth calls=%d want 2", deadCalls.Load())
+	}
+}
+
+func TestAntigravityProbeSkipsWhenTokenExpiresWaitingForSlot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resetAntigravityCapabilityCache()
+		defer resetAntigravityCapabilityCache()
+
+		slots := antigravityProbeSlots
+		antigravityProbeSlots = make(chan struct{}, cap(slots))
+		defer func() { antigravityProbeSlots = slots }()
+		for range cap(antigravityProbeSlots) {
+			antigravityProbeSlots <- struct{}{}
+		}
+
+		var clockMu sync.Mutex
+		now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+		antigravityNowFunc = func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		}
+		defer func() { antigravityNowFunc = time.Now }()
+
+		var calls atomic.Int32
+		transport := http.DefaultTransport
+		http.DefaultTransport = antigravityReviewTransport(func(r *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    r,
+			}, nil
+		})
+		defer func() { http.DefaultTransport = transport }()
+
+		manager := coreauth.NewManager(nil, nil, nil)
+		svc := &Service{cfg: &config.Config{}, coreManager: manager}
+		auth := antigravityTestAuth("slot-expiry", "https://slot-expiry.invalid")
+		auth.Metadata["expired"] = now.Add(5 * time.Minute).Format(time.RFC3339)
+		registered, errRegister := manager.Register(t.Context(), auth)
+		if errRegister != nil {
+			t.Fatal(errRegister)
+		}
+		defer GlobalModelRegistry().UnregisterClient(registered.ID)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			svc.fetchAntigravityModelCapabilityHints(t.Context(), registered)
+		}()
+		// Wait until the probe goroutine has passed pre-slot checks and is blocked acquiring a slot.
+		synctest.Wait()
+
+		// Advance clock past token expiry without emitting any auth-change notification.
+		clockMu.Lock()
+		now = now.Add(10 * time.Minute)
+		clockMu.Unlock()
+
+		for range cap(antigravityProbeSlots) {
+			<-antigravityProbeSlots
+		}
+		<-done
+		synctest.Wait()
+
+		if calls.Load() != 0 {
+			t.Fatalf("token expired while waiting for probe slot still issued %d HTTP requests, want 0", calls.Load())
+		}
+		antigravityCapabilityMu.RLock()
+		failureCount := len(antigravityAuthFailureCache)
+		antigravityCapabilityMu.RUnlock()
+		if failureCount != 0 {
+			t.Fatalf("expected 0 failure cache entries, got %d", failureCount)
+		}
+	})
 }

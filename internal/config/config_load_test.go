@@ -190,18 +190,21 @@ func TestPrepareConfigFileForUploadLeavesSettledConfigUntouched(t *testing.T) {
 		"no secret":            "# operator note\nport: 8317\n",
 		"null v8 secret":       "# operator note\nmanagement:\n  secret-key: null\n",
 		"tilde legacy secret":  "# operator note\nremote-management:\n  secret-key: ~\n",
-		"empty file":           "",
 		"shipped template":     string(shippedTemplate),
 	} {
 		t.Run(name, func(t *testing.T) {
-			path := writeUploadTestConfig(t, content)
-
-			if errPrepare := PrepareConfigFileForUpload(path); errPrepare != nil {
-				t.Fatalf("PrepareConfigFileForUpload() error = %v", errPrepare)
+			settled, _, errEnsure := EnsureServerIDInConfigBytes([]byte(content))
+			if errEnsure != nil {
+				t.Fatal(errEnsure)
 			}
+			path := writeUploadTestConfig(t, string(settled))
 
-			if saved := readUploadTestConfig(t, path); saved != content {
-				t.Fatalf("config rewritten to %q, want it untouched", saved)
+			snapshot, errPrepare := PrepareConfigFileForUploadWithOptional(path, false)
+			if errPrepare != nil {
+				t.Fatalf("prepare config: %v", errPrepare)
+			}
+			if string(snapshot) != string(settled) || readUploadTestConfig(t, path) != string(settled) {
+				t.Fatal("preparing an already settled config changed its bytes")
 			}
 		})
 	}

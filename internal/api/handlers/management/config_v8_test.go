@@ -51,12 +51,12 @@ func TestConfigV8MigrationAndLegacyAPI(t *testing.T) {
 	}
 	request(http.MethodGet, "/v8/management/config", "", 200)
 	saved, _ := os.ReadFile(path)
-	if string(saved) != raw {
+	if config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatal("GET migrated the config")
 	}
 	request(http.MethodPatch, "/v8/management/config", `{"server":{"port":"invalid"}}`, 422)
 	saved, _ = os.ReadFile(path)
-	if string(saved) != raw {
+	if config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatal("failed write migrated the config")
 	}
 	request(http.MethodPut, "/v0/management/request-retry", `{"value":2}`, 200)
@@ -147,7 +147,7 @@ func TestConfigV8CommentsUnknownLegacySectionsOnWrite(t *testing.T) {
 	request(http.MethodPatch, "/v8/management/config", `{"home":{"enabled":true}}`, http.StatusBadRequest)
 	request(http.MethodPatch, "/v8/management/config", `{"unknown-setting":true}`, http.StatusBadRequest)
 	saved, err := os.ReadFile(path)
-	if err != nil || string(saved) != raw {
+	if err != nil || config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatalf("read or failed write changed the config: %v", err)
 	}
 	request(http.MethodPut, "/v8/management/config/requests/proxy-url", `"direct"`, http.StatusOK)
@@ -212,7 +212,7 @@ func TestConfigV8CommentsUnknownNestedFieldsOnWrite(t *testing.T) {
 		}
 	}
 	request(http.MethodGet, "/v8/management/config", "", http.StatusOK)
-	if saved, errRead := os.ReadFile(path); errRead != nil || string(saved) != raw {
+	if saved, errRead := config.ReadConfigFile(path); errRead != nil || config.ComputeSourceHash(saved) != cfg.SourceHash {
 		t.Fatalf("GET changed existing config: %v", errRead)
 	}
 	request(http.MethodPatch, "/v8/management/config", `{"server":{"port":8318}}`, http.StatusOK)
@@ -687,8 +687,6 @@ plugins:
 			t.Fatal(errLoad)
 		}
 		loaded.Home = cfg.Home
-		// SourceHash is runtime-only metadata of a file load, not persisted config.
-		loaded.SourceHash = ""
 		select {
 		case snapshot := <-reloads:
 			if !reflect.DeepEqual(snapshot, loaded) || !reflect.DeepEqual(h.cfg, loaded) {
@@ -704,7 +702,7 @@ plugins:
 	// Simulate a new sibling written on the server after the first deletion.
 	// The next request must use the latest file, not a stale runtime projection.
 	data, _ := read()
-	data = []byte(strings.Replace(string(data), "max-retry-interval: 30", "max-retry-interval: 30\n        max-retry-credentials: 7 # Keep new sibling", 1))
+	data = []byte(strings.Replace(string(data), "    max-retry-interval: 30\n", "    max-retry-interval: 30\n    max-retry-credentials: 7 # Keep new sibling\n", 1))
 	if err = os.WriteFile(file, data, 0600); err != nil {
 		t.Fatal(err)
 	}

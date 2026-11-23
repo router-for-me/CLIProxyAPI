@@ -47,14 +47,13 @@ func newCopilotCatalogTestRefresher(t *testing.T, manager *coreauth.Manager, cfg
 }
 
 func registerCopilotCatalogTestAuth(t *testing.T, manager *coreauth.Manager, fetched time.Time) *coreauth.Auth {
+	useCopilotTestModels(t)
 	t.Helper()
-	raw, err := json.Marshal(copilot.Catalog{FetchedAt: fetched, Models: []copilot.Model{{ID: "copilot-catalog-test-model", Endpoints: []string{copilot.Chat}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	snapshot := copilot.NewCatalog([]copilot.Model{{ID: "copilot-catalog-test-model", Endpoints: []string{copilot.Chat}}}, fetched)
 	a, err := manager.Register(context.Background(), &coreauth.Auth{
 		ID: t.Name(), Provider: copilot.Provider, Status: coreauth.StatusActive,
-		Metadata: map[string]any{"type": copilot.Provider, "access_token": "old-token", "refresh_token": "grant", "base_url": "https://api.individual.githubcopilot.com", "expired": time.Now().Add(24 * time.Hour).Format(time.RFC3339), copilot.CatalogKey: string(raw)},
+		CopilotCatalog: snapshot,
+		Metadata:       map[string]any{"type": copilot.Provider, "access_token": "old-token", "refresh_token": "grant", "base_url": "https://api.individual.githubcopilot.com", "expired": time.Now().Add(24 * time.Hour).Format(time.RFC3339)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,13 +92,8 @@ func TestCopilotAccountCatalogRepublishesOnAuthUpdate(t *testing.T) {
 	base := registerCopilotCatalogTestAuth(t, manager, time.Now())
 	r.reconcile(ctx, time.Now())
 	updated := base.Clone()
-	catalog := copilot.Catalog{FetchedAt: time.Now(), Models: []copilot.Model{{ID: "copilot-test-new", Endpoints: []string{copilot.Messages}}}}
-	data, err := json.Marshal(catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updated.Metadata[copilot.CatalogKey] = string(data)
-	current, err := manager.UpdateRefreshedAuth(ctx, base, updated)
+	updated.CopilotCatalog = copilot.NewCatalog([]copilot.Model{{ID: "copilot-test-new", Endpoints: []string{copilot.Messages}}}, time.Now())
+	current, err := manager.Update(ctx, updated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,13 +102,8 @@ func TestCopilotAccountCatalogRepublishesOnAuthUpdate(t *testing.T) {
 		t.Fatalf("update did not publish the account catalog with its alias: %+v", models)
 	}
 	updated = current.Clone()
-	catalog.Models = []copilot.Model{}
-	data, err = json.Marshal(catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updated.Metadata[copilot.CatalogKey] = string(data)
-	if _, err = manager.UpdateRefreshedAuth(ctx, current, updated); err != nil {
+	updated.CopilotCatalog = copilot.NewCatalog(nil, time.Now())
+	if _, err = manager.Update(ctx, updated); err != nil {
 		t.Fatal(err)
 	}
 	r.reconcile(ctx, time.Now())
@@ -128,7 +117,7 @@ func TestCopilotPublicModelRegistrationAndRouting(t *testing.T) {
 		name, prefix, alias string
 		forcePrefix         bool
 	}{
-		{"team-prefix", "team", "routing-chat", false},
+		{"team-prefix", "team", "fast", false},
 		{"copilot-prefix", "copilot", "routing-chat", false},
 		{"qualified-alias", "copilot", "copilot/routing-chat", false},
 		{"alias-equals-prefix", "copilot", "copilot", false},
@@ -141,6 +130,7 @@ func TestCopilotPublicModelRegistrationAndRouting(t *testing.T) {
 }
 
 func testCopilotPublicModelRegistrationAndRouting(t *testing.T, prefix, alias string, forcePrefix bool) {
+	useCopilotTestModels(t)
 	t.Helper()
 	const native = "copilot-routing-chat"
 	const public = "copilot/copilot-routing-chat"
@@ -177,13 +167,11 @@ oauth:
 	model.Capabilities.Supports.Reasoning = json.RawMessage(`["low","high"]`)
 	model.Capabilities.Limits.Context = 32768
 	models := []copilot.Model{model, {ID: "copilot-routing-hidden", Endpoints: []string{copilot.Chat}}}
-	raw, err := json.Marshal(copilot.Catalog{FetchedAt: time.Now(), Models: models})
-	if err != nil {
-		t.Fatal(err)
-	}
+	snapshot := copilot.NewCatalog(models, time.Now())
 	auth, err := manager.Register(t.Context(), &coreauth.Auth{
 		ID: t.Name(), Provider: copilot.Provider, Prefix: prefix, Status: coreauth.StatusActive,
-		Metadata: map[string]any{"access_token": "test-token", "base_url": "https://api.individual.githubcopilot.com", copilot.CatalogKey: string(raw)},
+		CopilotCatalog: snapshot,
+		Metadata:       map[string]any{"access_token": "test-token", "base_url": "https://api.individual.githubcopilot.com"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -209,7 +197,7 @@ oauth:
 			t.Fatalf("missing model %s in Copilot registration", id)
 		}
 		info := registered[idx]
-		if info.DisplayName != "Routing Chat (Copilot)" || info.MetadataModelID != native ||
+		if info.DisplayName != "Routing Chat (Copilot)" || info.SourceModelID != public || info.MetadataModelID != native ||
 			info.ContextLength != 32768 || !slices.Contains(info.SupportedInputModalities, "IMAGE") ||
 			info.Thinking == nil || !slices.Equal(info.Thinking.Levels, []string{"low", "high"}) {
 			t.Fatalf("unexpected catalog metadata for %s: %+v", id, info)
@@ -237,16 +225,21 @@ oauth:
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		if wire := ojson.ParseBytes(body); wire.Get("model").String() != native || wire.Get("reasoning_effort").String() != "high" {
+		wire := ojson.ParseBytes(body)
+		if wire.Get("model").String() != native || wire.Get("reasoning_effort").String() != "high" {
 			t.Fatalf("unexpected upstream request: %s", body)
 		}
 		status := http.StatusOK
+		header := make(http.Header)
 		response := `{"model":"copilot-routing-chat","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
-		if returnLimit {
+		if wire.Get("stream").Bool() {
+			header.Set("Content-Type", "text/event-stream")
+			response = "data: " + `{"model":"copilot-routing-chat","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}` + "\n\ndata: [DONE]\n\n"
+		} else if returnLimit {
 			status = http.StatusTooManyRequests
 			response = `{"error":{"message":"copilot_test_request_limit"}}`
 		}
-		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(response))}, nil
+		return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(response))}, nil
 	}))
 	request := func(id string) int {
 		id += "(high)"
@@ -278,6 +271,35 @@ oauth:
 	}
 	if calls != len(publicIDs)+2 {
 		t.Fatalf("upstream calls = %d, want %d", calls, len(publicIDs)+2)
+	}
+	if prefix == "team" {
+		model := prefix + "/" + alias + "(high)"
+		payload := fmt.Appendf(nil, `{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, model)
+		count, _, errCount := base.ExecuteCountWithAuthManager(ctx, "openai", model, payload, "")
+		if errCount != nil || ojson.GetBytesNoCopy(count, "usage.prompt_tokens").Int() <= 0 || calls != len(publicIDs)+2 {
+			t.Fatalf("count did not use the published Copilot route: %s, error=%v", count, errCount)
+		}
+		chunks, _, errs := base.ExecuteStreamWithAuthManager(ctx, "openai", model, payload, "")
+		var output strings.Builder
+		for chunks != nil || errs != nil {
+			select {
+			case chunk, ok := <-chunks:
+				if !ok {
+					chunks = nil
+				}
+				output.Write(chunk)
+			case errStream, ok := <-errs:
+				if !ok {
+					errs = nil
+				}
+				if errStream != nil {
+					t.Fatalf("stream for %s: %v", model, errStream.Error)
+				}
+			}
+		}
+		if !strings.Contains(output.String(), `"content":"ok"`) || calls != len(publicIDs)+3 {
+			t.Fatalf("stream did not use the published Copilot route: %s (upstream calls=%d)", output.String(), calls)
+		}
 	}
 }
 
@@ -376,7 +398,7 @@ func TestCopilotRoutesOnlyPublishedModels(t *testing.T) {
 			}
 			for _, id := range tc.published {
 				if !slices.ContainsFunc(registered, func(info *ModelInfo) bool {
-					return info.ID == id && info.MetadataModelID == tc.native
+					return info.ID == id && info.SourceModelID == copilot.ModelPrefix+tc.native && info.MetadataModelID == tc.native
 				}) {
 					t.Fatalf("missing route %q to %q", id, tc.native)
 				}
@@ -439,19 +461,18 @@ func TestCopilotRoutesOnlyPublishedModels(t *testing.T) {
 }
 
 func registerCopilotRoutingTestAuth(t *testing.T, manager *coreauth.Manager, prefix string, modelIDs ...string) *coreauth.Auth {
+	useCopilotTestModels(t)
 	t.Helper()
 	models := make([]copilot.Model, 0, len(modelIDs))
 	for _, id := range modelIDs {
 		models = append(models, copilot.Model{ID: id, Endpoints: []string{copilot.Chat}})
 	}
-	raw, err := json.Marshal(copilot.Catalog{FetchedAt: time.Now(), Models: models})
-	if err != nil {
-		t.Fatal(err)
-	}
+	snapshot := copilot.NewCatalog(models, time.Now())
 	// The registry keeps registration epochs even after a client is removed.
 	auth, err := manager.Register(t.Context(), &coreauth.Auth{
 		ID: t.Name() + "/" + uuid.NewString(), Provider: copilot.Provider, Prefix: prefix, Status: coreauth.StatusActive,
-		Metadata: map[string]any{"access_token": "test-token", "base_url": "https://api.individual.githubcopilot.com", copilot.CatalogKey: string(raw)},
+		CopilotCatalog: snapshot,
+		Metadata:       map[string]any{"access_token": "test-token", "base_url": "https://api.individual.githubcopilot.com"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -461,6 +482,7 @@ func registerCopilotRoutingTestAuth(t *testing.T, manager *coreauth.Manager, pre
 }
 
 func TestCopilotPublicModelsShareModelCooldown(t *testing.T) {
+	useCopilotTestModels(t)
 	const native = "copilot-shared-cooldown"
 	const public = copilot.ModelPrefix + native
 	const prefixed = copilot.ModelPrefix + public
@@ -471,13 +493,11 @@ func TestCopilotPublicModelsShareModelCooldown(t *testing.T) {
 			manager := coreauth.NewManager(nil, nil, nil)
 			manager.SetConfig(cfg)
 			service := &Service{cfg: cfg, coreManager: manager}
-			raw, err := json.Marshal(copilot.Catalog{FetchedAt: time.Now(), Models: []copilot.Model{{ID: native, Endpoints: []string{copilot.Chat}}}})
-			if err != nil {
-				t.Fatal(err)
-			}
+			snapshot := copilot.NewCatalog([]copilot.Model{{ID: native, Endpoints: []string{copilot.Chat}}}, time.Now())
 			auth, err := manager.Register(ctx, &coreauth.Auth{
 				ID: t.Name(), Provider: copilot.Provider, Prefix: copilot.Provider, Status: coreauth.StatusActive,
-				Metadata: map[string]any{"access_token": "test-token", "base_url": "https://api.individual.githubcopilot.com", copilot.CatalogKey: string(raw)},
+				CopilotCatalog: snapshot,
+				Metadata:       map[string]any{"access_token": "test-token", "base_url": "https://api.individual.githubcopilot.com"},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -628,8 +648,8 @@ func TestCopilotRemovedNativeCooldownDoesNotFollowReusedAlias(t *testing.T) {
 	}
 	reg := registry.GetGlobalRegistry()
 	for _, id := range []string{beta, alpha} {
-		native, _ := reg.ClientModelRoute(auth.ID, id, "")
-		if native != "beta" || reg.IsModelSuspendedForClient(auth.ID, id) || reg.IsModelQuotaExceededForClient(auth.ID, id) {
+		native := reg.LookupClientModelRoute(auth.ID, id).SourceModelID
+		if native != beta || reg.IsModelSuspendedForClient(auth.ID, id) || reg.IsModelQuotaExceededForClient(auth.ID, id) {
 			t.Fatalf("route %q was not published as available beta: native = %q", id, native)
 		}
 		if errMsg := request(id); errMsg != nil {
@@ -828,7 +848,7 @@ func TestCopilotCatalogFetchOutcomesAndCredentialPreservation(t *testing.T) {
 			if (len(models) != 0) != (status == http.StatusTooManyRequests) {
 				t.Fatalf("wrong availability after HTTP %d: %+v", status, models)
 			}
-			if status == http.StatusTooManyRequests && current.Metadata[copilot.CatalogKey] != a.Metadata[copilot.CatalogKey] {
+			if status == http.StatusTooManyRequests && current.CopilotCatalog != a.CopilotCatalog {
 				t.Fatal("failure extended the catalog TTL")
 			}
 		})
@@ -860,11 +880,10 @@ func TestCopilotCatalogClocksAndExpiryAreIndependent(t *testing.T) {
 	if len(r.jobs) != 1 {
 		t.Fatal("directory retry waited for token expiration")
 	}
-	// Explicitly expire the persisted snapshot while a discovery job is pending.
+	// Explicitly expire the runtime snapshot while a discovery job is pending.
 	_, _, err := m.Modify(t.Context(), a.ID, a.RegistrationEpoch, func(current *coreauth.Auth) error {
-		raw, errEncode := json.Marshal(copilot.Catalog{FetchedAt: time.Now().Add(-copilot.CatalogMaxAge - time.Minute), Models: []copilot.Model{{ID: "copilot-catalog-test-model", Endpoints: []string{copilot.Chat}}}})
-		current.Metadata[copilot.CatalogKey] = string(raw)
-		return errEncode
+		current.CopilotCatalog = copilot.NewCatalog([]copilot.Model{{ID: "copilot-catalog-test-model", Endpoints: []string{copilot.Chat}}}, time.Now().Add(-copilot.CatalogMaxAge-time.Minute))
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -876,11 +895,12 @@ func TestCopilotCatalogClocksAndExpiryAreIndependent(t *testing.T) {
 }
 
 func TestCopilotCatalogRejectsStaleDiscoveryResults(t *testing.T) {
-	for _, change := range []string{"token", "origin", "registration", "catalog", "disabled", "removed"} {
+	for _, change := range []string{"token", "account", "origin", "registration", "catalog", "disabled", "removed"} {
 		t.Run(change, func(t *testing.T) {
 			m := coreauth.NewManager(nil, nil, nil)
 			r := newCopilotCatalogTestRefresher(t, m, &config.Config{})
 			a := registerCopilotCatalogTestAuth(t, m, time.Now().Add(-copilot.CatalogMaxAge*3/4))
+			newer := copilot.NewCatalog(nil, time.Now())
 			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", copilotCatalogTransport(func(req *http.Request) (*http.Response, error) {
 				if change == "removed" {
 					m.Remove(t.Context(), a.ID)
@@ -894,10 +914,12 @@ func TestCopilotCatalogRejectsStaleDiscoveryResults(t *testing.T) {
 						switch change {
 						case "token":
 							current.Metadata["access_token"] = "rotated"
+						case "account":
+							current.Metadata["account_id"] = "replacement"
 						case "origin":
 							current.Metadata["base_url"] = "https://api.business.githubcopilot.com"
 						case "catalog":
-							current.Metadata[copilot.CatalogKey] = "newer-catalog"
+							current.CopilotCatalog = newer
 						case "disabled":
 							current.Disabled = true
 						}
@@ -922,11 +944,15 @@ func TestCopilotCatalogRejectsStaleDiscoveryResults(t *testing.T) {
 			if err == nil {
 				t.Fatal("stale directory was accepted")
 			}
-			want := a.Metadata[copilot.CatalogKey]
+			want := a.CopilotCatalog
 			if change == "catalog" {
-				want = "newer-catalog"
+				want = newer
+			} else if change == "registration" {
+				want = nil
+			} else if change == "account" || change == "origin" || change == "disabled" {
+				want = copilot.UnavailableCatalog
 			}
-			if !exists || current.Metadata[copilot.CatalogKey] != want {
+			if !exists || current.CopilotCatalog != want {
 				t.Fatal("stale directory overwrote current state")
 			}
 		})

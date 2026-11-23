@@ -9,6 +9,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
+var claude55Model = regexp.MustCompile(`^claude-(opus|sonnet)-5-5(?:-(high|reasoning))?(?:-[0-9]{8})?(?:\[[^\[\]]+\])?$`)
+
 // claudeFableForcedToolChoiceModel matches Claude Fable 5.1 and 5.2 (dashed or
 // dotted version), which reject forced tool use like Claude 5.5. Fable 5
 // accepts it.

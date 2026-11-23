@@ -34,7 +34,9 @@ func TestRestoreUsageMetadata(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := restoreUsageMetadata(tt.input)
+			doc := ojson.NewDoc(tt.input)
+			restoreUsageMetadata(doc, "")
+			result := doc.Bytes()
 			if string(result) != tt.expected {
 				t.Errorf("restoreUsageMetadata() = %s, want %s", string(result), tt.expected)
 			}
@@ -217,6 +219,63 @@ func TestConvertAntigravityResponseToGeminiStream_ResponseFreeEventDoesNotStartS
 	doneResults := ConvertAntigravityResponseToGemini(ctx, "gemini-3.7-flash", nil, nil, []byte("[DONE]"), &param)
 	if len(doneResults) != 0 {
 		t.Fatalf("response-free events must not synthesize a terminal chunk, got %d results: %s", len(doneResults), doneResults[0])
+	}
+}
+
+func TestGeminiStreamTerminalRequiresGeneratedOutput(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "")
+	for _, tt := range []struct {
+		name     string
+		response string
+		wantStop bool
+	}{
+		{"signature only", `{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig","text":""}]}}]}`, false},
+		{"prompt tokens only", `{"usageMetadata":{"promptTokenCount":120,"candidatesTokenCount":0,"thoughtsTokenCount":0}}`, false},
+		{"signature and filtered prompt usage", `{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig","text":""}]}}],"cpaUsageMetadata":{"promptTokenCount":120}}`, false},
+		{"thought tokens only", `{"usageMetadata":{"thoughtsTokenCount":2}}`, true},
+		{"filtered candidate tokens only", `{"cpaUsageMetadata":{"candidatesTokenCount":1}}`, true},
+		{"grounding only", `{"candidates":[{"groundingMetadata":{"groundingChunks":[{"web":{"title":"source"}}]}}]}`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte(`{"response":`+tt.response+`}`), &param)
+			tail := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte("[DONE]"), &param)
+			if !tt.wantStop {
+				if len(tail) != 0 {
+					t.Fatalf("zero-output stream produced a terminal chunk: %s", tail)
+				}
+			} else if len(tail) != 1 || ojson.GetBytesNoCopy(tail[0], "candidates.0.finishReason").String() != "STOP" {
+				t.Fatalf("expected a single STOP chunk, got %s", tail)
+			}
+		})
+	}
+}
+
+func TestGeminiStreamJSONArrayRestoresResponseFields(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "json")
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := first + "_logs"
+	original := []byte(`{"tools":[{"functionDeclarations":[{"name":"` + first + `"},{"name":"` + second + `"}]}]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	raw := []byte(`[{},
+		{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `"}}]}}],"cpaUsageMetadata":{"promptTokenCount":120}}},
+		{"response":{"candidates":[{"content":{"parts":[{"functionResponse":{"name":"` + mapped + `"}}]}}],"cpaUsageMetadata":{"promptTokenCount":121}}}]`)
+
+	out := ConvertAntigravityResponseToGemini(ctx, "", original, nil, raw, nil)
+	if len(out) != 1 {
+		t.Fatalf("expected one array chunk, got %d", len(out))
+	}
+	items := ojson.ParseBytes(out[0]).Array()
+	if len(items) != 2 {
+		t.Fatalf("expected two responses, got %s", out[0])
+	}
+	for i, field := range []string{"functionCall", "functionResponse"} {
+		if got := items[i].Get("candidates.0.content.parts.0." + field + ".name").String(); got != second {
+			t.Errorf("response %d: %s.name = %q, want %q", i, field, got, second)
+		}
+		if items[i].Get("cpaUsageMetadata").Exists() || items[i].Get("usageMetadata.promptTokenCount").Int() != int64(120+i) {
+			t.Errorf("response %d: usage metadata not restored: %s", i, items[i].Raw)
+		}
 	}
 }
 
