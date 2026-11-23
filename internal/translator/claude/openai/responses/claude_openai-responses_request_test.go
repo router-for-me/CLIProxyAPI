@@ -3449,3 +3449,427 @@ func TestConvertOpenAIResponsesRequestToClaude_InputFileAndToolOutputMedia(t *te
 		}
 	})
 }
+
+func TestConvertOpenAIResponsesRequestToClaude_ToolOutputCacheControl(t *testing.T) {
+	findToolResult := func(t *testing.T, out []byte, callID string) ojson.Result {
+		t.Helper()
+		var found ojson.Result
+		ok := false
+		ojson.GetBytesNoCopy(out, "messages").ForEach(func(_, msg ojson.Result) bool {
+			msg.Get("content").ForEach(func(_, block ojson.Result) bool {
+				if block.Get("type").String() == "tool_result" && block.Get("tool_use_id").String() == callID {
+					found = block
+					ok = true
+					return false
+				}
+				return true
+			})
+			return !ok
+		})
+		if !ok {
+			t.Fatalf("expected tool_result for %q. Output: %s", callID, string(out))
+		}
+		return found
+	}
+
+	assertNoInnerCacheControl := func(t *testing.T, toolResult ojson.Result, out []byte) {
+		t.Helper()
+		content := toolResult.Get("content")
+		if !content.IsArray() {
+			return
+		}
+		for i, part := range content.Array() {
+			if part.Get("cache_control").Exists() {
+				t.Fatalf("tool_result.content[%d] must not carry cache_control. Output: %s", i, string(out))
+			}
+		}
+	}
+
+	t.Run("function_call_output item-level cache_control", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run lookup"}]},
+				{"type": "function_call", "call_id": "call_x", "name": "lookup", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_x", "output": "long tool output", "cache_control": {"type": "ephemeral"}}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_x")
+		if got := tr.Get("content").String(); got != "long tool output" {
+			t.Fatalf("content = %q, want %q. Output: %s", got, "long tool output", string(out))
+		}
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("custom_tool_call_output item-level cache_control with ttl", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Patch file"}]},
+				{"type": "custom_tool_call", "call_id": "call_c1", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch"},
+				{"type": "custom_tool_call_output", "call_id": "call_c1", "output": "patched", "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_c1")
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+		if got := tr.Get("cache_control.ttl").String(); got != "1h" {
+			t.Fatalf("tool_result cache_control.ttl = %q, want 1h. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("function_call_output single text part cache_control hoisted", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run lookup"}]},
+				{"type": "function_call", "call_id": "call_p1", "name": "lookup", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_p1", "output": [{"type": "input_text", "text": "part output", "cache_control": {"type": "ephemeral"}}]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_p1")
+		if tr.Get("content").Type != ojson.String || tr.Get("content").String() != "part output" {
+			t.Fatalf("expected collapsed string content %q, got %s. Output: %s", "part output", tr.Get("content").Raw, string(out))
+		}
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+		assertNoInnerCacheControl(t, tr, out)
+	})
+
+	t.Run("function_call_output multi-part hoists last valid cache_control without inner markers", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run lookup"}]},
+				{"type": "function_call", "call_id": "call_m1", "name": "lookup", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_m1", "output": [
+					{"type": "input_text", "text": "part 1", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+					{"type": "input_text", "text": "part 2", "cache_control": {"type": "ephemeral"}}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_m1")
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+		if tr.Get("cache_control.ttl").Exists() {
+			t.Fatalf("expected last part cache_control without ttl to win. Output: %s", string(out))
+		}
+		assertNoInnerCacheControl(t, tr, out)
+	})
+
+	t.Run("function_call_output image part cache_control hoisted", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Capture"}]},
+				{"type": "function_call", "call_id": "call_img", "name": "capture", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_img", "output": [
+					{"type": "input_text", "text": "screenshot"},
+					{"type": "input_image", "image_url": "https://example.com/pic.png", "cache_control": {"type": "ephemeral"}}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_img")
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+		assertNoInnerCacheControl(t, tr, out)
+	})
+
+	t.Run("function_call_output single structured object cache_control hoisted", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run"}]},
+				{"type": "function_call", "call_id": "call_obj", "name": "run", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_obj", "output": {"type": "input_text", "text": "obj output", "cache_control": {"type": "ephemeral"}}}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_obj")
+		if got := tr.Get("content").String(); got != "obj output" {
+			t.Fatalf("content = %q, want %q. Output: %s", got, "obj output", string(out))
+		}
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("part-level cache_control takes precedence over item-level", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run"}]},
+				{"type": "function_call", "call_id": "call_prec", "name": "run", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_prec", "cache_control": {"type": "ephemeral", "ttl": "1h"}, "output": [
+					{"type": "input_text", "text": "result", "cache_control": {"type": "ephemeral"}}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_prec")
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+		if tr.Get("cache_control.ttl").Exists() {
+			t.Fatalf("part-level cache_control should win over item-level ttl. Output: %s", string(out))
+		}
+	})
+
+	t.Run("invalid part-level cache_control falls back to valid item-level", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run"}]},
+				{"type": "function_call", "call_id": "call_fb", "name": "run", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_fb", "cache_control": {"type": "ephemeral", "ttl": "1h"}, "output": [
+					{"type": "input_text", "text": "result", "cache_control": {"type": "invalid"}}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_fb")
+		if got := tr.Get("cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("tool_result cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+		if got := tr.Get("cache_control.ttl").String(); got != "1h" {
+			t.Fatalf("tool_result cache_control.ttl = %q, want 1h. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("invalid item-level cache_control is ignored", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run"}]},
+				{"type": "function_call", "call_id": "call_inv", "name": "run", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_inv", "output": "ok", "cache_control": {"type": "invalid"}}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		tr := findToolResult(t, out, "call_inv")
+		if tr.Get("cache_control").Exists() {
+			t.Fatalf("invalid cache_control must not be attached. Output: %s", string(out))
+		}
+	})
+
+	t.Run("standalone unpaired function_call_output preserves item and part cache_control", func(t *testing.T) {
+		rawItem := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "function_call_output", "call_id": "orphan_item", "output": "seed context", "cache_control": {"type": "ephemeral"}}
+			]
+		}`)
+		outItem, errItem := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", rawItem, false)
+		if errItem != nil {
+			t.Fatalf("unexpected error: %v", errItem)
+		}
+		if got := ojson.GetBytesNoCopy(outItem, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("standalone item cache_control.type = %q, want ephemeral. Output: %s", got, string(outItem))
+		}
+
+		rawPart := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "function_call_output", "call_id": "orphan_part", "output": [
+					{"type": "input_text", "text": "seed 1", "cache_control": {"type": "ephemeral"}},
+					{"type": "input_text", "text": "seed 2"}
+				]}
+			]
+		}`)
+		outPart, errPart := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", rawPart, false)
+		if errPart != nil {
+			t.Fatalf("unexpected error: %v", errPart)
+		}
+		if got := ojson.GetBytesNoCopy(outPart, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("standalone part[0] cache_control.type = %q, want ephemeral. Output: %s", got, string(outPart))
+		}
+		if ojson.GetBytesNoCopy(outPart, "messages.0.content.1.cache_control").Exists() {
+			t.Fatalf("standalone part[1] should not have cache_control. Output: %s", string(outPart))
+		}
+	})
+
+	t.Run("late orphan tool_result folded during repair preserves cache_control", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "start"}]},
+				{"type": "function_call", "call_id": "call_late", "name": "lookup", "arguments": "{}"},
+				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "interrupted"}]},
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+				{"type": "function_call_output", "call_id": "call_late", "output": "delayed output", "cache_control": {"type": "ephemeral"}}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		msgs := ojson.GetBytesNoCopy(out, "messages").Array()
+		lastMsg := msgs[len(msgs)-1]
+		if got := lastMsg.Get("role").String(); got != "user" {
+			t.Fatalf("last message role = %q, want user. Output: %s", got, string(out))
+		}
+		if got := lastMsg.Get("content.0.type").String(); got != "text" {
+			t.Fatalf("expected folded text block, got %q. Output: %s", got, string(out))
+		}
+		if got := lastMsg.Get("content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("folded block cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("standalone empty trailing part cache_control moves to preceding block", func(t *testing.T) {
+		raw := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "function_call_output", "call_id": "orphan_blank", "output": [
+					{"type": "input_text", "text": "visible seed"},
+					{"type": "input_text", "text": "   ", "cache_control": {"type": "ephemeral"}}
+				]}
+			]
+		}`)
+		out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.0.content.0.text").String(); got != "visible seed" {
+			t.Fatalf("content.0.text = %q, want %q. Output: %s", got, "visible seed", string(out))
+		}
+		if got := ojson.GetBytesNoCopy(out, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, string(out))
+		}
+	})
+
+	t.Run("standalone all-empty output preserves last valid part cache_control on placeholder", func(t *testing.T) {
+		rawOnlyBlank := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "function_call_output", "call_id": "orphan_only_blank", "output": [
+					{"type": "input_text", "text": "   ", "cache_control": {"type": "ephemeral"}}
+				]}
+			]
+		}`)
+		outOnlyBlank, errOnlyBlank := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", rawOnlyBlank, false)
+		if errOnlyBlank != nil {
+			t.Fatalf("unexpected error: %v", errOnlyBlank)
+		}
+		if got := ojson.GetBytesNoCopy(outOnlyBlank, "messages.0.content.0.text").String(); got != "Tool result was empty." {
+			t.Fatalf("content.0.text = %q, want %q. Output: %s", got, "Tool result was empty.", string(outOnlyBlank))
+		}
+		if got := ojson.GetBytesNoCopy(outOnlyBlank, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, string(outOnlyBlank))
+		}
+
+		rawPartWins := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "function_call_output", "call_id": "orphan_blank_prec", "cache_control": {"type": "ephemeral", "ttl": "1h"}, "output": [
+					{"type": "input_text", "text": "", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+					{"type": "input_text", "text": "   ", "cache_control": {"type": "ephemeral"}}
+				]}
+			]
+		}`)
+		outPartWins, errPartWins := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", rawPartWins, false)
+		if errPartWins != nil {
+			t.Fatalf("unexpected error: %v", errPartWins)
+		}
+		if got := ojson.GetBytesNoCopy(outPartWins, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+			t.Fatalf("content.0.cache_control.type = %q, want ephemeral. Output: %s", got, string(outPartWins))
+		}
+		if ojson.GetBytesNoCopy(outPartWins, "messages.0.content.0.cache_control.ttl").Exists() {
+			t.Fatalf("last valid blank part cache_control should win over item-level ttl. Output: %s", string(outPartWins))
+		}
+
+		rawInvalidPartFallback := []byte(`{
+			"model": "claude-sonnet-5-5",
+			"input": [
+				{"type": "function_call_output", "call_id": "orphan_blank_fb", "cache_control": {"type": "ephemeral", "ttl": "1h"}, "output": [
+					{"type": "input_text", "text": "   ", "cache_control": {"type": "invalid"}}
+				]}
+			]
+		}`)
+		outFallback, errFallback := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", rawInvalidPartFallback, false)
+		if errFallback != nil {
+			t.Fatalf("unexpected error: %v", errFallback)
+		}
+		if got := ojson.GetBytesNoCopy(outFallback, "messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+			t.Fatalf("content.0.cache_control.ttl = %q, want 1h. Output: %s", got, string(outFallback))
+		}
+	})
+
+	t.Run("non-part JSON output does not hoist domain cache_control field", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			output string
+		}{
+			{
+				name:   "untyped JSON array element",
+				output: `[{"id": 1, "cache_control": {"type": "ephemeral"}}]`,
+			},
+			{
+				name:   "case-mismatched TEXT array element",
+				output: `[{"type": "TEXT", "text": "record", "cache_control": {"type": "ephemeral"}}]`,
+			},
+			{
+				name:   "case-mismatched TEXT object",
+				output: `{"type": "TEXT", "text": "record", "cache_control": {"type": "ephemeral"}}`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				raw := []byte(`{
+					"model": "claude-sonnet-5-5",
+					"input": [
+						{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Inspect"}]},
+						{"type": "function_call", "call_id": "call_raw", "name": "inspect", "arguments": "{}"},
+						{"type": "function_call_output", "call_id": "call_raw", "output": ` + tc.output + `}
+					]
+				}`)
+				out, err := ConvertOpenAIResponsesRequestToClaude("claude-sonnet-5-5", raw, false)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				tr := findToolResult(t, out, "call_raw")
+				if tr.Get("cache_control").Exists() {
+					t.Fatalf("non-part JSON payload must not be hoisted as Claude cache_control. Output: %s", string(out))
+				}
+			})
+		}
+	})
+}

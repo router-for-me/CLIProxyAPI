@@ -23,7 +23,7 @@ func ApplyThinkingWithSourcePayloadDoc(doc *ojson.Doc, currentSourcePayload, ori
 	if doc == nil {
 		return nil
 	}
-	summary := translatedRequestSummaryConfigDoc(doc, currentSourcePayload, originalSourcePayload, model, fromFormat, toFormat)
+	summary := translatedRequestSummaryConfigDoc(sdktranslator.Default(), doc, currentSourcePayload, originalSourcePayload, model, fromFormat, toFormat)
 	return thinking.ApplyThinkingWithSummaryDoc(doc, model, fromFormat, toFormat, providerKey, summary)
 }
 
@@ -74,7 +74,7 @@ func translatedRequestSummaryConfig(body, currentSourcePayload, originalSourcePa
 	return currentSummary
 }
 
-func translatedRequestSummaryConfigDoc(doc *ojson.Doc, currentSourcePayload, originalSourcePayload []byte, model, fromFormat, toFormat string) thinking.SummaryConfig {
+func translatedRequestSummaryConfigDoc(translators *sdktranslator.Registry, doc *ojson.Doc, currentSourcePayload, originalSourcePayload []byte, model, fromFormat, toFormat string) thinking.SummaryConfig {
 	if doc == nil || doc.Len() == 0 {
 		return thinking.SummaryConfig{}
 	}
@@ -99,7 +99,7 @@ func translatedRequestSummaryConfigDoc(doc *ojson.Doc, currentSourcePayload, ori
 
 	from := sdktranslator.FromString(fromFormat)
 	to := sdktranslator.FromString(toFormat)
-	if !sdktranslator.HasRequestTransformer(from, to) {
+	if !translators.HasRequestTransformer(from, to) {
 		return thinking.SummaryConfig{}
 	}
 

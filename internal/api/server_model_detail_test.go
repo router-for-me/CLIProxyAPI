@@ -130,3 +130,33 @@ func TestIssue5190ModelDetailHomeVisibility(t *testing.T) {
 		t.Fatalf("local registry leaked into Home: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestModelDetailPropagatesModelListResponseInterceptKind(t *testing.T) {
+	server := newTestServer(t)
+	var capturedReq pluginapi.ResponseInterceptRequest
+	called := false
+	server.handlers.SetPluginHost(&mockModelListInterceptorHost{
+		interceptResponse: func(_ context.Context, req pluginapi.ResponseInterceptRequest) pluginapi.ResponseInterceptResponse {
+			called = true
+			capturedReq = req
+			return pluginapi.ResponseInterceptResponse{
+				Body: []byte(`{"object":"list","data":[{"id":"vendor/visible","object":"model","owned_by":"plugin"}]}`),
+			}
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/vendor/visible", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !called {
+		t.Fatal("InterceptResponse was not called for /v1/models/{id}")
+	}
+	if capturedReq.Kind != pluginapi.ResponseInterceptKindModelList {
+		t.Fatalf("ResponseInterceptRequest.Kind = %q, want %q", capturedReq.Kind, pluginapi.ResponseInterceptKindModelList)
+	}
+}

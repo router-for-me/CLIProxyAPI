@@ -264,9 +264,9 @@ func TestManagerClaudeStreamTailCancellationIsAvailabilityNeutral(t *testing.T) 
 	if chunk := <-stream.Chunks; chunk.Err != nil || string(chunk.Payload) != "first" {
 		t.Fatalf("first chunk = %#v", chunk)
 	}
-	cancel()
 	source <- cliproxyexecutor.StreamChunk{Err: claudeRequestScopedCancellation{}}
 	close(source)
+	cancel()
 	for range stream.Chunks {
 	}
 

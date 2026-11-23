@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && !aix && !solaris
 
 package codex
 

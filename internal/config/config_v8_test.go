@@ -84,6 +84,8 @@ func TestV8ExampleLoadsAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Parsing does not allocate a file identity; startup does.
+	cfg.ServerID = reloaded.ServerID
 	var beforeNode, afterNode yaml.Node
 	if err = beforeNode.Encode(cfg); err != nil {
 		t.Fatal(err)
@@ -152,8 +154,8 @@ func TestV8PresencePrecedenceAndCleanup(t *testing.T) {
 				t.Fatalf("unexpected effective config: retry=%d cooling=%v keys=%d", cfg.RequestRetry, cfg.DisableCooling, len(cfg.APIKeys))
 			}
 			saved, _ := os.ReadFile(path)
-			if tc.unchanged && string(saved) != tc.raw {
-				t.Fatal("legacy config was rewritten")
+			if tc.unchanged && !bytes.HasPrefix(saved, []byte(tc.raw)) {
+				t.Fatal("startup changed legacy settings instead of only adding identity")
 			}
 			if !tc.unchanged {
 				var doc yaml.Node
@@ -464,6 +466,48 @@ debug: true
 	}
 	if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
 		t.Fatalf("expected no warnings for purely known configuration, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+	}
+
+	// Silent normalization collects sections without emitting warnings until explicitly flushed.
+	hook.Reset()
+	hookBuf.Reset()
+	silentOut, silentChanged, commented, errSilent := NormalizeConfigLayoutSilent(raw, true)
+	if errSilent != nil || !silentChanged {
+		t.Fatalf("NormalizeConfigLayoutSilent() changed=%v err=%v", silentChanged, errSilent)
+	}
+	if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
+		t.Fatalf("expected no warnings during silent normalization, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+	}
+	if len(commented) != 2 || !strings.Contains(string(silentOut), "# some-obsolete-legacy-block:") {
+		t.Fatalf("unexpected silent normalization output: commented=%v out=%s", commented, string(silentOut))
+	}
+	WarnUnrecognizedV8Sections(commented)
+	if !strings.Contains(hookBuf.String(), "HOOK: some-obsolete-legacy-block") || !strings.Contains(hookBuf.String(), "HOOK: another-legacy-key") {
+		t.Fatalf("expected WarnUnrecognizedV8Sections to flush collected warnings, got: %s", hookBuf.String())
+	}
+
+	// SaveConfigPreserveComments must not emit migration warnings when writing fails.
+	if os.Geteuid() != 0 {
+		hook.Reset()
+		hookBuf.Reset()
+		roPath := filepath.Join(t.TempDir(), "readonly-config.yaml")
+		if errWriteRO := os.WriteFile(roPath, raw, 0o600); errWriteRO != nil {
+			t.Fatal(errWriteRO)
+		}
+		roCfg, errLoadRO := LoadConfig(roPath)
+		if errLoadRO != nil {
+			t.Fatal(errLoadRO)
+		}
+		if errChmod := os.Chmod(roPath, 0o400); errChmod != nil {
+			t.Fatal(errChmod)
+		}
+		t.Cleanup(func() { _ = os.Chmod(roPath, 0o600) })
+		if errSaveRO := SaveConfigPreserveComments(roPath, roCfg, true); errSaveRO == nil {
+			t.Fatal("expected SaveConfigPreserveComments to fail on read-only file")
+		}
+		if len(hook.AllEntries()) != 0 || hookBuf.Len() != 0 {
+			t.Fatalf("expected no migration warnings when SaveConfigPreserveComments fails to write, got logs=%+v hook=%s", hook.AllEntries(), hookBuf.String())
+		}
 	}
 }
 
@@ -878,8 +922,9 @@ func TestV8LegacyNullRouting(t *testing.T) {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(path)
-			if err != nil || string(data) != raw {
-				t.Fatalf("loading legacy null routing rewrote the file: %v", err)
+			var node yaml.Node
+			if err != nil || yaml.Unmarshal(data, &node) != nil || yamlPath(node.Content[0], "routing").ShortTag() != "!!null" {
+				t.Fatalf("startup changed the null routing setting: %v", err)
 			}
 			if err = SaveConfigPreserveComments(path, loaded, true); err != nil {
 				t.Fatalf("migrate null routing: %v", err)
@@ -897,7 +942,7 @@ func TestV8LegacyNullRouting(t *testing.T) {
 	}
 }
 
-func TestV8SecretHashResolvesReferences(t *testing.T) {
+func TestV8SecretHashPreservesSourceReferences(t *testing.T) {
 	const secret = "test-management-reference-secret"
 	for _, tc := range []struct {
 		name        string
@@ -932,8 +977,8 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
 			}
 			effective := expandConfigAliases(doc.Content[0])
 			stored := yamlPath(effective, tc.path+".secret-key")
-			if stored == nil || stored.Value != cfg.RemoteManagement.SecretKey || !looksLikeBcrypt(stored.Value) {
-				t.Fatal("effective management secret was not hashed at the correct path")
+			if stored == nil || stored.Value != secret || !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
+				t.Fatal("startup did not hash the effective key without masking its source")
 			}
 			if cfg.RemoteManagement.AllowRemote != tc.allowRemote || cfg.Port != 8317 || !strings.Contains(string(saved), "# Keep this comment") {
 				t.Fatal("hashing changed unrelated settings or comments")
@@ -941,16 +986,11 @@ func TestV8SecretHashResolvesReferences(t *testing.T) {
 			if other := yamlPath(effective, "other.secret-key"); other != nil && other.Value != secret {
 				t.Fatal("hashing mutated another use of the shared anchor")
 			}
-			if tc.path == "management" && yamlPath(effective, "remote-management.secret-key") != nil {
-				t.Fatal("hashing left a conflicting legacy secret")
+			if _, errPrepare := PrepareConfigFileForUploadWithOptional(path, false); errPrepare == nil {
+				t.Fatal("a subsequent upload accepted the retained plaintext")
 			}
-			reloaded, err := LoadConfig(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			second, err := os.ReadFile(path)
-			if err != nil || string(second) != string(saved) || reloaded.RemoteManagement.SecretKey != cfg.RemoteManagement.SecretKey || reloaded.RemoteManagement.AllowRemote != tc.allowRemote {
-				t.Fatalf("second load changed the persisted hash or settings: %v", err)
+			if second := readUploadTestConfig(t, path); second != string(saved) {
+				t.Fatal("refused upload changed file bytes")
 			}
 		})
 	}

@@ -56,6 +56,16 @@ type CooldownStateRecord struct {
 	// CredentialRetryAfter persists a non-429 credential-wide retry deadline so
 	// restart recovery blocks all models even when ModelStates also exist.
 	CredentialRetryAfter time.Time `json:"credential_retry_after,omitempty"`
+	// NonAuthCredentialRetryAfter persists the deadline of any non-429 credential-wide
+	// cooldown that is not an auth/grant failure (e.g. 403 VALIDATION_REQUIRED), so a
+	// subsequent OAuth token refresh only clears auth/grant retry windows.
+	NonAuthCredentialRetryAfter time.Time `json:"non_auth_credential_retry_after,omitempty"`
+	// NonAuthCredentialLastError persists the underlying non-auth credential error
+	// paired with NonAuthCredentialRetryAfter so it survives a subsequent 401 and restart.
+	NonAuthCredentialLastError *Error `json:"non_auth_credential_last_error,omitempty"`
+	// NonAuthCredentialRetryEvaluated marks records produced by provenance-aware versions so
+	// a zero NonAuthCredentialRetryAfter means "explicitly no non-auth layer" rather than legacy unknown.
+	NonAuthCredentialRetryEvaluated bool `json:"non_auth_credential_retry_evaluated,omitempty"`
 	// QuotaForceCooldownUntil persists the deadline of any active quota (429)
 	// ErrorCodeForceCooldown layer so a subsequent expired non-quota LastError
 	// does not misclassify the remaining quota force window across restarts.
