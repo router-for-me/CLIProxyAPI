@@ -19,8 +19,6 @@ import (
 	"time"
 
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
-	// Pure-Go SQLite driver, registered as "sqlite".
-	_ "modernc.org/sqlite"
 )
 
 // DefaultFileName is the database file name placed under the auth directory.
@@ -167,6 +165,9 @@ func Open(path string) (*Store, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, errors.New("usagestats: empty database path")
+	}
+	if errSQLiteDriver != nil {
+		return nil, errSQLiteDriver
 	}
 	if errMkdir := os.MkdirAll(filepath.Dir(path), 0o700); errMkdir != nil {
 		return nil, fmt.Errorf("usagestats: create database directory: %w", errMkdir)
