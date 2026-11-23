@@ -1947,6 +1947,7 @@ func (m *Manager) tryAntigravityCreditsExecuteCandidates(ctx context.Context, re
 		}
 		c.auth = preparedAuth
 		publishSelectedAuthMetadata(creditsOpts.Metadata, c.auth)
+		didRefreshOnUnauthorized := false
 		for _, upstreamModel := range models {
 			creditsCtx = m.newUpstreamAttemptContext(creditsCtx)
 			resultModel := m.stateModelForExecution(c.auth, routeModel, upstreamModel, pooled)
@@ -1969,27 +1970,53 @@ func (m *Manager) tryAntigravityCreditsExecuteCandidates(ctx context.Context, re
 			}
 			var activeAuth atomic.Pointer[Auth]
 			activeAuth.Store(c.auth)
-			creditsCtx = m.withExecutionAuthRefresh(syncMetadataSessionToContext(creditsCtx, execOpts.Metadata), executionAuthRefreshOptions{
-				onAuthUpdated: func(updated *Auth) {
-					if updated != nil {
-						activeAuth.Store(updated.Clone())
-					}
-				},
-			})
+			refreshExecCtx := func(base context.Context) context.Context {
+				return m.withExecutionAuthRefresh(syncMetadataSessionToContext(base, execOpts.Metadata), executionAuthRefreshOptions{
+					onAuthUpdated: func(updated *Auth) {
+						if updated != nil {
+							activeAuth.Store(updated.Clone())
+						}
+					},
+				})
+			}
+			syncActiveAuth := func() {
+				if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != c.auth {
+					c.auth = currentAuth
+				}
+			}
+			creditsCtx = refreshExecCtx(creditsCtx)
 			executionSeq := m.nextExecutionSeq()
 			resp, errExec := c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
-			if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != c.auth {
-				c.auth = currentAuth
-			}
+			syncActiveAuth()
 			errExec = markUpstreamExecutionAttemptFromContext(creditsCtx, errExec)
-			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(creditsCtx, c.auth, execOpts.Headers), RefreshToken: authRefreshToken(c.auth), CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				if errCtx := creditsCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, false, errCtx
 				}
-				if errCancel := claudeOAuthRequestCancellation(creditsCtx, c.auth, errExec); errCancel != nil {
-					return cliproxyexecutor.Response{}, false, errCancel
+				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(creditsCtx), c.auth, errExec, didRefreshOnUnauthorized, execOpts.Headers)
+				if errCtx := creditsCtx.Err(); errCtx != nil {
+					return cliproxyexecutor.Response{}, false, errCtx
 				}
+				if okRefresh {
+					c.auth = refreshed
+					activeAuth.Store(c.auth)
+					publishSelectedAuthMetadata(execOpts.Metadata, c.auth)
+					didRefreshOnUnauthorized = true
+					creditsCtx = refreshExecCtx(m.newUpstreamAttemptContext(creditsCtx))
+					executionSeq = m.nextExecutionSeq()
+					resp, errExec = c.executor.Execute(creditsCtx, c.auth, execReq, execOpts)
+					syncActiveAuth()
+					errExec = markUpstreamExecutionAttemptFromContext(creditsCtx, errExec)
+					if errCtx := creditsCtx.Err(); errCtx != nil {
+						return cliproxyexecutor.Response{}, false, errCtx
+					}
+				}
+			}
+			if errCancel := claudeOAuthRequestCancellation(creditsCtx, c.auth, errExec); errCancel != nil {
+				return cliproxyexecutor.Response{}, false, errCancel
+			}
+			result := Result{AuthID: c.auth.ID, Provider: c.provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(creditsCtx, c.auth, execOpts.Headers), RefreshToken: authRefreshToken(c.auth), CredentialVersion: c.auth.CredentialVersion, RegistrationEpoch: c.auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
 				if ra := retryAfterFromError(errExec); ra != nil {
 					result.RetryAfter = ra
