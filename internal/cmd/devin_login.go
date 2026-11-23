@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,6 +24,7 @@ func DoDevinLogin(cfg *config.Config, options *LoginOptions) {
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
+		ProxyURL:     options.ProxyURL,
 		Metadata:     map[string]string{},
 		Prompt:       promptFn,
 	}

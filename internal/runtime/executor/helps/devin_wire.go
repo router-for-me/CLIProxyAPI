@@ -5,10 +5,8 @@ import (
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -18,10 +16,13 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
+
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -68,10 +69,12 @@ type DevinToolCall struct {
 
 // DevinToolCallDelta represents a streaming tool call chunk from response Field 6.
 type DevinToolCallDelta struct {
-	ID        string
-	Name      string
-	Arguments string
-	Index     int
+	ID               string
+	Name             string
+	Arguments        string
+	InvalidJSONStr   string
+	InvalidJSONErr   string
+	IsCustomToolCall bool
 }
 
 // DevinImage represents an image attachment in a DevinPrompt (Prompt #10).
@@ -82,15 +85,18 @@ type DevinImage struct {
 
 // DevinPrompt represents a single turn in the request history (repeated Field 3).
 type DevinPrompt struct {
-	MessageID     string
-	Source        int // 1=user, 2=assistant, 4=tool
-	Content       string
-	Images        []DevinImage
-	ToolCalls     []DevinToolCall
-	ToolCallID    string // For source=4 (tool result)
-	Thinking      string
-	Signature     []byte
-	SignatureType string
+	MessageID          string
+	Source             int // 1=user, 2=assistant, 4=tool
+	Content            string
+	Images             []DevinImage
+	ToolCalls          []DevinToolCall
+	ToolCallID         string // For source=4 (tool result)
+	OriginalToolCallID string // Retained when downgraded from source=4 to source=1
+	IsOrphanedTool     bool   // Explicit flag marking downgraded tool results
+	DroppedPart        string // Type of a user media part Devin cannot send; never put on the wire
+	Thinking           string
+	Signature          []byte
+	SignatureType      string
 }
 
 // DevinUsage captures token accounting from response Field 7.
@@ -98,6 +104,7 @@ type DevinUsage struct {
 	PromptTokens     int64             `json:"prompt_tokens"`
 	CompletionTokens int64             `json:"completion_tokens"`
 	CachedTokens     int64             `json:"cached_tokens"`
+	CacheWriteTokens int64             `json:"cache_write_tokens,omitempty"`
 	StatusCode       uint64            `json:"status_code,omitempty"`
 	RequestID        string            `json:"request_id,omitempty"`
 	ModelName        string            `json:"model_name,omitempty"`
@@ -253,7 +260,7 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 
 	var f1Bytes []byte
 	f1Bytes = protowire.AppendTag(f1Bytes, 1, protowire.BytesType)
-	f1Bytes = protowire.AppendString(f1Bytes, "devin-cli")
+	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientName)
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 2, protowire.BytesType)
 	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientVersion)
@@ -271,9 +278,6 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientVersion)
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 12, protowire.BytesType)
-	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientName)
-
-	f1Bytes = protowire.AppendTag(f1Bytes, 28, protowire.BytesType)
 	f1Bytes = protowire.AppendString(f1Bytes, DevinDefaultClientName)
 
 	f1Bytes = protowire.AppendTag(f1Bytes, 31, protowire.BytesType)
@@ -614,7 +618,7 @@ func ParseDevinFrame(payload []byte) (DevinFrameResult, error) {
 }
 
 // SanitizeDevinSystemPrompt strips Claude Code attribution and CLI identity headers
-// (referencing Antigravity conventions), and applies zero-width obfuscation for configured sensitive words.
+// (referencing Antigravity conventions), and applies configured sensitive-word replacements and obfuscation.
 func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) string {
 	if prompt == "" {
 		return ""
@@ -645,16 +649,13 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 		if strings.Contains(trimmed, "- Don’t output ANSI escape codes directly — the CLI renderer applies them.") {
 			continue
 		}
-		if matcher != nil && matcher.Matches(trimmed) {
-			continue
-		}
 		kept = append(kept, line)
 	}
-	res := strings.TrimSpace(strings.Join(kept, "\n"))
+	res := strings.Join(kept, "\n")
 	if matcher != nil && res != "" {
-		res = matcher.ObfuscateText(res)
+		return matcher.SanitizeDevinText(res)
 	}
-	return res
+	return strings.TrimSpace(res)
 }
 
 func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
@@ -674,8 +675,8 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 				return tc, protowire.ParseError(vn)
 			}
 			pos += vn
-			if num == 4 {
-				tc.Index = int(v)
+			if num == 6 {
+				tc.IsCustomToolCall = (v != 0)
 			}
 		case protowire.BytesType:
 			val, bn := protowire.ConsumeBytes(data[pos:])
@@ -690,6 +691,10 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 				tc.Name = string(val)
 			case 3:
 				tc.Arguments = string(val)
+			case 4:
+				tc.InvalidJSONStr = string(val)
+			case 5:
+				tc.InvalidJSONErr = string(val)
 			}
 		default:
 			nSkip := protowire.ConsumeFieldValue(num, typ, data[pos:])
@@ -785,8 +790,8 @@ func parseDevinUsageField(data []byte) *DevinUsage {
 				u.PromptTokens += int64(v)
 			case 3: // Output tokens
 				u.CompletionTokens = int64(v)
-			case 4: // Additional context/system prompt tokens in OpenAI-family models (total prompt = 2 + 4)
-				u.PromptTokens += int64(v)
+			case 4: // Cache write tokens
+				u.CacheWriteTokens += int64(v)
 			case 5: // Cache read tokens
 				u.CachedTokens = int64(v)
 			case 6: // Status code
@@ -1217,15 +1222,16 @@ func BuildDevinUpstreamLogBody(
 
 // DevinUpstreamResponseLog represents the decoded response frames from Devin Connect-RPC.
 type DevinUpstreamResponseLog struct {
-	Status        string          `json:"status,omitempty"`
-	FramesCount   int             `json:"frames_count"`
-	Content       string          `json:"content,omitempty"`
-	Thinking      string          `json:"thinking,omitempty"`
-	Signature     string          `json:"signature,omitempty"`
-	SignatureType string          `json:"signature_type,omitempty"`
-	ToolCalls     []DevinToolCall `json:"tool_calls,omitempty"`
-	Usage         *DevinUsage     `json:"usage,omitempty"`
-	UnknownFields []int           `json:"unknown_fields,omitempty"`
+	Status                string                      `json:"status,omitempty"`
+	FramesCount           int                         `json:"frames_count"`
+	Content               string                      `json:"content,omitempty"`
+	Thinking              string                      `json:"thinking,omitempty"`
+	Signature             string                      `json:"signature,omitempty"`
+	SignatureType         string                      `json:"signature_type,omitempty"`
+	ToolCalls             []DevinToolCall             `json:"tool_calls,omitempty"`
+	Usage                 *DevinUsage                 `json:"usage,omitempty"`
+	UnknownFields         []int                       `json:"unknown_fields,omitempty"`
+	ApplyPatchDiagnostics *DevinApplyPatchDiagnostics `json:"-"`
 }
 
 // BuildDevinUpstreamResponseLogBody formats the decoded Devin response and the intermediate

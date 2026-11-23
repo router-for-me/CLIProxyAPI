@@ -4,21 +4,77 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
+
+type pluginCallFinishKey struct{}
+
+type pluginCallFinishHook struct {
+	once    sync.Once
+	claimed atomic.Bool
+	fn      func()
+}
+
+func withPluginCallFinish(ctx context.Context, fn func()) (context.Context, func()) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hook := &pluginCallFinishHook{fn: fn}
+	return context.WithValue(ctx, pluginCallFinishKey{}, hook), func() {
+		if !hook.claimed.Load() {
+			hook.once.Do(hook.fn)
+		}
+	}
+}
+
+func claimPluginCallFinish(ctx context.Context) func() {
+	if ctx == nil {
+		return nil
+	}
+	hook, ok := ctx.Value(pluginCallFinishKey{}).(*pluginCallFinishHook)
+	if !ok || hook == nil || !hook.claimed.CompareAndSwap(false, true) {
+		return nil
+	}
+	return func() {
+		hook.once.Do(hook.fn)
+	}
+}
 
 type guardedPluginClient struct {
 	mu           sync.Mutex
 	cond         *sync.Cond
 	inner        pluginClient
+	instance     *hostCallbackInstance
 	calls        int
 	closed       bool
 	shutdownDone chan struct{}
 }
 
 func newGuardedPluginClient(inner pluginClient) *guardedPluginClient {
-	client := &guardedPluginClient{inner: inner, shutdownDone: make(chan struct{})}
+	instance := pluginCallbackInstance(inner)
+	if instance == nil {
+		instance = &hostCallbackInstance{}
+	}
+	client := &guardedPluginClient{inner: inner, instance: instance, shutdownDone: make(chan struct{})}
 	client.cond = sync.NewCond(&client.mu)
 	return client
+}
+
+func (c *guardedPluginClient) callbackInstance() *hostCallbackInstance {
+	if c == nil {
+		return nil
+	}
+	return c.instance
+}
+
+func pluginCallbackInstance(client pluginClient) *hostCallbackInstance {
+	if client == nil {
+		return nil
+	}
+	if provider, ok := client.(interface{ callbackInstance() *hostCallbackInstance }); ok {
+		return provider.callbackInstance()
+	}
+	return nil
 }
 
 func (c *guardedPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
@@ -29,15 +85,22 @@ func (c *guardedPluginClient) Call(ctx context.Context, method string, request [
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	onFinish := claimPluginCallFinish(ctx)
 	result := make(chan guardedPluginCallResult, 1)
 	go func() {
 		defer c.release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if onFinish != nil {
+					onFinish()
+				}
 				result <- guardedPluginCallResult{recovered: recovered}
 			}
 		}()
 		response, errCall := inner.Call(ctx, method, request)
+		if onFinish != nil {
+			onFinish()
+		}
 		result <- guardedPluginCallResult{response: response, err: errCall}
 	}()
 	select {

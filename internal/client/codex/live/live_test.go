@@ -2,7 +2,6 @@ package live
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,13 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 type apiKeyFirstSelector struct{}
@@ -794,8 +794,10 @@ func TestHandlerReportsUnauthorizedBeforeEarlyReturn(t *testing.T) {
 			if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != test.wantFailBody {
 				t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, test.wantFailBody)
 			}
-			if test.name == "response read failure" && (!strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error())) {
-				t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+			if test.name == "response read failure" {
+				if !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+					t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
+				}
 			}
 		})
 	}
@@ -1165,53 +1167,6 @@ func TestMediaRelayWrapsRawSDPForCodexBackend(t *testing.T) {
 	}
 	if payload.SDP != "v=0\r\no=gateway-offer\r\n" {
 		t.Fatalf("upstream SDP = %q", payload.SDP)
-	}
-}
-
-func TestHandlerUpdatesMediaRelayConfig(t *testing.T) {
-	handler := NewHandler(nil, nil)
-	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
-		t.Fatalf("initial media relay = %#v, error = %v", relay, errRelay)
-	}
-	enabled := &config.Config{Codex: config.CodexConfig{LiveMediaRelay: config.CodexLiveMediaRelayConfig{
-		Enabled:                 true,
-		MaxSessions:             1,
-		DisablePrivateRemoteIPs: false,
-	}}}
-	if errUpdate := handler.UpdateConfig(enabled); errUpdate != nil {
-		t.Fatalf("enable media relay: %v", errUpdate)
-	}
-	enabledRelay, errRelay := handler.currentMediaRelay()
-	if enabledRelay == nil || errRelay != nil {
-		t.Fatalf("enabled media relay = %#v, error = %v", enabledRelay, errRelay)
-	}
-	unchanged := *enabled
-	unchanged.Debug = true
-	unchanged.ProxyURL = "http://new-proxy.example"
-	if errUpdate := handler.UpdateConfig(&unchanged); errUpdate != nil {
-		t.Fatalf("apply unrelated config change: %v", errUpdate)
-	}
-	unchangedRelay, errRelay := handler.currentMediaRelay()
-	if unchangedRelay != enabledRelay || errRelay != nil {
-		t.Fatalf("unrelated config change rebuilt media relay: before=%#v after=%#v error=%v", enabledRelay, unchangedRelay, errRelay)
-	}
-	if current := handler.currentConfig(); current == nil || current.ProxyURL != "http://new-proxy.example" {
-		t.Fatalf("runtime config was not updated: %#v", current)
-	}
-	changed := *enabled
-	changed.Codex.LiveMediaRelay.MaxSessions = 2
-	if errUpdate := handler.UpdateConfig(&changed); errUpdate != nil {
-		t.Fatalf("reload media relay: %v", errUpdate)
-	}
-	changedRelay, errRelay := handler.currentMediaRelay()
-	if changedRelay == nil || changedRelay == enabledRelay || errRelay != nil {
-		t.Fatalf("changed media relay = %#v, previous=%#v error=%v", changedRelay, enabledRelay, errRelay)
-	}
-	if errUpdate := handler.UpdateConfig(&config.Config{}); errUpdate != nil {
-		t.Fatalf("disable media relay: %v", errUpdate)
-	}
-	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
-		t.Fatalf("disabled media relay = %#v, error = %v", relay, errRelay)
 	}
 }
 

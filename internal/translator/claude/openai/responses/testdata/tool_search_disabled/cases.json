@@ -1,0 +1,985 @@
+{
+ "stream": [
+  "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_ts\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}",
+  "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_search\",\"name\":\"tool_search\",\"input\":{}}}",
+  "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"calendar\"}}",
+  "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" create\\\",\\\"limit\\\":8}\"}}",
+  "data: {\"type\":\"content_block_stop\",\"index\":0}",
+  "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_cal\",\"name\":\"mcp__codex_apps__calendar_create_event\",\"input\":{}}}",
+  "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"title\\\":\\\"Standup\\\"}\"}}",
+  "data: {\"type\":\"content_block_stop\",\"index\":1}",
+  "data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_exec\",\"name\":\"exec_command\",\"input\":{}}}",
+  "data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}",
+  "data: {\"type\":\"content_block_stop\",\"index\":2}",
+  "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":5}}",
+  "data: {\"type\":\"message_stop\"}"
+ ],
+ "cases": [
+  {
+   "name": "codex_session",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     },
+     {
+      "type": "tool_search_call",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "arguments": {
+       "query": "calendar create",
+       "limit": 8
+      }
+     },
+     {
+      "type": "tool_search_output",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "tools": [
+       {
+        "type": "namespace",
+        "name": "mcp__codex_apps__",
+        "description": "Calendar.",
+        "tools": [
+         {
+          "type": "function",
+          "name": "calendar_create_event",
+          "description": "Create a calendar event.",
+          "strict": false,
+          "defer_loading": true,
+          "cache_control": {
+           "type": "ephemeral"
+          },
+          "parameters": {
+           "type": "object",
+           "properties": {
+            "title": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "title"
+           ]
+          }
+         }
+        ]
+       },
+       {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "type": "function_call",
+      "call_id": "call_cal_1",
+      "name": "calendar_create_event",
+      "namespace": "mcp__codex_apps__",
+      "arguments": "{\"title\":\"Standup\"}"
+     },
+     {
+      "type": "function_call_output",
+      "call_id": "call_cal_1",
+      "output": "created"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     },
+     {
+      "type": "tool_search",
+      "execution": "client",
+      "description": "# Tool discovery\n\nSearches deferred tools.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "limit": {
+         "type": "number"
+        },
+        "query": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      }
+     },
+     {
+      "type": "function",
+      "name": "lookup_order",
+      "description": "Look up an order.",
+      "strict": false,
+      "defer_loading": true,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "id"
+       ]
+      }
+     },
+     {
+      "type": "namespace",
+      "name": "mcp__node_repl__",
+      "description": "Node REPL.",
+      "tools": [
+       {
+        "type": "function",
+        "name": "js",
+        "description": "Run JavaScript.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "code": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "code"
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "codex_first_turn",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     },
+     {
+      "type": "tool_search",
+      "execution": "client",
+      "description": "# Tool discovery\n\nSearches deferred tools.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "limit": {
+         "type": "number"
+        },
+        "query": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      }
+     },
+     {
+      "type": "function",
+      "name": "lookup_order",
+      "description": "Look up an order.",
+      "strict": false,
+      "defer_loading": true,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "id"
+       ]
+      }
+     },
+     {
+      "type": "namespace",
+      "name": "mcp__node_repl__",
+      "description": "Node REPL.",
+      "tools": [
+       {
+        "type": "function",
+        "name": "js",
+        "description": "Run JavaScript.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "code": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "code"
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "named_declarations",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     },
+     {
+      "type": "tool_search",
+      "name": "ToolSearch"
+     },
+     {
+      "type": "tool_search",
+      "execution": "client",
+      "description": "# Tool discovery\n\nSearches deferred tools.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "limit": {
+         "type": "number"
+        },
+        "query": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      },
+      "name": "ClientSearch"
+     },
+     {
+      "type": "function",
+      "name": "lookup_order",
+      "description": "Look up an order.",
+      "strict": false,
+      "defer_loading": true,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "id"
+       ]
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "named_declarations_session",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     },
+     {
+      "type": "tool_search_call",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "arguments": {
+       "query": "calendar create",
+       "limit": 8
+      }
+     },
+     {
+      "type": "tool_search_output",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "tools": [
+       {
+        "type": "namespace",
+        "name": "mcp__codex_apps__",
+        "description": "Calendar.",
+        "tools": [
+         {
+          "type": "function",
+          "name": "calendar_create_event",
+          "description": "Create a calendar event.",
+          "strict": false,
+          "defer_loading": true,
+          "cache_control": {
+           "type": "ephemeral"
+          },
+          "parameters": {
+           "type": "object",
+           "properties": {
+            "title": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "title"
+           ]
+          }
+         }
+        ]
+       },
+       {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     },
+     {
+      "type": "tool_search",
+      "execution": "client",
+      "description": "# Tool discovery\n\nSearches deferred tools.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "limit": {
+         "type": "number"
+        },
+        "query": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      },
+      "name": "ClientSearch"
+     },
+     {
+      "type": "function",
+      "name": "lookup_order",
+      "description": "Look up an order.",
+      "strict": false,
+      "defer_loading": true,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "id"
+       ]
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "function_named_tool_search",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     },
+     {
+      "type": "function_call",
+      "call_id": "call_fts",
+      "name": "tool_search",
+      "arguments": "{\"q\":\"a\"}"
+     },
+     {
+      "type": "function_call_output",
+      "call_id": "call_fts",
+      "output": "ok"
+     },
+     {
+      "type": "tool_search_call",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "arguments": {
+       "query": "calendar create",
+       "limit": 8
+      }
+     },
+     {
+      "type": "tool_search_output",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "tools": [
+       {
+        "type": "namespace",
+        "name": "mcp__codex_apps__",
+        "description": "Calendar.",
+        "tools": [
+         {
+          "type": "function",
+          "name": "calendar_create_event",
+          "description": "Create a calendar event.",
+          "strict": false,
+          "defer_loading": true,
+          "cache_control": {
+           "type": "ephemeral"
+          },
+          "parameters": {
+           "type": "object",
+           "properties": {
+            "title": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "title"
+           ]
+          }
+         }
+        ]
+       },
+       {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "tool_search",
+      "description": "User function named tool_search.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "q": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "q"
+       ]
+      }
+     },
+     {
+      "type": "tool_search",
+      "execution": "client",
+      "description": "# Tool discovery\n\nSearches deferred tools.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "limit": {
+         "type": "number"
+        },
+        "query": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      }
+     },
+     {
+      "type": "function",
+      "name": "lookup_order",
+      "description": "Look up an order.",
+      "strict": false,
+      "defer_loading": true,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "id"
+       ]
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "additional_tools",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "additional_tools",
+      "tools": [
+       {
+        "type": "tool_search",
+        "execution": "client",
+        "description": "# Tool discovery\n\nSearches deferred tools.",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "limit": {
+           "type": "number"
+          },
+          "query": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "query"
+         ],
+         "additionalProperties": false
+        }
+       },
+       {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ]
+        }
+       }
+      ]
+     },
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     },
+     {
+      "type": "tool_search_call",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "arguments": {
+       "query": "calendar create",
+       "limit": 8
+      }
+     },
+     {
+      "type": "tool_search_output",
+      "call_id": "call_search_1",
+      "status": "completed",
+      "execution": "client",
+      "tools": [
+       {
+        "type": "namespace",
+        "name": "mcp__codex_apps__",
+        "description": "Calendar.",
+        "tools": [
+         {
+          "type": "function",
+          "name": "calendar_create_event",
+          "description": "Create a calendar event.",
+          "strict": false,
+          "defer_loading": true,
+          "cache_control": {
+           "type": "ephemeral"
+          },
+          "parameters": {
+           "type": "object",
+           "properties": {
+            "title": {
+             "type": "string"
+            }
+           },
+           "required": [
+            "title"
+           ]
+          }
+         }
+        ]
+       },
+       {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "hosted_and_orphan_items",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     },
+     {
+      "type": "tool_search_call",
+      "id": "tsc_hosted",
+      "status": "completed",
+      "execution": "server",
+      "arguments": {
+       "query": "x"
+      }
+     },
+     {
+      "type": "tool_search_output",
+      "call_id": "call_missing",
+      "status": "completed",
+      "execution": "client",
+      "tools": [
+       {
+        "type": "function",
+        "name": "lookup_order",
+        "description": "Look up an order.",
+        "strict": false,
+        "defer_loading": true,
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "id": {
+           "type": "string"
+          }
+         },
+         "required": [
+          "id"
+         ]
+        }
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     },
+     {
+      "type": "tool_search"
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true
+   }
+  },
+  {
+   "name": "tool_choice_tool_search",
+   "request": {
+    "model": "claude-sonnet-4-5",
+    "instructions": "You are Codex.",
+    "input": [
+     {
+      "type": "message",
+      "role": "user",
+      "content": [
+       {
+        "type": "input_text",
+        "text": "create a calendar event"
+       }
+      ]
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "name": "exec_command",
+      "description": "Run a command.",
+      "strict": false,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "cmd": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "cmd"
+       ]
+      }
+     },
+     {
+      "type": "tool_search",
+      "execution": "client",
+      "description": "# Tool discovery\n\nSearches deferred tools.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "limit": {
+         "type": "number"
+        },
+        "query": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "query"
+       ],
+       "additionalProperties": false
+      }
+     },
+     {
+      "type": "function",
+      "name": "lookup_order",
+      "description": "Look up an order.",
+      "strict": false,
+      "defer_loading": true,
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "id": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "id"
+       ]
+      }
+     }
+    ],
+    "tool_choice": {
+     "type": "function",
+     "name": "tool_search"
+    },
+    "stream": true
+   }
+  }
+ ]
+}

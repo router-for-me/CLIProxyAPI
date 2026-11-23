@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestExtractSummaryConfig(t *testing.T) {
@@ -37,13 +37,17 @@ func TestExtractSummaryConfig(t *testing.T) {
 		{name: "responses boolean summary invalid", format: "openai-response", body: `{"reasoning":{"summary":true}}`, wantMode: SummaryUnspecified},
 		{name: "responses deprecated generate summary", format: "openai-response", body: `{"reasoning":{"generate_summary":"detailed"}}`, wantMode: SummaryEnabled, wantDetail: "detailed"},
 		{name: "claude summarized", format: "claude", body: `{"thinking":{"type":"adaptive","display":"summarized"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
+		{name: "claude updates", format: "claude", body: `{"thinking":{"type":"adaptive","display":"updates"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
 		{name: "claude omitted", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":2048,"display":"omitted"}}`, wantMode: SummaryDisabled},
 		{name: "claude display without type is invalid", format: "claude", body: `{"thinking":{"display":"summarized"}}`, wantMode: SummaryUnspecified},
+		{name: "claude updates without type is invalid", format: "claude", body: `{"thinking":{"display":"updates"}}`, wantMode: SummaryUnspecified},
 		{name: "claude display with auto type is invalid", format: "claude", body: `{"thinking":{"type":"auto","display":"summarized"}}`, wantMode: SummaryUnspecified},
 		// ApplySummaryConfig runs before ApplyThinking fills budget_tokens, so an
 		// absent budget must not be read as inactive thinking.
 		{name: "claude enabled display without budget is valid", format: "claude", body: `{"thinking":{"type":"enabled","display":"summarized"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
+		{name: "claude enabled updates without budget is valid", format: "claude", body: `{"thinking":{"type":"enabled","display":"updates"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
 		{name: "claude enabled display with zero budget is invalid", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":0,"display":"summarized"}}`, wantMode: SummaryUnspecified},
+		{name: "claude enabled updates with zero budget is invalid", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":0,"display":"updates"}}`, wantMode: SummaryUnspecified},
 		{name: "claude auto compatibility budget summarized", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":-1,"display":"summarized"}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
 		{name: "claude auto compatibility budget omitted", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":-1,"display":"omitted"}}`, wantMode: SummaryDisabled},
 		{name: "gemini include true", format: "gemini", body: `{"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}`, wantMode: SummaryEnabled, wantDetail: "auto"},
@@ -107,7 +111,9 @@ func TestApplySummaryConfig(t *testing.T) {
 		{name: "chat disabled updates legacy include_reasoning when present", format: "openai", body: `{"reasoning_effort":"high","include_reasoning":true}`, config: SummaryConfig{Mode: SummaryDisabled}, path: "include_reasoning", want: "false"},
 		{name: "chat disabled invents no openrouter field", format: "openai", body: `{"reasoning_effort":"high"}`, config: SummaryConfig{Mode: SummaryDisabled}, path: "reasoning", want: ""},
 		{name: "claude enabled", format: "claude", body: `{"thinking":{"type":"adaptive"}}`, config: SummaryConfig{Mode: SummaryEnabled}, path: "thinking.display", want: "summarized"},
+		{name: "claude enabled preserves existing updates", format: "claude", body: `{"thinking":{"type":"adaptive","display":"updates"}}`, config: SummaryConfig{Mode: SummaryEnabled}, path: "thinking.display", want: "updates"},
 		{name: "claude disabled", format: "claude", body: `{"thinking":{"type":"enabled","budget_tokens":2048}}`, config: SummaryConfig{Mode: SummaryDisabled}, path: "thinking.display", want: "omitted"},
+		{name: "claude disabled overrides existing updates", format: "claude", body: `{"thinking":{"type":"adaptive","display":"updates"}}`, config: SummaryConfig{Mode: SummaryDisabled}, path: "thinking.display", want: "omitted"},
 		{name: "gemini enabled", format: "gemini", config: SummaryConfig{Mode: SummaryEnabled}, path: "generationConfig.thinkingConfig.includeThoughts", want: "true"},
 		{name: "gemini disabled", format: "gemini", config: SummaryConfig{Mode: SummaryDisabled}, path: "generationConfig.thinkingConfig.includeThoughts", want: "false"},
 		{name: "antigravity enabled", format: "antigravity", config: SummaryConfig{Mode: SummaryEnabled}, path: "request.generationConfig.thinkingConfig.includeThoughts", want: "true"},
@@ -123,7 +129,7 @@ func TestApplySummaryConfig(t *testing.T) {
 				body = `{}`
 			}
 			out := ApplySummaryConfig([]byte(body), test.format, test.config)
-			if got := gjson.GetBytes(out, test.path).String(); got != test.want {
+			if got := ojson.GetBytes(out, test.path).String(); got != test.want {
 				t.Fatalf("%s = %q, want %q; body=%s", test.path, got, test.want, out)
 			}
 		})
@@ -151,14 +157,14 @@ func TestApplySummaryConfig_OpenAIChatProviderDialects(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			out := applySummaryConfigForProvider([]byte(test.body), "openai", "model", test.provider, nil, SummaryConfig{Mode: test.mode})
-			exclude := gjson.GetBytes(out, "reasoning.exclude")
+			exclude := ojson.GetBytes(out, "reasoning.exclude")
 			if exclude.Exists() != test.wantExisting {
 				t.Fatalf("reasoning.exclude exists = %v, want %v; body=%s", exclude.Exists(), test.wantExisting, out)
 			}
 			if test.wantExisting && exclude.String() != test.wantExclude {
 				t.Fatalf("reasoning.exclude = %q, want %q; body=%s", exclude.String(), test.wantExclude, out)
 			}
-			effort := gjson.GetBytes(out, "reasoning_effort")
+			effort := ojson.GetBytes(out, "reasoning_effort")
 			if test.wantEffort == "" {
 				if effort.Exists() {
 					t.Fatalf("summary visibility invented reasoning_effort: %s", out)
@@ -183,10 +189,10 @@ func TestApplySummaryConfigNormalizesTargetAliases(t *testing.T) {
 	}
 	for _, test := range tests {
 		out := ApplySummaryConfig([]byte(test.body), test.format, SummaryConfig{Mode: SummaryEnabled})
-		if !gjson.GetBytes(out, test.canonical).Exists() {
+		if !ojson.GetBytes(out, test.canonical).Exists() {
 			t.Fatalf("%s missing canonical field: %s", test.format, out)
 		}
-		if gjson.GetBytes(out, test.alias).Exists() {
+		if ojson.GetBytes(out, test.alias).Exists() {
 			t.Fatalf("%s retained alias %s: %s", test.format, test.alias, out)
 		}
 	}
@@ -203,7 +209,7 @@ func TestApplySummaryConfig_ClaudeDisplayRequiresActiveThinking(t *testing.T) {
 	for _, mode := range []SummaryMode{SummaryEnabled, SummaryDisabled} {
 		for _, body := range bodies {
 			out := ApplySummaryConfig([]byte(body), "claude", SummaryConfig{Mode: mode})
-			if gjson.GetBytes(out, "thinking.display").Exists() {
+			if ojson.GetBytes(out, "thinking.display").Exists() {
 				t.Fatalf("mode %v wrote display without active thinking: %s", mode, out)
 			}
 			if !bytes.Equal(out, []byte(body)) {
@@ -227,14 +233,14 @@ func TestApplySummaryConfigForModel_ClaudeEnabledSummaryUsesValidThinkingMode(t 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			out := ApplySummaryConfigForModel([]byte(test.body), "claude", test.model, SummaryConfig{Mode: SummaryEnabled})
-			if got := gjson.GetBytes(out, "thinking.type").String(); got != test.wantType {
+			if got := ojson.GetBytes(out, "thinking.type").String(); got != test.wantType {
 				t.Fatalf("thinking.type = %q, want %q; body=%s", got, test.wantType, out)
 			}
-			if got := gjson.GetBytes(out, "thinking.display").String(); got != "summarized" {
+			if got := ojson.GetBytes(out, "thinking.display").String(); got != "summarized" {
 				t.Fatalf("thinking.display = %q, want summarized; body=%s", got, out)
 			}
-			if test.wantBudget > 0 && gjson.GetBytes(out, "thinking.budget_tokens").Int() != test.wantBudget {
-				t.Fatalf("thinking.budget_tokens = %d, want %d; body=%s", gjson.GetBytes(out, "thinking.budget_tokens").Int(), test.wantBudget, out)
+			if test.wantBudget > 0 && ojson.GetBytes(out, "thinking.budget_tokens").Int() != test.wantBudget {
+				t.Fatalf("thinking.budget_tokens = %d, want %d; body=%s", ojson.GetBytes(out, "thinking.budget_tokens").Int(), test.wantBudget, out)
 			}
 		})
 	}
@@ -247,7 +253,7 @@ func TestApplySummaryConfigForModel_ClaudeDisabledSummaryDoesNotEnableThinking(t
 	for _, model := range []string{"claude-opus-5", "claude-haiku-4-5-20251001"} {
 		body := []byte(`{"model":"` + model + `","max_tokens":32000}`)
 		out := ApplySummaryConfigForModel(body, "claude", model, SummaryConfig{Mode: SummaryDisabled})
-		if gjson.GetBytes(out, "thinking").Exists() {
+		if ojson.GetBytes(out, "thinking").Exists() {
 			t.Fatalf("model %s gained thinking for a disabled summary: %s", model, out)
 		}
 	}
@@ -255,27 +261,27 @@ func TestApplySummaryConfigForModel_ClaudeDisabledSummaryDoesNotEnableThinking(t
 
 func TestApplySummaryConfig_ResponsesNormalizesDeprecatedGenerateSummary(t *testing.T) {
 	out := ApplySummaryConfig([]byte(`{"reasoning":{"generate_summary":"detailed"}}`), "openai-response", SummaryConfig{Mode: SummaryEnabled, Detail: "detailed"})
-	if got := gjson.GetBytes(out, "reasoning.summary").String(); got != "detailed" {
+	if got := ojson.GetBytes(out, "reasoning.summary").String(); got != "detailed" {
 		t.Fatalf("reasoning.summary = %q, want detailed; body=%s", got, out)
 	}
-	if gjson.GetBytes(out, "reasoning.generate_summary").Exists() {
+	if ojson.GetBytes(out, "reasoning.generate_summary").Exists() {
 		t.Fatalf("deprecated reasoning.generate_summary remained: %s", out)
 	}
 }
 
 func TestApplySummaryConfig_ResponsesDisabledOmitsSummary(t *testing.T) {
 	out := ApplySummaryConfig([]byte(`{"reasoning":{"effort":"high","summary":"auto"}}`), "openai-response", SummaryConfig{Mode: SummaryDisabled})
-	if result := gjson.GetBytes(out, "reasoning.summary"); result.Exists() {
+	if result := ojson.GetBytes(out, "reasoning.summary"); result.Exists() {
 		t.Fatalf("reasoning.summary = %s, want absent; body=%s", result.Raw, out)
 	}
-	if got := gjson.GetBytes(out, "reasoning.effort").String(); got != "high" {
+	if got := ojson.GetBytes(out, "reasoning.effort").String(); got != "high" {
 		t.Fatalf("reasoning.effort = %q, want high; body=%s", got, out)
 	}
 }
 
 func TestApplySummaryConfig_ResponsesDisabledDropsEmptyReasoning(t *testing.T) {
 	out := ApplySummaryConfig([]byte(`{"model":"gpt-5.4","reasoning":{"summary":"auto"}}`), "openai-response", SummaryConfig{Mode: SummaryDisabled})
-	if gjson.GetBytes(out, "reasoning").Exists() {
+	if ojson.GetBytes(out, "reasoning").Exists() {
 		t.Fatalf("empty reasoning object left behind: %s", out)
 	}
 }

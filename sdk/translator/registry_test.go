@@ -2,10 +2,11 @@ package translator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 type fakePluginHooks struct {
@@ -60,6 +61,37 @@ func hasCall(calls []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestPrivateRegistryUsesLiveDefaultHooks(t *testing.T) {
+	local := NewRegistryWithDefaultPluginHooks()
+	const from, to Format = "local-client", "local-upstream"
+	local.Register(from, to, func(_ string, _ []byte, _ bool) ([]byte, error) { return []byte(`{"native":true}`), nil }, ResponseTransform{})
+	if Default().HasRequestTransformer(from, to) {
+		t.Fatal("private registration reached default registry")
+	}
+	previous := Default().hooks
+	t.Cleanup(func() { SetPluginHooks(previous) })
+	for _, label := range []string{"first", "reloaded"} {
+		hooks := &fakePluginHooks{normalizeRequest: func(body []byte) []byte {
+			if !ojson.GetBytesNoCopy(body, "native").Bool() {
+				t.Fatal("hook ran before native translation")
+			}
+			return []byte(label)
+		}, requestTranslateBody: []byte("plugin fallback"), requestTranslateOK: true}
+		SetPluginHooks(hooks)
+		if !local.HasPluginHooks() || string(local.TranslateRequest(from, to, "m", nil, false)) != label || hasCall(hooks.calls, "translate-request") {
+			t.Fatal("private route did not use current normalizer after native translation")
+		}
+		hooks.normalizeRequest = nil
+		if string(TranslateRequest(from, to, "m", []byte("{}"), false)) != "plugin fallback" {
+			t.Fatal("private route displaced default plugin translator")
+		}
+	}
+	SetPluginHooks(nil)
+	if local.HasPluginHooks() || !ojson.GetBytesNoCopy(local.TranslateRequest(from, to, "m", nil, false), "native").Bool() {
+		t.Fatal("unloading hooks affected the private route")
+	}
 }
 
 func TestHasPluginHooks(t *testing.T) {
@@ -120,7 +152,7 @@ func TestTranslateRequest_FallbackNormalizesModel(t *testing.T) {
 			input := []byte(tt.payload)
 			got := r.TranslateRequest(Format("a"), Format("b"), tt.model, input, false)
 
-			gotModel := gjson.GetBytes(got, "model").String()
+			gotModel := ojson.GetBytesNoCopy(got, "model").String()
 			if gotModel != tt.wantModel {
 				t.Errorf("model = %q, want %q", gotModel, tt.wantModel)
 			}
@@ -131,11 +163,11 @@ func TestTranslateRequest_FallbackNormalizesModel(t *testing.T) {
 
 			// Verify other fields are preserved.
 			for _, key := range []string{"input", "stream"} {
-				orig := gjson.Get(tt.payload, key)
+				orig := ojson.Get(tt.payload, key)
 				if !orig.Exists() {
 					continue
 				}
-				after := gjson.GetBytes(got, key)
+				after := ojson.GetBytesNoCopy(got, key)
 				if orig.Raw != after.Raw {
 					t.Errorf("field %q changed: got %s, want %s", key, after.Raw, orig.Raw)
 				}
@@ -149,14 +181,14 @@ func TestTranslateRequest_RegisteredTransformTakesPrecedence(t *testing.T) {
 	from := Format("openai-response")
 	to := Format("openai-response")
 
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return []byte(`{"model":"from-transform"}`)
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return []byte(`{"model":"from-transform"}`), nil
 	}, ResponseTransform{})
 
 	input := []byte(`{"model":"copilot/gpt-5-mini","input":"ping"}`)
 	got := r.TranslateRequest(from, to, "gpt-5-mini", input, false)
 
-	gotModel := gjson.GetBytes(got, "model").String()
+	gotModel := ojson.GetBytesNoCopy(got, "model").String()
 	if gotModel != "from-transform" {
 		t.Errorf("expected registered transform to take precedence, got model = %q", gotModel)
 	}
@@ -171,8 +203,8 @@ func TestHasRequestTransformer(t *testing.T) {
 		t.Fatal("request transformer exists before registration")
 	}
 
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return rawJSON
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return rawJSON, nil
 	}, ResponseTransform{})
 
 	if !r.HasRequestTransformer(from, to) {
@@ -185,8 +217,8 @@ func TestHasResponseTransformerIgnoresEmptyRegistration(t *testing.T) {
 	from := Format("from")
 	to := Format("to")
 
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return rawJSON
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return rawJSON, nil
 	}, ResponseTransform{})
 
 	if r.HasResponseTransformer(from, to) {
@@ -256,7 +288,7 @@ func TestTranslateRequest_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) {
 	missingNative.SetPluginHooks(missingHooks)
 
 	gotMissing := missingNative.TranslateRequest(from, to, "resolved", []byte(`{"model":"prefixed/resolved"}`), false)
-	if gjson.GetBytes(gotMissing, "model").String() != "plugin-request" {
+	if ojson.GetBytesNoCopy(gotMissing, "model").String() != "plugin-request" {
 		t.Fatalf("plugin request translator was not used, got %s", gotMissing)
 	}
 	if !hasCall(missingHooks.calls, "translate-request") {
@@ -269,12 +301,12 @@ func TestTranslateRequest_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) {
 		requestTranslateOK:   true,
 	}
 	withNative.SetPluginHooks(nativeHooks)
-	withNative.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return []byte(`{"model":"native-request"}`)
+	withNative.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return []byte(`{"model":"native-request"}`), nil
 	}, ResponseTransform{})
 
 	gotNative := withNative.TranslateRequest(from, to, "resolved", []byte(`{"model":"prefixed/resolved"}`), false)
-	if gjson.GetBytes(gotNative, "model").String() != "native-request" {
+	if ojson.GetBytesNoCopy(gotNative, "model").String() != "native-request" {
 		t.Fatalf("native request transformer was not preserved, got %s", gotNative)
 	}
 	if hasCall(nativeHooks.calls, "translate-request") {
@@ -295,7 +327,7 @@ func TestTranslateNonStream_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) 
 	missingNative.SetPluginHooks(missingHooks)
 
 	gotMissing := missingNative.TranslateNonStream(ctx, from, to, "model", nil, nil, []byte(`{"output":"raw"}`), nil)
-	if gjson.GetBytes(gotMissing, "output").String() != "plugin-response" {
+	if ojson.GetBytesNoCopy(gotMissing, "output").String() != "plugin-response" {
 		t.Fatalf("plugin response translator was not used, got %s", gotMissing)
 	}
 	if !hasCall(missingHooks.calls, "translate-response") {
@@ -315,7 +347,7 @@ func TestTranslateNonStream_PluginTranslatorOnlyWhenNativeMissing(t *testing.T) 
 	})
 
 	gotNative := withNative.TranslateNonStream(ctx, from, to, "model", nil, nil, []byte(`{"output":"raw"}`), nil)
-	if gjson.GetBytes(gotNative, "output").String() != "native-response" {
+	if ojson.GetBytesNoCopy(gotNative, "output").String() != "native-response" {
 		t.Fatalf("native response transformer was not preserved, got %s", gotNative)
 	}
 	if hasCall(nativeHooks.calls, "translate-response") {
@@ -383,7 +415,7 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 	})
 
 	withoutMetadata := r.TranslateRequest(from, to, "home-model", []byte(`{"input":"hello"}`), false)
-	if gjson.GetBytes(withoutMetadata, "source").String() != "native" {
+	if ojson.GetBytesNoCopy(withoutMetadata, "source").String() != "native" {
 		t.Fatalf("without metadata used unexpected transform: %s", withoutMetadata)
 	}
 	withMetadata, err := NewPipeline(r).TranslateRequest(context.Background(), from, to, RequestEnvelope{
@@ -392,7 +424,7 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipeline translation failed: %v", err)
 	}
-	if gjson.GetBytes(withMetadata.Body, "source").String() != "model-info" {
+	if ojson.GetBytesNoCopy(withMetadata.Body, "source").String() != "model-info" {
 		t.Fatalf("envelope metadata was not used: %s", withMetadata.Body)
 	}
 	if withMetadata.ModelInfo != modelInfo {
@@ -400,8 +432,8 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 	}
 
 	// A custom registration replaces the envelope-aware native route.
-	r.Register(from, to, func(string, []byte, bool) []byte {
-		return []byte(`{"source":"custom"}`)
+	r.Register(from, to, func(string, []byte, bool) ([]byte, error) {
+		return []byte(`{"source":"custom"}`), nil
 	}, ResponseTransform{})
 	for _, payload := range [][]byte{
 		[]byte(`{"input":"hello"}`),
@@ -410,7 +442,7 @@ func TestRequestEnvelopePreservesRegisteredTransformDispatch(t *testing.T) {
 		customWithMetadata := r.TranslateRequestEnvelope(context.Background(), from, to, RequestEnvelope{
 			Format: from, Model: "home-model", Body: payload, ModelInfo: modelInfo,
 		})
-		if gjson.GetBytes(customWithMetadata.Body, "source").String() != "custom" {
+		if ojson.GetBytesNoCopy(customWithMetadata.Body, "source").String() != "custom" {
 			t.Fatalf("request metadata bypassed custom transform for %s: %s", payload, customWithMetadata.Body)
 		}
 	}
@@ -442,8 +474,8 @@ func TestPluginNormalizersChainAfterNative(t *testing.T) {
 		},
 	}
 	r.SetPluginHooks(hooks)
-	r.Register(from, to, func(model string, rawJSON []byte, stream bool) []byte {
-		return []byte(`{"stage":"native-request"}`)
+	r.Register(from, to, func(model string, rawJSON []byte, stream bool) ([]byte, error) {
+		return []byte(`{"stage":"native-request"}`), nil
 	}, ResponseTransform{})
 	r.Register(to, from, nil, ResponseTransform{
 		NonStream: func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []byte {
@@ -465,5 +497,87 @@ func TestPluginNormalizersChainAfterNative(t *testing.T) {
 	}
 	if hasCall(hooks.calls, "translate-request") || hasCall(hooks.calls, "translate-response") {
 		t.Fatalf("plugin translators should not run when native transformers exist, calls=%v", hooks.calls)
+	}
+}
+
+func TestUnregisterRestoresFormatPair(t *testing.T) {
+	from := Format("unregister-default-from")
+	to := Format("unregister-default-to")
+	other := Format("unregister-default-other")
+	if HasRequestTransformer(from, to) || HasRequestTransformer(from, other) {
+		t.Fatal("test formats are already registered")
+	}
+	identity := func(_ string, rawJSON []byte, _ bool) ([]byte, error) {
+		return append([]byte(nil), rawJSON...), nil
+	}
+	Register(from, to, identity, ResponseTransform{
+		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte {
+			return []byte(`{"removed":true}`)
+		},
+	})
+	Register(from, other, identity, ResponseTransform{})
+	t.Cleanup(func() {
+		Unregister(from, to)
+		Unregister(from, other)
+	})
+
+	if !HasRequestTransformer(from, to) || !HasNonStreamResponseTransformer(from, to) || !HasRequestTransformer(from, other) {
+		t.Fatal("register did not store transforms")
+	}
+	Unregister(from, to)
+	if HasRequestTransformer(from, to) || HasNonStreamResponseTransformer(from, to) || HasResponseTransformer(from, to) {
+		t.Fatal("unregister left transforms behind")
+	}
+	if !HasRequestTransformer(from, other) {
+		t.Fatal("unregister removed a different format pair")
+	}
+}
+
+type patchRegistryError struct{ err error }
+
+func (s *patchRegistryError) ToolInputError() error { return s.err }
+
+func TestApplyPatchRegistryNilAndRetainedFailure(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		r := NewRegistry()
+		r.SetPluginHooks(&fakePluginHooks{normalizeAfter: func([]byte) []byte { return []byte(`{"success":true}`) }})
+		if native {
+			r.Register(FormatOpenAI, FormatOpenAIResponse, nil, ResponseTransform{
+				Stream: func(_ context.Context, _ string, _, _, _ []byte, param *any) [][]byte {
+					*param = &patchRegistryError{errors.New("invalid")}
+					return nil
+				},
+				NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
+					*param = &patchRegistryError{errors.New("invalid")}
+					return nil
+				},
+			})
+		}
+		var param any = &patchRegistryError{errors.New("invalid")}
+		if got := r.TranslateStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param); got != nil {
+			t.Errorf("native=%v: stream failure recovered as %s", native, got)
+		}
+		if got := r.TranslateNonStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param); got != nil {
+			t.Errorf("native=%v: nonstream failure recovered as %s", native, got)
+		}
+	}
+}
+
+func TestApplyPatchRegistryNativeNilDoesNotInvokeRecovery(t *testing.T) {
+	r := NewRegistry()
+	r.SetPluginHooks(&fakePluginHooks{normalizeAfter: func([]byte) []byte {
+		t.Error("nil native output passed through plugin recovery")
+		return []byte(`{"success":true}`)
+	}})
+	r.Register(FormatOpenAI, FormatOpenAIResponse, nil, ResponseTransform{
+		Stream:    func(context.Context, string, []byte, []byte, []byte, *any) [][]byte { return nil },
+		NonStream: func(context.Context, string, []byte, []byte, []byte, *any) []byte { return nil },
+	})
+	var param any
+	if r.TranslateStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param) != nil {
+		t.Fatal("native stream nil became raw success")
+	}
+	if r.TranslateNonStream(context.Background(), FormatOpenAIResponse, FormatOpenAI, "m", nil, nil, []byte(`{"RAW_SECRET":true}`), &param) != nil {
+		t.Fatal("native nonstream nil became raw success")
 	}
 }

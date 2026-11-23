@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested verifies
@@ -55,7 +55,7 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(
 		}]
 	}`)
 	incomingHeaders := http.Header{}
-	incomingHeaders.Set("User-Agent", "claude-cli/2.1.263 (external, cli)")
+	incomingHeaders.Set("User-Agent", "claude-cli/2.1.322 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-123")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,extended-cache-ttl-2025-04-11")
 
@@ -76,7 +76,7 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested(
 	if !has1h {
 		t.Fatalf("subagent body must preserve ttl: 1h when requested by client, got: %s", rawBody)
 	}
-	for _, msg := range gjson.GetBytes(seenBody, "messages").Array() {
+	for _, msg := range ojson.GetBytes(seenBody, "messages").Array() {
 		for _, content := range msg.Get("content").Array() {
 			if cc := content.Get("cache_control"); cc.Exists() {
 				if gotTTL := cc.Get("ttl").String(); gotTTL != "1h" {
@@ -132,7 +132,7 @@ func TestClaudeExecutor_SubagentPreserves1hTTLAndExtendedCacheBetaWhenRequested_
 		}]
 	}`)
 	incomingHeaders := http.Header{}
-	incomingHeaders.Set("User-Agent", "claude-cli/2.1.263 (external, cli)")
+	incomingHeaders.Set("User-Agent", "claude-cli/2.1.322 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-stream-456")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20,extended-cache-ttl-2025-04-11")
 
@@ -202,7 +202,7 @@ func TestClaudeExecutor_SubagentWithout1hKeepsDefault5m(t *testing.T) {
 		}]
 	}`)
 	incomingHeaders := http.Header{}
-	incomingHeaders.Set("User-Agent", "claude-cli/2.1.263 (external, cli)")
+	incomingHeaders.Set("User-Agent", "claude-cli/2.1.322 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-default-789")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219,oauth-2025-04-20")
 
@@ -268,7 +268,7 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta(t *testing.T)
 		}]
 	}`)
 	incomingHeaders := http.Header{}
-	incomingHeaders.Set("User-Agent", "claude-cli/2.1.263 (external, cli)")
+	incomingHeaders.Set("User-Agent", "claude-cli/2.1.322 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-apikey-101")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219") // Note: NO extended-cache-ttl beta in incoming header
 
@@ -334,7 +334,7 @@ func TestClaudeExecutor_APIKeySubagentPreserves1hTTLAndInjectsBeta_Stream(t *tes
 		}]
 	}`)
 	incomingHeaders := http.Header{}
-	incomingHeaders.Set("User-Agent", "claude-cli/2.1.263 (external, cli)")
+	incomingHeaders.Set("User-Agent", "claude-cli/2.1.322 (external, cli)")
 	incomingHeaders.Set("X-Claude-Code-Agent-Id", "agent-sub-apikey-stream-202")
 	incomingHeaders.Set("Anthropic-Beta", "claude-code-20250219") // Note: NO extended-cache-ttl beta in incoming header
 

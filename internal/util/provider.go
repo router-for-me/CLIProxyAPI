@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -215,7 +215,7 @@ func MaskAuthorizationHeader(value string) string {
 //
 // Behavior by header key (case-insensitive):
 //   - "Authorization": Preserve the auth type prefix (e.g., "Bearer ") and mask only the credential part.
-//   - Headers containing "api-key": Mask the entire value using HideAPIKey.
+//   - Headers containing "api-key", "apikey", "token", "secret", or "cookie": Mask the entire value using HideAPIKey.
 //   - Others: Return the original value unchanged.
 //
 // Parameters:
@@ -232,7 +232,8 @@ func MaskSensitiveHeaderValue(key, value string) string {
 	case strings.Contains(lowerKey, "api-key"),
 		strings.Contains(lowerKey, "apikey"),
 		strings.Contains(lowerKey, "token"),
-		strings.Contains(lowerKey, "secret"):
+		strings.Contains(lowerKey, "secret"),
+		strings.Contains(lowerKey, "cookie"):
 		return HideAPIKey(value)
 	default:
 		return value
@@ -283,7 +284,9 @@ func shouldMaskQueryParam(key string) bool {
 		return false
 	}
 	key = strings.TrimSuffix(key, "[]")
-	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
+	// The management API deletes a client API key by ?value=<key>, so a plain
+	// "value" parameter can carry a full secret into the request log.
+	if key == "key" || key == "value" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
 		return true
 	}
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {

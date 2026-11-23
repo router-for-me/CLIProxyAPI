@@ -1,0 +1,412 @@
+{
+    "tools": [
+        {
+            "type": "namespace",
+            "name": "history",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "list_windows",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of windows to return."
+                            },
+                            "agent_name": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent."
+                            },
+                            "recent_first": {
+                                "type": "boolean",
+                                "description": "Whether to return the most recently created windows first."
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "type": "namespace",
+            "name": "history",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "list_items",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of items to return."
+                            },
+                            "recent_first": {
+                                "type": "boolean",
+                                "description": "Whether to return the most recently created items first."
+                            },
+                            "tool_namespace": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Callable namespace to include. When set, non-tool messages are excluded."
+                            },
+                            "role": {
+                                "anyOf": [
+                                    {
+                                        "type": "string",
+                                        "enum": [
+                                            "user",
+                                            "assistant",
+                                            "tool",
+                                            "system",
+                                            "developer"
+                                        ]
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Message role to include. Null or omission includes all roles."
+                            },
+                            "agent_name": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent."
+                            },
+                            "tool_name": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Callable tool name to include. When set, non-tool messages are excluded."
+                            },
+                            "window_id": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Full window ID. Null or omission includes all windows."
+                            },
+                            "max_chars_per_item": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum characters returned in each item's truncated_content."
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "type": "namespace",
+            "name": "history",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read_item",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_name": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent."
+                            },
+                            "item_id": {
+                                "type": "string",
+                                "description": "The short item ID is the suffix shown in the target item's trailing `[id: ...]` marker, printed after that item's content."
+                            },
+                            "offset_chars": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Zero-based character offset at which reading starts."
+                            },
+                            "limit_chars": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of characters to return."
+                            },
+                            "window_id": {
+                                "type": "string",
+                                "description": "Full window ID containing the item."
+                            }
+                        },
+                        "required": [
+                            "item_id",
+                            "window_id"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "type": "namespace",
+            "name": "history",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "search_contents",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of matching items to return."
+                            },
+                            "query": {
+                                "type": "string",
+                                "encrypted": true,
+                                "description": "Case-sensitive literal substring to find in item content."
+                            },
+                            "recent_first": {
+                                "type": "boolean",
+                                "description": "Whether to return the most recently created matches first."
+                            },
+                            "tool_namespace": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Callable namespace to include. When set, non-tool messages are excluded."
+                            },
+                            "role": {
+                                "anyOf": [
+                                    {
+                                        "type": "string",
+                                        "enum": [
+                                            "user",
+                                            "assistant",
+                                            "tool",
+                                            "system",
+                                            "developer"
+                                        ]
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Message role to include. Null or omission includes all roles."
+                            },
+                            "agent_name": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Agent whose history to inspect. Omit to use the current agent; otherwise pass an absolute agent name or a name relative to the current agent."
+                            },
+                            "tool_name": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Callable tool name to include. When set, non-tool messages are excluded."
+                            },
+                            "window_id": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Full window ID. Null or omission includes all windows."
+                            }
+                        },
+                        "required": [
+                            "query"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "type": "namespace",
+            "name": "notes",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "list_files_by_prefix",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prefix": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Note path prefix to list."
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of files to return."
+                            },
+                            "file_order_by": {
+                                "type": "string",
+                                "enum": [
+                                    "name",
+                                    "created_at",
+                                    "updated_at"
+                                ],
+                                "description": "Field used to order files."
+                            },
+                            "file_order": {
+                                "type": "string",
+                                "enum": [
+                                    "ascending",
+                                    "descending"
+                                ],
+                                "description": "Direction used to order files."
+                            }
+                        }
+                    }
+                }
+            ]
+        },
+        {
+            "type": "namespace",
+            "name": "notes",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read_file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Note file path to read."
+                            },
+                            "start_line": {
+                                "anyOf": [
+                                    {
+                                        "type": "integer"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "First line to return, inclusive and 1-based. Negative values count backward from the final line."
+                            },
+                            "stop_line": {
+                                "anyOf": [
+                                    {
+                                        "type": "integer"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Last line to return, inclusive and 1-based. Negative values count backward from the final line."
+                            }
+                        },
+                        "required": [
+                            "path"
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "type": "namespace",
+            "name": "notes",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "search_contents",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "max_matches_per_file": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of matching lines returned per file."
+                            },
+                            "query": {
+                                "type": "string",
+                                "encrypted": true,
+                                "description": "Case-sensitive literal substring to find in note lines."
+                            },
+                            "recent_file_first": {
+                                "type": "boolean",
+                                "description": "Whether to order matching files by creation time, newest first."
+                            },
+                            "max_files": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Maximum number of matching files returned."
+                            },
+                            "path_prefix": {
+                                "anyOf": [
+                                    {
+                                        "type": "string"
+                                    },
+                                    {
+                                        "type": "null"
+                                    }
+                                ],
+                                "description": "Note path prefix to search."
+                            }
+                        },
+                        "required": [
+                            "query"
+                        ]
+                    }
+                }
+            ]
+        }
+    ]
+}

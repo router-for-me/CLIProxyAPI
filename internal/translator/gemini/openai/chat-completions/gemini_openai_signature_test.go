@@ -3,8 +3,8 @@ package chat_completions
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 )
 
 const capturedGeminiToolCallThoughtSignature = "EjQKMgEMOdbHO0Gd+c9Mxk4ELwPGbpCEcp2mFfYYLix2UVtBH3fL8GECc4+JITVnHF4qZDsA"
@@ -42,8 +42,8 @@ func TestConvertOpenAIRequestToGemini_ToolCallSignatureCompatibility(t *testing.
 				}]
 			}`)
 
-			output := ConvertOpenAIRequestToGemini("gemini-3.5-flash", input, false)
-			if got := gjson.GetBytes(output, "contents.0.parts.0.thoughtSignature").String(); got != tt.wantSignature {
+			output, _ := ConvertOpenAIRequestToGemini("gemini-3.5-flash", input, false)
+			if got := ojson.GetBytesNoCopy(output, "contents.0.parts.0.thoughtSignature").String(); got != tt.wantSignature {
 				t.Fatalf("thoughtSignature = %q, want %q. Output: %s", got, tt.wantSignature, output)
 			}
 		})

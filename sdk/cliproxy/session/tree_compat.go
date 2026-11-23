@@ -19,6 +19,9 @@ type SessionTreeNode struct {
 	LastAuthID      string         `json:"last_auth_id,omitempty"`
 	LastProvider    string         `json:"last_provider,omitempty"`
 	LastModel       string         `json:"last_model,omitempty"`
+	NodeKind        string         `json:"node_kind,omitempty"`
+	IsFork          bool           `json:"is_fork,omitempty"`
+	IsCompaction    bool           `json:"is_compaction,omitempty"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
@@ -90,6 +93,9 @@ func (s *InMemorySessionTreeStore) RecordNode(info SessionTreeInfo) *SessionTree
 		LastAuthID:      info.AuthID,
 		LastProvider:    info.Provider,
 		LastModel:       info.Model,
+		NodeKind:        info.NodeKind,
+		IsFork:          info.IsFork,
+		IsCompaction:    info.IsCompaction,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 		Metadata:        info.Metadata,

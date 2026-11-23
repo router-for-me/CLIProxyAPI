@@ -3,12 +3,12 @@
 package vertex
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/MoeForge/moego/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 

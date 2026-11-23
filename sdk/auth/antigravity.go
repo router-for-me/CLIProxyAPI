@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/antigravity"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -269,6 +269,34 @@ func AntigravityDefaultCallbackURI() string {
 // AntigravityUserAgent returns the canonical User-Agent string used by the Antigravity Hub family.
 func AntigravityUserAgent() string {
 	return misc.AntigravityUserAgent()
+}
+
+// StartAntigravityVersionUpdater starts background refresh for the Antigravity Hub version
+// using the inherited process environment proxy settings. If an updater is already active,
+// this call is a no-op and preserves the active updater and its proxy configuration.
+func StartAntigravityVersionUpdater(ctx context.Context) {
+	misc.StartAntigravityVersionUpdater(ctx)
+}
+
+// StartAntigravityVersionUpdaterWithProxy starts background refresh for the Antigravity Hub
+// version using the configured proxyURL. An empty proxyURL inherits process environment proxies,
+// while "direct" or "none" bypasses them. A later call cancels any previous updater goroutine
+// and binds the new context and proxy URL.
+func StartAntigravityVersionUpdaterWithProxy(ctx context.Context, proxyURL string) {
+	misc.StartAntigravityVersionUpdaterWithProxy(ctx, proxyURL)
+}
+
+// StartAntigravityVersionUpdaterWithProxyProvider starts background refresh for the Antigravity Hub
+// version using proxyProvider to resolve the active proxy setting on each fetch. A later call
+// cancels any previous updater goroutine and binds the new context and proxy provider.
+func StartAntigravityVersionUpdaterWithProxyProvider(ctx context.Context, proxyProvider func() string) {
+	misc.StartAntigravityVersionUpdaterWithProxyProvider(ctx, proxyProvider)
+}
+
+// AntigravityRequestUserAgent returns the User-Agent for Antigravity runtime requests,
+// falling back to AntigravityUserAgent when userAgent is empty.
+func AntigravityRequestUserAgent(userAgent string) string {
+	return misc.AntigravityRequestUserAgent(userAgent)
 }
 
 // BuildAntigravityAuthURL generates the OAuth authorization URL for Antigravity.

@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // BuildConfigChangeDetails computes a redacted, human-readable list of config changes.
@@ -19,6 +19,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 
 	// Simple scalars
+	if oldCfg.Client.Codex.EnableApplyPatch != newCfg.Client.Codex.EnableApplyPatch {
+		changes = append(changes, fmt.Sprintf("client.codex.enable-apply-patch: %t -> %t", oldCfg.Client.Codex.EnableApplyPatch, newCfg.Client.Codex.EnableApplyPatch))
+	}
+	if oldCfg.ServerID != newCfg.ServerID {
+		changes = append(changes, fmt.Sprintf("server.server-id: %s -> %s", oldCfg.ServerID, newCfg.ServerID))
+	}
 	if oldCfg.Port != newCfg.Port {
 		changes = append(changes, fmt.Sprintf("port: %d -> %d", oldCfg.Port, newCfg.Port))
 	}
@@ -33,6 +39,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if strings.TrimSpace(oldCfg.Pprof.Addr) != strings.TrimSpace(newCfg.Pprof.Addr) {
 		changes = append(changes, fmt.Sprintf("pprof.addr: %s -> %s", strings.TrimSpace(oldCfg.Pprof.Addr), strings.TrimSpace(newCfg.Pprof.Addr)))
+	}
+	if oldCfg.KVStore.Disabled != newCfg.KVStore.Disabled {
+		changes = append(changes, fmt.Sprintf("kv-store.disabled: %t -> %t", oldCfg.KVStore.Disabled, newCfg.KVStore.Disabled))
+	}
+	if oldCfg.EffectiveKVStorePath() != newCfg.EffectiveKVStorePath() {
+		changes = append(changes, fmt.Sprintf("kv-store.path: %s -> %s", oldCfg.EffectiveKVStorePath(), newCfg.EffectiveKVStorePath()))
 	}
 	if oldCfg.LoggingToFile != newCfg.LoggingToFile {
 		changes = append(changes, fmt.Sprintf("logging-to-file: %t -> %t", oldCfg.LoggingToFile, newCfg.LoggingToFile))
@@ -108,8 +120,20 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
+	if !equalStringMap(oldCfg.Antigravity.SensitiveWordsReplace, newCfg.Antigravity.SensitiveWordsReplace) {
+		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words-replace: %d -> %d", len(oldCfg.Antigravity.SensitiveWordsReplace), len(newCfg.Antigravity.SensitiveWordsReplace)))
+	}
+	if !equalSensitivePatternRules(oldCfg.Antigravity.SensitivePatternsReplace, newCfg.Antigravity.SensitivePatternsReplace) {
+		changes = append(changes, fmt.Sprintf("antigravity.sensitive-patterns-replace: %d -> %d", len(oldCfg.Antigravity.SensitivePatternsReplace), len(newCfg.Antigravity.SensitivePatternsReplace)))
+	}
 	if !reflect.DeepEqual(oldCfg.Devin.SensitiveWords, newCfg.Devin.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("devin.sensitive-words: %d -> %d", len(oldCfg.Devin.SensitiveWords), len(newCfg.Devin.SensitiveWords)))
+	}
+	if !equalStringMap(oldCfg.Devin.SensitiveWordsReplace, newCfg.Devin.SensitiveWordsReplace) {
+		changes = append(changes, fmt.Sprintf("devin.sensitive-words-replace: %d -> %d", len(oldCfg.Devin.SensitiveWordsReplace), len(newCfg.Devin.SensitiveWordsReplace)))
+	}
+	if !equalSensitivePatternRules(oldCfg.Devin.SensitivePatternsReplace, newCfg.Devin.SensitivePatternsReplace) {
+		changes = append(changes, fmt.Sprintf("devin.sensitive-patterns-replace: %d -> %d", len(oldCfg.Devin.SensitivePatternsReplace), len(newCfg.Devin.SensitivePatternsReplace)))
 	}
 	oldEnabled := "<nil>"
 	if oldCfg.Antigravity.ConnectionPool.Enabled != nil {
@@ -137,9 +161,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, fmt.Sprintf("antigravity.connection-pool.max-idle-conns-per-host: %s -> %s", oldMaxIdle, newMaxIdle))
 	}
 
-	if oldCfg.Codex.IdentityConfuse != newCfg.Codex.IdentityConfuse {
-		changes = append(changes, fmt.Sprintf("codex.identity-confuse: %t -> %t", oldCfg.Codex.IdentityConfuse, newCfg.Codex.IdentityConfuse))
-	}
 	if oldCfg.Codex.DisableCodexCloaking != newCfg.Codex.DisableCodexCloaking {
 		changes = append(changes, fmt.Sprintf("codex.disable-codex-cloaking: %t -> %t", oldCfg.Codex.DisableCodexCloaking, newCfg.Codex.DisableCodexCloaking))
 	}
@@ -149,11 +170,26 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if strings.TrimSpace(oldCfg.Codex.StreamBootstrapTimeout) != strings.TrimSpace(newCfg.Codex.StreamBootstrapTimeout) {
 		changes = append(changes, fmt.Sprintf("codex.stream-bootstrap-timeout: %s -> %s", strings.TrimSpace(oldCfg.Codex.StreamBootstrapTimeout), strings.TrimSpace(newCfg.Codex.StreamBootstrapTimeout)))
 	}
-	if oldCfg.Codex.OptimizeMultiAgentV2 != newCfg.Codex.OptimizeMultiAgentV2 {
-		changes = append(changes, fmt.Sprintf("codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Codex.OptimizeMultiAgentV2, newCfg.Codex.OptimizeMultiAgentV2))
+	if oldCfg.Client.Codex.OptimizeMultiAgentV2 != newCfg.Client.Codex.OptimizeMultiAgentV2 {
+		changes = append(changes, fmt.Sprintf("client.codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Client.Codex.OptimizeMultiAgentV2, newCfg.Client.Codex.OptimizeMultiAgentV2))
+	}
+	if oldCfg.Client.Codex.WebSearchResultCache.Enabled != newCfg.Client.Codex.WebSearchResultCache.Enabled {
+		changes = append(changes, fmt.Sprintf("client.codex.web-search-result-cache.enabled: %t -> %t", oldCfg.Client.Codex.WebSearchResultCache.Enabled, newCfg.Client.Codex.WebSearchResultCache.Enabled))
+	}
+	if strings.TrimSpace(oldCfg.Client.Codex.WebSearchResultCache.TTL) != strings.TrimSpace(newCfg.Client.Codex.WebSearchResultCache.TTL) {
+		changes = append(changes, fmt.Sprintf("client.codex.web-search-result-cache.ttl: %s -> %s", strings.TrimSpace(oldCfg.Client.Codex.WebSearchResultCache.TTL), strings.TrimSpace(newCfg.Client.Codex.WebSearchResultCache.TTL)))
+	}
+	if oldCfg.Client.Codex.WebSearchResultCache.Limit != newCfg.Client.Codex.WebSearchResultCache.Limit {
+		changes = append(changes, fmt.Sprintf("client.codex.web-search-result-cache.limit: %d -> %d", oldCfg.Client.Codex.WebSearchResultCache.Limit, newCfg.Client.Codex.WebSearchResultCache.Limit))
 	}
 	if oldCfg.Codex.OrphanDelegationCompatibility != newCfg.Codex.OrphanDelegationCompatibility {
 		changes = append(changes, fmt.Sprintf("codex.orphan-delegation-compatibility: %t -> %t", oldCfg.Codex.OrphanDelegationCompatibility, newCfg.Codex.OrphanDelegationCompatibility))
+	}
+	if oldCfg.Claude.ToolSearch != newCfg.Claude.ToolSearch {
+		changes = append(changes, fmt.Sprintf("claude.tool-search: %t -> %t", oldCfg.Claude.ToolSearch, newCfg.Claude.ToolSearch))
+	}
+	if oldCfg.Claude.ServerSideFallback != newCfg.Claude.ServerSideFallback {
+		changes = append(changes, fmt.Sprintf("claude.server-side-fallback: %t -> %t", oldCfg.Claude.ServerSideFallback, newCfg.Claude.ServerSideFallback))
 	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(changes, fmt.Sprintf("xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch, newCfg.XAI.InjectXSearch))
@@ -207,6 +243,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("gemini[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -242,6 +279,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("interactions[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("interactions[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("interactions[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -279,6 +317,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("claude[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("claude[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("claude[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -302,20 +341,35 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
 				changes = append(changes, fmt.Sprintf("claude[%d].rebuild-mid-system-message: %t -> %t", i, o.RebuildMidSystemMessage, n.RebuildMidSystemMessage))
 			}
+			if o.NativeToolSearch != n.NativeToolSearch {
+				changes = append(changes, fmt.Sprintf("claude[%d].native-tool-search: %t -> %t", i, o.NativeToolSearch, n.NativeToolSearch))
+			}
 			if strings.TrimSpace(o.FingerprintProfile) != strings.TrimSpace(n.FingerprintProfile) {
 				changes = append(changes, fmt.Sprintf("claude[%d].fingerprint-profile: %s -> %s", i, strings.TrimSpace(o.FingerprintProfile), strings.TrimSpace(n.FingerprintProfile)))
 			}
 			changes = appendOptionalIntChange(changes, fmt.Sprintf("claude[%d].request-retry", i), o.RequestRetry, n.RequestRetry)
-			if o.Cloak != nil && n.Cloak != nil {
+			switch {
+			case o.Cloak == nil && n.Cloak != nil:
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak: added", i))
+			case o.Cloak != nil && n.Cloak == nil:
+				changes = append(changes, fmt.Sprintf("claude[%d].cloak: removed", i))
+			case o.Cloak != nil && n.Cloak != nil:
 				if strings.TrimSpace(o.Cloak.Mode) != strings.TrimSpace(n.Cloak.Mode) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.mode: %s -> %s", i, o.Cloak.Mode, n.Cloak.Mode))
 				}
 				if o.Cloak.StrictMode != n.Cloak.StrictMode {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.strict-mode: %t -> %t", i, o.Cloak.StrictMode, n.Cloak.StrictMode))
 				}
-				if len(o.Cloak.SensitiveWords) != len(n.Cloak.SensitiveWords) {
+				if !reflect.DeepEqual(o.Cloak.SensitiveWords, n.Cloak.SensitiveWords) {
 					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words: %d -> %d", i, len(o.Cloak.SensitiveWords), len(n.Cloak.SensitiveWords)))
 				}
+				if !equalStringMap(o.Cloak.SensitiveWordsReplace, n.Cloak.SensitiveWordsReplace) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-words-replace: %d -> %d", i, len(o.Cloak.SensitiveWordsReplace), len(n.Cloak.SensitiveWordsReplace)))
+				}
+				if !equalSensitivePatternRules(o.Cloak.SensitivePatternsReplace, n.Cloak.SensitivePatternsReplace) {
+					changes = append(changes, fmt.Sprintf("claude[%d].cloak.sensitive-patterns-replace: %d -> %d", i, len(o.Cloak.SensitivePatternsReplace), len(n.Cloak.SensitivePatternsReplace)))
+				}
+				changes = appendOptionalBoolChange(changes, fmt.Sprintf("claude[%d].cloak.cache-user-id", i), o.Cloak.CacheUserID, n.Cloak.CacheUserID)
 			}
 		}
 	}
@@ -333,6 +387,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("codex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("codex[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("codex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -343,6 +398,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				changes = append(changes, fmt.Sprintf("codex[%d].alpha-search: %t -> %t", i, o.AlphaSearch, n.AlphaSearch))
 			}
 			changes = appendOptionalBoolChange(changes, fmt.Sprintf("codex[%d].disable-cooling", i), o.DisableCooling, n.DisableCooling)
+			changes = appendOptionalBoolChange(changes, fmt.Sprintf("codex[%d].disable-codex-cloaking", i), o.DisableCodexCloaking, n.DisableCodexCloaking)
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
 			}
@@ -376,6 +432,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("xai[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("xai[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("xai[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
@@ -419,6 +476,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("meta[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("meta[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("meta[%d].prefix: %s -> %s", i, o.Prefix, n.Prefix))
 			}
@@ -455,6 +513,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if entries, _ := DiffOAuthRequestScopedErrorsChanges(oldCfg.OAuthRequestScopedErrors, newCfg.OAuthRequestScopedErrors); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
+	if entries, _ := DiffOAuthSettingsChanges(oldCfg.OAuthSettings, newCfg.OAuthSettings); len(entries) > 0 {
+		changes = append(changes, entries...)
+	}
 
 	// Remote management (never print the key)
 	if oldCfg.RemoteManagement.AllowRemote != newCfg.RemoteManagement.AllowRemote {
@@ -470,6 +531,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
 	if oldPanelRepo != newPanelRepo {
 		changes = append(changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", formatURL(oldPanelRepo), formatURL(newPanelRepo)))
+	}
+	oldBaseURL := strings.TrimSpace(oldCfg.RemoteManagement.BaseURL)
+	newBaseURL := strings.TrimSpace(newCfg.RemoteManagement.BaseURL)
+	if oldBaseURL != newBaseURL {
+		changes = append(changes, fmt.Sprintf("remote-management.base-url: %s -> %s", formatURL(oldBaseURL), formatURL(newBaseURL)))
 	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {
 		switch {
@@ -503,10 +569,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
 			}
+			changes = appendConnectionPoolChanges(changes, fmt.Sprintf("vertex[%d].connection-pool", i), o.ConnectionPool, n.ConnectionPool)
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
 			}
 			changes = appendOptionalBoolChange(changes, fmt.Sprintf("vertex[%d].disable-cooling", i), o.DisableCooling, n.DisableCooling)
+			changes = appendOptionalBoolChange(changes, fmt.Sprintf("vertex[%d].openapi", i), o.OpenAPI, n.OpenAPI)
+			if strings.TrimSpace(o.OpenAPILocation) != strings.TrimSpace(n.OpenAPILocation) {
+				changes = append(changes, fmt.Sprintf("vertex[%d].openapi-location: %s -> %s", i, strings.TrimSpace(o.OpenAPILocation), strings.TrimSpace(n.OpenAPILocation)))
+			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("vertex[%d].api-key: updated", i))
 			}
@@ -543,22 +614,49 @@ func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.
 	changes = appendPayloadRuleChanges(changes, "default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
 	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
 	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
-	changes = appendPayloadFilterRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	changes = appendPayloadRuleChanges(changes, "replace", oldPayload.Replace, newPayload.Replace)
+	changes = appendPayloadRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
 	return changes
 }
 
-func appendPayloadRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadRule) []string {
+func appendPayloadRuleChanges[T any](changes []string, section string, oldRules, newRules []T) []string {
 	if reflect.DeepEqual(oldRules, newRules) {
 		return changes
 	}
 	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
 }
 
-func appendPayloadFilterRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadFilterRule) []string {
-	if reflect.DeepEqual(oldRules, newRules) {
+func appendConnectionPoolChanges(changes []string, prefix string, oldPool, newPool *config.ProxyConnectionPoolConfig) []string {
+	if oldPool == nil && newPool == nil {
 		return changes
 	}
-	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
+	var oldCfg, newCfg config.ProxyConnectionPoolConfig
+	if oldPool != nil {
+		oldCfg = *oldPool
+	}
+	if newPool != nil {
+		newCfg = *newPool
+	}
+	oldEnabled := formatConnectionPoolEnabled(oldPool)
+	newEnabled := formatConnectionPoolEnabled(newPool)
+	if oldEnabled != newEnabled {
+		changes = append(changes, fmt.Sprintf("%s.enabled: %s -> %s", prefix, oldEnabled, newEnabled))
+	}
+	if strings.TrimSpace(oldCfg.IdleConnTimeout) != strings.TrimSpace(newCfg.IdleConnTimeout) {
+		changes = append(changes, fmt.Sprintf("%s.idle-conn-timeout: %q -> %q", prefix, strings.TrimSpace(oldCfg.IdleConnTimeout), strings.TrimSpace(newCfg.IdleConnTimeout)))
+	}
+	changes = appendOptionalIntChange(changes, prefix+".max-idle-conns-per-host", oldCfg.MaxIdleConnsPerHost, newCfg.MaxIdleConnsPerHost)
+	return changes
+}
+
+func formatConnectionPoolEnabled(pool *config.ProxyConnectionPoolConfig) string {
+	if pool == nil {
+		return "<unset>"
+	}
+	if pool.Enabled == nil {
+		return "true"
+	}
+	return fmt.Sprintf("%t", *pool.Enabled)
 }
 
 func appendOptionalIntChange(changes []string, field string, oldVal, newVal *int) []string {
@@ -614,7 +712,19 @@ func equalStringMap(a, b map[string]string) bool {
 		return false
 	}
 	for k, v := range a {
-		if b[k] != v {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func equalSensitivePatternRules(a, b []config.SensitivePatternRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

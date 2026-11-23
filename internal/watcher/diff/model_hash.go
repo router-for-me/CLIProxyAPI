@@ -3,13 +3,13 @@ package diff
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/MoeForge/moego/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelconfig"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.

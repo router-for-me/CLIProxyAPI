@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 var ErrRefreshNotSupported = errors.New("cliproxy auth: refresh not supported")
@@ -19,6 +19,7 @@ type LoginOptions struct {
 	CallbackPort int
 	Metadata     map[string]string
 	Prompt       func(prompt string) (string, error)
+	ProxyURL     string
 }
 
 // Authenticator manages login and optional refresh flows for a provider.

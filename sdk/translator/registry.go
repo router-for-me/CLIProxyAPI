@@ -2,20 +2,21 @@ package translator
 
 import (
 	"context"
+	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // Registry manages translation functions across schemas.
 type Registry struct {
-	mu        sync.RWMutex
-	requests  map[Format]map[Format]RequestEnvelopeTransform
-	responses map[Format]map[Format]ResponseTransform
-	hooks     PluginHooks
+	mu              sync.RWMutex
+	requests        map[Format]map[Format]RequestEnvelopeTransform
+	responses       map[Format]map[Format]ResponseTransform
+	hooks           PluginHooks
+	useDefaultHooks bool
 }
 
 // NewRegistry constructs an empty translator registry.
@@ -24,6 +25,25 @@ func NewRegistry() *Registry {
 		requests:  make(map[Format]map[Format]RequestEnvelopeTransform),
 		responses: make(map[Format]map[Format]ResponseTransform),
 	}
+}
+
+// NewRegistryWithDefaultPluginHooks creates a private transform table that uses
+// the live default plugin hooks without advertising its formats to other callers.
+func NewRegistryWithDefaultPluginHooks() *Registry {
+	r := NewRegistry()
+	r.useDefaultHooks = true
+	return r
+}
+
+// The caller holds r.mu. Only a private registry can delegate to the default
+// one, so the locks are always acquired in that order.
+func (r *Registry) pluginHooksLocked() PluginHooks {
+	if r.useDefaultHooks {
+		defaultRegistry.mu.RLock()
+		defer defaultRegistry.mu.RUnlock()
+		return defaultRegistry.hooks
+	}
+	return r.hooks
 }
 
 // Register stores request/response transforms between two formats.
@@ -36,7 +56,7 @@ func (r *Registry) Register(from, to Format, request RequestTransform, response 
 	}
 	if request != nil {
 		r.requests[from][to] = func(_ context.Context, req RequestEnvelope) RequestEnvelope {
-			req.Body = request(req.Model, req.Body, req.Stream)
+			req.Body, req.Err = request(req.Model, req.Body, req.Stream)
 			return req
 		}
 	}
@@ -60,11 +80,32 @@ func (r *Registry) RegisterRequestEnvelope(from, to Format, request RequestEnvel
 	}
 }
 
+// Unregister removes the request and response transforms for one format pair.
+// Empty parent maps are dropped so a temporary registration can be restored.
+func (r *Registry) Unregister(from, to Format) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if byTarget, ok := r.requests[from]; ok {
+		delete(byTarget, to)
+		if len(byTarget) == 0 {
+			delete(r.requests, from)
+		}
+	}
+	if byTarget, ok := r.responses[from]; ok {
+		delete(byTarget, to)
+		if len(byTarget) == 0 {
+			delete(r.responses, from)
+		}
+	}
+}
+
 // SetPluginHooks stores translator plugin hooks for this registry.
 func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.useDefaultHooks = false
 	r.hooks = hooks
 }
 
@@ -72,7 +113,7 @@ func (r *Registry) SetPluginHooks(hooks PluginHooks) {
 func (r *Registry) HasPluginHooks() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.hooks != nil
+	return r.pluginHooksLocked() != nil
 }
 
 // TranslateRequest converts a payload between schemas, returning the original payload
@@ -100,24 +141,26 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	if byTarget, ok := r.requests[from]; ok {
 		fn = byTarget[to]
 	}
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	if fn != nil {
-		summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
+		summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 		req = fn(ctx, req)
 		req.Body = thinking.ApplySummaryConfigForModel(req.Body, to.String(), req.Model, summaryConfig)
 		if hooks != nil {
 			// Request normalizers run after native translation and own the final
 			// provider payload, including any summary field they remove.
+			before := configurationUpdates(req.Body)
 			req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
+			req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged(before, configurationUpdates(req.Body))
 		}
 		req.Format = to
 		return req
 	}
 
-	if req.Model != "" && gjson.GetBytes(req.Body, "model").String() != req.Model {
-		if updated, err := sjson.SetBytes(req.Body, "model", req.Model); err != nil {
+	if req.Model != "" && ojson.GetBytesNoCopy(req.Body, "model").String() != req.Model {
+		if updated, err := ojson.SetBytes(req.Body, "model", req.Model); err != nil {
 			log.Warnf("translator: failed to normalize model in request fallback: %v", err)
 		} else {
 			req.Body = updated
@@ -133,13 +176,44 @@ func (r *Registry) TranslateRequestEnvelope(ctx context.Context, from, to Format
 	// Plugin request normalizers canonicalize the source before a plugin request
 	// translator gets a chance to handle a missing native route. Extract summary
 	// intent from that normalized source so a normalizer can remove or rewrite it.
+	before := configurationUpdates(req.Body)
 	req.Body = hooks.NormalizeRequest(ctx, from, to, req.Model, req.Body, req.Stream)
-	summaryConfig := thinking.ExtractSummaryConfig(req.Body, from.String())
+	req.ConfigurationUpdatesChanged = req.ConfigurationUpdatesChanged || updatesChanged(before, configurationUpdates(req.Body))
+	summaryConfig := thinking.ExtractTranslatedSummaryConfig(req.Body, from.String(), to.String())
 	if translated, ok := hooks.TranslateRequest(ctx, from, to, req.Model, req.Body, req.Stream); ok {
 		req.Body = thinking.ApplySummaryConfigForModel(translated, to.String(), req.Model, summaryConfig)
 	}
 	req.Format = to
 	return req
+}
+
+// configurationUpdates captures only Responses update items before and after a plugin
+// normalizer. A native cross-protocol translation removing updates is not a plugin edit.
+func configurationUpdates(body []byte) []string {
+	input := ojson.GetBytesNoCopy(body, "input")
+	if !input.IsArray() {
+		return nil
+	}
+	var updates []string
+	input.ForEach(func(_, item ojson.Result) bool {
+		if item.Get("type").String() == "configuration_update" {
+			updates = append(updates, strings.Clone(item.Raw))
+		}
+		return true
+	})
+	return updates
+}
+
+func updatesChanged(before, after []string) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for i, item := range before {
+		if item != after[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // HasRequestTransformer indicates whether a request translator exists.
@@ -194,6 +268,19 @@ func (r *Registry) HasNonStreamResponseTransformer(from, to Format) bool {
 	return false
 }
 
+// HasTokenCountTransformer indicates whether a token count translator exists.
+func (r *Registry) HasTokenCountTransformer(from, to Format) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if byTarget, ok := r.responses[to]; ok {
+		if fn, isOk := byTarget[from]; isOk && fn.TokenCount != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // TranslateStream applies the registered streaming response translator.
 func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	r.mu.RLock()
@@ -201,7 +288,7 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 	if byTarget, ok := r.responses[to]; ok {
 		stream = byTarget[from].Stream
 	}
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	body := rawJSON
@@ -218,6 +305,10 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 		if translated, ok := hooks.TranslateResponse(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, true); ok {
 			outputs = [][]byte{translated}
 		}
+	}
+	// Retained tool failures are never recovered by raw fallback or plugin normalization.
+	if translationToolInputFailed(param) {
+		return outputs
 	}
 	if outputs == nil && !usedNativeTransform {
 		outputs = [][]byte{body}
@@ -237,7 +328,7 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 	if byTarget, ok := r.responses[to]; ok {
 		fn = byTarget[from]
 	}
-	hooks := r.hooks
+	hooks := r.pluginHooksLocked()
 	r.mu.RUnlock()
 
 	body := rawJSON
@@ -251,10 +342,22 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 			body = translated
 		}
 	}
+	if translationToolInputFailed(param) || (fn.NonStream != nil && body == nil) {
+		return nil
+	}
 	if hooks != nil {
 		body = hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 	}
 	return body
+}
+
+// translationToolInputFailed consumes only the optional, request-local error contract.
+func translationToolInputFailed(param *any) bool {
+	if param == nil {
+		return false
+	}
+	state, okState := (*param).(interface{ ToolInputError() error })
+	return okState && state.ToolInputError() != nil
 }
 
 // TranslateTokenCount applies the registered token count response translator.
@@ -270,6 +373,22 @@ func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, cou
 	return rawJSON
 }
 
+// NormalizeRequest executes registered plugin request normalizer hooks, returning
+// the payload unmodified if no hooks are registered.
+func (r *Registry) NormalizeRequest(ctx context.Context, from, to Format, model string, body []byte, stream bool) []byte {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	r.mu.RLock()
+	hooks := r.pluginHooksLocked()
+	r.mu.RUnlock()
+
+	if hooks != nil {
+		return hooks.NormalizeRequest(ctx, from, to, model, body, stream)
+	}
+	return body
+}
+
 var defaultRegistry = NewRegistry()
 
 // Default exposes the package-level registry for shared use.
@@ -280,6 +399,11 @@ func Default() *Registry {
 // Register attaches transforms to the default registry.
 func Register(from, to Format, request RequestTransform, response ResponseTransform) {
 	defaultRegistry.Register(from, to, request, response)
+}
+
+// Unregister removes transforms for one format pair from the default registry.
+func Unregister(from, to Format) {
+	defaultRegistry.Unregister(from, to)
 }
 
 // RegisterRequestEnvelope stores an envelope-aware transform on the default registry.
@@ -307,6 +431,11 @@ func TranslateRequestEnvelope(ctx context.Context, from, to Format, req RequestE
 	return defaultRegistry.TranslateRequestEnvelope(ctx, from, to, req)
 }
 
+// NormalizeRequest executes registered plugin request normalizer hooks on the default registry.
+func NormalizeRequest(ctx context.Context, from, to Format, model string, body []byte, stream bool) []byte {
+	return defaultRegistry.NormalizeRequest(ctx, from, to, model, body, stream)
+}
+
 // HasRequestTransformer inspects the default registry.
 func HasRequestTransformer(from, to Format) bool {
 	return defaultRegistry.HasRequestTransformer(from, to)
@@ -325,6 +454,11 @@ func HasStreamResponseTransformer(from, to Format) bool {
 // HasNonStreamResponseTransformer inspects the default registry for a non-streaming response translator.
 func HasNonStreamResponseTransformer(from, to Format) bool {
 	return defaultRegistry.HasNonStreamResponseTransformer(from, to)
+}
+
+// HasTokenCountTransformer inspects the default registry.
+func HasTokenCountTransformer(from, to Format) bool {
+	return defaultRegistry.HasTokenCountTransformer(from, to)
 }
 
 // TranslateStream is a helper on the default registry.

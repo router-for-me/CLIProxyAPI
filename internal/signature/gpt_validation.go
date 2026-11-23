@@ -1,10 +1,12 @@
 package signature
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/ojson"
 )
 
 const MaxGPTReasoningSignatureLen = 32 * 1024 * 1024
@@ -12,11 +14,33 @@ const MaxGPTReasoningSignatureLen = 32 * 1024 * 1024
 type GPTReasoningSignatureInfo struct {
 	DecodedLen    int
 	CiphertextLen int
+	// RouterSuffix is the dot-delimited suffix a router such as OpenRouter
+	// appends after the native Fernet envelope; empty for native values.
+	RouterSuffix string
 }
 
 func IsValidGPTReasoningSignature(rawSignature string) bool {
 	_, err := InspectGPTReasoningSignature(rawSignature)
 	return err == nil
+}
+
+// IsDevinOpenAIReasoningSignature validates Devin's serialized list of GPT
+// reasoning items. The list itself is not a native GPT encrypted_content token.
+func IsDevinOpenAIReasoningSignature(raw string) bool {
+	if len(raw) > MaxGPTReasoningSignatureLen {
+		return false
+	}
+	s := strings.TrimSpace(raw)
+	if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") || !ojson.Valid(s) {
+		return false
+	}
+	valid := false
+	ojson.Parse(s).ForEach(func(_, item ojson.Result) bool {
+		token := item.Get("encrypted_content")
+		valid = item.IsObject() && item.Get("type").String() == "reasoning" && token.Type == ojson.String && IsValidGPTReasoningSignature(token.String())
+		return valid
+	})
+	return valid
 }
 
 // InspectGPTReasoningSignature validates the Fernet-like outer format used
@@ -38,11 +62,20 @@ func InspectGPTReasoningSignature(rawSignature string) (*GPTReasoningSignatureIn
 	if !strings.HasPrefix(sig, "gAAAA") {
 		return nil, fmt.Errorf("invalid GPT reasoning signature: expected gAAAA prefix")
 	}
-	if index, r, ok := firstInvalidGPTReasoningSignatureChar(sig); ok {
+	native := sig
+	routerSuffix := ""
+	if head, tail, ok := strings.Cut(sig, "."); ok {
+		if !isValidMetaRouterSuffix(tail) {
+			return nil, fmt.Errorf("invalid GPT reasoning signature: router suffix must be 1-%d alphanumeric characters", maxMetaRouterSuffixLen)
+		}
+		native = head
+		routerSuffix = tail
+	}
+	if index, r, ok := firstInvalidGPTReasoningSignatureChar(native); ok {
 		return nil, fmt.Errorf("invalid GPT reasoning signature: contains non-base64url character U+%04X at byte %d", r, index)
 	}
 
-	decoded, err := decodeGPTReasoningSignature(sig)
+	decoded, err := decodeGPTReasoningSignature(native)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +94,7 @@ func InspectGPTReasoningSignature(rawSignature string) (*GPTReasoningSignatureIn
 	return &GPTReasoningSignatureInfo{
 		DecodedLen:    len(decoded),
 		CiphertextLen: ciphertextLen,
+		RouterSuffix:  routerSuffix,
 	}, nil
 }
 

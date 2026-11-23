@@ -5,23 +5,23 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 
 	// Import provider packages to trigger init() registration of ProviderAppliers
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/antigravity"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/claude"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/codex"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/gemini"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/interactions"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/kimi"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/openai"
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/thinking/provider/xai"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/antigravity"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/claude"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/gemini"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/interactions"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/kimi"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/xai"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // thinkingTestCase represents a common test case structure for both suffix and body tests.
@@ -42,15 +42,25 @@ type thinkingTestCase struct {
 	expectErr       bool
 }
 
+func registerTestModelsForProviders(t *testing.T, prefix string) {
+	t.Helper()
+	reg := registry.GetGlobalRegistry()
+	models := getTestModels()
+	for _, provider := range []string{"gemini", "antigravity", "claude", "openai", "codex", "kimi", "xai", "interactions"} {
+		clientID := fmt.Sprintf("%s-%s", prefix, provider)
+		reg.RegisterClient(clientID, provider, models)
+		t.Cleanup(func() {
+			reg.UnregisterClient(clientID)
+		})
+	}
+}
+
 // TestThinkingE2EMatrix_Suffix tests the thinking configuration transformation using model name suffix.
 // Data flow: Input JSON → TranslateRequest → ApplyThinking → Validate Output
 // No helper functions are used; all test data is inline.
 func TestThinkingE2EMatrix_Suffix(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-suffix-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// level-model (Levels=minimal/low/medium/high, ZeroAllowed=false, DynamicAllowed=false)
@@ -830,7 +840,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 68: Budget 64000 → passthrough logic → xhigh
+		// Case 68: Budget 64000 → passthrough logic → max
 		{
 			name:        "68",
 			from:        "gemini",
@@ -838,7 +848,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(64000)",
 			inputJSON:   `{"model":"user-defined-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
 			expectField: "reasoning_effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 69: Budget 0 → passthrough logic → none
@@ -885,7 +895,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 73: Budget 64000 → passthrough logic → xhigh
+		// Case 73: Budget 64000 → passthrough logic → max
 		{
 			name:        "73",
 			from:        "claude",
@@ -893,7 +903,7 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			model:       "user-defined-model(64000)",
 			inputJSON:   `{"model":"user-defined-model(64000)","messages":[{"role":"user","content":"hi"}]}`,
 			expectField: "reasoning.effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 74: Budget 0 → passthrough logic → none
@@ -1082,6 +1092,117 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "",
 			expectErr:       false,
 		},
+
+		// Global max effort and clamping after conversion.
+		// Case 90: Keep an explicitly supported max effort.
+		{
+			name:        "90",
+			from:        "openai-response",
+			to:          "codex",
+			model:       "level-max-model(max)",
+			inputJSON:   `{"model":"level-max-model(max)","input":[{"role":"user","content":"hi"}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "max",
+		},
+		// Case 91: 32768 is the last budget in the xhigh band.
+		{
+			name:        "91",
+			from:        "gemini",
+			to:          "codex",
+			model:       "level-max-model(32768)",
+			inputJSON:   `{"model":"level-max-model(32768)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "xhigh",
+		},
+		// Case 92: 32769 is the first budget in the max band.
+		{
+			name:        "92",
+			from:        "gemini",
+			to:          "codex",
+			model:       "level-max-model(32769)",
+			inputJSON:   `{"model":"level-max-model(32769)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "max",
+		},
+		// Case 93: Budgets above 128000 still select max.
+		{
+			name:        "93",
+			from:        "gemini",
+			to:          "codex",
+			model:       "level-max-model(128001)",
+			inputJSON:   `{"model":"level-max-model(128001)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "reasoning.effort",
+			expectValue: "max",
+		},
+		// Case 94: Clamp a derived level to the same-protocol model maximum.
+		{
+			name:        "94",
+			from:        "gemini",
+			to:          "gemini",
+			model:       "level-subset-model(64000)",
+			inputJSON:   `{"model":"level-subset-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue: "high",
+		},
+		// Case 95: Clamp a derived budget to the same-protocol model maximum.
+		{
+			name:        "95",
+			from:        "gemini",
+			to:          "gemini",
+			model:       "gemini-budget-model(max)",
+			inputJSON:   `{"model":"gemini-budget-model(max)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue: "20000",
+		},
+		// Case 96: Convert max effort to its representative budget of 128000.
+		{
+			name:        "96",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-budget-model(max)",
+			inputJSON:   `{"model":"claude-budget-model(max)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "thinking.budget_tokens",
+			expectValue: "128000",
+		},
+		// Case 97: Raise the budget for minimal effort to the Claude model minimum.
+		{
+			name:        "97",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-budget-model(minimal)",
+			inputJSON:   `{"model":"claude-budget-model(minimal)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "thinking.budget_tokens",
+			expectValue: "1024",
+		},
+		// Case 98: Reject explicit max on a same-protocol model without that level.
+		{
+			name:      "98",
+			from:      "gemini",
+			to:        "gemini",
+			model:     "level-subset-model(max)",
+			inputJSON: `{"model":"level-subset-model(max)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectErr: true,
+		},
+		// Case 99: Clamp a derived level to the custom model levels.
+		{
+			name:        "99",
+			from:        "gemini",
+			to:          "openai",
+			model:       "user-defined-level-model(64000)",
+			inputJSON:   `{"model":"user-defined-level-model(64000)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "reasoning_effort",
+			expectValue: "xhigh",
+		},
+		// Case 100: Clamp a derived budget to the custom model budget range.
+		{
+			name:        "100",
+			from:        "openai",
+			to:          "gemini",
+			model:       "user-defined-budget-model(max)",
+			inputJSON:   `{"model":"user-defined-budget-model(max)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue: "20000",
+		},
 	}
 
 	runThinkingTests(t, cases)
@@ -1090,11 +1211,8 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 // TestThinkingE2EMatrix_Body tests the thinking configuration transformation using request body parameters.
 // Data flow: Input JSON with thinking params → TranslateRequest → ApplyThinking → Validate Output
 func TestThinkingE2EMatrix_Body(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-body-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// level-model (Levels=minimal/low/medium/high, ZeroAllowed=false, DynamicAllowed=false)
@@ -1904,7 +2022,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 68: thinkingBudget=64000 → xhigh (passthrough)
+		// Case 68: thinkingBudget=64000 → max (passthrough)
 		{
 			name:        "68",
 			from:        "gemini",
@@ -1912,7 +2030,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
 			expectField: "reasoning_effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 69: thinkingBudget=0 → none
@@ -1959,7 +2077,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			expectValue: "medium",
 			expectErr:   false,
 		},
-		// Case 73: thinking.budget_tokens=64000 → xhigh (passthrough)
+		// Case 73: thinking.budget_tokens=64000 → max (passthrough)
 		{
 			name:        "73",
 			from:        "claude",
@@ -1967,7 +2085,7 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			model:       "user-defined-model",
 			inputJSON:   `{"model":"user-defined-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":64000}}`,
 			expectField: "reasoning.effort",
-			expectValue: "xhigh",
+			expectValue: "max",
 			expectErr:   false,
 		},
 		// Case 74: thinking.budget_tokens=0 → none
@@ -2151,6 +2269,118 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "",
 			expectErr:       false,
 		},
+
+		// Global max effort and clamping after conversion.
+		// Case 90: Keep an explicitly supported max effort.
+		{
+			name:        "90",
+			from:        "openai-response",
+			to:          "codex",
+			model:       "level-max-model",
+			inputJSON:   `{"model":"level-max-model","input":[{"role":"user","content":"hi"}],"reasoning":{"effort":"max"}}`,
+			expectField: "reasoning.effort",
+			expectValue: "max",
+		},
+		// Case 91: 32768 is the last budget in the xhigh band.
+		{
+			name:        "91",
+			from:        "gemini",
+			to:          "codex",
+			model:       "level-max-model",
+			inputJSON:   `{"model":"level-max-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
+			expectField: "reasoning.effort",
+			expectValue: "xhigh",
+		},
+		// Case 92: 32769 is the first budget in the max band.
+		{
+			name:        "92",
+			from:        "gemini",
+			to:          "codex",
+			model:       "level-max-model",
+			inputJSON:   `{"model":"level-max-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32769}}}`,
+			expectField: "reasoning.effort",
+			expectValue: "max",
+		},
+		// Case 93: Budgets above 128000 still select max.
+		{
+			name:        "93",
+			from:        "gemini",
+			to:          "codex",
+			model:       "level-max-model",
+			inputJSON:   `{"model":"level-max-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":128001}}}`,
+			expectField: "reasoning.effort",
+			expectValue: "max",
+		},
+		// Case 94: Clamp a derived level to the same-protocol model maximum.
+		{
+			name:        "94",
+			from:        "gemini",
+			to:          "gemini",
+			model:       "level-subset-model",
+			inputJSON:   `{"model":"level-subset-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
+			expectField: "generationConfig.thinkingConfig.thinkingLevel",
+			expectValue: "high",
+		},
+		// Case 95: Clamp a derived budget to the same-protocol model maximum.
+		{
+			name:        "95",
+			from:        "gemini",
+			to:          "gemini",
+			model:       "gemini-budget-model",
+			inputJSON:   `{"model":"gemini-budget-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"max"}}}`,
+			expectField: "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue: "20000",
+		},
+		// Case 96: Convert max effort to its representative budget of 128000.
+		{
+			name:        "96",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-budget-model",
+			inputJSON:   `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`,
+			expectField: "thinking.budget_tokens",
+			expectValue: "128000",
+		},
+		// Case 97: Raise the budget for minimal effort to the Claude model minimum.
+		{
+			name:        "97",
+			from:        "claude",
+			to:          "claude",
+			model:       "claude-budget-model",
+			inputJSON:   `{"model":"claude-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"output_config":{"effort":"minimal"}}`,
+			expectField: "thinking.budget_tokens",
+			expectValue: "1024",
+		},
+		// Case 98: Reject explicit max on a same-protocol model without that level.
+		{
+			name:      "98",
+			from:      "gemini",
+			to:        "gemini",
+			model:     "level-subset-model",
+			inputJSON: `{"model":"level-subset-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"max"}}}`,
+			expectErr: true,
+		},
+		// Case 99: Clamp a derived level to the custom model levels.
+		{
+			name:        "99",
+			from:        "gemini",
+			to:          "openai",
+			model:       "user-defined-level-model",
+			inputJSON:   `{"model":"user-defined-level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
+			expectField: "reasoning_effort",
+			expectValue: "xhigh",
+		},
+		// Case 100: Clamp a derived budget to the custom model budget range.
+		{
+			name:            "100",
+			from:            "openai",
+			to:              "gemini",
+			model:           "user-defined-budget-model",
+			inputJSON:       `{"model":"user-defined-budget-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"max"}`,
+			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "20000",
+			includeThoughts: "true",
+		},
 	}
 
 	runThinkingTests(t, cases)
@@ -2158,11 +2388,8 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 
 // TestThinkingE2EProviderTargets covers provider-specific targets that are not part of the main matrix.
 func TestThinkingE2EProviderTargets(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-provider-targets-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// Kimi target: emit the native thinking object and accept reasoning_effort only as legacy input.
@@ -2356,6 +2583,18 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 			expectValue2: "medium",
 			expectAbsent: []string{"reasoning_effort"},
 		},
+		{
+			name:         "K17",
+			from:         "gemini",
+			to:           "kimi",
+			model:        "kimi-toggle-thinking-model",
+			inputJSON:    `{"model":"kimi-toggle-thinking-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
+			expectField:  "thinking.type",
+			expectValue:  "enabled",
+			expectField2: "thinking.effort",
+			expectValue2: "high",
+			expectAbsent: []string{"reasoning_effort"},
+		},
 
 		// xAI target: Grok uses Responses-compatible reasoning.effort with Grok-specific levels.
 		{
@@ -2448,6 +2687,15 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 			expectField: "reasoning.effort",
 			expectValue: "high",
 		},
+		{
+			name:        "X11",
+			from:        "gemini",
+			to:          "xai",
+			model:       "xai-level-model",
+			inputJSON:   `{"model":"xai-level-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
+			expectField: "reasoning.effort",
+			expectValue: "high",
+		},
 
 		// Interactions target: native API uses generation_config.thinking_level and optional thinking_summaries.
 		{
@@ -2469,6 +2717,16 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 			inputJSON:   `{"model":"level-model(8192)","input":"hi"}`,
 			expectField: "generation_config.thinking_level",
 			expectValue: "medium",
+		},
+		{
+			name:         "I3",
+			from:         "interactions",
+			to:           "interactions",
+			model:        "gemini-mixed-model",
+			inputJSON:    `{"model":"gemini-mixed-model","input":"hi","generation_config":{"thinking_budget":512}}`,
+			expectField:  "generation_config.thinking_level",
+			expectValue:  "low",
+			expectAbsent: []string{"generation_config.thinking_budget"},
 		},
 		// Responses client against a chat-shaped provider. Because thinking is read
 		// back off the translated body, this pair only works if the request translator
@@ -2518,6 +2776,24 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 	runThinkingTests(t, cases)
 }
 
+func TestThinkingE2EDevinModelUID(t *testing.T) {
+	cases := []struct {
+		name    string
+		model   string
+		wantUID string
+	}{
+		{"D1", "MODEL_GPT_5_2(32768)", "MODEL_GPT_5_2_XHIGH"},
+		{"D2", "glm-5-2(32769)", "glm-5-2-max"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := helps.ResolveDevinChatModelUID(tc.model, "", 0); got != tc.wantUID {
+				t.Errorf("model %q resolved to %q, want %q", tc.model, got, tc.wantUID)
+			}
+		})
+	}
+}
+
 // TestThinkingE2EInteractionsMatrix covers the Interactions protocol in both
 // directions, which the suffix and body matrices above barely touch.
 //
@@ -2529,11 +2805,8 @@ func TestThinkingE2EProviderTargets(t *testing.T) {
 // client against every provider, so an explicit on/off request has to survive the
 // round trip in both roles.
 func TestThinkingE2EInteractionsMatrix(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-interactions-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// Interactions as provider: explicit on from every client protocol.
@@ -2774,11 +3047,8 @@ func TestThinkingE2EInteractionsMatrix(t *testing.T) {
 // TestThinkingE2EClaudeAdaptive_Body covers Group 3 cases in docs/thinking-e2e-test-cases.md.
 // It focuses on Claude 4.6 adaptive thinking and effort/level cross-protocol semantics (body-only).
 func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
-	reg := registry.GetGlobalRegistry()
 	uid := fmt.Sprintf("thinking-e2e-claude-adaptive-%d", time.Now().UnixNano())
-
-	reg.RegisterClient(uid, "test", getTestModels())
-	defer reg.UnregisterClient(uid)
+	registerTestModelsForProviders(t, uid)
 
 	cases := []thinkingTestCase{
 		// A subgroup: OpenAI -> Claude (reasoning_effort -> output_config.effort)
@@ -2971,7 +3241,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			model:       "claude-opus-4-6-model",
 			inputJSON:   `{"model":"claude-opus-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":32768}}}`,
 			expectField: "output_config.effort",
-			expectValue: "max",
+			expectValue: "high",
 			expectErr:   false,
 		},
 		{
@@ -3003,6 +3273,30 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			expectField: "output_config.effort",
 			expectValue: "high",
 			expectErr:   false,
+		},
+		{
+			name:         "B15",
+			from:         "gemini",
+			to:           "claude",
+			model:        "claude-opus-4-6-model",
+			inputJSON:    `{"model":"claude-opus-4-6-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":128000}}}`,
+			expectField:  "output_config.effort",
+			expectValue:  "max",
+			expectField2: "thinking.type",
+			expectValue2: "adaptive",
+			expectAbsent: []string{"thinking.budget_tokens"},
+		},
+		{
+			name:         "B16",
+			from:         "gemini",
+			to:           "claude",
+			model:        "claude-adaptive-xhigh-model",
+			inputJSON:    `{"model":"claude-adaptive-xhigh-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":64000}}}`,
+			expectField:  "output_config.effort",
+			expectValue:  "xhigh",
+			expectField2: "thinking.type",
+			expectValue2: "adaptive",
+			expectAbsent: []string{"thinking.budget_tokens"},
 		},
 
 		// C subgroup: Claude adaptive + effort cross-protocol conversion
@@ -3292,6 +3586,15 @@ func getTestModels() []*registry.ModelInfo {
 			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "high"}, ZeroAllowed: false, DynamicAllowed: false},
 		},
 		{
+			ID:          "level-max-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "openai",
+			DisplayName: "Max Effort Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"high", "xhigh", "max"}},
+		},
+		{
 			ID:          "gemini-budget-model",
 			Object:      "model",
 			Created:     1700000000,
@@ -3351,6 +3654,15 @@ func getTestModels() []*registry.ModelInfo {
 			Thinking:            &registry.ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false, Levels: []string{"low", "medium", "high"}},
 		},
 		{
+			ID:          "claude-adaptive-xhigh-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "claude",
+			DisplayName: "Claude Adaptive Xhigh Model",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"high", "xhigh"}},
+		},
+		{
 			ID:          "antigravity-budget-model",
 			Object:      "model",
 			Created:     1700000000,
@@ -3405,6 +3717,26 @@ func getTestModels() []*registry.ModelInfo {
 			UserDefined: true,
 			Thinking:    nil,
 		},
+		{
+			ID:          "user-defined-level-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "openai",
+			DisplayName: "User Defined Level Model",
+			UserDefined: true,
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"high", "xhigh"}},
+		},
+		{
+			ID:          "user-defined-budget-model",
+			Object:      "model",
+			Created:     1700000000,
+			OwnedBy:     "test",
+			Type:        "gemini",
+			DisplayName: "User Defined Budget Model",
+			UserDefined: true,
+			Thinking:    &registry.ThinkingSupport{Min: 128, Max: 20000},
+		},
 	}
 }
 
@@ -3434,7 +3766,12 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				true,
 			)
 			if applyTo == "claude" {
-				body, _ = sjson.SetBytes(body, "max_tokens", 200000)
+				// Let the model's thinking range determine the budget in these tests.
+				doc := ojson.NewDoc(body)
+				if errSet := doc.Set("max_tokens", 200000); errSet != nil {
+					t.Fatalf("setting Claude max_tokens: %v", errSet)
+				}
+				body = doc.Bytes()
 			}
 
 			body, err := thinking.ApplyThinking(body, tc.model, tc.from, applyTo, applyTo)
@@ -3450,7 +3787,7 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			}
 
 			for _, fieldPath := range tc.expectAbsent {
-				if gjson.GetBytes(body, fieldPath).Exists() {
+				if ojson.GetBytesNoCopy(body, fieldPath).Exists() {
 					t.Fatalf("expected field %s to be absent, body=%s", fieldPath, string(body))
 				}
 			}
@@ -3459,17 +3796,17 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				var hasThinking bool
 				switch tc.to {
 				case "gemini":
-					hasThinking = gjson.GetBytes(body, "generationConfig.thinkingConfig").Exists()
+					hasThinking = ojson.GetBytesNoCopy(body, "generationConfig.thinkingConfig").Exists()
 				case "antigravity":
-					hasThinking = gjson.GetBytes(body, "request.generationConfig.thinkingConfig").Exists()
+					hasThinking = ojson.GetBytesNoCopy(body, "request.generationConfig.thinkingConfig").Exists()
 				case "claude":
-					hasThinking = gjson.GetBytes(body, "thinking").Exists()
+					hasThinking = ojson.GetBytesNoCopy(body, "thinking").Exists()
 				case "openai":
-					hasThinking = gjson.GetBytes(body, "reasoning_effort").Exists()
+					hasThinking = ojson.GetBytesNoCopy(body, "reasoning_effort").Exists()
 				case "codex":
-					hasThinking = gjson.GetBytes(body, "reasoning.effort").Exists() || gjson.GetBytes(body, "reasoning").Exists()
+					hasThinking = ojson.GetBytesNoCopy(body, "reasoning.effort").Exists() || ojson.GetBytesNoCopy(body, "reasoning").Exists()
 				case "kimi":
-					hasThinking = gjson.GetBytes(body, "thinking").Exists() || gjson.GetBytes(body, "reasoning_effort").Exists()
+					hasThinking = ojson.GetBytesNoCopy(body, "thinking").Exists() || ojson.GetBytesNoCopy(body, "reasoning_effort").Exists()
 				}
 				if hasThinking {
 					t.Fatalf("expected no thinking field but found one, body=%s", string(body))
@@ -3478,12 +3815,12 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			}
 
 			assertField := func(fieldPath, expected string) {
-				val := gjson.GetBytes(body, fieldPath)
+				val := ojson.GetBytesNoCopy(body, fieldPath)
 				if !val.Exists() {
 					t.Fatalf("expected field %s not found, body=%s", fieldPath, string(body))
 				}
 				actualValue := val.String()
-				if val.Type == gjson.Number {
+				if val.Type == ojson.Number {
 					actualValue = fmt.Sprintf("%d", val.Int())
 				}
 				if actualValue != expected {
@@ -3500,7 +3837,7 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			// 2.1.220 always sends thinking.type="adaptive" alongside
 			// output_config.effort. Emitting effort on its own would be a wire
 			// shape the real client never produces.
-			if tc.to == "claude" && gjson.GetBytes(body, "output_config.effort").Exists() {
+			if tc.to == "claude" && ojson.GetBytesNoCopy(body, "output_config.effort").Exists() {
 				assertField("thinking.type", "adaptive")
 			}
 			if tc.expectField3 != "" {
@@ -3515,7 +3852,7 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 				// Each case declares its expected visibility independently from the
 				// extractor under test. Empty means the provider field must be absent.
 				wantIncludeThoughts := tc.includeThoughts
-				itVal := gjson.GetBytes(body, path)
+				itVal := ojson.GetBytesNoCopy(body, path)
 				if wantIncludeThoughts == "" {
 					if itVal.Exists() {
 						t.Fatalf("includeThoughts should be absent without summary intent, body=%s", string(body))

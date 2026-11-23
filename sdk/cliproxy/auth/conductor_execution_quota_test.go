@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	internalutil "github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	internalutil "github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 type quotaAttemptIsolationSelector struct{}
@@ -210,7 +210,7 @@ func TestSyncMetadataSessionToContext(t *testing.T) {
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
+func TestPrepareRequestAfterAuthSessionClearing(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
 		Payload: nil,
@@ -230,7 +230,7 @@ func TestApplyRequestAfterAuthInterceptorSessionClearing(t *testing.T) {
 		},
 	}
 
-	finalReq, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	finalReq, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestGhostParentElimination(t *testing.T) {
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrelatedHeaderChange(t *testing.T) {
+func TestPrepareRequestAfterAuthPreservesOriginalRequestSessionOnUnrelatedHeaderChange(t *testing.T) {
 	bodyWithSession := []byte(`{"session_id":"important-session"}`)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
@@ -303,7 +303,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrela
 		},
 	}
 
-	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	_, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesOriginalRequestSessionOnUnrela
 	}
 }
 
-func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderChange(t *testing.T) {
+func TestPrepareRequestAfterAuthPreservesLCPHierarchyOnUnrelatedHeaderChange(t *testing.T) {
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.6-luna",
 		Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`),
@@ -334,7 +334,7 @@ func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderC
 		},
 	}
 
-	_, finalOpts, err := applyRequestAfterAuthInterceptor(context.Background(), nil, "openai", req, opts, "gpt-5.6-luna")
+	_, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai", req, opts, "gpt-5.6-luna")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -351,5 +351,34 @@ func TestApplyRequestAfterAuthInterceptorPreservesLCPHierarchyOnUnrelatedHeaderC
 	meta := internallogging.GetClientRequestMetadata(syncedCtx)
 	if meta.SessionID != "lcp:v1:child-fork-123" || meta.ParentSessionID != "lcp:v1:parent-trunk-000" {
 		t.Fatalf("synced context hierarchy = (%q, %q), want (lcp:v1:child-fork-123, lcp:v1:parent-trunk-000)", meta.SessionID, meta.ParentSessionID)
+	}
+}
+
+func TestPrepareRequestAfterAuth_OverridesPath_Issue6196(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-image-2.5",
+		Payload: []byte(`{"model":"gpt-image-2.5","prompt":"edit this"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestPathMetadataKey: "/v1/images/edits",
+		},
+		RequestAfterAuthInterceptor: func(ctx context.Context, req cliproxyexecutor.RequestAfterAuthInterceptRequest) cliproxyexecutor.RequestAfterAuthInterceptResponse {
+			return cliproxyexecutor.RequestAfterAuthInterceptResponse{
+				Path: "/v1/images/generations",
+				Body: []byte(`{"model":"gpt-image-2.5","prompt":"rewritten for generations"}`),
+			}
+		},
+	}
+
+	finalReq, finalOpts, err := prepareRequestAfterAuth(context.Background(), nil, nil, "openai-compatibility", req, opts, "gpt-image-2.5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(finalReq.Payload) != `{"model":"gpt-image-2.5","prompt":"rewritten for generations"}` {
+		t.Fatalf("final payload = %s, want rewritten", string(finalReq.Payload))
+	}
+	if gotPath := finalOpts.Metadata[cliproxyexecutor.RequestPathMetadataKey]; gotPath != "/v1/images/generations" {
+		t.Fatalf("final request path = %v, want /v1/images/generations", gotPath)
 	}
 }

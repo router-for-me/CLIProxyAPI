@@ -8,17 +8,28 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 )
 
 const (
 	WebsocketTimelineSourceContextKey    = "WEBSOCKET_TIMELINE_SOURCE"
 	APIRequestSourceContextKey           = "API_REQUEST_SOURCE"
 	DeferredAPIRequestContextKey         = "DEFERRED_API_REQUEST"
+	DeferredAPIResponseContextKey        = "DEFERRED_API_RESPONSE"
 	APIResponseSourceContextKey          = "API_RESPONSE_SOURCE"
+	APIResponseSnapshotterContextKey     = "API_RESPONSE_SNAPSHOTTER"
 	APIResponseCapturedContextKey        = "API_RESPONSE_CAPTURED"
 	APIWebsocketTimelineSourceContextKey = "API_WEBSOCKET_TIMELINE_SOURCE"
 )
+
+// APIResponseSnapshotter renders and closes a request-scoped in-memory upstream
+// response buffer safely across asynchronous stream workers and response finalization.
+type APIResponseSnapshotter interface {
+	// SnapshotAPIResponse returns a copy of the aggregated upstream response log bytes.
+	SnapshotAPIResponse() []byte
+	// Close marks the buffer closed so late asynchronous stream writes become no-ops.
+	Close()
+}
 
 // DeferredAPIRequest builds an upstream request log only when an error log needs it.
 type DeferredAPIRequest func() []byte
@@ -117,6 +128,9 @@ type StreamingLogWriter interface {
 	// Returns:
 	//   - error: An error if writing fails, nil otherwise
 	WriteAPIWebsocketTimeline(apiWebsocketTimeline []byte) error
+
+	// WriteAPIResponseErrors writes upstream API error entries to the log.
+	WriteAPIResponseErrors(errors []*interfaces.ErrorMessage) error
 
 	// SetFirstChunkTimestamp sets the TTFB timestamp captured when first chunk was received.
 	//

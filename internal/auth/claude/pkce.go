@@ -6,9 +6,19 @@ package claude
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
+
+	"github.com/MoeForge/moego/base64"
 )
+
+// GenerateState returns a 43-character OAuth state matching native Claude Code.
+func GenerateState() (string, error) {
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		return "", fmt.Errorf("failed to generate Claude OAuth state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(stateBytes), nil
+}
 
 // GeneratePKCECodes generates a PKCE code verifier and challenge pair
 // following RFC 7636 specifications for OAuth 2.0 PKCE extension.
@@ -45,12 +55,12 @@ func generateCodeVerifier() (string, error) {
 	}
 
 	// Encode to URL-safe base64 without padding
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(bytes), nil
+	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
 // generateCodeChallenge creates a SHA256 hash of the code verifier
 // and encodes it using URL-safe base64 encoding without padding
 func generateCodeChallenge(codeVerifier string) string {
 	hash := sha256.Sum256([]byte(codeVerifier))
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(hash[:])
+	return base64.RawURLEncoding.EncodeToString(hash[:])
 }

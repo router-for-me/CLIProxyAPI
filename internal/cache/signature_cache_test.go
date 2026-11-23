@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	homekv "github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -224,6 +224,36 @@ func TestGetCachedSignatureRequiredGeminiEmptyThinkingSentinel(t *testing.T) {
 	}
 	if client.getCount != 0 {
 		t.Fatalf("KVGet count = %d, want 0", client.getCount)
+	}
+}
+
+func TestSignatureCacheScopesEntries(t *testing.T) {
+	ClearSignatureCache("")
+	text := "same thinking"
+	signature := "signature12345678901234567890123456789012345678901234567890"
+	accountA := WithSignatureCacheScope(context.Background(), "account-a\x00project-a")
+	accountB := WithSignatureCacheScope(context.Background(), "account-b\x00project-b")
+
+	if !CacheSignatureBestEffort(accountA, testModelName, text, signature) {
+		t.Fatal("failed to cache account A signature")
+	}
+	if got, errGet := GetCachedSignatureRequired(accountA, testModelName, text); errGet != nil || got != signature {
+		t.Fatalf("account A lookup = %q, %v; want %q", got, errGet, signature)
+	}
+	if got, errGet := GetCachedSignatureRequired(accountB, testModelName, text); errGet != nil || got != "" {
+		t.Fatalf("account B lookup = %q, %v; want cache miss", got, errGet)
+	}
+	if got, errGet := GetCachedSignatureRequired(context.Background(), testModelName, text); errGet != nil || got != "" {
+		t.Fatalf("unbound lookup = %q, %v; want cache miss", got, errGet)
+	}
+}
+
+func TestSignatureCacheHomeKeysIncludeScope(t *testing.T) {
+	text := "same thinking"
+	keyA := signatureKVKeyScoped(testModelName, "account-a\x00project-a", text)
+	keyB := signatureKVKeyScoped(testModelName, "account-b\x00project-b", text)
+	if keyA == keyB || keyA == signatureKVKey(testModelName, text) {
+		t.Fatalf("signature scopes did not isolate Home keys: A=%q B=%q legacy=%q", keyA, keyB, signatureKVKey(testModelName, text))
 	}
 }
 

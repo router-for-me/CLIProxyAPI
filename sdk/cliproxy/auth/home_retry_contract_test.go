@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,11 +11,12 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/MoeForge/moego/json"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type retryContractHomeDispatcher struct {
@@ -25,6 +25,7 @@ type retryContractHomeDispatcher struct {
 	excluded         [][]string
 	metadata         map[string]any
 	requestRetry     *int
+	selectionID      string
 	websocket        bool
 	exhaustedPayload []byte
 	exhaustedErr     error
@@ -213,6 +214,7 @@ func (d *retryContractHomeDispatcher) RPopAuthWithConstraints(_ context.Context,
 		}
 		return json.Marshal(homeAuthDispatchResponse{
 			RequestRetry: d.requestRetry,
+			SelectionID:  d.selectionID,
 			Auth: Auth{
 				ID:         authID,
 				Provider:   "home-retry-contract",

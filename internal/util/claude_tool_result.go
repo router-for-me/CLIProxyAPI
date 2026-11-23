@@ -1,30 +1,40 @@
 package util
 
 import (
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
-// ClaudeToolResultImage represents a base64-encoded image extracted from a Claude
-// tool_result content block. Callers emit it as a provider-specific inline data
-// part so that image bytes do not bloat the textual function response result.
+// ClaudeToolResultImage represents a base64-encoded media block (image or document)
+// extracted from a Claude tool_result content block. Callers emit it as a
+// provider-specific inline data part so that media bytes do not bloat the textual
+// function response result.
 type ClaudeToolResultImage struct {
 	MimeType string
 	Data     string
 }
 
-// ClaudeToolResult is the normalized form of a Claude tool_result `content` field,
+// ClaudeToolResult is the normalized form of a Claude tool_result block,
 // ready to be written into a Gemini-style functionResponse.
 type ClaudeToolResult struct {
-	// Result is the value for functionResponse.response.result.
+	// Result is the value for functionResponse.response.result or .error.
 	Result string
-	// ResultIsRaw reports whether Result holds raw JSON (write with sjson.SetRaw*)
-	// or a plain string (write with sjson.Set*). Writing raw JSON text through
-	// sjson.Set as a string value would double-encode it, so callers must honor
+	// ResultIsRaw reports whether Result holds raw JSON (write with ojson.SetRaw*)
+	// or a plain string (write with ojson.Set*). Writing raw JSON text through
+	// ojson.Set as a string value would double-encode it, so callers must honor
 	// this flag.
 	ResultIsRaw bool
+	// IsError preserves an explicit tool_result.is_error failure flag.
+	IsError bool
 	// Images holds base64 image blocks separated out of the content.
 	Images []ClaudeToolResultImage
+}
+
+// ConvertClaudeToolResult normalizes a complete Claude tool_result block while
+// preserving its success/failure semantics.
+func ConvertClaudeToolResult(block ojson.Result) ClaudeToolResult {
+	result := ConvertClaudeToolResultContent(block.Get("content"))
+	result.IsError = block.Get("is_error").Type == ojson.True
+	return result
 }
 
 // ConvertClaudeToolResultContent normalizes a Claude tool_result `content` field into
@@ -32,7 +42,7 @@ type ClaudeToolResult struct {
 //
 // Claude tool_result content may be a plain string, an array of mixed text/image
 // blocks, a single object, or absent. Some Claude->Gemini translators previously
-// wrote content.Raw straight through sjson.SetBytes, which double-encoded string
+// wrote content.Raw straight through ojson.SetBytes, which double-encoded string
 // content and flattened structured arrays (including base64 image data) into one
 // opaque escaped string. This helper mirrors the Antigravity Claude translator,
 // which already handles structured content correctly:
@@ -40,23 +50,23 @@ type ClaudeToolResult struct {
 //   - string             -> plain string result (no double-encoding)
 //   - single non-image   -> raw JSON result (structure preserved)
 //   - multiple non-image -> raw JSON array result
-//   - base64 image block -> separated into Images (emitted as inline data parts)
-//   - object             -> raw JSON result, or image -> Images with empty result
+//   - base64 media block -> separated into Images (image or document emitted as inline data parts)
+//   - object             -> raw JSON result, or media -> Images with empty result
 //   - absent/empty       -> empty string result
 //
-// Unlike Antigravity, image blocks without base64 data are dropped rather than
-// emitted as empty inline data parts, matching the Gemini image part guards.
-func ConvertClaudeToolResultContent(content gjson.Result) ClaudeToolResult {
+// Unlike Antigravity, image/document blocks without base64 data are dropped rather than
+// emitted as empty inline data parts, matching the Gemini inline data part guards.
+func ConvertClaudeToolResultContent(content ojson.Result) ClaudeToolResult {
 	switch {
-	case content.Type == gjson.String:
+	case content.Type == ojson.String:
 		return ClaudeToolResult{Result: content.String()}
 	case content.IsArray():
 		var images []ClaudeToolResultImage
 		nonImageCount := 0
 		lastNonImageRaw := ""
-		filtered := []byte(`[]`)
-		content.ForEach(func(_, block gjson.Result) bool {
-			if isClaudeBase64Image(block) {
+		filteredDoc := ojson.NewDoc([]byte(`[]`))
+		content.ForEach(func(_, block ojson.Result) bool {
+			if isClaudeBase64Media(block) {
 				if img, ok := claudeImageFromBlock(block); ok {
 					images = append(images, img)
 				}
@@ -64,19 +74,19 @@ func ConvertClaudeToolResultContent(content gjson.Result) ClaudeToolResult {
 			}
 			nonImageCount++
 			lastNonImageRaw = block.Raw
-			filtered, _ = sjson.SetRawBytes(filtered, "-1", []byte(block.Raw))
+			_ = filteredDoc.SetRaw("-1", block.Raw)
 			return true
 		})
 		switch {
 		case nonImageCount == 1:
 			return ClaudeToolResult{Result: lastNonImageRaw, ResultIsRaw: true, Images: images}
 		case nonImageCount > 1:
-			return ClaudeToolResult{Result: string(filtered), ResultIsRaw: true, Images: images}
+			return ClaudeToolResult{Result: filteredDoc.String(), ResultIsRaw: true, Images: images}
 		default:
 			return ClaudeToolResult{Images: images}
 		}
 	case content.IsObject():
-		if isClaudeBase64Image(content) {
+		if isClaudeBase64Media(content) {
 			if img, ok := claudeImageFromBlock(content); ok {
 				return ClaudeToolResult{Images: []ClaudeToolResultImage{img}}
 			}
@@ -90,20 +100,26 @@ func ConvertClaudeToolResultContent(content gjson.Result) ClaudeToolResult {
 	}
 }
 
-// isClaudeBase64Image reports whether a content block is a base64-encoded image block.
-func isClaudeBase64Image(block gjson.Result) bool {
-	return block.Get("type").String() == "image" && block.Get("source.type").String() == "base64"
+// isClaudeBase64Media reports whether a content block is a base64-encoded image or document block.
+func isClaudeBase64Media(block ojson.Result) bool {
+	blockType := block.Get("type").String()
+	return (blockType == "image" || blockType == "document") && block.Get("source.type").String() == "base64"
 }
 
-// claudeImageFromBlock extracts image data from a base64 image block. It returns false
-// when the block carries no base64 data, so empty inline data parts are not emitted.
-func claudeImageFromBlock(block gjson.Result) (ClaudeToolResultImage, bool) {
+// claudeImageFromBlock extracts inline media data from a base64 image or document block.
+// It returns false when the block carries no base64 data (or no media_type for documents),
+// so empty inline data parts are not emitted.
+func claudeImageFromBlock(block ojson.Result) (ClaudeToolResultImage, bool) {
 	data := block.Get("source.data").String()
 	if data == "" {
 		return ClaudeToolResultImage{}, false
 	}
+	mimeType := block.Get("source.media_type").String()
+	if block.Get("type").String() == "document" && mimeType == "" {
+		return ClaudeToolResultImage{}, false
+	}
 	return ClaudeToolResultImage{
-		MimeType: block.Get("source.media_type").String(),
+		MimeType: mimeType,
 		Data:     data,
 	}, true
 }

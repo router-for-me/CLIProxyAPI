@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type claudeCancellationTestExecutor struct {
@@ -264,9 +264,9 @@ func TestManagerClaudeStreamTailCancellationIsAvailabilityNeutral(t *testing.T) 
 	if chunk := <-stream.Chunks; chunk.Err != nil || string(chunk.Payload) != "first" {
 		t.Fatalf("first chunk = %#v", chunk)
 	}
-	cancel()
 	source <- cliproxyexecutor.StreamChunk{Err: claudeRequestScopedCancellation{}}
 	close(source)
+	cancel()
 	for range stream.Chunks {
 	}
 

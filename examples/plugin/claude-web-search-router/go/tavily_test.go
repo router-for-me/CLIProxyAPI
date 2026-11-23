@@ -2,15 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestTavilyClientSearchMockAPI(t *testing.T) {
@@ -174,7 +174,7 @@ func TestRunTavilyClaudeJSONWithMock(t *testing.T) {
 	if errRun != nil {
 		t.Fatal(errRun)
 	}
-	root := gjson.ParseBytes(payload)
+	root := ojson.GetBytesNoCopy(payload, "@this")
 	if root.Get("type").String() != "message" {
 		t.Fatalf("type = %s", root.Get("type").String())
 	}

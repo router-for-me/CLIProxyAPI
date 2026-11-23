@@ -3,40 +3,56 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tiktoken-go/tokenizer"
 )
 
 func (e *CodexExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	ctx = helps.WithCodexCommentaryPolicy(ctx, e.cfg)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if _, errExpand := e.expandCodexResponsesCompaction(auth, &req, &opts, baseModel); errExpand != nil {
+		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadRequest, msg: errExpand.Error()}
+	}
 
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("codex")
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
-
-	body, err := helps.ApplyRequestThinking(body, req, opts, from.String(), to.String(), e.Identifier())
+	body, updatesChanged, err := helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntentForExecutor(ctx, opts.Headers, e.cfg, e.Identifier(), from, to, baseModel, req.Payload, false, helps.APIKeyModelIsCompat(req))
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+	originalTranslatedForPayload := append([]byte(nil), body...)
+	if len(opts.OriginalRequest) > 0 {
+		originalTranslatedForPayload, _, _ = helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntentForExecutor(ctx, opts.Headers, e.cfg, e.Identifier(), from, to, baseModel, opts.OriginalRequest, false, helps.APIKeyModelIsCompat(req))
+	}
 
-	body = helps.SetStringIfDifferent(body, "model", baseModel)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
-	body, _ = sjson.DeleteBytes(body, "generate")
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body = helps.SetBoolIfDifferent(body, "stream", false)
-	body = normalizeCodexInstructions(body, helps.IsNativeCodexRequest(req.Payload, opts))
+	doc := ojson.NewDoc(body)
+	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier(), updatesChanged); err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 
+	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
+	_ = doc.Delete("previous_response_id")
+	helps.StripCodexSessionInstructionMarker(doc, from)
+	_ = doc.Delete("generate")
+	_ = doc.Delete("prompt_cache_retention")
+	_ = doc.Delete("safety_identifier")
+	_ = doc.Delete("stream_options")
+	helps.SetBoolIfDifferentDoc(doc, "stream", false)
+	normalizeCodexInstructionsDoc(doc, helps.IsNativeCodexRequest(req.Payload, opts))
+
+	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "", originalTranslatedForPayload, req, opts))
+	helps.FinalizePayloadDoc(ctx, doc)
+	body = doc.Bytes()
 	enc, err := tokenizerForCodexModel(baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("codex executor: tokenizer init failed: %w", err)
@@ -80,7 +96,7 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 		return 0, nil
 	}
 
-	root := gjson.ParseBytes(body)
+	root := util.ParseGJSONBytesNoCopy(body)
 	var segments []string
 
 	if inst := strings.TrimSpace(root.Get("instructions").String()); inst != "" {
@@ -88,14 +104,26 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 	}
 
 	inputItems := root.Get("input")
-	if inputItems.IsArray() {
+	if inputItems.Type == ojson.String {
+		if text := strings.TrimSpace(inputItems.String()); text != "" {
+			segments = append(segments, text)
+		}
+	} else if inputItems.IsArray() {
 		arr := inputItems.Array()
 		for i := range arr {
 			item := arr[i]
-			switch item.Get("type").String() {
+			itemType := item.Get("type").String()
+			if itemType == "" && item.Get("role").String() != "" && item.Get("content").Exists() {
+				itemType = "message"
+			}
+			switch itemType {
 			case "message":
 				content := item.Get("content")
-				if content.IsArray() {
+				if content.Type == ojson.String {
+					if text := strings.TrimSpace(content.String()); text != "" {
+						segments = append(segments, text)
+					}
+				} else if content.IsArray() {
 					parts := content.Array()
 					for j := range parts {
 						part := parts[j]
@@ -136,7 +164,7 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 			}
 			if params := tool.Get("parameters"); params.Exists() {
 				val := params.Raw
-				if params.Type == gjson.String {
+				if params.Type == ojson.String {
 					val = params.String()
 				}
 				if trimmed := strings.TrimSpace(val); trimmed != "" {
@@ -153,7 +181,7 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 		}
 		if schema := textFormat.Get("schema"); schema.Exists() {
 			val := schema.Raw
-			if schema.Type == gjson.String {
+			if schema.Type == ojson.String {
 				val = schema.String()
 			}
 			if trimmed := strings.TrimSpace(val); trimmed != "" {

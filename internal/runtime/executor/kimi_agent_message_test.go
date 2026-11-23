@@ -1,144 +1,132 @@
 package executor
 
 import (
-	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-// TestNormalizeKimiAgentMessages covers the payload rewrite that unblocks the
-// upstream Kimi Responses endpoint for Codex subagent sessions (live-proven
-// 2026-09-17: agent_message items -> HTTP 400 invalid_request_error).
-func TestNormalizeKimiAgentMessages(t *testing.T) {
-	t.Run("rewrites agent_message to user message and surfaces ciphertext", func(t *testing.T) {
-		body := []byte(`{
-			"model": "k3",
-			"input": [
-				{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "before"}]},
-				{"type": "agent_message", "id": "amsg_1", "author": "/root", "recipient": "/root/sub",
-					"content": [
-						{"type": "input_text", "text": "task text"},
-						{"type": "encrypted_content", "encrypted_content": "ciphertext-payload"}
-					]},
-				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "after"}]}
-			]
-		}`)
-		out := normalizeKimiAgentMessages(body)
-		items := gjson.ParseBytes(out).Get("input").Array()
-		if len(items) != 3 {
-			t.Fatalf("expected 3 items, got %d: %s", len(items), string(out))
-		}
-		item := items[1]
-		if item.Get("type").String() != "message" || item.Get("role").String() != "user" {
-			t.Fatalf("item[1] = %q/%q, want message/user", item.Get("type").String(), item.Get("role").String())
-		}
-		if item.Get("content.0.text").String() != "task text" {
-			t.Fatalf("delegated task text lost: %s", item.Get("content.0").Raw)
-		}
-		if item.Get("content.1.type").String() != "input_text" || item.Get("content.1.text").String() != "ciphertext-payload" {
-			t.Fatalf("ciphertext not surfaced as input_text: %s", item.Get("content.1").Raw)
-		}
-		if item.Get("content.1.encrypted_content").Exists() {
-			t.Fatalf("encrypted_content key must be removed: %s", item.Get("content.1").Raw)
-		}
-		if items[0].Get("content.0.text").String() != "before" || items[2].Get("content.0.text").String() != "after" {
-			t.Fatalf("neighbouring items mutated: %s", string(out))
-		}
-	})
+func TestKimiExecutorResponsesNormalizesAgentMessages(t *testing.T) {
+	const payload = `{"model":"kimi-k3","input":[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]},
+		{"type":"function_call","call_id":"call_a","name":"lookup","arguments":"{}"},
+		{"type":"function_call","call_id":"call_b","name":"lookup","arguments":"{}"},
+		{"type":"function_call_output","call_id":"call_a","output":"result A"},
+		{"type":"agent_message","id":"amsg_1","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"task text"},{"type":"encrypted_content","encrypted_content":"synthetic handoff"}]},
+		{"type":"message","role":"developer","content":[{"type":"input_text","text":"developer note"}]},
+		{"type":"function_call_output","call_id":"call_b","output":"result B"}
+	]}`
+	for _, tc := range []struct {
+		name   string
+		stream bool
+	}{
+		{name: "JSON"},
+		{name: "SSE", stream: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/responses" {
+					t.Errorf("upstream request = %s %s, want POST /v1/responses", r.Method, r.URL.Path)
+					http.Error(w, "unexpected endpoint", http.StatusNotFound)
+					return
+				}
+				body, errRead := io.ReadAll(r.Body)
+				if errRead != nil {
+					t.Errorf("read upstream request: %v", errRead)
+					http.Error(w, "read error", http.StatusBadRequest)
+					return
+				}
+				outbound := ojson.ParseBytes(body)
+				items := outbound.Get("input").Array()
+				for _, item := range items {
+					if item.Get("type").String() == "agent_message" {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"unsupported input item: agent_message"}}`)
+						return
+					}
+				}
+				if len(items) != 7 {
+					t.Errorf("upstream got %d input items, want 7: %s", len(items), body)
+					http.Error(w, "unexpected input size", http.StatusBadRequest)
+					return
+				}
+				original := ojson.Get(payload, "input").Array()
+				for i, originalIndex := range []int{0, 1, 2, 3, 6, 4, 5} {
+					if originalIndex != 4 && items[i].Raw != original[originalIndex].Raw {
+						t.Errorf("upstream input[%d] = %s, want %s", i, items[i].Raw, original[originalIndex].Raw)
+					}
+				}
+				item := items[5]
+				if item.Get("type").String() != "message" || item.Get("role").String() != "user" || item.Get("id").String() != "amsg_1" {
+					t.Errorf("upstream handoff did not become a user message: %s", item.Raw)
+				}
+				if item.Get("content.0").Raw != original[4].Get("content.0").Raw {
+					t.Errorf("existing handoff text changed: %s", item.Raw)
+				}
+				part := item.Get("content.1")
+				if part.Get("type").String() != "input_text" || part.Get("text").String() != "synthetic handoff" || part.Get("encrypted_content").Exists() {
+					t.Errorf("upstream handoff content was not converted: %s", part.Raw)
+				}
+				if outbound.Get("stream").Bool() != tc.stream {
+					t.Errorf("wrong upstream stream flag: %s", body)
+				}
+				if outbound.Get("max_output_tokens").Int() != 123 {
+					t.Errorf("payload rule did not match normalized handoff: %s", body)
+				}
+				const completed = `{"id":"resp_test","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"handoff received"}]}]}`
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":"+completed+"}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, completed)
+			}))
+			t.Cleanup(upstream.Close)
 
-	t.Run("passes through payloads without input array", func(t *testing.T) {
-		body := []byte(`{"model": "k3", "messages": [{"role": "user", "content": "hi"}]}`)
-		if out := normalizeKimiAgentMessages(body); string(out) != string(body) {
-			t.Fatalf("chat-format payload must be untouched, got %s", string(out))
-		}
-	})
+			exec := NewKimiExecutor(&config.Config{Payload: config.PayloadConfig{
+				Override: []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "kimi-k3", Match: []map[string]any{{"input.5.role": "user"}}}},
+					Params: map[string]any{"max_output_tokens": 123},
+				}},
+			}})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"base_url": upstream.URL}}
+			req := cliproxyexecutor.Request{Model: "kimi-k3", Payload: []byte(payload)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: tc.stream}
+			if !tc.stream {
+				resp, errExecute := exec.Execute(t.Context(), auth, req, opts)
+				if errExecute != nil {
+					t.Fatalf("Execute() error = %v", errExecute)
+				}
+				if got := ojson.GetBytes(resp.Payload, "output.0.content.0.text").String(); got != "handoff received" {
+					t.Fatalf("unexpected completed response: %s", resp.Payload)
+				}
+				return
+			}
 
-	t.Run("passes through when no agent_message present", func(t *testing.T) {
-		body := []byte(`{"input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}`)
-		if out := normalizeKimiAgentMessages(body); string(out) != string(body) {
-			t.Fatalf("agent_message-free payload must be untouched, got %s", string(out))
-		}
-	})
-
-	t.Run("handles agent_message without content array", func(t *testing.T) {
-		body := []byte(`{"input": [{"type": "agent_message", "id": "amsg_2"}]}`)
-		out := normalizeKimiAgentMessages(body)
-		item := gjson.ParseBytes(out).Get("input.0")
-		if item.Get("type").String() != "message" || item.Get("role").String() != "user" {
-			t.Fatalf("contentless agent_message not converted: %s", item.Raw)
-		}
-	})
-}
-
-// TestKimiExecutorResponsesNonStream_NormalizesAgentMessages exercises the
-// non-streaming Responses dispatch (Execute -> executeResponses) to prove the
-// normalization reaches the upstream request on that route too.
-func TestKimiExecutorResponsesNonStream_NormalizesAgentMessages(t *testing.T) {
-	var upstreamBody []byte
-
-	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		var errRead error
-		upstreamBody, errRead = io.ReadAll(req.Body)
-		if errRead != nil {
-			return nil, errRead
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_test","object":"response","status":"completed","model":"k3","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}`)),
-		}, nil
-	}))
-
-	cfg := &config.Config{}
-	executor := NewKimiExecutor(cfg)
-	auth := &cliproxyauth.Auth{
-		Attributes: map[string]string{},
-		Metadata:   map[string]any{"access_token": "test-key"},
-	}
-
-	payload := []byte(`{
-		"model": "kimi-k3",
-		"input": [
-			{"type": "agent_message", "id": "amsg_1", "author": "/root", "recipient": "/root/sub",
-				"content": [
-					{"type": "input_text", "text": "task text"},
-					{"type": "encrypted_content", "encrypted_content": "ciphertext-payload"}
-				]},
-			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}
-		]
-	}`)
-
-	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
-		Model:   "kimi-k3",
-		Payload: payload,
-	}, cliproxyexecutor.Options{
-		SourceFormat: sdktranslator.FormatOpenAIResponse,
-		Stream:       false,
-	})
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-
-	if len(upstreamBody) == 0 {
-		t.Fatal("expected upstreamBody to be captured, got empty")
-	}
-	parsed := gjson.ParseBytes(upstreamBody)
-	item0 := parsed.Get("input.0")
-	if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
-		t.Fatalf("upstream input[0] = %q/%q, want message/user (agent_message normalized): %s", item0.Get("type").String(), item0.Get("role").String(), string(upstreamBody))
-	}
-	if item0.Get("content.1.text").String() != "ciphertext-payload" {
-		t.Fatalf("upstream ciphertext not surfaced: %s", item0.Get("content.1").Raw)
-	}
-	if parsed.Get("input.1.content.0.text").String() != "hello" {
-		t.Fatalf("neighbouring user message mutated: %s", string(upstreamBody))
+			result, errStream := exec.ExecuteStream(t.Context(), auth, req, opts)
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+			var output strings.Builder
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error = %v", chunk.Err)
+				}
+				output.Write(chunk.Payload)
+			}
+			if got := output.String(); !strings.Contains(got, "event: response.completed\n") || !strings.Contains(got, "handoff received") {
+				t.Fatalf("stream did not complete with expected output: %s", got)
+			}
+		})
 	}
 }

@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
-	metaauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/meta"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/browser"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -123,6 +123,12 @@ func (a MetaAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	}
 	if tokenStorage.Name != "" {
 		metadata["name"] = tokenStorage.Name
+	}
+	if bundle.MintedKey != nil {
+		metadata["subs_tier_name"] = bundle.MintedKey.SubsTierName
+		metadata["subs_tier_id"] = bundle.MintedKey.SubsTierID
+		metadata["is_subs_active"] = bundle.MintedKey.IsSubsActive
+		metadata["has_payment_method"] = bundle.MintedKey.HasPaymentMethod
 	}
 
 	attrs := map[string]string{

@@ -2,9 +2,12 @@ package config
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
-	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginstore"
+	"github.com/MoeForge/moego/regexp"
+	sdkpluginstore "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginstore"
+	log "github.com/sirupsen/logrus"
 )
 
 // NormalizePluginsConfig applies default plugin configuration values.
@@ -33,6 +36,17 @@ func (cfg *Config) NormalizePluginsConfig() {
 	}
 }
 
+// NormalizeClaudeConfig applies default Claude provider configuration values.
+func (cfg *Config) NormalizeClaudeConfig() {
+	if cfg == nil {
+		return
+	}
+	if cfg.Claude.SessionDatePinDays == nil {
+		days := DefaultClaudeSessionDatePinDays
+		cfg.Claude.SessionDatePinDays = &days
+	}
+}
+
 // SanitizeCodexHeaderDefaults trims surrounding whitespace from the
 // configured Codex header fallback values.
 func (cfg *Config) SanitizeCodexHeaderDefaults() {
@@ -41,14 +55,28 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+	cfg.Codex.SignInWithChatGPTIdentifier = strings.TrimSpace(cfg.Codex.SignInWithChatGPTIdentifier)
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
-// configured Claude fingerprint baseline values.
+// configured Claude fingerprint baseline values, normalizes the native
+// entrypoint and beta override lists, and resets an unknown client-request-id
+// mode to the default.
 func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	if cfg == nil {
 		return
 	}
+	cfg.ClaudeHeaderDefaults.NativeEntrypoints = normalizeClaudeEntrypointNames(cfg.ClaudeHeaderDefaults.NativeEntrypoints)
+	cfg.ClaudeHeaderDefaults.AnthropicBetaStrip = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaStrip)
+	cfg.ClaudeHeaderDefaults.AnthropicBetaAppend = normalizeClaudeBetaNames(cfg.ClaudeHeaderDefaults.AnthropicBetaAppend)
+	mode := strings.ToLower(strings.TrimSpace(cfg.ClaudeHeaderDefaults.ClientRequestID))
+	switch mode {
+	case "", ClaudeClientRequestIDOn, ClaudeClientRequestIDOff, ClaudeClientRequestIDPassthrough:
+	default:
+		log.Warnf("unrecognized claude header-defaults client-request-id %q (supported: on, off, passthrough); falling back to on", cfg.ClaudeHeaderDefaults.ClientRequestID)
+		mode = ""
+	}
+	cfg.ClaudeHeaderDefaults.ClientRequestID = mode
 	cfg.ClaudeHeaderDefaults.UserAgent = strings.TrimSpace(cfg.ClaudeHeaderDefaults.UserAgent)
 	cfg.ClaudeHeaderDefaults.PackageVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion)
 	cfg.ClaudeHeaderDefaults.RuntimeVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion)
@@ -56,6 +84,56 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
 	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
 	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
+}
+
+// normalizeClaudeEntrypointNames trims and lowercases entrypoint names,
+// dropping empty and duplicate entries while keeping the configured order.
+func normalizeClaudeEntrypointNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// normalizeClaudeBetaNames trims beta names and drops empty and duplicate
+// entries while keeping the configured order.
+func normalizeClaudeBetaNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
@@ -79,7 +157,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if name == "" || alias == "" {
 				continue
 			}
-			if strings.EqualFold(name, alias) {
+			if name == alias {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
@@ -87,7 +165,13 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
+			var openAPI *bool
+			if entry.OpenAPI != nil {
+				value := *entry.OpenAPI
+				openAPI = &value
+			}
 			clean = append(clean, OAuthModelAlias{
+				OpenAPI:      openAPI,
 				Name:         name,
 				Alias:        alias,
 				Fork:         entry.Fork,
@@ -100,6 +184,56 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		}
 	}
 	cfg.OAuthModelAlias = out
+}
+
+// SanitizeOAuthSettings normalizes and deduplicates global OAuth model settings.
+// It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
+// and ensures entries are unique within each channel.
+func (cfg *Config) SanitizeOAuthSettings() {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return
+	}
+	out := make(map[string][]OAuthModelSetting, len(cfg.OAuthSettings))
+	for rawChannel, settings := range cfg.OAuthSettings {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(settings) == 0 {
+			continue
+		}
+		seen := make(map[string]struct{}, len(settings))
+		reversed := make([]OAuthModelSetting, 0, len(settings))
+		for i := len(settings) - 1; i >= 0; i-- {
+			entry := settings[i]
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				continue
+			}
+			alias := strings.TrimSpace(entry.Alias)
+			key := strings.ToLower(name) + "->" + strings.ToLower(alias)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			var openAPI *bool
+			if entry.OpenAPI != nil {
+				value := *entry.OpenAPI
+				openAPI = &value
+			}
+			reversed = append(reversed, OAuthModelSetting{
+				OpenAPI:          openAPI,
+				Name:             name,
+				Alias:            alias,
+				MaxContextLength: entry.MaxContextLength,
+			})
+		}
+		if len(reversed) > 0 {
+			clean := make([]OAuthModelSetting, len(reversed))
+			for i := range reversed {
+				clean[len(reversed)-1-i] = reversed[i]
+			}
+			out[channel] = clean
+		}
+	}
+	cfg.OAuthSettings = out
 }
 
 // SanitizeOAuthRequestScopedErrors normalizes and validates global OAuth request-scoped error rules.
@@ -246,6 +380,108 @@ func sanitizeCodexKeyEntries(entries []CodexKey) []CodexKey {
 	return out
 }
 
+// NormalizeSensitiveWordsReplace trims replacement target keys, drops blank keys,
+// and preserves replacement values (including empty strings for phrase deletion).
+func NormalizeSensitiveWordsReplace(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(in))
+	for k := range in {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make(map[string]string, len(in))
+	for _, rawKey := range keys {
+		trimmedKey := strings.TrimSpace(rawKey)
+		if trimmedKey == "" {
+			continue
+		}
+		if _, exists := out[trimmedKey]; exists && rawKey != trimmedKey {
+			continue
+		}
+		out[trimmedKey] = in[rawKey]
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeSensitivePatternsReplace validates Go RE2 regex rules, logs and drops
+// invalid or blank patterns, and preserves replacement values (including empty strings).
+func NormalizeSensitivePatternsReplace(in []SensitivePatternRule) []SensitivePatternRule {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]SensitivePatternRule, 0, len(in))
+	for i, rule := range in {
+		if strings.TrimSpace(rule.Pattern) == "" {
+			continue
+		}
+		if _, errCompile := regexp.Compile(rule.Pattern); errCompile != nil {
+			log.WithFields(log.Fields{
+				"rule_index": i + 1,
+				"pattern":    rule.Pattern,
+				"error":      errCompile,
+			}).Warn("sensitive-patterns-replace rule dropped: invalid regex")
+			continue
+		}
+		out = append(out, SensitivePatternRule{
+			Pattern:     rule.Pattern,
+			Replacement: rule.Replacement,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// SanitizeAntigravity normalizes Antigravity sensitive-word settings.
+func (cfg *Config) SanitizeAntigravity() {
+	if cfg == nil {
+		return
+	}
+	cfg.Antigravity.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cfg.Antigravity.SensitiveWordsReplace)
+	cfg.Antigravity.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cfg.Antigravity.SensitivePatternsReplace)
+}
+
+// SanitizeDevin normalizes Devin sensitive-word settings.
+func (cfg *Config) SanitizeDevin() {
+	if cfg == nil {
+		return
+	}
+	cfg.Devin.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cfg.Devin.SensitiveWordsReplace)
+	cfg.Devin.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cfg.Devin.SensitivePatternsReplace)
+}
+
+// NormalizeCloakConfig trims strings and removes blank sensitive words.
+func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
+	if cloak == nil {
+		return nil
+	}
+	cloak.Mode = strings.TrimSpace(cloak.Mode)
+	if len(cloak.SensitiveWords) > 0 {
+		normalizedWords := make([]string, 0, len(cloak.SensitiveWords))
+		for _, w := range cloak.SensitiveWords {
+			if trimmed := strings.TrimSpace(w); trimmed != "" {
+				normalizedWords = append(normalizedWords, trimmed)
+			}
+		}
+		if len(normalizedWords) > 0 {
+			cloak.SensitiveWords = normalizedWords
+		} else {
+			cloak.SensitiveWords = nil
+		}
+	} else {
+		cloak.SensitiveWords = nil
+	}
+	cloak.SensitiveWordsReplace = NormalizeSensitiveWordsReplace(cloak.SensitiveWordsReplace)
+	cloak.SensitivePatternsReplace = NormalizeSensitivePatternsReplace(cloak.SensitivePatternsReplace)
+	return cloak
+}
+
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
@@ -256,6 +492,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.Cloak = NormalizeCloakConfig(entry.Cloak)
 		// Only a recognized value is rewritten. An unrecognized one is preserved as
 		// written so sanitizing a config file never destroys operator input; the
 		// request path falls back to the default profile and reports it once.
@@ -302,6 +539,28 @@ func formatGeminiKeyDedupID(entry GeminiKey) string {
 	b.WriteString(entry.Prefix)
 	b.WriteByte(0)
 	b.WriteString(FormatSortedHeaders(entry.Headers))
+	b.WriteByte(0)
+	b.WriteString(FormatConnectionPoolDedupID(entry.ConnectionPool))
+	return b.String()
+}
+
+// FormatConnectionPoolDedupID serializes a per-credential connection-pool override
+// deterministically for credential deduplication and auth-index mapping.
+func FormatConnectionPoolDedupID(pool *ProxyConnectionPoolConfig) string {
+	if pool == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("pool:")
+	if pool.Enabled != nil {
+		b.WriteString(strconv.FormatBool(*pool.Enabled))
+	}
+	b.WriteByte(0)
+	b.WriteString(strings.TrimSpace(pool.IdleConnTimeout))
+	b.WriteByte(0)
+	if pool.MaxIdleConnsPerHost != nil {
+		b.WriteString(strconv.Itoa(*pool.MaxIdleConnsPerHost))
+	}
 	return b.String()
 }
 

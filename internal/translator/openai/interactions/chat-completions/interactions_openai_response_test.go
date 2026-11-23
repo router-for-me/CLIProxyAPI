@@ -3,9 +3,10 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 func TestConvertOpenAIResponseToInteractionsStreamUsageOnlyTerminalChunk(t *testing.T) {
@@ -31,13 +32,13 @@ func TestConvertOpenAIResponseToInteractionsStreamUsageOnlyTerminalChunk(t *test
 		t.Fatalf("done event count = %d, want 1", got)
 	}
 	payload := findInteractionsEventPayload(usageOut, "interaction.completed")
-	if got := gjson.GetBytes(payload, "interaction.usage.total_input_tokens").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(payload, "interaction.usage.total_input_tokens").Int(); got != 3 {
 		t.Fatalf("total_input_tokens = %d, want 3. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "interaction.usage.total_output_tokens").Int(); got != 4 {
+	if got := ojson.GetBytesNoCopy(payload, "interaction.usage.total_output_tokens").Int(); got != 4 {
 		t.Fatalf("total_output_tokens = %d, want 4. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "interaction.usage.total_tokens").Int(); got != 7 {
+	if got := ojson.GetBytesNoCopy(payload, "interaction.usage.total_tokens").Int(); got != 7 {
 		t.Fatalf("total_tokens = %d, want 7. Payload: %s", got, string(payload))
 	}
 }
@@ -66,10 +67,10 @@ func TestConvertOpenAIResponseToInteractionsStreamCreatedUsesChunkIdentity(t *te
 	raw := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`)
 	out := ConvertOpenAIResponseToInteractions(context.Background(), "", nil, nil, raw, &param)
 	payload := findInteractionsEventPayload(out, "interaction.created")
-	if got := gjson.GetBytes(payload, "interaction.id").String(); got != "chatcmpl_1" {
+	if got := ojson.GetBytesNoCopy(payload, "interaction.id").String(); got != "chatcmpl_1" {
 		t.Fatalf("interaction.id = %q, want chatcmpl_1. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "interaction.model").String(); got != "gpt-test" {
+	if got := ojson.GetBytesNoCopy(payload, "interaction.model").String(); got != "gpt-test" {
 		t.Fatalf("interaction.model = %q, want gpt-test. Payload: %s", got, string(payload))
 	}
 }
@@ -77,16 +78,16 @@ func TestConvertOpenAIResponseToInteractionsStreamCreatedUsesChunkIdentity(t *te
 func TestConvertOpenAIResponseToInteractionsNonStreamDirectToolCall(t *testing.T) {
 	raw := []byte(`{"id":"chatcmpl_1","model":"gpt-test","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`)
 	out := ConvertOpenAIResponseToInteractionsNonStream(context.Background(), "gpt-test", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "steps.0.type").String(); got != "function_call" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.type").String(); got != "function_call" {
 		t.Fatalf("step type = %q, want function_call. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "steps.0.id").String(); got != "call_1" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.id").String(); got != "call_1" {
 		t.Fatalf("id = %q, want call_1. Output: %s", got, string(out))
 	}
-	if gjson.GetBytes(out, "steps.0.call_id").Exists() {
+	if ojson.GetBytesNoCopy(out, "steps.0.call_id").Exists() {
 		t.Fatalf("steps.0 should not have call_id parameter. Output: %s", string(out))
 	}
-	if got := gjson.GetBytes(out, "steps.0.arguments.q").String(); got != "x" {
+	if got := ojson.GetBytesNoCopy(out, "steps.0.arguments.q").String(); got != "x" {
 		t.Fatalf("arguments.q = %q, want x. Output: %s", got, string(out))
 	}
 }
@@ -96,16 +97,16 @@ func TestConvertOpenAIResponseToInteractionsStreamToolCall(t *testing.T) {
 	raw := []byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","model":"gpt-test","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"x\"}"}}]},"finish_reason":null}]}`)
 	out := ConvertOpenAIResponseToInteractions(context.Background(), "gpt-test", nil, nil, raw, &param)
 	payload := findInteractionsEventPayload(out, "step.start")
-	if got := gjson.GetBytes(payload, "step.type").String(); got != "function_call" {
+	if got := ojson.GetBytesNoCopy(payload, "step.type").String(); got != "function_call" {
 		t.Fatalf("step.type = %q, want function_call. Payload: %s", got, string(payload))
 	}
-	if got := gjson.GetBytes(payload, "step.id").String(); got != "call_1" {
+	if got := ojson.GetBytesNoCopy(payload, "step.id").String(); got != "call_1" {
 		t.Fatalf("step.id = %q, want call_1. Payload: %s", got, string(payload))
 	}
-	if gjson.GetBytes(payload, "step.call_id").Exists() {
+	if ojson.GetBytesNoCopy(payload, "step.call_id").Exists() {
 		t.Fatalf("step.call_id must be omitted in stream. Payload: %s", string(payload))
 	}
-	if got := gjson.GetBytes(payload, "step.name").String(); got != "lookup" {
+	if got := ojson.GetBytesNoCopy(payload, "step.name").String(); got != "lookup" {
 		t.Fatalf("step.name = %q, want lookup. Payload: %s", got, string(payload))
 	}
 }
@@ -124,21 +125,21 @@ func TestConvertInteractionsResponseToOpenAIStreamToolCall(t *testing.T) {
 		out = append(out, ConvertInteractionsResponseToOpenAI(context.Background(), "gemini-3.1-flash-lite", nil, nil, chunk, &param)...)
 	}
 	toolStart := findOpenAIChatChunk(out, "choices.0.delta.tool_calls.0.function.name")
-	if got := gjson.GetBytes(toolStart, "choices.0.delta.tool_calls.0.id").String(); got != "call_1" {
+	if got := ojson.GetBytesNoCopy(toolStart, "choices.0.delta.tool_calls.0.id").String(); got != "call_1" {
 		t.Fatalf("tool call id = %q, want call_1. Payload: %s", got, string(toolStart))
 	}
-	if got := gjson.GetBytes(toolStart, "choices.0.delta.tool_calls.0.function.name").String(); got != "get_weather" {
+	if got := ojson.GetBytesNoCopy(toolStart, "choices.0.delta.tool_calls.0.function.name").String(); got != "get_weather" {
 		t.Fatalf("tool name = %q, want get_weather. Payload: %s", got, string(toolStart))
 	}
 	toolArgs := findOpenAIChatChunkValue(out, "choices.0.delta.tool_calls.0.function.arguments", `{"location":"北京"}`)
-	if got := gjson.GetBytes(toolArgs, "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"location":"北京"}` {
+	if got := ojson.GetBytesNoCopy(toolArgs, "choices.0.delta.tool_calls.0.function.arguments").String(); got != `{"location":"北京"}` {
 		t.Fatalf("tool args = %q, want location JSON. Payload: %s", got, string(toolArgs))
 	}
 	completed := findOpenAIChatChunkValue(out, "choices.0.finish_reason", "tool_calls")
-	if got := gjson.GetBytes(completed, "choices.0.finish_reason").String(); got != "tool_calls" {
+	if got := ojson.GetBytesNoCopy(completed, "choices.0.finish_reason").String(); got != "tool_calls" {
 		t.Fatalf("finish_reason = %q, want tool_calls. Payload: %s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "usage.prompt_tokens").Int(); got != 2 {
+	if got := ojson.GetBytesNoCopy(completed, "usage.prompt_tokens").Int(); got != 2 {
 		t.Fatalf("prompt_tokens = %d, want 2. Payload: %s", got, string(completed))
 	}
 }
@@ -150,19 +151,19 @@ func TestConvertInteractionsResponseToOpenAIStreamFinishMetadataUsage(t *testing
 	if len(completed) == 0 {
 		t.Fatalf("completion chunk not found")
 	}
-	if got := gjson.GetBytes(completed, "usage.prompt_tokens").Int(); got != 2 {
+	if got := ojson.GetBytesNoCopy(completed, "usage.prompt_tokens").Int(); got != 2 {
 		t.Fatalf("prompt_tokens = %d, want 2. Payload: %s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "usage.completion_tokens").Int(); got != 6 {
+	if got := ojson.GetBytesNoCopy(completed, "usage.completion_tokens").Int(); got != 6 {
 		t.Fatalf("completion_tokens = %d, want 6. Payload: %s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 3 {
+	if got := ojson.GetBytesNoCopy(completed, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 3 {
 		t.Fatalf("reasoning_tokens = %d, want 3. Payload: %s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "usage.prompt_tokens_details.cached_tokens").Int(); got != 1 {
+	if got := ojson.GetBytesNoCopy(completed, "usage.prompt_tokens_details.cached_tokens").Int(); got != 1 {
 		t.Fatalf("cached_tokens = %d, want 1. Payload: %s", got, string(completed))
 	}
-	if got := gjson.GetBytes(completed, "usage.total_tokens").Int(); got != 11 {
+	if got := ojson.GetBytesNoCopy(completed, "usage.total_tokens").Int(); got != 11 {
 		t.Fatalf("total_tokens = %d, want 11. Payload: %s", got, string(completed))
 	}
 }
@@ -170,16 +171,16 @@ func TestConvertInteractionsResponseToOpenAIStreamFinishMetadataUsage(t *testing
 func TestConvertInteractionsResponseToOpenAINonStreamToolCall(t *testing.T) {
 	raw := []byte(`{"id":"i1","model":"gemini-3.1-flash-lite","steps":[{"type":"function_call","id":"call_1","name":"get_weather","arguments":{"location":"北京"}}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`)
 	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.id").String(); got != "call_1" {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.id").String(); got != "call_1" {
 		t.Fatalf("tool call id = %q, want call_1. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "get_weather" {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.name").String(); got != "get_weather" {
 		t.Fatalf("tool name = %q, want get_weather. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"location":"北京"}` {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != `{"location":"北京"}` {
 		t.Fatalf("tool args = %q, want location JSON. Output: %s", got, string(out))
 	}
-	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.finish_reason").String(); got != "tool_calls" {
 		t.Fatalf("finish_reason = %q, want tool_calls. Output: %s", got, string(out))
 	}
 }
@@ -187,7 +188,7 @@ func TestConvertInteractionsResponseToOpenAINonStreamToolCall(t *testing.T) {
 func TestConvertInteractionsResponseToOpenAINonStream_PreservesEnvironmentID(t *testing.T) {
 	raw := []byte(`{"id":"i1","model":"antigravity-preview-05-2026","environment_id":"env_chat123","steps":[{"type":"model_output","content":[{"type":"text","text":"hello"}]}],"usage":{"total_tokens":5}}`)
 	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "antigravity-preview-05-2026", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "environment_id").String(); got != "env_chat123" {
+	if got := ojson.GetBytesNoCopy(out, "environment_id").String(); got != "env_chat123" {
 		t.Fatalf("environment_id = %q, want env_chat123. Output: %s", got, string(out))
 	}
 }
@@ -199,7 +200,7 @@ func TestConvertInteractionsResponseToOpenAIStream_PreservesEnvironmentID(t *tes
 	if len(out) == 0 {
 		t.Fatalf("no output chunks generated")
 	}
-	if got := gjson.GetBytes(out[0], "environment_id").String(); got != "env_chat_stream456" {
+	if got := ojson.GetBytesNoCopy(out[0], "environment_id").String(); got != "env_chat_stream456" {
 		t.Fatalf("environment_id = %q, want env_chat_stream456. Chunk: %s", got, string(out[0]))
 	}
 }
@@ -207,7 +208,7 @@ func TestConvertInteractionsResponseToOpenAIStream_PreservesEnvironmentID(t *tes
 func TestConvertInteractionsResponseToOpenAINonStreamRestoresAntigravityToolName(t *testing.T) {
 	raw := []byte(`{"id":"i1","model":"antigravity-preview-05-2026","steps":[{"type":"function_call","id":"call_1","name":"external_read_file","arguments":{"path":"/etc/hosts"}}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`)
 	out := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "antigravity-preview-05-2026", nil, nil, raw, nil)
-	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "read_file" {
+	if got := ojson.GetBytesNoCopy(out, "choices.0.message.tool_calls.0.function.name").String(); got != "read_file" {
 		t.Fatalf("tool name = %q, want read_file (restored from external_read_file). Output: %s", got, string(out))
 	}
 }
@@ -226,7 +227,7 @@ func TestConvertInteractionsResponseToOpenAIStreamRestoresAntigravityToolName(t 
 		out = append(out, ConvertInteractionsResponseToOpenAI(context.Background(), "antigravity-preview-05-2026", nil, nil, chunk, &param)...)
 	}
 	toolStart := findOpenAIChatChunk(out, "choices.0.delta.tool_calls.0.function.name")
-	if got := gjson.GetBytes(toolStart, "choices.0.delta.tool_calls.0.function.name").String(); got != "read_file" {
+	if got := ojson.GetBytesNoCopy(toolStart, "choices.0.delta.tool_calls.0.function.name").String(); got != "read_file" {
 		t.Fatalf("stream tool name = %q, want read_file (restored from external_read_file). Payload: %s", got, string(toolStart))
 	}
 }
@@ -234,13 +235,13 @@ func TestConvertInteractionsResponseToOpenAIStreamRestoresAntigravityToolName(t 
 func TestConvertInteractionsResponseToOpenAIPreservesNonCollidingAndNonAntigravityNames(t *testing.T) {
 	rawNonColliding := []byte(`{"id":"i1","model":"antigravity-preview-05-2026","steps":[{"type":"function_call","id":"call_1","name":"external_lookup","arguments":{"q":"test"}}]}`)
 	outNonColliding := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "antigravity-preview-05-2026", nil, nil, rawNonColliding, nil)
-	if got := gjson.GetBytes(outNonColliding, "choices.0.message.tool_calls.0.function.name").String(); got != "external_lookup" {
+	if got := ojson.GetBytesNoCopy(outNonColliding, "choices.0.message.tool_calls.0.function.name").String(); got != "external_lookup" {
 		t.Fatalf("tool name = %q, want external_lookup (preserved). Output: %s", got, string(outNonColliding))
 	}
 
 	rawNonAnti := []byte(`{"id":"i2","model":"gemini-3.1-flash-lite","steps":[{"type":"function_call","id":"call_2","name":"external_read_file","arguments":{"path":"/etc/hosts"}}]}`)
 	outNonAnti := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, rawNonAnti, nil)
-	if got := gjson.GetBytes(outNonAnti, "choices.0.message.tool_calls.0.function.name").String(); got != "external_read_file" {
+	if got := ojson.GetBytesNoCopy(outNonAnti, "choices.0.message.tool_calls.0.function.name").String(); got != "external_read_file" {
 		t.Fatalf("tool name = %q, want external_read_file (preserved for non-antigravity). Output: %s", got, string(outNonAnti))
 	}
 }
@@ -267,7 +268,7 @@ func countInteractionsEvents(events [][]byte, eventType string) int {
 }
 
 func interactionsEventName(event, payload []byte) string {
-	if eventType := gjson.GetBytes(payload, "event_type").String(); eventType != "" {
+	if eventType := ojson.GetBytesNoCopy(payload, "event_type").String(); eventType != "" {
 		return eventType
 	}
 	const prefix = "event: "
@@ -289,7 +290,7 @@ func interactionsSSEPayload(event []byte) []byte {
 
 func findOpenAIChatChunk(chunks [][]byte, path string) []byte {
 	for _, chunk := range chunks {
-		if gjson.GetBytes(chunk, path).Exists() {
+		if ojson.GetBytesNoCopy(chunk, path).Exists() {
 			return chunk
 		}
 	}
@@ -298,7 +299,7 @@ func findOpenAIChatChunk(chunks [][]byte, path string) []byte {
 
 func findOpenAIChatChunkValue(chunks [][]byte, path, want string) []byte {
 	for _, chunk := range chunks {
-		if gjson.GetBytes(chunk, path).String() == want {
+		if ojson.GetBytesNoCopy(chunk, path).String() == want {
 			return chunk
 		}
 	}
@@ -338,10 +339,10 @@ func TestConvertInteractionsResponseToOpenAIStreamToolCall_ContiguousZeroBasedIn
 	var firstToolStart []byte
 	var secondToolStart []byte
 	for _, chunk := range out {
-		if gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.id").String() == "call_first" {
+		if ojson.GetBytesNoCopy(chunk, "choices.0.delta.tool_calls.0.id").String() == "call_first" {
 			firstToolStart = chunk
 		}
-		if gjson.GetBytes(chunk, "choices.0.delta.tool_calls.0.id").String() == "call_second" {
+		if ojson.GetBytesNoCopy(chunk, "choices.0.delta.tool_calls.0.id").String() == "call_second" {
 			secondToolStart = chunk
 		}
 	}
@@ -349,14 +350,14 @@ func TestConvertInteractionsResponseToOpenAIStreamToolCall_ContiguousZeroBasedIn
 	if firstToolStart == nil {
 		t.Fatalf("call_first chunk not found")
 	}
-	if got := gjson.GetBytes(firstToolStart, "choices.0.delta.tool_calls.0.index").Int(); got != 0 {
+	if got := ojson.GetBytesNoCopy(firstToolStart, "choices.0.delta.tool_calls.0.index").Int(); got != 0 {
 		t.Fatalf("first tool call index = %d, want 0 (0-based contiguous index). Payload: %s", got, string(firstToolStart))
 	}
 
 	if secondToolStart == nil {
 		t.Fatalf("call_second chunk not found")
 	}
-	if got := gjson.GetBytes(secondToolStart, "choices.0.delta.tool_calls.0.index").Int(); got != 1 {
+	if got := ojson.GetBytesNoCopy(secondToolStart, "choices.0.delta.tool_calls.0.index").Int(); got != 1 {
 		t.Fatalf("second tool call index = %d, want 1 (0-based contiguous index). Payload: %s", got, string(secondToolStart))
 	}
 }
@@ -406,7 +407,54 @@ func TestConvertInteractionsResponseToOpenAI_ContentFilterFinishReason(t *testin
 	// 2. Non-stream
 	raw := []byte(`{"id":"i1","model":"devin/swe-2","status":"incomplete","finish_reason":"content_filter","steps":[{"type":"model_output","content":[{"type":"text","text":"blocked"}]}]}`)
 	outNonStream := ConvertInteractionsResponseToOpenAINonStream(context.Background(), "devin/swe-2", nil, nil, raw, nil)
-	if got := gjson.GetBytes(outNonStream, "choices.0.finish_reason").String(); got != "content_filter" {
+	if got := ojson.GetBytesNoCopy(outNonStream, "choices.0.finish_reason").String(); got != "content_filter" {
 		t.Fatalf("finish_reason = %q, want content_filter. Output: %s", got, string(outNonStream))
+	}
+}
+
+func TestConvertInteractionsResponseToOpenAI_ResponseFailed(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		wantMsg  string
+		wantCode string
+	}{
+		{
+			name:     "response_failed_top_level",
+			payload:  `data: {"event_type":"response.failed","error":{"message":"devin upstream error (permission_denied): Unable to process request due to an MCP configuration issue.","code":"403"}}`,
+			wantMsg:  "permission_denied",
+			wantCode: "403",
+		},
+		{
+			name:     "interaction_failed_nested",
+			payload:  `data: {"event_type":"interaction.failed","interaction":{"error":{"message":"rate limit exceeded","code":"429"}}}`,
+			wantMsg:  "rate limit exceeded",
+			wantCode: "429",
+		},
+		{
+			name:     "fallback_defaults",
+			payload:  `data: {"event_type":"response.failed"}`,
+			wantMsg:  "upstream error occurred",
+			wantCode: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var param any
+			events := ConvertInteractionsResponseToOpenAI(context.Background(), "devin/kimi-k3", nil, nil, []byte(tt.payload), &param)
+			if len(events) == 0 {
+				t.Fatalf("expected non-empty events for %s, got 0", tt.name)
+			}
+			errorMsg := ojson.GetBytesNoCopy(events[0], "error.message").String()
+			if !strings.Contains(errorMsg, tt.wantMsg) {
+				t.Fatalf("expected error.message containing %q, got: %s", tt.wantMsg, string(events[0]))
+			}
+			if tt.wantCode != "" {
+				if gotCode := ojson.GetBytesNoCopy(events[0], "error.code").String(); gotCode != tt.wantCode {
+					t.Fatalf("expected error.code %q, got: %s", tt.wantCode, string(events[0]))
+				}
+			}
+		})
 	}
 }

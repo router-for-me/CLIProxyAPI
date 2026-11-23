@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/discovery"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/discovery"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -39,6 +39,7 @@ type discoveryAdvertiserManager struct {
 	advertiser      discovery.Advertiser
 	enabled         bool
 	lastSpec        discovery.ServiceSpec
+	lastBuildError  string
 	lastCfg         *config.Config
 	lastPort        int
 	lastTLS         bool
@@ -137,6 +138,9 @@ func (m *discoveryAdvertiserManager) applyContext(ctx context.Context, cfg *conf
 	boundCfg.Host = m.boundHost
 	boundPort := m.boundPort
 	boundTLS := m.boundTLS
+	if m.lastCfg != cfg {
+		m.lastBuildError = ""
+	}
 	m.lastCfg = cfg
 	m.lastPort = boundPort
 	m.lastTLS = boundTLS
@@ -157,6 +161,7 @@ func (m *discoveryAdvertiserManager) applyContext(ctx context.Context, cfg *conf
 		m.advertiser = nil
 		m.enabled = false
 		m.lastSpec = discovery.ServiceSpec{}
+		m.lastBuildError = ""
 		m.mu.Unlock()
 
 		m.stopRefresh(refreshStop)
@@ -177,21 +182,26 @@ func (m *discoveryAdvertiserManager) applyContext(ctx context.Context, cfg *conf
 	spec, err := buildSpec(&boundCfg, boundPort, boundTLS)
 	if err != nil {
 		m.mu.Lock()
-		if !m.closed && m.generation == applyGeneration && m.lastCfg == cfg && cfg.Discovery.Enabled {
-			oldAdv := m.advertiser
-			m.advertiser = nil
-			m.enabled = false
-			m.lastSpec = discovery.ServiceSpec{}
-			m.generation++
+		if m.closed || m.generation != applyGeneration || m.lastCfg != cfg || !cfg.Discovery.Enabled {
 			m.mu.Unlock()
-			if oldAdv != nil {
-				log.Info("discovery: stopping stale mDNS advertisement after spec build failure")
-				_ = oldAdv.Stop()
-			}
-		} else {
-			m.mu.Unlock()
+			return false
 		}
-		log.Warnf("discovery: failed to build service spec: %v", err)
+		oldAdv := m.advertiser
+		m.advertiser = nil
+		m.enabled = false
+		m.lastSpec = discovery.ServiceSpec{}
+		message := err.Error()
+		shouldWarn := m.lastBuildError != message
+		m.lastBuildError = message
+		m.generation++
+		m.mu.Unlock()
+		if oldAdv != nil {
+			log.Info("discovery: stopping stale mDNS advertisement after spec build failure")
+			_ = oldAdv.Stop()
+		}
+		if shouldWarn {
+			log.Warnf("discovery: failed to build service spec: %v", err)
+		}
 		return false
 	}
 
@@ -200,6 +210,7 @@ func (m *discoveryAdvertiserManager) applyContext(ctx context.Context, cfg *conf
 		m.mu.Unlock()
 		return false
 	}
+	m.lastBuildError = ""
 	if m.enabled && m.advertiser != nil && specEqual(m.lastSpec, spec) {
 		m.mu.Unlock()
 		return true
@@ -278,6 +289,7 @@ func (m *discoveryAdvertiserManager) Shutdown() error {
 	m.advertiser = nil
 	m.enabled = false
 	m.lastSpec = discovery.ServiceSpec{}
+	m.lastBuildError = ""
 	m.lastCfg = nil
 	m.generation++
 	m.mu.Unlock()

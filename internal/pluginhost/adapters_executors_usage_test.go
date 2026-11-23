@@ -4,17 +4,18 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type testUsageCapturePlugin struct {
@@ -385,6 +386,76 @@ func TestExecutorAdapterExecuteStreamPublishesUsage(t *testing.T) {
 	}
 	if rec.Detail.InputTokens != 15 || rec.Detail.OutputTokens != 25 || rec.Detail.TotalTokens != 40 {
 		t.Errorf("got usage %+v, want prompt=15 completion=25 total=40", rec.Detail)
+	}
+}
+
+// TestExecutorAdapterExecuteStreamSameFormatStripsSSEFraming pins the contract
+// that same-format plugin executor streams are normalized like built-in
+// executor streams: SSE-framed chunks ("data: {...}\n\n") must reach callers
+// as bare JSON payloads without the "[DONE]" marker, because the HTTP handlers
+// add their own "data:" prefix and terminal marker. Forwarding the framed
+// chunks unchanged produced a doubled "data: data:" prefix on the wire.
+func TestExecutorAdapterExecuteStreamSameFormatStripsSSEFraming(t *testing.T) {
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-stream-framing"})
+	host := newHostWithRecords(executorRecord)
+
+	streamChunks := make(chan pluginapi.ExecutorStreamChunk, 4)
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n")}
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")}
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+	close(streamChunks)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider-stream-framing",
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: streamChunks}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+	adapter.provider = "plugin-provider-stream-framing"
+
+	auth := &coreauth.Auth{ID: "auth-stream-framing-1", Provider: "plugin-provider-stream-framing"}
+	req := coreexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","stream":true}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+		Stream:         true,
+	}
+
+	streamRes, errStream := adapter.ExecuteStream(context.Background(), auth, req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream returned unexpected error: %v", errStream)
+	}
+
+	var received []string
+	for chunk := range streamRes.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		received = append(received, string(chunk.Payload))
+	}
+
+	want := []string{
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+	}
+	if len(received) != len(want) {
+		t.Fatalf("received %d chunks %q, want %d %q", len(received), received, len(want), want)
+	}
+	for i := range want {
+		if received[i] != want[i] {
+			t.Errorf("chunk %d = %q, want %q", i, received[i], want[i])
+		}
+		if strings.HasPrefix(received[i], "data:") {
+			t.Errorf("chunk %d still carries SSE framing: %q", i, received[i])
+		}
 	}
 }
 
@@ -884,5 +955,540 @@ func TestUsageAdapterRecoversSessionHierarchyFromContext(t *testing.T) {
 	recLoop := <-plugin.captured
 	if recLoop.SessionID != "loop-sess" || recLoop.ParentSessionID != "" {
 		t.Fatalf("loop protection = (%q, %q), want (loop-sess, empty)", recLoop.SessionID, recLoop.ParentSessionID)
+	}
+}
+
+func TestUsageAdapterPropagatesNativeKeyAndAccessProvider(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 1)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-native-key",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-native-key",
+	}
+
+	// 1. Direct record propagation
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider:       "test-provider",
+		Model:          "test-model",
+		APIKey:         "sk-native-key",
+		IsNativeKey:    true,
+		AccessProvider: "config-inline",
+	})
+	rec := <-plugin.captured
+	if !rec.IsNativeKey {
+		t.Fatalf("rec.IsNativeKey = false, want true")
+	}
+	if rec.AccessProvider != "config-inline" {
+		t.Fatalf("rec.AccessProvider = %q, want %q", rec.AccessProvider, "config-inline")
+	}
+
+	// 2. Fallback to context values when record fields are omitted
+	ctx := coreusage.WithAPIKey(context.Background(), "sk-ctx-native")
+	ctx = coreusage.WithAccessProvider(ctx, "config-inline")
+	adapter.HandleUsage(ctx, coreusage.Record{
+		Provider: "test-provider",
+		Model:    "test-model",
+	})
+	recCtx := <-plugin.captured
+	if recCtx.APIKey != "sk-ctx-native" {
+		t.Fatalf("recCtx.APIKey = %q, want sk-ctx-native", recCtx.APIKey)
+	}
+	if !recCtx.IsNativeKey {
+		t.Fatalf("recCtx.IsNativeKey = false, want true")
+	}
+	if recCtx.AccessProvider != "config-inline" {
+		t.Fatalf("recCtx.AccessProvider = %q, want config-inline", recCtx.AccessProvider)
+	}
+}
+
+func TestUsageAdapterDeliversClaudeStreamingAndNonStreamingCacheCreationTTL(t *testing.T) {
+	plugin := &capturingUsagePlugin{captured: make(chan pluginapi.UsageRecord, 2)}
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-claude-ttl",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			UsagePlugin: plugin,
+		}},
+	})
+	adapter := &usageAdapter{
+		host:     host,
+		pluginID: "usage-claude-ttl",
+		plugin:   plugin,
+	}
+
+	// Non-streaming Claude usage payload with 5m + 1h breakdown.
+	nonStreamDetail := helps.ParseClaudeUsage([]byte(`{
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 50,
+			"cache_creation_input_tokens": 1500,
+			"cache_creation": {
+				"ephemeral_5m_input_tokens": 1000,
+				"ephemeral_1h_input_tokens": 500
+			}
+		}
+	}`))
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Stream:   false,
+		Detail:   nonStreamDetail,
+	})
+	recNonStream := <-plugin.captured
+	if recNonStream.Detail.CacheCreationTokens != 1500 {
+		t.Fatalf("non-stream CacheCreationTokens = %d, want 1500", recNonStream.Detail.CacheCreationTokens)
+	}
+	if recNonStream.Detail.CacheCreation5mTokens == nil || *recNonStream.Detail.CacheCreation5mTokens != 1000 {
+		t.Fatalf("non-stream CacheCreation5mTokens = %v, want 1000", recNonStream.Detail.CacheCreation5mTokens)
+	}
+	if recNonStream.Detail.CacheCreation1hTokens == nil || *recNonStream.Detail.CacheCreation1hTokens != 500 {
+		t.Fatalf("non-stream CacheCreation1hTokens = %v, want 500", recNonStream.Detail.CacheCreation1hTokens)
+	}
+
+	// Streaming Claude SSE events with 5m=0 and 1h=45045 preserved across message_start + message_delta.
+	var streamBuf helps.StreamUsageBuffer
+	streamBuf.ObserveClaudeStream([]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":16,"cache_creation_input_tokens":45045,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":45045},"output_tokens":4}}}`))
+	streamBuf.ObserveClaudeStream([]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":24}}`))
+	streamDetail, ok := streamBuf.Detail()
+	if !ok {
+		t.Fatal("expected streaming Claude usage detail")
+	}
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "claude",
+		Model:    "claude-sonnet-4-6",
+		Stream:   true,
+		Detail:   streamDetail,
+	})
+	recStream := <-plugin.captured
+	if recStream.Detail.CacheCreationTokens != 45045 {
+		t.Fatalf("stream CacheCreationTokens = %d, want 45045", recStream.Detail.CacheCreationTokens)
+	}
+	if recStream.Detail.CacheCreation5mTokens == nil || *recStream.Detail.CacheCreation5mTokens != 0 {
+		t.Fatalf("stream CacheCreation5mTokens = %v, want explicit 0", recStream.Detail.CacheCreation5mTokens)
+	}
+	if recStream.Detail.CacheCreation1hTokens == nil || *recStream.Detail.CacheCreation1hTokens != 45045 {
+		t.Fatalf("stream CacheCreation1hTokens = %v, want 45045", recStream.Detail.CacheCreation1hTokens)
+	}
+}
+
+func TestExecutorAdapterExecuteAttributesResponsesUsageToSelectedAuth(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("plugin-provider-responses")
+	registerTestUsagePlugin(t, "test-executor-adapter-responses-auth-usage", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-responses"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider-responses",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload: []byte(`{"id":"resp_1","object":"response","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`),
+			}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	)
+	adapter.provider = "plugin-provider-responses"
+
+	auth := &coreauth.Auth{
+		ID:         "auth-responses-1",
+		Provider:   "plugin-provider-responses",
+		FileName:   "auth-responses-1.json",
+		Attributes: map[string]string{"type": "oauth"},
+	}
+	req := coreexecutor.Request{
+		Model:   "deepseek/deepseek-v4.1-flash",
+		Payload: []byte(`{"model":"deepseek/deepseek-v4.1-flash","input":"Write me a poem"}`),
+	}
+	opts := coreexecutor.Options{
+		Stream:         false,
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+	}
+
+	ctx := coreusage.WithStream(context.Background(), false)
+	resp, errExecute := adapter.Execute(ctx, auth, req, opts)
+	if errExecute != nil {
+		t.Fatalf("adapter.Execute returned unexpected error: %v", errExecute)
+	}
+	if len(resp.Payload) == 0 {
+		t.Fatal("adapter.Execute returned empty payload")
+	}
+
+	rec := plugin.waitRecord(t, 200*time.Millisecond)
+	if rec.AuthID != auth.ID {
+		t.Errorf("AuthID = %q, want %q", rec.AuthID, auth.ID)
+	}
+	if rec.Stream {
+		t.Errorf("Stream = true, want false")
+	}
+	if rec.Detail.InputTokens != 34 || rec.Detail.OutputTokens != 499 || rec.Detail.TotalTokens != 533 {
+		t.Errorf("usage = %+v, want input=34 output=499 total=533", rec.Detail)
+	}
+}
+
+func TestExecutorAdapterExecuteStreamLargeSSELineKeepsUsage(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("plugin-provider-bigline")
+	registerTestUsagePlugin(t, "test-executor-adapter-bigline-usage", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "executor-plugin-bigline"})
+	host := newHostWithRecords(executorRecord)
+
+	echo := strings.Repeat("i", 70*1024)
+	terminal := `event: response.completed` + "\n" +
+		`data: {"type":"response.completed","response":{"instructions":"` + echo +
+		`","usage":{"input_tokens":7000,"output_tokens":30,"total_tokens":7030}}}` + "\n\n"
+	prefix := "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"
+	whole := prefix + terminal
+
+	// The first read ends 66KB into the terminal data line: more than 64KB
+	// has accumulated and the newline has not arrived yet.
+	streamChunks := make(chan pluginapi.ExecutorStreamChunk, 4)
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte(whole[:66000])}
+	streamChunks <- pluginapi.ExecutorStreamChunk{Payload: []byte(whole[66000:])}
+	close(streamChunks)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider-bigline",
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: streamChunks}, nil
+		},
+	}
+
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	)
+	adapter.provider = "plugin-provider-bigline"
+
+	auth := &coreauth.Auth{ID: "auth-bigline-1", Provider: "plugin-provider-bigline"}
+	req := coreexecutor.Request{Model: "test-model", Payload: []byte(`{"model":"test-model","stream":true}`)}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Stream:         true,
+	}
+
+	streamRes, errExecuteStream := adapter.ExecuteStream(context.Background(), auth, req, opts)
+	if errExecuteStream != nil {
+		t.Fatalf("ExecuteStream returned unexpected error: %v", errExecuteStream)
+	}
+	var got strings.Builder
+	for chunk := range streamRes.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		got.Write(chunk.Payload)
+	}
+	if got.String() != whole {
+		t.Fatal("payload was altered")
+	}
+
+	rec := plugin.waitRecord(t, 500*time.Millisecond)
+	if rec.Detail.InputTokens != 7000 || rec.Detail.OutputTokens != 30 || rec.Detail.TotalTokens != 7030 {
+		t.Errorf("got usage input=%d output=%d total=%d, want input=7000 output=30 total=7030: "+
+			"the terminal frame's usage was dropped",
+			rec.Detail.InputTokens, rec.Detail.OutputTokens, rec.Detail.TotalTokens)
+	}
+}
+
+type endToEndSelectionTestExecutor struct {
+	provider      string
+	execute       func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error)
+	executeStream func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error)
+}
+
+func (e *endToEndSelectionTestExecutor) Identifier() string { return e.provider }
+
+func (e *endToEndSelectionTestExecutor) Execute(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	if e.execute != nil {
+		return e.execute(ctx, auth, req, opts)
+	}
+	return coreexecutor.Response{}, nil
+}
+
+func (e *endToEndSelectionTestExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	if e.executeStream != nil {
+		return e.executeStream(ctx, auth, req, opts)
+	}
+	return nil, nil
+}
+
+func (e *endToEndSelectionTestExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *endToEndSelectionTestExecutor) CountTokens(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	return coreexecutor.Response{}, nil
+}
+
+func (e *endToEndSelectionTestExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func TestSchedulerPickAndUsageRecordShareSelectionIDEndToEnd(t *testing.T) {
+	provider := "selection-e2e-provider"
+	model := "selection-e2e-model"
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("auth-e2e-1", provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("auth-e2e-1")
+	})
+
+	pickSelectionIDs := make(chan string, 32)
+	usageRecords := make(chan pluginapi.UsageRecord, 32)
+
+	host := newHostWithRecords(capabilityRecord{
+		id:       "routing-usage-plugin",
+		priority: 10,
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			Scheduler: schedulerFunc(func(ctx context.Context, req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, error) {
+				selID, _ := req.Options.Metadata[pluginapi.SelectionIDMetadataKey].(string)
+				pickSelectionIDs <- selID
+				return pluginapi.SchedulerPickResponse{
+					Handled: true,
+					AuthID:  "auth-e2e-1",
+				}, nil
+			}),
+			UsagePlugin: usagePluginFunc(func(ctx context.Context, record pluginapi.UsageRecord) {
+				if record.Provider == provider {
+					usageRecords <- record
+				}
+			}),
+		}},
+	})
+	host.RegisterUsagePlugins()
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin("plugin:routing-usage-plugin", noopUsagePlugin{})
+	})
+
+	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	manager.SetRetryConfig(1, 0, 0)
+	coreauth.SetQuotaCooldownDisabled(true)
+	t.Cleanup(func() { coreauth.SetQuotaCooldownDisabled(false) })
+	manager.SetPluginScheduler(host)
+
+	if _, errReg := manager.Register(context.Background(), &coreauth.Auth{ID: "auth-e2e-1", Provider: provider}); errReg != nil {
+		t.Fatalf("Register(auth-e2e-1) error = %v", errReg)
+	}
+
+	attemptCount := 0
+	streamRelease := make(chan struct{})
+	manager.RegisterExecutor(&endToEndSelectionTestExecutor{
+		provider: provider,
+		execute: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+			reporter := helps.NewUsageReporter(ctx, provider, req.Model, auth)
+			if opts.Metadata["mode"] == "retry-429-once" {
+				attemptCount++
+				if attemptCount == 1 {
+					reporter.PublishFailure(ctx, &coreauth.Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true})
+					return coreexecutor.Response{}, &coreauth.Error{Code: "rate_limited", Message: "429", HTTPStatus: http.StatusTooManyRequests, Retryable: true}
+				}
+			}
+			reporter.Publish(ctx, coreusage.Detail{InputTokens: 10, OutputTokens: 5, TotalTokens: 15})
+			return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+		},
+		executeStream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			reporter := helps.NewUsageReporter(ctx, provider, req.Model, auth)
+			ch := make(chan coreexecutor.StreamChunk, 1)
+			ch <- coreexecutor.StreamChunk{Payload: []byte("data: chunk\n\n")}
+			go func() {
+				<-streamRelease
+				close(ch)
+				// Delayed asynchronous usage publication after other requests have run.
+				reporter.Publish(context.Background(), coreusage.Detail{InputTokens: 20, OutputTokens: 10, TotalTokens: 30})
+			}()
+			return &coreexecutor.StreamResult{Chunks: ch}, nil
+		},
+	})
+
+	// 1. Single credential outer retry after 429: two Picks, two distinct SelectionIDs, each matching its UsageRecord.
+	traceCtx := logging.WithRequestID(context.Background(), "trace-429")
+	_, errExec := manager.Execute(traceCtx, []string{provider}, coreexecutor.Request{Model: model}, coreexecutor.Options{
+		Metadata: map[string]any{"mode": "retry-429-once"},
+	})
+	if errExec != nil {
+		t.Fatalf("Execute(retry-429-once) error = %v", errExec)
+	}
+	pick1 := <-pickSelectionIDs
+	pick2 := <-pickSelectionIDs
+	if pick1 == "" || pick2 == "" || pick1 == pick2 {
+		t.Fatalf("outer retry pick SelectionIDs = (%q, %q), want two distinct non-empty IDs", pick1, pick2)
+	}
+
+	rec1 := waitPluginUsageRecord(t, usageRecords)
+	rec2 := waitPluginUsageRecord(t, usageRecords)
+	if rec1.SelectionID != pick1 || !rec1.Failed {
+		t.Fatalf("first UsageRecord = (SelectionID=%q, Failed=%v), want (%q, true)", rec1.SelectionID, rec1.Failed, pick1)
+	}
+	if rec2.SelectionID != pick2 || rec2.Failed {
+		t.Fatalf("second UsageRecord = (SelectionID=%q, Failed=%v), want (%q, false)", rec2.SelectionID, rec2.Failed, pick2)
+	}
+	if rec1.RequestID == rec2.RequestID {
+		t.Fatalf("UsageRecord RequestIDs should remain distinct: %q", rec1.RequestID)
+	}
+
+	// 2. Concurrent requests and delayed asynchronous streaming usage keep their own SelectionIDs.
+	sharedOpts := coreexecutor.Options{Stream: true, Metadata: map[string]any{"shared": "true"}}
+	streamRes, errStream := manager.ExecuteStream(context.Background(), []string{provider}, coreexecutor.Request{Model: model}, sharedOpts)
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	streamPickID := <-pickSelectionIDs
+
+	// Run a concurrent non-streaming request while the stream is still open and its usage has not been published.
+	if _, errConcurrent := manager.Execute(context.Background(), []string{provider}, coreexecutor.Request{Model: model}, coreexecutor.Options{Metadata: sharedOpts.Metadata}); errConcurrent != nil {
+		t.Fatalf("concurrent Execute() error = %v", errConcurrent)
+	}
+	concurrentPickID := <-pickSelectionIDs
+	if streamPickID == "" || concurrentPickID == "" || streamPickID == concurrentPickID {
+		t.Fatalf("streamPickID=%q concurrentPickID=%q, want distinct non-empty IDs", streamPickID, concurrentPickID)
+	}
+
+	concurrentRec := waitPluginUsageRecord(t, usageRecords)
+	if concurrentRec.SelectionID != concurrentPickID {
+		t.Fatalf("concurrent UsageRecord.SelectionID = %q, want %q", concurrentRec.SelectionID, concurrentPickID)
+	}
+
+	close(streamRelease)
+	for range streamRes.Chunks {
+	}
+	streamRec := waitPluginUsageRecord(t, usageRecords)
+	if streamRec.SelectionID != streamPickID {
+		t.Fatalf("delayed stream UsageRecord.SelectionID = %q, want %q", streamRec.SelectionID, streamPickID)
+	}
+}
+
+func waitPluginUsageRecord(t *testing.T, ch <-chan pluginapi.UsageRecord) pluginapi.UsageRecord {
+	t.Helper()
+	select {
+	case rec := <-ch:
+		return rec
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for pluginapi.UsageRecord")
+		return pluginapi.UsageRecord{}
+	}
+}
+
+func TestExecutorAdapterPropagatesAttributionAndPluginExecutorType(t *testing.T) {
+	plugin := newTestUsageCapturePlugin("")
+	registerTestUsagePlugin(t, "test-executor-adapter-plugin-type", plugin)
+
+	executorRecord := normalizeTestCapabilityRecord(capabilityRecord{id: "custom-plugin-id"})
+	host := newHostWithRecords(executorRecord)
+
+	exec := &fakeExecutor{
+		identifier: "plugin-provider",
+		execute: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{
+				Payload:  []byte(`{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
+				Metadata: map[string]any{"k": "v"},
+				Attribution: &pluginapi.UsageAttribution{
+					AuthIndex: " idx-1 ",
+					AuthType:  " oauth ",
+					Source:    " acct@example.com ",
+				},
+			}, nil
+		},
+		executeStream: func(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			ch := make(chan pluginapi.ExecutorStreamChunk, 1)
+			ch <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+			close(ch)
+			return pluginapi.ExecutorStreamResponse{
+				Headers: http.Header{"Content-Type": []string{"text/event-stream"}},
+				Attribution: &pluginapi.UsageAttribution{
+					AuthIndex: "idx-stream",
+					AuthType:  "api_key",
+					Source:    "stream-acct",
+				},
+				Chunks: ch,
+			}, nil
+		},
+	}
+
+	executorRecord.plugin.Capabilities.Executor = exec
+	executorRecord.plugin.Capabilities.ExecutorInputFormats = []string{"openai"}
+	executorRecord.plugin.Capabilities.ExecutorOutputFormats = []string{"openai"}
+	host = newHostWithRecords(executorRecord)
+	adapter := newExecutorAdapterForRecordForTest(host, executorRecord, exec,
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+		[]sdktranslator.Format{sdktranslator.FormatOpenAI},
+	)
+
+	req := coreexecutor.Request{
+		Model:   "test-model",
+		Payload: []byte(`{"model":"test-model","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	opts := coreexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAI,
+		ResponseFormat: sdktranslator.FormatOpenAI,
+	}
+
+	_, attr, errExec := host.ExecutePluginExecutorWithAttribution(context.Background(), "custom-plugin-id", req, opts)
+	if errExec != nil {
+		t.Fatalf("ExecutePluginExecutorWithAttribution error = %v", errExec)
+	}
+	if attr == nil ||
+		attr.AuthIndex != " idx-1 " ||
+		attr.AuthType != " oauth " ||
+		attr.Source != " acct@example.com " {
+		t.Fatalf("attr = %+v", attr)
+	}
+
+	streamRes, streamAttr, errStream := host.ExecutePluginExecutorStreamWithAttribution(context.Background(), "custom-plugin-id", req, opts)
+	if errStream != nil {
+		t.Fatalf("ExecutePluginExecutorStreamWithAttribution error = %v", errStream)
+	}
+	if streamAttr == nil ||
+		streamAttr.AuthIndex != "idx-stream" ||
+		streamAttr.AuthType != "api_key" ||
+		streamAttr.Source != "stream-acct" {
+		t.Fatalf("streamAttr = %+v", streamAttr)
+	}
+	for range streamRes.Chunks {
+	}
+
+	// Verify auth-backed executions report "plugin:<id>", preserve auth credentials, and apply source attribution.
+	auth := &coreauth.Auth{
+		ID:         "auth-1",
+		Provider:   "plugin-provider",
+		FileName:   "auth-1.json",
+		Attributes: map[string]string{coreauth.AttributeAuthKind: "oauth"},
+	}
+	if _, errAuthExec := adapter.Execute(context.Background(), auth, req, opts); errAuthExec != nil {
+		t.Fatalf("Execute(auth!=nil) error = %v", errAuthExec)
+	}
+	rec := plugin.waitRecord(t, 2*time.Second)
+	if rec.ExecutorType != "plugin:custom-plugin-id" ||
+		rec.Provider != "plugin-provider" ||
+		rec.AuthID != "auth-1" ||
+		rec.AuthIndex != auth.EnsureIndex() ||
+		rec.AuthType != "oauth" ||
+		rec.Source != "acct@example.com" {
+		t.Fatalf("auth-backed Execute rec = %+v", rec)
+	}
+
+	authStreamRes, errAuthStream := adapter.ExecuteStream(context.Background(), auth, req, opts)
+	if errAuthStream != nil {
+		t.Fatalf("ExecuteStream(auth!=nil) error = %v", errAuthStream)
+	}
+	for range authStreamRes.Chunks {
+	}
+	streamRec := plugin.waitRecord(t, 2*time.Second)
+	if streamRec.ExecutorType != "plugin:custom-plugin-id" ||
+		streamRec.Provider != "plugin-provider" ||
+		streamRec.AuthID != "auth-1" ||
+		streamRec.AuthIndex != auth.EnsureIndex() ||
+		streamRec.AuthType != "oauth" ||
+		streamRec.Source != "stream-acct" {
+		t.Fatalf("auth-backed ExecuteStream rec = %+v", streamRec)
 	}
 }

@@ -43,6 +43,24 @@ func HasExplicitSessionID(ctx context.Context) bool {
 // SessionIDResolver is a pluggable resolver for extracting the internal session ID.
 var SessionIDResolver func(ctx context.Context, clientHeaders http.Header) string
 
+// ResolveClientHeaders returns the client request headers from the provided slice
+// or falls back to the Gin request headers in r.Context() when available.
+func ResolveClientHeaders(r *http.Request, clientHeaders ...http.Header) http.Header {
+	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
+		return clientHeaders[0]
+	}
+	if r != nil && r.Context() != nil {
+		ctx := r.Context()
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			return ginCtx.Request.Header
+		}
+		if ginCtx, ok := ctx.(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			return ginCtx.Request.Header
+		}
+	}
+	return nil
+}
+
 // ApplyCustomHeadersFromAttrs applies user-defined headers stored in the provided attributes map.
 // Custom headers override built-in defaults when conflicts occur.
 // If clientHeaders is provided (or if the request context carries a Gin context), any custom header
@@ -55,20 +73,11 @@ func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string, clien
 	if r == nil {
 		return
 	}
-	var ch http.Header
 	var ctx context.Context
 	if r.Context() != nil {
 		ctx = r.Context()
 	}
-	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
-		ch = clientHeaders[0]
-	} else if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			ch = ginCtx.Request.Header
-		} else if ginCtx, ok := ctx.(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			ch = ginCtx.Request.Header
-		}
-	}
+	ch := ResolveClientHeaders(r, clientHeaders...)
 	applyCustomHeaders(r, extractCustomHeaders(attrs, ch, ctx))
 }
 

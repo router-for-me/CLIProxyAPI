@@ -7,9 +7,9 @@ import (
 	"sync"
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 type forceMappingExecutor struct {
@@ -503,7 +503,7 @@ func TestManagerExecuteStream_LiveDerivedForceMapping_AllProviders(t *testing.T)
 
 func TestManagerExecute_AntigravityCreditsFallbackForceMappingRewritesResponse(t *testing.T) {
 	const (
-		upstreamModel = "gemini-3-flash-preview"
+		upstreamModel = "claude-sonnet-4-6"
 		aliasModel    = "claude-haiku-4-5-20251001"
 	)
 
@@ -526,7 +526,7 @@ func TestManagerExecute_AntigravityCreditsFallbackForceMappingRewritesResponse(t
 
 func TestManagerExecuteStream_AntigravityCreditsFallbackForceMappingRewritesResponse(t *testing.T) {
 	const (
-		upstreamModel = "gemini-3-flash-preview"
+		upstreamModel = "claude-sonnet-4-6"
 		aliasModel    = "claude-haiku-4-5-20251001"
 	)
 

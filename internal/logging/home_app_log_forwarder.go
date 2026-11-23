@@ -2,14 +2,14 @@ package logging
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/MoeForge/moego/json"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	log "github.com/sirupsen/logrus"
 )
 

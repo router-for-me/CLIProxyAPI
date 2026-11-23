@@ -6,130 +6,60 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
-// TestAntigravityCapabilityProbe_HardTimeout verifies that fetchAntigravityModelCapabilityHintsForAuth
-// enforces a hard timeout (not exceeding 5s) even when passed an unbounded background context
-// and connecting to a hanging server.
-func TestAntigravityCapabilityProbe_HardTimeout(t *testing.T) {
-	// Mock server that hangs unless client cancels
+func TestAntigravityCapabilityProbe_CallerCancellation(t *testing.T) {
+	started := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(10 * time.Second):
-		}
-		_, _ = w.Write([]byte(`{"webSearchModelIds":["gemini-2.5-flash"]}`))
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
 	}))
-	t.Cleanup(func() {
-		server.CloseClientConnections()
-		server.Close()
-	})
-
-	svc := &Service{
-		cfg: &config.Config{},
-	}
-
-	auth := &coreauth.Auth{
-		ID:       "test-antigravity-auth",
-		Provider: "antigravity",
-		Attributes: map[string]string{
-			"base_url": server.URL,
-		},
-		Metadata: map[string]any{
-			"access_token": "ya29.test-token",
-		},
-	}
-
-	start := time.Now()
-	hints := svc.fetchAntigravityModelCapabilityHintsForAuth(context.Background(), auth)
-	elapsed := time.Since(start)
-
-	// It must enforce a hard timeout <= 6 seconds instead of waiting the full 10s
-	if elapsed >= 8*time.Second {
-		t.Fatalf("fetchAntigravityModelCapabilityHintsForAuth took %v, want hard timeout <= 6s", elapsed)
-	}
-	if len(hints.WebSearchModelIDs) != 0 {
-		t.Fatalf("expected empty hints due to timeout, got %v", hints)
-	}
+	defer server.Close()
+	svc := &Service{cfg: &config.Config{}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.fetchAntigravityModelCapabilityHintsForAuth(ctx, antigravityTestAuth("cancel", server.URL))
+	}()
+	<-started
+	cancel()
+	<-done
 }
 
-// TestAntigravityCapabilityProbe_ConcurrentBaseURLs verifies that when multiple baseURLs
-// are configured and one hangs while the other responds promptly, both endpoints receive requests
-// concurrently and the probe returns the fast result quickly (< 2s) without waiting for the slow one.
-func TestAntigravityCapabilityProbe_ConcurrentBaseURLs(t *testing.T) {
-	slowStarted := make(chan struct{})
-	var slowOnce sync.Once
-	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		slowOnce.Do(func() { close(slowStarted) })
-		w.WriteHeader(http.StatusOK)
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-		select {
-		case <-r.Context().Done():
-			return
-		case <-time.After(10 * time.Second):
-		}
+func TestAntigravityCapabilityProbe_UsesFirstConfiguredEndpoint(t *testing.T) {
+	var firstCalls, secondCalls atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalls.Add(1)
+		_, _ = w.Write([]byte(`{"models":{"first":{}}}`))
 	}))
-	t.Cleanup(func() {
-		slowServer.CloseClientConnections()
-		slowServer.Close()
-	})
-
-	fastServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Wait for slowServer to have received its concurrent request or client context cancellation
-		select {
-		case <-slowStarted:
-		case <-r.Context().Done():
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"webSearchModelIds":["gemini-3.1-flash-lite"]}`))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalls.Add(1)
+		_, _ = w.Write([]byte(`{"models":{"second":{}}}`))
 	}))
-	t.Cleanup(fastServer.Close)
-
-	svc := &Service{
-		cfg: &config.Config{},
-	}
-
-	auth := &coreauth.Auth{
-		ID:       "test-ag-concurrent-auth",
-		Provider: "antigravity",
-		Attributes: map[string]string{
-			"base_urls": slowServer.URL + "," + fastServer.URL,
-		},
-		Metadata: map[string]any{
-			"access_token": "ya29.test-token",
-		},
-	}
-
-	start := time.Now()
-	hints := svc.fetchAntigravityModelCapabilityHintsForAuth(context.Background(), auth)
-	elapsed := time.Since(start)
-
-	if elapsed >= 2*time.Second {
-		t.Fatalf("concurrent fetch took %v, want < 2s", elapsed)
-	}
-	if _, ok := hints.WebSearchModelIDs["gemini-3.1-flash-lite"]; !ok {
-		t.Fatalf("expected gemini-3.1-flash-lite in hints, got %v", hints)
+	defer second.Close()
+	svc := &Service{cfg: &config.Config{}}
+	auth := antigravityTestAuth("route", first.URL)
+	auth.Attributes["base_urls"] = first.URL + "," + second.URL
+	hints := svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), auth)
+	if _, ok := hints.ModelIDs["first"]; !ok || firstCalls.Load() != 1 || secondCalls.Load() != 0 {
+		t.Fatalf("hints=%v first=%d second=%d", hints, firstCalls.Load(), secondCalls.Load())
 	}
 }
 
 // TestAntigravityModelRegistration_AsyncNonBlocking verifies that registerModelsForAuth
-// returns immediately (< 500ms) with baseline models and does not block on a hanging capability probe.
+// returns immediately without exposing unverified models and does not block on the probe.
 func TestAntigravityModelRegistration_AsyncNonBlocking(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -161,8 +91,10 @@ func TestAntigravityModelRegistration_AsyncNonBlocking(t *testing.T) {
 		GlobalModelRegistry().UnregisterClient(auth.ID)
 	})
 
+	ctx, cancel := context.WithCancel(t.Context())
+	defer func() { cancel(); svc.WaitAntigravityProbes() }()
 	start := time.Now()
-	svc.registerModelsForAuth(context.Background(), auth)
+	svc.registerModelsForAuth(ctx, auth)
 	elapsed := time.Since(start)
 
 	if elapsed >= 500*time.Millisecond {
@@ -170,8 +102,8 @@ func TestAntigravityModelRegistration_AsyncNonBlocking(t *testing.T) {
 	}
 
 	models := GlobalModelRegistry().GetModelsForClient(auth.ID)
-	if len(models) == 0 {
-		t.Fatal("expected baseline models to be registered immediately")
+	if len(models) != 0 {
+		t.Fatal("unverified models registered before probe completed")
 	}
 }
 
@@ -461,7 +393,7 @@ func TestAntigravityAsyncProbe_NormalRequestsDoNotDiscardProbe(t *testing.T) {
 		close(probeStarted)
 		<-releaseProbe
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"webSearchModelIds":["gemini-3.1-flash-lite"]}`))
+		_, _ = w.Write([]byte(`{"models":{"gemini-3.1-flash-lite":{}},"webSearchModelIds":["gemini-3.1-flash-lite"]}`))
 	}))
 	t.Cleanup(func() {
 		server.CloseClientConnections()

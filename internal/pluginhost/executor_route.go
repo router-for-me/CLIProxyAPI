@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 // executorPluginReady reports whether the named plugin can actually execute a
@@ -84,20 +84,32 @@ func (h *Host) PluginExecutorRequestToFormat(pluginID string, req coreexecutor.R
 
 // ExecutePluginExecutor executes a request with the named plugin executor without changing the requested model.
 func (h *Host) ExecutePluginExecutor(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	resp, _, err := h.ExecutePluginExecutorWithAttribution(ctx, pluginID, req, opts)
+	return resp, err
+}
+
+// ExecutePluginExecutorWithAttribution executes a request with the named plugin executor and returns optional plugin attribution.
+func (h *Host) ExecutePluginExecutorWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, *pluginapi.UsageAttribution, error) {
 	adapter, errAdapter := h.executorAdapterForPlugin(pluginID)
 	if errAdapter != nil {
-		return coreexecutor.Response{}, errAdapter
+		return coreexecutor.Response{}, nil, errAdapter
 	}
-	return adapter.Execute(ctx, (*coreauth.Auth)(nil), req, opts)
+	return adapter.executeWithAttribution(ctx, (*coreauth.Auth)(nil), req, opts)
 }
 
 // ExecutePluginExecutorStream executes a streaming request with the named plugin executor without changing the requested model.
 func (h *Host) ExecutePluginExecutorStream(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	result, _, err := h.ExecutePluginExecutorStreamWithAttribution(ctx, pluginID, req, opts)
+	return result, err
+}
+
+// ExecutePluginExecutorStreamWithAttribution executes a streaming request with the named plugin executor and returns optional plugin attribution.
+func (h *Host) ExecutePluginExecutorStreamWithAttribution(ctx context.Context, pluginID string, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, *pluginapi.UsageAttribution, error) {
 	adapter, errAdapter := h.executorAdapterForPlugin(pluginID)
 	if errAdapter != nil {
-		return nil, errAdapter
+		return nil, nil, errAdapter
 	}
-	return adapter.ExecuteStream(ctx, (*coreauth.Auth)(nil), req, opts)
+	return adapter.executeStreamWithAttribution(ctx, (*coreauth.Auth)(nil), req, opts)
 }
 
 // CountPluginExecutor executes a count-tokens request with the named plugin executor without changing the requested model.

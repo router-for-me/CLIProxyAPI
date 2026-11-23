@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -128,6 +129,7 @@ func TestExchangeCodeForTokensUsesNative220ControlPlaneShape(t *testing.T) {
 	var order []string
 	headers := make(map[string]http.Header)
 	var tokenBody []byte
+	state := strings.Repeat("Ab9-_", 8) + "AbA"
 
 	auth := &ClaudeAuth{
 		httpClient: &http.Client{
@@ -167,7 +169,7 @@ func TestExchangeCodeForTokensUsesNative220ControlPlaneShape(t *testing.T) {
 		},
 	}
 
-	bundle, errExchange := auth.ExchangeCodeForTokens(t.Context(), "auth-code", "state-value", &PKCECodes{CodeVerifier: "verifier"})
+	bundle, errExchange := auth.ExchangeCodeForTokens(t.Context(), "auth-code", state, &PKCECodes{CodeVerifier: "verifier"})
 	if errExchange != nil {
 		t.Fatalf("ExchangeCodeForTokens() error = %v", errExchange)
 	}
@@ -183,7 +185,7 @@ func TestExchangeCodeForTokensUsesNative220ControlPlaneShape(t *testing.T) {
 	}
 
 	// Key order mirrors the captured native exchange body.
-	wantBody := `{"grant_type":"authorization_code","code":"auth-code","redirect_uri":"` + RedirectURI + `","client_id":"` + ClientID + `","code_verifier":"verifier","state":"state-value"}`
+	wantBody := `{"grant_type":"authorization_code","code":"auth-code","redirect_uri":"` + RedirectURI + `","client_id":"` + ClientID + `","code_verifier":"verifier","state":"` + state + `"}`
 	if got := string(tokenBody); got != wantBody {
 		t.Fatalf("exchange body = %q, want %q", got, wantBody)
 	}
@@ -257,6 +259,95 @@ func TestExchangeCodeForTokensSurvivesCompanionLookupFailure(t *testing.T) {
 	}
 	if bundle.TokenData.OrganizationName != "Token Org" {
 		t.Fatalf("organization = %q, want token-response organization", bundle.TokenData.OrganizationName)
+	}
+}
+
+type errorReader struct {
+	err error
+}
+
+func (r *errorReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func (r *errorReader) Close() error {
+	return nil
+}
+
+func TestRefreshTokensWithRetry_DoesNotReplayAfterResponseReadError(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	var calls int32
+	auth := &ClaudeAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       &errorReader{err: io.ErrUnexpectedEOF},
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-refresh-token", 3)
+	if err == nil {
+		t.Fatal("expected refresh error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected one refresh attempt after a response decode/read error, got %d", got)
+	}
+}
+
+func TestRefreshTokensWithRetry_DoesNotReplayAfterJSONDecodeError(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	var calls int32
+	auth := &ClaudeAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`invalid json payload`)),
+					Header:     make(http.Header),
+				}, nil
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-refresh-token", 3)
+	if err == nil {
+		t.Fatal("expected refresh error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected one refresh attempt after a JSON decode error, got %d", got)
+	}
+}
+
+func TestRefreshTokensWithRetry_DoesNotReplayAfterTransportError(t *testing.T) {
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+
+	var calls int32
+	auth := &ClaudeAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				atomic.AddInt32(&calls, 1)
+				return nil, errors.New("connection reset by peer")
+			}),
+		},
+	}
+
+	_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-refresh-token", 3)
+	if err == nil {
+		t.Fatal("expected refresh error")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected one refresh attempt after an ambiguous transport error, got %d", got)
 	}
 }
 
@@ -409,7 +500,7 @@ func TestRefreshTokensUsesNative220ControlPlaneShape(t *testing.T) {
 					if errRead != nil {
 						t.Fatal(errRead)
 					}
-					wantBody := `{"client_id":"` + ClientID + `","grant_type":"refresh_token","refresh_token":"` + refreshToken + `","scope":"` + ClaudeOAuthScope + `"}`
+					wantBody := `{"client_id":"` + ClientID + `","grant_type":"refresh_token","refresh_token":"` + refreshToken + `","scope":"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"}`
 					if got := string(body); got != wantBody {
 						t.Fatalf("refresh body = %q, want %q", got, wantBody)
 					}

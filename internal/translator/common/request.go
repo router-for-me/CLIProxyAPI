@@ -4,7 +4,8 @@ import (
 	"crypto/rand"
 	"strings"
 
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
 const tooluLetters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -46,16 +47,60 @@ func RequestModelName(originalRequestRawJSON, requestRawJSON []byte) string {
 }
 
 func requestModelName(rawJSON []byte) string {
-	if len(rawJSON) == 0 || !gjson.ValidBytes(rawJSON) {
+	if len(rawJSON) == 0 || !ojson.ValidBytes(rawJSON) {
 		return ""
 	}
 
-	root := gjson.ParseBytes(rawJSON)
+	root := util.ParseGJSONBytesNoCopy(rawJSON)
 	for _, path := range []string{"model", "request.model"} {
 		model := root.Get(path)
-		if model.Type == gjson.String && strings.TrimSpace(model.String()) != "" {
-			return model.String()
+		if model.Type == ojson.String && strings.TrimSpace(model.String()) != "" {
+			return strings.Clone(model.String())
 		}
 	}
 	return ""
+}
+
+// ClaudeMaxTokensRaw returns the raw JSON number token for a Claude max_tokens
+// field so translators preserve native values (including 0) without float
+// reformatting, silent truncation, or arbitrary clamping.
+func ClaudeMaxTokensRaw(v ojson.Result) (string, bool) {
+	if !v.Exists() || v.Type != ojson.Number || v.Raw == "" {
+		return "", false
+	}
+	return v.Raw, true
+}
+
+// ClaudeStopSequences extracts non-empty string entries from a Claude stop_sequences array.
+func ClaudeStopSequences(v ojson.Result) []string {
+	if !v.Exists() || !v.IsArray() {
+		return nil
+	}
+	var sequences []string
+	v.ForEach(func(_, item ojson.Result) bool {
+		if item.Type == ojson.String && item.String() != "" {
+			sequences = append(sequences, item.String())
+		}
+		return true
+	})
+	if len(sequences) == 0 {
+		return nil
+	}
+	return sequences
+}
+
+// ClaudeOutputJSONSchema returns the schema object when output_config.format
+// specifies a valid json_schema format.
+func ClaudeOutputJSONSchema(format ojson.Result) (ojson.Result, bool) {
+	if !format.Exists() || !format.IsObject() {
+		return ojson.Result{}, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(format.Get("type").String()), "json_schema") {
+		return ojson.Result{}, false
+	}
+	schema := format.Get("schema")
+	if !schema.Exists() || !schema.IsObject() {
+		return ojson.Result{}, false
+	}
+	return schema, true
 }

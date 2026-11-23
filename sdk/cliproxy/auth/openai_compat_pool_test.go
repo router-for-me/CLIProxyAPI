@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 const openAICompatPoolProviderKey = "openai-compatible-pool"
@@ -830,8 +830,8 @@ func TestManagerExecuteStream_OpenAICompatAliasPoolStopsOnInvalidBootstrap(t *te
 	if err == nil {
 		t.Fatal("expected invalid request error")
 	}
-	if err != invalidErr {
-		t.Fatalf("error = %v, want %v", err, invalidErr)
+	if !errors.Is(err, invalidErr) {
+		t.Fatalf("error = %v, want wrapped %v", err, invalidErr)
 	}
 	if streamResult != nil {
 		t.Fatalf("streamResult = %#v, want nil on invalid bootstrap", streamResult)

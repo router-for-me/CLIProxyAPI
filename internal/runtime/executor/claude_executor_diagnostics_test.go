@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	claudeauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestInjectClaudeDiagnosticsMatchesNativeFieldOrderAndContinuity(t *testing.T) {
@@ -29,19 +29,19 @@ func TestInjectClaudeDiagnosticsMatchesNativeFieldOrderAndContinuity(t *testing.
 	if !bytes.Contains(first, []byte(wantOrder)) {
 		t.Fatalf("diagnostics field order differs from native: %s", first)
 	}
-	if got := gjson.GetBytes(first, "diagnostics.previous_message_id"); got.Type != gjson.Null {
+	if got := ojson.GetBytes(first, "diagnostics.previous_message_id"); got.Type != ojson.Null {
 		t.Fatalf("first previous_message_id = %s, want null", got.Raw)
 	}
 
 	commitClaudeDiagnostics(state, "msg_01ABCDEF0123456789ABCDEFG")
 	second, _ := injectClaudeDiagnostics(body, auth, "session-diagnostics-order-"+testID)
-	if got := gjson.GetBytes(second, "diagnostics.previous_message_id").String(); got != "msg_01ABCDEF0123456789ABCDEFG" {
+	if got := ojson.GetBytes(second, "diagnostics.previous_message_id").String(); got != "msg_01ABCDEF0123456789ABCDEFG" {
 		t.Fatalf("second previous_message_id = %q, want committed upstream ID", got)
 	}
 }
 
 func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) {
-	var previousValues []gjson.Result
+	var previousValues []ojson.Result
 	var betaValues []string
 	call := 0
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -49,7 +49,7 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		previousValues = append(previousValues, gjson.GetBytes(body, "diagnostics.previous_message_id"))
+		previousValues = append(previousValues, ojson.GetBytes(body, "diagnostics.previous_message_id"))
 		betas := req.Header.Get("Anthropic-Beta")
 		if betas == "" {
 			betas = strings.Join(req.Header["anthropic-beta"], ",")
@@ -64,7 +64,7 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 	testID := uuid.NewString()
 	auth := &cliproxyauth.Auth{
 		ID:         "diagnostics-live-path-" + testID,
-		Attributes: map[string]string{"api_key": "sk-ant-oat-diagnostics-live-path"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-diagnostics-live-path", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid":                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 			claudeauth.ClaudeDeviceIDsMetadataKey: deviceIDs,
@@ -84,7 +84,7 @@ func TestClaudeExecutorDiagnosticsAdvancesAfterSuccessfulResponse(t *testing.T) 
 			auth.Attributes["api_key"] = "sk-ant-oat-diagnostics-live-path-rotated"
 		}
 	}
-	if len(previousValues) != 2 || previousValues[0].Type != gjson.Null || previousValues[0].Raw != "null" {
+	if len(previousValues) != 2 || previousValues[0].Type != ojson.Null || previousValues[0].Raw != "null" {
 		t.Fatalf("first diagnostics value = %#v, want explicit null", previousValues)
 	}
 	if got := previousValues[1].String(); got != "msg_diagnostics_1" {
@@ -119,7 +119,7 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 		if errRead != nil {
 			t.Fatal(errRead)
 		}
-		billing := gjson.GetBytes(body, "system.0.text").String()
+		billing := ojson.GetBytes(body, "system.0.text").String()
 		capturedBillingHeaders = append(capturedBillingHeaders, billing)
 		call++
 		response := `{"id":"msg_turn_` + string(rune('0'+call)) + `","type":"message","model":"claude-sonnet-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`
@@ -134,7 +134,7 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 	testID := uuid.NewString()
 	auth := &cliproxyauth.Auth{
 		ID:         "continuity-test-" + testID,
-		Attributes: map[string]string{"api_key": "sk-ant-oat-continuity-test"},
+		Attributes: map[string]string{"api_key": "sk-ant-oat-continuity-test", "cloak_mode": "always"},
 		Metadata: map[string]any{
 			"account_uuid":                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 			claudeauth.ClaudeDeviceIDsMetadataKey: deviceIDs,
@@ -193,7 +193,7 @@ func TestClaudeExecutorContinuityAdvancesRequestIDAndPromptIDInBillingHeader(t *
 
 	// Verify Turn 1:
 	h1 := capturedBillingHeaders[0]
-	if !strings.Contains(h1, "cc_version=2.1.258.") || !strings.Contains(h1, "cc_entrypoint=cli;") || !strings.Contains(h1, "cch=") {
+	if !strings.Contains(h1, "cc_version=2.1.321.") || !strings.Contains(h1, "cc_entrypoint=cli;") || !strings.Contains(h1, "cch=") {
 		t.Fatalf("h1 invalid: %s", h1)
 	}
 	if strings.Contains(h1, "cc_prev_req=") {

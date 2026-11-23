@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"gopkg.in/yaml.v3"
 )
 
@@ -132,8 +132,9 @@ func sampleCloneRuntimeConfig() *Config {
 		SDKConfig: SDKConfig{
 			APIKeys: []string{"client-key"},
 			Streaming: StreamingConfig{
-				KeepAliveSeconds: 3,
-				BootstrapRetries: 2,
+				KeepAliveSeconds:      3,
+				BootstrapRetries:      2,
+				SendKeepAliveBeforeFT: true,
 			},
 		},
 		Home: HomeConfig{
@@ -163,6 +164,20 @@ func sampleCloneRuntimeConfig() *Config {
 		},
 		AntigravitySignatureCacheEnabled: &cacheStrict,
 		AntigravitySignatureBypassStrict: &bypassStrict,
+		Antigravity: AntigravityConfig{
+			SensitiveWords:        []string{"Codex"},
+			SensitiveWordsReplace: map[string]string{"You are Codex": "You are an assistant"},
+			SensitivePatternsReplace: []SensitivePatternRule{
+				{Pattern: `(?m)^RFC 2119[^\n]*\n?`, Replacement: ""},
+			},
+		},
+		Devin: DevinConfig{
+			SensitiveWords:        []string{"DevinWord"},
+			SensitiveWordsReplace: map[string]string{"Claude Code": "Devin"},
+			SensitivePatternsReplace: []SensitivePatternRule{
+				{Pattern: `(?m)^You are omp[^\n]*\n?`, Replacement: ""},
+			},
+		},
 		GeminiKey: []GeminiKey{{
 			APIKey:         "gemini-key",
 			Models:         []GeminiModel{{Name: "gemini-upstream", Alias: "gemini-upstream-alias"}},
@@ -181,8 +196,12 @@ func sampleCloneRuntimeConfig() *Config {
 			Headers:        map[string]string{"X-Claude": "one"},
 			ExcludedModels: []string{"claude-hidden"},
 			Cloak: &CloakConfig{
-				SensitiveWords: []string{"secret"},
-				CacheUserID:    &cacheUserID,
+				SensitiveWords:        []string{"secret"},
+				SensitiveWordsReplace: map[string]string{"Claude Code": "Claude"},
+				SensitivePatternsReplace: []SensitivePatternRule{
+					{Pattern: `Claude\s+Code`, Replacement: "Claude"},
+				},
+				CacheUserID: &cacheUserID,
 			},
 		}},
 		OpenAICompatibility: []OpenAICompatibility{{
@@ -342,4 +361,111 @@ func keyForPath(key reflect.Value) string {
 		return key.String()
 	}
 	return key.Type().String()
+}
+
+func TestParseConfigBytes_ProxyConnectionPool(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte("api-keys:\n  codex:\n    - name: pool-group\n      base-url: https://ollama.com/v1\n      connection-pool:\n        enabled: true\n        idle-conn-timeout: 15s\n        max-idle-conns-per-host: 4\n      keys:\n        - api-key: pool-key\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CodexKey) != 1 {
+		t.Fatalf("codex entries = %d, want 1", len(cfg.CodexKey))
+	}
+	pool := cfg.CodexKey[0].ConnectionPool
+	if pool == nil || pool.Enabled == nil || !*pool.Enabled || pool.IdleConnTimeout != "15s" || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 4 {
+		t.Fatalf("unexpected pool config: %+v", pool)
+	}
+	clone := cfg.CloneForRuntime()
+	if clone.CodexKey[0].ConnectionPool == pool {
+		t.Fatal("clone shares the pool block")
+	}
+	*clone.CodexKey[0].ConnectionPool.Enabled = false
+	if !*cfg.CodexKey[0].ConnectionPool.Enabled {
+		t.Fatal("clone shares enabled pointer")
+	}
+}
+
+func TestV8Validate_SensitiveWordsReplace(t *testing.T) {
+	v8YAML := []byte(`config-version: 8
+oauth:
+  providers:
+    antigravity:
+      sensitive-words:
+        - "Codex"
+      sensitive-words-replace:
+        "You are Codex, an agent based on GPT-5.": "You are a helpful coding assistant."
+    devin:
+      sensitive-words:
+        - "API"
+      sensitive-words-replace:
+        "Claude Code": "Devin Assistant"
+api-keys:
+  claude:
+    - name: claude-1
+      keys:
+        - api-key: sk-ant-test
+          cloak:
+            sensitive-words:
+              - "proxy"
+            sensitive-words-replace:
+              "Claude Code": "Claude"
+`)
+	if err := ValidateV8Config(v8YAML); err != nil {
+		t.Fatalf("ValidateV8Config() error = %v", err)
+	}
+	cfg, errParse := ParseConfigBytes(v8YAML)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if got := cfg.Antigravity.SensitiveWordsReplace["You are Codex, an agent based on GPT-5."]; got != "You are a helpful coding assistant." {
+		t.Fatalf("Antigravity.SensitiveWordsReplace = %#v", cfg.Antigravity.SensitiveWordsReplace)
+	}
+	if got := cfg.Devin.SensitiveWordsReplace["Claude Code"]; got != "Devin Assistant" {
+		t.Fatalf("Devin.SensitiveWordsReplace = %#v", cfg.Devin.SensitiveWordsReplace)
+	}
+	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Cloak == nil || cfg.ClaudeKey[0].Cloak.SensitiveWordsReplace["Claude Code"] != "Claude" {
+		t.Fatalf("ClaudeKey[0].Cloak = %#v", cfg.ClaudeKey)
+	}
+}
+
+func TestV8Validate_SensitivePatternsReplaceAndInvalidDrop(t *testing.T) {
+	v8YAML := []byte(`config-version: 8
+oauth:
+  providers:
+    antigravity:
+      sensitive-patterns-replace:
+        - pattern: '(?m)^RFC 2119[^\n]*\n?'
+          replacement: ""
+        - pattern: '[invalid'
+          replacement: "ignored"
+    devin:
+      sensitive-patterns-replace:
+        - pattern: '(?m)^You are omp[^\n]*\n?'
+          replacement: ""
+api-keys:
+  claude:
+    - name: claude-1
+      keys:
+        - api-key: sk-ant-test
+          cloak:
+            sensitive-patterns-replace:
+              - pattern: 'Claude\s+Code'
+                replacement: "Claude"
+`)
+	if err := ValidateV8Config(v8YAML); err != nil {
+		t.Fatalf("ValidateV8Config() error = %v", err)
+	}
+	cfg, errParse := ParseConfigBytes(v8YAML)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	if len(cfg.Antigravity.SensitivePatternsReplace) != 1 || cfg.Antigravity.SensitivePatternsReplace[0].Pattern != `(?m)^RFC 2119[^\n]*\n?` || cfg.Antigravity.SensitivePatternsReplace[0].Replacement != "" {
+		t.Fatalf("Antigravity.SensitivePatternsReplace = %#v", cfg.Antigravity.SensitivePatternsReplace)
+	}
+	if len(cfg.Devin.SensitivePatternsReplace) != 1 || cfg.Devin.SensitivePatternsReplace[0].Pattern != `(?m)^You are omp[^\n]*\n?` {
+		t.Fatalf("Devin.SensitivePatternsReplace = %#v", cfg.Devin.SensitivePatternsReplace)
+	}
+	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].Cloak == nil || len(cfg.ClaudeKey[0].Cloak.SensitivePatternsReplace) != 1 || cfg.ClaudeKey[0].Cloak.SensitivePatternsReplace[0].Replacement != "Claude" {
+		t.Fatalf("ClaudeKey[0].Cloak.SensitivePatternsReplace = %#v", cfg.ClaudeKey)
+	}
 }

@@ -3,8 +3,6 @@ package executor
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,20 +11,135 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
+type antigravityPreparedRequest struct {
+	model              helps.AntigravityRequestModel
+	auth               *cliproxyauth.Auth
+	token              string
+	originalPayload    []byte
+	originalTranslated []byte
+	translated         []byte
+	cooldownRejected   bool
+}
+
+func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string, stream, countTokens bool) (antigravityPreparedRequest, error) {
+	source := opts.OriginalRequest
+	if len(source) == 0 {
+		source = req.Payload
+	}
+	from, to := opts.SourceFormat, sdktranslator.FormatAntigravity
+	prepared := antigravityPreparedRequest{auth: auth}
+	useCredits := !countTokens && antigravityShouldBypassShortCooldown(ctx, e.cfg)
+	rejectCooldown := func(model string, err error) error {
+		prepared.cooldownRejected = true
+		if model != baseModel {
+			return cliproxyauth.RejectAntigravityTarget(err)
+		}
+		return err
+	}
+	translate := func(credential *cliproxyauth.Auth) error {
+		translateCtx := cache.WithSignatureCacheScope(ctx, antigravitySignatureCacheScope(credential))
+		model := helps.SelectAntigravityRequestModel(translateCtx, e.cfg, credential, req.Model, baseModel, from.String(), source, countTokens)
+		if model.ID != baseModel {
+			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, credential, model.ID, time.Now(), useCredits); errCooldown != nil {
+				return rejectCooldown(model.ID, errCooldown)
+			}
+		}
+		if errCooldown := e.checkAntigravityRequestCooldown(ctx, credential, model.ID, countTokens); errCooldown != nil {
+			return rejectCooldown(model.ID, errCooldown)
+		}
+		original, errValidate := validateAntigravityRequestSignatures(translateCtx, model.ID, from, source)
+		if errValidate != nil {
+			return errValidate
+		}
+		prepared.model, prepared.originalPayload = model, original
+		envelope := sdktranslator.RequestEnvelope{Format: from, Model: model.ID, Body: original, Stream: stream, ModelInfo: model.TranslationModelInfo(req, baseModel, from)}
+		if countTokens {
+			translated := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(translateCtx, opts.Headers, e.cfg, from, to, envelope)
+			if translated.Err != nil {
+				return translated.Err
+			}
+			prepared.translated = translated.Body
+			prepared.originalTranslated = append([]byte(nil), translated.Body...)
+			return nil
+		}
+		var errTranslate error
+		prepared.originalTranslated, prepared.translated, errTranslate = helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(translateCtx, opts.Headers, e.cfg, from, to, envelope, original, original)
+		return errTranslate
+	}
+	// A translation refusal must precede token refresh and any upstream request.
+	if errTranslate := translate(auth); errTranslate != nil {
+		return prepared, errTranslate
+	}
+	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
+	if errToken != nil {
+		return antigravityPreparedRequest{}, errToken
+	}
+	if updatedAuth != nil {
+		// A changed catalog identity, exclusion policy, or signature scope invalidates this attempt's snapshot.
+		if !cliproxyauth.SameAntigravityModelCatalogScope(auth, updatedAuth) || antigravitySignatureCacheScope(auth) != antigravitySignatureCacheScope(updatedAuth) {
+			if errTranslate := translate(updatedAuth); errTranslate != nil {
+				return prepared, errTranslate
+			}
+		} else if prepared.model.ID != baseModel {
+			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, updatedAuth, prepared.model.ID, time.Now(), useCredits); errCooldown != nil {
+				err := rejectCooldown(prepared.model.ID, errCooldown)
+				return prepared, err
+			}
+		}
+		prepared.auth = updatedAuth
+	}
+	prepared.token = token
+	if prepared.model.ID != baseModel {
+		cliproxyexecutor.SetUpstreamAttemptModel(ctx, prepared.model.ID)
+	}
+	return prepared, nil
+}
+
+func (e *AntigravityExecutor) checkAntigravityRequestCooldown(ctx context.Context, auth *cliproxyauth.Auth, model string, countTokens bool) error {
+	if antigravityCoolingDisabled(auth, e.cfg) {
+		return nil
+	}
+	inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, model, time.Now())
+	if errCooldown != nil {
+		return homeKVUnavailableStatusErr(errCooldown)
+	}
+	if inCooldown && (countTokens || !antigravityShouldBypassShortCooldown(ctx, e.cfg)) {
+		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", antigravityAuthID(auth), model, remaining)
+		return statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &remaining}
+	}
+	return nil
+}
+
 func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, error) {
+	doc := ojson.NewDoc(payload)
+	httpReq, _, err := e.buildRequestDoc(ctx, auth, token, modelName, doc, stream, alt, baseURL, derivedSessionIDs...)
+	return httpReq, err
+}
+
+func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, error) {
+	selection := cliproxyauth.SelectAntigravityModel(ctx, auth, modelName, "", e.cfg)
+	return e.buildRequestForModelDoc(ctx, auth, token, selection, doc, stream, alt, baseURL, derivedSessionIDs...)
+}
+
+func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth *cliproxyauth.Auth, token string, selection cliproxyauth.AntigravityModelSelection, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, error) {
 	if token == "" {
-		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+		return nil, nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
+	}
+	if doc == nil {
+		doc = ojson.NewDoc(nil)
 	}
 
 	base := strings.TrimSuffix(baseURL, "/")
@@ -54,69 +167,70 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 
 	projectID, errProject := e.projectIDForRequest(ctx, auth, token)
 	if errProject != nil {
-		return nil, errProject
+		return nil, nil, errProject
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
+	modelName := selection.ID
+	isAgent := geminiToAntigravityDocForAuth(doc, selection, projectID, auth, derivedSessionIDs...)
+	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
-	// Cap maxOutputTokens to model's max_completion_tokens from registry
-	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
-		if modelInfo := registry.LookupModelInfo(modelName, "antigravity"); modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+	lowerModel := strings.ToLower(modelName)
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
+
+	// A matched variant uses the output limit from the same catalog as its ID and enum.
+	if selection.MaxOutputTokens > 0 {
+		_ = doc.Set("request.generationConfig.maxOutputTokens", selection.MaxOutputTokens)
+	} else if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
+		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
+		if modelInfo == nil && lowerModel != modelName {
+			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
+		}
+		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				payload, _ = sjson.SetBytes(payload, "request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+				if isClaudeModel {
+					for _, budgetPath := range []string{
+						"request.generationConfig.thinkingConfig.thinkingBudget",
+						"request.generationConfig.thinkingConfig.thinking_budget",
+					} {
+						if budget := doc.Get(budgetPath); budget.Exists() && budget.Int() >= int64(modelInfo.MaxCompletionTokens) {
+							_ = doc.Set(budgetPath, modelInfo.MaxCompletionTokens-1)
+						}
+					}
+				}
 			}
 		}
 	}
-
-	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(modelName, "gemini-3-pro") || strings.Contains(modelName, "gemini-3.1-pro")
-	var (
-		bodyReader io.Reader
-		payloadLog []byte
-	)
-	if antigravityRequestNeedsSchemaSanitization(payload) {
-		payloadStr := sanitizeAntigravityRequestSchemas(string(payload), useAntigravitySchema)
-
-		if strings.Contains(modelName, "claude") {
-			updated, _ := sjson.SetBytes([]byte(payloadStr), "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-			payloadStr = string(updated)
-		} else {
-			payloadStr, _ = sjson.Delete(payloadStr, "request.generationConfig.maxOutputTokens")
+	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
+		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
+	}
+	if isClaudeModel {
+		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
+			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
-
-		payloadStrBytes := applyAntigravityNativeSignatureReplayIfNeeded(modelName, []byte(payloadStr))
-		bodyReader = bytes.NewReader(payloadStrBytes)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payloadStrBytes...)
-		}
-	} else {
-		if strings.Contains(modelName, "claude") {
-			payload, _ = sjson.SetBytes(payload, "request.toolConfig.functionCallingConfig.mode", "VALIDATED")
-		} else {
-			payload, _ = sjson.DeleteBytes(payload, "request.generationConfig.maxOutputTokens")
-		}
-
-		payload = applyAntigravityNativeSignatureReplayIfNeeded(modelName, payload)
-		bodyReader = bytes.NewReader(payload)
-		if e.cfg != nil && e.cfg.RequestLog {
-			payloadLog = append([]byte(nil), payload...)
-		}
+	} else if selection.MaxOutputTokens == 0 {
+		_ = doc.Delete("request.generationConfig.maxOutputTokens")
 	}
 
-	// if useAntigravitySchema {
-	// 	systemInstructionPartsResult := gjson.Get(payloadStr, "request.systemInstruction.parts")
-	// 	payloadStr, _ = sjson.SetBytes([]byte(payloadStr), "request.systemInstruction.role", "user")
-	// 	payloadStr, _ = sjson.SetBytes([]byte(payloadStr), "request.systemInstruction.parts.0.text", systemInstruction)
-	// 	payloadStr, _ = sjson.SetBytes([]byte(payloadStr), "request.systemInstruction.parts.1.text", fmt.Sprintf("Please ignore following [ignore]%s[/ignore]", systemInstruction))
-
-	// 	if systemInstructionPartsResult.Exists() && systemInstructionPartsResult.IsArray() {
-	// 		for _, partResult := range systemInstructionPartsResult.Array() {
-	// 			payloadStr, _ = sjson.SetRawBytes([]byte(payloadStr), "request.systemInstruction.parts.-1", []byte(partResult.Raw))
-	// 		}
-	// 	}
-	// }
+	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
+	helps.FinalizePayloadDoc(ctx, doc)
+	if isAgent {
+		// A filtered requestType is not reinserted. If a rule explicitly selected
+		// another request type, keep that protocol's serialization unchanged.
+		requestType := doc.Get("requestType")
+		isAgent = !requestType.Exists() || strings.TrimSpace(requestType.String()) == "agent"
+	}
+	finalPayload := helps.SerializeAntigravityPayload(doc, isAgent)
+	var (
+		bodyReader io.Reader = bytes.NewReader(finalPayload)
+		payloadLog []byte
+	)
+	if e.cfg != nil && e.cfg.RequestLog {
+		payloadLog = append([]byte(nil), finalPayload...)
+	}
 
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bodyReader)
 	if errReq != nil {
-		return nil, errReq
+		return nil, nil, errReq
 	}
 	// Deliberately no httpReq.Close: the native Antigravity client omits the
 	// Connection header and keeps its HTTP/1.1 connections alive, so forcing
@@ -152,7 +266,29 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		AuthValue: authValue,
 	})
 
-	return httpReq, nil
+	return httpReq, finalPayload, nil
+}
+
+// antigravityToolChoiceModeIsNoneDoc reports whether the request already sets
+// function calling mode to NONE under either camelCase or snake_case proto-JSON
+// paths, canonicalizing non-canonical casing or surrounding whitespace in place.
+func antigravityToolChoiceModeIsNoneDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	for _, container := range []string{"request.toolConfig", "request.tool_config"} {
+		for _, key := range []string{"functionCallingConfig", "function_calling_config"} {
+			modePath := container + "." + key + ".mode"
+			mode := doc.Get(modePath)
+			if mode.Type == ojson.String && strings.EqualFold(strings.TrimSpace(mode.String()), "NONE") {
+				if mode.String() != "NONE" {
+					_ = doc.Set(modePath, "NONE")
+				}
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sanitizeAntigravityRequestSchemas cleans the JSON schemas carried by an Antigravity request.
@@ -162,9 +298,46 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 // data keys inside functionCall arguments replayed from conversation history. Running it over the
 // whole document silently mutated that history, so tools lost required argument fields and the
 // model imitated the corrupted examples on later turns.
+// sanitizeAntigravityRequestSchemas cleans with union-preserving (Gemini) tool semantics.
+// Claude tool unions are flattened only when the caller supplies the model flag via
+// sanitizeAntigravityRequestSchemasForModel; the placeholder group alone must not decide it,
+// because gemini-3-pro models share that group and accept preserved unions.
 func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
-	payloadStr = sanitizeAntigravityToolSchemas(payloadStr, useAntigravitySchema)
+	return sanitizeAntigravityRequestSchemasForModel(payloadStr, useAntigravitySchema, false)
+}
+
+// sanitizeAntigravityRequestSchemasForModel applies sanitizeAntigravityRequestSchemas with an
+// explicit Antigravity Claude flag. Antigravity Claude tool schemas additionally flatten
+// multi-branch anyOf/oneOf unions, which the Claude-side upstream rejects (Issue 3662).
+func sanitizeAntigravityRequestSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
+	payloadStr = sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, isClaudeModel)
 	return sanitizeAntigravityGenerationSchemas(payloadStr)
+}
+
+func antigravitySchemaSanitizationFlags(modelName string) (useAntigravitySchema, isClaudeModel bool) {
+	lowerModel := strings.ToLower(modelName)
+	isClaudeModel = strings.Contains(lowerModel, "claude")
+	useAntigravitySchema = isClaudeModel || strings.Contains(lowerModel, "gemini-3-pro") || strings.Contains(lowerModel, "gemini-3.1-pro")
+	return useAntigravitySchema, isClaudeModel
+}
+
+func sanitizeAntigravityRequestSchemasForModelIfNeededDoc(modelName string, doc *ojson.Doc) bool {
+	if !antigravityRequestNeedsSchemaSanitizationDoc(doc) {
+		return false
+	}
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
+	return sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
+}
+
+func sanitizeAntigravityRequestSchemasForModelDoc(doc *ojson.Doc, useAntigravitySchema, isClaudeModel bool) bool {
+	if doc == nil {
+		return false
+	}
+	changed := sanitizeAntigravityToolSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
+	if sanitizeAntigravityGenerationSchemasDoc(doc) {
+		changed = true
+	}
+	return changed
 }
 
 // sanitizeAntigravityToolSchemas applies the existing declaration rewrites to
@@ -172,18 +345,22 @@ func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema b
 // once. This preserves rewrite order and bytes without copying the full request
 // for every declaration schema.
 func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool) string {
-	tools := gjson.Get(payloadStr, "request.tools")
+	return sanitizeAntigravityToolSchemasForModel(payloadStr, useAntigravitySchema, false)
+}
+
+func sanitizeAntigravityToolSchemasForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
+	tools := ojson.Get(payloadStr, "request.tools")
 	if !tools.IsArray() {
 		return payloadStr
 	}
 
 	toolDocument := `{"request":{"tools":` + tools.Raw + `}}`
-	toolDocument = sanitizeAntigravityToolSchemaDocument(toolDocument, useAntigravitySchema)
-	cleanedTools := gjson.Get(toolDocument, "request.tools")
+	toolDocument = sanitizeAntigravityToolSchemaDocumentForModel(toolDocument, useAntigravitySchema, isClaudeModel)
+	cleanedTools := ojson.Get(toolDocument, "request.tools")
 	if !cleanedTools.IsArray() || cleanedTools.Raw == tools.Raw {
 		return payloadStr
 	}
-	updated, errSet := sjson.SetRawBytes([]byte(payloadStr), "request.tools", []byte(cleanedTools.Raw))
+	updated, errSet := ojson.SetRawBytes([]byte(payloadStr), "request.tools", []byte(cleanedTools.Raw))
 	if errSet != nil {
 		log.Debugf("antigravity: failed to write cleaned request.tools: %v", errSet)
 		return payloadStr
@@ -191,44 +368,255 @@ func sanitizeAntigravityToolSchemas(payloadStr string, useAntigravitySchema bool
 	return string(updated)
 }
 
-func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySchema bool) string {
-	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
-		oldPath := base + ".parametersJsonSchema"
-		if !gjson.Get(payloadStr, oldPath).Exists() {
-			continue
-		}
-		renamed, errRename := util.RenameKey(payloadStr, oldPath, base+".parameters")
-		if errRename != nil {
-			log.Debugf("antigravity: failed to rename %s: %v", oldPath, errRename)
-			continue
-		}
-		payloadStr = renamed
+func sanitizeAntigravityToolSchemasForModelDoc(doc *ojson.Doc, useAntigravitySchema, isClaudeModel bool) bool {
+	if doc == nil {
+		return false
+	}
+	tools := doc.Get("request.tools")
+	if !tools.IsArray() {
+		return false
 	}
 
-	toolSchemaCleaner := func(schema string) string {
+	toolDocument := `{"request":{"tools":` + tools.Raw + `}}`
+	toolDocument = sanitizeAntigravityToolSchemaDocumentForModel(toolDocument, useAntigravitySchema, isClaudeModel)
+	cleanedTools := ojson.Get(toolDocument, "request.tools")
+	if !cleanedTools.IsArray() || cleanedTools.Raw == tools.Raw {
+		return false
+	}
+	if errSet := doc.SetRawBytes("request.tools", []byte(cleanedTools.Raw)); errSet != nil {
+		log.Debugf("antigravity: failed to write cleaned request.tools: %v", errSet)
+		return false
+	}
+	return true
+}
+
+func sanitizeAntigravityToolSchemaDocument(payloadStr string, useAntigravitySchema bool) string {
+	return sanitizeAntigravityToolSchemaDocumentForModel(payloadStr, useAntigravitySchema, false)
+}
+
+// antigravityDeclarationContainers lists both spellings of the declarations
+// array a tool may carry.
+var antigravityDeclarationContainers = []string{"functionDeclarations", "function_declarations"}
+
+// sanitizeAntigravityToolSchemaDocumentForModel renames and cleans every
+// declaration schema in the tools-only document. Each declaration is edited
+// on its own raw bytes and the results are spliced back into the tools array
+// in a single pass, so the cost stays linear in the document size instead of
+// scaling with declarations x document size (Issue 6714). The emitted bytes
+// match the previous whole-document edits: changed elements are spliced at
+// their original offsets, so untouched bytes (including whitespace around
+// array elements) survive verbatim, and changed nodes go through the same
+// sjson edits, scoped to one declaration.
+func sanitizeAntigravityToolSchemaDocumentForModel(payloadStr string, useAntigravitySchema, isClaudeModel bool) string {
+	toolSchemaCleaner := func(schema string, isParameterSchema bool) string {
+		// Only declaration parameter schemas become Claude custom.input_schema upstream,
+		// so only they need Claude union flattening. Function return schemas keep the
+		// union-preserving cleaning like every other response-side schema.
+		if isClaudeModel && isParameterSchema {
+			return util.CleanJSONSchemaForAntigravityClaudeTool(schema, useAntigravitySchema)
+		}
 		return util.CleanJSONSchemaForAntigravityTool(schema, useAntigravitySchema)
 	}
-	cleanNestedToolSchema := func(schemaRaw string) string {
-		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+	cleanNestedToolSchema := func(schemaRaw string, isParameterSchema bool) string {
+		return cleanNestedSchema(func(schema string) string {
+			return toolSchemaCleaner(schema, isParameterSchema)
+		}, schemaRaw)
 	}
-	return cleanAntigravitySchemasAtPaths(
-		payloadStr,
-		antigravityDeclarationSchemaPaths(payloadStr),
-		cleanNestedToolSchema,
-	)
+
+	tools := ojson.Parse(payloadStr).Get("request.tools")
+	if !tools.IsArray() {
+		return payloadStr
+	}
+	elements := make([]ojson.Result, 0)
+	edits := make([]antigravityElementEdit, 0)
+	tools.ForEach(func(_, tool ojson.Result) bool {
+		elements = append(elements, tool)
+		if !tool.IsObject() {
+			return true
+		}
+		var toolDoc *ojson.Doc
+		toolChanged := false
+		for _, declKey := range antigravityDeclarationContainers {
+			decls := tool.Get(declKey)
+			if !decls.IsArray() {
+				continue
+			}
+			cleanedDecls, declsChanged := sanitizeAntigravityDeclarations(decls, cleanNestedToolSchema)
+			if !declsChanged {
+				continue
+			}
+			if toolDoc == nil {
+				toolDoc = ojson.NewDoc([]byte(tool.Raw))
+			}
+			if errSet := toolDoc.SetRawBytes(declKey, []byte(cleanedDecls)); errSet != nil {
+				log.Debugf("antigravity: failed to write cleaned %s: %v", declKey, errSet)
+				continue
+			}
+			toolChanged = true
+		}
+		if toolChanged && toolDoc != nil {
+			toolRaw := string(toolDoc.Bytes())
+			if toolRaw != tool.Raw {
+				edits = append(edits, antigravityElementEdit{offset: tool.Index - tools.Index, raw: tool.Raw, replacement: toolRaw})
+			}
+		}
+		return true
+	})
+	if len(edits) == 0 {
+		return payloadStr
+	}
+	updated, errSet := ojson.SetRawBytes([]byte(payloadStr), "request.tools", []byte(applyAntigravityElementEdits(tools.Raw, tools.Index, elements, edits)))
+	if errSet != nil {
+		log.Debugf("antigravity: failed to write cleaned request.tools: %v", errSet)
+		return payloadStr
+	}
+	return string(updated)
+}
+
+// antigravityElementEdit replaces one array element (raw, at offset within
+// the array's raw bytes) with replacement.
+type antigravityElementEdit struct {
+	offset      int
+	raw         string
+	replacement string
+}
+
+// applyAntigravityElementEdits splices element replacements into an array's
+// raw bytes in offset order, keeping every other byte (commas, whitespace,
+// unchanged elements) verbatim. Edits whose offsets do not line up with the
+// array bytes fall back to joining the elements with commas: still valid
+// and semantically identical, just without the original separators. gjson
+// reports element offsets into the parsed document, so offsets here are
+// relative to the array start.
+func applyAntigravityElementEdits(arrayRaw string, arrayIndex int, elements []ojson.Result, edits []antigravityElementEdit) string {
+	var rebuilt strings.Builder
+	rebuilt.Grow(len(arrayRaw))
+	cursor := 0
+	for _, edit := range edits {
+		if edit.offset < cursor || edit.offset+len(edit.raw) > len(arrayRaw) || arrayRaw[edit.offset:edit.offset+len(edit.raw)] != edit.raw {
+			return joinAntigravityElements(arrayIndex, elements, edits)
+		}
+		rebuilt.WriteString(arrayRaw[cursor:edit.offset])
+		rebuilt.WriteString(edit.replacement)
+		cursor = edit.offset + len(edit.raw)
+	}
+	rebuilt.WriteString(arrayRaw[cursor:])
+	return rebuilt.String()
+}
+
+// joinAntigravityElements rebuilds an array by joining element bytes with
+// commas, substituting replacements where recorded. It is the fallback for
+// applyAntigravityElementEdits when splice offsets cannot be trusted.
+func joinAntigravityElements(arrayIndex int, elements []ojson.Result, edits []antigravityElementEdit) string {
+	replacements := make(map[int]string, len(edits))
+	for _, edit := range edits {
+		replacements[edit.offset] = edit.replacement
+	}
+	var rebuilt strings.Builder
+	rebuilt.WriteByte('[')
+	for i, element := range elements {
+		if i > 0 {
+			rebuilt.WriteByte(',')
+		}
+		if replacement, ok := replacements[element.Index-arrayIndex]; ok {
+			rebuilt.WriteString(replacement)
+		} else {
+			rebuilt.WriteString(element.Raw)
+		}
+	}
+	rebuilt.WriteByte(']')
+	return rebuilt.String()
+}
+
+// sanitizeAntigravityDeclarations rebuilds one declarations array, applying
+// the rename and schema cleaning to each declaration in isolation. It
+// reports whether any declaration actually changed so callers can keep the
+// original bytes when the array is already clean.
+func sanitizeAntigravityDeclarations(decls ojson.Result, clean func(schemaRaw string, isParameterSchema bool) string) (string, bool) {
+	elements := make([]ojson.Result, 0)
+	edits := make([]antigravityElementEdit, 0)
+	decls.ForEach(func(_, decl ojson.Result) bool {
+		elements = append(elements, decl)
+		if !decl.IsObject() {
+			return true
+		}
+		cleanedDecl := sanitizeAntigravityDeclaration(decl, clean)
+		if cleanedDecl != decl.Raw {
+			edits = append(edits, antigravityElementEdit{offset: decl.Index - decls.Index, raw: decl.Raw, replacement: cleanedDecl})
+		}
+		return true
+	})
+	if len(edits) == 0 {
+		return "", false
+	}
+	return applyAntigravityElementEdits(decls.Raw, decls.Index, elements, edits), true
+}
+
+// sanitizeAntigravityDeclaration applies the declaration-level edits that
+// used to run against the whole tools document: parametersJsonSchema is
+// renamed onto parameters first, then every object schema is cleaned in
+// place. Failed edits keep the declaration as-is and are only logged.
+func sanitizeAntigravityDeclaration(decl ojson.Result, clean func(schemaRaw string, isParameterSchema bool) string) string {
+	declRaw := decl.Raw
+	if decl.Get("parametersJsonSchema").Exists() {
+		renamed, errRename := util.RenameKey(declRaw, "parametersJsonSchema", "parameters")
+		if errRename != nil {
+			log.Debugf("antigravity: failed to rename parametersJsonSchema: %v", errRename)
+		} else {
+			declRaw = renamed
+			decl = ojson.Parse(declRaw)
+		}
+	}
+	var declDoc *ojson.Doc
+	changed := false
+	for _, key := range antigravityDeclarationSchemaKeys {
+		schema := decl.Get(key)
+		if !schema.IsObject() {
+			continue
+		}
+		cleanedSchema := clean(schema.Raw, isParameterSchemaPath(key))
+		if cleanedSchema == schema.Raw {
+			continue
+		}
+		if declDoc == nil {
+			declDoc = ojson.NewDoc([]byte(declRaw))
+		}
+		if errSet := declDoc.SetRawBytes(key, []byte(cleanedSchema)); errSet != nil {
+			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", key, errSet)
+			continue
+		}
+		changed = true
+	}
+	if changed && declDoc != nil {
+		return string(declDoc.Bytes())
+	}
+	return declRaw
 }
 
 // sanitizeAntigravityGenerationSchemas batches every schema edit within one
 // generation config before replacing that config in the full request.
 func sanitizeAntigravityGenerationSchemas(payloadStr string) string {
+	doc := ojson.NewDoc([]byte(payloadStr))
+	if !sanitizeAntigravityGenerationSchemasDoc(doc) {
+		return payloadStr
+	}
+	return string(doc.Bytes())
+}
+
+func sanitizeAntigravityGenerationSchemasDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	changed := false
 	for _, container := range antigravityGenerationConfigContainers {
-		generationConfig := gjson.Get(payloadStr, container)
+		generationConfig := doc.Get(container)
 		if !generationConfig.IsObject() {
 			continue
 		}
-		cleanedConfig := generationConfig.Raw
+		var configDoc *ojson.Doc
+		configChanged := false
 		for _, key := range antigravityGenerationSchemaKeys {
-			schema := gjson.Get(cleanedConfig, key)
+			schema := generationConfig.Get(key)
 			if !schema.IsObject() {
 				continue
 			}
@@ -236,29 +624,46 @@ func sanitizeAntigravityGenerationSchemas(payloadStr string) string {
 			if cleanedSchema == schema.Raw {
 				continue
 			}
-			updated, errSet := sjson.SetRawBytes([]byte(cleanedConfig), key, []byte(cleanedSchema))
-			if errSet != nil {
+			if configDoc == nil {
+				configDoc = ojson.NewDoc([]byte(generationConfig.Raw))
+			}
+			if errSet := configDoc.SetRawBytes(key, []byte(cleanedSchema)); errSet != nil {
 				log.Debugf("antigravity: failed to write cleaned schema at %s.%s: %v", container, key, errSet)
 				continue
 			}
-			cleanedConfig = string(updated)
+			configChanged = true
 		}
-		if cleanedConfig == generationConfig.Raw {
+		if !configChanged || configDoc == nil {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), container, []byte(cleanedConfig))
-		if errSet != nil {
+		cleanedConfig := configDoc.Bytes()
+		if string(cleanedConfig) == generationConfig.Raw {
+			continue
+		}
+		if errSet := doc.SetRawBytes(container, cleanedConfig); errSet != nil {
 			log.Debugf("antigravity: failed to write cleaned %s: %v", container, errSet)
 			continue
 		}
-		payloadStr = string(updated)
+		changed = true
 	}
-	return payloadStr
+	return changed
+}
+
+// isParameterSchemaPath reports whether a declaration schema path holds tool input
+// parameters rather than a function return schema.
+func isParameterSchemaPath(schemaPath string) bool {
+	key := schemaPath
+	if idx := strings.LastIndex(schemaPath, "."); idx >= 0 {
+		key = schemaPath[idx+1:]
+	}
+	return strings.HasPrefix(key, "parameters")
 }
 
 func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, clean func(string) string) string {
+	var doc *ojson.Doc
+	changed := false
 	for _, schemaPath := range schemaPaths {
-		schema := gjson.Get(payloadStr, schemaPath)
+		schema := ojson.Get(payloadStr, schemaPath)
 		if !schema.Exists() {
 			continue
 		}
@@ -266,14 +671,19 @@ func cleanAntigravitySchemasAtPaths(payloadStr string, schemaPaths []string, cle
 		if cleanedSchema == schema.Raw {
 			continue
 		}
-		updated, errSet := sjson.SetRawBytes([]byte(payloadStr), schemaPath, []byte(cleanedSchema))
-		if errSet != nil {
+		if doc == nil {
+			doc = ojson.NewDoc([]byte(payloadStr))
+		}
+		if errSet := doc.SetRawBytes(schemaPath, []byte(cleanedSchema)); errSet != nil {
 			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", schemaPath, errSet)
 			continue
 		}
-		payloadStr = string(updated)
+		changed = true
 	}
-	return payloadStr
+	if !changed || doc == nil {
+		return payloadStr
+	}
+	return string(doc.Bytes())
 }
 
 // antigravitySchemaWrapperKey nests a schema during cleaning. It is never sent upstream.
@@ -286,11 +696,11 @@ const antigravitySchemaWrapperKey = "schema"
 // cleaning always saw tool schemas nested inside the request, so nesting is reproduced here to keep
 // the emitted schema byte-identical to the previous behaviour.
 func cleanNestedSchema(clean func(string) string, schemaRaw string) string {
-	wrapped, errWrap := sjson.SetRaw("{}", antigravitySchemaWrapperKey, schemaRaw)
+	wrapped, errWrap := ojson.SetRaw("{}", antigravitySchemaWrapperKey, schemaRaw)
 	if errWrap != nil {
 		return clean(schemaRaw)
 	}
-	if unwrapped := gjson.Get(clean(wrapped), antigravitySchemaWrapperKey); unwrapped.Exists() {
+	if unwrapped := ojson.Get(clean(wrapped), antigravitySchemaWrapperKey); unwrapped.Exists() {
 		return unwrapped.Raw
 	}
 	return clean(schemaRaw)
@@ -300,7 +710,7 @@ func cleanNestedSchema(clean func(string) string, schemaRaw string) string {
 // Both the camelCase and snake_case spellings are accepted because callers reach this executor
 // through different translators.
 func antigravityFunctionDeclarationPaths(payloadStr string) []string {
-	tools := gjson.Get(payloadStr, "request.tools")
+	tools := ojson.Get(payloadStr, "request.tools")
 	if !tools.IsArray() {
 		return nil
 	}
@@ -331,7 +741,7 @@ func antigravityDeclarationSchemaPaths(payloadStr string) []string {
 	paths := make([]string, 0, 8)
 	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
 		for _, key := range antigravityDeclarationSchemaKeys {
-			if gjson.Get(payloadStr, base+"."+key).IsObject() {
+			if ojson.Get(payloadStr, base+"."+key).IsObject() {
 				paths = append(paths, base+"."+key)
 			}
 		}
@@ -344,7 +754,7 @@ func antigravityGenerationSchemaPaths(payloadStr string) []string {
 	for _, container := range antigravityGenerationConfigContainers {
 		for _, key := range antigravityGenerationSchemaKeys {
 			path := container + "." + key
-			if gjson.Get(payloadStr, path).IsObject() {
+			if ojson.Get(payloadStr, path).IsObject() {
 				paths = append(paths, path)
 			}
 		}
@@ -371,12 +781,29 @@ var (
 )
 
 func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
-	if gjson.GetBytes(payload, "request.tools.0").Exists() {
+	if ojson.GetBytesNoCopy(payload, "request.tools.0").Exists() {
 		return true
 	}
 	for _, container := range antigravityGenerationConfigContainers {
 		for _, key := range antigravityGenerationSchemaKeys {
-			if gjson.GetBytes(payload, container+"."+key).Exists() {
+			if ojson.GetBytesNoCopy(payload, container+"."+key).Exists() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func antigravityRequestNeedsSchemaSanitizationDoc(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	if doc.Get("request.tools.0").Exists() {
+		return true
+	}
+	for _, container := range antigravityGenerationConfigContainers {
+		for _, key := range antigravityGenerationSchemaKeys {
+			if doc.Get(container + "." + key).Exists() {
 				return true
 			}
 		}
@@ -394,10 +821,7 @@ func resolveAntigravityRequestBaseURL(auth *cliproxyauth.Auth) string {
 }
 
 func antigravityLoadCodeAssistBaseURL(auth *cliproxyauth.Auth) string {
-	if base := resolveCustomAntigravityBaseURL(auth); base != "" {
-		return base
-	}
-	return antigravityBaseURLProd
+	return resolveAntigravityRequestBaseURL(auth)
 }
 
 func resolveHost(base string) string {
@@ -456,52 +880,156 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
-	template := payload
-	template = helps.SetStringIfDifferent(template, "model", modelName)
-	template = helps.SetStringIfDifferent(template, "userAgent", "antigravity")
+func antigravityAuthID(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.ID)
+}
 
-	isImageModel := strings.Contains(modelName, "image")
-	reqType := strings.TrimSpace(gjson.GetBytes(template, "requestType").String())
+const (
+	antigravitySignatureGrantScopeMetadataKey   = "cpa_signature_cache_grant"
+	antigravitySignatureGrantBindingMetadataKey = "cpa_signature_cache_grant_binding"
+)
+
+func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	refresh := strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token"))
+	access := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token"))
+	if refresh == "" && access == "" {
+		return ""
+	}
+	return antigravityCredentialScope("grant:", refresh+"\x00"+access)
+}
+
+func antigravitySignatureGrantIdentity(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+		binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
+		if retained != "" && binding != "" && binding == antigravitySignatureGrantBinding(auth) {
+			return retained
+		}
+		if binding := antigravitySignatureGrantBinding(auth); binding != "" {
+			return binding
+		}
+	}
+	return ""
+}
+
+func antigravitySignatureCacheScope(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	scope := strings.TrimSpace(auth.ID)
+	if scope != "" {
+		scope = "id:" + scope
+	} else if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath]); path != "" {
+			scope = "path:" + path
+		} else if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); source != "" {
+			scope = "source:" + source
+		}
+	}
+	grantIdentity := antigravitySignatureGrantIdentity(auth)
+	if grantIdentity == "" {
+		return ""
+	}
+	scope += "\x00" + grantIdentity
+	if auth.Metadata != nil {
+		if projectID, ok := auth.Metadata["project_id"].(string); ok {
+			if projectID = strings.TrimSpace(projectID); projectID != "" {
+				scope += "\x00" + projectID
+			}
+		}
+	}
+	return scope
+}
+
+// geminiToAntigravityDocForAuth builds the upstream envelope and reports whether
+// it used the agent protocol.
+func geminiToAntigravityDocForAuth(doc *ojson.Doc, selection cliproxyauth.AntigravityModelSelection, projectID string, auth *cliproxyauth.Auth, derivedSessionIDs ...string) bool {
+	if doc == nil {
+		return false
+	}
+	modelName := selection.ID
+	helps.SetStringIfDifferentDoc(doc, "model", modelName)
+	helps.SetStringIfDifferentDoc(doc, "userAgent", "antigravity")
+
+	isImageModel := strings.Contains(strings.ToLower(modelName), "image")
+	reqType := strings.TrimSpace(doc.Get("requestType").String())
 	if reqType == "" {
 		if isImageModel {
 			reqType = "image_gen"
 		} else {
 			reqType = "agent"
 		}
-		template, _ = sjson.SetBytes(template, "requestType", reqType)
+		_ = doc.Set("requestType", reqType)
 	}
 
 	if projectID != "" {
-		template = helps.SetStringIfDifferent(template, "project", projectID)
+		helps.SetStringIfDifferentDoc(doc, "project", projectID)
 	} else {
-		template, _ = sjson.DeleteBytes(template, "project")
+		_ = doc.Delete("project")
 	}
 
-	if isImageModel {
-		template, _ = sjson.SetBytes(template, "requestId", generateImageGenRequestID())
-	} else if reqType != "web_search" {
-		template, _ = sjson.SetBytes(template, "requestId", generateRequestID())
-		sessionID := strings.TrimSpace(gjson.GetBytes(template, "request.sessionId").String())
-		if sessionID == "" && len(derivedSessionIDs) > 0 {
-			sessionID = strings.TrimSpace(derivedSessionIDs[0])
+	authID := antigravityAuthID(auth)
+	incomingSessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
+	derivedSessionID := ""
+	if len(derivedSessionIDs) > 0 {
+		derivedSessionID = strings.TrimSpace(derivedSessionIDs[0])
+	}
+
+	switch {
+	case isImageModel:
+		_ = doc.Set("requestId", generateImageGenRequestID())
+		if incomingSessionID != "" && authID != "" {
+			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
+		}
+	case reqType == "web_search":
+		if incomingSessionID != "" && authID != "" {
+			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
+		}
+	default:
+		var sessionID string
+		if authID != "" {
+			if derivedSessionID != "" || incomingSessionID != "" {
+				sessionID = scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID)
+			}
+		} else {
+			sessionID = incomingSessionID
+			if sessionID == "" {
+				sessionID = derivedSessionID
+			}
 		}
 		if sessionID == "" {
-			sessionID = generateStableSessionID(payload)
+			sessionID = generateStableSessionIDDocForAuth(doc, authID)
 		}
-		template, _ = sjson.SetBytes(template, "request.sessionId", sessionID)
+		_ = doc.Set("request.sessionId", sessionID)
+		if reqType == "agent" {
+			helps.ApplyAntigravityAgentEnvelope(doc, auth, sessionID, modelName, selection.Enum)
+		} else {
+			_ = doc.Set("requestId", "agent-"+uuid.NewString())
+		}
 	}
 
-	template, _ = sjson.DeleteBytes(template, "request.safetySettings")
-	if toolConfig := gjson.GetBytes(template, "toolConfig"); toolConfig.Exists() && !gjson.GetBytes(template, "request.toolConfig").Exists() {
-		template, _ = sjson.SetRawBytes(template, "request.toolConfig", []byte(toolConfig.Raw))
-		template, _ = sjson.DeleteBytes(template, "toolConfig")
+	_ = doc.Delete("request.safetySettings")
+	if toolConfig := doc.Get("toolConfig"); toolConfig.Exists() && !doc.Get("request.toolConfig").Exists() {
+		_ = doc.SetRawBytes("request.toolConfig", []byte(toolConfig.Raw))
+		_ = doc.Delete("toolConfig")
 	}
-	return template
+	return !isImageModel && reqType == "agent"
 }
 
-func generateRequestID() string {
-	return "agent-" + uuid.NewString()
+func scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID string) string {
+	if derivedSessionID != "" {
+		return derivedSessionID
+	}
+	return helps.ScopeAntigravitySessionIDForAuth(authID, incomingSessionID)
 }
 
 func generateImageGenRequestID() string {
@@ -510,29 +1038,71 @@ func generateImageGenRequestID() string {
 
 func generateSessionID() string {
 	randSourceMutex.Lock()
-	n := randSource.Int63n(9_000_000_000_000_000_000)
+	n := int64(randSource.Uint64())
 	randSourceMutex.Unlock()
-	return "-" + strconv.FormatInt(n, 10)
+	return strconv.FormatInt(n, 10)
 }
 
 func generateStableSessionID(payload []byte) string {
 	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
+		contents = util.GetGJSONBytesNoCopy(payload, "contents")
+	}
+	return generateStableSessionIDFromContents(contents)
+}
+
+func generateStableSessionIDDoc(doc *ojson.Doc) string {
+	return generateStableSessionIDDocForAuth(doc, "")
+}
+
+func generateStableSessionIDDocForAuth(doc *ojson.Doc, authID string) string {
+	if doc == nil {
+		return generateSessionID()
+	}
+	contents := doc.Get("request.contents")
+	if !contents.IsArray() {
+		contents = doc.Get("contents")
+	}
+	return generateStableSessionIDFromContentsForAuth(contents, authID)
+}
+
+func generateStableSessionIDFromContents(contents ojson.Result) string {
+	return generateStableSessionIDFromContentsForAuth(contents, "")
+}
+
+func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID string) string {
+	if !contents.IsArray() {
 		return generateSessionID()
 	}
 
+	authID = strings.TrimSpace(authID)
 	stableID := ""
-	contents.ForEach(func(_, content gjson.Result) bool {
+	contents.ForEach(func(_, content ojson.Result) bool {
 		if content.Get("role").String() != "user" {
 			return true
 		}
-		text := content.Get("parts.0.text").String()
+		text := ""
+		if parts := content.Get("parts"); parts.IsArray() {
+			parts.ForEach(func(_, part ojson.Result) bool {
+				if candidate := part.Get("text").String(); candidate != "" {
+					text = candidate
+					return false
+				}
+				return true
+			})
+		}
 		if text == "" {
 			return true
 		}
-		hash := sha256.Sum256([]byte(text))
-		value := int64(binary.BigEndian.Uint64(hash[:8])) & 0x7FFFFFFFFFFFFFFF
-		stableID = "-" + strconv.FormatInt(value, 10)
+		var hashInput []byte
+		if authID != "" {
+			// Place variable text and authID before the fixed domain suffix so trailing-byte
+			// changes avalanche into the sign bit of FNV-1a.
+			hashInput = []byte(text + "\x00" + authID + "\x00cli-proxy-api:antigravity:content-session")
+		} else {
+			hashInput = []byte(text)
+		}
+		stableID = helps.HashAntigravitySessionID(hashInput)
 		return false
 	})
 	if stableID != "" {

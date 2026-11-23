@@ -3,10 +3,13 @@ package pluginapi
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // Plugin is the host-side representation produced from a dynamic plugin registration.
@@ -62,6 +65,8 @@ type ConfigField struct {
 	Name string
 	// Type classifies the field value for management clients.
 	Type ConfigFieldType
+	// Default is the value used when the configuration key is omitted.
+	Default any
 	// EnumValues lists allowed values when Type is ConfigFieldTypeEnum.
 	EnumValues []string
 	// Description explains how the plugin uses the field.
@@ -76,19 +81,40 @@ type Capabilities struct {
 	ModelProvider ModelProvider
 	// AuthProvider lets the host parse, login, poll, and refresh plugin provider auths.
 	AuthProvider AuthProvider
+	// AuthProviders lets a plugin register multiple provider auth entries (for example,
+	// multi-portal vendors sharing the same plugin). When non-empty, each entry is exposed
+	// under its own identifier alongside AuthProvider.
+	AuthProviders []AuthProvider
 	// FrontendAuthProvider authenticates frontend requests before proxy handling.
 	FrontendAuthProvider FrontendAuthProvider
 	// FrontendAuthProviderExclusive makes this frontend auth provider the only active request auth provider when selected.
 	FrontendAuthProviderExclusive bool
+	// FrontendAuthProviderOmitBody opts out of receiving FrontendAuthRequest.Body and
+	// FrontendAuthRequest.DecodedBody in FrontendAuthProvider.Authenticate. It is honored
+	// only on schema version 7+; the host then skips reading, decoding, and cloning the
+	// request body during authentication.
+	FrontendAuthProviderOmitBody bool
+	// FrontendAuthOmitBody is an alias for FrontendAuthProviderOmitBody.
+	FrontendAuthOmitBody bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// SchedulerAcrossPriorities opts into receiving available candidates across all priority tiers
+	// in SchedulerPickRequest.Candidates. When false (default), Candidates only contains
+	// credentials from the highest available priority tier.
+	SchedulerAcrossPriorities bool
+	// SchedulerContinuity optionally evaluates bounded pre-admission continuity when
+	// eligible Codex credentials are waiting for quota recovery or after a pre-output 429.
+	SchedulerContinuity SchedulerContinuity
 	// ModelRouter routes matching requests to a plugin executor, the router's own executor,
 	// or a built-in provider before model-to-provider resolution and auth selection.
 	ModelRouter ModelRouter
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
-	// Empty defaults to ExecutorModelScopeBoth for backward compatibility.
+	// Empty defaults to ExecutorModelScopeOAuth when AuthProvider/AuthProviders is declared,
+	// and ExecutorModelScopeBoth otherwise for backward compatibility.
+	// When AuthProvider/AuthProviders is declared, only ExecutorModelScopeStatic registers an
+	// unauthenticated static model client in ModelRegistry.
 	ExecutorModelScope ExecutorModelScope
 	// ExecutorInputFormats lists request protocols accepted directly by Executor. Executors must declare at least one.
 	ExecutorInputFormats []string
@@ -106,9 +132,31 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestInterceptorOmitBodyBefore opts out of receiving RequestInterceptRequest.Body
+	// in InterceptRequestBeforeAuth. It is honored only on schema version 7+; the plugin
+	// may still replace the body blindly via RequestInterceptResponse.Body.
+	RequestInterceptorOmitBodyBefore bool
+	// RequestInterceptorOmitBodyAfter opts out of receiving RequestInterceptRequest.Body
+	// in InterceptRequestAfterAuth. It is honored only on schema version 7+; the plugin
+	// may still replace the body blindly via RequestInterceptResponse.Body.
+	RequestInterceptorOmitBodyAfter bool
+	// RequestBodyPatcherBefore scans raw request bodies in the before-auth phase and
+	// returns localized byte-range edits via request.patch_body_before (schema v8+).
+	RequestBodyPatcherBefore RequestBodyPatcher
+	// RequestBodyPatcherAfter scans raw request bodies in the after-auth phase and
+	// returns localized byte-range edits via request.patch_body_after (schema v8+).
+	RequestBodyPatcherAfter RequestBodyPatcher
+	// RequestInterceptorPatchBodyBefore opts into raw request body delivery and byte-range
+	// patching in the before-auth phase via request.patch_body_before. It is honored only
+	// on schema version 8+.
+	RequestInterceptorPatchBodyBefore bool
+	// RequestInterceptorPatchBodyAfter opts into raw request body delivery and byte-range
+	// patching in the after-auth phase via request.patch_body_after. It is honored only
+	// on schema version 8+.
+	RequestInterceptorPatchBodyAfter bool
 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
 	RequestLifecyclePlugin RequestLifecyclePlugin
-	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
+	// ResponseInterceptor rewrites successful non-streaming HTTP responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
@@ -130,7 +178,8 @@ type Capabilities struct {
 type ExecutorModelScope string
 
 const (
-	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models.
+	// ExecutorModelScopeBoth means the executor supports static and OAuth auth-bound models
+	// when no AuthProvider/AuthProviders is declared, or OAuth auth-bound models when credential-bound.
 	ExecutorModelScopeBoth ExecutorModelScope = "both"
 	// ExecutorModelScopeStatic means the executor supports only non-OAuth static models.
 	ExecutorModelScopeStatic ExecutorModelScope = "static"
@@ -190,6 +239,9 @@ type ThinkingSupport struct {
 	ZeroAllowed bool
 	// DynamicAllowed reports whether automatic reasoning budget selection is supported.
 	DynamicAllowed bool
+	// DisableType is the Claude thinking.type that turns thinking off for this
+	// model. Empty means "disabled"; claude-sonnet-5-5 needs "between_tools".
+	DisableType string
 	// Levels lists supported named reasoning levels.
 	Levels []string
 }
@@ -273,6 +325,30 @@ type AuthProvider interface {
 	StartLogin(context.Context, AuthLoginStartRequest) (AuthLoginStartResponse, error)
 	PollLogin(context.Context, AuthLoginPollRequest) (AuthLoginPollResponse, error)
 	RefreshAuth(context.Context, AuthRefreshRequest) (AuthRefreshResponse, error)
+}
+
+// MultiAuthProvider is an optional extension implemented by an AuthProvider
+// that handles multiple provider identifiers (for example, multi-portal vendors).
+type MultiAuthProvider interface {
+	AuthProvider
+	Identifiers() []string
+}
+
+// AuthProviderEntry describes user-facing display metadata for one OAuth login entry.
+type AuthProviderEntry struct {
+	// Identifier is the provider key used for login and callback routing.
+	Identifier string `json:"identifier"`
+	// Name is the user-facing display label for this entry; falls back to Metadata.Name when empty.
+	Name string `json:"name,omitempty"`
+	// Logo is the display asset reference for this entry; falls back to Metadata.Logo when empty.
+	Logo string `json:"logo,omitempty"`
+}
+
+// AuthProviderEntries is an optional extension implemented by an AuthProvider
+// that publishes per-entry display metadata (name and logo).
+type AuthProviderEntries interface {
+	AuthProvider
+	AuthEntries() []AuthProviderEntry
 }
 
 // AuthLoginStartRequest asks a plugin to start a provider login flow.
@@ -368,6 +444,8 @@ type AuthRefreshResponse struct {
 }
 
 // ModelRegistrar registers plugin-provided models with the host.
+// Without an Executor, these models are published only through matching credentials
+// after applying their model exclusions.
 type ModelRegistrar interface {
 	RegisterModels(context.Context, ModelRegistrationRequest) (ModelRegistrationResponse, error)
 }
@@ -376,6 +454,16 @@ type ModelRegistrar interface {
 type ModelRegistrationRequest struct {
 	// Plugin is the metadata of the plugin being registered.
 	Plugin Metadata
+	// MultiProviderModels reports whether the host supports ModelRegistrationResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
+}
+
+// ProviderModels pairs a provider key with the models registered for it.
+type ProviderModels struct {
+	// Provider is the provider key associated with the returned models.
+	Provider string `json:"provider,omitempty"`
+	// Models is the complete set of plugin-provided models for Provider.
+	Models []ModelInfo `json:"models,omitempty"`
 }
 
 // ModelRegistrationResponse returns provider and model metadata to register.
@@ -384,9 +472,16 @@ type ModelRegistrationResponse struct {
 	Provider string
 	// Models is the complete set of plugin-provided models.
 	Models []ModelInfo
+	// Registrations registers model sets for multiple providers in one call.
+	// When non-empty, each entry is registered under its own Provider for catalog
+	// and per-auth model discovery (plugins that also declare an Executor still
+	// bind that executor to the first registered provider); when empty, Provider
+	// and Models behave as a single registration.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 }
 
 // ModelProvider contributes provider-native static and per-auth model metadata.
+// StaticModels alone does not make models available without an Executor or matching credentials.
 type ModelProvider interface {
 	StaticModels(context.Context, StaticModelRequest) (ModelResponse, error)
 	ModelsForAuth(context.Context, AuthModelRequest) (ModelResponse, error)
@@ -398,6 +493,8 @@ type StaticModelRequest struct {
 	Plugin Metadata
 	// Host contains relevant host configuration.
 	Host HostConfigSummary
+	// MultiProviderModels reports whether the host supports ModelResponse.Registrations.
+	MultiProviderModels bool `json:"multi_provider_models,omitempty"`
 }
 
 // AuthModelRequest carries auth context for provider model discovery.
@@ -426,6 +523,9 @@ type ModelResponse struct {
 	Provider string
 	// Models is the complete set of discovered provider models.
 	Models []ModelInfo
+	// Registrations registers static model sets for multiple providers in one call.
+	// Used by StaticModels when non-empty; ignored by ModelsForAuth.
+	Registrations []ProviderModels `json:"registrations,omitempty"`
 	// AuthUpdate contains updated auth data from model discovery when needed.
 	AuthUpdate AuthData
 }
@@ -446,8 +546,11 @@ type FrontendAuthRequest struct {
 	Headers http.Header
 	// Query contains inbound query parameters.
 	Query url.Values
-	// Body contains the raw request body.
+	// Body contains the raw request body as received, before any Content-Encoding decoding.
 	Body []byte
+	// DecodedBody contains the request body after Content-Encoding decoding. It is set only when
+	// the body was content-encoded and the route's handler decodes it, and is nil otherwise.
+	DecodedBody []byte
 }
 
 // FrontendAuthResponse reports the authentication decision and identity metadata.
@@ -458,6 +561,10 @@ type FrontendAuthResponse struct {
 	Principal string
 	// Metadata carries plugin-defined identity attributes for downstream use.
 	Metadata map[string]string
+	// DenyStatusCode optionally specifies an HTTP status code when denying the request.
+	DenyStatusCode int
+	// DenyMessage optionally specifies an error message when denying the request.
+	DenyMessage string
 }
 
 const (
@@ -465,6 +572,8 @@ const (
 	SchedulerBuiltinRoundRobin = "round-robin"
 	// SchedulerBuiltinFillFirst delegates auth selection to the built-in fill-first scheduler.
 	SchedulerBuiltinFillFirst = "fill-first"
+	// SelectionIDMetadataKey is the metadata key carrying the per-selection identifier in SchedulerOptions.Metadata.
+	SelectionIDMetadataKey = "selection_id"
 )
 
 // Scheduler chooses an auth candidate before the built-in scheduler runs.
@@ -528,6 +637,233 @@ type SchedulerPickResponse struct {
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.
 	Handled bool
+	// Reject indicates that the scheduler explicitly rejected candidate selection.
+	// When Reject is true and Handled is true, candidate selection terminates with an error
+	// instead of falling back to built-in schedulers.
+	Reject bool
+	// RejectReason is an optional human-readable reason for why candidate selection was rejected.
+	RejectReason string
+	// RejectCode is an optional machine-readable error code for the rejection (defaults to "auth_unavailable").
+	RejectCode string
+	// ExcludeCandidates optionally lists auth IDs to exclude for the current selection pass
+	// when the scheduler declines handling (Handled: false) or delegates to a built-in scheduler.
+	ExcludeCandidates []string
+}
+
+// UnmarshalJSON supports both Go struct field names and snake_case field names.
+func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
+	type rawResponse struct {
+		AuthID               *string         `json:"AuthID"`
+		AltAuthID            *string         `json:"auth_id"`
+		DelegateBuiltin      *string         `json:"DelegateBuiltin"`
+		AltDelegate          *string         `json:"delegate_builtin"`
+		Handled              *bool           `json:"Handled"`
+		AltHandled           *bool           `json:"handled"`
+		Reject               *bool           `json:"Reject"`
+		AltReject            *bool           `json:"reject"`
+		RejectReason         *string         `json:"RejectReason"`
+		AltRejectReason      *string         `json:"reject_reason"`
+		RejectCode           *string         `json:"RejectCode"`
+		AltRejectCode        *string         `json:"reject_code"`
+		ExcludeCandidates    json.RawMessage `json:"ExcludeCandidates"`
+		AltExcludeCandidates json.RawMessage `json:"exclude_candidates"`
+	}
+	var raw rawResponse
+	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	if raw.AuthID != nil {
+		r.AuthID = *raw.AuthID
+	} else if raw.AltAuthID != nil {
+		r.AuthID = *raw.AltAuthID
+	}
+	if raw.DelegateBuiltin != nil {
+		r.DelegateBuiltin = *raw.DelegateBuiltin
+	} else if raw.AltDelegate != nil {
+		r.DelegateBuiltin = *raw.AltDelegate
+	}
+	if raw.Handled != nil {
+		r.Handled = *raw.Handled
+	} else if raw.AltHandled != nil {
+		r.Handled = *raw.AltHandled
+	}
+	if raw.Reject != nil {
+		r.Reject = *raw.Reject
+	} else if raw.AltReject != nil {
+		r.Reject = *raw.AltReject
+	}
+	if raw.RejectReason != nil {
+		r.RejectReason = *raw.RejectReason
+	} else if raw.AltRejectReason != nil {
+		r.RejectReason = *raw.AltRejectReason
+	}
+	if raw.RejectCode != nil {
+		r.RejectCode = *raw.RejectCode
+	} else if raw.AltRejectCode != nil {
+		r.RejectCode = *raw.AltRejectCode
+	}
+	if len(raw.ExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.ExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	} else if len(raw.AltExcludeCandidates) > 0 {
+		excluded, errExclude := parseExcludeCandidatesJSON(raw.AltExcludeCandidates)
+		if errExclude != nil {
+			return errExclude
+		}
+		r.ExcludeCandidates = excluded
+	}
+	return nil
+}
+
+func parseExcludeCandidatesJSON(raw []byte) ([]string, error) {
+	if !ojson.ValidBytes(raw) {
+		return nil, fmt.Errorf("exclude_candidates contains invalid JSON")
+	}
+	parsed := ojson.ParseBytes(raw)
+	if parsed.Type == ojson.Null {
+		return nil, nil
+	}
+	if !parsed.IsArray() {
+		return nil, fmt.Errorf("exclude_candidates must be a JSON array")
+	}
+	items := parsed.Array()
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.Type != ojson.String {
+			return nil, fmt.Errorf("exclude_candidates entries must be strings")
+		}
+		out = append(out, item.String())
+	}
+	return out, nil
+}
+
+// SchedulerContinuityDecision selects the host action returned by SchedulerContinuity.
+type SchedulerContinuityDecision string
+
+const (
+	// SchedulerContinuityReady allows normal admission or redispatch to proceed immediately.
+	SchedulerContinuityReady SchedulerContinuityDecision = "ready"
+	// SchedulerContinuityWait requests a bounded host-owned pause before re-evaluating candidates.
+	SchedulerContinuityWait SchedulerContinuityDecision = "wait"
+	// SchedulerContinuityDisabled disables continuity waiting for this request.
+	SchedulerContinuityDisabled SchedulerContinuityDecision = "disabled"
+)
+
+// SchedulerContinuity evaluates bounded pre-admission and pre-output-429 continuity
+// for Codex requests. Implementations must be nonblocking.
+type SchedulerContinuity interface {
+	Continuity(context.Context, SchedulerContinuityRequest) (SchedulerContinuityResponse, error)
+}
+
+// SchedulerContinuityCandidate describes one model/request-eligible auth candidate
+// passed to SchedulerContinuity without credential documents.
+type SchedulerContinuityCandidate struct {
+	// ID identifies the auth record.
+	ID string `json:"id"`
+	// Provider identifies the auth provider.
+	Provider string `json:"provider"`
+	// Priority is the host priority assigned to the auth record.
+	Priority int `json:"priority,omitempty"`
+	// Status is the current host-visible auth status.
+	Status string `json:"status,omitempty"`
+	// InCooldown reports whether the candidate is currently in quota cooldown for the request.
+	InCooldown bool `json:"in_cooldown,omitempty"`
+	// CooldownReason describes the quota/cooldown reason when available.
+	CooldownReason string `json:"cooldown_reason,omitempty"`
+	// CooldownUntil is the host's earliest recorded recovery timestamp when known.
+	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
+	// Attributes contains sanitized non-secret routing attributes.
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// SchedulerContinuityRequest describes request lifecycle identity and current
+// model/request-eligible candidates offered to SchedulerContinuity.
+type SchedulerContinuityRequest struct {
+	// Plugin is the metadata of the plugin being executed.
+	Plugin Metadata `json:"plugin,omitempty"`
+	// RequestID uniquely identifies the inbound execution request lifecycle.
+	RequestID string `json:"request_id,omitempty"`
+	// TraceID identifies the parent inbound request trace when available.
+	TraceID string `json:"trace_id,omitempty"`
+	// ExecutionSessionID identifies the downstream execution session when present.
+	ExecutionSessionID string `json:"execution_session_id,omitempty"`
+	// CanonicalSessionID identifies the reconciled canonical session when present.
+	CanonicalSessionID string `json:"canonical_session_id,omitempty"`
+	// Provider is the primary provider key requested by the route.
+	Provider string `json:"provider,omitempty"`
+	// Providers lists provider keys accepted by the route.
+	Providers []string `json:"providers,omitempty"`
+	// Model is the normalized route model identifier.
+	Model string `json:"model,omitempty"`
+	// RequestedModel is the client-requested model before normalization.
+	RequestedModel string `json:"requested_model,omitempty"`
+	// Stream reports whether the request expects streaming output.
+	Stream bool `json:"stream,omitempty"`
+	// Phase identifies the continuity check phase ("pre_admission" or "pre_output_429").
+	Phase string `json:"phase,omitempty"`
+	// Attempt is the zero-based continuity poll counter within the current gate.
+	Attempt int `json:"attempt,omitempty"`
+	// ElapsedMs reports elapsed milliseconds since continuity waiting began for this request.
+	ElapsedMs int64 `json:"elapsed_ms,omitempty"`
+	// Options carries request headers and sanitized metadata.
+	Options SchedulerOptions `json:"options,omitempty"`
+	// Candidates lists current model/request-eligible candidates without credential documents.
+	Candidates []SchedulerContinuityCandidate `json:"candidates,omitempty"`
+}
+
+// SchedulerContinuityResponse returns a continuity decision from a scheduler plugin.
+type SchedulerContinuityResponse struct {
+	// Decision selects "ready", "wait", or "disabled". Empty defaults to "disabled".
+	Decision SchedulerContinuityDecision `json:"decision,omitempty"`
+	// PollIntervalMs specifies the bounded poll interval in milliseconds when Decision is "wait".
+	PollIntervalMs int64 `json:"poll_interval_ms,omitempty"`
+	// WaitBudgetMs specifies the request-wide total wait budget in milliseconds when Decision is "wait".
+	// Subsequent poll responses may shorten but not extend the first request-wide deadline.
+	WaitBudgetMs int64 `json:"wait_budget_ms,omitempty"`
+	// Reason is an optional diagnostic explanation.
+	Reason string `json:"reason,omitempty"`
+}
+
+// UnmarshalJSON supports both Go struct field names and snake_case field names.
+func (r *SchedulerContinuityResponse) UnmarshalJSON(data []byte) error {
+	type rawResponse struct {
+		Decision          *string `json:"Decision"`
+		AltDecision       *string `json:"decision"`
+		PollIntervalMs    *int64  `json:"PollIntervalMs"`
+		AltPollIntervalMs *int64  `json:"poll_interval_ms"`
+		WaitBudgetMs      *int64  `json:"WaitBudgetMs"`
+		AltWaitBudgetMs   *int64  `json:"wait_budget_ms"`
+		Reason            *string `json:"Reason"`
+		AltReason         *string `json:"reason"`
+	}
+	var raw rawResponse
+	if errUnmarshal := json.Unmarshal(data, &raw); errUnmarshal != nil {
+		return errUnmarshal
+	}
+	if raw.Decision != nil {
+		r.Decision = SchedulerContinuityDecision(*raw.Decision)
+	} else if raw.AltDecision != nil {
+		r.Decision = SchedulerContinuityDecision(*raw.AltDecision)
+	}
+	if raw.PollIntervalMs != nil {
+		r.PollIntervalMs = *raw.PollIntervalMs
+	} else if raw.AltPollIntervalMs != nil {
+		r.PollIntervalMs = *raw.AltPollIntervalMs
+	}
+	if raw.WaitBudgetMs != nil {
+		r.WaitBudgetMs = *raw.WaitBudgetMs
+	} else if raw.AltWaitBudgetMs != nil {
+		r.WaitBudgetMs = *raw.AltWaitBudgetMs
+	}
+	if raw.Reason != nil {
+		r.Reason = *raw.Reason
+	} else if raw.AltReason != nil {
+		r.Reason = *raw.AltReason
+	}
+	return nil
 }
 
 // ModelRouteRequest describes the original request context offered to a model router plugin.
@@ -625,6 +961,15 @@ type HostModelExecutionRequest struct {
 	ForcedProvider string `json:"forced_provider,omitempty"`
 	// AuthID optionally locks execution to an exact credential ID.
 	AuthID string `json:"auth_id,omitempty"`
+	// ProxyURL optionally overrides the outbound proxy for this model execution only.
+	// Supported schemes are http, https, socks5, and socks5h.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// Path optionally specifies or overrides the request path (e.g. "/v1/images/generations" or "/v1/images/edits").
+	Path string `json:"path,omitempty"`
+	// CallerScope optionally carries the opaque caller scope handle from an intercepted
+	// request so the host execution resolves the same caller-scoped session and alias state
+	// without exposing the downstream client API key.
+	CallerScope string `json:"caller_scope,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
@@ -782,6 +1127,30 @@ type HostAuthSaveResponse struct {
 	Path string `json:"path"`
 }
 
+// HostAuthModelsRequest asks the host for the models registered for one or all credentials.
+type HostAuthModelsRequest struct {
+	// AuthIndex identifies the credential index; empty requests all credentials.
+	AuthIndex string `json:"auth_index,omitempty"`
+}
+
+// HostAuthModelsResponse returns the models registered for each matching credential.
+type HostAuthModelsResponse struct {
+	// Credentials lists the credentials and their registered models.
+	Credentials []HostAuthModels `json:"credentials"`
+}
+
+// HostAuthModels describes the models registered for one credential.
+type HostAuthModels struct {
+	// ID identifies the credential record.
+	ID string `json:"id"`
+	// AuthIndex is the stable runtime credential index.
+	AuthIndex string `json:"auth_index"`
+	// Provider is the credential provider key.
+	Provider string `json:"provider"`
+	// Models lists the model identifiers registered for this credential in the global registry.
+	Models []string `json:"models"`
+}
+
 // Host affinity lookup status outcomes.
 const (
 	HostAffinityStatusBound       = "bound"
@@ -812,6 +1181,20 @@ type HostAffinityLookupResponse struct {
 	Disabled bool `json:"disabled,omitempty"`
 	// Unavailable reports whether the bound credential is currently unavailable.
 	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// HostRoutingResetCooldownRequest asks the host to clear quota and cooldown routing state for one credential.
+type HostRoutingResetCooldownRequest struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostRoutingResetCooldownResponse reports the credential whose quota and cooldown state was cleared.
+type HostRoutingResetCooldownResponse struct {
+	// AuthIndex identifies the credential index.
+	AuthIndex string `json:"auth_index"`
+	// Models lists the model keys whose routing state was reset.
+	Models []string `json:"models,omitempty"`
 }
 
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
@@ -936,6 +1319,17 @@ type ExecutorRequest struct {
 	HTTPClient HostHTTPClient `json:"-"`
 }
 
+// UsageAttribution reports optional upstream credential identity
+// resolved by a plugin executor when no built-in credential was selected upfront.
+type UsageAttribution struct {
+	// AuthIndex identifies the selected credential index.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// AuthType identifies the selected credential type (e.g. "oauth", "api_key").
+	AuthType string `json:"auth_type,omitempty"`
+	// Source identifies the upstream account, project, or credential label.
+	Source string `json:"source,omitempty"`
+}
+
 // ExecutorResponse returns a non-streaming executor result.
 type ExecutorResponse struct {
 	// Payload contains the raw response body.
@@ -944,6 +1338,8 @@ type ExecutorResponse struct {
 	Headers http.Header
 	// Metadata is an extension bag for executor-specific response data.
 	Metadata map[string]any
+	// Attribution reports optional upstream credential identity for usage tracking.
+	Attribution *UsageAttribution `json:"attribution,omitempty"`
 }
 
 // ExecutorStreamResponse returns a streaming executor result.
@@ -952,6 +1348,8 @@ type ExecutorStreamResponse struct {
 	Headers http.Header
 	// Chunks yields streaming payload chunks until the channel closes.
 	Chunks <-chan ExecutorStreamChunk
+	// Attribution reports optional upstream credential identity for usage tracking.
+	Attribution *UsageAttribution `json:"attribution,omitempty"`
 }
 
 // ExecutorStreamChunk carries one streaming payload chunk or an error.
@@ -993,7 +1391,7 @@ type RequestLifecyclePlugin interface {
 	HandleRequestComplete(context.Context, RequestCompletion) error
 }
 
-// ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
+// ResponseInterceptor rewrites successful non-streaming responses (execution, count_tokens, and model-directory responses) before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
 }
@@ -1010,6 +1408,9 @@ type WebSocketResponseObserver interface {
 
 // StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
 const StreamChunkHeaderInitIndex = -1
+
+// CallerScopeMetadataKey is the metadata key carrying the opaque downstream caller scope handle.
+const CallerScopeMetadataKey = "caller_scope"
 
 // RequestTransformRequest describes a request payload transformation.
 type RequestTransformRequest struct {
@@ -1061,28 +1462,69 @@ type RequestInterceptRequest struct {
 	Stream bool
 	// Headers contains the current upstream request headers.
 	Headers http.Header
-	// Body contains the current request payload.
+	// Body contains the current request payload. Treat it as read-only; modifications must be returned in RequestInterceptResponse.Body.
 	Body []byte
+	// CallerScope carries an opaque, irreversible handle identifying the downstream caller
+	// when available (mirrors Metadata[CallerScopeMetadataKey]).
+	CallerScope string
 	// Metadata is a best-effort cloned context snapshot. Treat it as read-only and JSON-like.
 	Metadata map[string]any
 }
 
 // RequestInterceptResponse returns request modifications.
 type RequestInterceptResponse struct {
+	// Path optionally overrides the target request path (e.g. "/v1/images/generations").
+	Path string `json:"path,omitempty"`
 	// Headers replaces matching current request headers and preserves headers not mentioned here.
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.
 	Body []byte
+	// BodyEdits applies localized byte-range replacements to the current request body when Body is empty.
+	BodyEdits []RequestBodyEdit `json:"body_edits,omitempty"`
+	// Edits is an alias for BodyEdits.
+	Edits []RequestBodyEdit `json:"edits,omitempty"`
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
 	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
 	Terminate bool
+	// TerminateScope narrows Terminate for after-auth interceptors. Empty or
+	// "request" keeps request-final behavior. "credential" means the selected
+	// credential is unusable for this request only: no cooldown, no failure
+	// counting, no usage record, and selection continues with the next
+	// candidate. If no candidate is left, the interceptor's response is returned.
+	// Unknown values behave as "request". Before-auth interceptors ignore it.
+	TerminateScope string
 	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
 	StatusCode int
 	// ResponseHeaders contains downstream response headers used when Terminate is true.
 	ResponseHeaders http.Header
 	// ResponseBody contains the downstream response body used when Terminate is true.
 	ResponseBody []byte
+}
+
+// RequestBodyPatcher scans a raw request body and returns localized byte-range edits
+// without JSON/Base64 request body wrapping.
+type RequestBodyPatcher interface {
+	PatchRequestBody(context.Context, []byte) (RequestBodyPatchResponse, error)
+}
+
+// RequestBodyEdit describes a 0-based [Start:End] byte-range replacement in a UTF-8 JSON request body.
+type RequestBodyEdit struct {
+	// Start is the inclusive 0-based start byte offset in the input body.
+	Start int `json:"start"`
+	// End is the exclusive 0-based end byte offset in the input body.
+	End int `json:"end"`
+	// Replacement is the UTF-8 replacement text spliced into [Start:End].
+	Replacement string `json:"replacement,omitempty"`
+	// ReplacementBytes optionally carries raw replacement bytes when non-empty.
+	ReplacementBytes []byte `json:"replacement_bytes,omitempty"`
+}
+
+// RequestBodyPatchResponse returns localized byte-range edits for a request body.
+type RequestBodyPatchResponse struct {
+	// Edits lists byte-range replacements relative to the input body received by this plugin.
+	// When empty, the host reuses the input body without copying.
+	Edits []RequestBodyEdit `json:"edits,omitempty"`
 }
 
 // RequestCompletionOutcome identifies how an intercepted request ended.
@@ -1115,8 +1557,23 @@ type RequestCompletion struct {
 	Metadata       map[string]any
 }
 
+// ResponseInterceptRequest.Kind values identifying the intercepted response category.
+const (
+	// ResponseInterceptKindModelList identifies model-directory and model-detail catalog responses.
+	ResponseInterceptKindModelList = "model_list"
+	// ResponseInterceptKindExecution identifies non-streaming model execution responses.
+	ResponseInterceptKindExecution = "execution"
+	// ResponseInterceptKindCountTokens identifies non-streaming token-counting responses.
+	ResponseInterceptKindCountTokens = "count_tokens"
+)
+
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	// Kind identifies the response being intercepted ("model_list", "execution", or "count_tokens").
+	// Empty means unknown (older hosts); plugins must then fall back to their own detection.
+	// Kept as the first struct field without a JSON tag so plugins can read it from the leading
+	// bytes of the RPC frame without decoding a large response body.
+	Kind            string
 	RequestID       string
 	SourceFormat    string
 	Model           string
@@ -1128,7 +1585,10 @@ type ResponseInterceptRequest struct {
 	RequestBody     []byte
 	Body            []byte
 	StatusCode      int
-	Metadata        map[string]any
+	// Metadata is a best-effort cloned context snapshot. Treat it as read-only, JSON-like,
+	// and an open map: plugins must ignore keys they do not recognize, and the host may add
+	// keys in any release without a schema bump.
+	Metadata map[string]any
 }
 
 // ResponseInterceptResponse returns non-streaming response modifications.
@@ -1398,6 +1858,12 @@ type ManagementResponse struct {
 
 // UsageRecord describes request usage and billing metadata.
 type UsageRecord struct {
+	// RequestID uniquely identifies this specific model execution instance (UUID v4).
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available (8-character hex).
+	TraceID string
+	// SelectionID identifies the scheduler selection decision that produced this usage record when available.
+	SelectionID string
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the upstream base URL configured for the request/credential when available.
@@ -1410,6 +1876,10 @@ type UsageRecord struct {
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// IsNativeKey reports whether the client API key was authenticated by CPA's native config provider.
+	IsNativeKey bool
+	// AccessProvider identifies the client request authentication provider (e.g. "config-inline" or plugin ID).
+	AccessProvider string
 	// SessionID identifies the session when present.
 	SessionID string
 	// ParentSessionID identifies the parent session in a hierarchy or fork.
@@ -1424,11 +1894,20 @@ type UsageRecord struct {
 	Source string
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
-	// ServiceTier records the requested or reported service tier.
+	// ServiceTier records the tier requested by the original client.
 	ServiceTier string
+	// EffectiveServiceTier records the tier in the final outbound request after
+	// protocol translation and payload defaults or overrides.
+	EffectiveServiceTier string
+	// ResponseServiceTier stores the final tier reported by the upstream response.
+	ResponseServiceTier string
+	// ResponseModel stores the model name reported by the upstream response, empty when unknown.
+	ResponseModel string
 	// Generate reports whether the client requested actual generation.
 	// The host normalizes omitted usage.Record values to true before delivery.
 	Generate bool
+	// Stream reports whether the request was executed in streaming mode.
+	Stream bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.
@@ -1469,6 +1948,33 @@ type UsageDetail struct {
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
+
+	// CacheCreation5mTokens is the optional 5-minute TTL cache creation token count.
+	CacheCreation5mTokens *int64
+	// CacheCreation1hTokens is the optional 1-hour TTL cache creation token count.
+	CacheCreation1hTokens *int64
+	// TextInputTokens is the optional text input token count.
+	TextInputTokens *int64
+	// ImageInputTokens is the optional image input token count.
+	ImageInputTokens *int64
+	// AudioInputTokens is the optional audio input token count.
+	AudioInputTokens *int64
+	// VideoInputTokens is the optional video input token count.
+	VideoInputTokens *int64
+	// FileInputTokens is the optional file input token count.
+	FileInputTokens *int64
+	// CachedTextTokens is the optional cached text token count.
+	CachedTextTokens *int64
+	// CachedImageTokens is the optional cached image token count.
+	CachedImageTokens *int64
+	// CachedAudioTokens is the optional cached audio token count.
+	CachedAudioTokens *int64
+	// TextOutputTokens is the optional text output token count.
+	TextOutputTokens *int64
+	// ImageOutputTokens is the optional image output token count.
+	ImageOutputTokens *int64
+	// AudioOutputTokens is the optional audio output token count.
+	AudioOutputTokens *int64
 }
 
 // QuotaProvider surfaces credential quota, balance, and billing information for management clients.

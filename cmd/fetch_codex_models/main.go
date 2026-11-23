@@ -18,7 +18,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -29,23 +28,29 @@ import (
 	"strings"
 	"time"
 
-	codexauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
+	codexauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
-	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.154.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.154.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
-	defaultCodexOriginator   = "codex_cli_rs"
-	accessTokenRefreshLeeway = 30 * time.Second
+	codexModelsBaseURL           = "https://chatgpt.com/backend-api/codex"
+	codexModelsPath              = "/models"
+	defaultClientVersion         = "0.169.0"
+	defaultCodexUserAgent        = "codex_cli_rs/0.169.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultCodexOriginator       = "codex_cli_rs"
+	accessTokenRefreshLeeway     = 30 * time.Second
+	baselineModelSlug            = "gpt-5.5"
+	baselineModelVisibility      = "list"
+	baselineMinimalClientVersion = "0.124.0"
+	baselinePriorityServiceTier  = "priority"
 )
 
 func init() {
@@ -194,7 +199,12 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 		return "", false, fmt.Errorf("missing access_token and refresh_token")
 	}
 
+	journal, errJournal := store.RefreshJournalFor(auth)
+	if errJournal != nil {
+		return "", false, errJournal
+	}
 	svc := codexauth.NewCodexAuthWithProxyURL(nil, auth.ProxyURL)
+	svc.SetRefreshJournal(journal)
 	tokenData, errRefresh := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if errRefresh != nil {
 		return "", false, errRefresh
@@ -220,6 +230,21 @@ func ensureAccessToken(ctx context.Context, store *sdkauth.FileTokenStore, auth 
 	auth.Metadata["expired"] = tokenData.Expire
 	auth.Metadata["type"] = "codex"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+
+	planType := strings.TrimSpace(tokenData.PlanType)
+	if planType == "" && tokenData.IDToken != "" {
+		if claims, errParse := codexauth.ParseJWTToken(tokenData.IDToken); errParse == nil && claims != nil {
+			planType = claims.GetPlanType()
+		}
+	}
+	if planType == "" {
+		planType = codexauth.DefaultPlanType
+	}
+	auth.Metadata["plan_type"] = planType
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["plan_type"] = planType
 
 	if _, errSave := store.Save(ctx, auth); errSave != nil {
 		return "", false, fmt.Errorf("failed to save refreshed auth: %w", errSave)
@@ -274,11 +299,134 @@ func fetchModels(ctx context.Context, auth *coreauth.Auth, accessToken, clientVe
 		return nil, 0, fmt.Errorf("models request failed with status %d: %s", httpResp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
-	count, errCount := countModels(bodyBytes)
-	if errCount != nil {
-		return nil, 0, errCount
+	bodyBytes, count, errEnsure := ensureBaselineModel(bodyBytes)
+	if errEnsure != nil {
+		return nil, 0, errEnsure
 	}
 	return bodyBytes, count, nil
+}
+
+func ensureBaselineModel(raw []byte) ([]byte, int, error) {
+	var payload struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &payload); errUnmarshal != nil {
+		return nil, 0, fmt.Errorf("failed to parse response JSON: %w", errUnmarshal)
+	}
+	// Keep this check intentionally loose: fetch_codex_models dumps the upstream
+	// Codex API payload. Strict CPA catalog validation belongs in
+	// cmd/validate_codex_models and registry.ValidateCodexClientModelsJSON.
+	if payload.Models == nil {
+		return nil, 0, fmt.Errorf("response JSON does not contain models array")
+	}
+	if len(payload.Models) == 0 {
+		return raw, 0, nil
+	}
+
+	foundBaseline := false
+	rawDoc := ojson.NewDoc(raw)
+	rawModified := false
+	for i, modelRaw := range payload.Models {
+		slugResult := ojson.GetBytesNoCopy(modelRaw, "slug")
+		if slugResult.Type != ojson.String || strings.TrimSpace(slugResult.Str) != baselineModelSlug {
+			continue
+		}
+		foundBaseline = true
+		visResult := ojson.GetBytesNoCopy(modelRaw, "visibility")
+		if visResult.Type != ojson.String || visResult.Str != baselineModelVisibility {
+			if errSet := rawDoc.Set(fmt.Sprintf("models.%d.visibility", i), baselineModelVisibility); errSet != nil {
+				return nil, 0, fmt.Errorf("failed to update %s visibility: %w", baselineModelSlug, errSet)
+			}
+			rawModified = true
+		}
+	}
+
+	count := len(payload.Models)
+	if !foundBaseline {
+		templateRaw := selectBaselineTemplateModel(payload.Models)
+		cloneDoc := ojson.NewDoc(templateRaw)
+		if errSet := cloneDoc.Set("slug", baselineModelSlug); errSet != nil {
+			return nil, 0, fmt.Errorf("failed to set %s slug on cloned model: %w", baselineModelSlug, errSet)
+		}
+		visResult := ojson.GetBytesNoCopy(templateRaw, "visibility")
+		if visResult.Type != ojson.String || visResult.Str != baselineModelVisibility {
+			if errSet := cloneDoc.Set("visibility", baselineModelVisibility); errSet != nil {
+				return nil, 0, fmt.Errorf("failed to set %s visibility on cloned model: %w", baselineModelSlug, errSet)
+			}
+		}
+		for _, reset := range []struct {
+			path  string
+			value any
+		}{
+			{path: "minimal_client_version", value: baselineMinimalClientVersion},
+			{path: "tool_mode", value: "direct"},
+			{path: "use_responses_lite", value: false},
+			{path: "supports_reasoning_effort_updates", value: false},
+		} {
+			if errSet := cloneDoc.Set(reset.path, reset.value); errSet != nil {
+				return nil, 0, fmt.Errorf("failed to set %s %s on cloned model: %w", baselineModelSlug, reset.path, errSet)
+			}
+		}
+		if errSet := rawDoc.SetRawBytes("models.-1", cloneDoc.Bytes()); errSet != nil {
+			return nil, 0, fmt.Errorf("failed to append %s model: %w", baselineModelSlug, errSet)
+		}
+		rawModified = true
+		count++
+	}
+	if rawModified {
+		raw = rawDoc.Bytes()
+	}
+
+	return raw, count, nil
+}
+
+// selectBaselineTemplateModel chooses the best source model to clone when
+// synthesizing the gpt-5.5 baseline entry, prioritizing visibility ("list"),
+// API support (supported_in_api), and the "priority" service tier in that
+// order. If no candidate advertises "priority", it falls back to the highest
+// scoring visible/API-supported model (and finally models[0]).
+func selectBaselineTemplateModel(models []json.RawMessage) json.RawMessage {
+	best := models[0]
+	bestScore := -1
+	for _, modelRaw := range models {
+		score := 0
+		visResult := ojson.GetBytesNoCopy(modelRaw, "visibility")
+		if visResult.Type == ojson.String && strings.TrimSpace(visResult.Str) == baselineModelVisibility {
+			score += 4
+		}
+		apiResult := ojson.GetBytesNoCopy(modelRaw, "supported_in_api")
+		if apiResult.Type == ojson.True {
+			score += 2
+		}
+		if hasPriorityServiceTier(modelRaw) {
+			score++
+		}
+		if score > bestScore {
+			best = modelRaw
+			bestScore = score
+			if bestScore == 7 {
+				return best
+			}
+		}
+	}
+	return best
+}
+
+func hasPriorityServiceTier(modelRaw json.RawMessage) bool {
+	tiers := ojson.GetBytesNoCopy(modelRaw, "service_tiers")
+	if !tiers.IsArray() {
+		return false
+	}
+	found := false
+	tiers.ForEach(func(_, tier ojson.Result) bool {
+		id := tier.Get("id")
+		if id.Type == ojson.String && strings.TrimSpace(id.Str) == baselinePriorityServiceTier {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func codexModelsURL(clientVersion string) (string, error) {

@@ -3,8 +3,6 @@ package management
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,10 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
+
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/devin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/devin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 type fakeDevinOAuthService struct {

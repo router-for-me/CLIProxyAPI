@@ -1,8 +1,8 @@
 package handlers
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 )
 
 func parsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Detail {
@@ -11,4 +11,8 @@ func parsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Det
 
 func observePluginExecutorStreamUsage(protocol string, payload []byte, buffer *helps.StreamUsageBuffer) {
 	helps.ObservePluginExecutorStreamUsage(protocol, payload, buffer)
+}
+
+func observePluginExecutorStreamTTFT(protocol string, reporter *helps.UsageReporter, payload []byte) {
+	helps.ObservePluginExecutorStreamTTFT(protocol, reporter, payload)
 }

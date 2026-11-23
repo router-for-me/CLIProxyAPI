@@ -34,12 +34,11 @@ codex-header-defaults:
 	}
 }
 
-func TestLoadConfigOptional_CodexIdentityConfuse(t *testing.T) {
+func TestLoadConfigOptional_CodexOptions(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 	configYAML := []byte(`
 codex:
-  identity-confuse: true
   disable-codex-cloaking: true
   optimize-multi-agent-v2: true
 `)
@@ -52,13 +51,10 @@ codex:
 		t.Fatalf("LoadConfigOptional() error = %v", err)
 	}
 
-	if !cfg.Codex.IdentityConfuse {
-		t.Fatalf("IdentityConfuse = false, want true")
-	}
 	if !cfg.Codex.DisableCodexCloaking {
 		t.Fatal("DisableCodexCloaking = false, want true")
 	}
-	if !cfg.Codex.OptimizeMultiAgentV2 {
+	if !cfg.Client.Codex.OptimizeMultiAgentV2 {
 		t.Fatalf("OptimizeMultiAgentV2 = false, want true")
 	}
 }
@@ -89,5 +85,34 @@ codex:
 	}
 	if defaultCfg.Codex.ModelLevelCooling {
 		t.Fatalf("default ModelLevelCooling = true, want false")
+	}
+}
+
+func TestParseConfigBytes_CodexSignInWithChatGPTIdentifier(t *testing.T) {
+	defaultCfg, errDefault := ParseConfigBytes([]byte("port: 8317\n"))
+	if errDefault != nil {
+		t.Fatalf("ParseConfigBytes (default) error: %v", errDefault)
+	}
+	if got := defaultCfg.Codex.EffectiveSignInWithChatGPTIdentifier(); got != "CLIProxyAPI" {
+		t.Fatalf("EffectiveSignInWithChatGPTIdentifier (default) = %q, want CLIProxyAPI", got)
+	}
+
+	rawV8 := []byte(`oauth:
+  providers:
+    codex:
+      signin-with-chatgpt-identifier: "  CustomSIWCClient/2.0  "
+`)
+	if errValidate := ValidateV8Config(rawV8); errValidate != nil {
+		t.Fatalf("ValidateV8Config error: %v", errValidate)
+	}
+	cfg, errParse := ParseConfigBytes(rawV8)
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes (v8) error: %v", errParse)
+	}
+	if cfg.Codex.SignInWithChatGPTIdentifier != "CustomSIWCClient/2.0" {
+		t.Fatalf("SignInWithChatGPTIdentifier = %q, want CustomSIWCClient/2.0", cfg.Codex.SignInWithChatGPTIdentifier)
+	}
+	if got := cfg.Codex.EffectiveSignInWithChatGPTIdentifier(); got != "CustomSIWCClient/2.0" {
+		t.Fatalf("EffectiveSignInWithChatGPTIdentifier = %q, want CustomSIWCClient/2.0", got)
 	}
 }

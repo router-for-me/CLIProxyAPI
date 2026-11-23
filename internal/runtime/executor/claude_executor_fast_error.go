@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // claudeFastRequestError marks a Fast request failure as request-scoped. Fast
@@ -38,7 +38,16 @@ func (e *claudeFastRequestError) Unwrap() error {
 }
 
 func (e *claudeFastRequestError) StatusCode() int {
-	if e == nil || (e.status >= http.StatusOK && e.status < http.StatusMultipleChoices) {
+	if e == nil {
+		return 0
+	}
+	if e.status <= 0 || (e.status >= http.StatusOK && e.status < http.StatusMultipleChoices) {
+		var statusCoder interface{ StatusCode() int }
+		if errors.As(e.cause, &statusCoder) && statusCoder != nil {
+			if code := statusCoder.StatusCode(); code > 0 {
+				return code
+			}
+		}
 		return 0
 	}
 	return e.status
@@ -146,7 +155,7 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 	var retryAfter *time.Duration
 	credentialScoped := false
 	if resp.StatusCode == http.StatusTooManyRequests {
-		retryAfter = helps.ParseClaudeRateLimitReset(resp.Header, time.Now())
+		retryAfter = helps.ParseClaudeRateLimitResetForError(resp.Header, body, time.Now())
 		if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(resp.Header) {
 			credentialScoped = true
 		}

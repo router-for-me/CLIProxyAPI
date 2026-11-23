@@ -1,12 +1,17 @@
 package helps
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 )
 
 func TestClaudeDiagnosticsTracksCompletedMessagePerCredentialSession(t *testing.T) {
@@ -439,5 +444,404 @@ func TestClaudeSubagentRequests1h(t *testing.T) {
 	headersWithBeta.Set("Anthropic-Beta", "claude-code-20250219,extended-cache-ttl-2025-04-11")
 	if !ClaudeSubagentRequests1h(headersWithBeta, payload) {
 		t.Fatal("ClaudeSubagentRequests1h() = false, want true when header has extended-cache-ttl beta")
+	}
+}
+
+func TestPinClaudeSessionDateAnchorsFirstRequestAndReanchorsAfterTTL(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	key, _, _ := BeginClaudeDiagnostics("credential", "session")
+	if got := PinClaudeSessionDate(key, "session", "2026-08-01", 0); got != "2026-08-01" {
+		t.Fatalf("first pin = %q, want 2026-08-01", got)
+	}
+	// Later requests of the same session keep the anchor even when the
+	// candidate date has flipped past local midnight.
+	if got := PinClaudeSessionDate(key, "session", "2026-08-02", 0); got != "2026-08-01" {
+		t.Fatalf("second pin = %q, want anchored 2026-08-01", got)
+	}
+
+	// With no retention, continuity TTL expiry preserves the legacy anchor.
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[key] = entry
+	claudeDiagnosticsState.Unlock()
+	BeginClaudeDiagnostics("credential", "session")
+	if got := PinClaudeSessionDate(key, "session", "2026-08-02", 0); got != "2026-08-02" {
+		t.Fatalf("post-TTL pin = %q, want re-anchored 2026-08-02", got)
+	}
+
+	// Unknown keys (no continuity entry) fall back to the candidate date,
+	// preserving the pre-pinning per-request behaviour.
+	if got := PinClaudeSessionDate("unknown-key", "", "2026-08-03", 0); got != "2026-08-03" {
+		t.Fatalf("unknown key pin = %q, want candidate 2026-08-03", got)
+	}
+}
+
+func TestPinClaudeSessionDateRetentionSurvivesContinuityTTLAndCredentialSwitch(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	retention := 7 * 24 * time.Hour
+	keyA, _, _ := BeginClaudeDiagnostics("credential-a", "session")
+	if got := PinClaudeSessionDate(keyA, "session", "2026-08-01", retention); got != "2026-08-01" {
+		t.Fatalf("first pin = %q, want 2026-08-01", got)
+	}
+
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[keyA]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[keyA] = entry
+	claudeDiagnosticsState.lastCleanup = time.Time{}
+	claudeDiagnosticsState.Unlock()
+	BeginClaudeDiagnostics("credential-a", "session")
+	if got := PinClaudeSessionDate(keyA, "session", "2026-08-02", retention); got != "2026-08-01" {
+		t.Fatalf("post-continuity-TTL pin = %q, want anchored 2026-08-01", got)
+	}
+
+	keyB, _, _ := BeginClaudeDiagnostics("credential-b", "session")
+	if got := PinClaudeSessionDate(keyB, "session", "2026-08-02", retention); got != "2026-08-01" {
+		t.Fatalf("post-credential-switch pin = %q, want anchored 2026-08-01", got)
+	}
+
+	claudeDiagnosticsState.Lock()
+	delete(claudeDiagnosticsState.entries, keyA)
+	delete(claudeDiagnosticsState.entries, keyB)
+	for pinKey := range claudeDiagnosticsState.datePins {
+		pin := claudeDiagnosticsState.datePins[pinKey]
+		pin.expiresAt = time.Now().Add(-time.Second)
+		claudeDiagnosticsState.datePins[pinKey] = pin
+	}
+	claudeDiagnosticsState.lastCleanup = time.Time{}
+	claudeDiagnosticsState.Unlock()
+	keyC, _, _ := BeginClaudeDiagnostics("credential-c", "session")
+	if got := PinClaudeSessionDate(keyC, "session", "2026-08-02", retention); got != "2026-08-02" {
+		t.Fatalf("post-pin-TTL pin = %q, want re-anchored 2026-08-02", got)
+	}
+}
+
+type fakeClaudeSessionDatePinKVClient struct {
+	mu           sync.Mutex
+	values       map[string][]byte
+	err          error
+	casErr       error
+	getCalls     int
+	setNXCalls   int
+	casCalls     int
+	lastSetNXTTL time.Duration
+	lastCASTTL   time.Duration
+	onKVGet      func()
+}
+
+func (f *fakeClaudeSessionDatePinKVClient) KVGet(_ context.Context, key string) ([]byte, bool, error) {
+	f.mu.Lock()
+	f.getCalls++
+	if f.err != nil {
+		err := f.err
+		f.mu.Unlock()
+		return nil, false, err
+	}
+	raw, ok := f.values[key]
+	var cloned []byte
+	if ok {
+		cloned = append([]byte(nil), raw...)
+	}
+	hook := f.onKVGet
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return cloned, true, nil
+}
+
+func (f *fakeClaudeSessionDatePinKVClient) KVSetNX(_ context.Context, key string, value []byte, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setNXCalls++
+	if f.err != nil {
+		return false, f.err
+	}
+	f.lastSetNXTTL = ttl
+	if _, exists := f.values[key]; exists {
+		return false, nil
+	}
+	f.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
+func (f *fakeClaudeSessionDatePinKVClient) KVCompareAndSwap(_ context.Context, key string, expected []byte, expectedExists bool, value []byte, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.casCalls++
+	if f.err != nil {
+		return false, f.err
+	}
+	if f.casErr != nil {
+		return false, f.casErr
+	}
+	f.lastCASTTL = ttl
+	cur, exists := f.values[key]
+	if exists != expectedExists {
+		return false, nil
+	}
+	if expectedExists && !bytes.Equal(cur, expected) {
+		return false, nil
+	}
+	f.values[key] = append([]byte(nil), value...)
+	return true, nil
+}
+
+func TestPinClaudeSessionDateKVPersistsPermanentlyAndIgnoresRetention(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	fakeKV := &fakeClaudeSessionDatePinKVClient{values: make(map[string][]byte)}
+	prevClientFunc := currentClaudeSessionDatePinKVClient
+	currentClaudeSessionDatePinKVClient = func() (claudeSessionDatePinKVClient, bool, error) {
+		return fakeKV, true, nil
+	}
+	defer func() {
+		currentClaudeSessionDatePinKVClient = prevClientFunc
+	}()
+
+	if !IsClaudeSessionDatePinKVActive() {
+		t.Fatal("IsClaudeSessionDatePinKVActive() = false, want true")
+	}
+
+	// First request with retention = 0 still persists permanently in KV.
+	keyA, _, _ := BeginClaudeDiagnostics("credential-a", "session-kv")
+	if got := PinClaudeSessionDate(keyA, "session-kv", "2026-08-01", 0); got != "2026-08-01" {
+		t.Fatalf("first KV pin = %q, want 2026-08-01", got)
+	}
+	if fakeKV.setNXCalls != 1 || fakeKV.casCalls != 0 {
+		t.Fatalf("KV writes after first pin: setNX=%d cas=%d, want 1/0", fakeKV.setNXCalls, fakeKV.casCalls)
+	}
+	if fakeKV.lastSetNXTTL != 0 {
+		t.Fatalf("KVSetNX TTL = %v, want 0 (permanent)", fakeKV.lastSetNXTTL)
+	}
+	wantKVKey := "cpa:claude:session-date-pin:" + ClaudeSessionDatePinKey("session-kv")
+	if string(fakeKV.values[wantKVKey]) != "2026-08-01" {
+		t.Fatalf("KV stored value at %q = %q, want 2026-08-01", wantKVKey, string(fakeKV.values[wantKVKey]))
+	}
+
+	// Lookup ignores retention <= 0 when KV is active.
+	if got := LookupClaudeSessionDatePin("session-kv", 0); got != "2026-08-01" {
+		t.Fatalf("LookupClaudeSessionDatePin(retention=0) = %q, want 2026-08-01", got)
+	}
+
+	// Simulate process restart (wiping all in-memory state) and credential switch.
+	resetClaudeDiagnosticsForTest()
+	keyB, _, _ := BeginClaudeDiagnostics("credential-b", "session-kv")
+	if got := PinClaudeSessionDate(keyB, "session-kv", "2026-09-15", 0); got != "2026-08-01" {
+		t.Fatalf("post-restart KV pin = %q, want anchored 2026-08-01", got)
+	}
+	if fakeKV.setNXCalls != 1 || fakeKV.casCalls != 0 {
+		t.Fatalf("subsequent request must perform zero KV writes: setNX=%d cas=%d, want 1/0", fakeKV.setNXCalls, fakeKV.casCalls)
+	}
+
+	// Invalid input date is never written to KV.
+	keyInvalid, _, _ := BeginClaudeDiagnostics("credential-a", "session-invalid-date")
+	if got := PinClaudeSessionDate(keyInvalid, "session-invalid-date", "not-a-valid-date", 0); got != "not-a-valid-date" {
+		t.Fatalf("invalid date pin = %q, want unchanged input", got)
+	}
+	if fakeKV.setNXCalls != 1 || fakeKV.casCalls != 0 {
+		t.Fatalf("invalid date must not write to KV: setNX=%d cas=%d, want 1/0", fakeKV.setNXCalls, fakeKV.casCalls)
+	}
+}
+
+func TestPinClaudeSessionDateKVConcurrentCorruptedRepairUsesCAS(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	fakeKV := &fakeClaudeSessionDatePinKVClient{values: make(map[string][]byte)}
+	prevClientFunc := currentClaudeSessionDatePinKVClient
+	currentClaudeSessionDatePinKVClient = func() (claudeSessionDatePinKVClient, bool, error) {
+		return fakeKV, true, nil
+	}
+	defer func() {
+		currentClaudeSessionDatePinKVClient = prevClientFunc
+	}()
+
+	wantKVKey := "cpa:claude:session-date-pin:" + ClaudeSessionDatePinKey("session-cas")
+	fakeKV.values[wantKVKey] = []byte("corrupted-value")
+
+	key1, _, _ := BeginClaudeDiagnostics("cred-1", "session-cas")
+	key2, _, _ := BeginClaudeDiagnostics("cred-2", "session-cas")
+
+	// Synchronize the first two KVGet calls so both callers deterministically
+	// observe the same corrupted bytes before either executes KVCompareAndSwap.
+	var getBarrier sync.WaitGroup
+	getBarrier.Add(2)
+	var barrierOnce sync.Mutex
+	barrierCount := 0
+	fakeKV.onKVGet = func() {
+		barrierOnce.Lock()
+		barrierCount++
+		waitForBoth := barrierCount <= 2
+		barrierOnce.Unlock()
+		if waitForBoth {
+			getBarrier.Done()
+			getBarrier.Wait()
+		}
+	}
+
+	var (
+		wg   sync.WaitGroup
+		got1 string
+		got2 string
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		got1 = PinClaudeSessionDate(key1, "session-cas", "2026-08-01", 0)
+	}()
+	go func() {
+		defer wg.Done()
+		got2 = PinClaudeSessionDate(key2, "session-cas", "2026-08-02", 0)
+	}()
+	wg.Wait()
+	fakeKV.onKVGet = nil
+
+	if got1 != got2 {
+		t.Fatalf("concurrent CAS repair returned divergent dates: %q vs %q", got1, got2)
+	}
+	if got1 != "2026-08-01" && got1 != "2026-08-02" {
+		t.Fatalf("concurrent CAS repair date = %q, want 2026-08-01 or 2026-08-02", got1)
+	}
+	if string(fakeKV.values[wantKVKey]) != got1 {
+		t.Fatalf("KV value after concurrent repair = %q, want %q", string(fakeKV.values[wantKVKey]), got1)
+	}
+	if fakeKV.casCalls != 2 {
+		t.Fatalf("CAS repair calls: cas=%d, want 2", fakeKV.casCalls)
+	}
+	if fakeKV.lastCASTTL != 0 {
+		t.Fatalf("KVCompareAndSwap TTL = %v, want 0 (permanent)", fakeKV.lastCASTTL)
+	}
+
+	// When KVCompareAndSwap returns ErrCompareAndSwapUnsupported, concurrent callers
+	// must still converge on a single deterministic date via the mutex-protected L1
+	// fallback without performing an unconditional KV overwrite race.
+	resetClaudeDiagnosticsForTest()
+	fakeKV.values[wantKVKey] = []byte("corrupted-again")
+	fakeKV.casErr = homekv.ErrCompareAndSwapUnsupported
+	key3, _, _ := BeginClaudeDiagnostics("cred-3", "session-cas")
+	key4, _, _ := BeginClaudeDiagnostics("cred-4", "session-cas")
+
+	var unsupportedBarrier sync.WaitGroup
+	unsupportedBarrier.Add(2)
+	unsupportedCount := 0
+	fakeKV.onKVGet = func() {
+		barrierOnce.Lock()
+		unsupportedCount++
+		waitForBoth := unsupportedCount <= 2
+		barrierOnce.Unlock()
+		if waitForBoth {
+			unsupportedBarrier.Done()
+			unsupportedBarrier.Wait()
+		}
+	}
+
+	var (
+		wgUnsupported sync.WaitGroup
+		got3          string
+		got4          string
+	)
+	wgUnsupported.Add(2)
+	go func() {
+		defer wgUnsupported.Done()
+		got3 = PinClaudeSessionDate(key3, "session-cas", "2026-08-05", 0)
+	}()
+	go func() {
+		defer wgUnsupported.Done()
+		got4 = PinClaudeSessionDate(key4, "session-cas", "2026-08-06", 0)
+	}()
+	wgUnsupported.Wait()
+	fakeKV.onKVGet = nil
+
+	if got3 != got4 {
+		t.Fatalf("concurrent CAS-unsupported fallback returned divergent dates: %q vs %q", got3, got4)
+	}
+	if got3 != "2026-08-05" && got3 != "2026-08-06" {
+		t.Fatalf("concurrent CAS-unsupported fallback date = %q, want 2026-08-05 or 2026-08-06", got3)
+	}
+	if got := PinClaudeSessionDate(key3, "session-cas", "2026-08-07", 0); got != got3 {
+		t.Fatalf("subsequent call after CAS-unsupported fallback = %q, want %q", got, got3)
+	}
+}
+
+func TestPinClaudeSessionDateKVTransientFailureAndRecovery(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	fakeKV := &fakeClaudeSessionDatePinKVClient{values: make(map[string][]byte)}
+	var clientErr error
+	prevClientFunc := currentClaudeSessionDatePinKVClient
+	currentClaudeSessionDatePinKVClient = func() (claudeSessionDatePinKVClient, bool, error) {
+		if clientErr != nil {
+			return nil, true, clientErr
+		}
+		return fakeKV, true, nil
+	}
+	defer func() {
+		currentClaudeSessionDatePinKVClient = prevClientFunc
+	}()
+
+	// Part 1: KV is unavailable on initial anchor and across midnight, then recovers.
+	clientErr = errors.New("home kv transiently unavailable")
+	if !IsClaudeSessionDatePinKVActive() {
+		t.Fatal("IsClaudeSessionDatePinKVActive() during transient KV error = false, want true")
+	}
+
+	keyA, _, _ := BeginClaudeDiagnostics("cred-a", "session-transient-1")
+	if got := PinClaudeSessionDate(keyA, "session-transient-1", "2026-08-01", 0); got != "2026-08-01" {
+		t.Fatalf("initial pin during KV outage = %q, want 2026-08-01", got)
+	}
+	if got := LookupClaudeSessionDatePin("session-transient-1", 0); got != "2026-08-01" {
+		t.Fatalf("LookupClaudeSessionDatePin during KV outage (retention=0) = %q, want 2026-08-01", got)
+	}
+
+	// Across midnight with a credential switch while KV is still down (with operation-level error).
+	clientErr = nil
+	fakeKV.err = errors.New("kv network timeout")
+	keyB, _, _ := BeginClaudeDiagnostics("cred-b", "session-transient-1")
+	if got := LookupClaudeSessionDatePin("session-transient-1", 0); got != "2026-08-01" {
+		t.Fatalf("LookupClaudeSessionDatePin across midnight during KV timeout = %q, want 2026-08-01", got)
+	}
+	if got := PinClaudeSessionDate(keyB, "session-transient-1", "2026-08-02", 0); got != "2026-08-01" {
+		t.Fatalf("PinClaudeSessionDate across midnight during KV timeout = %q, want 2026-08-01", got)
+	}
+
+	// KV recovers on day 3: PinClaudeSessionDate backfills the original 2026-08-01 anchor into KV.
+	fakeKV.err = nil
+	if got := PinClaudeSessionDate(keyB, "session-transient-1", "2026-08-03", 0); got != "2026-08-01" {
+		t.Fatalf("PinClaudeSessionDate after KV recovery = %q, want original anchor 2026-08-01", got)
+	}
+	wantKVKey1 := "cpa:claude:session-date-pin:" + ClaudeSessionDatePinKey("session-transient-1")
+	if string(fakeKV.values[wantKVKey1]) != "2026-08-01" {
+		t.Fatalf("KV backfilled date = %q, want 2026-08-01", string(fakeKV.values[wantKVKey1]))
+	}
+
+	// Part 2: Mid-session transient KV outage after L1 mirror is populated from KV.
+	keyC, _, _ := BeginClaudeDiagnostics("cred-c", "session-transient-2")
+	if got := PinClaudeSessionDate(keyC, "session-transient-2", "2026-08-10", 0); got != "2026-08-10" {
+		t.Fatalf("initial healthy KV pin = %q, want 2026-08-10", got)
+	}
+	// Simulate restart, then populate L1 via Lookup while KV is healthy.
+	resetClaudeDiagnosticsForTest()
+	if got := LookupClaudeSessionDatePin("session-transient-2", 0); got != "2026-08-10" {
+		t.Fatalf("LookupClaudeSessionDatePin after restart = %q, want 2026-08-10", got)
+	}
+	// KV goes down mid-session across midnight with retention = 0.
+	fakeKV.err = errors.New("mid-session kv error")
+	keyD, _, _ := BeginClaudeDiagnostics("cred-d", "session-transient-2")
+	if got := LookupClaudeSessionDatePin("session-transient-2", 0); got != "2026-08-10" {
+		t.Fatalf("LookupClaudeSessionDatePin during mid-session outage = %q, want 2026-08-10", got)
+	}
+	if got := PinClaudeSessionDate(keyD, "session-transient-2", "2026-08-11", 0); got != "2026-08-10" {
+		t.Fatalf("PinClaudeSessionDate during mid-session outage = %q, want 2026-08-10", got)
 	}
 }

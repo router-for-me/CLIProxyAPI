@@ -6,18 +6,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginstore"
 	log "github.com/sirupsen/logrus"
 )
 
 const (
 	pluginReleaseCacheTTL        = time.Hour
 	pluginReleaseFailureCacheTTL = 30 * time.Second
+	pluginReleaseRefreshFloor    = 10 * time.Second
 	pluginReleaseConcurrency     = 2
 )
 
 type pluginReleaseCacheEntry struct {
 	version     string
+	checkedAt   time.Time
 	nextCheckAt time.Time
 }
 
@@ -64,7 +66,7 @@ func (cache *pluginReleaseCache) cached(client pluginstore.Client, plugin plugin
 }
 
 // latestPluginVersions preserves catalog order, including skipped placeholders.
-func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.Client, plugins []pluginstore.Plugin) []string {
+func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.Client, plugins []pluginstore.Plugin, force bool) []string {
 	versions := make([]string, len(plugins))
 	var wg sync.WaitGroup
 	for index, plugin := range plugins {
@@ -74,14 +76,14 @@ func (h *Handler) latestPluginVersions(ctx context.Context, client pluginstore.C
 		wg.Add(1)
 		go func(index int) {
 			defer wg.Done()
-			versions[index] = h.latestPluginVersion(ctx, client, plugins[index])
+			versions[index] = h.latestPluginVersion(ctx, client, plugins[index], force)
 		}(index)
 	}
 	wg.Wait()
 	return versions
 }
 
-func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Client, plugin pluginstore.Plugin) string {
+func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Client, plugin pluginstore.Plugin, force bool) string {
 	if pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease {
 		return ""
 	}
@@ -95,7 +97,12 @@ func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Cl
 	for {
 		cache.mu.Lock()
 		entry = cache.entries[key]
-		if cache.now().Before(entry.nextCheckAt) || ctx.Err() != nil {
+		now := cache.now()
+		fresh := now.Before(entry.nextCheckAt)
+		if force {
+			fresh = !entry.checkedAt.IsZero() && now.Before(entry.checkedAt.Add(pluginReleaseRefreshFloor))
+		}
+		if fresh || ctx.Err() != nil {
 			cache.mu.Unlock()
 			return entry.version
 		}
@@ -137,18 +144,21 @@ func (h *Handler) latestPluginVersion(ctx context.Context, client pluginstore.Cl
 				version, errRelease = pluginstore.ReleaseVersion(release)
 			}
 			if ctx.Err() == nil {
-				ttl := pluginReleaseFailureCacheTTL
-				if errRelease != nil {
-					log.WithError(errRelease).WithField("plugin_id", plugin.ID).Warn("pluginstore: failed to fetch latest release")
-				} else {
-					entry.version = version
-					ttl = pluginReleaseCacheTTL
-				}
 				// Start the TTL when the lookup finishes, not when it was queued.
-				entry.nextCheckAt = cache.now().Add(ttl)
+				now := cache.now()
+				entry.checkedAt = now
 				var rateLimit *pluginstore.RateLimitError
-				if errors.As(errRelease, &rateLimit) {
+				if errRelease == nil {
+					entry.version = version
+					entry.nextCheckAt = now.Add(pluginReleaseCacheTTL)
+				} else if errors.As(errRelease, &rateLimit) {
+					log.WithError(errRelease).WithField("plugin_id", plugin.ID).Warn("pluginstore: failed to fetch latest release")
 					entry.nextCheckAt = rateLimit.RetryAt
+				} else {
+					log.WithError(errRelease).WithField("plugin_id", plugin.ID).Warn("pluginstore: failed to fetch latest release")
+					if next := now.Add(pluginReleaseFailureCacheTTL); next.After(entry.nextCheckAt) {
+						entry.nextCheckAt = next
+					}
 				}
 			}
 		}

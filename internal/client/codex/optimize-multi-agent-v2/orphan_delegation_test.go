@@ -6,14 +6,21 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func testRewriteCodexOrphan(payload []byte, enabled bool) []byte {
 	headers := http.Header{"X-Openai-Subagent": []string{"collab_spawn"}}
-	return RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, enabled)
+	out := RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, enabled)
+	doc := ojson.NewDoc(payload)
+	changed := RewriteCodexOrphanDelegationInputDoc(doc, context.Background(), headers, enabled)
+	if changed && string(doc.Bytes()) != string(out) {
+		panic(fmt.Sprintf("RewriteCodexOrphanDelegationInputDoc mismatch: %s != %s", string(doc.Bytes()), string(out)))
+	}
+	return out
 }
 
 func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
@@ -90,7 +97,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" {
@@ -124,7 +131,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 		}`)
 		headers := http.Header{"x-openai-subagent": []string{"COLLAB_SPAWN"}}
 		got := RewriteCodexOrphanDelegationInput(context.Background(), headers, payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
@@ -146,7 +153,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
@@ -179,7 +186,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item1 := parsed.Get("input.1")
 		if item1.Get("type").String() != "function_call_output" {
@@ -209,7 +216,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.0.type").String() != "function_call_output" {
 			t.Fatalf("automation_update should not be rewritten: %s", parsed.Get("input.0").Raw)
@@ -232,7 +239,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
@@ -265,7 +272,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.1.type").String() != "message" {
 			t.Fatalf("call_id with whitespace mismatch should be treated as orphan: %s", parsed.Get("input.1").Raw)
@@ -286,7 +293,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
@@ -319,7 +326,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.0.type").String() != "function_call_output" {
 			t.Fatalf("output should remain paired function_call_output: %s", parsed.Get("input.0").Raw)
@@ -357,7 +364,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.1.type").String() != "function_call_output" {
 			t.Fatalf("first output should pair with call: %s", parsed.Get("input.1").Raw)
@@ -387,7 +394,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.1.type").String() != "message" {
 			t.Fatalf("function_call_output should not pair with custom_tool_call: %s", parsed.Get("input.1").Raw)
@@ -413,7 +420,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.1.type").String() != "message" {
 			t.Fatalf("function_call_output should not pair with assistant message tool_calls: %s", parsed.Get("input.1").Raw)
@@ -444,7 +451,7 @@ func TestRewriteCodexOrphanDelegationInput(t *testing.T) {
 			]
 		}`)
 		got := testRewriteCodexOrphan(payload, true)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		for i := 0; i < 3; i++ {
 			if itemType := parsed.Get(fmt.Sprintf("input.%d.type", i)).String(); itemType != "function_call_output" {
@@ -481,7 +488,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 			},
 		}
 		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), http.Header{}, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAIResponse, "test-model", payload, false)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "function_call_output" {
@@ -497,7 +504,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 		}
 		headers := http.Header{"X-Openai-Subagent": []string{"other_agent"}}
 		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), headers, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAIResponse, "test-model", payload, false)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "function_call_output" {
@@ -512,7 +519,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 			},
 		}
 		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), collabHeaders, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAIResponse, "test-model", payload, false)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "message" || item0.Get("role").String() != "user" {
@@ -531,7 +538,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 			},
 		}
 		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), collabHeaders, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "test-model", payload, false)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		messages := parsed.Get("messages").Array()
 		if len(messages) < 2 {
@@ -560,7 +567,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 			},
 		}
 		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), collabHeaders, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAIResponse, "test-model", payload, false)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		item0 := parsed.Get("input.0")
 		if item0.Get("type").String() != "function_call_output" {
@@ -598,7 +605,7 @@ func TestTranslateRequestWithCodexMultiAgentV2OrphanDelegation(t *testing.T) {
 			},
 		}
 		got := TranslateRequestWithCodexMultiAgentV2(context.Background(), collabHeaders, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAIResponse, "test-model", interleaved, false)
-		parsed := gjson.ParseBytes(got)
+		parsed := util.ParseGJSONBytesNoCopy(got)
 
 		if parsed.Get("input.0.type").String() != "function_call" {
 			t.Fatalf("input.0 should remain function_call")

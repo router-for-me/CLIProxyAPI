@@ -1,13 +1,13 @@
 package management
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 )
 
 func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {

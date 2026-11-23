@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executionregistry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 func TestHandleHangupForwardsPinnedOAuthCall(t *testing.T) {
@@ -125,8 +125,8 @@ func TestHandleHangupReportsUnauthorizedWhenResponseReadFails(t *testing.T) {
 	if record.Fail.StatusCode != http.StatusUnauthorized || record.Fail.Body != upstreamError {
 		t.Fatalf("Home unauthorized failure = status %d body %q, want status 401 body %q", record.Fail.StatusCode, record.Fail.Body, upstreamError)
 	}
-	if !strings.Contains(string(apiResponse), upstreamError) || !strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
-		t.Fatalf("API_RESPONSE = %q, want upstream body and read error", apiResponse)
+	if !strings.Contains(string(apiResponse), upstreamError) || strings.Contains(string(apiResponse), io.ErrUnexpectedEOF.Error()) {
+		t.Fatalf("API_RESPONSE = %q, want upstream body without local read error", apiResponse)
 	}
 	if executor.refreshCalls.Load() != 0 || executor.httpCalls.Load() != 1 {
 		t.Fatalf("refresh/http calls = %d/%d, want 0/1", executor.refreshCalls.Load(), executor.httpCalls.Load())

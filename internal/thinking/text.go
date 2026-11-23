@@ -1,7 +1,7 @@
 package thinking
 
 import (
-	"github.com/tidwall/gjson"
+	"github.com/MoeForge/moego/ojson"
 )
 
 // GetThinkingText extracts the thinking text from a content part.
@@ -10,9 +10,9 @@ import (
 // - Wrapped object: { "thinking": { "text": "text", "cache_control": {...} } }
 // - Gemini-style: { "thought": true, "text": "text" }
 // Returns the extracted text string.
-func GetThinkingText(part gjson.Result) string {
+func GetThinkingText(part ojson.Result) string {
 	// Try direct text field first (Gemini-style)
-	if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
+	if text := part.Get("text"); text.Exists() && text.Type == ojson.String {
 		return text.String()
 	}
 
@@ -23,16 +23,16 @@ func GetThinkingText(part gjson.Result) string {
 	}
 
 	// thinking is a string
-	if thinkingField.Type == gjson.String {
+	if thinkingField.Type == ojson.String {
 		return thinkingField.String()
 	}
 
 	// thinking is an object with inner text/thinking
 	if thinkingField.IsObject() {
-		if inner := thinkingField.Get("text"); inner.Exists() && inner.Type == gjson.String {
+		if inner := thinkingField.Get("text"); inner.Exists() && inner.Type == ojson.String {
 			return inner.String()
 		}
-		if inner := thinkingField.Get("thinking"); inner.Exists() && inner.Type == gjson.String {
+		if inner := thinkingField.Get("thinking"); inner.Exists() && inner.Type == ojson.String {
 			return inner.String()
 		}
 	}
