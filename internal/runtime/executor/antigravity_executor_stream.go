@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -530,26 +529,14 @@ func (e *AntigravityExecutor) executeCompactionStream(ctx context.Context, auth 
 		return nil, errSummary
 	}
 
-	summaryText, errExtract := helps.ExtractAntigravitySummaryText(summaryResp.Payload)
-	if errExtract != nil {
-		return nil, fmt.Errorf("extract summary: %w", errExtract)
+	compactionResp, errBuild := helps.BuildResponsesCompactionResponseFromSummary(baseModel, summaryResp.Payload)
+	if errBuild != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: errBuild.Error()}
 	}
-	capsule, errSeal := helps.SealAntigravityCompaction(summaryText, baseModel)
-	if errSeal != nil {
-		return nil, fmt.Errorf("seal compaction capsule: %w", errSeal)
+	chunks, errChunks := helps.BuildResponsesCompactionStreamChunksFromResponse(baseModel, compactionResp)
+	if errChunks != nil {
+		return nil, statusErr{code: http.StatusBadGateway, msg: errChunks.Error()}
 	}
-
-	inputTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.input_tokens").Int())
-	outputTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.output_tokens").Int())
-	totalTokens := int(ojson.GetBytesNoCopy(summaryResp.Payload, "usage.total_tokens").Int())
-	if totalTokens == 0 && inputTokens == 0 {
-		usage := helps.ParseOpenAIUsage(summaryResp.Payload)
-		inputTokens = int(usage.InputTokens)
-		outputTokens = int(usage.OutputTokens)
-		totalTokens = int(usage.TotalTokens)
-	}
-
-	chunks := helps.BuildAntigravityCompactionStreamChunks(baseModel, capsule, inputTokens, outputTokens, totalTokens)
 	out := make(chan cliproxyexecutor.StreamChunk, len(chunks))
 	for _, chunk := range chunks {
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
