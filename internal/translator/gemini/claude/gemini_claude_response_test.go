@@ -743,6 +743,71 @@ func TestConvertGeminiResponseToClaude_MalformedFunctionCallWithToolUsePreserves
 	}
 }
 
+func TestConvertGeminiResponseToClaudeStream_IgnoresEmptyFinishReasonWithUsage(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`)
+	ctx := context.Background()
+
+	for _, finishReason := range []string{"null", `""`} {
+		t.Run(finishReason, func(t *testing.T) {
+			var param any
+			firstChunk := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":` + finishReason + `}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11}}`)
+			terminalChunk := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":" world"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
+
+			firstOutput := bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-2.5-pro", requestJSON, requestJSON, firstChunk, &param), nil)
+			if strings.Contains(string(firstOutput), `"type":"message_delta"`) || strings.Contains(string(firstOutput), `"type":"content_block_stop"`) {
+				t.Fatalf("intermediate finishReason %s emitted terminal events:\n%s", finishReason, firstOutput)
+			}
+
+			fullOutput := append(firstOutput, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-2.5-pro", requestJSON, requestJSON, terminalChunk, &param), nil)...)
+			fullOutput = append(fullOutput, bytes.Join(ConvertGeminiResponseToClaude(ctx, "gemini-2.5-pro", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+			var textBlockStarts, blockStops, messageDeltas int
+			var messageDelta ojson.Result
+			var text strings.Builder
+			for _, line := range strings.Split(string(fullOutput), "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimSpace(strings.TrimPrefix(line, "data: "))
+				switch ojson.Get(payload, "type").String() {
+				case "content_block_start":
+					if ojson.Get(payload, "content_block.type").String() == "text" {
+						textBlockStarts++
+					}
+				case "content_block_stop":
+					blockStops++
+				case "content_block_delta":
+					if ojson.Get(payload, "delta.type").String() == "text_delta" {
+						text.WriteString(ojson.Get(payload, "delta.text").String())
+					}
+				case "message_delta":
+					messageDeltas++
+					messageDelta = ojson.Parse(payload)
+				}
+			}
+
+			if textBlockStarts != 1 {
+				t.Fatalf("text content_block_start count = %d, want 1; output:\n%s", textBlockStarts, fullOutput)
+			}
+			if blockStops != 1 {
+				t.Fatalf("content_block_stop count = %d, want 1; output:\n%s", blockStops, fullOutput)
+			}
+			if messageDeltas != 1 {
+				t.Fatalf("message_delta count = %d, want 1; output:\n%s", messageDeltas, fullOutput)
+			}
+			if got := text.String(); got != "hello world" {
+				t.Fatalf("text = %q, want %q; output:\n%s", got, "hello world", fullOutput)
+			}
+			if got := messageDelta.Get("delta.stop_reason").String(); got != "max_tokens" {
+				t.Fatalf("stop_reason = %q, want max_tokens; output:\n%s", got, fullOutput)
+			}
+			if got := messageDelta.Get("usage.output_tokens").Int(); got != 5 {
+				t.Fatalf("output_tokens = %d, want 5; output:\n%s", got, fullOutput)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiResponseToClaudeStream_PartlessStopClosesMessageWithEndTurn(t *testing.T) {
 	requestJSON := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"hi"}]}`)
 	chunk := []byte(`{

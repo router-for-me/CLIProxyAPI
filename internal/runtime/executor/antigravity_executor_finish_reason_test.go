@@ -347,6 +347,30 @@ func TestAntigravityAssemblyReplacesOnlyContentParts(t *testing.T) {
 	}
 }
 
+func TestAntigravityAssemblyPreservesGroundingMetadataFromEarlierChunk(t *testing.T) {
+	exec := &AntigravityExecutor{}
+	chunks := [][]byte{
+		[]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Search result answer."}]},"groundingMetadata":{"webSearchQueries":["example query"],"groundingChunks":[{"web":{"uri":"https://example.com","title":"Example"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":6},"groundingChunkIndices":[0]}]}}],"modelVersion":"gemini-3-pro","responseId":"resp-ground-1"}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":5,"totalTokenCount":17}}}`),
+	}
+
+	out := exec.convertStreamChunksToNonStream(chunks)
+	grounding := ojson.GetBytes(out, "response.candidates.0.groundingMetadata")
+	if !grounding.Exists() {
+		t.Fatalf("assembled response dropped groundingMetadata from earlier chunk: %s", out)
+	}
+	if got := grounding.Get("webSearchQueries.0").String(); got != "example query" {
+		t.Fatalf("grounding web search query = %q, want %q; out=%s", got, "example query", out)
+	}
+	if got := grounding.Get("groundingChunks.0.web.uri").String(); got != "https://example.com" {
+		t.Fatalf("grounding chunk URI = %q, want %q; out=%s", got, "https://example.com", out)
+	}
+	groundingIndex := grounding.Get("groundingSupports.0.groundingChunkIndices.0")
+	if !groundingIndex.Exists() || groundingIndex.Raw != "0" {
+		t.Fatalf("grounding support index = %q, want 0; out=%s", groundingIndex.Raw, out)
+	}
+}
+
 func TestAntigravityStreamPreservesQuotedFilterNoticeWithUsageMetadata(t *testing.T) {
 	quotedNotice := "This request was blocked by Gemini's filters. They can occasionally trigger by mistake on safe coding, security, or biology-related queries. Please try rephrasing your prompt. You can [send feedback](https://ai.google.dev/gemini-api/docs/troubleshooting#file-bug) or read more about [our policies here](https://policies.google.com/terms/generative-ai/use-policy)."
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

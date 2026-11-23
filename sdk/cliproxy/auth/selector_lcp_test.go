@@ -677,6 +677,49 @@ func TestSessionAffinityBodyOnlyCodexFork(t *testing.T) {
 	}
 }
 
+func TestSessionAffinityForkFailurePreservesParentBinding(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}}
+	parentOpts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"conversation":{"id":"parent-1"},"messages":[{"role":"user","content":"parent"}]}`),
+	}
+	parentAuth, errParent := selector.Pick(context.Background(), "openai", "model", parentOpts, auths)
+	if errParent != nil || parentAuth.ID != "auth-a" {
+		t.Fatalf("parent Pick() error = %v, auth = %v", errParent, parentAuth)
+	}
+
+	forkOpts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"prompt_cache_key":"fork-1","conversation":{"id":"parent-1"},"messages":[{"role":"user","content":"fork"}]}`),
+		Metadata: map[string]any{
+			cliproxyexecutor.IsForkMetadataKey: true,
+		},
+	}
+	forkAuth, errFork := selector.Pick(context.Background(), "openai", "model", forkOpts, auths)
+	if errFork != nil || forkAuth.ID != "auth-a" {
+		t.Fatalf("fork Pick() error = %v, auth = %v", errFork, forkAuth)
+	}
+
+	selector.OnResult(Result{
+		Provider: "openai",
+		Model:    "model",
+		AuthID:   forkAuth.ID,
+		Success:  false,
+		Options:  forkOpts,
+	})
+
+	boundID, ok := selector.boundAuthForRequest([]string{"openai"}, "model", parentOpts)
+	if !ok || boundID != "auth-a" {
+		t.Fatalf("parent binding after fork failure = (%q, %v), want (auth-a, true)", boundID, ok)
+	}
+}
+
 func TestSessionAffinityForkRebindDoesNotMutateParentBinding(t *testing.T) {
 	t.Parallel()
 

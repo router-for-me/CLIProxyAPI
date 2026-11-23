@@ -13,7 +13,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
-var gjsonPathKeyReplacer = strings.NewReplacer(".", "\\.", "*", "\\*", "?", "\\?")
+var gjsonPathKeyReplacer = strings.NewReplacer("\\", "\\\\", ".", "\\.", "*", "\\*", "?", "\\?")
 
 const placeholderReasonDescription = "Brief explanation of why you are calling this tool"
 
@@ -184,6 +184,9 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 		jsonStr = cleanupRequiredFields(jsonStr)
 		jsonStr = sanitizeObjectProperties(jsonStr)
 		jsonStr = sanitizeArrayItems(jsonStr, options)
+	}
+	if !options.preserveStandardConstraints {
+		jsonStr = removeKeywords(jsonStr, []string{"prefixItems"})
 	}
 	// Phase 4: Add placeholder for empty object schemas (Claude VALIDATED mode requirement)
 	if options.addPlaceholder {
@@ -1801,7 +1804,7 @@ func parseSchemaNonNegativeInt(raw string) (int64, bool) {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "uniqueItems", "contains", "format",
+	"pattern", "minItems", "maxItems", "minProperties", "maxProperties", "uniqueItems", "contains", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
@@ -2546,7 +2549,7 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 	modified := false
 	for _, p := range paths {
 		typeVal := doc.Get(p)
-		if typeVal.String() != "object" {
+		if !strings.EqualFold(typeVal.String(), "object") {
 			continue
 		}
 
@@ -2790,7 +2793,7 @@ func orDefault(val, def string) string {
 }
 
 func escapeGJSONPathKey(key string) string {
-	if strings.IndexAny(key, ".*?") == -1 {
+	if strings.IndexAny(key, `\.*?`) == -1 {
 		return key
 	}
 	return gjsonPathKeyReplacer.Replace(key)

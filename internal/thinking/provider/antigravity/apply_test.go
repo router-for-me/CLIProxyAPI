@@ -116,6 +116,55 @@ func TestApplier_ClaudeValidBudgetPreservesIncludeThoughts(t *testing.T) {
 	}
 }
 
+func TestApplier_NormalizesSnakeCaseThinkingConfig(t *testing.T) {
+	applier := thinking.GetProviderApplier("antigravity")
+	if applier == nil {
+		t.Fatal("antigravity provider applier is not registered")
+	}
+
+	tests := []struct {
+		name      string
+		modelInfo *registry.ModelInfo
+		config    thinking.ThinkingConfig
+		wantPath  string
+		wantValue string
+	}{
+		{
+			name:      "budget",
+			modelInfo: claudeSonnet46AntigravityModel(),
+			config:    thinking.ThinkingConfig{Mode: thinking.ModeBudget, Budget: 4096},
+			wantPath:  "request.generationConfig.thinkingConfig.thinkingBudget",
+			wantValue: "4096",
+		},
+		{
+			name:      "level",
+			modelInfo: gemini4NeonAntigravityModel(),
+			config:    thinking.ThinkingConfig{Mode: thinking.ModeLevel, Level: thinking.LevelHigh},
+			wantPath:  "request.generationConfig.thinkingConfig.thinkingLevel",
+			wantValue: "HIGH",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"request":{"generationConfig":{"thinking_config":{"include_thoughts":true,"thinking_budget":2048}}}}`)
+			out, errApply := applier.Apply(body, tc.config, tc.modelInfo)
+			if errApply != nil {
+				t.Fatalf("Apply() error = %v", errApply)
+			}
+			if stale := ojson.GetBytes(out, "request.generationConfig.thinking_config"); stale.Exists() {
+				t.Fatalf("thinking_config remained alongside thinkingConfig: %s", out)
+			}
+			if got := ojson.GetBytes(out, tc.wantPath).String(); got != tc.wantValue {
+				t.Fatalf("%s = %q, want %q; body=%s", tc.wantPath, got, tc.wantValue, out)
+			}
+			if include := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); !include.Exists() || !include.Bool() {
+				t.Fatalf("includeThoughts = %s, want true; body=%s", include.Raw, out)
+			}
+		})
+	}
+}
+
 func gemini4NeonAntigravityModel() *registry.ModelInfo {
 	return &registry.ModelInfo{
 		ID:   "gemini-4-neon-xhigh",

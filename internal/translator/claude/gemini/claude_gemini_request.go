@@ -108,8 +108,7 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				_ = outDoc.Set("stop_sequences", stopSequences)
 			}
 		}
-		// Include thoughts configuration for reasoning process visibility
-		// Translator only does format conversion, ApplyThinking handles model capability validation.
+		// Convert thinking configuration to Claude request fields.
 		if thinkingConfig := genConfig.Get("thinkingConfig"); thinkingConfig.Exists() && thinkingConfig.IsObject() {
 			mi := registry.LookupModelInfo(modelName, "claude")
 			supportsAdaptive := mi != nil && mi.Thinking != nil && len(mi.Thinking.Levels) > 0
@@ -168,41 +167,26 @@ func convertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				}
 				if thinkingBudget.Exists() {
 					budget := int(thinkingBudget.Int())
-					if supportsAdaptive {
-						switch {
-						case budget == 0:
-							_ = outDoc.Set("thinking.type", "disabled")
-							_ = outDoc.Delete("thinking.budget_tokens")
+					switch {
+					case budget == 0:
+						_ = outDoc.Set("thinking.type", "disabled")
+						_ = outDoc.Delete("thinking.budget_tokens")
+						_ = outDoc.Delete("output_config.effort")
+					case budget == -1 && supportsAdaptive:
+						_ = outDoc.Set("thinking.type", "adaptive")
+						_ = outDoc.Delete("thinking.budget_tokens")
+						if supportsDynamic {
 							_ = outDoc.Delete("output_config.effort")
-						case budget == -1 && supportsDynamic:
-							_ = outDoc.Set("thinking.type", "adaptive")
-							_ = outDoc.Delete("thinking.budget_tokens")
-							_ = outDoc.Delete("output_config.effort")
-						default:
-							level, ok := thinking.ConvertBudgetToLevel(budget)
-							if ok {
-								if !thinking.HasLevel(mi.Thinking.Levels, level) {
-									if mapped, okM := thinking.MapToClaudeEffort(level, supportsMax); okM {
-										level = mapped
-									}
-								}
-								_ = outDoc.Set("thinking.type", "adaptive")
-								_ = outDoc.Delete("thinking.budget_tokens")
-								_ = outDoc.Set("output_config.effort", level)
-							}
+						} else {
+							_ = outDoc.Set("output_config.effort", string(thinking.LevelHigh))
 						}
-					} else {
-						switch budget {
-						case 0:
-							_ = outDoc.Set("thinking.type", "disabled")
-							_ = outDoc.Delete("thinking.budget_tokens")
-						case -1:
-							_ = outDoc.Set("thinking.type", "enabled")
-							_ = outDoc.Delete("thinking.budget_tokens")
-						default:
-							_ = outDoc.Set("thinking.type", "enabled")
-							_ = outDoc.Set("thinking.budget_tokens", budget)
-						}
+					case budget == -1:
+						_ = outDoc.Set("thinking.type", "enabled")
+						_ = outDoc.Delete("thinking.budget_tokens")
+					case budget > 0 || !supportsAdaptive:
+						// Preserve the budget for model-aware validation after translation.
+						_ = outDoc.Set("thinking.type", "enabled")
+						_ = outDoc.Set("thinking.budget_tokens", budget)
 					}
 				}
 			}

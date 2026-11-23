@@ -227,20 +227,10 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 
 	case "message_delta":
 		// Handle message-level changes (like stop reason and usage information)
+		_ = templateDoc.Set("candidates.0.finishReason", "STOP")
 		if delta := root.Get("delta"); delta.Exists() {
-			if stopReason := delta.Get("stop_reason"); stopReason.Exists() {
-				switch stopReason.String() {
-				case "end_turn":
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				case "tool_use":
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				case "max_tokens":
-					_ = templateDoc.Set("candidates.0.finishReason", "MAX_TOKENS")
-				case "stop_sequence":
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				default:
-					_ = templateDoc.Set("candidates.0.finishReason", "STOP")
-				}
+			if stopReason := delta.Get("stop_reason"); stopReason.Exists() && stopReason.String() == "max_tokens" {
+				_ = templateDoc.Set("candidates.0.finishReason", "MAX_TOKENS")
 			}
 		}
 
@@ -273,7 +263,6 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, original
 			// Set traffic type (required by Gemini API)
 			_ = templateDoc.Set("usageMetadata.trafficType", "PROVISIONED_THROUGHPUT")
 		}
-		_ = templateDoc.Set("candidates.0.finishReason", "STOP")
 
 		return [][]byte{templateDoc.Bytes()}
 	case "message_stop":

@@ -1429,6 +1429,38 @@ func TestAntigravityBuildRequest_CaseInsensitiveClaudeCapsMaxOutputTokens(t *tes
 	}
 }
 
+func TestAntigravityBuildRequest_CapsThinkingBudgetWithMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"request": {
+			"contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+			"generationConfig": {
+				"maxOutputTokens": 100000,
+				"thinkingConfig": {"thinkingBudget": 64000}
+			}
+		}
+	}`)
+
+	executor := &AntigravityExecutor{}
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+	for _, modelName := range []string{"claude-sonnet-4-6", "Claude-Sonnet-4-6", "claude-opus-4-6-thinking"} {
+		t.Run(modelName, func(t *testing.T) {
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestDoc(context.Background(), auth, "token", modelName, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestDoc(%q) error: %v", modelName, errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != 64000 {
+				t.Fatalf("model %q: maxOutputTokens = %d, want capped 64000", modelName, got)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig.thinkingBudget").Int(); got != 63999 {
+				t.Fatalf("model %q: thinkingBudget = %d, want 63999", modelName, got)
+			}
+		})
+	}
+}
+
 func TestAntigravityBuildRequest_CaseInsensitiveGeminiProAndImageModels(t *testing.T) {
 	t.Parallel()
 

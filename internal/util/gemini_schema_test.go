@@ -679,6 +679,22 @@ func TestCleanJSONSchemaForAntigravity_EmptySchemaPlaceholder(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_UppercaseObjectPlaceholder(t *testing.T) {
+	for _, input := range []string{
+		`{"type":"OBJECT"}`,
+		`{"type":"OBJECT","properties":{}}`,
+	} {
+		result := ojson.Parse(CleanJSONSchemaForAntigravity(input))
+		if got := result.Get("properties.reason.type").String(); got != "string" {
+			t.Errorf("uppercase object should get a reason placeholder, got type %q in %s", got, result.Raw)
+		}
+		required := result.Get("required").Array()
+		if len(required) != 1 || required[0].String() != "reason" {
+			t.Errorf("uppercase object should require reason, got %s in %s", result.Get("required").Raw, result.Raw)
+		}
+	}
+}
+
 func TestCleanJSONSchemaForAntigravity_EmptyPropertiesPlaceholder(t *testing.T) {
 	// Object with empty properties object
 	input := `{
@@ -5101,5 +5117,54 @@ func TestIssue7763_NormalizeNonObjectArrayItems(t *testing.T) {
 			t.Fatalf("CleanJSONSchemaForGeminiJSONSchema should preserve prefixItems, got: %s", got)
 		}
 		compareJSON(t, got, CleanJSONSchemaForGeminiJSONSchema(got))
+	})
+}
+
+func TestIssue7917_AntigravityCleanersStripUnsupportedSchemaKeywords(t *testing.T) {
+	input := `{
+		"type": "object",
+		"minProperties": 1,
+		"maxProperties": 5,
+		"properties": {
+			"tags": {
+				"type": "array",
+				"prefixItems": [{"type": "string"}]
+			}
+		}
+	}`
+	cleaners := map[string]func(string) string{
+		"Antigravity":           CleanJSONSchemaForAntigravity,
+		"AntigravityTool":       func(schema string) string { return CleanJSONSchemaForAntigravityTool(schema, false) },
+		"AntigravityClaudeTool": func(schema string) string { return CleanJSONSchemaForAntigravityClaudeTool(schema, true) },
+		"AntigravityResponse":   CleanJSONSchemaForAntigravityResponse,
+	}
+
+	for name, clean := range cleaners {
+		t.Run(name, func(t *testing.T) {
+			got := clean(input)
+			root := ojson.Parse(got)
+			for _, path := range []string{"minProperties", "maxProperties", "properties.tags.prefixItems"} {
+				if root.Get(path).Exists() {
+					t.Fatalf("unsupported keyword %s survived: %s", path, got)
+				}
+			}
+			if description := root.Get("description").String(); !strings.Contains(description, "minProperties: 1") || !strings.Contains(description, "maxProperties: 5") {
+				t.Fatalf("object size constraints were not retained as description hints: %s", got)
+			}
+		})
+	}
+
+	t.Run("escaped property names", func(t *testing.T) {
+		escapedInput := `{"type":"object","properties":{"a\\b":{"type":"array","prefixItems":[{"type":"object","minProperties":1,"maxProperties":2}]}}}`
+		for name, clean := range cleaners {
+			got := clean(escapedInput)
+			property := ojson.Parse(got).Get("properties").Map()[`a\b`]
+			if !property.Exists() {
+				t.Fatalf("%s changed the property name: %s", name, got)
+			}
+			if property.Get("prefixItems").Exists() || strings.Contains(got, `"minProperties"`) || strings.Contains(got, `"maxProperties"`) {
+				t.Fatalf("%s retained unsupported keywords below an escaped property name: %s", name, got)
+			}
+		}
 	})
 }

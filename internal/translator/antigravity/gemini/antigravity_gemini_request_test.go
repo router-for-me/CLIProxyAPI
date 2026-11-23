@@ -1157,6 +1157,154 @@ func TestFixCLIToolResponse_AttachesSiblingInlineDataToNearestFunctionResponse(t
 	}
 }
 
+func TestConvertGeminiRequestToAntigravity_PreservesUserPartsInToolResponseTurn(t *testing.T) {
+	input := []byte(`{
+		"contents": [
+			{"role":"user","parts":[{"text":"call tool"}]},
+			{"role":"model","parts":[{"functionCall":{"name":"foo","args":{},"id":"call_1"}}]},
+			{"role":"user","parts":[
+				{"text":"Please analyze this carefully:"},
+				{"functionResponse":{"name":"foo","response":{"result":"bar"},"id":"call_1"}}
+			]}
+		]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 4 {
+		t.Fatalf("contents = %d, want 4. Output: %s", len(contents), out)
+	}
+	if !contents[2].Get("parts.0.functionResponse").Exists() {
+		t.Fatalf("function response should immediately follow model call. Output: %s", out)
+	}
+	if got := contents[3].Get("parts.0.text").String(); got != "Please analyze this carefully:" {
+		t.Fatalf("preserved user text = %q, want %q. Output: %s", got, "Please analyze this carefully:", out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesTextAfterGroupedToolResponses(t *testing.T) {
+	input := []byte(`{
+		"contents": [
+			{"role":"user","parts":[{"text":"call tools"}]},
+			{"role":"model","parts":[
+				{"functionCall":{"name":"one","args":{},"id":"call_1"}},
+				{"functionCall":{"name":"two","args":{},"id":"call_2"}}
+			]},
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"one","response":{"result":"first"},"id":"call_1"}},
+				{"text":"remember this instruction"}
+			]},
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"two","response":{"result":"second"},"id":"call_2"}}
+			]}
+		]
+	}`)
+
+	out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 4 {
+		t.Fatalf("contents = %d, want 4. Output: %s", len(contents), out)
+	}
+	responseParts := contents[2].Get("parts").Array()
+	if len(responseParts) != 2 || !responseParts[0].Get("functionResponse").Exists() || !responseParts[1].Get("functionResponse").Exists() {
+		t.Fatalf("grouped function responses should immediately follow model call. Output: %s", out)
+	}
+	if got := contents[3].Get("parts.0.text").String(); got != "remember this instruction" {
+		t.Fatalf("deferred user text = %q, want %q. Output: %s", got, "remember this instruction", out)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_NormalizesPreservedToolResponseUserRole(t *testing.T) {
+	for _, roleField := range []string{``, `,"role":"function"`} {
+		input := []byte(`{"contents":[
+			{"role":"model","parts":[{"functionCall":{"name":"foo","id":"call_1"}}]},
+			{"parts":[
+				{"text":"keep user role"},
+				{"functionResponse":{"name":"foo","response":{"result":"bar"},"id":"call_1"}}
+			]` + roleField + `}
+		]}`)
+
+		out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+		if errConvert != nil {
+			t.Fatalf("ConvertGeminiRequestToAntigravity failed for role %q: %v", roleField, errConvert)
+		}
+		contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+		if len(contents) != 3 {
+			t.Fatalf("contents = %d, want 3 for role %q. Output: %s", len(contents), roleField, out)
+		}
+		if got := contents[2].Get("role").String(); got != "user" {
+			t.Fatalf("preserved text role = %q, want user for role %q. Output: %s", got, roleField, out)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_PreservesInterveningUserOrder(t *testing.T) {
+	input := []byte(`{"contents":[
+		{"role":"user","parts":[{"text":"call tools"}]},
+		{"role":"model","parts":[
+			{"functionCall":{"name":"one","id":"call_1"}},
+			{"functionCall":{"name":"two","id":"call_2"}}
+		]},
+		{"role":"user","parts":[
+			{"functionResponse":{"name":"one","response":{"result":"first"},"id":"call_1"}},
+			{"text":"instruction one"}
+		]},
+		{"role":"user","parts":[{"text":"instruction two"}]},
+		{"role":"user","parts":[
+			{"functionResponse":{"name":"two","response":{"result":"second"},"id":"call_2"}}
+		]}
+	]}`)
+
+	out, errConvert := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertGeminiRequestToAntigravity failed: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 5 {
+		t.Fatalf("contents = %d, want 5. Output: %s", len(contents), out)
+	}
+	if contents[2].Get("parts.#").Int() != 2 || !contents[2].Get("parts.0.functionResponse").Exists() || !contents[2].Get("parts.1.functionResponse").Exists() {
+		t.Fatalf("grouped responses should remain before deferred user turns. Output: %s", out)
+	}
+	if got := contents[3].Get("parts.0.text").String(); got != "instruction one" {
+		t.Fatalf("first deferred user text = %q, want %q. Output: %s", got, "instruction one", out)
+	}
+	if got := contents[4].Get("parts.0.text").String(); got != "instruction two" {
+		t.Fatalf("second deferred user text = %q, want %q. Output: %s", got, "instruction two", out)
+	}
+}
+
+func TestFixCLIToolResponse_PreservesUserPartsWhenToolResponseGroupIsIncomplete(t *testing.T) {
+	input := []byte(`{"request":{"contents":[
+		{"role":"model","parts":[
+			{"functionCall":{"name":"one","id":"call_1"}},
+			{"functionCall":{"name":"two","id":"call_2"}}
+		]},
+		{"role":"user","parts":[
+			{"functionResponse":{"name":"one","response":{"result":"first"},"id":"call_1"}},
+			{"text":"keep this even if a response is missing"}
+		]}
+	]}}`)
+
+	out, errFix := fixCLIToolResponse(input)
+	if errFix != nil {
+		t.Fatalf("fixCLIToolResponse failed: %v", errFix)
+	}
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents = %d, want 2. Output: %s", len(contents), out)
+	}
+	if got := contents[1].Get("parts.0.text").String(); got != "keep this even if a response is missing" {
+		t.Fatalf("preserved user text = %q, want %q. Output: %s", got, "keep this even if a response is missing", out)
+	}
+}
+
 func TestConvertGeminiRequestToAntigravity_PreservesSiblingToolImageOnUserRole(t *testing.T) {
 	input := []byte(`{
 		"contents": [

@@ -29,13 +29,23 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	defer closeCopilotResponse(resp.Body)
 	const maxResponse = 64 << 20
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	bodyTruncated := len(body) > maxResponse
+	logBody := body
+	if bodyTruncated {
+		logBody = body[:maxResponse]
+	}
+	helps.AppendAPIResponseChunk(ctx, e.cfg, logBody)
 	if err != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
 	}
-	if len(body) > maxResponse || !ojson.ValidBytes(body) {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: "copilot: invalid upstream JSON response"}
+	if bodyTruncated || !ojson.ValidBytes(body) {
+		errInvalid := statusErr{code: http.StatusBadGateway, msg: "copilot: invalid upstream JSON response"}
+		helps.RecordAPIResponseError(ctx, e.cfg, errInvalid)
+		return cliproxyexecutor.Response{}, errInvalid
 	}
 	if failure := copilotResponseError(body); failure != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, failure)
 		return cliproxyexecutor.Response{}, failure
 	}
 	format := cliproxyexecutor.ResponseFormatOrSource(opts)
@@ -50,7 +60,9 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	}
 	out := prepared.responseTranslators.TranslateNonStream(ctx, prepared.route.Format, format, req.Model, prepared.original, prepared.body, translatedBody, &state)
 	if len(out) == 0 || helps.ApplyPatchTranslationError(state) != nil {
-		return cliproxyexecutor.Response{}, statusErr{code: http.StatusBadGateway, msg: "copilot: unable to translate upstream response"}
+		errTranslate := statusErr{code: http.StatusBadGateway, msg: "copilot: unable to translate upstream response"}
+		helps.RecordAPIResponseError(ctx, e.cfg, errTranslate)
+		return cliproxyexecutor.Response{}, errTranslate
 	}
 	if prepared.responsesCapture != nil {
 		prepared.responsesCapture.Observe(ojson.ParseBytes(body), ojson.GetBytesNoCopy(out, "content"))
@@ -82,15 +94,19 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	if err != nil {
 		return nil, err
 	}
+	streamLogger := helps.BindAPIResponseStreamLogger(ctx, e.cfg)
 	out := make(chan cliproxyexecutor.StreamChunk)
-	go e.copilotStream(ctx, req, opts, prepared, resp.Body, reporter, out)
+	go e.copilotStream(ctx, req, opts, prepared, resp.Body, reporter, streamLogger, out)
 	return &cliproxyexecutor.StreamResult{Headers: resp.Header.Clone(), Chunks: out}, nil
 }
 
-func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, prepared copilotPreparedRequest, body io.ReadCloser, reporter *helps.UsageReporter, out chan<- cliproxyexecutor.StreamChunk) {
+func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, prepared copilotPreparedRequest, body io.ReadCloser, reporter *helps.UsageReporter, streamLogger *helps.APIResponseStreamLogger, out chan<- cliproxyexecutor.StreamChunk) {
 	defer close(out)
 	defer closeCopilotResponse(body)
 	scanner := helps.NewCodexSSEScanner(ctx, body, 16<<20)
+	scanner.SetOnLine(func(rawLine []byte) {
+		streamLogger.AppendChunk(rawLine)
+	})
 	from, to := prepared.route.Format, cliproxyexecutor.ResponseFormatOrSource(opts)
 	var state any
 	var usage helps.StreamUsageBuffer
@@ -113,6 +129,7 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 		}
 	}
 	fail := func(err error) {
+		streamLogger.RecordError(err)
 		usage.PublishFailure(ctx, reporter, err)
 		emit(cliproxyexecutor.StreamChunk{Err: err})
 	}
@@ -224,8 +241,8 @@ func (e *CopilotExecutor) copilotStream(ctx context.Context, req cliproxyexecuto
 			break
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		fail(err)
+	if errScan := scanner.Err(); errScan != nil {
+		fail(errScan)
 		return
 	}
 	if !terminal && from == sdktranslator.FormatOpenAI && chatFinished {

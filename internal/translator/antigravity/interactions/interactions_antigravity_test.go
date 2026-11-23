@@ -813,6 +813,32 @@ func TestConvertInteractionsRequestToAntigravity_ExplicitSignatureClearsPending(
 	}
 }
 
+func TestConvertInteractionsRequestToAntigravityMergesMultipartUserInput(t *testing.T) {
+	input := []byte(`{"model":"gemini-3-flash","input":[{"type":"user_input","content":[{"type":"text","text":"What is in this image?"},{"type":"image","mime_type":"image/png","data":"iVBORw0KGgo="}]}]}`)
+
+	out, errConvert := ConvertInteractionsRequestToAntigravity("gemini-3-flash", input, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+	}
+	contents := ojson.GetBytesNoCopy(out, "request.contents").Array()
+	if len(contents) != 1 {
+		t.Fatalf("request.contents length = %d, want 1. Output: %s", len(contents), string(out))
+	}
+	if role := contents[0].Get("role").String(); role != "user" {
+		t.Fatalf("request.contents.0.role = %q, want user. Output: %s", role, string(out))
+	}
+	parts := contents[0].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("request.contents.0.parts length = %d, want 2. Output: %s", len(parts), string(out))
+	}
+	if text := parts[0].Get("text").String(); text != "What is in this image?" {
+		t.Fatalf("request.contents.0.parts.0.text = %q, want question text. Output: %s", text, string(out))
+	}
+	if data := parts[1].Get("inlineData.data").String(); data != "iVBORw0KGgo=" {
+		t.Fatalf("request.contents.0.parts.1.inlineData.data = %q, want image data. Output: %s", data, string(out))
+	}
+}
+
 func TestConvertInteractionsRequestToAntigravityAcceptsBareContentBlockList(t *testing.T) {
 	bareInput := []byte(`{"model":"antigravity-test","input":[{"type":"image","mime_type":"image/png","data":"aGVsbG8="},{"type":"text","text":"describe"}]}`)
 	stepInput := []byte(`{"model":"antigravity-test","input":[{"type":"user_input","content":[{"type":"image","mime_type":"image/png","data":"aGVsbG8="},{"type":"text","text":"describe"}]}]}`)

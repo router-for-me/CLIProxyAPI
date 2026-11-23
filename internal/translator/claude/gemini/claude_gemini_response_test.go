@@ -8,6 +8,50 @@ import (
 	"github.com/MoeForge/moego/ojson"
 )
 
+func TestConvertClaudeResponseToGemini_StreamPreservesMaxTokensFinishReason(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	chunk := []byte(`data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"input_tokens":10,"output_tokens":100}}`)
+
+	out := ConvertClaudeResponseToGemini(ctx, "claude-sonnet-4-5", nil, nil, chunk, &param)
+	if len(out) != 1 {
+		t.Fatalf("expected one output chunk, got %d", len(out))
+	}
+	if got := ojson.GetBytesNoCopy(out[0], "candidates.0.finishReason").String(); got != "MAX_TOKENS" {
+		t.Fatalf("finishReason = %q, want MAX_TOKENS; output=%s", got, out[0])
+	}
+}
+
+func TestConvertClaudeResponseToGemini_StreamWithoutStopReasonDefaultsToStop(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk string
+	}{
+		{
+			name:  "empty delta",
+			chunk: `data: {"type":"message_delta","delta":{},"usage":{"input_tokens":10,"output_tokens":100}}`,
+		},
+		{
+			name:  "missing delta",
+			chunk: `data: {"type":"message_delta","usage":{"input_tokens":10,"output_tokens":100}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			var param any
+			out := ConvertClaudeResponseToGemini(ctx, "claude-sonnet-4-5", nil, nil, []byte(tt.chunk), &param)
+			if len(out) != 1 {
+				t.Fatalf("expected one output chunk, got %d", len(out))
+			}
+			if got := ojson.GetBytesNoCopy(out[0], "candidates.0.finishReason").String(); got != "STOP" {
+				t.Fatalf("finishReason = %q, want STOP; output=%s", got, out[0])
+			}
+		})
+	}
+}
+
 func TestConvertClaudeResponseToGemini_StreamPreservesToolUseID(t *testing.T) {
 	ctx := context.Background()
 	var param any

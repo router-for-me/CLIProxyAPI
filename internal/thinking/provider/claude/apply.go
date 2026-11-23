@@ -154,7 +154,8 @@ func (a *Applier) normalizeClaudeBudgetDoc(doc *ojson.Doc, budgetTokens int, mod
 	if modelInfo != nil && modelInfo.Thinking != nil {
 		minBudget = modelInfo.Thinking.Min
 	}
-	if minBudget > 0 && adjustedBudget > 0 && adjustedBudget < minBudget {
+	if minBudget > 0 && adjustedBudget >= 0 && adjustedBudget < minBudget {
+		disableThinkingDoc(doc, modelInfo)
 		return
 	}
 

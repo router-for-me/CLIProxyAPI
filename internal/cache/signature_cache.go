@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,8 +33,50 @@ const (
 	CacheCleanupInterval = 10 * time.Minute
 )
 
-// signatureCache stores signatures by model group -> textHash -> SignatureEntry
+// signatureCache stores signatures by credential scope and model group -> textHash -> SignatureEntry
 var signatureCache sync.Map
+
+type signatureCacheScopeContextKey struct{}
+
+type signatureCacheScopeValue struct {
+	scope string
+	bound bool
+}
+
+// WithSignatureCacheScope isolates signature recovery to one upstream credential.
+func WithSignatureCacheScope(ctx context.Context, scope string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, signatureCacheScopeContextKey{}, signatureCacheScopeValue{
+		scope: strings.TrimSpace(scope),
+		bound: true,
+	})
+}
+
+func signatureCacheScope(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	value, ok := ctx.Value(signatureCacheScopeContextKey{}).(signatureCacheScopeValue)
+	return value.scope, ok && value.bound
+}
+
+// RequireSignatureCacheScope prevents unscoped legacy fallback on security-sensitive paths.
+func RequireSignatureCacheScope(ctx context.Context) context.Context {
+	if _, bound := signatureCacheScope(ctx); bound {
+		return ctx
+	}
+	return WithSignatureCacheScope(ctx, "")
+}
+
+func signatureCacheGroupKey(modelName, scope string) string {
+	groupKey := GetModelGroup(modelName)
+	if scope == "" {
+		return groupKey
+	}
+	return homekv.HashKeyPart(scope) + "\x00" + groupKey
+}
 
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
 var cacheCleanupOnce sync.Once
@@ -130,13 +171,17 @@ func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature st
 	if len(signature) < MinValidSignatureLen {
 		return false
 	}
+	scope, scopeBound := signatureCacheScope(ctx)
+	if scopeBound && scope == "" {
+		return false
+	}
 
 	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
 		if errClient != nil {
 			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errClient)
 			return false
 		}
-		written, errSet := client.KVSet(ctx, signatureKVKey(modelName, text), []byte(signature), homekv.KVSetOptions{EX: SignatureCacheTTL})
+		written, errSet := client.KVSet(ctx, signatureKVKeyScoped(modelName, scope, text), []byte(signature), homekv.KVSetOptions{EX: SignatureCacheTTL})
 		if errSet != nil {
 			log.Errorf("home kv best-effort signature set failed prefix=cpa:signature:*: %v", errSet)
 			return false
@@ -144,7 +189,7 @@ func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature st
 		return written
 	}
 
-	groupKey := GetModelGroup(modelName)
+	groupKey := signatureCacheGroupKey(modelName, scope)
 	textHash := hashText(text)
 	sc := getOrCreateGroupCache(groupKey)
 	sc.mu.Lock()
@@ -157,22 +202,30 @@ func CacheSignatureBestEffort(ctx context.Context, modelName, text, signature st
 	return true
 }
 
-// GetCachedSignature retrieves a cached signature for a given model group and text.
-// Returns empty string if not found or expired.
+// GetCachedSignature retrieves a legacy, unscoped signature for compatibility callers.
 func GetCachedSignature(modelName, text string) string {
-	signature, errSignature := GetCachedSignatureRequired(context.Background(), modelName, text)
+	signature, errSignature := getCachedSignatureRequired(context.Background(), modelName, text, true)
 	if errSignature != nil {
 		return ""
 	}
 	return signature
 }
 
-// GetCachedSignatureRequired retrieves a cached signature for request-time paths.
+// GetCachedSignatureRequired retrieves a scoped signature for request-time paths.
 func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (string, error) {
-	groupKey := GetModelGroup(modelName)
+	return getCachedSignatureRequired(ctx, modelName, text, false)
+}
+
+func getCachedSignatureRequired(ctx context.Context, modelName, text string, allowLegacyScope bool) (string, error) {
+	scope, scopeBound := signatureCacheScope(ctx)
+	modelGroup := GetModelGroup(modelName)
+	if scopeBound && scope == "" && !allowLegacyScope {
+		return "", nil
+	}
+	groupKey := signatureCacheGroupKey(modelName, scope)
 
 	if text == "" {
-		if groupKey == "gemini" {
+		if modelGroup == "gemini" {
 			return "skip_thought_signature_validator", nil
 		}
 		return "", nil
@@ -182,13 +235,13 @@ func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (st
 		if errClient != nil {
 			return "", errClient
 		}
-		key := signatureKVKey(modelName, text)
+		key := signatureKVKeyScoped(modelName, scope, text)
 		raw, found, errGet := client.KVGet(ctx, key)
 		if errGet != nil {
 			return "", errGet
 		}
 		if !found {
-			if groupKey == "gemini" {
+			if modelGroup == "gemini" {
 				return "skip_thought_signature_validator", nil
 			}
 			return "", nil
@@ -201,7 +254,7 @@ func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (st
 
 	val, ok := signatureCache.Load(groupKey)
 	if !ok {
-		if groupKey == "gemini" {
+		if modelGroup == "gemini" {
 			return "skip_thought_signature_validator", nil
 		}
 		return "", nil
@@ -216,7 +269,7 @@ func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (st
 	entry, exists := sc.entries[textHash]
 	if !exists {
 		sc.mu.Unlock()
-		if groupKey == "gemini" {
+		if modelGroup == "gemini" {
 			return "skip_thought_signature_validator", nil
 		}
 		return "", nil
@@ -224,7 +277,7 @@ func GetCachedSignatureRequired(ctx context.Context, modelName, text string) (st
 	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
-		if groupKey == "gemini" {
+		if modelGroup == "gemini" {
 			return "skip_thought_signature_validator", nil
 		}
 		return "", nil
@@ -248,7 +301,13 @@ func ClearSignatureCache(modelName string) {
 		return
 	}
 	groupKey := GetModelGroup(modelName)
-	signatureCache.Delete(groupKey)
+	signatureCache.Range(func(key, _ any) bool {
+		cacheKey, ok := key.(string)
+		if ok && (cacheKey == groupKey || strings.HasSuffix(cacheKey, "\x00"+groupKey)) {
+			signatureCache.Delete(key)
+		}
+		return true
+	})
 }
 
 // DeleteCachedSignatureRequired removes one exact cached signature.
@@ -256,14 +315,18 @@ func DeleteCachedSignatureRequired(ctx context.Context, modelName, text string) 
 	if text == "" {
 		return nil
 	}
+	scope, scopeBound := signatureCacheScope(ctx)
+	if scopeBound && scope == "" {
+		return nil
+	}
 	if client, homeMode, errClient := currentSignatureKVClient(); homeMode {
 		if errClient != nil {
 			return errClient
 		}
-		_, errDel := client.KVDel(ctx, signatureKVKey(modelName, text))
+		_, errDel := client.KVDel(ctx, signatureKVKeyScoped(modelName, scope, text))
 		return errDel
 	}
-	groupKey := GetModelGroup(modelName)
+	groupKey := signatureCacheGroupKey(modelName, scope)
 	textHash := hashText(text)
 	val, ok := signatureCache.Load(groupKey)
 	if !ok {
@@ -297,7 +360,16 @@ func GetModelGroup(modelName string) string {
 }
 
 func signatureKVKey(modelName, text string) string {
-	return fmt.Sprintf("cpa:signature:%s:%s", GetModelGroup(modelName), homekv.HashKeyPart(text))
+	return signatureKVKeyScoped(modelName, "", text)
+}
+
+func signatureKVKeyScoped(modelName, scope, text string) string {
+	parts := []string{"cpa:signature"}
+	if scope = strings.TrimSpace(scope); scope != "" {
+		parts = append(parts, homekv.HashKeyPart(scope))
+	}
+	parts = append(parts, GetModelGroup(modelName), homekv.HashKeyPart(text))
+	return strings.Join(parts, ":")
 }
 
 var signatureCacheEnabled atomic.Bool

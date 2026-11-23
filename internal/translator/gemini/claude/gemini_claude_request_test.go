@@ -11,6 +11,49 @@ import (
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 )
 
+func TestConvertClaudeRequestToGemini_ToolUseWithoutInputDefaultsToEmptyObject(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "toolu_1", "name": "get_time"}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "toolu_1", "content": "12:00"}
+				]
+			}
+		]
+	}`)
+
+	output, errConvert := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
+	}
+
+	contents := ojson.GetBytesNoCopy(output, "contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents count = %d, want 2; output=%s", len(contents), output)
+	}
+	functionCall := contents[0].Get("parts.0.functionCall")
+	if functionCall.Get("id").String() != "toolu_1" || functionCall.Get("name").String() != "get_time" {
+		t.Fatalf("functionCall = %s, want id toolu_1 and name get_time", functionCall.Raw)
+	}
+	if functionCall.Get("args").Raw != `{}` {
+		t.Fatalf("functionCall.args = %s, want {}", functionCall.Get("args").Raw)
+	}
+	functionResponse := contents[1].Get("parts.0.functionResponse")
+	if functionResponse.Get("id").String() != "toolu_1" {
+		t.Fatalf("functionResponse = %s, want id toolu_1", functionResponse.Raw)
+	}
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(output); errPairing != nil {
+		t.Fatalf("translated tool history is invalid: %v; output=%s", errPairing, output)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",

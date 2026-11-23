@@ -13,13 +13,115 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
+
+type antigravityPreparedRequest struct {
+	model              helps.AntigravityRequestModel
+	auth               *cliproxyauth.Auth
+	token              string
+	originalPayload    []byte
+	originalTranslated []byte
+	translated         []byte
+	cooldownRejected   bool
+}
+
+func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string, stream, countTokens bool) (antigravityPreparedRequest, error) {
+	source := opts.OriginalRequest
+	if len(source) == 0 {
+		source = req.Payload
+	}
+	from, to := opts.SourceFormat, sdktranslator.FormatAntigravity
+	prepared := antigravityPreparedRequest{auth: auth}
+	useCredits := !countTokens && antigravityShouldBypassShortCooldown(ctx, e.cfg)
+	rejectCooldown := func(model string, err error) error {
+		prepared.cooldownRejected = true
+		if model != baseModel {
+			return cliproxyauth.RejectAntigravityTarget(err)
+		}
+		return err
+	}
+	translate := func(credential *cliproxyauth.Auth) error {
+		translateCtx := cache.WithSignatureCacheScope(ctx, antigravitySignatureCacheScope(credential))
+		model := helps.SelectAntigravityRequestModel(translateCtx, e.cfg, credential, req.Model, baseModel, from.String(), source, countTokens)
+		if model.ID != baseModel {
+			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, credential, model.ID, time.Now(), useCredits); errCooldown != nil {
+				return rejectCooldown(model.ID, errCooldown)
+			}
+		}
+		if errCooldown := e.checkAntigravityRequestCooldown(ctx, credential, model.ID, countTokens); errCooldown != nil {
+			return rejectCooldown(model.ID, errCooldown)
+		}
+		original, errValidate := validateAntigravityRequestSignatures(translateCtx, model.ID, from, source)
+		if errValidate != nil {
+			return errValidate
+		}
+		prepared.model, prepared.originalPayload = model, original
+		envelope := sdktranslator.RequestEnvelope{Format: from, Model: model.ID, Body: original, Stream: stream, ModelInfo: model.TranslationModelInfo(req, baseModel, from)}
+		if countTokens {
+			translated := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(translateCtx, opts.Headers, e.cfg, from, to, envelope)
+			if translated.Err != nil {
+				return translated.Err
+			}
+			prepared.translated = translated.Body
+			prepared.originalTranslated = append([]byte(nil), translated.Body...)
+			return nil
+		}
+		var errTranslate error
+		prepared.originalTranslated, prepared.translated, errTranslate = helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(translateCtx, opts.Headers, e.cfg, from, to, envelope, original, original)
+		return errTranslate
+	}
+	// A translation refusal must precede token refresh and any upstream request.
+	if errTranslate := translate(auth); errTranslate != nil {
+		return prepared, errTranslate
+	}
+	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
+	if errToken != nil {
+		return antigravityPreparedRequest{}, errToken
+	}
+	if updatedAuth != nil {
+		// A changed catalog identity, exclusion policy, or signature scope invalidates this attempt's snapshot.
+		if !cliproxyauth.SameAntigravityModelCatalogScope(auth, updatedAuth) || antigravitySignatureCacheScope(auth) != antigravitySignatureCacheScope(updatedAuth) {
+			if errTranslate := translate(updatedAuth); errTranslate != nil {
+				return prepared, errTranslate
+			}
+		} else if prepared.model.ID != baseModel {
+			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, updatedAuth, prepared.model.ID, time.Now(), useCredits); errCooldown != nil {
+				err := rejectCooldown(prepared.model.ID, errCooldown)
+				return prepared, err
+			}
+		}
+		prepared.auth = updatedAuth
+	}
+	prepared.token = token
+	if prepared.model.ID != baseModel {
+		cliproxyexecutor.SetUpstreamAttemptModel(ctx, prepared.model.ID)
+	}
+	return prepared, nil
+}
+
+func (e *AntigravityExecutor) checkAntigravityRequestCooldown(ctx context.Context, auth *cliproxyauth.Auth, model string, countTokens bool) error {
+	if antigravityCoolingDisabled(auth, e.cfg) {
+		return nil
+	}
+	inCooldown, remaining, errCooldown := antigravityIsInShortCooldownRequired(ctx, auth, model, time.Now())
+	if errCooldown != nil {
+		return homeKVUnavailableStatusErr(errCooldown)
+	}
+	if inCooldown && (countTokens || !antigravityShouldBypassShortCooldown(ctx, e.cfg)) {
+		log.Debugf("antigravity executor: auth %s in short cooldown for model %s (%s remaining), returning 429 to switch auth", antigravityAuthID(auth), model, remaining)
+		return statusErr{code: http.StatusTooManyRequests, msg: fmt.Sprintf("auth in short cooldown, %s remaining", remaining), retryAfter: &remaining}
+	}
+	return nil
+}
 
 func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, payload []byte, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, error) {
 	doc := ojson.NewDoc(payload)
@@ -28,6 +130,11 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 }
 
 func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliproxyauth.Auth, token, modelName string, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, error) {
+	selection := cliproxyauth.SelectAntigravityModel(ctx, auth, modelName, "", e.cfg)
+	return e.buildRequestForModelDoc(ctx, auth, token, selection, doc, stream, alt, baseURL, derivedSessionIDs...)
+}
+
+func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth *cliproxyauth.Auth, token string, selection cliproxyauth.AntigravityModelSelection, doc *ojson.Doc, stream bool, alt, baseURL string, derivedSessionIDs ...string) (*http.Request, []byte, error) {
 	if token == "" {
 		return nil, nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
@@ -62,13 +169,17 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	if errProject != nil {
 		return nil, nil, errProject
 	}
-	geminiToAntigravityDocForAuth(doc, modelName, projectID, antigravityAuthID(auth), derivedSessionIDs...)
+	modelName := selection.ID
+	isAgent := geminiToAntigravityDocForAuth(doc, selection, projectID, auth, derivedSessionIDs...)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
 	lowerModel := strings.ToLower(modelName)
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 
-	// Cap maxOutputTokens to model's max_completion_tokens from registry
-	if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
+	// A matched variant uses the output limit from the same catalog as its ID and enum.
+	if selection.MaxOutputTokens > 0 {
+		_ = doc.Set("request.generationConfig.maxOutputTokens", selection.MaxOutputTokens)
+	} else if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
 		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
 		if modelInfo == nil && lowerModel != modelName {
 			modelInfo = registry.LookupModelInfo(lowerModel, "antigravity")
@@ -76,10 +187,19 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
 				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+				if isClaudeModel {
+					for _, budgetPath := range []string{
+						"request.generationConfig.thinkingConfig.thinkingBudget",
+						"request.generationConfig.thinkingConfig.thinking_budget",
+					} {
+						if budget := doc.Get(budgetPath); budget.Exists() && budget.Int() >= int64(modelInfo.MaxCompletionTokens) {
+							_ = doc.Set(budgetPath, modelInfo.MaxCompletionTokens-1)
+						}
+					}
+				}
 			}
 		}
 	}
-	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
@@ -87,13 +207,19 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		if !promptStructuredOutput && !antigravityToolChoiceModeIsNoneDoc(doc) {
 			_ = doc.Set("request.toolConfig.functionCallingConfig.mode", "VALIDATED")
 		}
-	} else {
+	} else if selection.MaxOutputTokens == 0 {
 		_ = doc.Delete("request.generationConfig.maxOutputTokens")
 	}
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
 	helps.FinalizePayloadDoc(ctx, doc)
-	finalPayload := doc.Bytes()
+	if isAgent {
+		// A filtered requestType is not reinserted. If a rule explicitly selected
+		// another request type, keep that protocol's serialization unchanged.
+		requestType := doc.Get("requestType")
+		isAgent = !requestType.Exists() || strings.TrimSpace(requestType.String()) == "agent"
+	}
+	finalPayload := helps.SerializeAntigravityPayload(doc, isAgent)
 	var (
 		bodyReader io.Reader = bytes.NewReader(finalPayload)
 		payloadLog []byte
@@ -754,12 +880,6 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
-	doc := ojson.NewDoc(payload)
-	geminiToAntigravityDoc(doc, modelName, projectID, derivedSessionIDs...)
-	return doc.Bytes()
-}
-
 func antigravityAuthID(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -767,14 +887,76 @@ func antigravityAuthID(auth *cliproxyauth.Auth) string {
 	return strings.TrimSpace(auth.ID)
 }
 
-func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string, derivedSessionIDs ...string) {
-	geminiToAntigravityDocForAuth(doc, modelName, projectID, "", derivedSessionIDs...)
+const (
+	antigravitySignatureGrantScopeMetadataKey   = "cpa_signature_cache_grant"
+	antigravitySignatureGrantBindingMetadataKey = "cpa_signature_cache_grant_binding"
+)
+
+func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	refresh := strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token"))
+	access := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token"))
+	if refresh == "" && access == "" {
+		return ""
+	}
+	return antigravityCredentialScope("grant:", refresh+"\x00"+access)
 }
 
-func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID string, authID string, derivedSessionIDs ...string) {
-	if doc == nil {
-		return
+func antigravitySignatureGrantIdentity(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
 	}
+	if auth.Metadata != nil {
+		retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+		binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
+		if retained != "" && binding != "" && binding == antigravitySignatureGrantBinding(auth) {
+			return retained
+		}
+		if binding := antigravitySignatureGrantBinding(auth); binding != "" {
+			return binding
+		}
+	}
+	return ""
+}
+
+func antigravitySignatureCacheScope(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	scope := strings.TrimSpace(auth.ID)
+	if scope != "" {
+		scope = "id:" + scope
+	} else if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath]); path != "" {
+			scope = "path:" + path
+		} else if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); source != "" {
+			scope = "source:" + source
+		}
+	}
+	grantIdentity := antigravitySignatureGrantIdentity(auth)
+	if grantIdentity == "" {
+		return ""
+	}
+	scope += "\x00" + grantIdentity
+	if auth.Metadata != nil {
+		if projectID, ok := auth.Metadata["project_id"].(string); ok {
+			if projectID = strings.TrimSpace(projectID); projectID != "" {
+				scope += "\x00" + projectID
+			}
+		}
+	}
+	return scope
+}
+
+// geminiToAntigravityDocForAuth builds the upstream envelope and reports whether
+// it used the agent protocol.
+func geminiToAntigravityDocForAuth(doc *ojson.Doc, selection cliproxyauth.AntigravityModelSelection, projectID string, auth *cliproxyauth.Auth, derivedSessionIDs ...string) bool {
+	if doc == nil {
+		return false
+	}
+	modelName := selection.ID
 	helps.SetStringIfDifferentDoc(doc, "model", modelName)
 	helps.SetStringIfDifferentDoc(doc, "userAgent", "antigravity")
 
@@ -795,7 +977,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 		_ = doc.Delete("project")
 	}
 
-	authID = strings.TrimSpace(authID)
+	authID := antigravityAuthID(auth)
 	incomingSessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
 	derivedSessionID := ""
 	if len(derivedSessionIDs) > 0 {
@@ -813,7 +995,6 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
 		}
 	default:
-		_ = doc.Set("requestId", generateRequestID())
 		var sessionID string
 		if authID != "" {
 			if derivedSessionID != "" || incomingSessionID != "" {
@@ -829,6 +1010,11 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 			sessionID = generateStableSessionIDDocForAuth(doc, authID)
 		}
 		_ = doc.Set("request.sessionId", sessionID)
+		if reqType == "agent" {
+			helps.ApplyAntigravityAgentEnvelope(doc, auth, sessionID, modelName, selection.Enum)
+		} else {
+			_ = doc.Set("requestId", "agent-"+uuid.NewString())
+		}
 	}
 
 	_ = doc.Delete("request.safetySettings")
@@ -836,6 +1022,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 		_ = doc.SetRawBytes("request.toolConfig", []byte(toolConfig.Raw))
 		_ = doc.Delete("toolConfig")
 	}
+	return !isImageModel && reqType == "agent"
 }
 
 func scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID string) string {
@@ -843,10 +1030,6 @@ func scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSession
 		return derivedSessionID
 	}
 	return helps.ScopeAntigravitySessionIDForAuth(authID, incomingSessionID)
-}
-
-func generateRequestID() string {
-	return "agent-" + uuid.NewString()
 }
 
 func generateImageGenRequestID() string {

@@ -529,6 +529,9 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			reporter.ObserveResponseModel(line)
 			rawPayload := helps.JSONPayload(line)
+			if len(rawPayload) > 0 && len(pendingFilterPayload) > 0 && !ojson.ValidBytes(rawPayload) {
+				continue
+			}
 			if len(rawPayload) > 0 && len(pendingFilterPayload) > 0 {
 				flushed := pendingFilterPayload
 				pendingFilterPayload = nil
@@ -577,7 +580,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			return
 		}
-		if len(pendingFilterPayload) > 0 {
+		if scanner.Err() == nil && len(pendingFilterPayload) > 0 {
 			if !guardAndEmitPayload(pendingFilterPayload) {
 				return
 			}

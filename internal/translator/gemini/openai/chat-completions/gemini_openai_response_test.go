@@ -772,6 +772,30 @@ func TestConvertGeminiResponseToOpenAI_SkipsThoughtInlineDataImages(t *testing.T
 	})
 }
 
+func TestConvertGeminiResponseToOpenAI_FunctionCallWithoutArgsUsesEmptyObject(t *testing.T) {
+	upstream := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_time"}}]},"finishReason":"STOP"}]}`)
+
+	t.Run("streaming", func(t *testing.T) {
+		var param any
+		outputs := ConvertGeminiResponseToOpenAI(context.Background(), "gemini-2.5-flash", nil, nil, upstream, &param)
+		if len(outputs) != 1 {
+			t.Fatalf("output count = %d, want 1", len(outputs))
+		}
+		arguments := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.arguments")
+		if arguments.Type != ojson.String || arguments.String() != "{}" {
+			t.Fatalf("function.arguments = %s, want JSON string %q; payload=%s", arguments.Raw, "{}", outputs[0])
+		}
+	})
+
+	t.Run("non-streaming", func(t *testing.T) {
+		output := ConvertGeminiResponseToOpenAINonStream(context.Background(), "gemini-2.5-flash", nil, nil, upstream, nil)
+		arguments := ojson.GetBytesNoCopy(output, "choices.0.message.tool_calls.0.function.arguments")
+		if arguments.Type != ojson.String || arguments.String() != "{}" {
+			t.Fatalf("function.arguments = %s, want JSON string %q; payload=%s", arguments.Raw, "{}", output)
+		}
+	})
+}
+
 func BenchmarkConvertGeminiResponseToOpenAI_TextDelta(b *testing.B) {
 	request := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"` + strings.Repeat("x", 1024*1024) + `"}]}`)
 	delta := []byte(`{"candidates":[{"content":{"parts":[{"text":"token "}]}}],"modelVersion":"gemini-2.5-flash","responseId":"resp_bench"}`)
