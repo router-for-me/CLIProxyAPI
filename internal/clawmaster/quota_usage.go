@@ -20,7 +20,9 @@ import (
 const (
 	// ClaudeOAuthUsageEndpoint reports the limits for the authenticated Claude
 	// subscription. Authentication is deliberately left to the request callback.
-	ClaudeOAuthUsageEndpoint = "https://api.anthropic.com/api/oauth/usage"
+	// cedar_ember=1 adds the account's banked limit resets (its cedar_ember block),
+	// as Claude Code asks for them.
+	ClaudeOAuthUsageEndpoint = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
 
 	claudeQuotaDefaultTimeout = 10 * time.Second
 	claudeQuotaMaxBodyBytes   = 64 << 10
