@@ -189,7 +189,7 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	// 7. Special base models that default to bare name unless specific variant requested
 	switch canonicalBase {
 	case "swe-1-7":
-		if effort == "medium" {
+		if thinking.ClampLevel(thinking.ThinkingLevel(effort), modelInfo, "devin") == thinking.LevelMedium {
 			return "swe-1-7-medium"
 		}
 		return "swe-1-7"
