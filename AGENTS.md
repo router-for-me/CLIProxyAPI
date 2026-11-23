@@ -4,6 +4,7 @@ Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with 
 
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
+- This checkout is the fork https://github.com/iRedSC/CLIProxyAPI (remote `fork`; `origin` is upstream). NEVER open pull requests, issues, or pushes against upstream `router-for-me/CLIProxyAPI`; this includes the translator-issue rule below. Target `iRedSC/CLIProxyAPI` `main` only. Pass `--repo iRedSC/CLIProxyAPI` to `gh`, because its default may resolve to upstream.
 
 ## Commands
 ```bash

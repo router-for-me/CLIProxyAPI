@@ -71,6 +71,7 @@ func validateStartupConfig(data []byte, optional bool) (*startupConfig, error) {
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.DisableCooling = false
 	cfg.SaveCooldownStatus = false
+	cfg.RestartFiveHourWindow = true
 	cfg.TransientErrorCooldownSeconds = 0
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.WebsocketAuth = true
