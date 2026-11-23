@@ -119,6 +119,33 @@ func readServerTunnelBinary(t *testing.T, conn *websocket.Conn) wstunnel.DataFra
 	return view
 }
 
+// awaitTunnelServer reads a client's initial server_list and expects exactly the one server named.
+// A dial returns at the websocket upgrade, before the hub commits the peer, so the client may
+// commit first; the hub then announces the server as the client's next server_online instead.
+// Either way the client learns it exactly once, and no other server may appear.
+func awaitTunnelServer(t *testing.T, conn *websocket.Conn, uuid, serverType string) {
+	t.Helper()
+	list := readServerTunnelJSON(t, conn)
+	if list.Get("type").String() != wstunnel.ControlTypeServerList {
+		t.Fatalf("unexpected initial server_list: %s", list.Raw)
+	}
+	switch list.Get("servers.#").Int() {
+	case 1:
+		if list.Get("servers.0.uuid").String() != uuid || list.Get("servers.0.type").String() != serverType {
+			t.Fatalf("unexpected initial server_list: %s", list.Raw)
+		}
+	case 0:
+		online := readServerTunnelJSON(t, conn)
+		if online.Get("type").String() != wstunnel.ControlTypeServerOnline ||
+			online.Get("server.uuid").String() != uuid ||
+			online.Get("server.type").String() != serverType {
+			t.Fatalf("initial server_list was empty and the next event is not %s coming online: %s", uuid, online.Raw)
+		}
+	default:
+		t.Fatalf("unexpected initial server_list: %s", list.Raw)
+	}
+}
+
 func TestServerWebsocketTunnel_EndToEndAndTenantIsolation(t *testing.T) {
 	cfg := &config.Config{
 		SDKConfig: config.SDKConfig{
@@ -150,13 +177,7 @@ func TestServerWebsocketTunnel_EndToEndAndTenantIsolation(t *testing.T) {
 	_ = dialServerTunnelWithType(t, httpSrv.URL, "tenant-b", wstunnel.RoleServer, "srv-b1", "Server B1", "cpa-cloud")
 
 	cliA := dialServerTunnel(t, httpSrv.URL, "tenant-a", wstunnel.RoleClient, "cli-a1", "Client A1")
-	initList := readServerTunnelJSON(t, cliA)
-	if initList.Get("type").String() != wstunnel.ControlTypeServerList ||
-		initList.Get("servers.#").Int() != 1 ||
-		initList.Get("servers.0.uuid").String() != "srv-a1" ||
-		initList.Get("servers.0.type").String() != "cpa-desktop" {
-		t.Fatalf("unexpected initial server_list: %s", initList.Raw)
-	}
+	awaitTunnelServer(t, cliA, "srv-a1", "cpa-desktop")
 
 	srvA2 := dialServerTunnelWithType(t, httpSrv.URL, "tenant-a", wstunnel.RoleServer, "srv-a2", "Server A2", "build-runner")
 	online := readServerTunnelJSON(t, cliA)
@@ -368,7 +389,8 @@ func TestServerWebsocketTunnel_HotReloadRevokesRemovedKeyOnly(t *testing.T) {
 
 	srvKeep := dialServerTunnel(t, httpSrv.URL, "key-keep", wstunnel.RoleServer, "s-keep", "Keep Server")
 	cliKeep := dialServerTunnel(t, httpSrv.URL, "key-keep", wstunnel.RoleClient, "c-keep", "Keep Client")
-	_ = readServerTunnelJSON(t, cliKeep)
+	// The data frame below is only routable once s-keep has committed.
+	awaitTunnelServer(t, cliKeep, "s-keep", "default-server")
 
 	cliRevoke := dialServerTunnel(t, httpSrv.URL, "key-revoke", wstunnel.RoleClient, "c-revoke", "Revoke Client")
 	_ = readServerTunnelJSON(t, cliRevoke)
