@@ -29,6 +29,8 @@ type RoutingStatus struct {
 	Strategy               string                 `json:"strategy"`
 	Provider               string                 `json:"provider"`
 	Model                  string                 `json:"model"`
+	Pool                   string                 `json:"pool,omitempty"`
+	Pools                  []RoutingPool          `json:"pools,omitempty"`
 	GeneratedAt            time.Time              `json:"generated_at"`
 	PredictionScope        string                 `json:"prediction_scope"`
 	NextAuthIndex          string                 `json:"next_auth_index,omitempty"`
@@ -42,7 +44,22 @@ type RoutingStatus struct {
 // RoutingStatus is a read-only prediction for a new default HTTP session. It never
 // advances rotation cursors, looks up user sessions, or initiates network calls.
 func (m *Manager) RoutingStatus(ctx context.Context, provider, model string, now time.Time) RoutingStatus {
-	status := RoutingStatus{SchemaVersion: 1, Provider: provider, Model: model, GeneratedAt: now.UTC(), PredictionScope: "new_session", RefreshIntervalSeconds: int(RoutingQuotaRefreshInterval.Seconds()), MaxAgeSeconds: int(RoutingQuotaMaxAge.Seconds()), Accounts: []RoutingAccountStatus{}}
+	return m.RoutingStatusForPool(ctx, provider, model, "", now)
+}
+
+// RoutingStatusForPool ranks accounts by one quota pool from RoutingPools. Without a
+// model or pool, a provider with pools is ranked by its first pool, because none of
+// its windows applies to an unnamed model. Callers validate pool against RoutingPools.
+func (m *Manager) RoutingStatusForPool(ctx context.Context, provider, model, pool string, now time.Time) RoutingStatus {
+	pools := RoutingPools(provider)
+	if pool == "" && model == "" && len(pools) > 0 {
+		pool = pools[0].Key
+	}
+	windowPool, _ := routingPoolWindow(provider, pool)
+	if windowPool == "" {
+		pool = ""
+	}
+	status := RoutingStatus{Pool: pool, Pools: pools, SchemaVersion: 1, Provider: provider, Model: model, GeneratedAt: now.UTC(), PredictionScope: "new_session", RefreshIntervalSeconds: int(RoutingQuotaRefreshInterval.Seconds()), MaxAgeSeconds: int(RoutingQuotaMaxAge.Seconds()), Accounts: []RoutingAccountStatus{}}
 	status.RequestProfile = "default"
 	status.Transport = "http"
 	if cliproxyexecutor.DownstreamWebsocket(ctx) {
@@ -89,7 +106,7 @@ func (m *Manager) RoutingStatus(ctx context.Context, provider, model string, now
 		}
 		a.EnsureIndex()
 		checkModel := m.selectionModelForAuth(a, model)
-		r, w, state, until := s.view(a, checkModel, now)
+		r, w, state, until := s.viewScoped(a, checkModel, windowPool, now)
 		row := RoutingAccountStatus{AuthIndex: a.Index, Priority: authPriority(a), QuotaState: state, Window: w, RefreshError: r.errorCode}
 		if !r.observedAt.IsZero() {
 			observed := r.observedAt.UTC()

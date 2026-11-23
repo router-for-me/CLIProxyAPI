@@ -67,9 +67,24 @@ func (s *SoonestResetSelector) record(a *Auth) routingQuotaRecord {
 	return r
 }
 
+// routingQuotaSupported reports whether the refresh worker can observe the credential's quota.
+func routingQuotaSupported(a *Auth) bool {
+	if a.AuthKind() != AuthKindOAuth {
+		return false
+	}
+	switch a.Provider {
+	case "codex", "claude", "antigravity":
+		return true
+	}
+	return false
+}
+
 func applicableWindow(w RoutingWindow, model string) bool {
 	if w.model == "" {
 		return true
+	}
+	if strings.HasPrefix(w.model, antigravityPoolPrefix) {
+		return antigravityPoolApplies(w.model, model)
 	}
 	model = strings.ToLower(model)
 	if w.model == "opus" || w.model == "sonnet" {
@@ -95,8 +110,44 @@ func normalizeQuotaModel(model string) string {
 	return b.String()
 }
 
+// RoutingPool is a provider quota pool shared by a family of models.
+type RoutingPool struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+}
+
+// RoutingPools lists the pools a provider meters per model family, in display order.
+// Providers whose quota applies to every model have none.
+func RoutingPools(provider string) []RoutingPool {
+	if provider != "antigravity" {
+		return nil
+	}
+	pools := make([]RoutingPool, 0, len(antigravityRoutingPools))
+	for _, p := range antigravityRoutingPools {
+		pools = append(pools, p.RoutingPool)
+	}
+	return pools
+}
+
+// routingPoolWindow maps a public pool key to the window pool it selects.
+func routingPoolWindow(provider, pool string) (string, bool) {
+	if provider == "antigravity" {
+		for _, p := range antigravityRoutingPools {
+			if p.Key == pool {
+				return p.window, true
+			}
+		}
+	}
+	return "", false
+}
+
 func (s *SoonestResetSelector) view(a *Auth, model string, now time.Time) (routingQuotaRecord, *RoutingWindow, string, time.Time) {
-	if a.AuthKind() != AuthKindOAuth || (a.Provider != "codex" && a.Provider != "claude") {
+	return s.viewScoped(a, model, "", now)
+}
+
+// viewScoped reads one window pool instead of the windows that apply to model when pool is set.
+func (s *SoonestResetSelector) viewScoped(a *Auth, model, pool string, now time.Time) (routingQuotaRecord, *RoutingWindow, string, time.Time) {
+	if !routingQuotaSupported(a) {
 		return routingQuotaRecord{}, nil, "unsupported", time.Time{}
 	}
 	r := s.record(a)
@@ -113,21 +164,19 @@ func (s *SoonestResetSelector) view(a *Auth, model string, now time.Time) (routi
 	var selected *RoutingWindow
 	var blockedUntil time.Time
 	expired := false
-	// Codex named pools are independent of the default request pool.
-	namedCodexPool := false
-	if a.Provider == "codex" {
-		for _, w := range r.windows {
-			if w.model != "" && applicableWindow(w, model) {
-				namedCodexPool = true
-				break
-			}
+	// Codex named pools and Antigravity Gemini sub-pools are independent of the default request pool.
+	namedPool := false
+	for _, w := range r.windows {
+		if pool == "" && isNamedQuotaPool(a.Provider, w) && applicableWindow(w, model) {
+			namedPool = true
+			break
 		}
 	}
 	for _, window := range r.windows {
-		if namedCodexPool && window.model == "" {
+		if namedPool && isDefaultQuotaPool(a.Provider, window) {
 			continue
 		}
-		if !applicableWindow(window, model) {
+		if (pool != "" && window.model != pool) || (pool == "" && !applicableWindow(window, model)) {
 			continue
 		}
 		if !window.ResetsAt.After(now) {
@@ -150,6 +199,26 @@ func (s *SoonestResetSelector) view(a *Auth, model string, now time.Time) (routi
 		return r, nil, "missing", blockedUntil
 	}
 	return r, selected, "fresh", blockedUntil
+}
+
+func isNamedQuotaPool(provider string, w RoutingWindow) bool {
+	switch provider {
+	case "codex":
+		return w.model != ""
+	case "antigravity":
+		return strings.HasPrefix(w.model, antigravityGeminiPool+"-")
+	}
+	return false
+}
+
+func isDefaultQuotaPool(provider string, w RoutingWindow) bool {
+	switch provider {
+	case "codex":
+		return w.model == ""
+	case "antigravity":
+		return w.model == antigravityGeminiPool
+	}
+	return false
 }
 
 func (s *SoonestResetSelector) viewForRequest(ctx context.Context, a *Auth, model string, now time.Time) (routingQuotaRecord, *RoutingWindow, string, time.Time) {

@@ -38,6 +38,16 @@ A Claude window with null reset and zero or null
 utilization has not started and is omitted. A null optional Codex named pool is
 also omitted. Other Claude usage groups are not interpreted.
 
+Antigravity meters model families in pools, read from `retrieveUserQuotaSummary`.
+The bucket ID names the pool: `3p-*` is shared by Claude and GPT models,
+`gemini-5h`/`gemini-weekly` by every `gemini-*` model, and a separate
+`gemini-<name>-*` bucket (for example Argon) by models with that name, which then
+ignore the shared Gemini buckets. Unknown pools are ignored, and models outside
+every pool have unknown quota. A bucket's remaining fraction becomes used percent;
+none left blocks its pool until reset. Disabled buckets and full buckets without
+a reset are omitted. A missing fraction, unknown window or invalid reset makes the
+snapshot malformed.
+
 Only finite, nonnegative numeric utilization, valid reset timestamps and bounded
 window lengths are accepted. Missing, malformed, future-dated observations,
 observations older than 15 minutes, elapsed resets and unsupported providers fall
@@ -56,6 +66,11 @@ A service-owned worker runs without the dashboard. It probes enabled OAuth
 credentials at `https://chatgpt.com/backend-api/wham/usage` for Codex and
 `https://api.anthropic.com/api/oauth/usage` for Claude. Original ChatGPT OAuth
 credentials authenticate Codex probes, including accounts with nested SIWC.
+Antigravity probes `POST /v1internal:retrieveUserQuotaSummary` with the
+credential's `project_id` on the host its inference uses (`base_url`, otherwise
+the daily host); other hosts can meter the same account differently. Its executor
+refreshes expiring tokens inside a request, so a token within five minutes of
+expiry, or without a known expiry, is reported as `token_expiring` and not probed.
 Existing executor transports supply headers, proxies and TLS behavior.
 
 Every account is due at startup and after five minutes. A 30-second discovery
@@ -117,6 +132,12 @@ are `fresh`, `missing`, `stale`, `malformed`, `expired` and `unsupported`.
 `refresh_error`, when present, is a fixed diagnostic code, never an upstream body.
 `fallback_reason` is `quota_unavailable` when the predicted account has unknown
 quota, or `no_eligible_accounts` when the pool cannot serve the request.
+
+Providers with model pools list them in `pools` (`key` and `label`); Antigravity
+has `gemini` and `claude-gpt`. Without a model their status ranks one pool and
+names it in `pool`: the optional `pool` parameter, or the first listed pool.
+A `pool` that the provider does not list, or one sent with `model`, returns 400.
+Other providers omit both fields.
 
 Other selectors return `strategy_not_predictable` without a next prediction.
 Home or a plugin scheduler reports `home_authoritative` or `plugin_scheduler`

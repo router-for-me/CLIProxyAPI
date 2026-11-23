@@ -517,3 +517,263 @@ func TestSoonestResetCodexNamedPoolDoesNotUseDefaultQuota(t *testing.T) {
 		t.Fatalf("wrong active quota window %+v", w)
 	}
 }
+
+func antigravityRoutingTestAuth(id string, now time.Time) *Auth {
+	a := routingTestAuth(id)
+	a.Provider = "antigravity"
+	a.Metadata["project_id"] = "test-project"
+	a.Metadata["expired"] = now.Add(time.Hour).Format(time.RFC3339)
+	return a
+}
+
+func TestRoutingQuotaAntigravityParserContracts(t *testing.T) {
+	now := time.Date(2026, 10, 21, 10, 16, 4, 0, time.UTC)
+	// Shape of a reported retrieveUserQuotaSummary payload: untouched 3p buckets carry a rolling reset.
+	observed := `{"groups":[{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1,"resetTime":"2026-10-21T15:16:05Z"},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-10-28T10:16:05Z"}]},{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":0.848104,"resetTime":"2026-10-21T13:29:53Z","description":"You have used some of your 5-hour limit"},{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.9620177,"resetTime":"2026-10-28T08:29:53Z"}]},{"displayName":"Gemini 4 Argon","buckets":[{"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0,"resetTime":"2026-10-24T08:00:00Z"}]}]}`
+	for _, tc := range []struct {
+		name, body string
+		valid      bool
+		count      int
+	}{
+		{"observed", observed, true, 5},
+		{"top-level-buckets", `{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"2026-10-28T10:16:05Z"}]}`, true, 1},
+		{"snake-case", `{"groups":[{"buckets":[{"bucket_id":"gemini-weekly","window":"weekly","remaining_fraction":0.5,"reset_time":"2026-10-28T10:16:05Z"}]}]}`, true, 1},
+		{"full-without-reset", `{"groups":[{"buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1}]}]}`, true, 0},
+		{"disabled-bucket", `{"groups":[{"buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":1,"disabled":true},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0,"resetTime":"2026-10-28T10:16:05Z"}]}]}`, true, 1},
+		{"unknown-pool-ignored", `{"groups":[{"buckets":[{"bucketId":"credits-monthly","window":"other"},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"2026-10-28T10:16:05Z"}]}]}`, true, 1},
+		{"overfull-clamped", `{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":1.2,"resetTime":"2026-10-28T10:16:05Z"}]}`, true, 1},
+		{"used-without-reset", `{"groups":[{"buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":0.4}]}]}`, false, 0},
+		{"missing-fraction", `{"groups":[{"buckets":[{"bucketId":"gemini-weekly","window":"weekly","resetTime":"2026-10-28T10:16:05Z"}]}]}`, false, 0},
+		{"string-fraction", `{"groups":[{"buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":"0.5","resetTime":"2026-10-28T10:16:05Z"}]}]}`, false, 0},
+		{"unknown-window", `{"groups":[{"buckets":[{"bucketId":"gemini-weekly","window":"fortnight","remainingFraction":0.5,"resetTime":"2026-10-28T10:16:05Z"}]}]}`, false, 0},
+		{"invalid-reset", `{"groups":[{"buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"soon"}]}]}`, false, 0},
+		{"distant-reset", `{"groups":[{"buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"2027-01-01T00:00:00Z"}]}]}`, false, 0},
+		{"partly-malformed", `{"groups":[{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"2026-10-28T10:16:05Z"},{"bucketId":"gemini-weekly","window":"weekly"}]}]}`, false, 1},
+		{"groups-not-array", `{"groups":{"buckets":[]}}`, false, 0},
+		{"empty-groups", `{"groups":[]}`, false, 0},
+		{"only-unknown-pools", `{"groups":[{"buckets":[{"bucketId":"credits-monthly","window":"monthly","remainingFraction":0.5}]}]}`, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, valid := parseRoutingQuota("antigravity", []byte(tc.body), now)
+			if valid != tc.valid || len(w) != tc.count {
+				t.Fatalf("windows=%+v valid=%v", w, valid)
+			}
+		})
+	}
+	windows, _ := parseRoutingQuota("antigravity", []byte(observed), now)
+	byKey := make(map[string]RoutingWindow, len(windows))
+	for _, w := range windows {
+		byKey[w.Key] = w
+	}
+	if w := byKey["gemini-5h"]; w.model != antigravityGeminiPool || w.seconds != 18000 || w.UsedPercent < 15.18 || w.UsedPercent > 15.2 || !w.ResetsAt.Equal(time.Date(2026, 10, 21, 13, 29, 53, 0, time.UTC)) {
+		t.Fatalf("gemini-5h=%+v", w)
+	}
+	if w := byKey["3p-weekly"]; w.model != antigravityThirdParty || w.seconds != 604800 || w.UsedPercent != 0 {
+		t.Fatalf("3p-weekly=%+v", w)
+	}
+	if w := byKey["gemini-argon-wtu-weekly"]; w.model != antigravityGeminiPool+"-argon" || w.UsedPercent != 100 {
+		t.Fatalf("argon=%+v", w)
+	}
+}
+
+func TestSoonestResetAntigravityModelPools(t *testing.T) {
+	now := time.Now()
+	s := &SoonestResetSelector{}
+	a := antigravityRoutingTestAuth("pools", now)
+	if _, _, state, _ := s.view(a, "claude-opus-4-6-thinking", now); state != "missing" {
+		t.Fatalf("unobserved Antigravity state=%s", state)
+	}
+	thirdParty := routingTestWindow("3p-5h", now, time.Hour, 100, 18000)
+	thirdParty.model = antigravityThirdParty
+	thirdWeek := routingTestWindow("3p-weekly", now, 72*time.Hour, 40, 604800)
+	thirdWeek.model = antigravityThirdParty
+	gemini := routingTestWindow("gemini-weekly", now, 48*time.Hour, 100, 604800)
+	gemini.model = antigravityGeminiPool
+	argon := routingTestWindow("gemini-argon-wtu-weekly", now, 24*time.Hour, 30, 604800)
+	argon.model = antigravityGeminiPool + "-argon"
+	setRoutingTestQuota(s, a, now, thirdParty, thirdWeek, gemini, argon)
+	for _, tc := range []struct {
+		model   string
+		blocked time.Time
+		window  string
+		state   string
+	}{
+		{"claude-opus-4-6-thinking", thirdParty.ResetsAt, "3p-weekly", "fresh"},
+		{"claude-sonnet-4-6(high)", thirdParty.ResetsAt, "3p-weekly", "fresh"},
+		{"gpt-oss-120b-medium", thirdParty.ResetsAt, "3p-weekly", "fresh"},
+		{"gemini-3-flash", gemini.ResetsAt, "gemini-weekly", "fresh"},
+		{"gemini-4-neon-xhigh", gemini.ResetsAt, "gemini-weekly", "fresh"},
+		// Argon has its own pool, so the exhausted default Gemini pool does not apply.
+		{"gemini-4-argon-high", time.Time{}, "gemini-argon-wtu-weekly", "fresh"},
+		{"tab_flash_lite_preview", time.Time{}, "", "missing"},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			_, w, state, until := s.view(a, tc.model, now)
+			if !until.Equal(tc.blocked) || state != tc.state {
+				t.Fatalf("state=%s until=%v want %s %v", state, until, tc.state, tc.blocked)
+			}
+			if (w == nil) != (tc.window == "") || (w != nil && w.Key != tc.window) {
+				t.Fatalf("window=%+v want %s", w, tc.window)
+			}
+		})
+	}
+	// Stale and expired observations follow the shared semantics.
+	setRoutingTestQuota(s, a, now.Add(-16*time.Minute), thirdWeek)
+	if _, _, state, _ := s.view(a, "claude-opus-4-6-thinking", now); state != "stale" {
+		t.Fatalf("stale state=%s", state)
+	}
+	elapsed := routingTestWindow("3p-5h", now, 0, 100, 18000)
+	elapsed.model = antigravityThirdParty
+	setRoutingTestQuota(s, a, now, elapsed, thirdWeek)
+	if _, _, state, until := s.view(a, "claude-opus-4-6-thinking", now); state != "expired" || !until.IsZero() {
+		t.Fatalf("expired state=%s until=%v", state, until)
+	}
+	// Antigravity API keys and other providers stay outside quota routing.
+	key := antigravityRoutingTestAuth("api-key", now)
+	key.Attributes[AttributeAuthKind] = AuthKindAPIKey
+	if _, _, state, _ := s.view(key, "claude-opus-4-6-thinking", now); state != "unsupported" {
+		t.Fatalf("api key state=%s", state)
+	}
+}
+
+func TestRoutingQuotaAntigravityProbeContract(t *testing.T) {
+	now := time.Now()
+	m := NewManager(nil, &SoonestResetSelector{}, nil)
+	var gotURL, gotBody, gotMethod, gotType string
+	exec := &routingTestExecutor{provider: "antigravity", http: func(ctx context.Context, _ *Auth, r *http.Request) (*http.Response, error) {
+		if _, deadline := ctx.Deadline(); deadline {
+			t.Error("probe set a request deadline")
+		}
+		body, _ := io.ReadAll(r.Body)
+		gotURL, gotBody, gotMethod, gotType = r.URL.String(), string(body), r.Method, r.Header.Get("Content-Type")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"groups":[{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.25,"resetTime":"` + now.Add(24*time.Hour).UTC().Format(time.RFC3339) + `"}]}]}`))}, nil
+	}}
+	m.RegisterExecutor(exec)
+	a := antigravityRoutingTestAuth("probe", now)
+	windows, code := m.fetchRoutingQuota(context.Background(), a)
+	if code != "" || len(windows) != 1 || windows[0].UsedPercent != 75 || exec.refreshes.Load() != 0 {
+		t.Fatalf("probe=%+v code=%s refreshes=%d", windows, code, exec.refreshes.Load())
+	}
+	if gotMethod != http.MethodPost || gotURL != "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary" || gotBody != `{"project":"test-project"}` || gotType != "application/json" {
+		t.Fatalf("request=%s %s %s %s", gotMethod, gotURL, gotBody, gotType)
+	}
+	// Inference and quota share the credential's configured endpoint.
+	a.Attributes["base_url"] = "https://cloudcode-pa.googleapis.com/"
+	delete(a.Metadata, "project_id")
+	if _, code = m.fetchRoutingQuota(context.Background(), a); code != "" || gotURL != "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary" || gotBody != `{}` {
+		t.Fatalf("custom endpoint code=%s url=%s body=%s", code, gotURL, gotBody)
+	}
+	// A token the executor would refresh is never probed.
+	gotURL = ""
+	a.Metadata["expired"] = now.Add(time.Minute).Format(time.RFC3339)
+	if _, code = m.fetchRoutingQuota(context.Background(), a); code != "token_expiring" || gotURL != "" {
+		t.Fatalf("expiring token code=%s url=%s", code, gotURL)
+	}
+	delete(a.Metadata, "expired")
+	if _, code = m.fetchRoutingQuota(context.Background(), a); code != "token_expiring" || gotURL != "" {
+		t.Fatalf("unknown expiry code=%s url=%s", code, gotURL)
+	}
+}
+
+func TestSoonestResetAntigravityRefreshSelectionAndStatus(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	s := &SoonestResetSelector{}
+	m := NewManager(nil, s, nil)
+	reset := func(d time.Duration) string { return now.Add(d).UTC().Format(time.RFC3339) }
+	bodies := map[string]string{
+		"exhausted": `{"groups":[{"buckets":[{"bucketId":"3p-5h","window":"5h","remainingFraction":0,"resetTime":"` + reset(time.Hour) + `"},{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"` + reset(24*time.Hour) + `"}]}]}`,
+		"later":     `{"groups":[{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"` + reset(96*time.Hour) + `"}]}]}`,
+		"sooner":    `{"groups":[{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5,"resetTime":"` + reset(48*time.Hour) + `"}]}]}`,
+		"malformed": `{"groups":[{"buckets":[{"bucketId":"3p-weekly","window":"weekly","remainingFraction":0.5}]}]}`,
+	}
+	m.RegisterExecutor(&routingTestExecutor{provider: "antigravity", http: func(_ context.Context, a *Auth, _ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(bodies[strings.TrimPrefix(a.ID, t.Name()+"-")]))}, nil
+	}})
+	const model = "claude-opus-4-6-thinking"
+	byName := make(map[string]*Auth)
+	for _, name := range []string{"exhausted", "later", "sooner", "malformed"} {
+		id := t.Name() + "-" + name
+		saved, err := m.Register(ctx, antigravityRoutingTestAuth(id, now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		byName[name] = saved
+		registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	m.refreshRoutingQuotas(ctx, now).Wait()
+	got, err := m.SelectAuth(ctx, "antigravity", model, cliproxyexecutor.Options{})
+	if err != nil || got.ID != byName["sooner"].ID {
+		t.Fatalf("selection got=%v err=%v", got, err)
+	}
+	status := m.RoutingStatus(ctx, "antigravity", model, time.Now())
+	if status.Strategy != "soonest-reset-first" || status.NextAuthIndex != byName["sooner"].Index || status.FallbackReason != "" {
+		t.Fatalf("status=%+v", status)
+	}
+	rows := make(map[string]RoutingAccountStatus)
+	for _, row := range status.Accounts {
+		rows[row.AuthIndex] = row
+	}
+	if row := rows[byName["exhausted"].Index]; row.QuotaState != "fresh" || row.SkippedReason != "quota_exhausted" || row.Eligible {
+		t.Fatalf("exhausted row=%+v", row)
+	}
+	if row := rows[byName["later"].Index]; row.QuotaState != "fresh" || row.Rank != 2 || row.Window == nil || row.Window.Key != "3p-weekly" {
+		t.Fatalf("later row=%+v", row)
+	}
+	if row := rows[byName["malformed"].Index]; row.QuotaState != "malformed" || row.RefreshError != "malformed" || row.Rank != 3 {
+		t.Fatalf("malformed row=%+v", row)
+	}
+}
+
+func TestRoutingStatusAntigravityPools(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	s := &SoonestResetSelector{}
+	m := NewManager(nil, s, nil)
+	m.RegisterExecutor(&routingTestExecutor{provider: "antigravity"})
+	var auths []*Auth
+	for _, name := range []string{"a", "b"} {
+		id := t.Name() + "-" + name
+		saved, err := m.Register(ctx, antigravityRoutingTestAuth(id, now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		auths = append(auths, saved)
+		registry.GetGlobalRegistry().RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: "claude-opus-5-5-high"}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	window := func(key, pool string, reset time.Duration, used float64) RoutingWindow {
+		w := routingTestWindow(key, now, reset, used, 604800)
+		w.model = pool
+		return w
+	}
+	// a resets Gemini sooner, b resets Claude/GPT sooner, and b's Gemini pool is spent.
+	setRoutingTestQuota(s, auths[0], now, window("gemini-weekly", antigravityGeminiPool, 24*time.Hour, 10), window("3p-weekly", antigravityThirdParty, 96*time.Hour, 10))
+	setRoutingTestQuota(s, auths[1], now, window("gemini-weekly", antigravityGeminiPool, 48*time.Hour, 100), window("3p-weekly", antigravityThirdParty, 48*time.Hour, 10))
+	rows := func(status RoutingStatus) map[string]RoutingAccountStatus {
+		out := make(map[string]RoutingAccountStatus)
+		for _, row := range status.Accounts {
+			out[row.AuthIndex] = row
+		}
+		return out
+	}
+	gemini := m.RoutingStatus(ctx, "antigravity", "", now)
+	if gemini.Pool != "gemini" || len(gemini.Pools) != 2 || gemini.Pools[0].Key != "gemini" || gemini.Pools[1].Key != "claude-gpt" || gemini.NextAuthIndex != auths[0].Index {
+		t.Fatalf("default pool status=%+v", gemini)
+	}
+	if row := rows(gemini)[auths[1].Index]; row.SkippedReason != "quota_exhausted" || row.Window == nil || row.Window.Key != "gemini-weekly" {
+		t.Fatalf("spent Gemini row=%+v", row)
+	}
+	other := m.RoutingStatusForPool(ctx, "antigravity", "", "claude-gpt", now)
+	if other.Pool != "claude-gpt" || other.NextAuthIndex != auths[1].Index || rows(other)[auths[0].Index].Window.Key != "3p-weekly" {
+		t.Fatalf("claude-gpt status=%+v", other)
+	}
+	// A named model ranks by the windows that apply to it, not by a pool.
+	if byModel := m.RoutingStatus(ctx, "antigravity", "claude-opus-5-5-high", now); byModel.Pool != "" || byModel.NextAuthIndex != auths[1].Index {
+		t.Fatalf("model status=%+v", byModel)
+	}
+	if codex := m.RoutingStatus(ctx, "codex", "", now); codex.Pool != "" || codex.Pools != nil {
+		t.Fatalf("codex status=%+v", codex)
+	}
+}

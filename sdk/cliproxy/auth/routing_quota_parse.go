@@ -16,7 +16,8 @@ func quotaNumber(r ojson.Result) (float64, bool) {
 	return n, !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0
 }
 
-// parseRoutingQuota accepts the documented Codex wham and Claude OAuth usage shapes.
+// parseRoutingQuota accepts the documented Codex wham, Claude OAuth usage and
+// Antigravity retrieveUserQuotaSummary shapes.
 // It never interprets retry-after, billing credits or code-review quota as inference quota.
 func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWindow, bool) {
 	if !ojson.ValidBytes(data) {
@@ -136,6 +137,12 @@ func parseRoutingQuota(provider string, data []byte, now time.Time) ([]RoutingWi
 			}
 			add(legacy, "seven_day_fable", "fable", "utilization", 604800)
 		}
+	} else if provider == "antigravity" {
+		var recognized, bad bool
+		windows, recognized, bad = parseAntigravityRoutingQuota(root, now)
+		// Buckets that are all full, unstarted or disabled are a valid snapshot without deadlines.
+		idle = recognized
+		malformed = malformed || bad
 	}
 	// A partly malformed snapshot cannot establish that all applicable limits are usable.
 	// A valid all-idle response clears an earlier snapshot without inventing a reset.

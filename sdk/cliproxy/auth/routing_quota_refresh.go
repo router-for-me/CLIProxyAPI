@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,7 +63,7 @@ func (m *Manager) refreshRoutingQuotas(ctx context.Context, now time.Time) *sync
 		if ctx.Err() != nil {
 			return pending
 		}
-		if a.Disabled || a.Status == StatusDisabled || a.AuthKind() != AuthKindOAuth || (a.Provider != "codex" && a.Provider != "claude") {
+		if a.Disabled || a.Status == StatusDisabled || !routingQuotaSupported(a) {
 			continue
 		}
 		fingerprint := quotaFingerprint(a)
@@ -118,24 +119,34 @@ func (m *Manager) fetchRoutingQuota(ctx context.Context, a *Auth) ([]RoutingWind
 	if token == "" {
 		return nil, "missing_token"
 	}
-	target := "https://chatgpt.com/backend-api/wham/usage"
-	if a.Provider == "claude" {
+	method, target := http.MethodGet, "https://chatgpt.com/backend-api/wham/usage"
+	var body io.Reader
+	switch a.Provider {
+	case "claude":
 		target = "https://api.anthropic.com/api/oauth/usage"
+	case "antigravity":
+		// The executor refreshes an expiring token inside HttpRequest; probes must not.
+		if !antigravityTokenUsable(a, time.Now()) {
+			return nil, "token_expiring"
+		}
+		method, target = http.MethodPost, antigravityQuotaBaseURL(a)+antigravityQuotaPath
+		body = strings.NewReader(antigravityQuotaBody(a))
 	}
 	// Account usage always authenticates the original ChatGPT OAuth partition,
 	// including credentials that use SIWC for non-Codex inference clients.
 	if a.Provider == "codex" {
 		ctx = WithCodexClientRequest(ctx, true)
 	}
-	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	req, errRequest := http.NewRequestWithContext(ctx, method, target, body)
 	if errRequest != nil {
 		return nil, "request_failed"
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	// The Antigravity executor sets its own User-Agent and bearer token.
 	if a.Provider == "codex" {
 		req.Header.Set("User-Agent", "codex-tui/0.154.0")
-	} else {
+	} else if a.Provider == "claude" {
 		req.Header.Set("User-Agent", "claude-cli/2.1.280 (external, cli)")
 	}
 	if a.Provider == "claude" {
