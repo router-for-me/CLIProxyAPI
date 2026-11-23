@@ -391,6 +391,32 @@ func TestBuildWebSearchCitedTextBlocks_TrimsOverlappingGroundingSupports(t *test
 	}
 }
 
+func TestBuildWebSearchCitedTextBlocks_PreservesTextWithoutChunkURLs(t *testing.T) {
+	textContent := "Hello world. Missing citation segment. Tail sentence."
+
+	blocks := buildWebSearchCitedTextBlocks(textContent, []webSearchGroundingSupport{
+		{
+			StartIndex: 13,
+			EndIndex:   38,
+			Text:       "Missing citation segment.",
+		},
+	})
+
+	var got strings.Builder
+	for _, block := range blocks {
+		got.WriteString(block.Text)
+	}
+	if got.String() != textContent {
+		t.Fatalf("joined text = %q, want %q", got.String(), textContent)
+	}
+	if len(blocks) != 3 || blocks[1].Text != "Missing citation segment." {
+		t.Fatalf("uncited block not preserved: %#v", blocks)
+	}
+	if blocks[1].Citations != nil {
+		t.Fatalf("uncited block citations = %#v, want nil", blocks[1].Citations)
+	}
+}
+
 func sseDataForEvent(t *testing.T, output string, eventName string) string {
 	t.Helper()
 

@@ -394,6 +394,8 @@ func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroun
 				Text:      citedText,
 				Citations: []map[string]any{citation},
 			})
+		} else if citedText != "" {
+			blocks = append(blocks, webSearchCitedTextBlock{Text: citedText})
 		}
 		if support.EndIndex > lastEnd {
 			lastEnd = support.EndIndex
