@@ -197,7 +197,8 @@ Filled in as features land (see the ADRs for design):
     `internal/api/server_management_proxx_usage.go`.
   - Management: `GET /v8/management/proxx/usage/summary`, `GET .../usage/recent`, `DELETE .../usage`.
 - Request log viewer and retention: ADR 0006
-  - `internal/proxx/requestlogs` (directory index, section parser, SSE assembler, usage join plugin
+  - `internal/proxx/requestlogs` (directory index with lazy meta worker and persisted index
+    `proxx-request-logs-index.json` next to the config file, section parser, SSE assembler, usage join plugin
     `proxx-request-logs`, retention, live-tail poller), driven from the `internal/proxx/proxx.go` facade
     (no new upstream hooks). Handlers in `internal/api/handlers/management/requestlogs_proxx.go`, routes in
     `internal/api/server_management_proxx_requestlogs.go`.

@@ -131,6 +131,14 @@ func readMetaReader(r io.Reader) (fileMeta, error) {
 	if !sse && !plain.truncated {
 		meta.tokens.mergeUsage(plain.String())
 	}
+	// Index entries live for the whole process. Clone the strings so they do not keep the
+	// parsed buffers (a request body can be megabytes) alive through substrings.
+	meta.method = strings.Clone(meta.method)
+	meta.path = strings.Clone(meta.path)
+	meta.requestedModel = strings.Clone(meta.requestedModel)
+	meta.servedHeader = strings.Clone(meta.servedHeader)
+	meta.requestID = strings.Clone(meta.requestID)
+	meta.authProvider = strings.Clone(meta.authProvider)
 	return meta, nil
 }
 

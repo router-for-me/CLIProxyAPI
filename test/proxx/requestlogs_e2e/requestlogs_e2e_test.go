@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -48,6 +49,8 @@ type listResponse struct {
 	TotalSizeBytes    int64  `json:"total_size_bytes"`
 	MaxTotalSizeBytes int64  `json:"max_total_size_bytes"`
 	LogDir            string `json:"log_dir"`
+	IndexPending      *int   `json:"index_pending"`
+	IndexTotal        *int   `json:"index_total"`
 }
 
 type attempt struct {
@@ -205,7 +208,8 @@ func TestE2ERequestLogs(t *testing.T) {
 
 	initial := p.list("")
 	wantDir := filepath.Join(authDir, "logs")
-	if !initial.RequestLogEnabled || initial.MaxTotalSizeBytes != 10240*1024*1024 || len(initial.Items) != 0 {
+	if !initial.RequestLogEnabled || initial.MaxTotalSizeBytes != 10240*1024*1024 || len(initial.Items) != 0 ||
+		initial.IndexPending == nil || *initial.IndexPending != 0 || initial.IndexTotal == nil || *initial.IndexTotal != 0 {
 		t.Fatalf("initial list = %+v", initial)
 	}
 	if resolved, _ := filepath.EvalSymlinks(filepath.Dir(initial.LogDir)); resolved != mustEval(t, authDir) || filepath.Base(initial.LogDir) != "logs" {
@@ -488,6 +492,65 @@ func TestE2ERequestLogs(t *testing.T) {
 			t.Fatalf("get cap: %d %s", get.Status, get.Body)
 		}
 		t.Logf("GET cap -> %s", get.Body)
+	})
+
+	mainT := t
+	t.Run("restart keeps the index", func(t *testing.T) {
+		cancel() // close the live stream so the graceful shutdown does not wait for it
+		var before listResponse
+		waitFor(t, 15*time.Second, "index complete before restart", func() bool {
+			before = p.list("")
+			return before.IndexPending != nil && *before.IndexPending == 0 && len(before.Items) > 0
+		})
+		if errSignal := p.cmd.Process.Signal(syscall.SIGTERM); errSignal != nil {
+			t.Fatalf("signal proxy: %v", errSignal)
+		}
+		waitDone := make(chan struct{})
+		go func() {
+			_, _ = p.cmd.Process.Wait()
+			close(waitDone)
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(60 * time.Second):
+			t.Fatal("proxy did not exit on SIGTERM")
+		}
+		indexPath := filepath.Join(dir, "proxx-request-logs-index.json")
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			t.Fatalf("index file not saved on shutdown: %v", err)
+		}
+		var saved struct {
+			Version int    `json:"version"`
+			LogDir  string `json:"log_dir"`
+			Files   []any  `json:"files"`
+		}
+		if err = json.Unmarshal(data, &saved); err != nil || len(saved.Files) != len(before.Items) || saved.LogDir != before.LogDir {
+			t.Fatalf("saved index: err=%v files=%d (want %d) log_dir=%q", err, len(saved.Files), len(before.Items), saved.LogDir)
+		}
+
+		// Bound to the parent test, so the restarted proxy outlives this subtest.
+		p = startProxy(mainT, bin, dir, renderConfig(port, mock.srv.URL, authDir, "  request-logs:\n    max-total-size-mb: 0\n"))
+		p.base = fmt.Sprintf("http://127.0.0.1:%d", port)
+		waitFor(t, 30*time.Second, "proxy up after restart", func() bool {
+			return p.do(http.MethodGet, "/v1/models", nil, nil).Status == http.StatusOK
+		})
+		var after listResponse
+		waitFor(t, 15*time.Second, "index_pending=0 after restart", func() bool {
+			after = p.list("")
+			return after.IndexPending != nil && *after.IndexPending == 0
+		})
+		if *after.IndexTotal != len(before.Items) || len(after.Items) != len(before.Items) || after.TotalSizeBytes != before.TotalSizeBytes {
+			t.Fatalf("after restart: %d rows, index_total %d, total %d; want %d rows, total %d",
+				len(after.Items), *after.IndexTotal, after.TotalSizeBytes, len(before.Items), before.TotalSizeBytes)
+		}
+		for i, r := range after.Items {
+			b := before.Items[i]
+			if r.ID != b.ID || r.Time != b.Time || r.Status != b.Status || r.RequestedModel != b.RequestedModel || r.Stream != b.Stream ||
+				r.Attempts != b.Attempts || r.Error != b.Error || r.SizeBytes != b.SizeBytes {
+				t.Fatalf("row %d changed across restart:\nbefore %+v\nafter  %+v", i, b, r)
+			}
+		}
 	})
 
 	t.Run("delete", func(t *testing.T) {

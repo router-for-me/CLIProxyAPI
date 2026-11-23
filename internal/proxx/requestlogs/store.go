@@ -66,16 +66,23 @@ type Row struct {
 	SizeBytes       int64    `json:"size_bytes"`
 }
 
+// entry is what the index knows about one file. The stat level (name, size, mtime, isLog, settled)
+// is always known; the meta level (meta, hasMeta) is filled lazily by the meta indexer.
 type entry struct {
 	name        string
 	id          string
+	stamp       string // file name timestamp, sorts like time
 	errorPrefix bool
 	size        int64
 	mtime       time.Time
-	meta        fileMeta
-	parsed      bool
-	complete    bool
-	silent      bool
+	// isLog is set when the first line is exactly "=== REQUEST INFO ===".
+	isLog bool
+	// settled is set once the file is non-empty and has not been modified for settleDelay. Settled
+	// files never change (both writers write each file once), so they are not statted again.
+	settled bool
+	meta    fileMeta
+	// hasMeta is set once meta was parsed for the current size and mtime.
+	hasMeta bool
 }
 
 func (e *entry) timeOf() time.Time {
@@ -85,23 +92,62 @@ func (e *entry) timeOf() time.Time {
 	return e.mtime
 }
 
+// pending reports whether the entry still needs its meta parsed. Files still being written wait
+// until they settle.
+func (e *entry) pending() bool {
+	return e.isLog && e.settled && !e.hasMeta
+}
+
+// listed reports whether the entry is shown in the list.
+func (e *entry) listed() bool {
+	return e.isLog && e.hasMeta && e.meta.valid
+}
+
 // Store indexes the request log directory.
 type Store struct {
-	mu       sync.Mutex
-	dir      string
-	maxBytes int64
-	enabled  bool
-	entries  map[string]*entry
-	total    int64
-	scanned  bool
-	subs     map[chan Row]struct{}
-	usage    *usageIndex
-	now      func() time.Time
+	// refreshMu serializes refreshes; it is held while files are read, s.mu is not.
+	refreshMu sync.Mutex
+	mu        sync.Mutex
+	dir       string
+	maxBytes  int64
+	enabled   bool
+	entries   map[string]*entry
+	total     int64
+	scanned   bool
+	// subs maps each live-tail subscriber to the time it subscribed.
+	subs map[chan Row]time.Time
+	// toAnnounce holds the files first seen while a subscriber was listening that are not announced yet.
+	toAnnounce map[string]struct{}
+	usage      *usageIndex
+	now        func() time.Time
+
+	// indexing is set by the first viewer use; until then only the stat refresh runs.
+	indexing bool
+	// backlogDone is set once the worker parsed every pending file; later refreshes parse new files inline.
+	backlogDone bool
+	// gen changes when the directory changes or indexing stops; parse results of an older gen are dropped.
+	gen        uint64
+	workerDone chan struct{}
+
+	// Persistence (index.go).
+	indexPath string
+	loaded    bool
+	dirty     bool
+	lastSave  time.Time
+	// saveFailed is guarded by saveMu.
+	saveFailed bool
+	saveMu     sync.Mutex
 }
 
 // NewStore returns an empty store.
 func NewStore() *Store {
-	return &Store{entries: map[string]*entry{}, subs: map[chan Row]struct{}{}, usage: newUsageIndex(), now: time.Now}
+	return &Store{
+		entries:    map[string]*entry{},
+		subs:       map[chan Row]time.Time{},
+		toAnnounce: map[string]struct{}{},
+		usage:      newUsageIndex(),
+		now:        time.Now,
+	}
 }
 
 // SetClock overrides the clock (tests).
@@ -118,8 +164,13 @@ func (s *Store) Configure(dir string, maxBytes int64, enabled bool) {
 	if dir != s.dir {
 		s.dir = dir
 		s.entries = map[string]*entry{}
+		s.toAnnounce = map[string]struct{}{}
 		s.total = 0
 		s.scanned = false
+		s.backlogDone = false
+		s.loaded = false
+		s.dirty = false
+		s.gen++
 	}
 	s.maxBytes = maxBytes
 	s.enabled = enabled
@@ -140,11 +191,96 @@ func (s *Store) Status() Status {
 	return Status{Enabled: s.enabled, Dir: s.dir, TotalBytes: s.total, MaxTotalBytes: s.maxBytes}
 }
 
-// Refresh rescans the directory, parses new or changed files, enforces retention and
-// notifies subscribers about files that just completed.
+// readMetaFn indexes one file (replaced in tests).
+var readMetaFn = readMetaFile
+
+// firstLineFn reports whether a file starts with the REQUEST INFO line (replaced in tests).
+var firstLineFn = hasRequestLogHeader
+
+// requestLogHeader is the first line of every request log.
+const requestLogHeader = "=== REQUEST INFO ==="
+
+// hasRequestLogHeader reads at most 32 bytes and reports whether the first line is requestLogHeader.
+func hasRequestLogHeader(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() {
+		if errClose := f.Close(); errClose != nil {
+			log.WithError(errClose).Debug("proxx: close request log")
+		}
+	}()
+	buf := make([]byte, 32)
+	n, _ := io.ReadFull(f, buf)
+	head := string(buf[:n])
+	return strings.HasPrefix(head, requestLogHeader+"\n") || strings.HasPrefix(head, requestLogHeader+"\r\n")
+}
+
+// fileState is the part of an entry the unlocked scan needs to decide whether to stat a file.
+type fileState struct {
+	settled bool
+	isLog   bool
+	size    int64
+	mtime   time.Time
+}
+
+// scanItem is one request log file statted by the unlocked scan.
+type scanItem struct {
+	name        string
+	id          string
+	stamp       string
+	errorPrefix bool
+	size        int64
+	mtime       time.Time
+	isLog       bool
+	meta        fileMeta
+	hasMeta     bool
+}
+
+// Refresh runs the stat refresh (directory listing, plus a stat and a first-line check for new or
+// unsettled files), enforces retention, parses new files inline once the meta backlog is done, and
+// notifies subscribers about files that just completed. It never reads request bodies before the
+// first viewer use, and it reads files without holding s.mu.
 func (s *Store) Refresh() {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
+
 	s.mu.Lock()
-	rows := s.refreshLocked()
+	dir := s.dir
+	load := !s.loaded && s.indexPath != ""
+	indexPath := s.indexPath
+	s.loaded = true
+	known := make(map[string]fileState, len(s.entries))
+	for name, e := range s.entries {
+		known[name] = fileState{settled: e.settled, isLog: e.isLog, size: e.size, mtime: e.mtime}
+	}
+	s.mu.Unlock()
+	if dir == "" {
+		return
+	}
+	var persisted map[string]indexRecord
+	if load {
+		persisted = loadIndex(indexPath, dir)
+	}
+
+	items, seen, errScan := scanDir(dir, known, persisted)
+
+	s.mu.Lock()
+	if s.dir != dir {
+		s.mu.Unlock()
+		return
+	}
+	s.applyScanLocked(items, seen, errScan)
+	jobs := s.inlineJobsLocked()
+	gen := s.gen
+	s.mu.Unlock()
+
+	results := parseJobs(dir, jobs, nil)
+
+	s.mu.Lock()
+	s.mergeMetaLocked(gen, results)
+	rows := s.announceLocked()
 	subs := make([]chan Row, 0, len(s.subs))
 	for ch := range s.subs {
 		subs = append(subs, ch)
@@ -158,26 +294,19 @@ func (s *Store) Refresh() {
 			}
 		}
 	}
+	s.saveIndex(false)
 }
 
-func (s *Store) refreshLocked() []Row {
-	if s.dir == "" {
-		return nil
-	}
-	dirEntries, err := os.ReadDir(s.dir)
+// scanDir lists dir and stats the files that are new or not settled yet. It reads at most the first
+// 32 bytes of a file, and nothing when a persisted record matches the file's size and mtime. It takes
+// no locks.
+func scanDir(dir string, known map[string]fileState, persisted map[string]indexRecord) ([]scanItem, map[string]struct{}, error) {
+	dirEntries, err := os.ReadDir(dir)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			log.WithError(err).Debug("proxx: read request log dir")
-		}
-		s.entries = map[string]*entry{}
-		s.total = 0
-		s.scanned = true
-		return nil
+		return nil, nil, err
 	}
-	now := s.now()
-	initial := !s.scanned
 	seen := make(map[string]struct{}, len(dirEntries))
-	var completed []*entry
+	var items []scanItem
 	for _, de := range dirEntries {
 		if de.IsDir() {
 			continue
@@ -188,33 +317,61 @@ func (s *Store) refreshLocked() []Row {
 			continue
 		}
 		seen[name] = struct{}{}
-		e := s.entries[name]
-		if e != nil && e.complete {
+		st, ok := known[name]
+		if ok && st.settled {
 			continue
 		}
 		info, errInfo := de.Info()
 		if errInfo != nil || !info.Mode().IsRegular() {
 			continue
 		}
+		it := scanItem{name: name, id: m[4], stamp: m[3], errorPrefix: m[1] != "", size: info.Size(), mtime: info.ModTime()}
+		rec, okRec := persisted[name]
+		switch {
+		case ok && st.isLog && st.size == it.size && st.mtime.Equal(it.mtime):
+			it.isLog = true
+		case !ok && okRec && rec.Size == it.size && rec.MtimeUnixNano == it.mtime.UnixNano():
+			it.isLog, it.meta, it.hasMeta = true, rec.fileMeta(), true
+		default:
+			it.isLog = firstLineFn(filepath.Join(dir, name))
+		}
+		items = append(items, it)
+	}
+	return items, seen, nil
+}
+
+// applyScanLocked merges a stat scan into the index and enforces retention.
+func (s *Store) applyScanLocked(items []scanItem, seen map[string]struct{}, errScan error) {
+	if errScan != nil {
+		if !os.IsNotExist(errScan) {
+			log.WithError(errScan).Debug("proxx: read request log dir")
+		}
+		s.entries = map[string]*entry{}
+		s.toAnnounce = map[string]struct{}{}
+		s.total = 0
+		s.scanned = true
+		return
+	}
+	now := s.now()
+	for _, it := range items {
+		e := s.entries[it.name]
 		if e == nil {
-			e = &entry{name: name, id: m[4], errorPrefix: m[1] != ""}
-			e.silent = initial && now.Sub(info.ModTime()) >= settleDelay
-			s.entries[name] = e
-		}
-		if !e.parsed || e.size != info.Size() || !e.mtime.Equal(info.ModTime()) {
-			e.size, e.mtime = info.Size(), info.ModTime()
-			meta, errMeta := readMetaFile(filepath.Join(s.dir, name), e.size)
-			if logging.ShortRequestID(meta.requestID) != e.id {
-				meta.requestID = ""
+			e = &entry{name: it.name, id: it.id, stamp: it.stamp, errorPrefix: it.errorPrefix}
+			if s.announceableLocked(it.mtime) {
+				s.toAnnounce[it.name] = struct{}{}
 			}
-			e.meta, e.parsed = meta, errMeta == nil
+			s.entries[it.name] = e
+		} else if e.settled {
+			continue
 		}
-		if e.meta.valid && e.size > 0 && now.Sub(e.mtime) >= settleDelay {
-			e.complete = true
-			if !e.silent {
-				completed = append(completed, e)
-			}
+		if e.size != it.size || !e.mtime.Equal(it.mtime) {
+			e.meta, e.hasMeta = fileMeta{}, false
 		}
+		e.size, e.mtime, e.isLog = it.size, it.mtime, it.isLog
+		if it.hasMeta {
+			e.meta, e.hasMeta = it.meta, true
+		}
+		e.settled = e.size > 0 && now.Sub(e.mtime) >= settleDelay
 	}
 	for name := range s.entries {
 		if _, ok := seen[name]; !ok {
@@ -224,12 +381,45 @@ func (s *Store) refreshLocked() []Row {
 	s.scanned = true
 	s.recountLocked()
 	s.enforceLocked()
-	rows := make([]Row, 0, len(completed))
-	sort.Slice(completed, func(i, j int) bool { return completed[i].timeOf().Before(completed[j].timeOf()) })
-	for _, e := range completed {
-		if _, ok := s.entries[e.name]; ok {
-			rows = append(rows, s.rowOf(e))
+}
+
+// announceableLocked reports whether a file first seen now, last modified at mtime, finished while a
+// subscriber was listening. Files that finished before every subscription stay silent, so opening the
+// live tail never replays older requests.
+func (s *Store) announceableLocked(mtime time.Time) bool {
+	if len(s.subs) == 0 {
+		return false
+	}
+	var first time.Time
+	for _, since := range s.subs {
+		if first.IsZero() || since.Before(first) {
+			first = since
 		}
+	}
+	// Allow for file systems that store mtimes with one-second precision.
+	return !mtime.Before(first.Truncate(time.Second))
+}
+
+// announceLocked returns the rows of announceable files that are now complete, oldest first.
+func (s *Store) announceLocked() []Row {
+	var completed []*entry
+	for name := range s.toAnnounce {
+		e := s.entries[name]
+		switch {
+		case e == nil:
+			delete(s.toAnnounce, name)
+		case !e.settled:
+		case !e.isLog || (e.hasMeta && !e.meta.valid):
+			delete(s.toAnnounce, name)
+		case e.hasMeta:
+			delete(s.toAnnounce, name)
+			completed = append(completed, e)
+		}
+	}
+	sort.Slice(completed, func(i, j int) bool { return completed[i].timeOf().Before(completed[j].timeOf()) })
+	rows := make([]Row, 0, len(completed))
+	for _, e := range completed {
+		rows = append(rows, s.rowOf(e))
 	}
 	return rows
 }
@@ -237,21 +427,22 @@ func (s *Store) refreshLocked() []Row {
 func (s *Store) recountLocked() {
 	var total int64
 	for _, e := range s.entries {
-		if e.meta.valid {
+		if e.isLog {
 			total += e.size
 		}
 	}
 	s.total = total
 }
 
-// enforceLocked deletes the oldest complete request logs until the total fits the cap.
+// enforceLocked deletes the oldest settled request logs until the total fits the cap. It needs only
+// the stat level, so it works before any meta is parsed.
 func (s *Store) enforceLocked() {
 	if s.maxBytes <= 0 || s.total <= s.maxBytes {
 		return
 	}
 	var list []*entry
 	for _, e := range s.entries {
-		if e.meta.valid && e.complete {
+		if e.isLog && e.settled {
 			list = append(list, e)
 		}
 	}
@@ -275,6 +466,7 @@ func (s *Store) enforceLocked() {
 		removed++
 	}
 	if removed > 0 {
+		s.dirty = true
 		log.Infof("proxx: request log retention removed %d file(s); total now %d bytes (cap %d)", removed, s.total, s.maxBytes)
 	}
 }
@@ -408,6 +600,11 @@ type Page struct {
 	// first page (no cursor) fills them.
 	Models    []string
 	Providers []string
+	// IndexPending is the number of settled request logs whose meta is not parsed yet; while it is
+	// above 0, Items, Models and Providers cover the parsed files only. IndexTotal is the number of
+	// request log files known at the stat level.
+	IndexPending int
+	IndexTotal   int
 }
 
 func encodeCursor(r Row) string {
@@ -462,7 +659,7 @@ func ValidStatusFilter(status string) bool {
 func (s *Store) rowsSortedLocked() []Row {
 	rows := make([]Row, 0, len(s.entries))
 	for _, e := range s.entries {
-		if e.meta.valid {
+		if e.listed() {
 			rows = append(rows, s.rowOf(e))
 		}
 	}
@@ -476,6 +673,7 @@ func (s *Store) rowsSortedLocked() []Row {
 }
 
 // List returns rows newest first. Cheap filters run on the index; q scans file contents.
+// It starts meta indexing on first use and never waits for the backlog.
 func (s *Store) List(q Query) (Page, error) {
 	if q.Limit <= 0 {
 		q.Limit = 50
@@ -490,10 +688,12 @@ func (s *Store) List(q Query) (Page, error) {
 			return Page{}, err
 		}
 	}
+	s.startIndexing()
 	s.Refresh()
 	s.mu.Lock()
 	dir := s.dir
 	all := s.rowsSortedLocked()
+	pending, total := s.indexProgressLocked()
 	s.mu.Unlock()
 
 	model := strings.ToLower(strings.TrimSpace(q.Model))
@@ -530,7 +730,7 @@ func (s *Store) List(q Query) (Page, error) {
 		}
 		items = append(items, r)
 	}
-	page := Page{Items: items}
+	page := Page{Items: items, IndexPending: pending, IndexTotal: total}
 	if more && len(items) > 0 {
 		page.NextCursor = encodeCursor(items[len(items)-1])
 	}
@@ -604,22 +804,24 @@ func fileContains(path string, needle []byte) bool {
 	}
 }
 
-// find resolves an id (short request id, full request id, or file name) to the newest file.
+// find resolves an id (short request id, full request id, or file name) to the newest request log.
+// It works at the stat level, whether or not the file's meta is parsed.
 func (s *Store) find(id string) (*entry, string, error) {
 	id = strings.TrimSpace(id)
 	if id == "" || strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
 		return nil, "", ErrNotFound
 	}
+	s.startIndexing()
 	s.Refresh()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.entries[id]; ok && e.meta.valid {
+	if e, ok := s.entries[id]; ok && e.isLog {
 		return e, filepath.Join(s.dir, e.name), nil
 	}
 	short := logging.ShortRequestID(id)
 	var best *entry
 	for _, e := range s.entries {
-		if e.id != short || !e.meta.valid {
+		if e.id != short || !e.isLog {
 			continue
 		}
 		if best == nil || e.timeOf().After(best.timeOf()) || (e.timeOf().Equal(best.timeOf()) && e.name > best.name) {
@@ -632,11 +834,22 @@ func (s *Store) find(id string) (*entry, string, error) {
 	return best, filepath.Join(s.dir, best.name), nil
 }
 
-// Detail parses the file for id.
+// Detail parses the file for id. A file whose meta is not parsed yet is parsed on demand and merged
+// into the index.
 func (s *Store) Detail(id string) (*Detail, error) {
 	e, path, err := s.find(id)
 	if err != nil {
 		return nil, err
+	}
+	s.mu.Lock()
+	job, gen, need := metaJob{name: e.name, id: e.id, size: e.size, mtime: e.mtime}, s.gen, !e.hasMeta
+	dir := s.dir
+	s.mu.Unlock()
+	if need {
+		results := parseJobs(dir, []metaJob{job}, nil)
+		s.mu.Lock()
+		s.mergeMetaLocked(gen, results)
+		s.mu.Unlock()
 	}
 	d, err := readDetail(path)
 	if err != nil {
@@ -670,6 +883,7 @@ func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	delete(s.entries, e.name)
 	s.recountLocked()
+	s.dirty = true
 	s.mu.Unlock()
 	return nil
 }
@@ -682,7 +896,7 @@ func (s *Store) DeleteAll() (int, error) {
 	removed := 0
 	var firstErr error
 	for name, e := range s.entries {
-		if !e.meta.valid {
+		if !e.isLog {
 			continue
 		}
 		if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !os.IsNotExist(err) {
@@ -695,14 +909,19 @@ func (s *Store) DeleteAll() (int, error) {
 		removed++
 	}
 	s.recountLocked()
+	if removed > 0 {
+		s.dirty = true
+	}
 	return removed, firstErr
 }
 
-// Subscribe registers for rows of newly completed files; call the returned func to stop.
+// Subscribe registers for rows of files that complete from now on; call the returned func to stop.
+// It starts meta indexing like any viewer use.
 func (s *Store) Subscribe() (<-chan Row, func()) {
 	ch := make(chan Row, 64)
 	s.mu.Lock()
-	s.subs[ch] = struct{}{}
+	s.subs[ch] = s.now()
+	s.ensureIndexingLocked()
 	s.mu.Unlock()
 	return ch, func() {
 		s.mu.Lock()

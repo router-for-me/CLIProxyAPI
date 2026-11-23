@@ -1,6 +1,8 @@
 # 0006: Request log viewer API and retention
 
-Date: 2026-11-16. Status: accepted.
+Date: 2026-11-16. Status: accepted. Amended 2026-11-23: cheap startup, lazy meta indexing and a
+persisted index, after a 21 GB log directory froze a production box at startup (every file was parsed
+on every start, and index entries kept request bodies alive).
 
 ## Context
 
@@ -34,7 +36,7 @@ a single file by id, and that's all. Nothing bounds the total size.
 
 | Method | Path | Result |
 |---|---|---|
-| GET | `/v8/management/proxx/requests` | `{items:[Row], next_cursor, models, providers, request_log_enabled, total_size_bytes, max_total_size_bytes (0 = unlimited), log_dir}` |
+| GET | `/v8/management/proxx/requests` | `{items:[Row], next_cursor, models, providers, request_log_enabled, total_size_bytes, max_total_size_bytes (0 = unlimited), log_dir, index_pending, index_total}` |
 | GET | `/v8/management/proxx/requests/:id` | `{row, client, attempts, response, websocket_timeline, api_websocket_timeline, raw_size_bytes}` |
 | GET | `/v8/management/proxx/requests/:id/raw` | the file as `text/plain` |
 | DELETE | `/v8/management/proxx/requests/:id` | `{removed: 1}` |
@@ -57,6 +59,12 @@ further down the list (e.g. one Jev call among thousands of chat requests) can b
 scrolling to it first. Later pages return them as null.
 
 Results are newest first.
+
+`index_pending` / `index_total` (added 2026-11-23): `index_total` is the number of request log files
+known from the directory listing; `index_pending` is how many settled ones have no parsed metadata yet
+(0 when the index is complete; files still being written are not counted). While `index_pending > 0`,
+`items`, `models` and `providers` (and every filter) cover only the indexed files. The newest files are
+indexed first, so the first page fills within seconds. `total_size_bytes` and retention are always exact.
 
 Row fields: `id, file, time (RFC3339), time_ms, method, path, status, duration_ms|null, stream,
 requested_model, served_model, group, provider, input_tokens|null, output_tokens|null,
@@ -119,13 +127,36 @@ Detail:
   handler's own `logDirectory()` skips the join, so it is not reused.
 - Effective `request_log_enabled` = `request-log && !commercial-mode && !home.enabled`. In home mode
   the logs are forwarded instead of written.
-- Index:
-  - The index maps file name to the parsed metadata, cached by size and mtime.
-  - A refresh lists the directory by name and stats only files that are new or not yet complete,
-    because complete files never change.
-  - The running total is summed from the index.
+- Index (2026-11-23): each file has two levels of knowledge.
+  - Stat level, always known: name, short id, `error-` prefix, size, mtime, whether it is a request log
+    (the first line, read with a 32-byte read, is exactly `=== REQUEST INFO ===`) and whether it is
+    settled (non-empty and not modified for 1 second). Settled files never change, so they are not
+    statted again. A file that fails the first-line check is re-checked until it settles (the writers
+    create the file first and fill it afterwards).
+  - Meta level, filled lazily: the parsed fields a row needs. It is reset when size or mtime change.
+  - Startup and every reload run only a stat refresh: a directory listing plus a stat and a first-line
+    read for new or unsettled files. No request body is read until the viewer is used.
+  - Meta indexing starts on the first viewer use (list, detail/raw/delete by id, or a live-tail
+    subscription), never at start and never for retention. One background worker parses settled files
+    without metadata, newest first by file name timestamp, without holding the store lock, and merges
+    every 200 files. After that backlog, refreshes (list, poll tick) parse new files inline; more than
+    200 new files go back to the worker. Detail parses a file without metadata on demand and merges it.
+    `list` never waits for the backlog.
   - Files up to 16 MB are parsed fully once. Larger files are parsed from their first 16 MB plus the
     `RESPONSE` section found in the last 1 MB.
+- Persisted index: `proxx-request-logs-index.json` next to the config file (fixed name, no config key).
+  It is proxx's own file, kept out of the log directory, which the upstream app log cleaner prunes.
+  - Content: `{version, log_dir, files:[{name, size, mtime_unix_nano, time, method, path, status, ...}]}`
+    (about 260 bytes per file; 6.5 MB for 25,000 files).
+  - Loaded once per directory by the first refresh. A record is used only when a file with the same
+    name, size and mtime exists, and then the file is not read at all (not even its first line).
+    Missing file, decode error, version or `log_dir` mismatch mean an empty index: files are parsed again.
+  - Saved with a temp file + rename, only when something changed: at most once per 60s while indexing
+    or refreshing, once when the backlog completes, and on shutdown. A failed save is logged and retried
+    later. Deleted files drop out at the next save.
+  - Measured on 25,000 synthetic files (2.45 GB, macOS): startup reads 0.8 MB (first lines only) and
+    holds about 12 MB of heap; full indexing reads each file once (2.5 GB, ~9 s warm cache) and ends at
+    about 13 MB of heap; a restart with the index reads no file contents and lists in ~0.1 s.
 - Parser:
   - It reads lines with `bufio.Reader` and has no line length limit; single-line bodies are capped
     while reading.
@@ -157,16 +188,21 @@ Detail:
   - Both writers create the `.log` with `O_EXCL` and then write it, so a file counts as complete only
     once it is non-empty, starts with `REQUEST INFO`, and has not been modified for 1 second. Only then
     is it emitted.
-  - Files already present when the index is first built are never announced. The subscriber buffer
-    holds 64 rows; rows beyond that are dropped for a slow client.
+  - A file is announced only if it finished while a subscriber was listening: it is first seen while a
+    subscription is open and its mtime is not older than the earliest open subscription (2026-11-23).
+    Files already known, and files written before the tail opened, are never announced, so opening the
+    tail hours after startup does not replay them. The background meta worker never announces; the
+    refresh parses announceable files itself. The subscriber buffer holds 64 rows; rows beyond that are
+    dropped for a slow client.
   - The handler flushes after every event and ping and sets no deadlines (AGENTS.md timeout rule).
 - Retention runs:
   - at start and after every config reload (via the facade);
   - every 60s;
   - on every refresh (list, detail, stream poll) whenever the total exceeds the cap.
 
-  It deletes the oldest complete files by mtime first. Files still being written are skipped and
-  removed on a later pass.
+  It works from the stat level only, so it runs from startup without parsing any file. It deletes the
+  oldest settled request logs by mtime first. Files still being written are skipped and removed on a
+  later pass.
 - Paging: keyset cursor on (`time_ms`, file name), encoded as base64url, so new files arriving between
   page loads never shift later pages. `q` runs the cheap filters first, then scans files newest first
   in 1 MB chunks (with a `len(q)-1` overlap) and stops after `limit + 1` matches.
@@ -176,6 +212,8 @@ Detail:
 - Joined usage (provider, served upstream model, tokens summed over attempts, cost) is in memory only.
   After a restart, older rows fall back to file-derived fields, and their cost is null.
 - `q` scans file contents, so on a large directory a search with a rare term reads many files.
+- Until the first viewer use after a fresh install (or after the index file is lost), rows appear as the
+  backlog is indexed; `index_pending` reports the progress.
 - Websocket transcripts have no request body and at most a diagnostics-only `RESPONSE`, so `requested_model` is empty and
   `status` is 0. The timelines are returned raw.
 - The unnumbered error-path `API RESPONSE` is dropped when numbered responses exist (it duplicates them).
@@ -196,7 +234,13 @@ Detail:
   - a websocket transcript (timelines, status 0, attempts);
   - retention: oldest first, app logs untouched;
   - stream completion with an injected clock, no sleeps;
-  - delete and delete-all, and path traversal.
+  - delete and delete-all, and path traversal;
+  - the index (`index_test.go`, `index_memory_test.go`): the stat refresh never parses files; retention
+    with no metadata, sparing non-request-log and unsettled files; worker order (newest first) and a
+    partial list with correct `index_pending`; persistence round trip (whole rows equal after restart, no
+    parse and no first-line read), stale/missing/corrupt/version/`log_dir` cases, save after a directory
+    change; detail on demand; live tail; index entries not retaining request bodies; file reads never
+    blocking `Configure`.
 - E2E: `PROXX_E2E=1 go test ./test/proxx/requestlogs_e2e/ -run E2E -v -count=1`. It builds the real
   binary and runs it with `--local-model` against an in-process mock OpenAI-compatible upstream, with
   no provider keys. It sends non-stream, stream, `auto` failover (429 → member 2) and 400 requests,
@@ -210,4 +254,5 @@ Detail:
   - toggling `request-log` through the v8 config endpoint;
   - retention after a hot reload to `max-total-size-mb: 1`, which keeps the newest files;
   - setting the cap to `0` through the v8 config endpoint, and that the value survives another v8 write;
+  - a graceful restart: the index file is saved on shutdown, rows survive and `index_pending` is 0;
   - delete and delete-all.

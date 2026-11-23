@@ -99,6 +99,8 @@ func (h *Handler) ListProxxRequestLogs(c *gin.Context) {
 		"total_size_bytes":     st.TotalBytes,
 		"max_total_size_bytes": st.MaxTotalBytes,
 		"log_dir":              st.Dir,
+		"index_pending":        page.IndexPending,
+		"index_total":          page.IndexTotal,
 	})
 }
 

@@ -42,11 +42,21 @@ func logName(prefix string, i int) string {
 	return fmt.Sprintf("%sv1-chat-completions-2026-11-16T120000-%08x.log", prefix, i)
 }
 
+// newTestStore returns a store whose meta index is complete (viewer already used).
 func newTestStore(dir string, maxBytes int64) *Store {
 	s := NewStore()
 	s.Configure(dir, maxBytes, true)
 	s.SetClock(func() time.Time { return baseTime.Add(time.Hour) })
+	indexSync(s)
 	return s
+}
+
+// indexSync starts meta indexing and waits until the backlog is parsed.
+func indexSync(s *Store) {
+	s.startIndexing()
+	s.Refresh()
+	s.waitIndexIdle()
+	s.Refresh()
 }
 
 func TestListPagingAndFilters(t *testing.T) {
@@ -231,6 +241,7 @@ func TestSubscribeEmitsOnlyCompletedNewFiles(t *testing.T) {
 	rows, cancel := s.Subscribe()
 	defer cancel()
 	s.Refresh() // initial scan: existing files are not announced
+	s.waitIndexIdle()
 
 	// A new file modified "just now" is not complete yet.
 	path := fixtureCopy(t, dir, "openai-stream.log", logName("", 2), now)

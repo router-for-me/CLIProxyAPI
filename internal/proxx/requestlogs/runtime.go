@@ -51,8 +51,10 @@ func fileLoggingEnabled(cfg *config.Config) bool {
 }
 
 // Configure applies proxx.request-logs and the request-log flag, registers the usage join plugin,
-// starts the poll/retention loop bound to ctx and runs a refresh (which enforces retention).
-// The directory is resolved once, like the request logger, which is built once at startup.
+// starts the poll/retention loop bound to ctx and runs a stat refresh (which enforces retention).
+// The directory and the persisted index path are resolved once, like the request logger, which is
+// built once at startup. The index is loaded by the first refresh; meta parsing waits for the first
+// viewer use.
 func Configure(ctx context.Context, cfg *config.Config, configPath string) {
 	if cfg == nil {
 		return
@@ -60,6 +62,7 @@ func Configure(ctx context.Context, cfg *config.Config, configPath string) {
 	runtimeMu.Lock()
 	if runtimeState.dir == "" {
 		runtimeState.dir = ResolveDir(cfg, configPath)
+		defaultStore.setIndexFile(ResolveIndexFile(configPath))
 	}
 	dir := runtimeState.dir
 	defaultStore.Configure(dir, cfg.Proxx.RequestLogs.MaxTotalSizeBytes(), fileLoggingEnabled(cfg))
@@ -93,7 +96,7 @@ func pollLoop(ctx context.Context, done chan struct{}) {
 	}
 }
 
-// Shutdown stops the poll loop.
+// Shutdown stops the poll loop and the meta worker, then saves the index if it changed.
 func Shutdown() {
 	runtimeMu.Lock()
 	cancel, done := runtimeState.cancel, runtimeState.done
@@ -105,4 +108,6 @@ func Shutdown() {
 		cancel()
 		<-done
 	}
+	defaultStore.stopIndexing()
+	defaultStore.saveIndex(true)
 }
