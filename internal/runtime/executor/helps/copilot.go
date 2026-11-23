@@ -114,28 +114,28 @@ func NormalizeCopilotRequest(doc *ojson.Doc, route copilot.Route, from translato
 			_ = doc.Delete("reasoning_effort")
 		}
 		for i, message := range doc.Get("messages").Array() {
+			prefix := "messages." + strconv.Itoa(i)
 			role := message.Get("role").String()
+			if role == "developer" {
+				role = "system"
+				_ = doc.Set(prefix+".role", role)
+			}
+			// Copilot Chat can ignore assistant history sent as plain text blocks.
+			if role == "assistant" || (from != translator.FormatOpenAI && (role == "system" || role == "user")) {
+				if text, ok := flattenCopilotPlainTextContent(message.Get("content"), role == "assistant"); ok {
+					_ = doc.Set(prefix+".content", text)
+				}
+			}
 			if from == translator.FormatClaude {
 				// Claude tool_result has no Chat name field. Do not alter native Chat envelopes.
-				prefix := "messages." + strconv.Itoa(i)
 				if role == "tool" && message.Get("name").Exists() {
 					_ = doc.Delete(prefix + ".name")
 				}
-				if role == "assistant" && message.Get("tool_calls.0").Exists() && message.Get("content").Type == ojson.String && message.Get("content").String() == "" {
-					_ = doc.SetRaw(prefix+".content", "null")
-				}
-			}
-			if role == "developer" {
-				role = "system"
-				_ = doc.Set("messages."+strconv.Itoa(i)+".role", role)
-			}
-			// Chat represents a single plain text prompt as a string. Do not flatten
-			// client-native arrays, multimodal messages, or blocks carrying annotations.
-			if from != translator.FormatOpenAI && (role == "system" || role == "user") {
-				parts := message.Get("content")
-				part := parts.Get("0")
-				if parts.IsArray() && parts.Get("#").Int() == 1 && part.Get("type").String() == "text" && part.Get("text").Type == ojson.String && len(part.Map()) == 2 {
-					_ = doc.Set("messages."+strconv.Itoa(i)+".content", part.Get("text").String())
+				if role == "assistant" && message.Get("tool_calls.0").Exists() {
+					content := doc.Get(prefix + ".content")
+					if content.Type == ojson.String && content.String() == "" {
+						_ = doc.SetRaw(prefix+".content", "null")
+					}
 				}
 			}
 		}
@@ -238,6 +238,31 @@ func SetCopilotInferenceHeaders(header http.Header, route copilot.Route, root oj
 			header.Set("Anthropic-Beta", strings.Join(route.AnthropicBetas, ","))
 		}
 	}
+}
+
+func flattenCopilotPlainTextContent(parts ojson.Result, allowMultiple bool) (string, bool) {
+	if !parts.IsArray() {
+		return "", false
+	}
+	items := parts.Array()
+	if len(items) == 0 || (!allowMultiple && len(items) != 1) {
+		return "", false
+	}
+	if len(items) == 1 {
+		part := items[0]
+		if part.Get("type").String() == "text" && part.Get("text").Type == ojson.String && len(part.Map()) == 2 {
+			return part.Get("text").String(), true
+		}
+		return "", false
+	}
+	var b strings.Builder
+	for _, part := range items {
+		if part.Get("type").String() != "text" || part.Get("text").Type != ojson.String || len(part.Map()) != 2 {
+			return "", false
+		}
+		b.WriteString(part.Get("text").String())
+	}
+	return b.String(), true
 }
 
 func hasCopilotImage(content ojson.Result) bool {

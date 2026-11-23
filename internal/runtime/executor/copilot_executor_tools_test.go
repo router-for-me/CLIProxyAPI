@@ -126,25 +126,25 @@ func TestCopilotToolRoundTrip(t *testing.T) {
 	}{
 		{"chat via messages", copilot.Messages, tr.FormatOpenAI,
 			`{"messages":[{"role":"user","content":"calculate"}]}`,
-			`{"id":"msg_1","type":"message","model":"test-model","role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"calculate","input":{"x":1}}],"stop_reason":"tool_use"}`,
-			`{"id":"msg_2","type":"message","model":"test-model","role":"assistant","content":[{"type":"text","text":"success"}],"stop_reason":"end_turn"}`,
+			`{"id":"msg_1","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"calculate","input":{"x":1}}],"stop_reason":"tool_use"}`,
+			`{"id":"msg_2","type":"message","model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"success"}],"stop_reason":"end_turn"}`,
 			"choices.0.message.tool_calls.0.id", `{"messages":[{"role":"user","content":"calculate"},{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"calculate","arguments":"{\"x\":1}"}}]},{"role":"tool","content":"result"}]}`,
 			"messages.1.tool_calls.0.id", "messages.2.tool_call_id", "messages", "content.0.id", "content.0.tool_use_id", false},
 		{"messages via responses with image result", copilot.Responses, tr.FormatClaude,
 			`{"max_tokens":128,"messages":[{"role":"user","content":"calculate"}]}`,
-			`{"id":"resp_1","status":"completed","model":"test-model","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"calculate","arguments":"{\"x\":1}"}]}`,
-			`{"id":"resp_2","status":"completed","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"success"}]}]}`,
+			`{"id":"resp_1","status":"completed","model":"claude-opus-5","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"calculate","arguments":"{\"x\":1}"}]}`,
+			`{"id":"resp_2","status":"completed","model":"claude-opus-5","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"success"}]}]}`,
 			"content.0.id", `{"max_tokens":128,"messages":[{"role":"user","content":"calculate"},{"role":"assistant","content":[{"type":"tool_use","name":"calculate","input":{"x":1}}]},{"role":"user","content":[{"type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}]}]}`,
 			"messages.1.content.0.id", "messages.2.content.0.tool_use_id", "input", "call_id", "call_id", true},
 		{"responses via chat", copilot.Chat, tr.FormatOpenAIResponse,
 			`{"input":"calculate"}`,
-			`{"id":"chat_1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calculate","arguments":"{\"x\":1}"}}]},"finish_reason":"tool_calls"}]}`,
-			`{"id":"chat_2","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"success"},"finish_reason":"stop"}]}`,
+			`{"id":"chat_1","model":"claude-opus-5","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"calculate","arguments":"{\"x\":1}"}}]},"finish_reason":"tool_calls"}]}`,
+			`{"id":"chat_2","model":"claude-opus-5","choices":[{"index":0,"message":{"role":"assistant","content":"success"},"finish_reason":"stop"}]}`,
 			"output.0.call_id", `{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"calculate"}]},{"type":"function_call","name":"calculate","arguments":"{\"x\":1}"},{"type":"function_call_output","output":"result"}]}`,
 			"input.1.call_id", "input.2.call_id", "messages", "tool_calls.0.id", "tool_call_id", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			const model = "test-model"
+			const model = "claude-opus-5"
 			executor := NewCopilotExecutor(&config.Config{})
 			auth := copilotTestAuth(t, "one", model, tc.endpoint)
 			opts := cliproxyexecutor.Options{SourceFormat: tc.from}

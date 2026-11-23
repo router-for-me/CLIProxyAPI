@@ -3,14 +3,16 @@ package executor
 import (
 	"bytes"
 	"context"
-	"github.com/MoeForge/moego/base64"
 	"io"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -320,6 +322,227 @@ func TestDevinStreamContentDoesNotOvertakeQueuedTool(t *testing.T) {
 			}
 			if !toolSeen || !textSeen {
 				t.Errorf("tool seen = %v, text seen = %v; want both", toolSeen, textSeen)
+			}
+		})
+	}
+}
+
+func TestDevinGPTReasoningRoundTrip(t *testing.T) {
+	const model = "gpt-6-1-sol"
+	const format = sdktranslator.FormatOpenAIResponse
+	token := make([]byte, 73)
+	token[0] = 0x80
+	sig := ` [{"id":"rs_first","type":"reasoning","summary":[],"encrypted_content":"` + base64.URLEncoding.EncodeToString(token) + `"}] `
+	var frames bytes.Buffer
+
+	frames.Write(devinContentTestFrame(10, sig[:20]))
+	frames.Write(devinContentTestFrame(10, sig[20:]))
+	frames.Write(devinContentTestFrame(21, "openai"))
+	frames.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte(`{}`)))
+	e := NewDevinExecutor(&config.Config{})
+	ctx := t.Context()
+	assertReplay := func(t *testing.T, item ojson.Result) {
+		t.Helper()
+		if item.Get("encrypted_content").String() == "" {
+			t.Fatal("returned reasoning item has empty encrypted_content")
+		}
+		next := ojson.NewDocString(`{"input":[{"type":"message","role":"user","content":"go"},{},{},{"type":"function_call","call_id":"c","name":"run","arguments":"{}"},{"type":"function_call_output","call_id":"c","output":"ok"}]}`)
+		_ = next.SetRaw("input.1", item.Raw)
+		// Preserve a second distinct thought, even without an intervening user turn.
+		_ = next.SetRaw("input.2", strings.Replace(item.Raw, "rs_first", "rs_second", 1))
+		body := next.Bytes()
+		auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+		_, _, payload, err := e.prepareDevinHTTPRequest(ctx, auth, cliproxyexecutor.Request{Model: model, Payload: body}, cliproxyexecutor.Options{SourceFormat: format, OriginalRequest: body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompts := ojson.GetBytesNoCopy(payload, "prompts").Array()
+		if len(prompts) != 4 {
+			t.Fatalf("got %d prompts, want user, two signed assistant prompts and tool result", len(prompts))
+		}
+		for i, p := range prompts[1:3] {
+			want := sig
+			if i == 1 {
+				want = strings.Replace(sig, "rs_first", "rs_second", 1)
+			}
+			if p.Get("signature_type").String() != "openai" || p.Get("signature").String() != base64.StdEncoding.EncodeToString([]byte(want)) {
+				t.Fatalf("upstream prompt lost typed signature: %s", p.Raw)
+			}
+		}
+		other := sdktranslator.TranslateRequest(format, sdktranslator.FormatInteractions, "gemini-3.5-flash", body, false)
+		for _, step := range ojson.GetBytesNoCopy(other, "input").Array() {
+			if step.Get("type").String() == "thought" {
+				t.Fatal("replayed Devin reasoning to Gemini")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		first []byte
+	}{
+		{"stream", devinContentTestFrame(9, "plan")},
+		{"stream_content_first_no_summary", devinContentTestFrame(3, "answer")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := make(chan cliproxyexecutor.StreamChunk, 64)
+			e.streamDevinFrames(ctx, io.MultiReader(bytes.NewReader(tc.first), bytes.NewReader(frames.Bytes())), cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{SourceFormat: format}, model, format, nil, out)
+			events, errs := devinContentTestEvents(out)
+			if len(errs) > 0 {
+				t.Fatal(errs)
+			}
+			var done, completed ojson.Result
+			for _, event := range events {
+				switch event.Get("type").String() {
+				case "response.output_item.done":
+					if event.Get("item.type").String() == "reasoning" {
+						done = event.Get("item")
+					}
+				case "response.completed":
+					for _, item := range event.Get("response.output").Array() {
+						if item.Get("type").String() == "reasoning" {
+							completed = item
+						}
+					}
+				}
+			}
+			if !done.Exists() {
+				t.Fatal("missing reasoning item after signature frame")
+			}
+			if done.Raw != completed.Raw {
+				t.Fatal("completed reasoning differs from done item")
+			}
+			assertReplay(t, done)
+		})
+	}
+	t.Run("nonstream", func(t *testing.T) {
+		interactions, _, err := consumeDevinFramesToInteractions(bytes.NewReader(frames.Bytes()), model, model)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var param any
+		response := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, format, model, nil, nil, interactions, &param)
+		assertReplay(t, ojson.GetBytesNoCopy(response, "output.0"))
+	})
+}
+
+func TestDevinGeminiThoughtSignatureRoundTrip(t *testing.T) {
+	const model = "gemini-4-neon"
+	const format = sdktranslator.FormatOpenAIResponse
+	// Devin issues Gemini thought signatures in the Vertex bare-Tink envelope:
+	// prefix byte, four-byte key id, ciphertext.
+	tink := append([]byte{0x01, 0x8f, 0x3d, 0x6b, 0x5f}, bytes.Repeat([]byte{0x5a}, 64)...)
+	sig := base64.StdEncoding.EncodeToString(tink)
+	var frames bytes.Buffer
+	frames.Write(devinContentTestFrame(10, sig[:20]))
+	frames.Write(devinContentTestFrame(10, sig[20:]))
+	frames.Write(devinContentTestFrame(21, "gemini"))
+	frames.Write(helps.WrapConnectEnvelopeWithFlag(helps.ConnectFlagEndStream, []byte("{}")))
+	e := NewDevinExecutor(&config.Config{})
+	ctx := t.Context()
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+	// One model turn with two parallel tool calls shares a single signature.
+	replay := func(t *testing.T, reasoning string) (ojson.Result, []byte) {
+		t.Helper()
+		next := ojson.NewDocString(`{"input":[{"type":"message","role":"user","content":"go"},{},{"type":"function_call","call_id":"a","name":"run","arguments":"{}"},{"type":"function_call","call_id":"b","name":"run","arguments":"{}"},{"type":"function_call_output","call_id":"a","output":"ok"},{"type":"function_call_output","call_id":"b","output":"ok"}]}`)
+		_ = next.SetRaw("input.1", reasoning)
+		body := next.Bytes()
+		_, _, payload, errPrep := e.prepareDevinHTTPRequest(ctx, auth, cliproxyexecutor.Request{Model: model, Payload: body}, cliproxyexecutor.Options{SourceFormat: format, OriginalRequest: body})
+		if errPrep != nil {
+			t.Fatal(errPrep)
+		}
+		prompts := ojson.GetBytesNoCopy(payload, "prompts").Array()
+		if len(prompts) != 4 {
+			t.Fatalf("got %d prompts, want user, one assistant prompt and two tool results", len(prompts))
+		}
+		if got := len(prompts[1].Get("tool_calls").Array()); got != 2 {
+			t.Fatalf("assistant prompt carries %d tool calls, want 2: %s", got, prompts[1].Raw)
+		}
+		return prompts[1], body
+	}
+	assertReplay := func(t *testing.T, item ojson.Result) {
+		t.Helper()
+		if item.Get("encrypted_content").String() != sig {
+			t.Fatalf("returned reasoning item lost the signature: %s", item.Raw)
+		}
+		prompt, body := replay(t, item.Raw)
+		// Devin takes the signature back as the same base64 text it sent.
+		if prompt.Get("signature_type").String() != "gemini" || prompt.Get("signature").String() != base64.StdEncoding.EncodeToString([]byte(sig)) {
+			t.Fatalf("upstream prompt lost typed signature: %s", prompt.Raw)
+		}
+		other := sdktranslator.TranslateRequest(format, sdktranslator.FormatInteractions, "gemini-3.5-flash", body, false)
+		for _, step := range ojson.GetBytesNoCopy(other, "input").Array() {
+			if step.Get("type").String() == "thought" {
+				t.Fatal("replayed Devin thought signature outside the Devin route")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		first []byte
+	}{
+		{"stream", devinContentTestFrame(9, "plan")},
+		{"stream_content_first_no_summary", devinContentTestFrame(3, "answer")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := make(chan cliproxyexecutor.StreamChunk, 64)
+			e.streamDevinFrames(ctx, io.MultiReader(bytes.NewReader(tc.first), bytes.NewReader(frames.Bytes())), cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{SourceFormat: format}, model, format, nil, out)
+			events, errs := devinContentTestEvents(out)
+			if len(errs) > 0 {
+				t.Fatal(errs)
+			}
+			var done, completed ojson.Result
+			for _, event := range events {
+				switch event.Get("type").String() {
+				case "response.output_item.done":
+					if event.Get("item.type").String() == "reasoning" {
+						done = event.Get("item")
+					}
+				case "response.completed":
+					for _, item := range event.Get("response.output").Array() {
+						if item.Get("type").String() == "reasoning" {
+							completed = item
+						}
+					}
+				}
+			}
+			if !done.Exists() {
+				t.Fatal("missing reasoning item after signature frame")
+			}
+			if done.Raw != completed.Raw {
+				t.Fatal("completed reasoning differs from done item")
+			}
+			assertReplay(t, done)
+		})
+	}
+	t.Run("nonstream", func(t *testing.T) {
+		interactions, _, errConsume := consumeDevinFramesToInteractions(bytes.NewReader(frames.Bytes()), model, model)
+		if errConsume != nil {
+			t.Fatal(errConsume)
+		}
+		var param any
+		response := sdktranslator.TranslateNonStream(ctx, sdktranslator.FormatInteractions, format, model, nil, nil, interactions, &param)
+		assertReplay(t, ojson.GetBytesNoCopy(response, "output.0"))
+	})
+	// Signatures Devin did not issue for Gemini stay out of the Devin prompt.
+	fernet := make([]byte, 73)
+	fernet[0] = 0x80
+	aiStudio := protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), tink)
+	aiStudio = protowire.AppendBytes(protowire.AppendTag(nil, 2, protowire.BytesType), aiStudio)
+	unknownKeyTink := append([]byte{0x01, 0x69, 0x14, 0x7d, 0x13}, bytes.Repeat([]byte{0x5a}, 64)...)
+	for name, foreign := range map[string]string{
+		"native_gpt":       base64.URLEncoding.EncodeToString(fernet),
+		"gemini_ai_studio": base64.StdEncoding.EncodeToString(aiStudio),
+		"truncated_tink":   sig[:20],
+		"unknown_tink_key": base64.StdEncoding.EncodeToString(unknownKeyTink),
+		"prefixed_claude":  "claude#" + sig,
+		"prefixed_google":  "google#" + sig,
+		"prefixed_gemini":  "gemini#" + sig,
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := ojson.NewDocString(`{"type":"reasoning","summary":[],"encrypted_content":""}`)
+			_ = item.Set("encrypted_content", foreign)
+			if prompt, _ := replay(t, item.String()); prompt.Get("signature").Exists() {
+				t.Fatalf("replayed a foreign signature to Devin: %s", prompt.Raw)
 			}
 		})
 	}

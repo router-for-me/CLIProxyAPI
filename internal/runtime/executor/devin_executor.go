@@ -450,7 +450,8 @@ func (e *DevinExecutor) prepareDevinHTTPRequest(ctx context.Context, auth *clipr
 	payload := req.Payload
 	isInteractionsSource := opts.SourceFormat == "" || opts.SourceFormat == sdktranslator.FormatInteractions
 	if !isInteractionsSource {
-		translated := sdktranslator.TranslateRequestEnvelope(ctx, opts.SourceFormat, sdktranslator.FormatInteractions, sdktranslator.RequestEnvelope{
+		translateCtx := context.WithValue(ctx, translatorcommon.DevinReasoningReplayKey{}, true)
+		translated := sdktranslator.TranslateRequestEnvelope(translateCtx, opts.SourceFormat, sdktranslator.FormatInteractions, sdktranslator.RequestEnvelope{
 			Format: opts.SourceFormat,
 			Model:  req.Model,
 			Stream: opts.Stream,
@@ -1219,9 +1220,20 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			}
 		}
 
-		// Emit thinking signature delta targeting the thought step
-		if len(frameRes.DeltaSignature) > 0 {
-			if thoughtStepIndex == -1 && !contentStarted {
+		// Responses may receive the signature type in a separate frame.
+		lateType := responseFormat == sdktranslator.FormatOpenAIResponse && frameRes.DeltaSignatureType != "" && thoughtStepIndex >= 0 && responseThoughtSignatures[thoughtStepIndex] != ""
+		if len(frameRes.DeltaSignature) > 0 || lateType {
+			if thoughtStepIndex == -1 && (!contentStarted || responseFormat == sdktranslator.FormatOpenAIResponse) {
+				// A signature-only thought can follow an already-open message.
+				if contentStarted {
+					stopDoc := ojson.NewDocString(`{"event_type":"step.stop"}`)
+					_ = stopDoc.Set("index", stepIndex)
+					if !emitInteractionsEvent(stopDoc.Bytes()) {
+						return
+					}
+					contentStarted = false
+					stepIndex++
+				}
 				thoughtStepIndex = stepIndex
 				startEvent, _ := ojson.SetBytes([]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`), "index", stepIndex)
 				if !emitInteractionsEvent(startEvent) {
@@ -1236,14 +1248,16 @@ func (e *DevinExecutor) streamDevinFramesForAuth(
 			sigDoc := ojson.NewDoc([]byte(`{"event_type":"step.delta","index":0,"delta":{"type":"thought_signature","signature":""}}`))
 			_ = sigDoc.Set("index", targetIdx)
 			sig := string(frameRes.DeltaSignature)
+			sigType := frameRes.DeltaSignatureType
 			if responseFormat == sdktranslator.FormatOpenAIResponse {
 				// The Responses translator accepts complete signatures, not fragments.
 				responseThoughtSignatures[targetIdx] += sig
 				sig = responseThoughtSignatures[targetIdx]
+				sigType = signatureType
 			}
 			_ = sigDoc.Set("delta.signature", sig)
-			if frameRes.DeltaSignatureType != "" {
-				_ = sigDoc.Set("delta.signature_type", frameRes.DeltaSignatureType)
+			if sigType != "" {
+				_ = sigDoc.Set("delta.signature_type", sigType)
 			}
 			if !emitInteractionsEvent(sigDoc.Bytes()) {
 				return
@@ -1829,6 +1843,9 @@ func consumeDevinFramesToInteractionsForAuth(body io.Reader, model, chatModelUID
 			sigStr := string(accumulatedSignature)
 			_ = thoughtDoc.Set("signature", sigStr)
 			_ = thoughtDoc.Set("thought_signature", sigStr)
+			if signatureType != "" {
+				_ = thoughtDoc.Set("signature_type", signatureType)
+			}
 		}
 		steps = append(steps, thoughtDoc.Bytes())
 	}
@@ -2041,8 +2058,15 @@ func parseInteractionsPayload(payload, originalRequest []byte) (
 				// If previous prompt was assistant, attach thinking; otherwise append assistant prompt
 				text := extractInteractionsStepText(step)
 				sigStr := firstNonEmpty(step.Get("signature").String(), step.Get("thought_signature").String())
-				sigBytes, sigType := parseSignatureBytes(sigStr)
-				if len(prompts) > 0 && prompts[len(prompts)-1].Source == 2 {
+				var sigBytes []byte
+				var sigType string
+				openAI := step.Get("signature_type").String() == "openai" && internalsignature.IsDevinOpenAIReasoningSignature(sigStr)
+				if openAI {
+					sigBytes, sigType = []byte(sigStr), "openai"
+				} else {
+					sigBytes, sigType = parseSignatureBytes(sigStr)
+				}
+				if len(prompts) > 0 && prompts[len(prompts)-1].Source == 2 && !(openAI && len(prompts[len(prompts)-1].Signature) > 0) {
 					if prompts[len(prompts)-1].Thinking != "" {
 						prompts[len(prompts)-1].Thinking += "\n\n" + text
 					} else {

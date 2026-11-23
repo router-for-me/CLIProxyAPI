@@ -21,8 +21,8 @@ import (
 
 func TestCopilotPlannedRouteCannotOutliveCatalog(t *testing.T) {
 	e := NewCopilotExecutor(nil)
-	a := copilotTestAuth(t, "account", "m", copilot.Chat)
-	req := x.Request{Model: "m", Payload: []byte(`{"messages":[]}`)}
+	a := copilotTestAuth(t, "account", "claude-opus-5", copilot.Chat)
+	req := x.Request{Model: "claude-opus-5", Payload: []byte(`{"messages":[]}`)}
 	opts := e.PlanRequestRoute(a, req, x.Options{SourceFormat: tr.FormatOpenAI})
 	plan := opts.Metadata[copilotRouteKey].(copilotAttemptRoute)
 	plan.expiresAt = time.Unix(1, 0)
@@ -38,9 +38,9 @@ func TestCopilotIncrementalResponseRequiresStatefulRoute(t *testing.T) {
 	e := NewCopilotExecutor(nil)
 	opts := x.Options{SourceFormat: tr.FormatOpenAIResponse}
 	for _, endpoint := range []string{copilot.Chat, copilot.Messages, copilot.Responses} {
-		a := copilotTestAuth(t, "account", "m", endpoint)
+		a := copilotTestAuth(t, "account", "claude-opus-5", endpoint)
 		for _, input := range []string{`"another question"`, `[{"type":"function_call_output","call_id":"a","output":"result"}]`} {
-			req := x.Request{Model: "m", Payload: []byte(`{"previous_response_id":"resp1","input":` + input + `}`)}
+			req := x.Request{Model: "claude-opus-5", Payload: []byte(`{"previous_response_id":"resp1","input":` + input + `}`)}
 			for _, mode := range [][2]bool{{false, false}, {true, false}, {false, true}} {
 				p, err := e.prepare(context.Background(), a, req, opts, mode[0], mode[1])
 				var status statusErr
@@ -64,7 +64,11 @@ func TestCopilotResponsesHistoryForChat(t *testing.T) {
 		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
 			e := NewCopilotExecutor(nil)
 			a := copilotTestAuth(t, "account", model, copilot.Responses)
-			opts := x.Options{SourceFormat: tr.FormatOpenAI, Metadata: map[string]any{x.CanonicalSessionIDMetadataKey: "session", x.CallerScopeMetadataKey: "caller"}}
+			opts := x.Options{SourceFormat: tr.FormatOpenAI, Metadata: map[string]any{
+				x.CanonicalSessionIDMetadataKey: "session",
+				x.CallerScopeMetadataKey:        "caller",
+				x.RequestedModelMetadataKey:     "coding",
+			}}
 			doc := ojson.NewDocString(`{"messages":[{"role":"user","content":"lookup"}]}`)
 			upstream := answer
 			if stream {
@@ -78,7 +82,7 @@ func TestCopilotResponsesHistoryForChat(t *testing.T) {
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(upstream)), Request: r}, nil
 			}))
-			req := x.Request{Model: model, Payload: doc.Bytes()}
+			req := x.Request{Model: copilot.ModelPrefix + model, Payload: doc.Bytes()}
 			if stream {
 				res, err := e.ExecuteStream(ctx, a, req, opts)
 				if err != nil {
@@ -104,7 +108,7 @@ func TestCopilotResponsesHistoryForChat(t *testing.T) {
 			prepare := func(cfg *config.Config, options x.Options) ojson.Result {
 				t.Helper()
 				n := helps.PayloadConfigEvaluationCount()
-				p, err := e.WithConfig(cfg).prepare(ctx, a, x.Request{Model: model, Payload: doc.Bytes()}, options, stream, false)
+				p, err := e.WithConfig(cfg).prepare(ctx, a, x.Request{Model: req.Model, Payload: doc.Bytes()}, options, stream, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -129,6 +133,7 @@ func TestCopilotResponsesHistoryForChat(t *testing.T) {
 				t.Fatal("lost final payload edits")
 			}
 			cfg.Payload.Filter = nil
+			cfg.Payload.Override[0].Models = []config.PayloadModelRule{{Name: req.Model}}
 			cfg.Payload.Override[0].Params = map[string]any{"model": "mai-code-2"}
 			wire = prepare(cfg, opts)
 			if wire.Get("model").String() != "mai-code-2" || strings.Contains(wire.Raw, "TEST-PRIVATE") {

@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
@@ -746,8 +745,8 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Con
 		return true, true
 	}
 	models := result.Models
-	if _, _, compat := openAICompatInfoFromAuth(activeAuth); providerKey == copilot.Provider && !compat {
-		models = copilotPublicPluginModels(models)
+	if _, _, compat := openAICompatInfoFromAuth(activeAuth); providerKey == "copilot" && !compat {
+		models = s.copilotPublicPluginModels(activeAuth, models)
 	}
 	models = applyExcludedModels(models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)

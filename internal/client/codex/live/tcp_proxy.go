@@ -1,3 +1,5 @@
+//go:build !solaris
+
 package live
 
 import (

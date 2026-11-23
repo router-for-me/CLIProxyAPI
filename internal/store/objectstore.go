@@ -18,7 +18,6 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -30,15 +29,16 @@ const (
 
 // ObjectStoreConfig captures configuration for the object storage-backed token store.
 type ObjectStoreConfig struct {
-	Endpoint  string
-	Bucket    string
-	AccessKey string
-	SecretKey string
-	Region    string
-	Prefix    string
-	LocalRoot string
-	UseSSL    bool
-	PathStyle bool
+	OptionalConfig bool
+	Endpoint       string
+	Bucket         string
+	AccessKey      string
+	SecretKey      string
+	Region         string
+	Prefix         string
+	LocalRoot      string
+	UseSSL         bool
+	PathStyle      bool
 }
 
 // ObjectTokenStore persists configuration and authentication metadata using an S3-compatible object storage backend.
@@ -48,6 +48,7 @@ type ObjectTokenStore struct {
 	cfg               ObjectStoreConfig
 	spoolRoot         string
 	configPath        string
+	configMirror      remoteConfigMirror
 	authDir           string
 	mu                sync.Mutex
 	putObjectFn       func(ctx context.Context, key string, data []byte, contentType string) error
@@ -145,19 +146,26 @@ func (s *ObjectTokenStore) AuthDir() string {
 
 // Bootstrap ensures the target bucket exists and synchronizes data from the object storage backend.
 func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
+	_, err := s.BootstrapConfig(ctx, exampleConfigPath)
+	return err
+}
+
+// BootstrapConfig synchronizes the workspace and returns the winning config snapshot.
+func (s *ObjectTokenStore) BootstrapConfig(ctx context.Context, exampleConfigPath string) (*config.Config, error) {
 	if s == nil {
-		return fmt.Errorf("object store: not initialized")
+		return nil, fmt.Errorf("object store: not initialized")
 	}
-	if err := s.ensureBucket(ctx); err != nil {
-		return err
+	if errEnsure := s.ensureBucket(ctx); errEnsure != nil {
+		return nil, errEnsure
 	}
-	if err := s.syncConfigFromBucket(ctx, exampleConfigPath); err != nil {
-		return err
+	cfg, errConfig := s.syncConfigFromBucket(ctx, exampleConfigPath)
+	if errConfig != nil {
+		return nil, errConfig
 	}
-	if err := s.syncAuthFromBucket(ctx); err != nil {
-		return err
+	if errAuth := s.syncAuthFromBucket(ctx); errAuth != nil {
+		return nil, errAuth
 	}
-	return nil
+	return cfg, nil
 }
 
 // Save persists authentication metadata to disk and uploads it to the object storage backend.
@@ -339,17 +347,10 @@ func (s *ObjectTokenStore) PersistConfig(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	data, err := os.ReadFile(s.configPath)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return s.deleteObject(ctx, objectStoreConfigKey)
-		}
-		return fmt.Errorf("object store: read config file: %w", err)
+	if errPersist := s.configMirror.persist(ctx, s.configPath, s.cfg.OptionalConfig, s.writeConfigVersion); errPersist != nil {
+		return fmt.Errorf("object store: %w", errPersist)
 	}
-	if len(data) == 0 {
-		return s.deleteObject(ctx, objectStoreConfigKey)
-	}
-	return s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml")
+	return nil
 }
 
 func (s *ObjectTokenStore) ensureBucket(ctx context.Context) error {
@@ -360,63 +361,84 @@ func (s *ObjectTokenStore) ensureBucket(ctx context.Context) error {
 	if exists {
 		return nil
 	}
-	if err = s.client.MakeBucket(ctx, s.cfg.Bucket, minio.MakeBucketOptions{Region: s.cfg.Region}); err != nil {
+	if err = s.client.MakeBucket(ctx, s.cfg.Bucket, minio.MakeBucketOptions{Region: s.cfg.Region}); err != nil && minio.ToErrorResponse(err).Code != "BucketAlreadyOwnedByYou" {
 		return fmt.Errorf("object store: create bucket: %w", err)
 	}
 	return nil
 }
 
-func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example string) error {
-	key := s.prefixedKey(objectStoreConfigKey)
-	_, err := s.client.StatObject(ctx, s.cfg.Bucket, key, minio.StatObjectOptions{})
-	switch {
-	case err == nil:
-		object, errGet := s.client.GetObject(ctx, s.cfg.Bucket, key, minio.GetObjectOptions{})
-		if errGet != nil {
-			return fmt.Errorf("object store: fetch config: %w", errGet)
-		}
-		defer object.Close()
-		data, errRead := io.ReadAll(object)
-		if errRead != nil {
-			return fmt.Errorf("object store: read config: %w", errRead)
-		}
-		if errWrite := os.WriteFile(s.configPath, normalizeLineEndingsBytes(data), 0o600); errWrite != nil {
-			return fmt.Errorf("object store: write config: %w", errWrite)
-		}
-	case isObjectNotFound(err):
-		if _, statErr := os.Stat(s.configPath); errors.Is(statErr, fs.ErrNotExist) {
-			if example != "" {
-				if errCopy := misc.CopyConfigTemplate(example, s.configPath); errCopy != nil {
-					return fmt.Errorf("object store: copy example config: %w", errCopy)
-				}
-			} else {
-				if errCreate := os.MkdirAll(filepath.Dir(s.configPath), 0o700); errCreate != nil {
-					return fmt.Errorf("object store: prepare config directory: %w", errCreate)
-				}
-				if errWrite := os.WriteFile(s.configPath, []byte{}, 0o600); errWrite != nil {
-					return fmt.Errorf("object store: create empty config: %w", errWrite)
-				}
-			}
-		}
-		// Seed the bucket with the file the startup load leaves behind, so a plaintext
-		// management secret never reaches it. Fail instead of skipping: the startup load
-		// could turn a refused file into one that a later start would upload.
-		if errPrepare := config.PrepareConfigFileForUpload(s.configPath); errPrepare != nil {
-			return fmt.Errorf("object store: prepare local config for seeding: %w", errPrepare)
-		}
-		data, errRead := os.ReadFile(s.configPath)
-		if errRead != nil {
-			return fmt.Errorf("object store: read local config: %w", errRead)
-		}
-		if len(data) > 0 {
-			if errPut := s.putObject(ctx, objectStoreConfigKey, data, "application/x-yaml"); errPut != nil {
-				return errPut
-			}
-		}
-	default:
-		return fmt.Errorf("object store: stat config: %w", err)
+func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example string) (*config.Config, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cfg, errSync := s.configMirror.sync(ctx, s.configPath, example, s.cfg.OptionalConfig, s.readConfigVersion, s.writeConfigVersion)
+	if errSync != nil {
+		return nil, fmt.Errorf("object store: synchronize config: %w", errSync)
 	}
-	return nil
+	return cfg, nil
+}
+
+func (s *ObjectTokenStore) readConfigVersion(ctx context.Context) (_ *remoteConfigVersion, err error) {
+	core := minio.Core{Client: s.client}
+	body, _, headers, errGet := core.GetObject(ctx, s.cfg.Bucket, s.prefixedKey(objectStoreConfigKey), minio.GetObjectOptions{})
+	if isObjectNotFound(errGet) {
+		return nil, nil
+	}
+	if errGet != nil {
+		return nil, fmt.Errorf("fetch config: %w", errGet)
+	}
+	defer func() { err = errors.Join(err, body.Close()) }()
+	etag, errETag := objectConfigETag(headers.Get("ETag"))
+	if errETag != nil {
+		return nil, errETag
+	}
+	data, errRead := io.ReadAll(body)
+	if errRead != nil {
+		return nil, fmt.Errorf("read config response: %w", errRead)
+	}
+	return &remoteConfigVersion{data: data, etag: etag}, nil
+}
+
+func objectConfigETag(value string) (string, error) {
+	etag := strings.TrimSpace(value)
+	if len(etag) >= 2 && etag[0] == '"' && etag[len(etag)-1] == '"' {
+		etag = etag[1 : len(etag)-1]
+	} else if strings.HasPrefix(etag, "W/") {
+		etag = ""
+	}
+	if etag == "" || strings.ContainsAny(etag, "\" \t") {
+		return "", errors.New("config response requires a nonempty strong ETag")
+	}
+	// Always quote the value so If-Match never uses a wildcard.
+	return "\"" + etag + "\"", nil
+}
+
+func (s *ObjectTokenStore) writeConfigVersion(ctx context.Context, previous *remoteConfigVersion, data []byte) (_ *remoteConfigVersion, err error) {
+	headers := make(http.Header)
+	if previous == nil {
+		// The SDK's SetMatchETagExcept quotes the wildcard as a literal ETag.
+		headers.Set("If-None-Match", "*")
+	} else {
+		headers.Set("If-Match", previous.etag)
+	}
+	headers.Set("Content-Type", "application/x-yaml")
+	resp, errDo := s.singleAttemptObjectRequest(ctx, http.MethodPut, s.prefixedKey(objectStoreConfigKey), headers, data)
+	if errDo != nil {
+		// Request errors may include the presigned URL, which must not be logged.
+		return nil, errors.Join(errors.New("config upload outcome unknown"), ctx.Err())
+	}
+	defer func() { err = errors.Join(err, resp.Body.Close()) }()
+	if resp.StatusCode == http.StatusPreconditionFailed || resp.StatusCode == http.StatusConflict {
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("config upload returned HTTP %d", resp.StatusCode)
+	}
+	// A subsequent GET could return another writer's version, not this PUT's.
+	etag, errETag := objectConfigETag(resp.Header.Get("ETag"))
+	if errETag != nil {
+		return nil, fmt.Errorf("config upload succeeded but the version is unknown: %w", errETag)
+	}
+	return &remoteConfigVersion{data: data, etag: etag}, nil
 }
 
 func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
@@ -648,11 +670,6 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 		auth.Status = cliproxyauth.StatusDisabled
 	}
 	return auth, nil
-}
-
-func normalizeLineEndingsBytes(data []byte) []byte {
-	replaced := bytes.ReplaceAll(data, []byte{'\r', '\n'}, []byte{'\n'})
-	return bytes.ReplaceAll(replaced, []byte{'\r'}, []byte{'\n'})
 }
 
 func isObjectNotFound(err error) bool {

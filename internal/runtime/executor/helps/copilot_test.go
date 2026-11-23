@@ -6,6 +6,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
@@ -158,5 +159,96 @@ func TestCopilotCLIHeadersUseAccountScopedSessionsAndFeatureBetas(t *testing.T) 
 	SetCopilotInferenceHeaders(other, route, ojson.Parse(`{"thinking":{"type":"enabled"}}`), "user", links.Resolve("account-b", CopilotTurnInput{Initiator: "user"}, opts, route.Format, ojson.Result{}))
 	if same.Get("Anthropic-Beta") != "" || other.Get("Anthropic-Beta") != "" || same.Get("X-Client-Session-Id") != headers.Get("X-Client-Session-Id") || other.Get("X-Client-Session-Id") == same.Get("X-Client-Session-Id") || same.Get("X-Client-Session-Id") == "incoming-session" {
 		t.Fatal("unexpected message beta or session identity")
+	}
+}
+
+func TestNormalizeCopilotRequestPlainTextContent(t *testing.T) {
+	route := copilot.Route{Format: translator.FormatOpenAI, Info: &registry.ModelInfo{}}
+	for _, tc := range []struct {
+		name     string
+		from     translator.Format
+		messages string
+		wantType ojson.Type
+		wantText string
+	}{
+		{
+			name:     "responses single plain text assistant",
+			from:     translator.FormatOpenAIResponse,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"triage summary"}]}]`,
+			wantType: ojson.String,
+			wantText: "triage summary",
+		},
+		{
+			name:     "responses multi-part plain text assistant",
+			from:     translator.FormatOpenAIResponse,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"part 1 "},{"type":"text","text":"part 2"}]}]`,
+			wantType: ojson.String,
+			wantText: "part 1 part 2",
+		},
+		{
+			name:     "claude single plain text assistant with tool calls",
+			from:     translator.FormatClaude,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"checking"}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"ask","arguments":"{}"}}]}]`,
+			wantType: ojson.String,
+			wantText: "checking",
+		},
+		{
+			name:     "claude empty plain text assistant with tool calls becomes null",
+			from:     translator.FormatClaude,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":""}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"ask","arguments":"{}"}}]}]`,
+			wantType: ojson.Null,
+		},
+		{
+			name:     "assistant block with extra metadata stays array",
+			from:     translator.FormatOpenAIResponse,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"annotated","annotations":[{"type":"url_citation"}]}]}]`,
+			wantType: ojson.JSON,
+		},
+		{
+			name:     "assistant multimodal array stays array",
+			from:     translator.FormatOpenAIResponse,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]`,
+			wantType: ojson.JSON,
+		},
+		{
+			name:     "native chat single plain text assistant",
+			from:     translator.FormatOpenAI,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"native"}]}]`,
+			wantType: ojson.String,
+			wantText: "native",
+		},
+		{
+			name:     "native chat assistant with annotated text stays array",
+			from:     translator.FormatOpenAI,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b","annotations":[]}]}]`,
+			wantType: ojson.JSON,
+		},
+		{
+			name:     "native chat user single text block stays array",
+			from:     translator.FormatOpenAI,
+			messages: `[{"role":"user","content":[{"type":"text","text":"native"}]}]`,
+			wantType: ojson.JSON,
+		},
+		{
+			name:     "user multi-part array stays array",
+			from:     translator.FormatOpenAIResponse,
+			messages: `[{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}]`,
+			wantType: ojson.JSON,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := ojson.NewDocString(`{"model":"gemini-4-neon","messages":` + tc.messages + `}`)
+			NormalizeCopilotRequest(doc, route, tc.from, ojson.Result{}, false)
+			got := doc.Get("messages.0.content")
+			if got.Type != tc.wantType {
+				t.Fatalf("messages.0.content type = %v, want %v (raw: %s)", got.Type, tc.wantType, got.Raw)
+			}
+			if tc.wantType == ojson.String && got.String() != tc.wantText {
+				t.Fatalf("messages.0.content = %q, want %q", got.String(), tc.wantText)
+			}
+			if tc.wantType == ojson.JSON && got.Raw != ojson.Get(tc.messages, "0.content").Raw {
+				t.Fatalf("expected original content array, got %s", got.Raw)
+			}
+		})
 	}
 }
