@@ -38,7 +38,7 @@ func (h *copilotStreamHooks) NormalizeResponseAfter(_ context.Context, _, _ tran
 }
 
 func TestCopilotNativeStreamResponseHooks(t *testing.T) {
-	const model = "test-model"
+	const model = "claude-opus-5"
 	for _, tc := range []struct {
 		format                    translator.Format
 		endpoint, request, frames string

@@ -125,31 +125,79 @@ func setCodexRequiredBoolDoc(rawJSON []byte, ensureDoc func() *ojson.Doc, path s
 	_ = ensureDoc().Set(path, value)
 }
 
+const codexRequiredIncludeReasoning = "reasoning.encrypted_content"
+
+// codexAllowedOptionalIncludes lists the Codex-verified optional include values
+// preserved by the Responses-to-Codex translator in canonical order.
+var codexAllowedOptionalIncludes = [...]string{
+	"web_search_call.action.sources",
+	"web_search_call.results",
+	"output.encrypted_content",
+}
+
+func codexAllowedOptionalIncludeIndex(value string) int {
+	for i, allowed := range codexAllowedOptionalIncludes {
+		if value == allowed {
+			return i
+		}
+	}
+	return -1
+}
+
 func setCodexRequiredIncludeDoc(rawJSON []byte, ensureDoc func() *ojson.Doc) {
 	current := ojson.GetBytesNoCopy(rawJSON, "include")
-	includeSources := false
+	var present [len(codexAllowedOptionalIncludes)]bool
+	hasOptional := false
 	if current.IsArray() {
 		values := current.Array()
-		for _, value := range values {
-			if value.Type == ojson.String && value.String() == "web_search_call.action.sources" {
-				includeSources = true
-				break
+		hasReasoning := false
+		alreadyCanonical := len(values) > 0 && values[0].Type == ojson.String && values[0].String() == codexRequiredIncludeReasoning
+		lastOptionalIdx := -1
+		for i, value := range values {
+			if value.Type != ojson.String {
+				alreadyCanonical = false
+				continue
 			}
+			entry := value.String()
+			if entry == codexRequiredIncludeReasoning {
+				if i != 0 || hasReasoning {
+					alreadyCanonical = false
+				}
+				hasReasoning = true
+				continue
+			}
+			optIdx := codexAllowedOptionalIncludeIndex(entry)
+			if optIdx < 0 {
+				alreadyCanonical = false
+				continue
+			}
+			if present[optIdx] || optIdx <= lastOptionalIdx {
+				alreadyCanonical = false
+			}
+			present[optIdx] = true
+			hasOptional = true
+			lastOptionalIdx = optIdx
 		}
-		if !includeSources && len(values) == 1 && values[0].Type == ojson.String && values[0].String() == "reasoning.encrypted_content" {
-			return
-		}
-		if includeSources && len(values) == 2 &&
-			values[0].Type == ojson.String && values[0].String() == "reasoning.encrypted_content" &&
-			values[1].Type == ojson.String && values[1].String() == "web_search_call.action.sources" {
+		if alreadyCanonical && hasReasoning {
 			return
 		}
 	}
 
-	encoded := []byte(`["reasoning.encrypted_content"]`)
-	if includeSources {
-		encoded = []byte(`["reasoning.encrypted_content","web_search_call.action.sources"]`)
+	if !hasOptional {
+		_ = ensureDoc().SetRawBytes("include", []byte(`["reasoning.encrypted_content"]`))
+		return
 	}
+	encoded := make([]byte, 0, 128)
+	encoded = append(encoded, `["reasoning.encrypted_content"`...)
+	for i, allowed := range codexAllowedOptionalIncludes {
+		if !present[i] {
+			continue
+		}
+		encoded = append(encoded, `,"`...)
+		encoded = append(encoded, allowed...)
+		encoded = append(encoded, '"')
+	}
+	encoded = append(encoded, ']')
 	_ = ensureDoc().SetRawBytes("include", encoded)
 }
 

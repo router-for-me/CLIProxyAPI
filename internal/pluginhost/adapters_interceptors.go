@@ -765,8 +765,9 @@ func cloneInterceptorMetadata(in map[string]any) map[string]any {
 }
 
 type metadataCloneVisit struct {
-	typ reflect.Type
-	ptr uintptr
+	typ    reflect.Type
+	ptr    uintptr
+	length int
 }
 
 func cloneInterceptorMetadataAny(value reflect.Value, visited map[metadataCloneVisit]reflect.Value) any {
@@ -834,7 +835,7 @@ func cloneInterceptorMetadataReflectValue(value reflect.Value, visited map[metad
 			reflect.Copy(out, value)
 			return out
 		}
-		visit := metadataCloneVisit{typ: value.Type(), ptr: value.Pointer()}
+		visit := metadataCloneVisit{typ: value.Type(), ptr: value.Pointer(), length: value.Len()}
 		if existing, okExisting := visited[visit]; okExisting {
 			return existing
 		}

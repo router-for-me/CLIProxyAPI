@@ -601,9 +601,23 @@ func (w *ResponseWriterWrapper) closeDeferredAPICapture(c *gin.Context) {
 			closer.Close()
 		}
 	}
+	if value, exists := c.Get(logging.APIResponseSnapshotterContextKey); exists {
+		if closer, ok := value.(interface{ Close() }); ok && closer != nil {
+			closer.Close()
+		}
+	}
 }
 
 func (w *ResponseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
+	if c != nil {
+		if value, exists := c.Get(logging.APIResponseSnapshotterContextKey); exists {
+			if snapshotter, ok := value.(logging.APIResponseSnapshotter); ok && snapshotter != nil {
+				if data := snapshotter.SnapshotAPIResponse(); len(data) > 0 {
+					return data
+				}
+			}
+		}
+	}
 	apiResponse, isExist := c.Get("API_RESPONSE")
 	if !isExist {
 		return nil
@@ -1005,6 +1019,11 @@ func hasRecordedUpstreamActivity(c *gin.Context) bool {
 	}
 	if value, exists := c.Get(logging.DeferredAPIRequestContextKey); exists {
 		if requests, ok := value.([]logging.DeferredAPIRequest); ok && len(requests) > 0 {
+			return true
+		}
+	}
+	if value, exists := c.Get(logging.APIResponseSnapshotterContextKey); exists {
+		if snapshotter, ok := value.(logging.APIResponseSnapshotter); ok && snapshotter != nil && len(snapshotter.SnapshotAPIResponse()) > 0 {
 			return true
 		}
 	}
