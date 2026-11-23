@@ -25,6 +25,10 @@ type Config struct {
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
 
+	// ServerID is the stable deployment UUID from server.server-id, or a
+	// process-local identity when the file cannot be written. It is not public JSON.
+	ServerID string `yaml:"-" json:"-"`
+
 	// GitHubToken is the global token for GitHub requests, taking precedence over GITHUB_TOKEN.
 	GitHubToken string `yaml:"github-token" json:"-"`
 
@@ -44,8 +48,8 @@ type Config struct {
 	// Home config is runtime-only and is populated from -home-jwt.
 	Home HomeConfig `yaml:"-" json:"-"`
 
-	// SourceHash is runtime-only: the SHA-256 of the config file bytes this config was
-	// parsed from, or empty when the config was not loaded from a file.
+	// SourceHash is runtime-only: the SHA-256 of the exact config file snapshot after startup
+	// rewrites, or empty when the config was not loaded from a file.
 	SourceHash string `yaml:"-" json:"-"`
 
 	// CredentialConcurrency contains Home-authoritative credential lifecycle settings.

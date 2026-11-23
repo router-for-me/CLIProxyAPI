@@ -3,12 +3,15 @@ package executor
 import (
 	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -507,5 +510,182 @@ func TestAntigravityRefreshTokenSingleFlightIsolatesConfiguredHTTP2BaseTransport
 		case <-deadline:
 			t.Fatalf("timed out waiting for isolated HTTP/2 connections to close; closed=%v want %q and %q", closedAddrs, recA.remoteAddr, recB.remoteAddr)
 		}
+	}
+}
+
+func isPeerClosedReadError(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
+}
+
+func startBlackholeSOCKS5GreetingProxy(t *testing.T) (addr string, greetingRead <-chan struct{}, serverDone <-chan error) {
+	t.Helper()
+
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen() error = %v", errListen)
+	}
+
+	greetingCh := make(chan struct{})
+	doneCh := make(chan error, 1)
+	stopServer := make(chan struct{})
+
+	t.Cleanup(func() {
+		close(stopServer)
+		_ = listener.Close()
+	})
+
+	go func() {
+		conn, errAccept := listener.Accept()
+		if errAccept != nil {
+			doneCh <- errAccept
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		go func() {
+			<-stopServer
+			_ = conn.Close()
+		}()
+		if errDeadline := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+			doneCh <- errDeadline
+			return
+		}
+		var greeting [3]byte
+		if _, errRead := io.ReadFull(conn, greeting[:]); errRead != nil {
+			doneCh <- errRead
+			return
+		}
+		if greeting != [3]byte{0x05, 0x01, 0x00} {
+			doneCh <- fmt.Errorf("unexpected SOCKS5 greeting: %x", greeting)
+			return
+		}
+		close(greetingCh)
+		var buf [1]byte
+		_, errEOF := conn.Read(buf[:])
+		doneCh <- errEOF
+	}()
+
+	return listener.Addr().String(), greetingCh, doneCh
+}
+
+func TestAntigravityFetchProjectIDSOCKS5CancellationClosesProxyConn(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			proxyAddr, greetingRead, serverDone := startBlackholeSOCKS5GreetingProxy(t)
+
+			cfg := &config.Config{}
+			auth := &cliproxyauth.Auth{
+				ID:       "ag-project-discovery-" + scheme,
+				ProxyURL: scheme + "://" + proxyAddr,
+			}
+			t.Cleanup(func() { closeAntigravityAuthIdleTransports(auth) })
+
+			// Pre-create the credential's shared HTTP/1.1 pool and verify project
+			// discovery isolates its own HTTP/1.1 clone without disturbing the shared pool.
+			sharedClient := newAntigravityHTTPClient(context.Background(), cfg, auth, 0)
+			sharedTransport, okShared := sharedClient.Transport.(*http.Transport)
+			if !okShared || sharedTransport == nil {
+				t.Fatalf("sharedClient.Transport = %#v, want *http.Transport", sharedClient.Transport)
+			}
+			discoveryClient, discoveryCleanup := newAntigravityProjectDiscoveryHTTPClient(context.Background(), cfg, auth)
+			defer discoveryCleanup()
+			discoveryTransport, okDiscovery := discoveryClient.Transport.(*http.Transport)
+			if !okDiscovery || discoveryTransport == nil {
+				t.Fatalf("discoveryClient.Transport = %#v, want *http.Transport", discoveryClient.Transport)
+			}
+			if discoveryTransport == sharedTransport {
+				t.Fatal("project discovery transport must be isolated from the shared pool transport")
+			}
+			if discoveryTransport.ForceAttemptHTTP2 || discoveryTransport.TLSNextProto == nil || len(discoveryTransport.TLSNextProto) != 0 {
+				t.Fatalf("project discovery transport must preserve HTTP/1.1-only config (ForceAttemptHTTP2=%v TLSNextProto=%#v)", discoveryTransport.ForceAttemptHTTP2, discoveryTransport.TLSNextProto)
+			}
+
+			exec := NewAntigravityExecutor(cfg)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			reqDone := make(chan error, 1)
+			go func() {
+				_, errFetch := exec.fetchAntigravityProjectID(ctx, auth, "secret-token")
+				reqDone <- errFetch
+			}()
+
+			select {
+			case <-greetingRead:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 proxy did not receive greeting from fetchAntigravityProjectID")
+			}
+
+			cancel()
+
+			select {
+			case errFetch := <-reqDone:
+				if errFetch == nil {
+					t.Fatal("canceled fetchAntigravityProjectID returned nil error")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("canceled fetchAntigravityProjectID did not return")
+			}
+
+			select {
+			case errServer := <-serverDone:
+				if !isPeerClosedReadError(errServer) {
+					t.Fatalf("SOCKS5 proxy read error = %v, want peer close (io.EOF or ECONNRESET)", errServer)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 proxy connection was not closed after fetchAntigravityProjectID cancellation")
+			}
+		})
+	}
+}
+
+func TestAntigravityRefreshTokenSingleFlightSOCKS5CancellationClosesProxyConn(t *testing.T) {
+	for _, scheme := range []string{"socks5", "socks5h"} {
+		scheme := scheme
+		t.Run(scheme, func(t *testing.T) {
+			proxyAddr, greetingRead, serverDone := startBlackholeSOCKS5GreetingProxy(t)
+
+			cfg := &config.Config{}
+			auth := &cliproxyauth.Auth{
+				ID:       "ag-oauth-refresh-" + scheme,
+				ProxyURL: scheme + "://" + proxyAddr,
+			}
+			exec := NewAntigravityExecutor(cfg)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			reqDone := make(chan error, 1)
+			go func() {
+				_, errRefresh := exec.refreshTokenSingleFlight(ctx, auth, "refresh-token")
+				reqDone <- errRefresh
+			}()
+
+			select {
+			case <-greetingRead:
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 proxy did not receive greeting from refreshTokenSingleFlight")
+			}
+
+			cancel()
+
+			select {
+			case errRefresh := <-reqDone:
+				if errRefresh == nil {
+					t.Fatal("canceled refreshTokenSingleFlight returned nil error")
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("canceled refreshTokenSingleFlight did not return")
+			}
+
+			select {
+			case errServer := <-serverDone:
+				if !isPeerClosedReadError(errServer) {
+					t.Fatalf("SOCKS5 proxy read error = %v, want peer close (io.EOF or ECONNRESET)", errServer)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("SOCKS5 proxy connection was not closed after refreshTokenSingleFlight cancellation")
+			}
+		})
 	}
 }

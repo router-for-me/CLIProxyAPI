@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
@@ -25,9 +26,9 @@ func TestCopilotChatSignedMessagesContinuation(t *testing.T) {
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
 			e := NewCopilotExecutor(nil)
 			a := copilotTestAuth(t, "account", model, copilot.Messages)
-			catalog := ojson.NewDocString(a.Metadata[copilot.CatalogKey].(string))
-			_ = catalog.Set("data.0.capabilities.supports.max_thinking_budget", 16000)
-			a.Metadata[copilot.CatalogKey] = catalog.String()
+			entry := copilot.Model{ID: model, Endpoints: []string{copilot.Messages}}
+			entry.Capabilities.Supports.MaxBudget = 16000
+			a.CopilotCatalog = copilot.NewCatalog([]copilot.Model{entry}, time.Now())
 			opts := x.Options{SourceFormat: tr.FormatOpenAI, Metadata: map[string]any{x.CanonicalSessionIDMetadataKey: "session", x.CallerScopeMetadataKey: "caller"}}
 			doc := ojson.NewDocString(prompt)
 			var body []byte

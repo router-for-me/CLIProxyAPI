@@ -104,14 +104,26 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 	}
 
 	inputItems := root.Get("input")
-	if inputItems.IsArray() {
+	if inputItems.Type == ojson.String {
+		if text := strings.TrimSpace(inputItems.String()); text != "" {
+			segments = append(segments, text)
+		}
+	} else if inputItems.IsArray() {
 		arr := inputItems.Array()
 		for i := range arr {
 			item := arr[i]
-			switch item.Get("type").String() {
+			itemType := item.Get("type").String()
+			if itemType == "" && item.Get("role").String() != "" && item.Get("content").Exists() {
+				itemType = "message"
+			}
+			switch itemType {
 			case "message":
 				content := item.Get("content")
-				if content.IsArray() {
+				if content.Type == ojson.String {
+					if text := strings.TrimSpace(content.String()); text != "" {
+						segments = append(segments, text)
+					}
+				} else if content.IsArray() {
 					parts := content.Array()
 					for j := range parts {
 						part := parts[j]

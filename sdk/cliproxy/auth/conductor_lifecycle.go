@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 )
@@ -221,6 +222,9 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		m.authEpochs[auth.ID] = auth.RegistrationEpoch
 	}
 	m.authEpochs[auth.ID]++
+	if auth.RegistrationEpoch != 0 {
+		auth.CopilotCatalog = nil
+	}
 	auth.RegistrationEpoch = m.authEpochs[auth.ID]
 	if existing, exists := m.auths[auth.ID]; exists && existing != nil {
 		auth.CredentialVersion = max(auth.CredentialVersion, existing.CredentialVersion) + 1
@@ -498,6 +502,19 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 	auth.Success = existing.Success
 	auth.Failed = existing.Failed
 	auth.recentRequests = existing.recentRequests
+	if existing.CopilotCatalog != nil || auth.CopilotCatalog != nil {
+		// An unversioned file reload or stale clone cannot replace newer discovery.
+		// A different account or upstream must discover its own permissions.
+		switch {
+		case existing.Provider != auth.Provider || auth.Disabled || auth.Status == StatusDisabled ||
+			authMetadataString(existing, "base_url") != authMetadataString(auth, "base_url") ||
+			authMetadataString(existing, "account_id") != authMetadataString(auth, "account_id") ||
+			authRefreshToken(existing) != authRefreshToken(auth):
+			auth.CopilotCatalog = copilot.UnavailableCatalog
+		case auth.CopilotCatalog == nil || auth.Generation < existing.Generation || isFileSnapshot:
+			auth.CopilotCatalog = existing.CopilotCatalog
+		}
+	}
 	if auth.Generation <= existing.Generation {
 		auth.Generation = existing.Generation + 1
 	} else {
@@ -547,9 +564,12 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonAuthCredentialRetryAfter = existing.nonAuthCredentialRetryAfter
+			auth.nonAuthCredentialLastError = cloneError(existing.nonAuthCredentialLastError)
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 		}
+		clearedAuthGrantRetry := false
 		if credChanged || mode == updateModeRefresh {
 			applyPreservedRejectedTokens(existing, auth, mode == updateModeRefresh)
 			applyPreservedRenewalState(existing, auth, mode, now)
@@ -567,31 +587,27 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 					}
 				}
 				canServeWithAccessToken := !auth.RequiresSignIn || auth.HasValidAccessToken(now)
-				isAuthOrGrantFailure := hasUnauthorizedAuthFailure(existing) ||
-					existing.RequiresSignIn ||
-					(existing.RefreshError != nil && isTerminalRefreshError(existing, existing.RefreshError)) ||
-					(auth.LastError != nil && (isUnauthorizedError(auth.LastError) || isInvalidGrantResultError(auth.LastError) || isTerminalRefreshError(auth, auth.LastError)))
-				if canServeWithAccessToken && !auth.Quota.NextRecoverAt.After(now) &&
-					(isAuthOrGrantFailure || (auth.Unavailable && !auth.NextRetryAfter.After(now))) {
-					auth.Unavailable = false
-					auth.NextRetryAfter = time.Time{}
-					auth.cooldownRecordedSeq = 0
-					auth.forceCooldownUntil = time.Time{}
-					auth.quotaForceCooldownUntil = time.Time{}
-					auth.credentialRetryAfter = time.Time{}
-					auth.nonQuotaCooldownUntil = time.Time{}
-					auth.LastError = nil
-					auth.StatusMessage = ""
-					auth.Status = StatusActive
-					cooldownStateChanged = true
-				} else if canServeWithAccessToken && isAuthOrGrantFailure && auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now) {
-					auth.Unavailable = true
-					if !auth.NextRetryAfter.After(now) {
-						auth.NextRetryAfter = auth.Quota.NextRecoverAt
+				if canServeWithAccessToken {
+					preserveNonAuth := mode == updateModeRefresh ||
+						(credChanged && authRefreshToken(existing) != "" && authRefreshToken(existing) == authRefreshToken(auth))
+					if reconcileAuthGrantCooldownAfterRefresh(auth, existing, preserveNonAuth, now) {
+						clearedAuthGrantRetry = true
+						cooldownStateChanged = true
+					} else if !auth.Quota.NextRecoverAt.After(now) && auth.Unavailable && !auth.NextRetryAfter.After(now) && !auth.credentialRetryAfter.After(now) && !effectiveAuthForceUntil(auth).After(now) {
+						auth.Unavailable = false
+						auth.NextRetryAfter = time.Time{}
+						auth.cooldownRecordedSeq = 0
+						auth.forceCooldownUntil = time.Time{}
+						auth.quotaForceCooldownUntil = time.Time{}
+						auth.credentialRetryAfter = time.Time{}
+						auth.nonAuthCredentialRetryAfter = time.Time{}
+						auth.nonAuthCredentialLastError = nil
+						auth.nonQuotaCooldownUntil = time.Time{}
+						auth.LastError = nil
+						auth.StatusMessage = ""
+						auth.Status = StatusActive
+						cooldownStateChanged = true
 					}
-					auth.LastError = nil
-					auth.StatusMessage = auth.Quota.Reason
-					cooldownStateChanged = true
 				}
 				if canServeWithAccessToken {
 					resumed := clearUnauthorizedModelStates(auth, now)
@@ -632,7 +648,20 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			cooldownStateChanged = true
 		} else if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(now) {
 			auth.Unavailable = existing.Unavailable
-			auth.NextRetryAfter = existing.NextRetryAfter
+			if clearedAuthGrantRetry {
+				auth.NextRetryAfter = existing.Quota.NextRecoverAt
+				if existing.forceCooldownUntil.After(auth.NextRetryAfter) {
+					auth.NextRetryAfter = existing.forceCooldownUntil
+				}
+				if auth.credentialRetryAfter.After(auth.NextRetryAfter) {
+					auth.NextRetryAfter = auth.credentialRetryAfter
+				}
+			} else {
+				auth.NextRetryAfter = existing.NextRetryAfter
+				if auth.credentialRetryAfter.After(auth.NextRetryAfter) {
+					auth.NextRetryAfter = auth.credentialRetryAfter
+				}
+			}
 			// Preserve cooldown fields; keep the newest observation snapshot.
 			observation := mergeQuotaObservation(auth.Quota, existing.Quota)
 			auth.Quota = existing.Quota
@@ -642,8 +671,12 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			auth.forceCooldownUntil = existing.forceCooldownUntil
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
-			auth.credentialRetryAfter = existing.credentialRetryAfter
-			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			if !clearedAuthGrantRetry {
+				auth.credentialRetryAfter = existing.credentialRetryAfter
+				auth.nonAuthCredentialRetryAfter = existing.nonAuthCredentialRetryAfter
+				auth.nonAuthCredentialLastError = cloneError(existing.nonAuthCredentialLastError)
+				auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
+			}
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 			if auth.Status == StatusActive {
 				auth.Status = existing.Status
@@ -656,6 +689,8 @@ func (m *Manager) updateInternalLockedWithOptions(ctx context.Context, base, aut
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
+			auth.nonAuthCredentialRetryAfter = existing.nonAuthCredentialRetryAfter
+			auth.nonAuthCredentialLastError = cloneError(existing.nonAuthCredentialLastError)
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
 			auth.forceCooldownSeeded = existing.forceCooldownSeeded
 			if auth.LastError == nil && existing.LastError != nil {
@@ -958,6 +993,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		if len(auth.ModelStates) > 0 {
 			updateAggregatedAvailability(auth, now)
 		}
+		auth.CopilotCatalog = nil
 		m.authEpochs[auth.ID] = max(m.authEpochs[auth.ID], auth.RegistrationEpoch) + 1
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 		auth.Generation = 1

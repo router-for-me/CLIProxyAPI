@@ -29,7 +29,7 @@ type antigravityHintPersistRequest struct {
 // one worker per account. Repeated updates replace a single queued successor,
 // rather than accumulating singleflight followers while an upstream is stalled.
 func (s *Service) queueAntigravityModelRefresh(ctx context.Context, auth *coreauth.Auth, provider string) {
-	if s == nil || auth == nil || auth.ID == "" || isAntigravityAuthDisabled(auth) || s.antigravityHomeEnabled() {
+	if s == nil || auth == nil || auth.ID == "" || shouldSkipAntigravityModelProbe(auth, antigravityNowFunc()) || s.antigravityHomeEnabled() {
 		return
 	}
 	if ctx == nil {
@@ -216,7 +216,7 @@ func (s *Service) antigravityAccountProbeCurrent(probe *antigravityAccountProbe)
 		}
 	}
 	token, _ := current.Metadata["access_token"].(string)
-	return !current.Disabled && current.Status != coreauth.StatusDisabled &&
+	return !shouldSkipAntigravityModelProbe(current, antigravityNowFunc()) &&
 		antigravityAuthModelSettingsEqual(current, probe.auth) &&
 		s.antigravityCapabilityKey(current) == probe.routeKey && strings.TrimSpace(token) == probe.token
 }

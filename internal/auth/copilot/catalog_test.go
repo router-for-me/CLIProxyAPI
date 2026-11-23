@@ -16,7 +16,7 @@ func TestResolveAccountEndpoint(t *testing.T) {
 		{"local preference allowed", `{"id":"claude-fable-5.1","supported_endpoints":["/responses","/v1/messages"]}`, Messages},
 		{"known model field absent", `{"id":"claude-fable-5.1"}`, Messages},
 		{"explicit empty", `{"id":"claude-fable-5.1","supported_endpoints":[]}`, ""},
-		{"unknown model with supported endpoints", `{"id":"new","supported_endpoints":["/chat/completions","/v1/messages","/responses"]}`, Responses},
+		{"upstream-only model", `{"id":"new","supported_endpoints":["/chat/completions","/v1/messages","/responses"]}`, ""},
 		{"unknown model without endpoints", `{"id":"new"}`, ""},
 		{"unsupported protocol", `{"id":"claude-fable-5.1","supported_endpoints":["ws:/responses","/interactions"]}`, ""},
 		{"not authorized", `{"id":"claude-fable-5.1","policy":{"state":"disabled"}}`, ""},
@@ -33,18 +33,15 @@ func TestResolveAccountEndpoint(t *testing.T) {
 				t.Fatal(err)
 			}
 			now := time.Now()
-			encoded, err := json.Marshal(Catalog{FetchedAt: now, Models: []Model{model}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			route, ok := ReadCatalog(string(encoded), now).Route(model.ID)
+			catalog := NewCatalog([]Model{model}, now)
+			route, ok := catalog.Active(now).Route(model.ID)
 			if got := route.Endpoint; got != tc.want || ok != (tc.want != "") {
 				t.Fatalf("route = %q, %v, want %q", got, ok, tc.want)
 			}
-			if _, okFuture := ReadCatalog(string(encoded), now.Add(-time.Second)).Route(model.ID); okFuture {
+			if _, okFuture := catalog.Active(now.Add(-time.Second)).Route(model.ID); okFuture {
 				t.Fatal("future catalog produced a route")
 			}
-			if _, okExpired := ReadCatalog(string(encoded), now.Add(CatalogMaxAge)).Route(model.ID); okExpired {
+			if _, okExpired := catalog.Active(now.Add(CatalogMaxAge)).Route(model.ID); okExpired {
 				t.Fatal("expired catalog produced a route")
 			}
 		})
@@ -65,7 +62,7 @@ func TestOfficialCLIEffortFallbacks(t *testing.T) {
 		t.Run(tc.id, func(t *testing.T) {
 			model := Model{ID: tc.id}
 			model.Capabilities.Supports.Reasoning = json.RawMessage(tc.reasoning)
-			route, ok := model.route()
+			route, ok := NewCatalog([]Model{model}, time.Now()).Route(model.ID)
 			if !ok || route.Info.Thinking == nil || !slices.Equal(route.Info.Thinking.Levels, tc.want) {
 				t.Fatalf("unexpected route capabilities: %+v", route.Info)
 			}
@@ -76,12 +73,12 @@ func TestOfficialCLIEffortFallbacks(t *testing.T) {
 func TestCopilotCLIDefaultsRespectAccountCapabilities(t *testing.T) {
 	m := Model{ID: "grok-4.7", DefaultEffort: "low"}
 	m.Capabilities.Supports.Reasoning = json.RawMessage(`["low","high"]`)
-	if r, _ := m.route(); r.DefaultEffort != "low" {
+	if r, _ := NewCatalog([]Model{m}, time.Now()).Route(m.ID); r.DefaultEffort != "low" {
 		t.Errorf("account default lost: %q", r.DefaultEffort)
 	}
 	m.DefaultEffort = ""
 	m.Capabilities.Supports.Reasoning = json.RawMessage(`["low"]`)
-	if r, _ := m.route(); r.DefaultEffort != "" {
+	if r, _ := NewCatalog([]Model{m}, time.Now()).Route(m.ID); r.DefaultEffort != "" {
 		t.Errorf("unsupported CLI effort seeded: %q", r.DefaultEffort)
 	}
 }

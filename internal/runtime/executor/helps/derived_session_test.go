@@ -1,12 +1,22 @@
 package helps
 
 import (
+	"fmt"
+	"strconv"
 	"testing"
 
-	"github.com/MoeForge/moego/regexp"
 	"github.com/google/uuid"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+func assertSignedInt64SessionID(t *testing.T, label, value string) int64 {
+	t.Helper()
+	parsed, errParse := strconv.ParseInt(value, 10, 64)
+	if errParse != nil || strconv.FormatInt(parsed, 10) != value {
+		t.Fatalf("%s = %q, want canonical signed int64 decimal (err=%v)", label, value, errParse)
+	}
+	return parsed
+}
 
 func TestDerivedSessionProviderMappings(t *testing.T) {
 	t.Parallel()
@@ -28,9 +38,7 @@ func TestDerivedSessionProviderMappings(t *testing.T) {
 	}
 
 	antigravityID := DerivedAntigravitySessionID(metadata)
-	if matched := regexp.MustCompile(`^-[0-9]+$`).MatchString(antigravityID); !matched {
-		t.Fatalf("Antigravity mapping = %q, want negative decimal", antigravityID)
-	}
+	assertSignedInt64SessionID(t, "Antigravity mapping", antigravityID)
 	if repeated := DerivedAntigravitySessionID(metadata); repeated != antigravityID {
 		t.Fatalf("Antigravity mapping is not stable: first=%q repeated=%q", antigravityID, repeated)
 	}
@@ -74,25 +82,19 @@ func TestDerivedSessionProviderMappingsRequireIdentity(t *testing.T) {
 func TestAntigravitySessionIDForAuth(t *testing.T) {
 	t.Parallel()
 
-	negativeDecimal := regexp.MustCompile(`^-[0-9]+$`)
-
 	canonicalMeta := map[string]any{
 		cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude:sess-7706",
 		cliproxyexecutor.ExecutionSessionMetadataKey:   "exec-1",
 		cliproxyexecutor.DerivedSessionIDMetadataKey:   "ctx:v1:derived-1",
 	}
 	authAFirst := AntigravitySessionIDForAuth("auth-a", canonicalMeta)
-	if !negativeDecimal.MatchString(authAFirst) {
-		t.Fatalf("AntigravitySessionIDForAuth(auth-a) = %q, want negative decimal", authAFirst)
-	}
+	assertSignedInt64SessionID(t, "AntigravitySessionIDForAuth(auth-a)", authAFirst)
 	if repeated := AntigravitySessionIDForAuth("  auth-a  ", canonicalMeta); repeated != authAFirst {
 		t.Fatalf("AntigravitySessionIDForAuth not stable across whitespace-trimmed authID: first=%q repeated=%q", authAFirst, repeated)
 	}
 
 	authB := AntigravitySessionIDForAuth("auth-b", canonicalMeta)
-	if !negativeDecimal.MatchString(authB) {
-		t.Fatalf("AntigravitySessionIDForAuth(auth-b) = %q, want negative decimal", authB)
-	}
+	assertSignedInt64SessionID(t, "AntigravitySessionIDForAuth(auth-b)", authB)
 	if authB == authAFirst {
 		t.Fatalf("different credentials produced identical Antigravity session ID: %q", authB)
 	}
@@ -116,5 +118,95 @@ func TestAntigravitySessionIDForAuth(t *testing.T) {
 	derivedID := AntigravitySessionIDForAuth("auth-a", optsMeta)
 	if execID == "" || derivedID == "" || execID == authAFirst || execID == derivedID {
 		t.Fatalf("session kinds did not produce distinct non-empty IDs: canonical=%q exec=%q derived=%q", authAFirst, execID, derivedID)
+	}
+}
+
+func TestScopeAntigravitySessionIDForAuth(t *testing.T) {
+	t.Parallel()
+
+	if got := ScopeAntigravitySessionIDForAuth("auth-a", "   "); got != "" {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(empty) = %q, want empty", got)
+	}
+	if got := ScopeAntigravitySessionIDForAuth("", "  -987654321  "); got != "-987654321" {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(empty authID) = %q, want -987654321", got)
+	}
+
+	authA := ScopeAntigravitySessionIDForAuth("auth-a", "-987654321")
+	assertSignedInt64SessionID(t, "ScopeAntigravitySessionIDForAuth(auth-a)", authA)
+	if authA == "-987654321" {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(auth-a) = %q, want scoped value distinct from raw input", authA)
+	}
+	if repeated := ScopeAntigravitySessionIDForAuth("  auth-a  ", " -987654321 "); repeated != authA {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth not stable across whitespace: first=%q repeated=%q", authA, repeated)
+	}
+
+	authB := ScopeAntigravitySessionIDForAuth("auth-b", "-987654321")
+	assertSignedInt64SessionID(t, "ScopeAntigravitySessionIDForAuth(auth-b)", authB)
+	if authB == "-987654321" || authB == authA {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth(auth-b) = %q, want distinct scoped signed int64 decimal (authA=%q)", authB, authA)
+	}
+}
+
+func TestHashAntigravitySessionIDMatchesFNV1a64AndIncludesBothSigns(t *testing.T) {
+	t.Parallel()
+
+	referenceFNV1a64 := func(input []byte) string {
+		var h uint64 = 0xcbf29ce484222325
+		for _, b := range input {
+			h = (h ^ uint64(b)) * 0x100000001b3
+		}
+		return strconv.FormatInt(int64(h), 10)
+	}
+
+	samples := []string{"", "a", "hello", "session-1", "session-2", "cli-proxy-api\x00antigravity\x00canonical-session\x00auth-a\x00sess-1"}
+	for _, sample := range samples {
+		got := HashAntigravitySessionID([]byte(sample))
+		want := referenceFNV1a64([]byte(sample))
+		if got != want {
+			t.Fatalf("HashAntigravitySessionID(%q) = %q, want %q", sample, got, want)
+		}
+		assertSignedInt64SessionID(t, fmt.Sprintf("HashAntigravitySessionID(%q)", sample), got)
+	}
+
+	var derivedPos, derivedNeg int
+	var authPos, authNeg int
+	var scopePos, scopeNeg int
+	for i := 0; i < 64; i++ {
+		sid := fmt.Sprintf("session-%d", i)
+
+		derivedVal := assertSignedInt64SessionID(t, "DerivedAntigravitySessionID", DerivedAntigravitySessionID(map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:" + sid,
+		}))
+		if derivedVal > 0 {
+			derivedPos++
+		} else if derivedVal < 0 {
+			derivedNeg++
+		}
+
+		authVal := assertSignedInt64SessionID(t, "AntigravitySessionIDForAuth", AntigravitySessionIDForAuth("auth-a", map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude:" + sid,
+		}))
+		if authVal > 0 {
+			authPos++
+		} else if authVal < 0 {
+			authNeg++
+		}
+
+		scopeVal := assertSignedInt64SessionID(t, "ScopeAntigravitySessionIDForAuth", ScopeAntigravitySessionIDForAuth("auth-a", sid))
+		if scopeVal > 0 {
+			scopePos++
+		} else if scopeVal < 0 {
+			scopeNeg++
+		}
+	}
+
+	if derivedPos == 0 || derivedNeg == 0 {
+		t.Fatalf("DerivedAntigravitySessionID produced skewed signs: pos=%d neg=%d", derivedPos, derivedNeg)
+	}
+	if authPos == 0 || authNeg == 0 {
+		t.Fatalf("AntigravitySessionIDForAuth produced skewed signs: pos=%d neg=%d", authPos, authNeg)
+	}
+	if scopePos == 0 || scopeNeg == 0 {
+		t.Fatalf("ScopeAntigravitySessionIDForAuth produced skewed signs: pos=%d neg=%d", scopePos, scopeNeg)
 	}
 }
