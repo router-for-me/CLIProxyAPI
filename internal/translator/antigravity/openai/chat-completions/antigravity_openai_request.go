@@ -526,17 +526,16 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 		}
 		deduplicated := util.DeduplicateFunctionDeclarations(translatorcommon.JoinRawArray(functionDeclarations))
 		hasFunction := len(deduplicated) > 2
+		toolItems := make([][]byte, 0, 1+len(codeExecutionNodes)+len(urlContextNodes))
 		if hasFunction {
 			functionToolNode := []byte(`{"functionDeclarations":[]}`)
 			functionToolNode, _ = ojson.SetRawBytes(functionToolNode, "functionDeclarations", deduplicated)
-			_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray([][]byte{functionToolNode}))
-		} else {
-			toolItems := make([][]byte, 0, len(codeExecutionNodes)+len(urlContextNodes))
-			toolItems = append(toolItems, codeExecutionNodes...)
-			toolItems = append(toolItems, urlContextNodes...)
-			if len(toolItems) > 0 {
-				_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray(toolItems))
-			}
+			toolItems = append(toolItems, functionToolNode)
+		}
+		toolItems = append(toolItems, codeExecutionNodes...)
+		toolItems = append(toolItems, urlContextNodes...)
+		if len(toolItems) > 0 {
+			_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray(toolItems))
 		}
 	}
 
