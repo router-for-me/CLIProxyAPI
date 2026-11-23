@@ -224,6 +224,73 @@ func TestConvertAntigravityResponseToClaudeNonStream_ExcludesCachedTokensFromInp
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeStream_WaitsForNonEmptyFinishReason(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3.1-flash-lite"}`)
+
+	for _, tt := range []struct {
+		name              string
+		emptyFinishReason string
+	}{
+		{name: "null", emptyFinishReason: `null`},
+		{name: "empty string", emptyFinishReason: `""`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			firstChunk := []byte(`{
+				"response": {
+					"candidates": [{
+						"content": {"parts": [{"text": "hello"}]},
+						"finishReason": ` + tt.emptyFinishReason + `
+					}],
+					"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 1, "totalTokenCount": 11}
+				}
+			}`)
+			finalChunk := []byte(`{
+				"response": {
+					"candidates": [{
+						"content": {"parts": [{"text": " world"}]},
+						"finishReason": "STOP"
+					}],
+					"usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}
+				}
+			}`)
+
+			var param any
+			firstOutput := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, requestJSON, firstChunk, &param), nil)
+			firstText := string(firstOutput)
+			if strings.Contains(firstText, "event: content_block_stop\n") || strings.Contains(firstText, "event: message_delta\n") {
+				t.Fatalf("empty finishReason finalized the stream prematurely:\n%s", firstText)
+			}
+
+			output := append([]byte{}, firstOutput...)
+			output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, requestJSON, finalChunk, &param), nil)...)
+			output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.1-flash-lite", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+			outputText := string(output)
+
+			if got := strings.Count(outputText, "event: content_block_start\n"); got != 1 {
+				t.Fatalf("content_block_start count = %d, want 1:\n%s", got, outputText)
+			}
+			if got := strings.Count(outputText, "event: content_block_stop\n"); got != 1 {
+				t.Fatalf("content_block_stop count = %d, want 1:\n%s", got, outputText)
+			}
+			if got := strings.Count(outputText, "event: message_delta\n"); got != 1 {
+				t.Fatalf("message_delta count = %d, want 1:\n%s", got, outputText)
+			}
+
+			secondText := strings.Index(outputText, `"text":" world"`)
+			blockStop := strings.Index(outputText, "event: content_block_stop\n")
+			messageDelta := strings.Index(outputText, "event: message_delta\n")
+			if secondText < 0 || blockStop < secondText || messageDelta < blockStop {
+				t.Fatalf("stream events are out of order:\n%s", outputText)
+			}
+
+			messageDeltaData := sseDataForEvent(t, outputText, "message_delta")
+			if got := ojson.Get(messageDeltaData, "usage.output_tokens").Int(); got != 5 {
+				t.Fatalf("output_tokens = %d, want 5: %s", got, messageDeltaData)
+			}
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToClaudeStream_EmptyCandidateClosesMessage(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
 	responseJSON := testEmptyAntigravityResponse()

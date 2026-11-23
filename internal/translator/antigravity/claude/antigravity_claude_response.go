@@ -195,6 +195,11 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 			}
 			return [][]byte{}
 		}
+		if params.WebSearchStreamMode && !params.HasWebSearchTool && params.WebSearchTextBuffer.Len() > 0 {
+			appendBufferedWebSearchTextBlock(params, func(event, payload string) {
+				output = translatorcommon.AppendSSEEventString(output, event, payload, 3)
+			})
+		}
 		if params.HasFirstResponse && !params.HasContent {
 			output = translatorcommon.AppendSSEEventString(output, "content_block_start", fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex), 3)
 			params.ResponseType = 1
@@ -563,9 +568,9 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 		}
 	}
 
-	if finishReasonResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
-		params.HasFinishReason = true
+	if finishReasonResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Type == ojson.String {
 		if finishReason := strings.TrimSpace(finishReasonResult.String()); finishReason != "" {
+			params.HasFinishReason = true
 			params.FinishReason = strings.Clone(finishReason)
 			flushPendingToolInput()
 		}
