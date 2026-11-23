@@ -4412,11 +4412,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	var ownAuthForceDeadline time.Time
 	var ownAuthNonQuotaDeadline time.Time
 	isForceAuth := isForceCooldownError(resultErr)
-	if shouldSkipCredentialCooldown(resultErr) {
+	if !isTOSViolationResultError(resultErr) && shouldSkipCredentialCooldown(resultErr) {
 		return time.Time{}, time.Time{}
 	}
 	defer func() {
-		if disableCooling && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
+		if disableCooling && !isTOSViolationResultError(resultErr) && auth.NextRetryAfter.IsZero() && auth.Quota.NextRecoverAt.IsZero() {
 			auth.Unavailable = false
 			auth.Quota.Exceeded = false
 		}
@@ -4431,7 +4431,21 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
-	if isTransientRateLimitResultError(resultErr) && statusCode == http.StatusTooManyRequests {
+	if isTOSViolationResultError(resultErr) {
+		// Terminal credential suspension: deactivate so the credential is
+		// excluded from selection/rotation, but keep OAuth refresh intact
+		// (the suspension is service-scoped per issue #7515; the token and
+		// model catalog keep working) so operator tooling can verify
+		// account liveness. The appeal detail travels on the result error's
+		// Metadata and is persisted onto the credential record below.
+		auth.StatusMessage = "tos_violation"
+		auth.Status = StatusDisabled
+		auth.Disabled = true
+		auth.Unavailable = true
+		auth.NextRetryAfter = time.Time{}
+		auth.LastError = cloneError(resultErr)
+		persistTOSAppealMetadata(auth, resultErr)
+	} else if isTransientRateLimitResultError(resultErr) && statusCode == http.StatusTooManyRequests {
 		// Without a model key the transient capacity rejection degrades to an
 		// auth-level transient cooldown (issue 7017), never quota exhaustion.
 		next := transientRateLimitRetryAfter(now, retryAfter, disableCooling)
@@ -4482,27 +4496,11 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 				auth.NextRetryAfter = now.Add(30 * time.Minute)
 			}
 		case 402, 403:
-			if isTOSViolationResultError(resultErr) {
-				// Terminal credential suspension: deactivate so the credential is
-				// excluded from selection/rotation, but keep OAuth refresh intact
-				// (the suspension is service-scoped per issue #7515; the token and
-				// model catalog keep working) so operator tooling can verify
-				// account liveness. The appeal detail travels on the result error's
-				// Metadata and is persisted onto the credential record below.
-				auth.StatusMessage = "tos_violation"
-				auth.Status = StatusDisabled
-				auth.Disabled = true
-				auth.Unavailable = true
+			auth.StatusMessage = "payment_required"
+			if disableCooling {
 				auth.NextRetryAfter = time.Time{}
-				auth.LastError = cloneError(resultErr)
-				persistTOSAppealMetadata(auth, resultErr)
 			} else {
-				auth.StatusMessage = "payment_required"
-				if disableCooling {
-					auth.NextRetryAfter = time.Time{}
-				} else {
-					auth.NextRetryAfter = now.Add(30 * time.Minute)
-				}
+				auth.NextRetryAfter = now.Add(30 * time.Minute)
 			}
 		case 404:
 			auth.StatusMessage = "not_found"
