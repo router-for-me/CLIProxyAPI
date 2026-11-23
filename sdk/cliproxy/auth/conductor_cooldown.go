@@ -493,6 +493,10 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		}
 		if record.NonQuotaCooldownUntil.After(now) && record.NonQuotaCooldownUntil.After(auth.nonQuotaCooldownUntil) {
 			auth.nonQuotaCooldownUntil = record.NonQuotaCooldownUntil
+		} else if !record.ForceCooldownEvaluated && len(auth.ModelStates) == 0 && record.NonQuotaCooldownUntil.IsZero() &&
+			record.LastError != nil && !isQuotaCooldownResultError(record.LastError) &&
+			record.NextRetryAfter.After(now) && record.NextRetryAfter.After(auth.nonQuotaCooldownUntil) {
+			auth.nonQuotaCooldownUntil = record.NextRetryAfter
 		}
 		auth.forceCooldownSeeded = true
 		auth.Generation++
@@ -803,6 +807,10 @@ func seedInitialForceCooldownDeadlines(auth *Auth) {
 		return
 	}
 	auth.forceCooldownSeeded = true
+	if len(auth.ModelStates) == 0 && auth.nonQuotaCooldownUntil.IsZero() &&
+		auth.LastError != nil && !isQuotaCooldownResultError(auth.LastError) && !auth.NextRetryAfter.IsZero() {
+		auth.nonQuotaCooldownUntil = auth.NextRetryAfter
+	}
 	if !isForceCooldownError(auth.LastError) {
 		return
 	}
@@ -1280,9 +1288,9 @@ func clearQuotaCooldownFromLookup(auth *Auth, lookedUpAt, now time.Time) bool {
 	// With model states, an unmarked "quota" can be a model aggregate.
 	if auth.Quota.Exceeded && (auth.Quota.Reason == credentialQuotaReason ||
 		(auth.Quota.Reason == "quota" && (changed || len(auth.ModelStates) == 0 || !auth.quotaForceCooldownUntil.IsZero()))) {
-		// Older auth-only state can lack separate deadlines for mixed failures.
-		if len(auth.ModelStates) == 0 && nonQuotaUntil.IsZero() && auth.LastError != nil &&
-			!isQuotaCooldownResultError(auth.LastError) {
+		// Unseeded auth-only state can lack separate deadlines for mixed failures.
+		if len(auth.ModelStates) == 0 && !auth.forceCooldownSeeded && nonQuotaUntil.IsZero() &&
+			auth.LastError != nil && !isQuotaCooldownResultError(auth.LastError) {
 			nonQuotaUntil = auth.NextRetryAfter
 		}
 		forceUntil := effectiveAuthForceUntil(auth)
