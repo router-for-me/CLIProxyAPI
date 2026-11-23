@@ -162,7 +162,7 @@ func TestCopilotCLIHeadersUseAccountScopedSessionsAndFeatureBetas(t *testing.T) 
 	}
 }
 
-func TestNormalizeCopilotRequestFlattensCrossProtocolAssistantTextContent(t *testing.T) {
+func TestNormalizeCopilotRequestPlainTextContent(t *testing.T) {
 	route := copilot.Route{Format: translator.FormatOpenAI, Info: &registry.ModelInfo{}}
 	for _, tc := range []struct {
 		name     string
@@ -211,9 +211,22 @@ func TestNormalizeCopilotRequestFlattensCrossProtocolAssistantTextContent(t *tes
 			wantType: ojson.JSON,
 		},
 		{
-			name:     "native chat assistant array stays untouched",
+			name:     "native chat single plain text assistant",
 			from:     translator.FormatOpenAI,
 			messages: `[{"role":"assistant","content":[{"type":"text","text":"native"}]}]`,
+			wantType: ojson.String,
+			wantText: "native",
+		},
+		{
+			name:     "native chat assistant with annotated text stays array",
+			from:     translator.FormatOpenAI,
+			messages: `[{"role":"assistant","content":[{"type":"text","text":"a"},{"type":"text","text":"b","annotations":[]}]}]`,
+			wantType: ojson.JSON,
+		},
+		{
+			name:     "native chat user single text block stays array",
+			from:     translator.FormatOpenAI,
+			messages: `[{"role":"user","content":[{"type":"text","text":"native"}]}]`,
 			wantType: ojson.JSON,
 		},
 		{
@@ -232,6 +245,9 @@ func TestNormalizeCopilotRequestFlattensCrossProtocolAssistantTextContent(t *tes
 			}
 			if tc.wantType == ojson.String && got.String() != tc.wantText {
 				t.Fatalf("messages.0.content = %q, want %q", got.String(), tc.wantText)
+			}
+			if tc.wantType == ojson.JSON && got.Raw != ojson.Get(tc.messages, "0.content").Raw {
+				t.Fatalf("expected original content array, got %s", got.Raw)
 			}
 		})
 	}
