@@ -9,20 +9,21 @@ import (
 
 // ClaudeResetGrants counts the limit resets a subscription has banked: grants Anthropic gives an account
 // that its owner may claim to clear a limit early. Each count is the resets left on grants that are not
-// paused and have not ended, and that clear that limit; a grant that clears several counts for each.
+// paused and have not ended. A grant counts once, under the largest limit it clears, as claude.ai's usage
+// page lists it ("Weekly reset", "Fable reset"): a Fable reset that also gives back the week's share
+// Fable used is a Fable reset.
 type ClaudeResetGrants struct {
-	Weekly   int // grants that clear the week (seven_day, or that give the week back)
-	Fable    int // grants that clear Fable's weekly allowance (seven_day_overage_included)
-	FiveHour int // grants that clear the five-hour window (five_hour)
+	Weekly   int // grants that clear the week (seven_day), a weekly or a full reset
+	Fable    int // grants that clear Fable's weekly allowance (seven_day_overage_included) but not the week
+	FiveHour int // grants that clear only the five-hour window (five_hour)
 }
 
 // claudeResetGrant is one grant of the usage endpoint's cedar_ember block, as Claude Code reads it.
 type claudeResetGrant struct {
-	ResetsLeft      *int     `json:"resets_left"`
-	Paused          bool     `json:"paused"`
-	EndsAt          *string  `json:"ends_at"`
-	Clears          []string `json:"clears"`
-	GivesBackWeekly bool     `json:"gives_back_weekly"`
+	ResetsLeft *int     `json:"resets_left"`
+	Paused     bool     `json:"paused"`
+	EndsAt     *string  `json:"ends_at"`
+	Clears     []string `json:"clears"`
 }
 
 // ParseClaudeResetGrants reads the reset grants of a usage response fetched with cedar_ember=1: the
@@ -62,13 +63,12 @@ func ParseClaudeResetGrants(payload []byte, now time.Time) (ClaudeResetGrants, b
 			}
 		}
 		left := *grant.ResetsLeft
-		if grant.GivesBackWeekly || slices.Contains(grant.Clears, "seven_day") {
+		switch {
+		case slices.Contains(grant.Clears, "seven_day"):
 			grants.Weekly += left
-		}
-		if slices.Contains(grant.Clears, "seven_day_overage_included") {
+		case slices.Contains(grant.Clears, "seven_day_overage_included"):
 			grants.Fable += left
-		}
-		if slices.Contains(grant.Clears, "five_hour") {
+		case slices.Contains(grant.Clears, "five_hour"):
 			grants.FiveHour += left
 		}
 	}
