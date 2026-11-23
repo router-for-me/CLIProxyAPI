@@ -174,6 +174,47 @@ func TestCopilotChatCrossProtocolReplay(t *testing.T) {
 	}
 }
 
+func TestCopilotNativeChatAssistantHistory(t *testing.T) {
+	const model = "gemini-4-neon"
+	const configured = `[{"type":"text","text":"configured"}]`
+	auth := copilotTestAuth(t, "account", model, copilot.Chat)
+	req := x.Request{Model: model, Payload: []byte(`{"messages":[
+		{"role":"user","content":"Give me a code."},
+		{"role":"assistant","content":[{"type":"text","text":"Code: "},{"type":"text","text":"0731"}]},
+		{"role":"user","content":"Repeat the code."}
+	]}`)}
+	opts := x.Options{SourceFormat: tr.FormatOpenAI}
+	for _, tc := range []struct {
+		name     string
+		stream   bool
+		override []config.PayloadRule
+		wantRaw  string
+	}{
+		{name: "buffered", wantRaw: `"Code: 0731"`},
+		{name: "streaming", stream: true, wantRaw: `"Code: 0731"`},
+		{
+			name: "payload override",
+			override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: model}},
+				Params: map[string]any{"messages.1.content": configured},
+			}},
+			wantRaw: configured,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Payload.OverrideRaw = tc.override
+			p, err := NewCopilotExecutor(cfg).prepare(t.Context(), auth, req, opts, tc.stream, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ojson.GetBytesNoCopy(p.body, "messages.1.content"); got.Raw != tc.wantRaw {
+				t.Fatalf("upstream assistant content = %s, want %s", got.Raw, tc.wantRaw)
+			}
+		})
+	}
+}
+
 func TestCopilotChatAssistantTextFlatteningAndReplay(t *testing.T) {
 	const model = "gemini-4-neon"
 	const turn1Resp = `{"id":"chat-t1","model":"gemini-4-neon","choices":[{"index":0,"message":{"role":"assistant","content":"Triage report with Plan A and Plan B.","reasoning_text":"trace-1","reasoning_opaque":"OPAQUE-1"},"finish_reason":"stop"}]}`

@@ -120,9 +120,8 @@ func NormalizeCopilotRequest(doc *ojson.Doc, route copilot.Route, from translato
 				role = "system"
 				_ = doc.Set(prefix+".role", role)
 			}
-			// Chat represents plain text prompts and assistant turns as strings. Do not
-			// flatten client-native arrays, multimodal messages, or blocks carrying annotations.
-			if from != translator.FormatOpenAI && (role == "system" || role == "user" || role == "assistant") {
+			// Copilot Chat can ignore assistant history sent as plain text blocks.
+			if role == "assistant" || (from != translator.FormatOpenAI && (role == "system" || role == "user")) {
 				if text, ok := flattenCopilotPlainTextContent(message.Get("content"), role == "assistant"); ok {
 					_ = doc.Set(prefix+".content", text)
 				}
