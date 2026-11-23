@@ -100,3 +100,43 @@ func TestThePollExportsEachAccountsBankedResets(t *testing.T) {
 		t.Fatalf("%s after the last grants: %v, want no gauges", resetGrantsMaxAge+time.Minute, got)
 	}
 }
+
+// The poll asks as Claude Code does, and logs what Anthropic said of the account's resets once per change,
+// without grant ids or labels, so an exported count can be checked against its source.
+func TestThePollAsksAsClaudeCodeAndLogsTheGrantBlock(t *testing.T) {
+	logs := captureLogs(t, "info")
+	selector, _, _ := namedSelector(t)
+	manager := coreauth.NewManager(nil, selector, nil)
+	if _, err := manager.Register(t.Context(), &coreauth.Auth{
+		ID: "profile-a", Provider: "claude", Status: coreauth.StatusActive,
+		Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth},
+		Metadata:   map[string]any{"access_token": "opaque-a", "expired": "2099-01-01T00:00:00Z"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"limits":[],"cedar_ember":{"eligible":false,"ineligible_reason":"surface","grants":[{"id":"grant-secret-id","label":"Weekly reset","resets_left":1,"clears":["seven_day"],"paused":false}]}}`
+	var agent string
+	poll := func() {
+		loadBackendWeeklyQuotas(t.Context(), manager, selector, []string{"profile-a"}, func(_ context.Context, _ *coreauth.Auth, req *http.Request) (*http.Response, error) {
+			agent = req.Header.Get("User-Agent")
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+	}
+	poll()
+	poll()
+	if !strings.HasPrefix(agent, "claude-cli/") || !strings.Contains(agent, "(external, cli)") {
+		t.Fatalf("User-Agent %q, want Claude Code's form", agent)
+	}
+	text := logs.String()
+	if n := strings.Count(text, "reset grants"); n != 1 {
+		t.Fatalf("logged the block %d times over two identical polls, want once:\n%s", n, text)
+	}
+	for _, want := range []string{"claude-primary", `\"ineligible_reason\":\"surface\"`, `\"clears\":[\"seven_day\"]`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the log lacks %s:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "grant-secret-id") || strings.Contains(text, "Weekly reset") {
+		t.Errorf("the log carries a grant id or label:\n%s", text)
+	}
+}

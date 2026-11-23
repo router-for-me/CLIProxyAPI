@@ -148,6 +148,26 @@ func (s *backendSeriesSelector) observeResetGrants(authID string, grants ClaudeR
 	s.resetGrants[authID] = polledResetGrants{grants: grants, at: s.nowOrReal()}
 }
 
+// logResetGrants logs what Anthropic said of an account's limit resets when it differs from what was last
+// logged for it, so the exported counts can be checked against the block they came from.
+func (s *backendSeriesSelector) logResetGrants(authID, block string) {
+	if block == "" || strings.TrimSpace(authID) == "" || authID == s.backupAuthID {
+		return
+	}
+	s.mu.Lock()
+	if s.stopped || s.resetGrantsLogged[authID] == block {
+		s.mu.Unlock()
+		return
+	}
+	if s.resetGrantsLogged == nil {
+		s.resetGrantsLogged = make(map[string]string, len(s.authIDs))
+	}
+	s.resetGrantsLogged[authID] = block
+	name := s.profileNameLocked(authID)
+	s.mu.Unlock()
+	lg().Info("reset grants", "profile", name, "cedar_ember", block)
+}
+
 // resetGrantsNowLocked is an account's banked resets as of now: unknown once the last reading is older
 // than resetGrantsMaxAge.
 func (s *backendSeriesSelector) resetGrantsNowLocked(authID string, now time.Time) (ClaudeResetGrants, bool) {
