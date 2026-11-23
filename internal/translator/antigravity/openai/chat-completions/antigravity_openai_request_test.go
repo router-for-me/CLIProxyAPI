@@ -61,6 +61,119 @@ func TestConvertOpenAIRequestToAntigravitySkipsEmptyTextPartsWithoutNulls(t *tes
 	}
 }
 
+func TestConvertOpenAIRequestToAntigravityChat_AdjacentUserTurns(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3.8-flash-high",
+		"messages": [
+			{"role": "user", "content": "run tool"},
+			{"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "test_tool", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "call_1", "content": "tool output"},
+			{"role": "user", "content": "now explain it"}
+		]
+	}`
+
+	result, err := ConvertOpenAIRequestToAntigravity("gemini-3.8-flash-high", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIRequestToAntigravity error: %v", err)
+	}
+	contents := ojson.GetBytesNoCopy(result, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3 merged turns. Output: %s", len(contents), result)
+	}
+	wantRoles := []string{"user", "model", "user"}
+	for i, wantRole := range wantRoles {
+		if gotRole := contents[i].Get("role").String(); gotRole != wantRole {
+			t.Fatalf("contents[%d].role = %q, want %q. Output: %s", i, gotRole, wantRole, result)
+		}
+	}
+	parts := contents[2].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("contents[2].parts length = %d, want 2. Output: %s", len(parts), result)
+	}
+	if gotResponse := parts[0].Get("functionResponse.response.result").String(); gotResponse != "tool output" {
+		t.Fatalf("merged tool result = %q, want tool output. Output: %s", gotResponse, result)
+	}
+	if gotText := parts[1].Get("text").String(); gotText != "now explain it" {
+		t.Fatalf("merged prompt text = %q, want now explain it. Output: %s", gotText, result)
+	}
+	if errPairing := signature.ValidateGeminiFunctionCallPairing(result); errPairing != nil {
+		t.Fatalf("ValidateGeminiFunctionCallPairing failed: %v; output=%s", errPairing, result)
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityChat_PreservesMergedUserPartOrder(t *testing.T) {
+	inputJSON := `{
+		"model": "gemini-3-flash",
+		"messages": [
+			{"role":"user","content":"inspect"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"inspect","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"},
+			{"role":"user","content":[
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2UtMQ=="}},
+				{"type":"text","text":"first"},
+				{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2UtMg=="}},
+				{"type":"text","text":"second"}
+			]}
+		]
+	}`
+
+	result, err := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIRequestToAntigravity error: %v", err)
+	}
+	parts := ojson.GetBytesNoCopy(result, "request.contents.2.parts").Array()
+	if len(parts) != 5 {
+		t.Fatalf("merged parts length = %d, want 5. Output: %s", len(parts), result)
+	}
+	want := []string{
+		"ok",
+		"image-1",
+		"first",
+		"image-2",
+		"second",
+	}
+	for i, part := range parts {
+		got := part.Get("functionResponse.response.result").String()
+		if got == "" {
+			got = part.Get("inlineData.data").String()
+			if decoded := map[string]string{"aW1hZ2UtMQ==": "image-1", "aW1hZ2UtMg==": "image-2"}[got]; decoded != "" {
+				got = decoded
+			}
+		}
+		if i > 0 && got == "" {
+			got = part.Get("text").String()
+		}
+		if got != want[i] {
+			t.Fatalf("merged parts[%d] = %q, want %q. Output: %s", i, got, want[i], result)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToAntigravityChat_PreservesDemotedInstructionBoundary(t *testing.T) {
+	inputJSON := `{
+		"model":"gemini-3-flash",
+		"messages":[
+			{"role":"user","content":"run tool"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"test_tool","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"tool output"},
+			{"role":"developer","content":"temporary reminder"},
+			{"role":"user","content":"now explain it"}
+		]
+	}`
+
+	result, err := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	if err != nil {
+		t.Fatalf("ConvertOpenAIRequestToAntigravity error: %v", err)
+	}
+	contents := ojson.GetBytesNoCopy(result, "request.contents").Array()
+	if len(contents) != 5 {
+		t.Fatalf("contents length = %d, want 5 preserving demoted instruction and user boundaries. Output: %s", len(contents), result)
+	}
+	if got := contents[3].Get("parts.0.text").String(); got != "<system-reminder>\ntemporary reminder\n</system-reminder>" {
+		t.Fatalf("demoted instruction = %q, want standalone reminder. Output: %s", got, result)
+	}
+}
+
 func TestConvertOpenAIRequestToAntigravity_ClaudeModelSanitizesUnsignedReasoningContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-sonnet-4-6",
@@ -154,8 +267,8 @@ func TestConvertOpenAIRequestToAntigravityPreservesReasoningBeforeVisibleContent
 
 	result, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), true)
 	contents := ojson.GetBytesNoCopy(result, "request.contents").Array()
-	if len(contents) != 4 {
-		t.Fatalf("contents length = %d, want 4. Output: %s", len(contents), result)
+	if len(contents) != 3 {
+		t.Fatalf("contents length = %d, want 3 merged turns. Output: %s", len(contents), result)
 	}
 	parts := contents[1].Get("parts").Array()
 	if len(parts) != 3 {
@@ -747,8 +860,7 @@ func TestConvertOpenAIRequestToAntigravity_MultiTurnRepeatedToolCallID_Issue5933
 
 	out, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
 
-	// In Turn 1 (contents[1] = model functionCall, contents[2] = user functionResponse):
-	// functionCall.name must be "glob", and functionResponse.name must be "glob".
+	// Turn 1 appends the subsequent user prompt after the function response.
 	call1Name := ojson.GetBytesNoCopy(out, "request.contents.1.parts.0.functionCall.name").String()
 	resp1Name := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.name").String()
 	resp1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.result").String()
@@ -763,11 +875,10 @@ func TestConvertOpenAIRequestToAntigravity_MultiTurnRepeatedToolCallID_Issue5933
 		t.Fatalf("turn 1 functionResponse result = %q, want [\"main.go\"]", resp1Result)
 	}
 
-	// In Turn 2 (contents[4] = model functionCall, contents[5] = user functionResponse):
-	// functionCall.name must be "read", and functionResponse.name must be "read".
-	call2Name := ojson.GetBytesNoCopy(out, "request.contents.4.parts.0.functionCall.name").String()
-	resp2Name := ojson.GetBytesNoCopy(out, "request.contents.5.parts.0.functionResponse.name").String()
-	resp2Result := ojson.GetBytesNoCopy(out, "request.contents.5.parts.0.functionResponse.response.result").String()
+	// Turn 2 shifts earlier because the first tool response and follow-up prompt share a turn.
+	call2Name := ojson.GetBytesNoCopy(out, "request.contents.3.parts.0.functionCall.name").String()
+	resp2Name := ojson.GetBytesNoCopy(out, "request.contents.4.parts.0.functionResponse.name").String()
+	resp2Result := ojson.GetBytesNoCopy(out, "request.contents.4.parts.0.functionResponse.response.result").String()
 
 	if call2Name != "read" {
 		t.Fatalf("turn 2 functionCall.name = %q, want read", call2Name)

@@ -261,6 +261,11 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 		arr := messages.Array()
 		systemParts := make([][]byte, 0, 2)
 		contentItems := make([][]byte, 0, len(arr))
+		contentCanMergeWithToolResponse := make([]bool, 0, len(arr))
+		appendContent := func(content []byte, canMerge bool) {
+			contentItems = append(contentItems, content)
+			contentCanMergeWithToolResponse = append(contentCanMergeWithToolResponse, canMerge)
+		}
 
 		hasEncounteredConversation := false
 		for i := 0; i < len(arr); i++ {
@@ -330,7 +335,7 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 				// Whitespace-only text is forwarded but never keeps an emptied turn alive.
 				drops.EndTurn(translatorcommon.CountSendableGeminiParts(partItems))
 				if len(partItems) > 0 {
-					contentItems = append(contentItems, antigravityOpenAIContent("user", partItems))
+					appendContent(antigravityOpenAIContent("user", partItems), role == "user")
 				}
 			} else if role == "assistant" {
 				hasEncounteredConversation = true
@@ -409,7 +414,7 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 						})
 					}
 					if len(partItems) > 0 {
-						contentItems = append(contentItems, antigravityOpenAIContent("model", partItems))
+						appendContent(antigravityOpenAIContent("model", partItems), false)
 					}
 
 					// Collect tool responses scoped to this assistant turn.
@@ -442,16 +447,17 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 						responseParts = append(responseParts, partDoc.Bytes())
 					}
 					if len(responseParts) > 0 {
-						contentItems = append(contentItems, antigravityOpenAIContent("user", responseParts))
+						appendContent(antigravityOpenAIContent("user", responseParts), false)
 					}
 				} else if len(partItems) > 0 {
-					contentItems = append(contentItems, antigravityOpenAIContent("model", partItems))
+					appendContent(antigravityOpenAIContent("model", partItems), false)
 				}
 			}
 		}
 		if len(systemParts) > 0 {
 			_ = outDoc.SetRawBytes("request.systemInstruction", antigravityOpenAIContent("user", systemParts))
 		}
+		contentItems = mergeAntigravityOpenAIToolResponseUserContents(contentItems, contentCanMergeWithToolResponse)
 		translatorcommon.SetRawArrayItemsDoc(outDoc, "request.contents", contentItems)
 	}
 
@@ -560,6 +566,48 @@ func antigravityOpenAIInlineDataPart(mimeType, data string) []byte {
 	_ = partDoc.Set("inlineData.mimeType", mimeType)
 	_ = partDoc.Set("inlineData.data", data)
 	return partDoc.Bytes()
+}
+
+func mergeAntigravityOpenAIToolResponseUserContents(contents [][]byte, canMerge []bool) [][]byte {
+	if len(contents) <= 1 {
+		return contents
+	}
+	merged := make([][]byte, 0, len(contents))
+	for i := 0; i < len(contents); i++ {
+		content := contents[i]
+		if ojson.GetBytesNoCopy(content, "role").String() != "user" ||
+			!translatorcommon.ContentHasGeminiFunctionResponse(content) {
+			merged = append(merged, content)
+			continue
+		}
+
+		j := i + 1
+		partCount := len(ojson.GetBytesNoCopy(content, "parts").Array())
+		for j < len(contents) && j < len(canMerge) && canMerge[j] {
+			partCount += len(ojson.GetBytesNoCopy(contents[j], "parts").Array())
+			j++
+		}
+		if j == i+1 {
+			merged = append(merged, content)
+			continue
+		}
+
+		parts := make([][]byte, 0, partCount)
+		for _, current := range contents[i:j] {
+			for _, part := range ojson.GetBytesNoCopy(current, "parts").Array() {
+				parts = append(parts, []byte(part.Raw))
+			}
+		}
+		contentDoc := ojson.NewDoc(content)
+		if errSet := contentDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(parts)); errSet != nil {
+			merged = append(merged, contents[i:j]...)
+			i = j - 1
+			continue
+		}
+		merged = append(merged, contentDoc.Bytes())
+		i = j - 1
+	}
+	return merged
 }
 
 func antigravityOpenAIContent(role string, parts [][]byte) []byte {
