@@ -197,6 +197,33 @@ func TestConvertAntigravityResponseToClaudeNonStream_EmptyCandidateReturnsConten
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeNonStream_ExcludesCachedTokensFromInput(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3.8-flash-high"}`)
+	responseJSON := []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": "ok"}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 1000, "cachedContentTokenCount": 800, "candidatesTokenCount": 50, "totalTokenCount": 1050},
+			"modelVersion": "gemini-3.8-flash-high",
+			"responseId": "resp_cached_usage"
+		}
+	}`)
+
+	output := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3.8-flash-high", requestJSON, requestJSON, responseJSON, nil)
+
+	if got := ojson.GetBytesNoCopy(output, "usage.input_tokens").Int(); got != 200 {
+		t.Fatalf("input_tokens = %d, want 200: %s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "usage.output_tokens").Int(); got != 50 {
+		t.Fatalf("output_tokens = %d, want 50: %s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "usage.cache_read_input_tokens").Int(); got != 800 {
+		t.Fatalf("cache_read_input_tokens = %d, want 800: %s", got, output)
+	}
+}
+
 func TestConvertAntigravityResponseToClaudeStream_EmptyCandidateClosesMessage(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
 	responseJSON := testEmptyAntigravityResponse()
