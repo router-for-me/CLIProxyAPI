@@ -689,7 +689,7 @@ func TestConvertInteractionsResponseToClaude_ResponseFailed(t *testing.T) {
 func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfigFormat(t *testing.T) {
 	raw := []byte(`{
 		"model": "gemini-3.5-flash",
-		"max_tokens": 512.8,
+		"max_tokens": 1030323,
 		"stop_sequences": ["STOP", "\n", "", 123, null],
 		"output_config": {
 			"effort": "low",
@@ -709,8 +709,8 @@ func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfig
 	if errConvert != nil {
 		t.Fatalf("ConvertClaudeRequestToInteractions() error = %v", errConvert)
 	}
-	if got := ojson.GetBytesNoCopy(out, "generation_config.max_output_tokens").Raw; got != "512" {
-		t.Fatalf("max_output_tokens raw = %q, want 512; out=%s", got, out)
+	if got := ojson.GetBytesNoCopy(out, "generation_config.max_output_tokens").Raw; got != "1030323" {
+		t.Fatalf("max_output_tokens raw = %q, want 1030323; out=%s", got, out)
 	}
 	if got := ojson.GetBytesNoCopy(out, "generation_config.thinking_level").String(); got != "low" {
 		t.Fatalf("thinking_level = %q, want low; out=%s", got, out)
@@ -729,9 +729,22 @@ func TestConvertClaudeRequestToInteractions_GenerationConstraintsAndOutputConfig
 		t.Fatalf("response_format.schema.properties.city.type = %q, want string; out=%s", got, out)
 	}
 
-	invalidRaw := []byte(`{
+	zeroRaw := []byte(`{
 		"model": "gemini-3.5-flash",
 		"max_tokens": 0,
+		"messages": [{"role": "user", "content": "hi"}]
+	}`)
+	zeroOut, errZero := ConvertClaudeRequestToInteractions("gemini-3.5-flash", zeroRaw, false)
+	if errZero != nil {
+		t.Fatalf("ConvertClaudeRequestToInteractions() zero error = %v", errZero)
+	}
+	if got := ojson.GetBytesNoCopy(zeroOut, "generation_config.max_output_tokens").Raw; got != "0" {
+		t.Fatalf("max_output_tokens raw = %q, want 0; out=%s", got, zeroOut)
+	}
+
+	invalidRaw := []byte(`{
+		"model": "gemini-3.5-flash",
+		"max_tokens": null,
 		"stop_sequences": ["", 123],
 		"output_config": {"format": {"type": "json_schema"}},
 		"messages": [{"role": "user", "content": "hi"}]

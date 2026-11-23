@@ -154,7 +154,7 @@ func TestAntigravityClaudeFormatOutputConfigAndStopSequences(t *testing.T) {
 	})
 }
 
-func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testing.T) {
+func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokens(t *testing.T) {
 	claudePayload := []byte(`{
 		"model": "gemini-3.1-pro-preview",
 		"max_tokens": 500000,
@@ -215,6 +215,17 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 		return text.String()
 	}
 
+	readCapturedBody := func(t *testing.T, captured <-chan []byte) []byte {
+		t.Helper()
+		select {
+		case body := <-captured:
+			return body
+		default:
+			t.Fatal("expected upstream request body to be captured")
+			return nil
+		}
+	}
+
 	t.Run("gemini executor maps fields and caps max_tokens", func(t *testing.T) {
 		for _, stream := range []bool{false, true} {
 			name := "execute"
@@ -222,7 +233,7 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 				name = "stream"
 			}
 			t.Run(name, func(t *testing.T) {
-				var upstreamBody []byte
+				captured := make(chan []byte, 1)
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					body, errRead := io.ReadAll(r.Body)
 					if errRead != nil {
@@ -230,7 +241,10 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 						w.WriteHeader(http.StatusInternalServerError)
 						return
 					}
-					upstreamBody = append([]byte(nil), body...)
+					select {
+					case captured <- append([]byte(nil), body...):
+					default:
+					}
 					if stream {
 						w.Header().Set("Content-Type", "text/event-stream")
 						_, _ = w.Write([]byte("data: " + geminiResp + "\n\n"))
@@ -265,12 +279,127 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 						t.Fatalf("response text = %q, want {\"answer\":\"ok\"}; payload=%s", got, resp.Payload)
 					}
 				}
-				assertOutbound(t, upstreamBody, 65536)
+				assertOutbound(t, readCapturedBody(t, captured), 65536)
 			})
 		}
 	})
 
-	t.Run("vertex executor maps fields, caps max_tokens, and keeps payload override final", func(t *testing.T) {
+	t.Run("gemini interactions executor maps fields without silently capping max_tokens, and keeps payload override final", func(t *testing.T) {
+		interactionsResp := `{"id":"interaction_1","object":"interaction","status":"completed","steps":[{"type":"model_output","content":[{"type":"text","text":"{\"answer\":\"ok\"}"}]}],"usage":{"total_input_tokens":1,"total_output_tokens":1,"total_tokens":2}}`
+		interactionsSSE := strings.Join([]string{
+			`event: interaction.created`,
+			`data: {"event_type":"interaction.created","interaction":{"id":"interaction_1","model":"gemini-4-neon"}}`,
+			``,
+			`event: step.start`,
+			`data: {"event_type":"step.start","index":0,"step":{"type":"model_output"}}`,
+			``,
+			`event: step.delta`,
+			`data: {"event_type":"step.delta","index":0,"delta":{"type":"text","text":"{\"answer\":\"ok\"}"}}`,
+			``,
+			`event: step.stop`,
+			`data: {"event_type":"step.stop","index":0}`,
+			``,
+			`event: interaction.completed`,
+			`data: {"event_type":"interaction.completed","interaction":{"id":"interaction_1","model":"gemini-4-neon","usage":{"total_input_tokens":1,"total_output_tokens":1}}}`,
+			``,
+			`event: done`,
+			`data: [DONE]`,
+			``,
+			``,
+		}, "\n")
+
+		for _, tc := range []struct {
+			name     string
+			stream   bool
+			override int64
+			wantMax  int64
+		}{
+			{name: "execute_preserves_requested_max", stream: false, wantMax: 500000},
+			{name: "stream_preserves_requested_max", stream: true, wantMax: 500000},
+			{name: "execute_payload_override_final", stream: false, override: 123456, wantMax: 123456},
+			{name: "stream_payload_override_final", stream: true, override: 123456, wantMax: 123456},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				captured := make(chan []byte, 1)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					body, errRead := io.ReadAll(r.Body)
+					if errRead != nil {
+						t.Errorf("read request body: %v", errRead)
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					select {
+					case captured <- append([]byte(nil), body...):
+					default:
+					}
+					if tc.stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, interactionsSSE)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, interactionsResp)
+				}))
+				defer server.Close()
+
+				cfg := &config.Config{}
+				if tc.override > 0 {
+					cfg.Payload = config.PayloadConfig{
+						Override: []config.PayloadRule{{
+							Models: []config.PayloadModelRule{{Name: "gemini-4-neon", Protocol: "interactions"}},
+							Params: map[string]any{"generation_config.max_output_tokens": tc.override},
+						}},
+					}
+				}
+				exec := NewGeminiInteractionsExecutor(cfg)
+				auth := &cliproxyauth.Auth{
+					Provider: "gemini-interactions",
+					Attributes: map[string]string{
+						"api_key":  "test-key",
+						"base_url": server.URL,
+					},
+				}
+				req := cliproxyexecutor.Request{Model: "gemini-4-neon", Payload: claudePayload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude, Stream: tc.stream}
+				if tc.stream {
+					res, errStream := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if errStream != nil {
+						t.Fatalf("ExecuteStream() error = %v", errStream)
+					}
+					if got := collectClaudeStreamText(t, res.Chunks); got != `{"answer":"ok"}` {
+						t.Fatalf("stream text = %q, want {\"answer\":\"ok\"}", got)
+					}
+				} else {
+					resp, errExec := exec.Execute(context.Background(), auth, req, opts)
+					if errExec != nil {
+						t.Fatalf("Execute() error = %v", errExec)
+					}
+					if got := ojson.GetBytes(resp.Payload, "content.0.text").String(); got != `{"answer":"ok"}` {
+						t.Fatalf("response text = %q, want {\"answer\":\"ok\"}; payload=%s", got, resp.Payload)
+					}
+				}
+
+				upstreamBody := readCapturedBody(t, captured)
+				if got := ojson.GetBytes(upstreamBody, "generation_config.max_output_tokens").Int(); got != tc.wantMax {
+					t.Fatalf("generation_config.max_output_tokens = %d, want %d; body=%s", got, tc.wantMax, upstreamBody)
+				}
+				if got := ojson.GetBytes(upstreamBody, "generation_config.stop_sequences.0").String(); got != "STOP_NOW" {
+					t.Fatalf("generation_config.stop_sequences[0] = %q, want STOP_NOW; body=%s", got, upstreamBody)
+				}
+				if got := ojson.GetBytes(upstreamBody, "response_format.type").String(); got != "text" {
+					t.Fatalf("response_format.type = %q, want text; body=%s", got, upstreamBody)
+				}
+				if got := ojson.GetBytes(upstreamBody, "response_format.mime_type").String(); got != "application/json" {
+					t.Fatalf("response_format.mime_type = %q, want application/json; body=%s", got, upstreamBody)
+				}
+				if got := ojson.GetBytes(upstreamBody, "response_format.schema.properties.answer.type").String(); got != "string" {
+					t.Fatalf("response_format.schema.properties.answer.type = %q, want string; body=%s", got, upstreamBody)
+				}
+			})
+		}
+	})
+
+	t.Run("vertex executor maps fields without silently capping max_tokens, and keeps payload override final", func(t *testing.T) {
 		for _, authMode := range []string{"api_key", "service_account"} {
 			for _, tc := range []struct {
 				name     string
@@ -278,13 +407,13 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 				override int64
 				wantMax  int64
 			}{
-				{name: "execute_capped", stream: false, wantMax: 65536},
-				{name: "stream_capped", stream: true, wantMax: 65536},
+				{name: "execute_preserves_requested_max", stream: false, wantMax: 500000},
+				{name: "stream_preserves_requested_max", stream: true, wantMax: 500000},
 				{name: "execute_payload_override_final", stream: false, override: 123456, wantMax: 123456},
 				{name: "stream_payload_override_final", stream: true, override: 123456, wantMax: 123456},
 			} {
 				t.Run(authMode+"/"+tc.name, func(t *testing.T) {
-					var upstreamBody []byte
+					captured := make(chan []byte, 1)
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						if r.URL.Path == "/token" {
 							w.Header().Set("Content-Type", "application/json")
@@ -297,7 +426,10 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 							w.WriteHeader(http.StatusInternalServerError)
 							return
 						}
-						upstreamBody = append([]byte(nil), body...)
+						select {
+						case captured <- append([]byte(nil), body...):
+						default:
+						}
 						if tc.stream {
 							w.Header().Set("Content-Type", "text/event-stream")
 							_, _ = w.Write([]byte("data: " + geminiResp + "\n\n"))
@@ -364,7 +496,7 @@ func TestGeminiAndVertexExecutors_ClaudeGenerationConfigAndMaxTokensCap(t *testi
 							t.Fatalf("response text = %q, want {\"answer\":\"ok\"}; payload=%s", got, resp.Payload)
 						}
 					}
-					assertOutbound(t, upstreamBody, tc.wantMax)
+					assertOutbound(t, readCapturedBody(t, captured), tc.wantMax)
 				})
 			}
 		}

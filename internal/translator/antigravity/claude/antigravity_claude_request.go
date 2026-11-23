@@ -1010,8 +1010,8 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 	if v := ojson.GetBytesNoCopy(rawJSON, "top_k"); v.Exists() && v.Type == ojson.Number {
 		_ = outDoc.Set("request.generationConfig.topK", v.Num)
 	}
-	if maxTokens, ok := translatorcommon.ClaudePositiveMaxTokens(ojson.GetBytesNoCopy(rawJSON, "max_tokens")); ok {
-		_ = outDoc.Set("request.generationConfig.maxOutputTokens", maxTokens)
+	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(ojson.GetBytesNoCopy(rawJSON, "max_tokens")); ok {
+		_ = outDoc.SetRaw("request.generationConfig.maxOutputTokens", rawMaxTokens)
 	}
 	if sequences := translatorcommon.ClaudeStopSequences(ojson.GetBytesNoCopy(rawJSON, "stop_sequences")); len(sequences) > 0 {
 		_ = outDoc.Set("request.generationConfig.stopSequences", sequences)

@@ -1,7 +1,6 @@
 package common
 
 import (
-	"math"
 	"reflect"
 	"testing"
 
@@ -41,27 +40,28 @@ func TestGenerateClaudeToolCallID(t *testing.T) {
 }
 
 func TestClaudeGenerationConstraintHelpers(t *testing.T) {
-	t.Run("ClaudePositiveMaxTokens", func(t *testing.T) {
+	t.Run("ClaudeMaxTokensRaw", func(t *testing.T) {
 		tests := []struct {
 			name   string
 			body   string
-			want   int64
+			want   string
 			wantOK bool
 		}{
-			{name: "positive integer", body: `{"max_tokens":256}`, want: 256, wantOK: true},
-			{name: "fractional above one truncates", body: `{"max_tokens":1024.9}`, want: 1024, wantOK: true},
-			{name: "huge scientific float clamps to MaxInt32", body: `{"max_tokens":1e30}`, want: math.MaxInt32, wantOK: true},
-			{name: "zero omitted", body: `{"max_tokens":0}`, wantOK: false},
-			{name: "negative omitted", body: `{"max_tokens":-5}`, wantOK: false},
-			{name: "fractional below one omitted", body: `{"max_tokens":0.5}`, wantOK: false},
+			{name: "positive integer", body: `{"max_tokens":256}`, want: "256", wantOK: true},
+			{name: "zero preserved for cache pre-warm", body: `{"max_tokens":0}`, want: "0", wantOK: true},
+			{name: "long decode integer preserved verbatim", body: `{"max_tokens":1030323}`, want: "1030323", wantOK: true},
+			{name: "fractional preserved verbatim for upstream validation", body: `{"max_tokens":1024.9}`, want: "1024.9", wantOK: true},
+			{name: "negative preserved verbatim for upstream validation", body: `{"max_tokens":-5}`, want: "-5", wantOK: true},
+			{name: "scientific notation preserved verbatim", body: `{"max_tokens":1e30}`, want: "1e30", wantOK: true},
 			{name: "string omitted", body: `{"max_tokens":"256"}`, wantOK: false},
 			{name: "null omitted", body: `{"max_tokens":null}`, wantOK: false},
+			{name: "missing omitted", body: `{}`, wantOK: false},
 		}
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
-				got, ok := ClaudePositiveMaxTokens(ojson.Get(tc.body, "max_tokens"))
+				got, ok := ClaudeMaxTokensRaw(ojson.Get(tc.body, "max_tokens"))
 				if ok != tc.wantOK || got != tc.want {
-					t.Fatalf("ClaudePositiveMaxTokens(%s) = (%d, %t), want (%d, %t)", tc.body, got, ok, tc.want, tc.wantOK)
+					t.Fatalf("ClaudeMaxTokensRaw(%s) = (%q, %t), want (%q, %t)", tc.body, got, ok, tc.want, tc.wantOK)
 				}
 			})
 		}

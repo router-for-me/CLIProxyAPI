@@ -424,8 +424,8 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 	if v := ojson.GetBytesNoCopy(rawJSON, "top_k"); v.Exists() && v.Type == ojson.Number {
 		_ = outDoc.Set("generationConfig.topK", v.Num)
 	}
-	if maxTokens, ok := translatorcommon.ClaudePositiveMaxTokens(ojson.GetBytesNoCopy(rawJSON, "max_tokens")); ok {
-		_ = outDoc.Set("generationConfig.maxOutputTokens", maxTokens)
+	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(ojson.GetBytesNoCopy(rawJSON, "max_tokens")); ok {
+		_ = outDoc.SetRaw("generationConfig.maxOutputTokens", rawMaxTokens)
 	}
 	if sequences := translatorcommon.ClaudeStopSequences(ojson.GetBytesNoCopy(rawJSON, "stop_sequences")); len(sequences) > 0 {
 		_ = outDoc.Set("generationConfig.stopSequences", sequences)

@@ -1163,49 +1163,61 @@ func TestConvertClaudeRequestToGemini_ToolResultDocumentNestedInFunctionResponse
 }
 
 func TestConvertClaudeRequestToGemini_SanitizesGenerationConstraints(t *testing.T) {
-	t.Run("sanitizes float max_tokens and mixed stop_sequences", func(t *testing.T) {
-		inputJSON := []byte(`{
-			"model": "gemini-3.5-flash",
-			"max_tokens": 1024.9,
-			"stop_sequences": ["END", "\n\n", " ", "", 123, null],
-			"messages": [{"role": "user", "content": "hi"}]
-		}`)
-		output, errConvert := ConvertClaudeRequestToGemini("gemini-3.5-flash", inputJSON, false)
-		if errConvert != nil {
-			t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
-		}
-		genConfig := ojson.GetBytesNoCopy(output, "generationConfig")
-		if got := genConfig.Get("maxOutputTokens").Raw; got != "1024" {
-			t.Fatalf("maxOutputTokens raw = %q, want 1024; output=%s", got, output)
-		}
-		stops := genConfig.Get("stopSequences").Array()
-		wantStops := []string{"END", "\n\n", " "}
-		if len(stops) != len(wantStops) {
-			t.Fatalf("stopSequences = %s, want %v", genConfig.Get("stopSequences").Raw, wantStops)
-		}
-		for i, want := range wantStops {
-			if got := stops[i].String(); got != want {
-				t.Fatalf("stopSequences[%d] = %q, want %q", i, got, want)
-			}
+	t.Run("preserves native numeric max_tokens and filters mixed stop_sequences", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			maxTokens  string
+			wantRawMax string
+		}{
+			{name: "zero max_tokens preserved", maxTokens: "0", wantRawMax: "0"},
+			{name: "long decode max_tokens preserved", maxTokens: "1030323", wantRawMax: "1030323"},
+			{name: "fractional max_tokens passed verbatim", maxTokens: "1024.9", wantRawMax: "1024.9"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inputJSON := []byte(`{
+					"model": "gemini-3.5-flash",
+					"max_tokens": ` + tc.maxTokens + `,
+					"stop_sequences": ["END", "\n\n", " ", "", 123, null],
+					"messages": [{"role": "user", "content": "hi"}]
+				}`)
+				output, errConvert := ConvertClaudeRequestToGemini("gemini-3.5-flash", inputJSON, false)
+				if errConvert != nil {
+					t.Fatalf("ConvertClaudeRequestToGemini() error = %v", errConvert)
+				}
+				genConfig := ojson.GetBytesNoCopy(output, "generationConfig")
+				if got := genConfig.Get("maxOutputTokens").Raw; got != tc.wantRawMax {
+					t.Fatalf("maxOutputTokens raw = %q, want %s; output=%s", got, tc.wantRawMax, output)
+				}
+				stops := genConfig.Get("stopSequences").Array()
+				wantStops := []string{"END", "\n\n", " "}
+				if len(stops) != len(wantStops) {
+					t.Fatalf("stopSequences = %s, want %v", genConfig.Get("stopSequences").Raw, wantStops)
+				}
+				for i, want := range wantStops {
+					if got := stops[i].String(); got != want {
+						t.Fatalf("stopSequences[%d] = %q, want %q", i, got, want)
+					}
+				}
+			})
 		}
 	})
 
-	t.Run("omits non-positive max_tokens, empty stop_sequences, and invalid output_config.format", func(t *testing.T) {
+	t.Run("omits non-numeric max_tokens, empty stop_sequences, and invalid output_config.format", func(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
 			payload string
 		}{
 			{
-				name:    "zero max_tokens and empty stop_sequences",
-				payload: `{"model":"gemini-3.5-flash","max_tokens":0,"stop_sequences":["",123],"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`,
+				name:    "null max_tokens and empty stop_sequences",
+				payload: `{"model":"gemini-3.5-flash","max_tokens":null,"stop_sequences":["",123],"output_config":{"effort":"low"},"messages":[{"role":"user","content":"hi"}]}`,
 			},
 			{
-				name:    "negative max_tokens and json_schema without schema object",
-				payload: `{"model":"gemini-3.5-flash","max_tokens":-5,"stop_sequences":[],"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`,
+				name:    "string max_tokens and json_schema without schema object",
+				payload: `{"model":"gemini-3.5-flash","max_tokens":"256","stop_sequences":[],"output_config":{"format":{"type":"json_schema"}},"messages":[{"role":"user","content":"hi"}]}`,
 			},
 			{
-				name:    "fractional max_tokens below one and unsupported format type",
-				payload: `{"model":"gemini-3.5-flash","max_tokens":0.5,"output_config":{"format":{"type":"text","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`,
+				name:    "unsupported format type",
+				payload: `{"model":"gemini-3.5-flash","output_config":{"format":{"type":"text","schema":{"type":"object"}}},"messages":[{"role":"user","content":"hi"}]}`,
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {

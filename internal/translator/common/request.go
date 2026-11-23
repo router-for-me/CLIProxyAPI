@@ -2,7 +2,6 @@ package common
 
 import (
 	"crypto/rand"
-	"math"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -62,21 +61,14 @@ func requestModelName(rawJSON []byte) string {
 	return ""
 }
 
-// ClaudePositiveMaxTokens parses a positive integer max_tokens value from a
-// Claude request, clamping huge numbers at math.MaxInt32 to avoid int64 overflow
-// differences across architectures before upstream executors enforce model limits.
-func ClaudePositiveMaxTokens(v ojson.Result) (int64, bool) {
-	if !v.Exists() || v.Type != ojson.Number || v.Num < 1 {
-		return 0, false
+// ClaudeMaxTokensRaw returns the raw JSON number token for a Claude max_tokens
+// field so translators preserve native values (including 0) without float
+// reformatting, silent truncation, or arbitrary clamping.
+func ClaudeMaxTokensRaw(v ojson.Result) (string, bool) {
+	if !v.Exists() || v.Type != ojson.Number || v.Raw == "" {
+		return "", false
 	}
-	if v.Num >= float64(math.MaxInt32) {
-		return math.MaxInt32, true
-	}
-	maxTokens := v.Int()
-	if maxTokens <= 0 {
-		return 0, false
-	}
-	return maxTokens, true
+	return v.Raw, true
 }
 
 // ClaudeStopSequences extracts non-empty string entries from a Claude stop_sequences array.
@@ -84,13 +76,13 @@ func ClaudeStopSequences(v ojson.Result) []string {
 	if !v.Exists() || !v.IsArray() {
 		return nil
 	}
-	items := v.Array()
-	sequences := make([]string, 0, len(items))
-	for _, item := range items {
+	var sequences []string
+	v.ForEach(func(_, item ojson.Result) bool {
 		if item.Type == ojson.String && item.String() != "" {
 			sequences = append(sequences, item.String())
 		}
-	}
+		return true
+	})
 	if len(sequences) == 0 {
 		return nil
 	}

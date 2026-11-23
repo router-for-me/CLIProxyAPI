@@ -57,8 +57,8 @@ func copyClaudeSystemToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
 }
 
 func copyClaudeGenerationConfigToInteractionsDoc(outDoc *ojson.Doc, root ojson.Result) {
-	if maxTokens, ok := translatorcommon.ClaudePositiveMaxTokens(root.Get("max_tokens")); ok {
-		_ = outDoc.Set("generation_config.max_output_tokens", maxTokens)
+	if rawMaxTokens, ok := translatorcommon.ClaudeMaxTokensRaw(root.Get("max_tokens")); ok {
+		_ = outDoc.SetRaw("generation_config.max_output_tokens", rawMaxTokens)
 	}
 	copyClaudeJSONFieldDoc(outDoc, root, "temperature", "generation_config.temperature")
 	copyClaudeJSONFieldDoc(outDoc, root, "top_p", "generation_config.top_p")
