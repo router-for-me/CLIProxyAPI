@@ -13,25 +13,22 @@ func TestFileRefreshClaimRequiresParentSync(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("directory fsync is unavailable on Windows")
 	}
-	dir := filepath.Join(t.TempDir(), "auths")
-	if errMkdir := os.Mkdir(dir, 0o300); errMkdir != nil {
-		t.Fatal(errMkdir)
-	}
-	t.Cleanup(func() {
-		if errChmod := os.Chmod(dir, 0o700); errChmod != nil {
-			t.Error(errChmod)
+	for _, journalExists := range []bool{false, true} {
+		dir := filepath.Join(t.TempDir(), "auths")
+		if errMkdir := os.Mkdir(dir, 0o700); errMkdir != nil {
+			t.Fatal(errMkdir)
 		}
-	})
-	if handle, errOpen := os.Open(dir); errOpen == nil {
-		if errClose := handle.Close(); errClose != nil {
-			t.Fatal(errClose)
+		if journalExists {
+			if errMkdir := os.Mkdir(filepath.Join(dir, ".codex-refresh"), 0o700); errMkdir != nil {
+				t.Fatal(errMkdir)
+			}
 		}
-		t.Skip("test requires directory read permissions to be enforced")
-	}
-	journal := &FileRefreshJournal{Dir: dir}
-	claimed, errClaim := journal.RefreshClaim(context.Background(), strings.Repeat("e", 64))
-	if claimed || errClaim == nil {
-		t.Fatalf("claim allowed OAuth without synchronizing parent directory: claimed=%v, error=%v", claimed, errClaim)
+		lockRefreshTestDirectory(t, dir, 0o300)
+		journal := &FileRefreshJournal{Dir: dir}
+		claimed, errClaim := journal.RefreshClaim(context.Background(), strings.Repeat("e", 64))
+		if claimed || errClaim == nil {
+			t.Fatalf("claim allowed OAuth without synchronizing the journal directory (journal existed: %v): claimed=%v, error=%v", journalExists, claimed, errClaim)
+		}
 	}
 }
 
@@ -107,8 +104,34 @@ func TestFileRefreshClaimSyncsDeepestExistingAncestor(t *testing.T) {
 	}
 	lockRefreshTestDirectory(t, outer, 0o300)
 	journal := &FileRefreshJournal{Dir: filepath.Join(outer, "new", "auths")}
-	claimed, errClaim := journal.RefreshClaim(context.Background(), strings.Repeat("b", 64))
-	if claimed || errClaim == nil {
-		t.Fatalf("claim allowed OAuth without synchronizing the directory that gained an entry: claimed=%v, error=%v", claimed, errClaim)
+	for attempt := 1; attempt <= 2; attempt++ {
+		claimed, errClaim := journal.RefreshClaim(context.Background(), strings.Repeat("b", 64))
+		if claimed || errClaim == nil {
+			t.Fatalf("claim attempt %d allowed OAuth without synchronizing the directory that gained an entry: claimed=%v, error=%v", attempt, claimed, errClaim)
+		}
+	}
+	if _, errStat := os.Stat(filepath.Join(outer, "new")); !os.IsNotExist(errStat) {
+		t.Fatalf("failed claim left an unsynced directory behind: %v", errStat)
+	}
+}
+
+func TestFileRefreshClaimKeepsDanglingJournalSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require privileges on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "auths")
+	if errMkdir := os.Mkdir(dir, 0o700); errMkdir != nil {
+		t.Fatal(errMkdir)
+	}
+	link := filepath.Join(dir, ".codex-refresh")
+	if errLink := os.Symlink(filepath.Join(dir, "missing", "journal"), link); errLink != nil {
+		t.Fatal(errLink)
+	}
+	journal := &FileRefreshJournal{Dir: dir}
+	if claimed, errClaim := journal.RefreshClaim(context.Background(), strings.Repeat("c", 64)); claimed || errClaim == nil {
+		t.Fatalf("claim through a dangling journal symlink: claimed=%v, error=%v", claimed, errClaim)
+	}
+	if _, errLstat := os.Lstat(link); errLstat != nil {
+		t.Fatalf("failed claim removed the journal symlink: %v", errLstat)
 	}
 }

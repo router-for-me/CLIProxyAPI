@@ -35,26 +35,61 @@ func (j *FileRefreshJournal) RefreshClaim(ctx context.Context, key string) (bool
 	if errPath != nil {
 		return false, errPath
 	}
-	root, errRoot := existingRefreshAncestor(j.Dir)
-	if errRoot != nil {
-		return false, errRoot
+	parent, errParent := filepath.Abs(filepath.Dir(path))
+	if errParent != nil {
+		return false, errParent
 	}
-	if errMkdir := os.MkdirAll(filepath.Dir(path), 0o700); errMkdir != nil {
+	existing, errExisting := existingRefreshAncestor(parent)
+	if errExisting != nil {
+		return false, errExisting
+	}
+	// Always sync the journal directory, which holds the claim directory's entry.
+	root := existing
+	if existing == parent {
+		root = filepath.Dir(parent)
+	}
+	if errMkdir := os.MkdirAll(parent, 0o700); errMkdir != nil {
+		removeRefreshClaimParents(parent, existing)
 		return false, errMkdir
 	}
 	if errMkdir := os.Mkdir(path, 0o700); errMkdir != nil {
 		if errors.Is(errMkdir, os.ErrExist) {
 			return false, nil
 		}
+		removeRefreshClaimParents(parent, existing)
 		return false, errMkdir
 	}
 	if errSync := syncRefreshClaimDirectories(path, root); errSync != nil {
 		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
 			log.Warnf("remove unsynced refresh claim: %v", errRemove)
 		}
+		removeRefreshClaimParents(parent, existing)
 		return false, errSync
 	}
 	return true, nil
+}
+
+// removeRefreshClaimParents removes the directories a failed claim created,
+// from dir up to but excluding existing. A leftover directory would otherwise
+// become the next claim's sync boundary, and the entry naming it would never
+// be synced.
+func removeRefreshClaimParents(dir, existing string) {
+	for dir != existing {
+		// A dangling symlink looked absent before MkdirAll; never remove it.
+		info, errLstat := os.Lstat(dir)
+		if errLstat == nil && !info.IsDir() {
+			return
+		}
+		if errRemove := os.Remove(dir); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			log.Warnf("remove unsynced refresh journal directory: %v", errRemove)
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
 }
 
 func (j *FileRefreshJournal) RefreshRead(ctx context.Context, key string) ([]byte, error) {
@@ -130,13 +165,9 @@ func (j *FileRefreshJournal) RefreshRelease(ctx context.Context, key string) err
 	return syncRefreshDirectory(filepath.Dir(path))
 }
 
-// existingRefreshAncestor returns the journal directory, or its deepest existing
-// ancestor when the journal directory does not exist yet.
+// existingRefreshAncestor returns the absolute dir, or its deepest existing
+// ancestor when dir does not exist yet.
 func existingRefreshAncestor(dir string) (string, error) {
-	dir, errAbs := filepath.Abs(dir)
-	if errAbs != nil {
-		return "", errAbs
-	}
 	for {
 		_, errStat := os.Stat(dir)
 		if errStat == nil {
