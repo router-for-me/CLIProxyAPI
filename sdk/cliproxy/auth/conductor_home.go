@@ -1379,6 +1379,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	routeModelKey := canonicalModelKey(routeModel)
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	registryRef := registry.GetGlobalRegistry()
+	now := time.Now()
 	var candidates []creditsCandidateEntry
 	m.mu.RLock()
 	if affinity, ok := m.selector.(*SessionAffinitySelector); ok && affinity != nil && affinity.rebindOnNever {
@@ -1391,7 +1392,8 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		}
 	}
 	for _, auth := range m.auths {
-		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || hasUnauthorizedAuthFailure(auth) {
+		if auth == nil || auth.Disabled || auth.Status == StatusDisabled || auth.RequiresSignIn ||
+			hasUnauthorizedAuthFailure(auth) || auth.credentialRetryAfter.After(now) || auth.nonAuthCredentialRetryAfter.After(now) {
 			continue
 		}
 		if pinnedAuthID != "" && auth.ID != pinnedAuthID {
@@ -1426,7 +1428,6 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 	}
 	m.mu.RUnlock()
 
-	now := time.Now()
 	var known []creditsCandidateEntry
 	var unknown []creditsCandidateEntry
 	for _, candidate := range candidates {
