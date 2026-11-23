@@ -133,12 +133,13 @@ var (
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs          map[string]struct{}
-	ModelQuotas       map[string]sdkauth.AntigravityModelQuota
-	weeklyModelQuotas map[string]sdkauth.AntigravityModelQuota
-	quotaBuckets      []sdkauth.AntigravityQuotaBucket
-	lookedUpAt        time.Time
-	revision          uint64
+	ModelIDs           map[string]struct{}
+	ModelQuotas        map[string]sdkauth.AntigravityModelQuota
+	weeklyModelQuotas  map[string]sdkauth.AntigravityModelQuota
+	quotaBuckets       []sdkauth.AntigravityQuotaBucket
+	summaryRequestedAt time.Time
+	lookedUpAt         time.Time
+	revision           uint64
 }
 
 type antigravityModelProbeResult struct {
@@ -308,7 +309,7 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 	key, hints, err := s.fetchAntigravityModelHints(ctx, auth, false)
 	if err == nil && s.coreManager != nil {
 		if windows := hints.quotaWindows(); len(windows) > 0 {
-			_ = s.recordAntigravityQuota(ctx, auth, key, windows, hints.lookedUpAt, true)
+			_ = s.recordAntigravityQuota(ctx, auth, key, windows, hints.lookedUpAt, hints.revision, true)
 		}
 	}
 	return key, hints
@@ -368,7 +369,7 @@ func (s *Service) fetchAntigravityModelHints(ctx context.Context, auth *coreauth
 	}
 	// The initiating caller owns the shared HTTP operation. Followers may cancel
 	// their own wait without canceling that operation or blocking a refresh worker.
-	probe := func() (any, error) {
+	probe := func() (antigravityModelProbeResult, error) {
 		result := antigravityModelProbeResult{usageProbe: usageProbe, catalogProbed: !usageProbe}
 		if hints, skip, err := lookup(); skip {
 			result.hints = hints
@@ -380,10 +381,11 @@ func (s *Service) fetchAntigravityModelHints(ctx context.Context, auth *coreauth
 			return result, errors.New("antigravity model probe credential is no longer current")
 		}
 		defer finish()
-		revision := antigravityProbeSequence.Add(1)
 		antigravityCapabilityMu.Lock()
+		revision := antigravityProbeSequence.Add(1)
+		lookedUpAt := antigravityNowFunc()
 		entry := antigravityCapabilityCache[cacheKey]
-		entry.probeRevision, entry.lastUsed, entry.pending = revision, antigravityNowFunc(), true
+		entry.probeRevision, entry.lastUsed, entry.pending = revision, lookedUpAt, true
 		antigravityCapabilityCache[cacheKey] = entry
 		antigravityCapabilityMu.Unlock()
 		defer func() {
@@ -415,6 +417,7 @@ func (s *Service) fetchAntigravityModelHints(ctx context.Context, auth *coreauth
 				return err
 			}
 			hints, status := probeAntigravity(ctx, req, path)
+			hints.lookedUpAt, hints.revision = lookedUpAt, revision
 			result.hints, err = finishAntigravityModelProbe(ctx, cacheKey, flightKey, path, revision, hints, status)
 			return err
 		}
@@ -431,7 +434,7 @@ func (s *Service) fetchAntigravityModelHints(ctx context.Context, auth *coreauth
 		if hints, skip, err := lookup(); skip {
 			return cacheKey, hints, err
 		}
-		resultCh := antigravityCapabilityGroup.DoChan(flightKey, probe)
+		resultCh := antigravityCapabilityGroup.DoChan(flightKey, func() (any, error) { return probe() })
 		select {
 		case <-ctx.Done():
 			return cacheKey, cached(), ctx.Err()
@@ -474,7 +477,6 @@ func finishAntigravityModelProbe(ctx context.Context, cacheKey, flightKey, path 
 		}
 		current.lastUsed = now
 		if hints.ModelIDs != nil {
-			hints.revision = revision
 			current.hints = antigravityModelCapabilityHints{
 				ModelIDs: hints.ModelIDs, WebSearchModelIDs: hints.WebSearchModelIDs,
 				revision: revision, lookedUpAt: hints.lookedUpAt,
@@ -517,10 +519,10 @@ func finishAntigravityModelProbe(ctx context.Context, cacheKey, flightKey, path 
 }
 
 func probeAntigravity(ctx context.Context, req sdkauth.AntigravityModelProbeRequest, path string) (antigravityModelCapabilityHints, antigravityProbeStatus) {
-	lookedUpAt := antigravityNowFunc()
 	if path == sdkauth.AntigravityQuotaSummaryPath {
+		requestedAt := antigravityNowFunc()
 		buckets, status := sdkauth.FetchAntigravityQuotaSummary(ctx, req)
-		return antigravityModelCapabilityHints{quotaBuckets: buckets, lookedUpAt: lookedUpAt}, status
+		return antigravityModelCapabilityHints{quotaBuckets: buckets, summaryRequestedAt: requestedAt}, status
 	}
 	hints, status := sdkauth.FetchAntigravityAvailableModels(ctx, req)
 	return antigravityModelCapabilityHints{
@@ -528,7 +530,6 @@ func probeAntigravity(ctx context.Context, req sdkauth.AntigravityModelProbeRequ
 		WebSearchModelIDs: hints.WebSearchModelIDs,
 		ModelQuotas:       hints.ModelQuotas,
 		weeklyModelQuotas: hints.WeeklyModelQuotas,
-		lookedUpAt:        lookedUpAt,
 	}, status
 }
 

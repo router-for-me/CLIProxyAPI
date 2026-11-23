@@ -47,7 +47,7 @@ func newHoldSelector(hold time.Duration) *SessionAffinitySelector {
 // spentClaudeAuth is a credential benched by a 5-hour usage limit that resets at reset.
 func spentClaudeAuth(t *testing.T, id string, reset time.Time) *Auth {
 	return credentialLimitAuth(t, id, map[string]string{
-		claudeUnifiedSignalPrefix + "5h-Status": quotaWindowRejectedStatus,
+		claudeUnifiedSignalPrefix + "5h-Status": QuotaWindowStatusRejected,
 		claudeUnifiedSignalPrefix + "5h-Reset":  strconv.FormatInt(reset.Unix(), 10),
 	}, reset)
 }

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -76,6 +77,55 @@ func (m *Manager) recordQuotaLookup(authID string, headers http.Header, lookedUp
 		return false, ""
 	}
 	return true, lookupDriftLine(auth, auth.Quota.LookupSignals, lookedUpAt)
+}
+
+// ErrQuotaLookupCredentialChanged means the credential is no longer current.
+var ErrQuotaLookupCredentialChanged = errors.New("quota lookup credential is no longer current")
+
+// ObserveQuotaLookupWindows records normalized lookup windows without persisting them.
+// A nil accept records observations at or after the stored time. A non-nil accept decides whether to record regardless of timestamp.
+// Recording preserves the later of the stored and incoming timestamps.
+// accept runs under the manager write lock and must neither mutate auth nor call manager methods.
+func (m *Manager) ObserveQuotaLookupWindows(ctx context.Context, authID string, windows []QuotaWindow,
+	lookedUpAt time.Time, accept func(*Auth) (bool, error)) (recorded bool, err error) {
+	if m == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(authID) == "" || len(windows) == 0 || lookedUpAt.IsZero() {
+		return false, errors.New("quota lookup requires a credential ID, windows, and timestamp")
+	}
+	release, errLock := m.lockAuthMutationContext(ctx, authID)
+	if errLock != nil {
+		return false, errLock
+	}
+	m.mu.Lock()
+	defer func() {
+		m.mu.Unlock()
+		release()
+		if recorded {
+			m.NotifyQuotaUpdated()
+		}
+	}()
+	auth := m.auths[authID]
+	if auth == nil {
+		return false, ErrQuotaLookupCredentialChanged
+	}
+	if accept != nil {
+		if ok, errAccept := accept(auth); !ok || errAccept != nil {
+			return false, errAccept
+		}
+	} else if lookedUpAt.Before(auth.Quota.LookedUpAt) {
+		return false, nil
+	}
+	auth.Quota.LookupWindows = cloneQuotaWindows(windows)
+	auth.Quota.LookupSignals = nil
+	if lookedUpAt.After(auth.Quota.LookedUpAt) {
+		auth.Quota.LookedUpAt = lookedUpAt
+	}
+	return true, nil
 }
 
 // SubscribeQuotaUpdates calls fn after a lookup or live response records quota.

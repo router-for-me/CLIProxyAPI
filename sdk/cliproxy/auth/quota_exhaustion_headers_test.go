@@ -63,8 +63,8 @@ func TestUsageLimitClientHeaders_ClaudeUnifiedOnlyInHeaders(t *testing.T) {
 	if got := err.SafeResponseHeaders().Get(claudeUnifiedSignalPrefix + "Status"); got != "" {
 		t.Fatalf("always-sent headers carry Claude unified status %q", got)
 	}
-	if got := err.Headers().Get(claudeUnifiedSignalPrefix + "Status"); got != quotaWindowRejectedStatus {
-		t.Fatalf("Headers() Claude unified status = %q, want %s", got, quotaWindowRejectedStatus)
+	if got := err.Headers().Get(claudeUnifiedSignalPrefix + "Status"); got != QuotaWindowStatusRejected {
+		t.Fatalf("Headers() Claude unified status = %q, want %s", got, QuotaWindowStatusRejected)
 	}
 }
 

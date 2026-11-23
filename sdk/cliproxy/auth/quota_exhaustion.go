@@ -28,8 +28,11 @@ var explicitQuotaErrorCodes = map[string]struct{}{
 	"insufficient_quota":  {},
 }
 
-// quotaWindowRejectedStatus is the upstream window status once its allowance is spent.
-const quotaWindowRejectedStatus = "rejected"
+// QuotaWindowStatusRejected is the upstream window status once its allowance is spent.
+const QuotaWindowStatusRejected = "rejected"
+
+// QuotaWindowStatusAllowed means the window has allowance remaining.
+const QuotaWindowStatusAllowed = "allowed"
 
 // credentialQuotaReason marks a credential-wide cooldown, set only by an explicit usage limit
 // (a Claude 5h/7d rejection or a Codex usage limit).
@@ -142,7 +145,7 @@ func credentialQuotaLimit(auth *Auth, model string, now time.Time) (quotaLimit, 
 	var latest quotaLimit
 	var lapsedWindow time.Duration
 	for _, window := range QuotaWindows(auth, now) {
-		spent := window.Status == quotaWindowRejectedStatus || (window.UsedPercent != nil && *window.UsedPercent >= fullWindowPercent)
+		spent := window.Status == QuotaWindowStatusRejected || (window.UsedPercent != nil && *window.UsedPercent >= fullWindowPercent)
 		if window.Scoped || !spent {
 			continue
 		}

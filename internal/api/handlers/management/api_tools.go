@@ -817,12 +817,18 @@ func tokenValueFromMetadata(metadata map[string]any) string {
 }
 
 func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
-	authIndex = strings.TrimSpace(authIndex)
-	if authIndex == "" || h == nil || h.authManager == nil {
+	if h == nil {
 		return nil
 	}
-	auths := h.authManager.List()
-	for _, auth := range auths {
+	return authByIndex(h.authManager, authIndex)
+}
+
+func authByIndex(manager *coreauth.Manager, authIndex string) *coreauth.Auth {
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" || manager == nil {
+		return nil
+	}
+	for _, auth := range manager.List() {
 		if auth == nil {
 			continue
 		}

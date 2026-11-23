@@ -221,8 +221,8 @@ func TestDesktopUsageRegisteredLookups(t *testing.T) {
 	})
 	first := &desktopTestUsageLookup{failures: map[string]error{"codex-a": errors.New("first lookup failed")}}
 	second := &desktopTestUsageLookup{failures: map[string]error{"another-credential": errors.New("second lookup failed")}}
-	h.RegisterUsageLookup(first)
-	h.RegisterUsageLookup(second)
+	h.RegisterUsageLookup(first, h.authManager)
+	h.RegisterUsageLookup(second, h.authManager)
 
 	payload := decodeDesktopUsage(t, serveDesktop(t, h.GetUsageWindows, http.MethodGet, "", "127.0.0.1:1"))
 	if len(payload.Credentials) != 4 {
@@ -247,6 +247,73 @@ func TestDesktopUsageRegisteredLookups(t *testing.T) {
 	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", "127.0.0.1:1"))
 	if len(payload.Errors) != 2 || payload.Errors["codex-a"] != "first lookup failed" || payload.Errors["another-credential"] != "second lookup failed" {
 		t.Fatalf("refresh-all errors = %v", payload.Errors)
+	}
+}
+
+func TestDesktopUsageLookupsFollowManagerAtDispatch(t *testing.T) {
+	h := newDesktopUsageHandler(t, "")
+	original := h.authManager
+	replacement := coreauth.NewManager(nil, nil, nil)
+	auth, _ := original.GetByID("codex-a")
+	registerAuthForLookupTest(t, replacement, auth)
+
+	lookup := &desktopTestUsageLookup{failures: map[string]error{auth.ID: errors.New("registered lookup called")}}
+	h.RegisterUsageLookup(lookup, original)
+	before, beforeLookups := h.usageLookupsSnapshot()
+	h.SetAuthManager(replacement)
+	after, afterLookups := h.usageLookupsSnapshot()
+
+	for _, snapshot := range []struct {
+		got, want *coreauth.Manager
+		lookups   []UsageLookup
+		count     int
+	}{
+		{before, original, beforeLookups, 3},
+		{after, replacement, afterLookups, 2},
+	} {
+		if snapshot.got != snapshot.want || len(snapshot.lookups) != snapshot.count {
+			t.Fatalf("wrong manager or lookup count in snapshot: %+v", snapshot)
+		}
+		claude, claudeOK := snapshot.lookups[0].(claudeUsageLookup)
+		codex, codexOK := snapshot.lookups[1].(codexUsageLookup)
+		if !claudeOK || !codexOK || claude.manager != snapshot.want || codex.manager != snapshot.want {
+			t.Fatalf("built-ins lost their snapshot manager or order: %v", snapshot.lookups)
+		}
+	}
+
+	const remoteAddr = "127.0.0.1:1"
+	const refreshBody = `{"auth_index":"idx-codex"}`
+	get := func() desktopUsageResponse {
+		return decodeDesktopUsage(t, serveDesktop(t, h.GetUsageWindows, http.MethodGet, "", remoteAddr))
+	}
+	checkCanRefresh := func(want bool) {
+		t.Helper()
+		for _, credential := range get().Credentials {
+			if credential.ID == auth.ID && credential.CanRefresh != nil && *credential.CanRefresh == want {
+				return
+			}
+		}
+		t.Fatalf("%s can_refresh did not match %t", auth.ID, want)
+	}
+	checkCanRefresh(false)
+	rec := serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, refreshBody, remoteAddr)
+	if rec.Code != http.StatusBadRequest || lookup.singleID != "" {
+		t.Fatalf("mismatched refresh: status=%d, dispatched to %q", rec.Code, lookup.singleID)
+	}
+	payload := decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", remoteAddr))
+	if len(payload.Errors) != 0 {
+		t.Fatalf("mismatched bulk refresh dispatched: %v", payload.Errors)
+	}
+
+	h.SetAuthManager(original)
+	checkCanRefresh(true)
+	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, refreshBody, remoteAddr))
+	if lookup.singleID != auth.ID || payload.Errors[auth.ID] != lookup.failures[auth.ID].Error() {
+		t.Fatalf("restored single refresh: dispatched to %q, errors=%v", lookup.singleID, payload.Errors)
+	}
+	payload = decodeDesktopUsage(t, serveDesktop(t, h.RefreshUsageWindows, http.MethodPost, "", remoteAddr))
+	if payload.Errors[auth.ID] != lookup.failures[auth.ID].Error() {
+		t.Fatalf("restored bulk refresh errors = %v", payload.Errors)
 	}
 }
 

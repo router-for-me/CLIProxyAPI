@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
@@ -29,11 +31,19 @@ func TestAntigravitySummarySupersedesNewerCatalogSnapshot(t *testing.T) {
 	summary := antigravitySummaryWindows([]sdkauth.AntigravityQuotaBucket{
 		{ID: "gemini-5h", Window: sdkauth.AntigravityQuotaWindowFiveHour, RemainingFraction: 0.5},
 	}, summaryAt)
-	if err := svc.recordAntigravityQuota(t.Context(), auth, key, catalog, catalogAt, true); err != nil {
+	if err := svc.recordAntigravityQuota(t.Context(), auth, key, catalog, catalogAt, 2, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.recordAntigravityQuota(t.Context(), auth, key, summary, summaryAt, false); err != nil {
+	if err := svc.recordAntigravityQuota(t.Context(), auth, key, summary, summaryAt, 1, false); err != nil {
 		t.Fatal(err)
+	}
+	if err := svc.recordAntigravityQuota(t.Context(), auth, key, catalog, catalogAt.Add(time.Second), 3, true); err != nil {
+		t.Fatal(err)
+	}
+	staleAuth := auth.Clone()
+	staleAuth.Prefix = "stale"
+	if err := svc.recordAntigravityQuota(t.Context(), staleAuth, key, catalog, summaryAt, 1, true); !errors.Is(err, coreauth.ErrQuotaLookupCredentialChanged) {
+		t.Fatalf("stale credential error = %v, want %v", err, coreauth.ErrQuotaLookupCredentialChanged)
 	}
 	current, _ := manager.GetByID(auth.ID)
 	if !reflect.DeepEqual(current.Quota.LookupWindows, summary) || !current.Quota.LookedUpAt.Equal(catalogAt) {
@@ -46,14 +56,11 @@ func TestAntigravityQuotaWindows(t *testing.T) {
 	quotas := map[string]sdkauth.AntigravityModelQuota{
 		"gemini-pro":   {ResetTime: reset.Add(time.Second), RemainingFraction: 0.12501},
 		"gemini-flash": {ResetTime: reset.Add(30 * time.Second).In(time.FixedZone("PST", -8*60*60)), RemainingFraction: 0.12504},
-		"gemini-lite":  {ResetTime: reset.Add(time.Minute), RemainingFraction: 0.12501},
-		"claude":       {ResetTime: reset.Add(time.Minute)},
+		"claude":       {ResetTime: reset.Add(time.Minute), RemainingFraction: -0.1},
 		"claude-lite":  {ResetTime: reset.Add(2 * time.Minute), RemainingFraction: 0.00001},
-		"gpt-a":        {ResetTime: reset, RemainingFraction: 0.5, DisplayName: "Short"},
-		"other-a":      {ResetTime: reset, RemainingFraction: 0.5, DisplayName: "Longer Name"},
-		"gpt-b":        {ResetTime: reset, RemainingFraction: 0.25005},
-		"gpt-c":        {ResetTime: reset, RemainingFraction: 0.25006},
-		"other":        {RemainingFraction: 1},
+		"a-b":          {ResetTime: reset, RemainingFraction: 0.5, DisplayName: " Shared "},
+		"a_b":          {ResetTime: reset, RemainingFraction: 0.5, DisplayName: " Shared "},
+		"other":        {RemainingFraction: 1.1},
 	}
 	windows := AntigravityQuotaWindows(quotas)
 	want := []struct {
@@ -61,13 +68,13 @@ func TestAntigravityQuotaWindows(t *testing.T) {
 		used               float64
 		reset              time.Time
 	}{
-		{"ag_claude", "Claude", "rejected", 100, reset.Add(time.Minute)},
-		{"ag_claude_2", "Claude", "allowed", 100, reset.Add(2 * time.Minute)},
-		{"ag_gemini", "Gemini", "allowed", 87.5, reset.Add(30 * time.Second)},
-		{"ag_gemini_2", "Gemini", "allowed", 87.5, reset.Add(time.Minute)},
-		{"ag_gpt", "GPT", "allowed", 75, reset},
-		{"ag_short", "Short", "allowed", 50, reset},
-		{"ag_quota", "Quota", "allowed", 0, time.Time{}},
+		{"ag:claude", "claude", coreauth.QuotaWindowStatusRejected, 100, reset.Add(time.Minute)},
+		{"ag:claude-lite", "claude-lite", coreauth.QuotaWindowStatusAllowed, 99.99, reset.Add(2 * time.Minute)},
+		{"ag:gemini-pro", "gemini-pro", coreauth.QuotaWindowStatusAllowed, 87.5, reset.Add(time.Second)},
+		{"ag:gemini-flash", "gemini-flash", coreauth.QuotaWindowStatusAllowed, 87.5, reset.Add(30 * time.Second)},
+		{"ag:a-b", "Shared", coreauth.QuotaWindowStatusAllowed, 50, reset},
+		{"ag:a_b", "Shared", coreauth.QuotaWindowStatusAllowed, 50, reset},
+		{"ag:other", "other", coreauth.QuotaWindowStatusAllowed, 0, time.Time{}},
 	}
 	if len(windows) != len(want) {
 		t.Fatalf("got %d windows, want %d", len(windows), len(want))
@@ -81,29 +88,78 @@ func TestAntigravityQuotaWindows(t *testing.T) {
 	}
 }
 
-func TestAntigravityQuotaWindowsKeepKeysWhenUsageOrderChanges(t *testing.T) {
-	reset := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
-	flash := sdkauth.AntigravityModelQuota{ResetTime: reset, RemainingFraction: 0.2}
-	pro := sdkauth.AntigravityModelQuota{ResetTime: reset.Add(time.Minute), RemainingFraction: 0.8}
-	windows := func() []coreauth.QuotaWindow {
-		return AntigravityQuotaWindows(map[string]sdkauth.AntigravityModelQuota{"gemini-flash": flash, "gemini-pro": pro})
+func TestAntigravityQuotaWindowsKeepKeysWhenUsageChanges(t *testing.T) {
+	quotas := map[string]sdkauth.AntigravityModelQuota{
+		"gemini-flash": {DisplayName: "Flash", RemainingFraction: 0.2},
+		"gemini-pro":   {DisplayName: "Pro", RemainingFraction: 0.8},
 	}
-	before := windows()
-	flash.RemainingFraction, pro.RemainingFraction = pro.RemainingFraction, flash.RemainingFraction
-	after := windows()
+	before := AntigravityQuotaWindows(quotas)
+	quotas["gemini-flash"] = sdkauth.AntigravityModelQuota{DisplayName: "Renamed Flash", RemainingFraction: 0.9}
+	after := AntigravityQuotaWindows(quotas)
 	if len(before) != 2 || len(after) != 2 {
-		t.Fatalf("expected two buckets before and after swap, got %v and %v", before, after)
+		t.Fatalf("expected two windows before and after update, got %v and %v", before, after)
 	}
-	for i, first := range before {
-		second := after[len(after)-1-i]
-		if first.Label != "Gemini" || first.Label != second.Label || first.ResetsAt != second.ResetsAt || first.Key != second.Key {
-			t.Errorf("same bucket moved from %+v to %+v", first, second)
+	if before[0].Key != "ag:gemini-flash" || after[1].Key != before[0].Key || after[0].Key != before[1].Key {
+		t.Fatalf("quota update changed model keys: %v to %v", before, after)
+	}
+}
+
+func TestAntigravityUsageLookupFollowsHome(t *testing.T) {
+	cfg := &config.Config{}
+	lookup := (&Service{cfg: cfg}).NewAntigravityUsageLookup()
+	auth := antigravityTestAuth("home-eligible", "")
+	for _, home := range []bool{false, true, false} {
+		cfg.Home.Enabled = home
+		if got := lookup.Eligible(auth); got == home {
+			t.Errorf("Home enabled = %t, Eligible = %t", home, got)
 		}
+	}
+	if (*AntigravityUsageLookup)(nil).Eligible(auth) {
+		t.Fatal("nil lookup is eligible")
+	}
+}
+
+func TestAntigravityQuotaLookupPublicationOrder(t *testing.T) {
+	now := time.Unix(2_000, 0)
+	for _, tt := range []struct {
+		name          string
+		staleAt       time.Time
+		staleRevision uint64
+	}{
+		{"older revision at equal timestamp", now, 1},
+		{"older timestamp at higher revision", now.Add(-time.Second), 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			svc := &Service{coreManager: manager}
+			auth, err := manager.Register(t.Context(), antigravityTestAuth("quota-order", ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := svc.antigravityCapabilityKey(auth)
+			if err := svc.recordAntigravityQuota(t.Context(), auth, key, []coreauth.QuotaWindow{{Key: "current"}}, now, 2, false); err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.recordAntigravityQuota(t.Context(), auth, key, []coreauth.QuotaWindow{{Key: "stale"}}, tt.staleAt, tt.staleRevision, false); err != nil {
+				t.Fatal(err)
+			}
+			stored, _ := manager.GetByID(auth.ID)
+			if !stored.Quota.LookedUpAt.Equal(now) || len(stored.Quota.LookupWindows) != 1 || stored.Quota.LookupWindows[0].Key != "current" {
+				t.Fatalf("stale publication replaced lookup: %+v", stored.Quota)
+			}
+			if err := svc.recordAntigravityQuota(t.Context(), auth, key, []coreauth.QuotaWindow{{Key: "newer"}}, now, 3, false); err != nil {
+				t.Fatal(err)
+			}
+			stored, _ = manager.GetByID(auth.ID)
+			if !stored.Quota.LookedUpAt.Equal(now) || len(stored.Quota.LookupWindows) != 1 || stored.Quota.LookupWindows[0].Key != "newer" {
+				t.Fatalf("higher revision at the same timestamp did not replace lookup: %+v", stored.Quota)
+			}
+		})
 	}
 }
 
 func TestAntigravityUsageLookupRequiresAccessToken(t *testing.T) {
-	lookup := &AntigravityUsageLookup{}
+	lookup := (&Service{}).NewAntigravityUsageLookup()
 	auth := &coreauth.Auth{Provider: "antigravity", Metadata: map[string]any{"email": "oauth@example.com"}}
 	if lookup.Eligible(auth) {
 		t.Error("OAuth credential without an access token is eligible")
@@ -221,6 +277,8 @@ func TestAntigravityUsageLookupSharesProbeTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var publications atomic.Int32
+	defer manager.SubscribeQuotaUpdates(func() { publications.Add(1) })()
 	leaderDone := make(chan error, 1)
 	go func() {
 		leaderDone <- svc.NewAntigravityUsageLookup().Refresh(t.Context(), auth)
@@ -240,8 +298,8 @@ func TestAntigravityUsageLookupSharesProbeTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	stored, _ := manager.GetByID(auth.ID)
-	if got := stored.Quota.LookedUpAt; calls.Load() != 1 || !got.Equal(start) {
-		t.Fatalf("probe calls = %d, lookup timestamp = %v, want one probe at %v", calls.Load(), got, start)
+	if got := stored.Quota.LookedUpAt; calls.Load() != 1 || publications.Load() != 1 || !got.Equal(start) {
+		t.Fatalf("probe calls = %d, publications = %d, lookup timestamp = %v, want one probe and one publication at %v", calls.Load(), publications.Load(), got, start)
 	}
 	if len(stored.Quota.LookupWindows) != 1 || !stored.Quota.LookupWindows[0].ResetsAt.IsZero() {
 		t.Fatalf("unstarted window = %+v", stored.Quota.LookupWindows)

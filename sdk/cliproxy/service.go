@@ -159,7 +159,11 @@ type Service struct {
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	antigravityProbeWg           sync.WaitGroup
 	// antigravityContext is protected by cfgMu and owns background model probes.
-	antigravityContext       context.Context
+	antigravityContext        context.Context
+	antigravityQuotaPublishMu sync.Mutex
+	// Retains one revision per refreshed credential ID until restart. Only credential churn grows the map.
+	antigravityQuotaPublished map[string]uint64
+
 	antigravityProbeMu       sync.Mutex
 	antigravityAccountProbes map[string]map[*antigravityAccountProbe]struct{}
 	antigravityRefreshWake   chan struct{}

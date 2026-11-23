@@ -1217,7 +1217,7 @@ func clearQuotaCooldownFromLookup(auth *Auth, lookedUpAt, now time.Time) bool {
 		return false
 	}
 	for _, window := range windows {
-		if window.Status == quotaWindowRejectedStatus || window.UsedPercent == nil || *window.UsedPercent >= fullWindowPercent {
+		if window.Status == QuotaWindowStatusRejected || window.UsedPercent == nil || *window.UsedPercent >= fullWindowPercent {
 			return false
 		}
 	}
@@ -2207,10 +2207,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 							authOwnRetry = activeAuthForce
 						}
 						auth.NextRetryAfter = authOwnRetry
-						auth.Quota = QuotaState{
-							ObservedAt: savedModelAggQuota.ObservedAt,
-							Signals:    maps.Clone(savedModelAggQuota.Signals),
-						}
+						auth.Quota = QuotaState{}
+						applyObservationFields(&auth.Quota, savedModelAggQuota)
 					}
 					prevAuthQuotaActive := auth.Quota.Exceeded && auth.Quota.NextRecoverAt.After(now)
 					prevAuthRecoverAt := auth.Quota.NextRecoverAt

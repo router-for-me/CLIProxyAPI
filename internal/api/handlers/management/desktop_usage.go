@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudeusage"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexusage"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/lifecycle"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resetcredits"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -48,40 +49,82 @@ type desktopUsageRefreshRequest struct {
 }
 
 // UsageLookup refreshes usage windows for eligible credentials.
+// Lookups act on the server's auth manager.
 type UsageLookup interface {
 	Eligible(auth *coreauth.Auth) bool
 	Refresh(ctx context.Context, auth *coreauth.Auth) error
 	RefreshAll(ctx context.Context) map[string]error
 }
 
-type usageRefresher interface {
-	Refresh(ctx context.Context, auth *coreauth.Auth) error
-	RefreshAll(ctx context.Context) map[string]error
+type claudeUsageLookup struct {
+	manager *coreauth.Manager
+	config  func() *config.Config
 }
 
-type usageLookupAdapter struct {
-	usageRefresher
-	eligible func(*coreauth.Auth) bool
+func (l claudeUsageLookup) Eligible(auth *coreauth.Auth) bool {
+	return claudeusage.Eligible(auth)
 }
 
-func (lookup usageLookupAdapter) Eligible(auth *coreauth.Auth) bool {
-	return lookup.eligible(auth)
+func (l claudeUsageLookup) Refresh(ctx context.Context, auth *coreauth.Auth) error {
+	return claudeusage.NewPoller(l.manager, l.config).Refresh(ctx, auth)
 }
 
-// RegisterUsageLookup appends a lookup after the built-in lookups.
-func (h *Handler) RegisterUsageLookup(lookup UsageLookup) {
+func (l claudeUsageLookup) RefreshAll(ctx context.Context) map[string]error {
+	return claudeusage.NewPoller(l.manager, l.config).RefreshAll(ctx)
+}
+
+type codexUsageLookup struct {
+	manager *coreauth.Manager
+	config  func() *config.Config
+}
+
+func (l codexUsageLookup) Eligible(auth *coreauth.Auth) bool {
+	return codexusage.Eligible(auth)
+}
+
+func (l codexUsageLookup) Refresh(ctx context.Context, auth *coreauth.Auth) error {
+	return codexusage.NewTracker(l.manager, l.config).Refresh(ctx, auth)
+}
+
+func (l codexUsageLookup) RefreshAll(ctx context.Context) map[string]error {
+	return codexusage.NewTracker(l.manager, l.config).RefreshAll(ctx)
+}
+
+type registeredUsageLookup struct {
+	lookup  UsageLookup
+	manager *coreauth.Manager
+}
+
+// RegisterUsageLookup appends a lookup bound to manager after the built-in lookups.
+func (h *Handler) RegisterUsageLookup(lookup UsageLookup, manager *coreauth.Manager) {
+	if h == nil || lookup == nil || manager == nil {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.usageLookups = append(h.usageLookups, lookup)
+	h.usageLookups = append(h.usageLookups, registeredUsageLookup{lookup: lookup, manager: manager})
 }
 
-func (h *Handler) usageLookupsSnapshot() []UsageLookup {
+func (h *Handler) usageLookupsSnapshot() (*coreauth.Manager, []UsageLookup) {
+	if h == nil {
+		return nil, nil
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return append([]UsageLookup{
-		usageLookupAdapter{claudeusage.NewPoller(h.authManager, h.configSnapshot), claudeusage.Eligible},
-		usageLookupAdapter{codexusage.NewTracker(h.authManager, h.configSnapshot), codexusage.Eligible},
-	}, h.usageLookups...)
+	manager := h.authManager
+	if manager == nil {
+		return nil, nil
+	}
+	lookups := []UsageLookup{
+		claudeUsageLookup{manager: manager, config: h.configSnapshot},
+		codexUsageLookup{manager: manager, config: h.configSnapshot},
+	}
+	for _, registered := range h.usageLookups {
+		if registered.manager == manager {
+			lookups = append(lookups, registered.lookup)
+		}
+	}
+	return manager, lookups
 }
 
 func firstEligibleUsageLookup(lookups []UsageLookup, auth *coreauth.Auth) UsageLookup {
@@ -99,17 +142,19 @@ func firstEligibleUsageLookup(lookups []UsageLookup, auth *coreauth.Auth) UsageL
 // GetUsageWindows lists every credential with its normalized usage windows and
 // the credential the routing strategy would pick for a new conversation.
 func (h *Handler) GetUsageWindows(c *gin.Context) {
-	if h.authManager == nil {
+	manager, lookups := h.usageLookupsSnapshot()
+	if manager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, h.usageWindowsPayload(time.Now()))
+	c.JSON(http.StatusOK, h.usageWindowsPayloadForManager(time.Now(), manager, lookups))
 }
 
 // RefreshUsageWindows looks up usage now, for one credential when
 // auth_index is given or for every eligible credential otherwise.
 func (h *Handler) RefreshUsageWindows(c *gin.Context) {
-	if h.authManager == nil {
+	manager, lookups := h.usageLookupsSnapshot()
+	if manager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -118,11 +163,10 @@ func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	lookups := h.usageLookupsSnapshot()
 	ctx := c.Request.Context()
 	failures := map[string]string{}
 	if authIndex := strings.TrimSpace(body.AuthIndex); authIndex != "" {
-		auth := h.authByIndex(authIndex)
+		auth := authByIndex(manager, authIndex)
 		if auth == nil {
 			c.JSON(http.StatusNotFound, gin.H{"error": "credential not found"})
 			return
@@ -142,7 +186,7 @@ func (h *Handler) RefreshUsageWindows(c *gin.Context) {
 			}
 		}
 	}
-	payload := h.usageWindowsPayload(time.Now())
+	payload := h.usageWindowsPayloadForManager(time.Now(), manager, lookups)
 	if len(failures) > 0 {
 		payload["errors"] = failures
 	}
@@ -174,6 +218,11 @@ func isLoopbackRequest(c *gin.Context) bool {
 }
 
 func (h *Handler) usageWindowsPayload(now time.Time) gin.H {
+	manager, lookups := h.usageLookupsSnapshot()
+	return h.usageWindowsPayloadForManager(now, manager, lookups)
+}
+
+func (h *Handler) usageWindowsPayloadForManager(now time.Time, manager *coreauth.Manager, lookups []UsageLookup) gin.H {
 	strategy := ""
 	preferredKind := ""
 	if cfg := h.configSnapshot(); cfg != nil {
@@ -183,13 +232,17 @@ func (h *Handler) usageWindowsPayload(now time.Time) gin.H {
 			strategy = normalized
 		}
 	}
-	auths := h.authManager.List()
+	var auths []*coreauth.Auth
+	var preferred map[string]string
+	if manager != nil {
+		auths = manager.List()
+		preferred = manager.PreferredAuths()
+	}
 	byProvider := map[string][]*coreauth.Auth{}
 	for _, auth := range auths {
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 		byProvider[provider] = append(byProvider[provider], auth)
 	}
-	preferred := h.authManager.PreferredAuths()
 	nextPick := map[string]string{}
 	for provider, group := range byProvider {
 		if pick := preferredNextPick(preferred[provider], group, now); pick != "" {
@@ -211,7 +264,6 @@ func (h *Handler) usageWindowsPayload(now time.Time) gin.H {
 		nextPick[provider] = coreauth.PreviewNextPick(strategy, group, now)
 	}
 	credentials := make([]gin.H, 0, len(auths))
-	lookups := h.usageLookupsSnapshot()
 	for _, auth := range auths {
 		entry := h.desktopCredentialEntry(auth, now)
 		if entry == nil {

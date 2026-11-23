@@ -62,7 +62,7 @@ func TestClassifyQuotaExhaustion_UnavailablePoolReportsReset(t *testing.T) {
 	now := time.Now()
 	reset := now.Add(time.Hour).Truncate(time.Second)
 	spent := credentialLimitAuth(t, "unavailable-spent", map[string]string{
-		claudeUnifiedSignalPrefix + "5h-Status": quotaWindowRejectedStatus,
+		claudeUnifiedSignalPrefix + "5h-Status": QuotaWindowStatusRejected,
 		claudeUnifiedSignalPrefix + "5h-Reset":  strconv.FormatInt(reset.Unix(), 10),
 	}, reset)
 	for _, auth := range []*Auth{spent, signedOutAuth(t, "unavailable-signed-out")} {

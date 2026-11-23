@@ -532,9 +532,9 @@ func (s *Server) Stop(ctx context.Context) error {
 }
 
 // RegisterUsageLookup registers an additional desktop usage lookup on the management handler.
-func (s *Server) RegisterUsageLookup(lookup managementHandlers.UsageLookup) {
-	if s == nil || s.mgmt == nil || lookup == nil {
+func (s *Server) RegisterUsageLookup(lookup managementHandlers.UsageLookup, manager *auth.Manager) {
+	if s == nil || s.mgmt == nil {
 		return
 	}
-	s.mgmt.RegisterUsageLookup(lookup)
+	s.mgmt.RegisterUsageLookup(lookup, manager)
 }

@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
@@ -127,11 +129,62 @@ func TestAntigravityUsageSummaryWindows(t *testing.T) {
 	if paths := probePaths(); !slices.Equal(paths, wantPaths) || !fallback.Quota.LookedUpAt.Equal(now) || len(windows) != 2 {
 		t.Fatalf("expected fresh fallback snapshot, paths=%v quota=%+v", paths, fallback.Quota)
 	}
-	if !windows[0].Scoped || !windows[1].Scoped || windows[0].Key == windows[1].Key ||
+	if !windows[0].Scoped || !windows[1].Scoped ||
+		windows[0].Key != "ag:gemini-pro" || windows[0].Label != "gemini-pro" ||
+		windows[1].Key != "weekly:ag:gemini-pro" || windows[1].Label != "gemini-pro · Weekly" ||
 		windows[0].Duration != 0 || windows[1].Duration != 604800*time.Second ||
-		windows[1].Status != "rejected" || windows[1].Label != "Gemini · Weekly" {
+		windows[1].Status != coreauth.QuotaWindowStatusRejected {
 		t.Fatalf("unexpected model fallback windows %+v", windows)
 	}
+}
+
+func TestAntigravityUsageSummaryKeepsQueuedWindowUnstarted(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resetAntigravityCapabilityCache()
+		defer resetAntigravityCapabilityCache()
+		queuedAt := time.Now()
+		now := queuedAt
+		oldClock := antigravityNowFunc
+		antigravityNowFunc = func() time.Time { return now }
+		defer func() { antigravityNowFunc = oldClock }()
+		oldSlots := antigravityProbeSlots
+		antigravityProbeSlots = make(chan struct{}, 1)
+		antigravityProbeSlots <- struct{}{}
+		defer func() { antigravityProbeSlots = oldSlots }()
+		oldTransport := http.DefaultTransport
+		http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != sdkauth.AntigravityQuotaSummaryPath {
+				return nil, fmt.Errorf("unexpected probe path %s", req.URL.Path)
+			}
+			reset := now.Add(antigravityFiveHourWindow).UTC().Format(time.RFC3339)
+			body := fmt.Sprintf(`{"buckets":[{"bucketId":"gemini-5h","window":"5h","remainingFraction":1,"resetTime":%q}]}`, reset)
+			return antigravityVersionTestResponse(req, http.StatusOK, body), nil
+		})
+		defer func() { http.DefaultTransport = oldTransport }()
+
+		manager := coreauth.NewManager(nil, nil, nil)
+		svc := &Service{coreManager: manager}
+		auth, err := manager.Register(t.Context(), antigravityTestAuth("summary-queued", "https://quota.invalid"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- svc.NewAntigravityUsageLookup().Refresh(t.Context(), auth) }()
+		synctest.Wait()
+		now = queuedAt.Add(antigravityUnstartedTolerance + time.Second)
+		<-antigravityProbeSlots
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		stored, _ := manager.GetByID(auth.ID)
+		if !stored.Quota.LookedUpAt.Equal(queuedAt) {
+			t.Fatalf("published lookup time = %v, want %v", stored.Quota.LookedUpAt, queuedAt)
+		}
+		windows := stored.Quota.LookupWindows
+		if len(windows) != 1 || !windows[0].ResetsAt.IsZero() {
+			t.Fatalf("queued summary should publish one unstarted window, got %+v", windows)
+		}
+	})
 }
 
 func TestAntigravityUsageDoesNotShareCatalogOnlyResult(t *testing.T) {

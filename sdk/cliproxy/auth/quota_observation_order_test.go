@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -50,6 +52,148 @@ func TestAntigravityQuotaLookupSurvivesResponseAndObservationMerge(t *testing.T)
 	stale.LookupWindows[0].Key = "modified"
 	if stored.Quota.LookupWindows[0] != window {
 		t.Fatal("merged lookup windows alias the source")
+	}
+}
+
+func TestObserveQuotaLookupWindows(t *testing.T) {
+	now := time.Unix(2_000, 0)
+	manager := NewManager(nil, nil, nil)
+	auth, err := manager.Register(t.Context(), &Auth{
+		ID: "lookup-windows", Provider: "claude", Status: StatusActive,
+		Quota: QuotaState{LookedUpAt: now, LookupSignals: map[string]string{"anthropic-ratelimit-unified-status": QuotaWindowStatusAllowed}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published []QuotaState
+	defer manager.SubscribeQuotaUpdates(func() {
+		current, _ := manager.GetByID(auth.ID)
+		published = append(published, current.Quota)
+	})()
+
+	used := 10.0
+	windows := []QuotaWindow{{Key: "five_hour", UsedPercent: &used}}
+	called := false
+	recorded, err := manager.ObserveQuotaLookupWindows(nil, auth.ID, windows, now, func(current *Auth) (bool, error) {
+		called = true
+		if current.ID != auth.ID || len(current.Quota.LookupSignals) != 1 {
+			t.Errorf("accept saw unexpected live credential: %+v", current)
+		}
+		return true, nil
+	})
+	if !called || !recorded || err != nil || len(published) != 1 {
+		t.Fatalf("tie: accept called=%t, recorded=%t, err=%v, publications=%d", called, recorded, err, len(published))
+	}
+	windows[0].Key = "changed"
+	used = 20
+	current, _ := manager.GetByID(auth.ID)
+	if !reflect.DeepEqual(current.Quota, published[0]) || !current.Quota.LookedUpAt.Equal(now) ||
+		current.Quota.LookupSignals != nil || len(current.Quota.LookupWindows) != 1 ||
+		current.Quota.LookupWindows[0].Key != "five_hour" || *current.Quota.LookupWindows[0].UsedPercent != 10 {
+		t.Fatalf("unexpected recorded snapshot: %+v", current.Quota)
+	}
+
+	rejected := errors.New("rejected by lookup")
+	for _, tc := range []struct {
+		name   string
+		at     time.Time
+		accept func(*Auth) (bool, error)
+		err    error
+	}{
+		{"older with nil accept", now.Add(-time.Second), nil, nil},
+		{"accept skip", now, func(*Auth) (bool, error) { return false, nil }, nil},
+		{"older accept error", now.Add(-time.Second), func(*Auth) (bool, error) { return true, rejected }, rejected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorded, err := manager.ObserveQuotaLookupWindows(t.Context(), auth.ID, windows, tc.at, tc.accept)
+			current, _ := manager.GetByID(auth.ID)
+			if recorded || !errors.Is(err, tc.err) || len(published) != 1 || !reflect.DeepEqual(current.Quota, published[0]) {
+				t.Fatalf("recorded=%t, err=%v, publications=%d, quota=%+v", recorded, err, len(published), current.Quota)
+			}
+		})
+	}
+	recorded, err = manager.ObserveQuotaLookupWindows(t.Context(), auth.ID, windows, now.Add(-time.Second), func(*Auth) (bool, error) {
+		return true, nil
+	})
+	current, _ = manager.GetByID(auth.ID)
+	if !recorded || err != nil || len(published) != 2 || !reflect.DeepEqual(current.Quota, published[1]) ||
+		!current.Quota.LookedUpAt.Equal(now) || !reflect.DeepEqual(current.Quota.LookupWindows, windows) {
+		t.Fatalf("accepted older lookup: recorded=%t, err=%v, publications=%d, quota=%+v", recorded, err, len(published), current.Quota)
+	}
+
+	for _, at := range []time.Time{now, now.Add(time.Second)} {
+		publications := len(published)
+		recorded, err = manager.ObserveQuotaLookupWindows(t.Context(), auth.ID, windows, at, nil)
+		current, _ = manager.GetByID(auth.ID)
+		if !recorded || err != nil || len(published) != publications+1 || !current.Quota.LookedUpAt.Equal(at) {
+			t.Fatalf("nil accept at %v: recorded=%t, err=%v, publications=%d, quota=%+v", at, recorded, err, len(published), current.Quota)
+		}
+	}
+}
+
+func TestObserveQuotaLookupWindowsValidation(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	auth, err := manager.Register(t.Context(), &Auth{ID: "lookup-input"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(2_000, 0)
+	windows := []QuotaWindow{{Key: "window"}}
+	for _, tc := range []struct {
+		id      string
+		windows []QuotaWindow
+		at      time.Time
+	}{
+		{" ", windows, now},
+		{auth.ID, nil, now},
+		{auth.ID, windows, time.Time{}},
+	} {
+		if recorded, err := manager.ObserveQuotaLookupWindows(t.Context(), tc.id, tc.windows, tc.at, nil); recorded || err == nil {
+			t.Errorf("invalid input %+v: recorded=%t, err=%v", tc, recorded, err)
+		}
+	}
+	if recorded, err := manager.ObserveQuotaLookupWindows(t.Context(), "missing", windows, now, nil); recorded || !errors.Is(err, ErrQuotaLookupCredentialChanged) {
+		t.Errorf("missing credential: recorded=%t, err=%v", recorded, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if recorded, err := manager.ObserveQuotaLookupWindows(ctx, auth.ID, windows, now, nil); recorded || !errors.Is(err, ctx.Err()) {
+		t.Errorf("canceled lookup: recorded=%t, err=%v", recorded, err)
+	}
+	current, _ := manager.GetByID(auth.ID)
+	if !current.Quota.LookedUpAt.IsZero() {
+		t.Fatalf("failed lookup changed the snapshot: %+v", current.Quota)
+	}
+}
+
+func TestQuotaLookupSurvivesCredentialScopedRateLimit(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	manager := NewManager(nil, nil, nil)
+	const model = "claude-sonnet-4-6"
+	snapshot := QuotaState{
+		LookedUpAt:    time.Unix(2_000, 0),
+		LookupWindows: []QuotaWindow{{Key: model, Scoped: true}},
+		LookupSignals: map[string]string{"anthropic-ratelimit-unified-status": QuotaWindowStatusAllowed},
+	}
+	auth, err := manager.Register(t.Context(), &Auth{
+		ID: "lookup-with-model-state", Provider: "claude", Status: StatusActive,
+		ModelStates: map[string]*ModelState{model: {Status: StatusActive}},
+		Quota:       snapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := time.Hour
+	manager.MarkResult(t.Context(), Result{
+		AuthID: auth.ID, Provider: auth.Provider, Model: model, CredentialScope: true,
+		Error:      &Error{HTTPStatus: http.StatusTooManyRequests, Code: ErrorCodeCredentialQuota},
+		RetryAfter: &retry,
+	})
+	stored, _ := manager.GetByID(auth.ID)
+	if stored.Quota.Reason != "credential_quota" || !stored.Quota.LookedUpAt.Equal(snapshot.LookedUpAt) ||
+		!reflect.DeepEqual(stored.Quota.LookupWindows, snapshot.LookupWindows) ||
+		!reflect.DeepEqual(stored.Quota.LookupSignals, snapshot.LookupSignals) {
+		t.Fatalf("credential quota changed the lookup snapshot: %+v", stored.Quota)
 	}
 }
 

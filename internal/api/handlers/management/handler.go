@@ -35,7 +35,7 @@ type Handler struct {
 	attemptsMu              sync.Mutex
 	failedAttempts          map[string]*attemptInfo // keyed by client IP
 	authManager             *coreauth.Manager
-	usageLookups            []UsageLookup
+	usageLookups            []registeredUsageLookup
 	tokenStore              coreauth.Store
 	localPassword           string
 	supervisorPassword      string
