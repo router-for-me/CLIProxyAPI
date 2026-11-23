@@ -113,6 +113,9 @@ type instruments struct {
 	quotaBand         metric.Int64ObservableGauge
 	quotaReserved     metric.Int64ObservableGauge
 	quotaReserveShare metric.Float64ObservableGauge
+	weeklyGrants      metric.Int64ObservableGauge
+	fableGrants       metric.Int64ObservableGauge
+	fiveHourGrants    metric.Int64ObservableGauge
 	sessions          metric.Int64ObservableGauge
 	activeConns       metric.Int64ObservableGauge
 	upstreamLimit     metric.Float64ObservableGauge
@@ -230,6 +233,9 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.quotaBand, _ = m.Int64ObservableGauge("claw_master.quota.band", metric.WithDescription("0 ok, 1 reserve (last tenth), 2 exhausted, -1 unknown"))
 	i.quotaReserveShare, _ = m.Float64ObservableGauge("claw_master.quota.reserve_fraction", metric.WithDescription("The share of the profile's week its configured reserve (--profile-reserve-file) holds back, 0 to 1, whether held out or kept as a last resort; only for a profile with a reserve configured"))
 	i.quotaReserved, _ = m.Int64ObservableGauge("claw_master.quota.reserved", metric.WithDescription("1 while the profile's configured reserve (--profile-reserve-file) holds it out of the pool, 2 while it is past a last-resort reserve (used only when every other subscription is out), else 0; only for a profile with a reserve configured"))
+	i.weeklyGrants, _ = m.Int64ObservableGauge("claw_master.quota.weekly.resets_left", metric.WithDescription("Banked resets the account may claim to clear its week early (grants that are not paused or ended), from the usage poll; absent when the poll does not report them"))
+	i.fableGrants, _ = m.Int64ObservableGauge("claw_master.quota.fable.resets_left", metric.WithDescription("Banked resets the account may claim to clear its weekly Fable allowance early, from the usage poll; absent when the poll does not report them"))
+	i.fiveHourGrants, _ = m.Int64ObservableGauge("claw_master.quota.five_hour.resets_left", metric.WithDescription("Banked resets the account may claim to clear its five-hour window early, from the usage poll; absent when the poll does not report them"))
 	i.tokenExpires, _ = m.Float64ObservableGauge("claw_master.auth.token_expires_in_seconds", metric.WithUnit("s"))
 	i.profileInfo, _ = m.Int64ObservableGauge("claw_master.profile.info", metric.WithDescription("1 per subscription profile, carrying the email of the account it is logged in to: the one metric with an account identifier"))
 	i.sessions, _ = m.Int64ObservableGauge("claw_master.sessions.tracked")
@@ -241,7 +247,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.heap, _ = m.Int64ObservableGauge("claw_master.process.heap_bytes", metric.WithUnit("By"))
 
 	i.registration, _ = m.RegisterCallback(i.observe,
-		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.quotaReserved, i.quotaReserveShare, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
+		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.quotaReserved, i.quotaReserveShare, i.weeklyGrants, i.fableGrants, i.fiveHourGrants, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
 		i.upstreamLimit, i.latencyQuantile, i.uptime, i.goroutines, i.heap)
 	return i
 }
@@ -279,6 +285,9 @@ type profileState struct {
 	LastResort        bool
 	// The share of the week the reserve holds back (0 to 1), when one is configured.
 	ReserveFraction float64
+	// The limit resets the account has banked, from the usage poll, when it reported them.
+	ResetGrantsKnown bool
+	ResetGrants      ClaudeResetGrants
 }
 
 type stateSnapshot struct {
@@ -332,6 +341,11 @@ func (i *instruments) observe(_ context.Context, o metric.Observer) error {
 				}
 				o.ObserveInt64(i.quotaReserved, reserved, attrs)
 				o.ObserveFloat64(i.quotaReserveShare, p.ReserveFraction, attrs)
+			}
+			if p.ResetGrantsKnown {
+				o.ObserveInt64(i.weeklyGrants, int64(p.ResetGrants.Weekly), attrs)
+				o.ObserveInt64(i.fableGrants, int64(p.ResetGrants.Fable), attrs)
+				o.ObserveInt64(i.fiveHourGrants, int64(p.ResetGrants.FiveHour), attrs)
 			}
 			if p.TokenKnown {
 				o.ObserveFloat64(i.tokenExpires, p.TokenExpiresIn, attrs)

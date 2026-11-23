@@ -122,6 +122,27 @@ func (s *backendSeriesSelector) observeFiveHourQuota(authID string, quota Claude
 	s.fiveHour[authID] = quota
 }
 
+// observeResetGrants records the limit resets a poll says an account has banked; a poll that reports
+// none (known false) forgets the last count, so a count never outlives the reading behind it.
+func (s *backendSeriesSelector) observeResetGrants(authID string, grants ClaudeResetGrants, known bool) {
+	if strings.TrimSpace(authID) == "" || authID == s.backupAuthID {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
+	if !known {
+		delete(s.resetGrants, authID)
+		return
+	}
+	if s.resetGrants == nil {
+		s.resetGrants = make(map[string]ClaudeResetGrants, len(s.authIDs))
+	}
+	s.resetGrants[authID] = grants
+}
+
 // fiveHourNowLocked is an account's five-hour window as of now: once its reset has passed the
 // window is over and nothing of it is used, whatever the last poll said.
 func (s *backendSeriesSelector) fiveHourNowLocked(authID string, now time.Time) (quota ClaudeFiveHourQuota, known bool) {

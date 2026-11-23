@@ -447,6 +447,9 @@ func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSna
 				p.FableResetsKnown, p.FableResetsIn = true, max(fable.ResetsAt.Sub(now).Seconds(), 0)
 			}
 		}
+		if grants, known := s.resetGrants[id]; known {
+			p.ResetGrantsKnown, p.ResetGrants = true, grants
+		}
 		if v, ok := expiry[id]; ok {
 			p.TokenKnown, p.TokenExpiresIn = true, v
 		}
