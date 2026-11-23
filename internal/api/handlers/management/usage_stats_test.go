@@ -72,6 +72,7 @@ func TestGetUsageStatsGroupsFiltersAndPrices(t *testing.T) {
 			Dimensions  map[string]string `json:"dimensions"`
 			TotalTokens int64             `json:"total_tokens"`
 			CostUSD     float64           `json:"cost_usd"`
+			InputCost   float64           `json:"input_cost_usd"`
 		} `json:"groups"`
 	}
 	if errDecode := json.Unmarshal(rec.Body.Bytes(), &payload); errDecode != nil {
@@ -82,7 +83,7 @@ func TestGetUsageStatsGroupsFiltersAndPrices(t *testing.T) {
 	}
 	group := payload.Groups[0]
 	// 06:00 UTC is still the previous day at UTC-8.
-	if group.Dimensions["day"] != "2026-11-11" || group.Dimensions["project"] != "beta" || group.TotalTokens != 2_000_000 || group.CostUSD != 8 {
+	if group.Dimensions["day"] != "2026-11-11" || group.Dimensions["project"] != "beta" || group.TotalTokens != 2_000_000 || group.CostUSD != 8 || group.InputCost != 8 {
 		t.Fatalf("group = %+v", group)
 	}
 }

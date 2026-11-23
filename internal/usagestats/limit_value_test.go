@@ -356,6 +356,10 @@ func TestLimitValueChargesARequestThatCompletesAsTheNextStartsBeforeIt(t *testin
 	if value.Intervals != 2 || value.Requests != 2 || value.USDPerPercent == nil || *value.USDPerPercent != 3 {
 		t.Fatalf("value = %+v, want the first two $3 requests charged to the two 1%% rises", value)
 	}
+	// The series embeds Metrics, so it carries the cost split too: all output.
+	if !approxEqual(value.OutputCostUSD, 6) || value.InputCostUSD != 0 || !approxEqual(value.CostUSD, 6) {
+		t.Fatalf("cost = %v split output %v input %v, want 6 all output", value.CostUSD, value.OutputCostUSD, value.InputCostUSD)
+	}
 }
 
 func TestModelInFamilyMatchesNameParts(t *testing.T) {

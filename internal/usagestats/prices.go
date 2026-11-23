@@ -111,8 +111,22 @@ func isModelNameChar(c byte) bool {
 	return c == '.' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')
 }
 
+// costSplit is an API-equivalent cost split by the token bucket it pays for.
+type costSplit struct {
+	Input      float64
+	CacheRead  float64
+	CacheWrite float64
+	// Output covers output and reasoning tokens, which are billed alike.
+	Output float64
+}
+
+// total is the cost of every bucket.
+func (c costSplit) total() float64 {
+	return c.Input + c.CacheRead + c.CacheWrite + c.Output
+}
+
 // cost returns the USD cost of the given token buckets at this price.
-func (p Price) cost(input, cacheRead, cacheWrite, cacheWrite1h, output int64) float64 {
+func (p Price) cost(input, cacheRead, cacheWrite, cacheWrite1h, output int64) costSplit {
 	cacheReadPrice := p.Input
 	if p.CacheRead != nil {
 		cacheReadPrice = *p.CacheRead
@@ -127,12 +141,12 @@ func (p Price) cost(input, cacheRead, cacheWrite, cacheWrite1h, output int64) fl
 	}
 	// Cache writes without a reported TTL are billed at the default (5m) rate.
 	otherWrites := max(cacheWrite-cacheWrite1h, 0)
-	total := float64(input)*p.Input +
-		float64(cacheRead)*cacheReadPrice +
-		float64(otherWrites)*write5mPrice +
-		float64(cacheWrite1h)*write1hPrice +
-		float64(output)*p.Output
-	return total / 1e6
+	return costSplit{
+		Input:      float64(input) * p.Input / 1e6,
+		CacheRead:  float64(cacheRead) * cacheReadPrice / 1e6,
+		CacheWrite: (float64(otherWrites)*write5mPrice + float64(cacheWrite1h)*write1hPrice) / 1e6,
+		Output:     float64(output) * p.Output / 1e6,
+	}
 }
 
 // priceMetrics fills in the cost of m, the summed token buckets of one model's
@@ -140,10 +154,11 @@ func (p Price) cost(input, cacheRead, cacheWrite, cacheWrite1h, output int64) fl
 func (t *PriceTable) priceMetrics(model string, m *Metrics) bool {
 	price, ok := t.Lookup(model)
 	if !ok {
+		m.setCost(costSplit{})
 		m.UnpricedTokens = m.TotalTokens
 		return false
 	}
-	m.CostUSD = price.cost(m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens, m.CacheWrite1hTokens, m.OutputTokens+m.ReasoningTokens)
+	m.setCost(price.cost(m.InputTokens, m.CacheReadTokens, m.CacheWriteTokens, m.CacheWrite1hTokens, m.OutputTokens+m.ReasoningTokens))
 	m.UnpricedTokens = m.UnclassifiedTokens
 	return true
 }

@@ -87,8 +87,14 @@ type Metrics struct {
 	UnclassifiedTokens int64 `json:"unclassified_tokens"`
 	TotalTokens        int64 `json:"total_tokens"`
 	WebSearchRequests  int64 `json:"web_search_requests"`
-	// CostUSD is the API-equivalent cost at list prices.
-	CostUSD float64 `json:"cost_usd"`
+	// CostUSD is the API-equivalent cost at list prices. The four bucket
+	// costs below split it by what the tokens were, and add up to it.
+	CostUSD           float64 `json:"cost_usd"`
+	InputCostUSD      float64 `json:"input_cost_usd"`
+	CacheReadCostUSD  float64 `json:"cache_read_cost_usd"`
+	CacheWriteCostUSD float64 `json:"cache_write_cost_usd"`
+	// OutputCostUSD covers output and reasoning tokens.
+	OutputCostUSD float64 `json:"output_cost_usd"`
 	// UnpricedTokens counts tokens that CostUSD does not cover, either because
 	// the model has no known price or because the tokens were unclassified.
 	UnpricedTokens int64 `json:"unpriced_tokens"`
@@ -298,6 +304,15 @@ func (s *Store) countSessions(ctx context.Context, exprs []string, where string,
 	return counts, nil
 }
 
+// setCost stores a cost split and its total.
+func (m *Metrics) setCost(cost costSplit) {
+	m.CostUSD = cost.total()
+	m.InputCostUSD = cost.Input
+	m.CacheReadCostUSD = cost.CacheRead
+	m.CacheWriteCostUSD = cost.CacheWrite
+	m.OutputCostUSD = cost.Output
+}
+
 // add sums every measure except Sessions, which does not add up.
 func (m *Metrics) add(other Metrics) {
 	m.Requests += other.Requests
@@ -314,6 +329,10 @@ func (m *Metrics) add(other Metrics) {
 	m.TotalTokens += other.TotalTokens
 	m.WebSearchRequests += other.WebSearchRequests
 	m.CostUSD += other.CostUSD
+	m.InputCostUSD += other.InputCostUSD
+	m.CacheReadCostUSD += other.CacheReadCostUSD
+	m.CacheWriteCostUSD += other.CacheWriteCostUSD
+	m.OutputCostUSD += other.OutputCostUSD
 	m.UnpricedTokens += other.UnpricedTokens
 }
 

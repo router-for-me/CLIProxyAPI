@@ -79,6 +79,10 @@ all history.
 - Models without a price are listed on the Usage page, and their tokens are
   left out of the cost. Add or override prices with the page's **Prices** button.
 - Service tiers, batch discounts, and long-context surcharges are not modelled.
+- Every cost is also split by what it paid for: uncached input, cache reads,
+  cache writes, and output. Reasoning tokens are billed as output. The four
+  parts add up to the total, so the Usage page can show where each model's
+  cost comes from.
 
 Subscription value compares that cost with the monthly plan price you enter for
 each account, prorated to the days recorded in the selected range. Each account
@@ -278,10 +282,17 @@ whole range. This group from the end-to-end test is the fake Claude account:
   "total_tokens": 12150,
   "web_search_requests": 0,
   "cost_usd": 0.08195,
+  "input_cost_usd": 0.028,
+  "cache_read_cost_usd": 0,
+  "cache_write_cost_usd": 0.02595,
+  "output_cost_usd": 0.028,
   "unpriced_tokens": 0
 }
 ```
 
+- `input_cost_usd`, `cache_read_cost_usd`, `cache_write_cost_usd`, and
+  `output_cost_usd` split `cost_usd` by token bucket and add up to it, to
+  floating-point rounding. `output_cost_usd` covers output and reasoning tokens.
 - `turns` and `sessions` are described in [Turns and sessions](#turns-and-sessions).
   `sessions` is the one field that does not add up across groups.
 - `cache_write_5m_tokens` and `cache_write_1h_tokens` split
@@ -365,6 +376,10 @@ filter dimensions, and returns one entry per series:
       "total_tokens": 48133600,
       "web_search_requests": 0,
       "cost_usd": 1138,
+      "input_cost_usd": 11.08,
+      "cache_read_cost_usd": 0,
+      "cache_write_cost_usd": 0,
+      "output_cost_usd": 1126.92,
       "unpriced_tokens": 0,
       "usd_per_percent": 23.708333333333332,
       "output_tokens_per_percent": 956075,
@@ -388,6 +403,10 @@ filter dimensions, and returns one entry per series:
           "total_tokens": 35360000,
           "web_search_requests": 0,
           "cost_usd": 680,
+          "input_cost_usd": 6.8,
+          "cache_read_cost_usd": 0,
+          "cache_write_cost_usd": 0,
+          "output_cost_usd": 673.2,
           "unpriced_tokens": 0,
           "usd_per_percent": 34,
           "output_tokens_per_percent": 1683000
