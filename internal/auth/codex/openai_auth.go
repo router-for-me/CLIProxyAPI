@@ -19,6 +19,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -67,29 +68,20 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 	}
 }
 
+var classicalKeyExchange = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521}
+
 func NewOAuthHTTPClient(cfg *config.Config, proxyURL string) *http.Client {
 	if strings.TrimSpace(proxyURL) == "" && cfg != nil {
 		proxyURL = cfg.ProxyURL
 	}
-	client := util.SetProxy(&config.SDKConfig{ProxyURL: proxyURL}, &http.Client{})
 	if cfg == nil || !cfg.Codex.OAuthDisableMLKEM {
-		return client
+		return util.SetProxy(&config.SDKConfig{ProxyURL: proxyURL}, &http.Client{})
 	}
-	base := client.Transport
-	if base == nil {
-		base = http.DefaultTransport
+	transport, _, errBuild := proxyutil.BuildHTTPTransportWithTLSConfig(proxyURL, &tls.Config{CurvePreferences: classicalKeyExchange})
+	if errBuild != nil {
+		log.Errorf("%v", errBuild)
 	}
-	if transport, ok := base.(*http.Transport); ok {
-		t := transport.Clone()
-		if t.TLSClientConfig == nil {
-			t.TLSClientConfig = &tls.Config{}
-		}
-		if len(t.TLSClientConfig.CurvePreferences) == 0 {
-			t.TLSClientConfig.CurvePreferences = []tls.CurveID{tls.X25519, tls.CurveP256, tls.CurveP384, tls.CurveP521}
-		}
-		client.Transport = t
-	}
-	return client
+	return &http.Client{Transport: transport}
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).

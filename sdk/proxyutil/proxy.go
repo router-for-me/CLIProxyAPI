@@ -117,6 +117,22 @@ func socksForwardDialer() *net.Dialer {
 
 // BuildHTTPTransport constructs an HTTP transport for the provided proxy setting.
 func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
+	return buildHTTPTransport(raw, nil)
+}
+
+func BuildHTTPTransportWithTLSConfig(raw string, tlsConfig *tls.Config) (*http.Transport, Mode, error) {
+	transport, mode, errBuild := buildHTTPTransport(raw, tlsConfig)
+	if tlsConfig == nil {
+		return transport, mode, errBuild
+	}
+	if transport == nil {
+		transport = cloneDefaultTransport()
+	}
+	transport.TLSClientConfig = tlsConfig.Clone()
+	return transport, mode, errBuild
+}
+
+func buildHTTPTransport(raw string, tlsConfig *tls.Config) (*http.Transport, Mode, error) {
 	setting, errParse := Parse(raw)
 	if errParse != nil {
 		return nil, setting.Mode, errParse
@@ -158,7 +174,7 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 		if setting.URL.Scheme == "https" {
 			transport := cloneDefaultTransport()
 			transport.Proxy = http.ProxyURL(setting.URL)
-			transport.DialTLSContext = buildHTTPSProxyDialTLSContext(setting.URL, nil, transport.TLSHandshakeTimeout, transport.DialContext)
+			transport.DialTLSContext = buildHTTPSProxyDialTLSContext(setting.URL, tlsConfig, transport.TLSHandshakeTimeout, transport.DialContext)
 			return transport, setting.Mode, nil
 		}
 		transport := cloneDefaultTransport()

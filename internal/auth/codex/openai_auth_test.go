@@ -89,6 +89,35 @@ func TestOAuthMLKEMUsesDefaultTransportUnlessDisabled(t *testing.T) {
 	}
 }
 
+func TestOAuthDisableMLKEMAppliesToHTTPSProxy(t *testing.T) {
+	offered := make(chan []tls.CurveID, 1)
+	proxyServer := httptest.NewUnstartedServer(http.NotFoundHandler())
+	proxyServer.TLS = &tls.Config{
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			select {
+			case offered <- slices.Clone(hello.SupportedCurves):
+			default:
+			}
+			return nil, errors.New("stop after ClientHello")
+		},
+	}
+	proxyServer.StartTLS()
+	defer proxyServer.Close()
+
+	cfg := &config.Config{}
+	cfg.Codex.OAuthDisableMLKEM = true
+	client := NewOAuthHTTPClient(cfg, proxyServer.URL)
+	if _, err := client.Get(TokenURL); err == nil {
+		t.Fatal("expected the stub proxy to stop the handshake")
+	}
+	curves := <-offered
+	if len(curves) == 0 || slices.ContainsFunc(curves, func(curve tls.CurveID) bool {
+		return !slices.Contains(classicalKeyExchange, curve)
+	}) {
+		t.Fatalf("HTTPS proxy handshake offered %v, want only classical groups", curves)
+	}
+}
+
 func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
 	resetCodexRefreshGroupForTest()
 	defer resetCodexRefreshGroupForTest()
