@@ -469,8 +469,8 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 				fcName := util.RestoreSanitizedToolName(params.ToolNameMap, functionCallResult.Get("name").String())
 				isContinuation := params.ResponseType == 3 && fcName == "" && params.CurrentToolName != ""
 				if !isContinuation && !isAntigravityNonEmptyFunctionCall(functionCallResult) {
-					if hasThoughtSignature {
-						appendPartSignature(toolSignature, geminiClaudeCarrierPrevious, params.LastSemanticKind)
+					if toolSignature != "" {
+						appendPartSignature(toolSignature, geminiClaudeCarrierNext, geminiClaudeCarrierAny)
 					}
 					continue
 				}

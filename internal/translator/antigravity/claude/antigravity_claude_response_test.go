@@ -972,6 +972,48 @@ func TestConvertAntigravityResponseToClaude_VisibleGeminiSignatureUsesLeadingCar
 	}
 }
 
+func TestConvertAntigravityResponseToClaude_EmptyFunctionCallPreservesThoughtSignature(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3.6-flash-high"}`)
+	validSignature := testGeminiEPrefixSignature(t)
+	emptyCallChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"` + validSignature + `","functionCall":{}}]},"finishReason":"STOP"}],"modelVersion":"gemini-3.6-flash","responseId":"resp-empty-tool"}}`)
+	testCases := []struct {
+		name   string
+		chunks [][]byte
+	}{
+		{name: "first part", chunks: [][]byte{emptyCallChunk}},
+		{
+			name: "after visible text",
+			chunks: [][]byte{
+				[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible answer"}]}}],"modelVersion":"gemini-3.6-flash","responseId":"resp-empty-tool"}}`),
+				emptyCallChunk,
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var param any
+			var output []byte
+			for _, chunk := range testCase.chunks {
+				output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "gemini-3.6-flash-high", requestJSON, requestJSON, chunk, &param), nil)...)
+			}
+			outputText := string(output)
+			carrierSignature := encodeGeminiClaudeCarrierSignature(validSignature, geminiClaudeCarrierNext, geminiClaudeCarrierAny)
+
+			if !strings.Contains(outputText, `"type":"signature_delta","signature":"`+carrierSignature+`"`) {
+				t.Fatalf("empty function call must preserve its thought signature: %s", outputText)
+			}
+			decodedSignature, direction, targetKind, marked, ok := decodeGeminiClaudeCarrierSignature(carrierSignature)
+			if !ok || !marked || decodedSignature != validSignature || direction != geminiClaudeCarrierNext || targetKind != geminiClaudeCarrierAny {
+				t.Fatalf("invalid signature carrier: signature=%q direction=%q target=%q marked=%t ok=%t", decodedSignature, direction, targetKind, marked, ok)
+			}
+			if strings.Contains(outputText, `"content_block":{"type":"tool_use"`) {
+				t.Fatalf("empty function call must not emit a tool_use block: %s", outputText)
+			}
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToClaude_ThoughtThenSignedFunctionUsesOneThinkingBlock(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-3.6-flash-high"}`)
 	validSignature := testGeminiEPrefixSignature(t)
