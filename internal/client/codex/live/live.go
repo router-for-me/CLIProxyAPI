@@ -45,6 +45,30 @@ var liveProtocolHeaders = []string{
 	"X-Oai-Attestation",
 }
 
+type mediaRelaySession interface {
+	AcceptUpstreamAnswer(context.Context, string) (string, error)
+	SetCallID(string)
+	SetCloseHandler(func(string))
+	Close() error
+	CloseWithReason(string) error
+}
+
+type mediaRelayFactory interface {
+	NewSession(context.Context, string, mediaSessionRoute) (mediaRelaySession, string, error)
+}
+
+type mediaSessionRoute struct {
+	proxyURL   string
+	credential string
+	authIndex  string
+}
+
+type mediaSessionLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	active int
+}
+
 // Handler forwards Codex live session requests through the shared auth scheduler.
 type Handler struct {
 	authManager          *auth.Manager
@@ -99,7 +123,7 @@ func (h *Handler) UpdateConfig(cfg *config.Config) error {
 	var relay mediaRelayFactory
 	var relayErr error
 	if relayConfig.Enabled {
-		relay, relayErr = newPionMediaRelayWithLimiter(relayConfig, h.mediaLimiter)
+		relay, relayErr = newMediaRelay(relayConfig, h.mediaLimiter)
 	}
 	h.mediaRelay = relay
 	h.mediaRelayErr = relayErr

@@ -12,8 +12,15 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
+
+func newIssue6199AntigravityCreditsExecutor() *AntigravityExecutor {
+	return NewAntigravityExecutor(&config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	})
+}
 
 type issue6199AntigravityRefreshResult struct {
 	auth *cliproxyauth.Auth
@@ -149,7 +156,7 @@ func TestIssue6199AntigravityRefreshPublishesTokenWithoutWaitingForCredits(t *te
 			}
 		})
 		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		manager := cliproxyauth.NewManager(nil, nil, nil)
 		manager.RegisterExecutor(executor)
 		auth := issue6199AntigravityAuth("issue6199-credits", t.Name()+"-refresh")
@@ -207,7 +214,7 @@ func TestIssue6199AntigravityProjectAcquisitionHasDeadline(t *testing.T) {
 	}
 }
 
-func TestIssue6199AntigravityOptionalCreditsRefreshIsDeduplicatedWithoutDeadline(t *testing.T) {
+func TestIssue6199AntigravityOptionalCreditsRefreshIsDeduplicatedAcrossRefreshes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		release := make(chan struct{})
 		defer close(release)
@@ -218,9 +225,7 @@ func TestIssue6199AntigravityOptionalCreditsRefreshIsDeduplicatedWithoutDeadline
 				return issue6199AntigravityJSONResponse(req, `{"access_token":"new-access","expires_in":3600}`), nil
 			case "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist":
 				creditsCalls++
-				if _, ok := req.Context().Deadline(); ok {
-					t.Error("optional credits lookup inherited a network deadline from token acquisition")
-				}
+				issue6199AssertBoundedCreditsDeadline(t, req.Context())
 				<-release
 				return issue6199AntigravityJSONResponse(req, `{"paidTier":{"id":"tier","availableCredits":[]}}`), nil
 			default:
@@ -228,7 +233,7 @@ func TestIssue6199AntigravityOptionalCreditsRefreshIsDeduplicatedWithoutDeadline
 			}
 		})
 		ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", transport)
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		auth := issue6199AntigravityAuth(t.Name(), t.Name()+"-refresh")
 		t.Cleanup(func() {
 			antigravityCreditsBalanceByAuth.Delete(auth.ID)
@@ -279,9 +284,10 @@ func issue6199RefreshForCreditsLifecycle(t *testing.T, executor *AntigravityExec
 func issue6199CreditsLifecycleFixture(t *testing.T, authID string) {
 	t.Helper()
 	reset := func() {
-		antigravityCreditsBalanceByAuth.Delete(authID)
+		antigravityCreditsBalanceByAuth.Delete(newAntigravityCreditsCacheKey(authID, "epoch:1"))
+		antigravityCreditsBalanceByAuth.Delete(newAntigravityCreditsCacheKey(authID, "epoch:2"))
 		antigravityCreditsHintRefreshByID.Delete(authID)
-		cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{})
+		antigravityCreditsCurrentScope.Delete(authID)
 	}
 	// Isolate repeated test runs without changing state between lifecycle transitions.
 	reset()
@@ -293,16 +299,31 @@ func issue6199CreditsBalanceResponse(req *http.Request, amount float64) *http.Re
 	return issue6199AntigravityJSONResponse(req, body)
 }
 
-func issue6199AssertCreditsBalance(t *testing.T, authID string, amount float64) {
+func issue6199AssertCreditsBalance(t *testing.T, auth *cliproxyauth.Auth, amount float64) {
 	t.Helper()
-	value, found := antigravityCreditsBalanceByAuth.Load(authID)
+	value, found := antigravityCreditsBalanceByAuth.Load(newAntigravityCreditsCacheKey(auth.ID, cliproxyauth.AntigravityCreditsScope(auth)))
 	balance, valid := value.(antigravityCreditsBalance)
 	if !found || !valid || !balance.Known || balance.CreditAmount != amount {
 		t.Errorf("published credits balance = %#v, want known balance %g", value, amount)
 	}
-	hint, known := cliproxyauth.GetAntigravityCreditsHint(authID)
+	hint, known := cliproxyauth.GetAntigravityCreditsHint(auth.ID, auth.RegistrationEpoch)
 	if !known || !hint.Known || !hint.Available || hint.CreditAmount != amount {
 		t.Errorf("published credits hint = %#v (found=%t), want available balance %g", hint, known, amount)
+	}
+}
+
+// issue6199AssertBoundedCreditsDeadline verifies the optional post-refresh
+// credits request carries the bounded warm-hint budget introduced by #7702,
+// not the longer OAuth credential-acquisition deadline.
+func issue6199AssertBoundedCreditsDeadline(t *testing.T, ctx context.Context) {
+	t.Helper()
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		t.Error("post-refresh credits request lost its bounded warm-hint deadline")
+		return
+	}
+	if until := time.Until(deadline); until <= 0 || until > antigravityCreditsHintRefreshTimeout {
+		t.Errorf("post-refresh credits deadline budget = %s, want within warm-hint timeout %s", until, antigravityCreditsHintRefreshTimeout)
 	}
 }
 
@@ -334,14 +355,12 @@ func TestIssue6199AntigravityCreditsRecoverAfterLifecycleCancellation(t *testing
 		})
 		ctx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", oldTransport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, ctx, auth)
 		if oldRequest == nil {
 			t.Fatal("old lifecycle credits request did not start")
 		}
-		if _, ok := oldRequest.Deadline(); ok {
-			t.Error("optional credits request acquired a network deadline")
-		}
+		issue6199AssertBoundedCreditsDeadline(t, oldRequest)
 
 		cancelLifecycle()
 		synctest.Wait()
@@ -364,9 +383,7 @@ func TestIssue6199AntigravityCreditsRecoverAfterLifecycleCancellation(t *testing
 				return issue6199AntigravityJSONResponse(req, `{"access_token":"healthy-access","expires_in":3600}`), nil
 			case "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist":
 				healthyCalls++
-				if _, ok := req.Context().Deadline(); ok {
-					t.Error("healthy optional credits request acquired a network deadline")
-				}
+				issue6199AssertBoundedCreditsDeadline(t, req.Context())
 				return issue6199CreditsBalanceResponse(req, 900), nil
 			default:
 				return nil, fmt.Errorf("unexpected intercepted request: %s", req.URL)
@@ -377,7 +394,7 @@ func TestIssue6199AntigravityCreditsRecoverAfterLifecycleCancellation(t *testing
 		if healthyCalls != 1 {
 			t.Errorf("healthy same-ID same-epoch credits requests = %d, want 1 after lifecycle cancellation", healthyCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 900)
+		issue6199AssertCreditsBalance(t, updated, 900)
 	})
 }
 
@@ -409,7 +426,7 @@ func TestIssue6199AntigravityCreditsReplaceOldRegistrationEpoch(t *testing.T) {
 		})
 		oldCtx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", oldTransport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, oldCtx, auth)
 		if oldRequest == nil {
 			t.Fatal("old registration credits request did not start")
@@ -421,9 +438,7 @@ func TestIssue6199AntigravityCreditsReplaceOldRegistrationEpoch(t *testing.T) {
 				return issue6199AntigravityJSONResponse(req, `{"access_token":"replacement-access","expires_in":3600}`), nil
 			case "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist":
 				healthyCalls++
-				if _, ok := req.Context().Deadline(); ok {
-					t.Error("replacement optional credits request acquired a network deadline")
-				}
+				issue6199AssertBoundedCreditsDeadline(t, req.Context())
 				return issue6199CreditsBalanceResponse(req, 1200), nil
 			default:
 				return nil, fmt.Errorf("unexpected intercepted request: %s", req.URL)
@@ -447,7 +462,7 @@ func TestIssue6199AntigravityCreditsReplaceOldRegistrationEpoch(t *testing.T) {
 		if healthyCalls != 1 {
 			t.Errorf("new registration credits requests = %d, want 1 without the old epoch's throttle", healthyCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 1200)
+		issue6199AssertCreditsBalance(t, replacement, 1200)
 	})
 }
 
@@ -475,7 +490,7 @@ func TestIssue6199AntigravityCanceledCreditsCannotOverwriteReplacementBalance(t 
 		})
 		oldCtx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", oldTransport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, oldCtx, auth)
 		if oldRequest == nil {
 			t.Fatal("old registration credits request did not start")
@@ -498,10 +513,10 @@ func TestIssue6199AntigravityCanceledCreditsCannotOverwriteReplacementBalance(t 
 		if healthyCalls != 1 {
 			t.Fatalf("replacement balance queries = %d, want 1", healthyCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 1500)
+		issue6199AssertCreditsBalance(t, replacement, 1500)
 		releaseOnce.Do(func() { close(releaseOld) })
 		synctest.Wait()
-		issue6199AssertCreditsBalance(t, auth.ID, 1500)
+		issue6199AssertCreditsBalance(t, replacement, 1500)
 	})
 }
 
@@ -536,7 +551,7 @@ func TestIssue6199AntigravityCanceledCreditsRetryWithoutOldThrottle(t *testing.T
 		})
 		oldCtx, cancelLifecycle := context.WithCancel(context.WithValue(context.Background(), "cliproxy.roundtripper", transport))
 		defer cancelLifecycle()
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, oldCtx, auth)
 		if oldRequest == nil {
 			t.Fatal("old credits request did not start")
@@ -549,7 +564,7 @@ func TestIssue6199AntigravityCanceledCreditsRetryWithoutOldThrottle(t *testing.T
 		if healthyCalls != 1 {
 			t.Errorf("immediate same-epoch credits recovery requests = %d, want 1", healthyCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 900)
+		issue6199AssertCreditsBalance(t, updated, 900)
 	})
 }
 
@@ -573,12 +588,12 @@ func TestIssue6199AntigravityOlderEpochCannotReplaceCompletedCredits(t *testing.
 		}
 		newCalls := 0
 		newCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", makeTransport(900, &newCalls))
-		executor := &AntigravityExecutor{}
+		executor := newIssue6199AntigravityCreditsExecutor()
 		updated := issue6199RefreshForCreditsLifecycle(t, executor, newCtx, auth)
 		if newCalls != 1 {
 			t.Fatalf("current epoch credits requests = %d, want 1", newCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 900)
+		issue6199AssertCreditsBalance(t, updated, 900)
 		timer := time.NewTimer(antigravityCreditsHintRefreshInterval + time.Nanosecond)
 		defer timer.Stop()
 		<-timer.C
@@ -590,6 +605,6 @@ func TestIssue6199AntigravityOlderEpochCannotReplaceCompletedCredits(t *testing.
 		if oldCalls != 0 {
 			t.Errorf("older epoch credits requests after throttle elapsed = %d, want 0", oldCalls)
 		}
-		issue6199AssertCreditsBalance(t, auth.ID, 900)
+		issue6199AssertCreditsBalance(t, updated, 900)
 	})
 }

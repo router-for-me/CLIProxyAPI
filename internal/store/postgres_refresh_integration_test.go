@@ -12,7 +12,8 @@ import (
 	"testing"
 )
 
-func TestPostgresConcurrentInitialRefreshClaims(t *testing.T) {
+func startIntegrationPostgres(t *testing.T) *sql.DB {
+	t.Helper()
 	if os.Getenv("CLIPROXY_TEST_POSTGRES") != "1" || runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires opt-in CLIPROXY_TEST_POSTGRES=1 and a non-root Unix PostgreSQL installation")
 	}
@@ -21,7 +22,7 @@ func TestPostgresConcurrentInitialRefreshClaims(t *testing.T) {
 		t.Skip("postgres is not installed")
 	}
 	bin := filepath.Dir(postgres)
-	root, errTemp := os.MkdirTemp("", "cpa-refresh-pg-")
+	root, errTemp := os.MkdirTemp("", "cpa-test-pg-")
 	if errTemp != nil {
 		t.Fatal(errTemp)
 	}
@@ -31,7 +32,7 @@ func TestPostgresConcurrentInitialRefreshClaims(t *testing.T) {
 		}
 	})
 	data := filepath.Join(root, "data")
-	cmdInit := exec.Command(filepath.Join(bin, "initdb"), "-D", data, "-U", "refresh_test", "-A", "trust", "--no-locale")
+	cmdInit := exec.Command(filepath.Join(bin, "initdb"), "-D", data, "-U", "refresh_test", "-A", "trust", "--no-locale", "--encoding=UTF8")
 	cmdInit.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	if output, errRun := cmdInit.CombinedOutput(); errRun != nil {
 		t.Fatalf("initdb: %v: %s", errRun, output)
@@ -58,6 +59,11 @@ func TestPostgresConcurrentInitialRefreshClaims(t *testing.T) {
 			t.Error(errClose)
 		}
 	})
+	return db
+}
+
+func TestPostgresConcurrentInitialRefreshClaims(t *testing.T) {
+	db := startIntegrationPostgres(t)
 	const parallel = 16
 	db.SetMaxOpenConns(parallel)
 	db.SetMaxIdleConns(parallel)

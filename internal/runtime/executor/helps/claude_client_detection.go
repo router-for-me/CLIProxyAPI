@@ -308,11 +308,11 @@ func measuredClaudeCodeHaiku55HelperHeadersMatch(headers http.Header, cfg *confi
 			return false
 		}
 	}
+	// Claude Code omits prompt-caching-scope when using a non-first-party base URL.
 	betaHeader := normalizedClaudeBetaHeader(headers)
 	return strings.Contains(betaHeader, "interleaved-thinking-2025-05-14") &&
 		strings.Contains(betaHeader, "thinking-token-count-2026-05-13") &&
-		strings.Contains(betaHeader, "context-management-2025-06-27") &&
-		strings.Contains(betaHeader, "prompt-caching-scope-2026-01-05")
+		strings.Contains(betaHeader, "context-management-2025-06-27")
 }
 
 func measuredClaudeCodeHaiku55HelperSessionMatches(headers http.Header, payload []byte) bool {

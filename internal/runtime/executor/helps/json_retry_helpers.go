@@ -45,7 +45,7 @@ func ParseGoogleRetryAfter(statusCode int, headers http.Header, errorBody []byte
 	if delay := parseGoogleStructuredRetryDelay(errorBody, false); delay != nil {
 		return delay
 	}
-	if delay := parsePositiveRetryAfterHeader(headers, now); delay != nil {
+	if delay := parseRetryAfterHeaderDuration(headers, now, false); delay != nil {
 		return delay
 	}
 	return parseGoogleMessageRetryDelay(errorBody, false)
@@ -58,6 +58,20 @@ func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		return delay, nil
 	}
 	if delay := parseGoogleMessageRetryDelay(errorBody, true); delay != nil {
+		return delay, nil
+	}
+	return nil, fmt.Errorf("no RetryInfo found")
+}
+
+// ParseRetryDelayWithHeaders extracts the retry delay from a Google API 429
+// error response body (preserving explicit zero-delay hints used by
+// Antigravity), falling back to an HTTP Retry-After header (preserving
+// explicit 0-second hints) when the body carries no retry delay hint.
+func ParseRetryDelayWithHeaders(headers http.Header, errorBody []byte, now time.Time) (*time.Duration, error) {
+	if delay, errParse := ParseRetryDelay(errorBody); errParse == nil && delay != nil {
+		return delay, nil
+	}
+	if delay := parseRetryAfterHeaderDuration(headers, now, true); delay != nil {
 		return delay, nil
 	}
 	return nil, fmt.Errorf("no RetryInfo found")
@@ -111,7 +125,7 @@ func parseGoogleStructuredRetryDelay(errorBody []byte, allowZero bool) *time.Dur
 	return nil
 }
 
-func parsePositiveRetryAfterHeader(headers http.Header, now time.Time) *time.Duration {
+func parseRetryAfterHeaderDuration(headers http.Header, now time.Time, allowZeroSeconds bool) *time.Duration {
 	if headers == nil {
 		return nil
 	}
@@ -128,7 +142,7 @@ func parsePositiveRetryAfterHeader(headers http.Header, now time.Time) *time.Dur
 		return nil
 	}
 	if seconds, errParse := strconv.ParseInt(raw, 10, 64); errParse == nil {
-		if seconds <= 0 {
+		if seconds < 0 || (!allowZeroSeconds && seconds == 0) {
 			return nil
 		}
 		if seconds > int64(math.MaxInt64)/int64(time.Second) {

@@ -123,6 +123,9 @@ func (e *XAIExecutor) prepareResponsesRequestToDoc(ctx context.Context, req clip
 	origDoc := ojson.NewDoc(originalTranslated)
 	helps.SetStringIfDifferentDoc(origDoc, "model", baseModel)
 	preserveXAIResponsesOutputControlsDoc(origDoc, originalPayload, from)
+	if to == sdktranslator.FormatCodex && sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		helps.StripResponsesIncludeValuesDoc(origDoc, "output.encrypted_content", "web_search_call.results")
+	}
 	originalTranslated = origDoc.Bytes()
 
 	body, updatesChanged, err := helps.TranslateRequestWithAPIKeyModelCompatibilityAndUpdateIntentForExecutor(ctx, opts.Headers, e.cfg, e.Identifier(), from, to, targetModel, bytes.Clone(req.Payload), stream, helps.APIKeyModelIsCompat(req))
@@ -132,6 +135,9 @@ func (e *XAIExecutor) prepareResponsesRequestToDoc(ctx context.Context, req clip
 	doc := ojson.NewDoc(body)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 	preserveXAIResponsesOutputControlsDoc(doc, req.Payload, from)
+	if to == sdktranslator.FormatCodex && sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		helps.StripResponsesIncludeValuesDoc(doc, "output.encrypted_content", "web_search_call.results")
+	}
 
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), e.Identifier(), e.Identifier(), updatesChanged); err != nil {
 		return nil, err

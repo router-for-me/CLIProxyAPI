@@ -3,7 +3,9 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -278,6 +280,10 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err != nil {
 		return err
 	}
+	id, errID := configuredServerID(node)
+	if errID != nil {
+		return errID
+	}
 	decoded := legacyConfig(*cfg)
 	if err = root.Decode(&decoded); err != nil {
 		return err
@@ -286,6 +292,7 @@ func (cfg *Config) UnmarshalYAML(node *yaml.Node) error {
 		return errValidate
 	}
 	*cfg = Config(decoded)
+	cfg.ServerID = id
 	cfg.SyncServerResponseCompression()
 	cfg.OAuthOnlyFields = nil
 	source := expandConfigAliases(node)
@@ -306,8 +313,7 @@ func flattenV8(node *yaml.Node) (*yaml.Node, error) {
 	}
 	// Decode once before transformation to reject duplicate keys even when a
 	// winning v8 value would otherwise hide the malformed legacy subtree.
-	var shape map[string]any
-	if err := node.Decode(&shape); err != nil {
+	if err := validateConfigYAMLShape(node); err != nil {
 		return nil, err
 	}
 	node = expandConfigAliases(node)
@@ -520,40 +526,74 @@ func groupLegacyKeys(keys *yaml.Node, provider string) *yaml.Node {
 type ArchivedV8Section struct {
 	Section string
 	Comment string
+
+	containsPlaintext bool
+	encodedCopies     []string
 }
 
 // NormalizeConfigLayout removes conflicting legacy fields. migrate also moves
 // legacy-only fields; callers use it only for an explicit v8 configuration write.
 func NormalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, error) {
-	out, changed, commented, err := normalizeConfigLayout(data, migrate)
+	out, changed, commented, err := NormalizeConfigLayoutSilent(data, migrate)
 	if err == nil {
 		WarnUnrecognizedV8Sections(commented)
 	}
 	return out, changed, err
 }
 
-// NormalizeConfigLayoutSilent behaves like NormalizeConfigLayout without emitting
-// migration warnings. Callers that project a read-only view or defer persistence
-// receive the commented-out sections and may log them once saved.
+// NormalizeConfigLayoutSilent normalizes a config for saving without emitting
+// migration warnings. Callers may report the archived sections once saved.
 func NormalizeConfigLayoutSilent(data []byte, migrate bool) ([]byte, bool, []ArchivedV8Section, error) {
-	return normalizeConfigLayout(data, migrate)
+	return normalizeConfigLayoutForSave(data, migrate, nil)
 }
 
-func normalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, []ArchivedV8Section, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+func normalizeConfigLayoutForSave(data []byte, migrate bool, originalSecrets map[string]bool) ([]byte, bool, []ArchivedV8Section, error) {
+	out, changed, sections, err := normalizeConfigLayout(data, migrate, originalSecrets)
+	for _, section := range sections {
+		if section.containsPlaintext {
+			return nil, false, nil, errConfigSaveOrphansSecret
+		}
+	}
+	return out, changed, sections, err
+}
+
+// ProjectV8ConfigLayout allows archives in a temporary view so that an explicit
+// edit can discard an unsafe archive. Check retained archives before saving.
+func ProjectV8ConfigLayout(data []byte) ([]byte, []ArchivedV8Section, error) {
+	out, _, sections, err := normalizeConfigLayout(data, true, nil)
+	return out, sections, err
+}
+
+func normalizeConfigLayout(data []byte, migrate bool, originalSecrets map[string]bool) ([]byte, bool, []ArchivedV8Section, error) {
+	docs, err := decodeConfigStream(data)
+	if err != nil {
 		return nil, false, nil, err
 	}
-	if len(doc.Content) == 0 {
+	if len(docs) == 0 {
 		if !migrate {
 			return data, false, nil, nil
 		}
 		return nil, false, nil, fmt.Errorf("empty config")
 	}
+	doc := docs[0]
 	root := doc.Content[0]
 	if _, err := flattenV8(root); err != nil {
 		return nil, false, nil, err
 	}
+	if !migrate {
+		if !removeConflictingConfigPaths(root) {
+			return data, false, nil, nil
+		}
+		out, errEncode := encodeConfigDocument(doc, data, docs)
+		if errEncode == nil {
+			_, errEncode = decodeConfigStream(out)
+		}
+		return out, true, nil, errEncode
+	}
+	// Capture current candidates before migration drops shadowed settings, and
+	// retain candidates that were already replaced when merging runtime values.
+	secrets, _, _ := inspectConfigSecrets(docs)
+	maps.Copy(secrets, originalSecrets)
 	root = expandConfigAliases(root)
 	doc.Content[0] = root
 	changed, err := normalizeV8PrivateIPAlias(root, migrate)
@@ -620,7 +660,7 @@ func normalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, []ArchivedV
 		// Existing unknown fields are ignored by the runtime. Retain their
 		// contents as comments while keeping new v8 writes strictly validated.
 		var errComment error
-		commented, errComment = commentUnknownV8Sections(root)
+		commented, errComment = commentUnknownV8Sections(root, configPlaintextValues(secrets))
 		if errComment != nil {
 			return nil, false, nil, errComment
 		}
@@ -630,8 +670,38 @@ func normalizeConfigLayout(data []byte, migrate bool) ([]byte, bool, []ArchivedV
 	if !changed {
 		return data, false, commented, nil
 	}
-	out, err := yaml.Marshal(&doc)
+	out, err := encodeConfigDocument(doc, data, docs)
+	if err == nil {
+		_, err = decodeConfigStream(out)
+	}
 	return out, true, commented, err
+}
+
+// Select conflicts from the resolved view, but edit the actual graph without
+// flattening unrelated aliases and merges in the startup file.
+func removeConflictingConfigPaths(root *yaml.Node) bool {
+	view := expandConfigAliases(root)
+	changed := false
+	const oldPrivateIPs = "codex.live-media-relay.allow-private-remote-ips"
+	if yamlPath(view, "oauth.providers.codex.live-media-relay.disable-private-remote-ips") != nil {
+		changed = removeConfigPath(root, oldPrivateIPs, false)
+	}
+	for _, path := range append(append([]configPath(nil), v8Aliases...), v8Paths...) {
+		if legacyPath(view, path.old) != nil && yamlPath(view, path.current) != nil {
+			changed = removeConfigPath(root, path.old, false) || changed
+		}
+	}
+	for _, path := range append(append([]configPath(nil), v8StructPaths...), v8SharedStructPaths...) {
+		if yamlPath(view, path.current) != nil {
+			changed = removeConfigPath(root, path.old, true) || changed
+		}
+	}
+	for _, family := range v8KeyFamilies {
+		if yamlPath(view, "api-keys."+family.current) != nil {
+			changed = removeConfigPath(root, family.old, false) || changed
+		}
+	}
+	return changed
 }
 
 // IsV8ConfigLayout identifies a validated document by its version or v8 paths.
@@ -646,6 +716,12 @@ func IsV8ConfigLayout(root *yaml.Node) bool {
 		delete(sections, shared)
 	}
 	for i := 0; i < len(root.Content); i += 2 {
+		if root.Content[i].Value == "server" {
+			server := root.Content[i+1]
+			if server.Kind == yaml.MappingNode && len(server.Content) == 2 && directConfigKey(server, "server-id") == 0 {
+				continue
+			}
+		}
 		if sections[root.Content[i].Value] {
 			return true
 		}
@@ -698,6 +774,45 @@ func WarnUnrecognizedV8Sections(sections []ArchivedV8Section) {
 	for _, section := range sections {
 		warnUnrecognizedV8Section(section.Section)
 	}
+}
+
+// ValidateV8ConfigArchives rejects secret-bearing archives from a temporary
+// projection if the edited file would keep them.
+func ValidateV8ConfigArchives(data []byte, sections []ArchivedV8Section) error {
+	if !slices.ContainsFunc(sections, func(section ArchivedV8Section) bool { return section.containsPlaintext }) {
+		return nil
+	}
+	if codec := configUTF16Encoding(data); codec != nil {
+		decoded, errDecode := codec.NewDecoder().Bytes(data)
+		if errDecode != nil {
+			return errDecode
+		}
+		data = decoded
+	}
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// Check potential comment text in the entire final stream, including inline
+	// and unattached comments. Match only complete known encodings, even if an
+	// edit wrapped the binary value across comment lines.
+	var comments strings.Builder
+	for line := range strings.FieldsFuncSeq(source, isConfigLineBreak) {
+		if _, comment, ok := strings.Cut(line, "#"); ok {
+			comments.WriteString(stripConfigWhitespace(comment))
+		} else {
+			comments.WriteByte('\n')
+		}
+	}
+	commentText := comments.String()
+	for _, section := range sections {
+		if section.containsPlaintext && strings.Contains(source, section.Comment) {
+			return errConfigSaveOrphansSecret
+		}
+		for _, encoded := range section.encodedCopies {
+			if strings.Contains(commentText, encoded) {
+				return errConfigSaveOrphansSecret
+			}
+		}
+	}
+	return nil
 }
 
 // FilterArchivedV8Sections returns the subset of sections whose exact root-level
@@ -780,8 +895,8 @@ func warnUnrecognizedV8Section(section string) {
 	log.Warn(msg)
 }
 
-func commentUnknownV8Sections(root *yaml.Node) ([]ArchivedV8Section, error) {
-	warned, err := commentUnknownV8Fields(root, root, v8AllowedRoots(), "")
+func commentUnknownV8Sections(root *yaml.Node, plaintext map[string]bool) ([]ArchivedV8Section, error) {
+	warned, err := commentUnknownV8Fields(root, root, v8AllowedRoots(), "", plaintext)
 	if err != nil {
 		return nil, err
 	}
@@ -797,6 +912,7 @@ func commentUnknownV8Sections(root *yaml.Node) ([]ArchivedV8Section, error) {
 			children[parent][parts[i]] = true
 		}
 	}
+	children["server"]["server-id"] = true
 	// Some structs already live at their v8 path and therefore have no remap entry.
 	allowedRoots := v8AllowedRoots()
 	var includeNative func(reflect.Type, string)
@@ -834,7 +950,7 @@ func commentUnknownV8Sections(root *yaml.Node) ([]ArchivedV8Section, error) {
 		if node == nil || node.Kind != yaml.MappingNode || children[path] == nil {
 			return nil
 		}
-		nestedWarned, errFields := commentUnknownV8Fields(node, root, children[path], path)
+		nestedWarned, errFields := commentUnknownV8Fields(node, root, children[path], path, plaintext)
 		if errFields != nil {
 			return errFields
 		}
@@ -855,7 +971,7 @@ func commentUnknownV8Sections(root *yaml.Node) ([]ArchivedV8Section, error) {
 	return warned, nil
 }
 
-func commentUnknownV8Fields(node *yaml.Node, archive *yaml.Node, allowed map[string]bool, path string) ([]ArchivedV8Section, error) {
+func commentUnknownV8Fields(node *yaml.Node, archive *yaml.Node, allowed map[string]bool, path string, plaintext map[string]bool) ([]ArchivedV8Section, error) {
 	var comments []string
 	var warned []ArchivedV8Section
 	for i := 0; i+1 < len(node.Content); {
@@ -871,13 +987,18 @@ func commentUnknownV8Fields(node *yaml.Node, archive *yaml.Node, allowed map[str
 		keyNode := *node.Content[i]
 		keyNode.Value = section
 		entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{&keyNode, node.Content[i+1]}}
+		// Check decoded values while the YAML tags are still available. Once
+		// archived, an encoded copy need not contain the secret's own encoding.
+		archived := ArchivedV8Section{Section: section}
+		inspectV8Archive(entry, plaintext, &archived)
 		data, errMarshal := yaml.Marshal(entry)
 		if errMarshal != nil {
 			return nil, errMarshal
 		}
 		text := strings.TrimSuffix(string(data), "\n")
 		commentBlock := "# " + strings.ReplaceAll(text, "\n", "\n# ")
-		warned = append(warned, ArchivedV8Section{Section: section, Comment: commentBlock})
+		archived.Comment = commentBlock
+		warned = append(warned, archived)
 		comments = append(comments, commentBlock)
 		node.Content = append(node.Content[:i], node.Content[i+2:]...)
 	}
@@ -886,6 +1007,21 @@ func commentUnknownV8Fields(node *yaml.Node, archive *yaml.Node, allowed map[str
 		archive.FootComment = strings.TrimSpace(archive.FootComment + "\n" + strings.Join(comments, "\n"))
 	}
 	return warned, nil
+}
+
+func inspectV8Archive(node *yaml.Node, plaintext map[string]bool, archived *ArchivedV8Section) {
+	if len(plaintext) == 0 {
+		return
+	}
+	if !isConfigNullScalar(node) && containsConfigScalarSecret(node, plaintext) {
+		archived.containsPlaintext = true
+		if node.ShortTag() == "!!binary" {
+			archived.encodedCopies = append(archived.encodedCopies, stripConfigWhitespace(node.Value))
+		}
+	}
+	for _, child := range node.Content {
+		inspectV8Archive(child, plaintext, archived)
+	}
 }
 
 // The deprecated allow flag is the inverse of disable-private-remote-ips.
@@ -994,7 +1130,7 @@ func preserveV8Comments(dst, src *yaml.Node) {
 // Expand aliases and YAML merge keys before moving paths. Keeping an alias to a
 // removed legacy anchor would produce an unreadable file, and updating a shared
 // anchor in place could unintentionally change an unrelated setting.
-// Callers first decode the document so yaml.v3 rejects cyclic/invalid aliases.
+// Callers must validate the complete alias graph before expansion.
 func expandConfigAliases(node *yaml.Node) *yaml.Node {
 	if node.Kind == yaml.AliasNode {
 		return expandConfigAliases(node.Alias)
@@ -1004,13 +1140,25 @@ func expandConfigAliases(node *yaml.Node) *yaml.Node {
 	copy.Content = make([]*yaml.Node, len(node.Content))
 	for i, child := range node.Content {
 		copy.Content[i] = expandConfigAliases(child)
+		if node.Kind == yaml.MappingNode && i%2 == 0 {
+			normalizeConfigKey(copy.Content[i], child.Kind == yaml.AliasNode)
+		}
 	}
 	if copy.Kind != yaml.MappingNode {
 		return &copy
 	}
+	var keys map[string]bool
 	for i := 0; i < len(copy.Content); i += 2 {
-		if copy.Content[i].Tag != "!!merge" {
+		if !isConfigMergeKey(copy.Content[i]) {
 			continue
+		}
+		if keys == nil {
+			keys = make(map[string]bool, len(copy.Content)/2)
+			for j := 0; j < len(copy.Content); j += 2 {
+				if !isConfigMergeKey(copy.Content[j]) {
+					keys[copy.Content[j].Value] = true
+				}
+			}
 		}
 		merge := copy.Content[i+1]
 		copy.Content = append(copy.Content[:i], copy.Content[i+2:]...)
@@ -1020,8 +1168,10 @@ func expandConfigAliases(node *yaml.Node) *yaml.Node {
 		}
 		for _, mapping := range mappings {
 			for j := 0; j < len(mapping.Content); j += 2 {
-				if findMapKeyIndex(&copy, mapping.Content[j].Value) < 0 {
+				key := mapping.Content[j].Value
+				if !keys[key] {
 					copy.Content = append(copy.Content, mapping.Content[j], mapping.Content[j+1])
+					keys[key] = true
 				}
 			}
 		}
@@ -1033,14 +1183,17 @@ func expandConfigAliases(node *yaml.Node) *yaml.Node {
 // ValidateV8Config accepts only the v8 layout in management writes.
 // Plugin-owned configuration remains extensible through its existing decoder.
 func ValidateV8Config(data []byte) error {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+	docs, err := decodeConfigStream(data)
+	if err != nil {
 		return err
 	}
-	if len(doc.Content) == 0 {
+	if len(docs) == 0 {
 		return fmt.Errorf("empty config")
 	}
-	root := doc.Content[0]
+	root := docs[0].Content[0]
+	if _, errID := configuredServerID(root); errID != nil {
+		return errID
+	}
 	flat, err := flattenV8(root)
 	if err != nil {
 		return err
@@ -1076,6 +1229,7 @@ func ValidateV8Config(data []byte) error {
 			}
 		}
 	}
+	deleteYAMLPath(flat, "server.server-id")
 	deleteYAMLPath(flat, "config-version")
 	// Empty struct containers are valid replacements. Only strip known structural
 	// paths; empty user maps (headers, aliases, plugin options) carry real values.

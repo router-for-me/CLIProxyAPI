@@ -7,360 +7,214 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
-	"syscall"
 
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
-// LoadConfig reads a YAML configuration file from the given path,
-// unmarshals it into a Config struct, applies environment variable overrides,
-// and returns it.
-//
-// Parameters:
-//   - configFile: The path to the YAML configuration file
-//
-// Returns:
-//   - *Config: The loaded configuration
-//   - error: An error if the configuration could not be loaded
+// LoadConfig loads the configuration and applies startup file rewrites.
 func LoadConfig(configFile string) (*Config, error) {
 	return LoadConfigOptional(configFile, false)
 }
 
-// ComputeSourceHash returns the Config.SourceHash value for config file bytes.
+// ComputeSourceHash returns the lowercase hex SHA-256 of the exact file bytes.
 func ComputeSourceHash(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
 
-// PrepareConfigFileForUpload applies the file rewrites of a startup load: a plaintext
-// management secret is replaced with its bcrypt hash and conflicting legacy fields are
-// removed. Stores that seed remote storage from configFile before the startup load call
-// it first, so the plaintext secret never leaves the machine and the local and remote
-// copies stay identical. When the plaintext cannot be removed it returns an error and
-// leaves configFile untouched, so every later attempt refuses the file again.
+// PrepareConfigFileForUpload applies startup rewrites and verifies that no
+// plaintext management secret would be uploaded. Prefer the variant returning
+// the verified bytes to avoid racing another write.
 func PrepareConfigFileForUpload(configFile string) error {
-	data, errRead := os.ReadFile(configFile)
-	if errRead != nil {
-		return errRead
-	}
-	prepared, errPrepare := prepareConfigForUpload(data)
-	if errPrepare != nil {
-		return errPrepare
-	}
-	if bytes.Equal(prepared, data) {
-		return nil
-	}
-	if errWrite := os.WriteFile(configFile, prepared, 0600); errWrite != nil {
-		return fmt.Errorf("failed to write prepared config file: %w", errWrite)
-	}
-	return nil
+	_, err := PrepareConfigFileForUploadWithOptional(configFile, false)
+	return err
 }
 
-// prepareConfigForUpload returns data with the file rewrites of a startup load applied.
-// It fails when the result would still hold a plaintext management secret: hashing
-// replaces only the effective key and the layout cleanup only drops an overridden legacy
-// key, so a YAML anchor or a copy elsewhere keeps the plaintext, and rewriting those could
-// change other settings that share them.
-func prepareConfigForUpload(data []byte) ([]byte, error) {
-	var cfg Config
-	if errParse := yaml.Unmarshal(data, &cfg); errParse != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", errParse)
-	}
-	prepared := data
-	if secret := cfg.RemoteManagement.SecretKey; secret != "" && !looksLikeBcrypt(secret) {
-		hashed, errHash := hashSecret(secret)
-		if errHash != nil {
-			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
-		}
-		updated, errUpdate := updateNestedScalarYAML(data, managementSecretKeyPath(data), hashed)
-		if errUpdate != nil {
-			return nil, fmt.Errorf("failed to update remote management key: %w", errUpdate)
-		}
-		prepared = updated
-	}
-	cleaned, _, errLayout := NormalizeConfigLayout(prepared, false)
-	if errLayout != nil {
-		return nil, errLayout
-	}
-	if plaintexts := plaintextManagementSecrets(data, cfg.RemoteManagement.SecretKey); len(plaintexts) > 0 {
-		var doc yaml.Node
-		if errParse := yaml.Unmarshal(cleaned, &doc); errParse != nil {
-			return nil, fmt.Errorf("failed to parse prepared config: %w", errParse)
-		}
-		for _, plaintext := range plaintexts {
-			if yamlScalarExists(&doc, plaintext) {
-				return nil, errors.New("plaintext remote management key is still present elsewhere in the config file, for example through a YAML anchor or as another setting's value")
-			}
-		}
-	}
-	return cleaned, nil
+// PrepareConfigFileForUploadWithOptional returns the verified bytes from the
+// same locked transaction that performed startup rewrites. Upload these bytes
+// directly, not a later read. A nil slice with no error means optional standby
+// and must not be uploaded. A required rewrite on a read-only file is an error.
+func PrepareConfigFileForUploadWithOptional(configFile string, optional bool) ([]byte, error) {
+	_, snapshot, err := loadConfigFile(configFile, optional, true)
+	return snapshot, err
 }
 
-// plaintextManagementSecrets returns the plaintext management secrets of data: the
-// effective one and the values of the legacy and v8 secret keys, since an overridden
-// legacy key still holds its own. YAML anchors, aliases and merge keys are resolved, so
-// data must already decode as a Config, which rejects cyclic aliases.
-func plaintextManagementSecrets(data []byte, effective string) []string {
-	candidates := []string{effective}
-	var doc yaml.Node
-	if yaml.Unmarshal(data, &doc) == nil && len(doc.Content) > 0 {
-		root := expandConfigAliases(doc.Content[0])
-		for _, path := range []string{"remote-management.secret-key", "management.secret-key"} {
-			if node := yamlPath(root, path); node != nil && node.Kind == yaml.ScalarNode && node.ShortTag() != "!!null" {
-				candidates = append(candidates, node.Value)
-			}
-		}
-	}
-	var plaintexts []string
-	for _, candidate := range candidates {
-		if candidate != "" && !looksLikeBcrypt(candidate) {
-			plaintexts = append(plaintexts, candidate)
-		}
-	}
-	return plaintexts
-}
-
-// yamlScalarExists reports whether node or any value below it is a non-null scalar equal
-// to value. Mapping keys only name settings and are skipped, as are alias nodes, whose
-// anchors are visited where they are defined.
-func yamlScalarExists(node *yaml.Node, value string) bool {
-	if node.Kind == yaml.ScalarNode {
-		return node.ShortTag() != "!!null" && node.Value == value
-	}
-	first, step := 0, 1
-	if node.Kind == yaml.MappingNode {
-		first, step = 1, 2
-	}
-	for i := first; i < len(node.Content); i += step {
-		if yamlScalarExists(node.Content[i], value) {
-			return true
-		}
-	}
-	return false
-}
-
-// managementSecretKeyPath returns the management secret key path used by data: the v8
-// path when the document defines it, the legacy path otherwise.
-func managementSecretKeyPath(data []byte) []string {
-	var source yaml.Node
-	if yaml.Unmarshal(data, &source) == nil && len(source.Content) > 0 && yamlPath(expandConfigAliases(source.Content[0]), "management.secret-key") != nil {
-		return []string{"management", "secret-key"}
-	}
-	return []string{"remote-management", "secret-key"}
-}
-
-// LoadConfigOptional reads YAML from configFile.
-// If optional is true and the file is missing, it returns an empty Config.
-// If optional is true and the file is empty or invalid, it returns an empty Config.
+// LoadConfigOptional loads the config or returns the optional standby defaults
+// for missing files, directories, empty input and YAML decoding failures. A
+// valid read-only config can use a process-local generated server identity.
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
-	// Read the entire configuration file into memory.
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		if optional {
-			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
-				// Missing and optional: return empty config (cloud deploy standby).
-				cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-				cfg.NormalizePluginsConfig()
-				cfg.NormalizeClaudeConfig()
-				return cfg, nil
+	cfg, _, err := loadConfigFile(configFile, optional, false)
+	return cfg, err
+}
+
+func loadConfigFile(configFile string, optional, forUpload bool) (cfg *Config, snapshot []byte, err error) {
+	err = withConfigFile(configFile, configWriteIfPossible, func(file *lockedConfigFile) error {
+		data := file.snapshot.data
+		parsed, errParse := validateStartupConfig(data, optional)
+		if errParse != nil {
+			return errParse
+		}
+		cfg = parsed.cfg
+		if len(parsed.docs) == 0 {
+			return nil
+		}
+		generated := cfg.ServerID == ""
+		if generated {
+			cfg.ServerID = lookupEphemeralServerID(file.snapshot.info)
+			if cfg.ServerID == "" {
+				cfg.ServerID, errParse = newServerID()
+				if errParse != nil {
+					return errParse
+				}
 			}
 		}
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
-	if optional && len(bytes.TrimSpace(data)) == 0 {
-		cfg := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-		cfg.NormalizePluginsConfig()
-		cfg.NormalizeClaudeConfig()
-		return cfg, nil
-	}
-
-	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
-		if optional {
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			cfgOptional.NormalizeClaudeConfig()
-			return cfgOptional, nil
+		prepared, errPrepare := prepareStartupConfig(data, parsed, forUpload)
+		if errPrepare != nil {
+			return errPrepare
 		}
-		return nil, errValidate
-	}
-
-	// Unmarshal the YAML data into the Config struct.
-	var cfg Config
-	// Set defaults before unmarshal so that absent keys keep defaults.
-	cfg.Host = "" // Default empty: binds to all interfaces (IPv4 + IPv6)
-	cfg.LoggingToFile = false
-	cfg.LogsMaxTotalSizeMB = 0
-	cfg.ErrorLogsMaxFiles = 10
-	cfg.UsageStatisticsEnabled = false
-	cfg.RedisUsageQueueRetentionSeconds = 60
-	cfg.DisableCooling = false
-	cfg.SaveCooldownStatus = false
-	cfg.RestartFiveHourWindow = true
-	cfg.TransientErrorCooldownSeconds = 0
-	cfg.DisableImageGeneration = DisableImageGenerationOff
-	cfg.WebsocketAuth = true
-	cfg.Pprof.Enable = false
-	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.Discovery.Enabled = false
-	cfg.Discovery.ServiceType = DefaultDiscoveryServiceType
-	cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
-	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
-	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
-	if err = yaml.Unmarshal(data, &cfg); err != nil {
-		if optional {
-			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			cfgOptional := &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}
-			cfgOptional.NormalizePluginsConfig()
-			cfgOptional.NormalizeClaudeConfig()
-			return cfgOptional, nil
+		committed, errWrite := file.replace(prepared)
+		if errWrite != nil {
+			if forUpload || file.writeError == nil || !isConfigReadOnly(errWrite) {
+				return fmt.Errorf("persist startup config: %w", errWrite)
+			}
+			if generated && lookupEphemeralServerID(file.snapshot.info) == "" {
+				rememberEphemeralServerID(file.snapshot.info, cfg.ServerID)
+			}
+			log.Debug("configuration is read-only; startup rewrites were not persisted")
+			committed = file.snapshot
 		}
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
-	}
-	if errValidate := validateTrustedProxies(cfg.TrustedProxies); errValidate != nil {
-		return nil, errValidate
-	}
-
-	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
-	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
-		return nil, errValidate
-	}
-	if cfg.Discovery.ServiceType == "" {
-		cfg.Discovery.ServiceType = DefaultDiscoveryServiceType
-	}
-	if len(cfg.Discovery.Subtypes) == 0 {
-		cfg.Discovery.Subtypes = []string{"_chat-completions", "_responses", "_messages", "_generate-content", "_interactions"}
-	}
-	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
-		return nil, errValidate
-	}
-	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
-		return nil, errValidate
-	}
-
-	// Hash remote management key if plaintext is detected (nested)
-	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
-	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
-		hashed, errHash := hashSecret(cfg.RemoteManagement.SecretKey)
-		if errHash != nil {
-			return nil, fmt.Errorf("failed to hash remote management key: %w", errHash)
+		if !generated {
+			forgetEphemeralServerID(file.snapshot.info)
 		}
-		cfg.RemoteManagement.SecretKey = hashed
-
-		// Persist the hashed value back to the config file to avoid re-hashing on next startup.
-		// Preserve YAML comments and ordering; update only the nested key.
-		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, managementSecretKeyPath(data), hashed)
+		if !forUpload {
+			cfg.sanitizeStartupConfig()
+		}
+		cfg.SourceHash = committed.SourceHash()
+		snapshot = committed.data
+		return nil
+	})
+	if err != nil {
+		if optional && !errors.Is(err, ErrConfigFileChanged) && (errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrConfigFileDirectory)) {
+			return standbyConfig(), nil, nil
+		}
+		return nil, nil, err
 	}
+	return cfg, snapshot, nil
+}
 
-	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
-	if cfg.RemoteManagement.PanelGitHubRepository == "" {
-		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+// PrepareConfigBytesForUploadWithOptional validates and rewrites remote or template
+// bytes without changing any file. A nil result and no error means optional standby.
+func PrepareConfigBytesForUploadWithOptional(data []byte, optional bool) ([]byte, error) {
+	parsed, errParse := validateStartupConfig(data, optional)
+	if errParse != nil || len(parsed.docs) == 0 {
+		return nil, errParse
 	}
-
-	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
-	if cfg.Pprof.Addr == "" {
-		cfg.Pprof.Addr = DefaultPprofAddr
+	if parsed.cfg.ServerID == "" {
+		parsed.cfg.ServerID, errParse = newServerID()
+		if errParse != nil {
+			return nil, errParse
+		}
 	}
+	return prepareStartupConfig(data, parsed, true)
+}
 
-	cfg.KVStore.Path = strings.TrimSpace(cfg.KVStore.Path)
-
-	if cfg.LogsMaxTotalSizeMB < 0 {
-		cfg.LogsMaxTotalSizeMB = 0
+// IsPreparedConfigFromSeed reports whether prepared differs from seed only by
+// the automatic startup rewrites, including a generated ID and salted hash.
+func IsPreparedConfigFromSeed(seed, prepared []byte) bool {
+	original, errSeed := validateStartupConfig(seed, false)
+	winner, errWinner := validateStartupConfig(prepared, false)
+	if errSeed != nil || errWinner != nil || len(original.docs) == 0 || len(winner.docs) == 0 || winner.cfg.ServerID == "" {
+		return false
 	}
-
-	if cfg.ErrorLogsMaxFiles < 0 {
-		cfg.ErrorLogsMaxFiles = 10
+	id := original.cfg.ServerID
+	if id == "" {
+		id = winner.cfg.ServerID
 	}
-
-	if cfg.RedisUsageQueueRetentionSeconds <= 0 {
-		cfg.RedisUsageQueueRetentionSeconds = 60
-	} else if cfg.RedisUsageQueueRetentionSeconds > 3600 {
-		log.WithField("value", cfg.RedisUsageQueueRetentionSeconds).Warn("redis-usage-queue-retention-seconds too large; clamping to 3600")
-		cfg.RedisUsageQueueRetentionSeconds = 3600
+	var hashed string
+	secret := original.cfg.RemoteManagement.SecretKey
+	if secret != "" && !looksLikeBcrypt(secret) {
+		hashed = winner.cfg.RemoteManagement.SecretKey
+		cost, errCost := bcrypt.Cost([]byte(hashed))
+		if errCost != nil || cost != bcrypt.DefaultCost || bcrypt.CompareHashAndPassword([]byte(hashed), []byte(secret)) != nil {
+			return false
+		}
 	}
+	rendered, errRender := renderStartupConfig(seed, original.docs, id, hashed, true)
+	return errRender == nil && bytes.Equal(rendered, prepared) && verifyConfigUpload(original.docs, prepared) == nil
+}
 
-	if cfg.MaxRetryCredentials < 0 {
-		cfg.MaxRetryCredentials = 0
+// VerifyConfigBytesForUpload verifies immutable bytes without rewriting them.
+func VerifyConfigBytesForUpload(data []byte) error {
+	parsed, errParse := validateStartupConfig(data, false)
+	if errParse != nil {
+		return errParse
 	}
+	return verifyConfigUpload(parsed.docs, data)
+}
 
-	cfg.NormalizePluginsConfig()
-	cfg.NormalizeClaudeConfig()
-	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
-		return nil, errResolvePluginsDir
+func prepareStartupConfig(data []byte, parsed *startupConfig, forUpload bool) ([]byte, error) {
+	secret := parsed.cfg.RemoteManagement.SecretKey
+	var hashed string
+	if secret != "" && !looksLikeBcrypt(secret) {
+		if errHash := parsed.hashManagementSecret(); errHash != nil {
+			return nil, errHash
+		}
+		hashed = parsed.cfg.RemoteManagement.SecretKey
 	}
-
-	// Sanitize Gemini API key configuration and migrate legacy entries.
-	cfg.SanitizeGeminiKeys()
-
-	// Sanitize native Interactions API key configuration.
-	cfg.SanitizeInteractionsKeys()
-
-	// Sanitize Vertex-compatible API keys.
-	cfg.SanitizeVertexCompatKeys()
-
-	// Sanitize Codex keys: drop entries without base-url
-	cfg.SanitizeCodexKeys()
-
-	// Sanitize xAI keys: drop entries without base-url
-	cfg.SanitizeXAIKeys()
-
-	// Sanitize Meta keys.
-	cfg.SanitizeMetaKeys()
-
-	// Sanitize Codex header defaults.
-	cfg.SanitizeCodexHeaderDefaults()
-
-	// Sanitize Claude header defaults.
-	cfg.SanitizeClaudeHeaderDefaults()
-
-	// Sanitize Claude key headers
-	cfg.SanitizeClaudeKeys()
-
-	// Sanitize Antigravity and Devin sensitive-word replacement maps.
-	cfg.SanitizeAntigravity()
-	cfg.SanitizeDevin()
-
-	// Sanitize OpenAI compatibility providers: drop entries without base-url
-	cfg.SanitizeOpenAICompatibility()
-
-	// Normalize OAuth provider model exclusion map.
-	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
-
-	// Normalize global OAuth model name aliases.
-	cfg.SanitizeOAuthModelAlias()
-
-	// Normalize global OAuth model settings.
-	cfg.SanitizeOAuthSettings()
-
-	// Normalize global OAuth request-scoped error rules.
-	cfg.SanitizeOAuthRequestScopedErrors()
-
-	// Validate raw payload rules and drop invalid entries.
-	cfg.SanitizePayloadRules()
-
-	// Only conflicting legacy fields are removed on load. A legacy-only document
-	// stays legacy until a v8 configuration write explicitly migrates it.
-	current, errRead := os.ReadFile(configFile)
-	if errRead != nil {
-		return nil, errRead
+	prepared, errPrepare := renderStartupConfig(data, parsed.docs, parsed.cfg.ServerID, hashed, true)
+	if errPrepare != nil {
+		return nil, errPrepare
 	}
-	cleaned, changed, errLayout := NormalizeConfigLayout(current, false)
-	if errLayout != nil {
-		return nil, errLayout
+	if errSecret := verifyConfigUpload(parsed.docs, prepared); errSecret != nil {
+		if forUpload {
+			return nil, errSecret
+		}
+		// Do not erase the evidence identifying a retained plaintext value.
+		// Otherwise a subsequent upload could mistake it for an unrelated value.
+		prepared, errPrepare = renderStartupConfig(data, parsed.docs, parsed.cfg.ServerID, "", false)
+		if errPrepare != nil {
+			return nil, errPrepare
+		}
 	}
+	return prepared, nil
+}
+
+var managementSecretPaths = [][]string{{"management", "secret-key"}, {"remote-management", "secret-key"}}
+
+func renderStartupConfig(data []byte, docs []*yaml.Node, id, hashed string, clean bool) ([]byte, error) {
+	doc := deepCopyNode(docs[0])
+	root := doc.Content[0]
+	previous := effectiveConfigValue(root, serverIDPath...)
+	changed := previous == nil || previous.Value != id
 	if changed {
-		if errWrite := os.WriteFile(configFile, cleaned, 0600); errWrite != nil {
-			return nil, fmt.Errorf("clean conflicting config fields: %w", errWrite)
-		}
+		setConfigScalar(root, serverIDPath, id)
 	}
-
-	// Record the exact bytes this config was parsed from, so a consumer can tell
-	// it apart from a newer version of the file.
-	cfg.SourceHash = ComputeSourceHash(data)
-
-	// Return the populated configuration struct.
-	return &cfg, nil
+	if hashed != "" {
+		path := managementSecretPaths[0]
+		if effectiveConfigValue(root, path...) == nil {
+			path = managementSecretPaths[1]
+		}
+		setConfigScalar(root, path, hashed)
+		changed = true
+	}
+	if clean {
+		changed = removeConflictingConfigPaths(root) || changed
+	}
+	if !changed {
+		return data, nil
+	}
+	updated, errEncode := encodeConfigDocument(doc, data, docs)
+	if errEncode != nil {
+		return nil, errEncode
+	}
+	closed, errParse := validateStartupConfig(updated, false)
+	if errParse != nil {
+		return nil, fmt.Errorf("validate rewritten config: %w", errParse)
+	}
+	if len(closed.docs) != len(docs) || closed.cfg.ServerID != id || (hashed != "" && closed.cfg.RemoteManagement.SecretKey != hashed) {
+		return nil, errors.New("rewritten config does not contain the expected startup settings")
+	}
+	return updated, nil
 }
