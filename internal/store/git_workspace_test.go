@@ -160,7 +160,8 @@ func TestGitFastForwardPreservesModesLinksAndUnrelatedEdits(t *testing.T) {
 	if errSync := a.EnsureRepository(); errSync != nil {
 		t.Fatal(errSync)
 	}
-	for name, executable := range map[string]bool{"script": true, "regular": false} {
+	// Windows file modes carry no executable bit, so only the regular-file shape is portable there.
+	for name, executable := range map[string]bool{"script": runtime.GOOS != "windows", "regular": false} {
 		info, errStat := os.Lstat(filepath.Join(adir, name))
 		if errStat != nil || !info.Mode().IsRegular() || (info.Mode().Perm()&0o111 != 0) != executable {
 			t.Fatalf("%s: %v, %v", name, info, errStat)
@@ -441,7 +442,8 @@ func TestGitRejectsConfigLinksInWorktreeAndOriginalTree(t *testing.T) {
 				if where == "local" || path == "config" {
 					assertRemoteTreePath(t, remote, "master", gitConfigPath, false)
 				} else {
-					assertRemoteFileContents(t, remote, "master", gitConfigPath, target)
+					// Git records symlink targets with forward slashes on every platform.
+					assertRemoteFileContents(t, remote, "master", gitConfigPath, filepath.ToSlash(target))
 				}
 			})
 		}
