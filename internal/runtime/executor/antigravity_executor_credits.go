@@ -466,7 +466,7 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 
 func newAntigravityStatusErrWithHeaders(statusCode int, headers http.Header, body []byte) statusErr {
 	err := statusErr{code: statusCode, msg: string(body)}
-	if statusCode == http.StatusTooManyRequests {
+	if statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable {
 		if retryAfter, parseErr := helps.ParseRetryDelayWithHeaders(headers, body, time.Now()); parseErr == nil && retryAfter != nil {
 			err.retryAfter = retryAfter
 		}
