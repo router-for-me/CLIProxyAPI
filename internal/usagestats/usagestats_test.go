@@ -404,12 +404,28 @@ func TestPriceLookupMatchesBaseModelAtSeparators(t *testing.T) {
 	}
 }
 
+func TestPriceLookupMatchesDottedClaudeVersions(t *testing.T) {
+	table, errTable := NewPriceTable(map[string]Price{"claude-opus-5-5": {Input: 1}, "claude-opus-4-8": {Input: 2}, "gpt-5": {Input: 3}})
+	if errTable != nil {
+		t.Fatalf("new price table: %v", errTable)
+	}
+	for model, want := range map[string]float64{"claude-opus-5.5": 1, "Claude-Opus-5.5": 1, "claude-opus-4.8-fast": 2} {
+		if price, ok := table.Lookup(model); !ok || price.Input != want {
+			t.Errorf("Lookup(%q) = %v, %v; want input %v", model, price.Input, ok, want)
+		}
+	}
+	// Only Claude names are rewritten; "gpt-5.97" must not become "gpt-5-97" and match "gpt-5".
+	if price, ok := table.Lookup("gpt-5.97"); ok {
+		t.Errorf("Lookup(gpt-5.97) = %+v, want no match", price)
+	}
+}
+
 func TestBuiltInPricesCoverCurrentModels(t *testing.T) {
 	table, errTable := NewPriceTable(nil)
 	if errTable != nil {
 		t.Fatalf("new price table: %v", errTable)
 	}
-	for _, model := range []string{"claude-fable-5-2", "claude-opus-4-5-20251101", "gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-astra", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "gemini-4-neon-xhigh"} {
+	for _, model := range []string{"claude-fable-5-2", "claude-opus-4-5-20251101", "gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-astra", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "gemini-4-neon-xhigh", "claude-opus-5.5", "claude-sonnet-5.5", "claude-haiku-4.5", "claude-haiku-5.5", "claude-fable-5.1", "claude-fable-5.2"} {
 		if price, ok := table.Lookup(model); !ok || price.Input <= 0 || price.Output <= 0 {
 			t.Errorf("Lookup(%q) = %+v, %v; want a positive price", model, price, ok)
 		}

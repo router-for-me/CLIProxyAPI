@@ -82,11 +82,24 @@ func NewPriceTable(overrides map[string]Price) (*PriceTable, error) {
 // the longest priced name that model extends at a separator, so dated or
 // suffixed variants ("claude-opus-4-5-20251101", "gemini-4-argon-high")
 // resolve to their base model while "gpt-5.4" never matches "gpt-5".
+// Claude names written with dotted versions ("claude-opus-5.5", as Copilot
+// lists them) fall back to Anthropic's dashed form ("claude-opus-5-5").
 func (t *PriceTable) Lookup(model string) (Price, bool) {
 	if t == nil {
 		return Price{}, false
 	}
 	model = normalizeModel(model)
+	if price, ok := t.lookup(model); ok {
+		return price, true
+	}
+	if strings.HasPrefix(model, "claude-") && strings.Contains(model, ".") {
+		return t.lookup(strings.ReplaceAll(model, ".", "-"))
+	}
+	return Price{}, false
+}
+
+// lookup matches a normalized model name exactly, then at its separators.
+func (t *PriceTable) lookup(model string) (Price, bool) {
 	if price, ok := t.prices[model]; ok {
 		return price, true
 	}
