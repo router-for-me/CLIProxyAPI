@@ -165,6 +165,9 @@ func convertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool,
 						}
 						functionName = util.SanitizeFunctionName(functionName)
 						functionArgs := contentResult.Get("input").String()
+						if functionArgs == "" {
+							functionArgs = `{}`
+						}
 						argsResult := ojson.Parse(functionArgs)
 						if argsResult.IsObject() && ojson.Valid(functionArgs) {
 							partDoc := ojson.NewDocString(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
