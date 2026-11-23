@@ -478,7 +478,7 @@ func (scanner *claudeCCHJSONScanner) parseObject(collect bool) error {
 		scanner.skipWhitespace()
 
 		key := scanner.body[keyStart:keyEnd]
-		excluded := collect && isClaudeCCHExcludedKey(key)
+		excluded := collect && isClaudeCCHExcludedKey(key) && claudeCCHExcludedValueStart(key, scanner.body, scanner.pos)
 		if collect && bytes.Equal(key, []byte(`"model"`)) && scanner.pos < len(scanner.body) && scanner.body[scanner.pos] == '"' {
 			valueStart, valueEnd, errString := scanner.parseString()
 			if errString != nil {
@@ -612,6 +612,25 @@ func (scanner *claudeCCHJSONScanner) consume(character byte) bool {
 	}
 	scanner.pos++
 	return true
+}
+
+// claudeCCHExcludedValueStart mirrors the native matcher, which looks for the
+// literal prefixes "fallbacks":[ , "max_tokens": and "fallback_credit_token":" .
+// Claude Code 2.1.321 sends "fallbacks":"default", a string, which is
+// therefore hashed (checked against native cch values on captured 2.1.321
+// bodies); the array form used up to 2.1.280 stays excluded.
+func claudeCCHExcludedValueStart(key, body []byte, pos int) bool {
+	if pos >= len(body) {
+		return false
+	}
+	switch string(key) {
+	case `"fallbacks"`:
+		return body[pos] == '['
+	case `"fallback_credit_token"`:
+		return body[pos] == '"'
+	default:
+		return true
+	}
 }
 
 func isClaudeCCHExcludedKey(key []byte) bool {
