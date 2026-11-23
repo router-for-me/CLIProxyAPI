@@ -833,9 +833,21 @@ func withClaudeAdvisorToolBeta(betas string) string {
 			seen[beta] = true
 		}
 	}
+	// Claude Code 2.1.321 sends thinking-token-count after prompt-caching-scope and
+	// advisor-tool right before it; older layouts carry it near the front.
+	tokenCountAfterScope := false
+	for _, beta := range parts {
+		if beta == "prompt-caching-scope-2026-01-05" {
+			tokenCountAfterScope = true
+		}
+		if beta == claudeThinkingTokenCountBeta {
+			break
+		}
+	}
 	insertAt := len(parts)
 	for index, beta := range parts {
-		if beta == claudeAdvancedToolUseBeta ||
+		if (tokenCountAfterScope && beta == claudeThinkingTokenCountBeta) ||
+			beta == claudeAdvancedToolUseBeta ||
 			beta == claudeEffortBeta ||
 			beta == claudeServerSideFallbackBeta ||
 			beta == claudeFallbackCreditBeta ||
