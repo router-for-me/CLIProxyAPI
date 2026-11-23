@@ -112,6 +112,7 @@ type instruments struct {
 	profileInfo       metric.Int64ObservableGauge
 	quotaBand         metric.Int64ObservableGauge
 	quotaReserved     metric.Int64ObservableGauge
+	quotaReserveShare metric.Float64ObservableGauge
 	sessions          metric.Int64ObservableGauge
 	activeConns       metric.Int64ObservableGauge
 	upstreamLimit     metric.Float64ObservableGauge
@@ -227,6 +228,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.fableResets, _ = m.Float64ObservableGauge("claw_master.quota.fable.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the weekly Fable allowance resets; absent when no reset is known"))
 	i.fableBlocked, _ = m.Float64ObservableGauge("claw_master.quota.fable.rate_limited_for_seconds", metric.WithUnit("s"), metric.WithDescription("How long Anthropic still refuses this subscription Fable (its Fable allowance is used up); 0 when it does not. Other models are unaffected"))
 	i.quotaBand, _ = m.Int64ObservableGauge("claw_master.quota.band", metric.WithDescription("0 ok, 1 reserve (last tenth), 2 exhausted, -1 unknown"))
+	i.quotaReserveShare, _ = m.Float64ObservableGauge("claw_master.quota.reserve_fraction", metric.WithDescription("The share of the profile's week its configured reserve (--profile-reserve-file) holds back, 0 to 1, whether held out or kept as a last resort; only for a profile with a reserve configured"))
 	i.quotaReserved, _ = m.Int64ObservableGauge("claw_master.quota.reserved", metric.WithDescription("1 while the profile's configured reserve (--profile-reserve-file) holds it out of the pool, 2 while it is past a last-resort reserve (used only when every other subscription is out), else 0; only for a profile with a reserve configured"))
 	i.tokenExpires, _ = m.Float64ObservableGauge("claw_master.auth.token_expires_in_seconds", metric.WithUnit("s"))
 	i.profileInfo, _ = m.Int64ObservableGauge("claw_master.profile.info", metric.WithDescription("1 per subscription profile, carrying the email of the account it is logged in to: the one metric with an account identifier"))
@@ -239,7 +241,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.heap, _ = m.Int64ObservableGauge("claw_master.process.heap_bytes", metric.WithUnit("By"))
 
 	i.registration, _ = m.RegisterCallback(i.observe,
-		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.quotaReserved, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
+		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.quotaReserved, i.quotaReserveShare, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
 		i.upstreamLimit, i.latencyQuantile, i.uptime, i.goroutines, i.heap)
 	return i
 }
@@ -275,6 +277,8 @@ type profileState struct {
 	ReserveConfigured bool
 	Reserved          bool
 	LastResort        bool
+	// The share of the week the reserve holds back (0 to 1), when one is configured.
+	ReserveFraction float64
 }
 
 type stateSnapshot struct {
@@ -327,6 +331,7 @@ func (i *instruments) observe(_ context.Context, o metric.Observer) error {
 					reserved = 2
 				}
 				o.ObserveInt64(i.quotaReserved, reserved, attrs)
+				o.ObserveFloat64(i.quotaReserveShare, p.ReserveFraction, attrs)
 			}
 			if p.TokenKnown {
 				o.ObserveFloat64(i.tokenExpires, p.TokenExpiresIn, attrs)
