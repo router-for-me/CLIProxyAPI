@@ -12,7 +12,8 @@ import (
 )
 
 // The usage endpoint, asked with cedar_ember=1, lists the limit resets an account has banked. Each count is
-// the resets left on grants that are neither paused nor ended, for each limit the grant clears.
+// the resets left on grants that are neither paused nor ended; a grant counts once, under the largest limit
+// it clears, as claude.ai's usage page lists one "Weekly reset" and one "Fable reset".
 func TestTheBankedResetsAreCountedPerLimit(t *testing.T) {
 	now := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -27,8 +28,9 @@ func TestTheBankedResetsAreCountedPerLimit(t *testing.T) {
 		{name: "ineligible", body: `{"cedar_ember":{"eligible":false,"grants":[{"id":"g","resets_left":1,"clears":["seven_day"]}]}}`, wantKnown: true},
 		{name: "one weekly reset", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"g","resets_total":1,"resets_left":1,"clears":["seven_day"]}]}}`, want: ClaudeResetGrants{Weekly: 1}, wantKnown: true},
 		{name: "used", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"g","resets_total":1,"resets_left":0,"clears":["seven_day"]}]}}`, wantKnown: true},
-		{name: "a Fable reset that gives the week back", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"g","resets_left":1,"clears":["seven_day_overage_included"],"gives_back_weekly":true}]}}`, want: ClaudeResetGrants{Weekly: 1, Fable: 1}, wantKnown: true},
-		{name: "a full reset and a session one", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"a","resets_left":2,"clears":["five_hour","seven_day","seven_day_overage_included"]},{"id":"b","resets_left":1,"clears":["five_hour"]}]}}`, want: ClaudeResetGrants{Weekly: 2, Fable: 2, FiveHour: 3}, wantKnown: true},
+		{name: "a Fable reset that gives the week back", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"g","resets_left":1,"clears":["seven_day_overage_included"],"gives_back_weekly":true}]}}`, want: ClaudeResetGrants{Fable: 1}, wantKnown: true},
+		{name: "a Fable reset and a weekly one", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"f","resets_total":1,"resets_left":1,"clears":["seven_day_overage_included"],"gives_back_weekly":true,"ends_at":"2027-03-08T00:00:00Z"},{"id":"w","resets_total":1,"resets_left":1,"clears":["seven_day"],"ends_at":"2026-12-10T00:00:00Z"}]}}`, want: ClaudeResetGrants{Weekly: 1, Fable: 1}, wantKnown: true},
+		{name: "a full reset and a session one", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"a","resets_left":2,"clears":["five_hour","seven_day","seven_day_overage_included"]},{"id":"b","resets_left":1,"clears":["five_hour"]}]}}`, want: ClaudeResetGrants{Weekly: 2, FiveHour: 1}, wantKnown: true},
 		{name: "paused, ended and malformed grants", body: `{"cedar_ember":{"eligible":true,"grants":[{"id":"p","resets_left":1,"paused":true,"clears":["seven_day"]},{"id":"e","resets_left":1,"ends_at":"2026-11-23T08:59:00Z","clears":["seven_day"]},{"id":"m","resets_left":"one","clears":["seven_day"]},{"id":"n","clears":["seven_day"]},{"id":"f","resets_left":1,"ends_at":"2026-11-30T00:00:00Z","clears":["seven_day"]}]}}`, want: ClaudeResetGrants{Weekly: 1}, wantKnown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
