@@ -67,32 +67,23 @@ func HasDevinEffortSuffix(model string) bool {
 	return false
 }
 
-// NormalizeThinkingLevel normalizes a Devin effort or budget, leaving auto for catalog resolution.
-func NormalizeThinkingLevel(level string, budgetTokens int) string {
+// normalizeDevinThinkingLevel resolves an effort and reports whether it came from a budget.
+func normalizeDevinThinkingLevel(level string, budgetTokens int) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(level))
 	switch normalized {
 	case "minimal", "low", "medium", "high", "xhigh", "max", "fast":
-		return normalized
+		return normalized, false
 	case "none", "off", "disabled":
-		return "none"
+		return "none", false
 	case "auto", "adaptive":
-		return string(thinking.LevelAuto)
+		return string(thinking.LevelAuto), false
 	}
 
 	if budgetTokens > 0 {
-		switch {
-		case budgetTokens <= 4096:
-			return "low"
-		case budgetTokens <= 16384:
-			return "medium"
-		case budgetTokens <= 32768:
-			return "high"
-		default:
-			return "max"
-		}
+		return thinking.ConvertBudgetToLevel(budgetTokens)
 	}
 
-	return ""
+	return "", false
 }
 
 // ResolveDevinChatModelUID resolves a model identifier into a valid upstream Devin chat_model_uid.
@@ -135,10 +126,10 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	}
 
 	// 4. Normalize requested effort. Compound "<level>-fast" requests select upstream
-	// fast-mode variants (see step 10); NormalizeThinkingLevel cannot represent them,
+	// fast-mode variants (see step 10); normalization cannot represent them,
 	// so keep the raw level alongside the normalized effort.
 	rawLevel := strings.ToLower(strings.TrimSpace(thinkingLevel))
-	effort := NormalizeThinkingLevel(thinkingLevel, budgetTokens)
+	effort, derivedFromBudget := normalizeDevinThinkingLevel(thinkingLevel, budgetTokens)
 	lowerBase := strings.ToLower(baseModel)
 	canonicalBase := strings.ReplaceAll(lowerBase, ".", "-")
 
@@ -169,11 +160,11 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	switch normalizedUnder {
 	case "model_gpt_5_2":
 		gptLevels := []string{"none", "low", "medium", "high", "xhigh"}
-		eff := clampEffort(effort, gptLevels, "low")
+		eff := clampEffort(effort, gptLevels, "low", derivedFromBudget)
 		return "MODEL_GPT_5_2_" + strings.ToUpper(eff)
 	case "model_google_gemini_3_0_flash":
 		gemLevels := []string{"minimal", "low", "medium", "high"}
-		eff := clampEffort(effort, gemLevels, "high")
+		eff := clampEffort(effort, gemLevels, "high", derivedFromBudget)
 		return "MODEL_GOOGLE_GEMINI_3_0_FLASH_" + strings.ToUpper(eff)
 	case "model_claude_4_5_opus":
 		if effort != "" && effort != "none" {
@@ -244,7 +235,7 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 			return canonicalBase
 		}
 		defaultEffort := selectDefaultDevinEffort(stem, allowedLevels)
-		clamped := clampEffort(effort, allowedLevels, defaultEffort)
+		clamped := clampEffort(effort, allowedLevels, defaultEffort, derivedFromBudget)
 		return stem + "-" + clamped + "-lightning"
 	}
 
@@ -257,13 +248,13 @@ func ResolveDevinChatModelUID(rawModel string, thinkingLevel string, budgetToken
 	// clamped to the catalog, never to the plain default.
 	if base, isFast := strings.CutSuffix(rawLevel, "-fast"); isFast && devinLevelIndex(base) != -1 {
 		defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
-		clamped := clampEffort(base, allowedLevels, defaultEffort)
+		clamped := clampEffort(base, allowedLevels, defaultEffort, false)
 		return canonicalBase + "-" + clamped + "-fast"
 	}
 
 	// 11. Model has thinking levels: determine default effort and clamp
 	defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
-	clamped := clampEffort(effort, allowedLevels, defaultEffort)
+	clamped := clampEffort(effort, allowedLevels, defaultEffort, derivedFromBudget)
 	if effort == "fast" {
 		return canonicalBase + "-" + clamped + "-fast"
 	}
@@ -327,7 +318,7 @@ func devinLevelIndex(level string) int {
 	return -1
 }
 
-func clampEffort(requested string, allowed []string, defaultEffort string) string {
+func clampEffort(requested string, allowed []string, defaultEffort string, derivedFromBudget bool) string {
 	if requested == "" {
 		return defaultEffort
 	}
@@ -358,12 +349,11 @@ func clampEffort(requested string, allowed []string, defaultEffort string) strin
 		if dist < 0 {
 			dist = -dist
 		}
-		if dist < bestDist {
+		// Keep Devin's higher-effort tie break for explicit requests. Budget
+		// conversions use the canonical lower-effort tie break.
+		preferOnTie := (derivedFromBudget && aIdx < bestIdx) || (!derivedFromBudget && aIdx > bestIdx)
+		if dist < bestDist || (dist == bestDist && preferOnTie) {
 			bestDist = dist
-			bestMatch = a
-			bestIdx = aIdx
-		} else if dist == bestDist && aIdx > bestIdx {
-			// On tie, prefer the higher effort (e.g. medium -> high for glm-5-3; xhigh -> max for swe-2)
 			bestMatch = a
 			bestIdx = aIdx
 		}
