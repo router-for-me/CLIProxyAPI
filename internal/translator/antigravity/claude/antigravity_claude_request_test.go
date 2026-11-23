@@ -2,15 +2,17 @@ package claude
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"strings"
 	"testing"
 
+	"github.com/MoeForge/moego/base64"
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -1529,7 +1531,8 @@ func TestConvertClaudeRequestToAntigravity_CacheModeRecoversSignatureWhenClientO
 
 	validNativeSig := testAnthropicNativeSignature(t)
 	expectedAntigravitySig := base64.StdEncoding.EncodeToString([]byte(validNativeSig))
-	cache.CacheSignature("claude-sonnet-4-5-thinking", "Let me think...", validNativeSig)
+	ctx := cache.WithSignatureCacheScope(context.Background(), "test-account")
+	cache.CacheSignatureBestEffort(ctx, "claude-sonnet-4-5-thinking", "Let me think...", validNativeSig)
 
 	// Client omitted signature (signature is empty or absent).
 	inputJSON := []byte(`{
@@ -1545,10 +1548,17 @@ func TestConvertClaudeRequestToAntigravity_CacheModeRecoversSignatureWhenClientO
 		]
 	}`)
 
-	output, _ := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
-	parts := ojson.GetBytesNoCopy(output, "request.contents.0.parts").Array()
+	translated := sdktranslator.TranslateRequestEnvelope(ctx, sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{
+		Format: sdktranslator.FormatClaude,
+		Model:  "claude-sonnet-4-5-thinking",
+		Body:   inputJSON,
+	})
+	if translated.Err != nil {
+		t.Fatalf("TranslateRequestEnvelope() error = %v", translated.Err)
+	}
+	parts := ojson.GetBytesNoCopy(translated.Body, "request.contents.0.parts").Array()
 	if len(parts) != 2 {
-		t.Fatalf("Expected omitted signature thinking block to be recovered from cache, got %d parts; output=%s", len(parts), output)
+		t.Fatalf("Expected omitted signature thinking block to be recovered from cache, got %d parts; output=%s", len(parts), translated.Body)
 	}
 	if !parts[0].Get("thought").Bool() || parts[0].Get("thoughtSignature").String() != expectedAntigravitySig {
 		t.Fatalf("Expected recovered thinking part with signature %s, got %s", expectedAntigravitySig, parts[0].Raw)

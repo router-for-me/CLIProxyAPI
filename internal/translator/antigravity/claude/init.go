@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/translator"
@@ -23,11 +24,11 @@ func init() {
 	sdktranslator.RegisterRequestEnvelope(sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, convertClaudeRequestEnvelopeToAntigravity)
 }
 
-func convertClaudeRequestEnvelopeToAntigravity(_ context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+func convertClaudeRequestEnvelopeToAntigravity(ctx context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
 	var webSearch *bool
 	if req.ModelInfo != nil && req.ModelInfo.NativeCapabilities != nil {
 		webSearch = req.ModelInfo.NativeCapabilities.WebSearch
 	}
-	req.Body, req.Err = convertClaudeRequestToAntigravityWithWebSearch(req.Model, req.Body, req.Stream, webSearch)
+	req.Body, req.Err = convertClaudeRequestToAntigravityWithWebSearchContext(cache.RequireSignatureCacheScope(ctx), req.Model, req.Body, req.Stream, webSearch)
 	return req
 }

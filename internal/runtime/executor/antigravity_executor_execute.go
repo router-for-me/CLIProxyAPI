@@ -11,6 +11,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -69,6 +70,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		auth = prepared.auth
 		reporter.UpdateAccessTokenFingerprint(auth)
 	}
+	ctx = cache.WithSignatureCacheScope(ctx, antigravitySignatureCacheScope(auth))
 	originalPayload, translated := prepared.originalPayload, prepared.translated
 	req.Payload = originalPayload
 	selection := prepared.model
@@ -260,6 +262,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		auth = prepared.auth
 		reporter.UpdateAccessTokenFingerprint(auth)
 	}
+	ctx = cache.WithSignatureCacheScope(ctx, antigravitySignatureCacheScope(auth))
 	originalPayload, translated := prepared.originalPayload, prepared.translated
 	req.Payload = originalPayload
 	selection := prepared.model

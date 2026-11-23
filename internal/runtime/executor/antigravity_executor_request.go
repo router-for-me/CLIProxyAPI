@@ -13,6 +13,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -49,7 +50,8 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 		return err
 	}
 	translate := func(credential *cliproxyauth.Auth) error {
-		model := helps.SelectAntigravityRequestModel(ctx, e.cfg, credential, req.Model, baseModel, from.String(), source, countTokens)
+		translateCtx := cache.WithSignatureCacheScope(ctx, antigravitySignatureCacheScope(credential))
+		model := helps.SelectAntigravityRequestModel(translateCtx, e.cfg, credential, req.Model, baseModel, from.String(), source, countTokens)
 		if model.ID != baseModel {
 			if errCooldown := cliproxyauth.CheckAntigravityTargetModel(ctx, credential, model.ID, time.Now(), useCredits); errCooldown != nil {
 				return rejectCooldown(model.ID, errCooldown)
@@ -58,14 +60,14 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 		if errCooldown := e.checkAntigravityRequestCooldown(ctx, credential, model.ID, countTokens); errCooldown != nil {
 			return rejectCooldown(model.ID, errCooldown)
 		}
-		original, errValidate := validateAntigravityRequestSignatures(ctx, model.ID, from, source)
+		original, errValidate := validateAntigravityRequestSignatures(translateCtx, model.ID, from, source)
 		if errValidate != nil {
 			return errValidate
 		}
 		prepared.model, prepared.originalPayload = model, original
 		envelope := sdktranslator.RequestEnvelope{Format: from, Model: model.ID, Body: original, Stream: stream, ModelInfo: model.TranslationModelInfo(req, baseModel, from)}
 		if countTokens {
-			translated := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, envelope)
+			translated := helps.TranslateRequestEnvelopeWithCodexMultiAgentV2(translateCtx, opts.Headers, e.cfg, from, to, envelope)
 			if translated.Err != nil {
 				return translated.Err
 			}
@@ -74,7 +76,7 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 			return nil
 		}
 		var errTranslate error
-		prepared.originalTranslated, prepared.translated, errTranslate = helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(ctx, opts.Headers, e.cfg, from, to, envelope, original, original)
+		prepared.originalTranslated, prepared.translated, errTranslate = helps.TranslateRequestEnvelopePairWithCodexMultiAgentV2(translateCtx, opts.Headers, e.cfg, from, to, envelope, original, original)
 		return errTranslate
 	}
 	// A translation refusal must precede token refresh and any upstream request.
@@ -86,8 +88,8 @@ func (e *AntigravityExecutor) prepareAntigravityRequest(ctx context.Context, aut
 		return antigravityPreparedRequest{}, errToken
 	}
 	if updatedAuth != nil {
-		// Only a changed catalog identity or exclusion policy invalidates this attempt's snapshot.
-		if !cliproxyauth.SameAntigravityModelCatalogScope(auth, updatedAuth) {
+		// A changed catalog identity, exclusion policy, or signature scope invalidates this attempt's snapshot.
+		if !cliproxyauth.SameAntigravityModelCatalogScope(auth, updatedAuth) || antigravitySignatureCacheScope(auth) != antigravitySignatureCacheScope(updatedAuth) {
 			if errTranslate := translate(updatedAuth); errTranslate != nil {
 				return prepared, errTranslate
 			}
@@ -883,6 +885,69 @@ func antigravityAuthID(auth *cliproxyauth.Auth) string {
 		return ""
 	}
 	return strings.TrimSpace(auth.ID)
+}
+
+const (
+	antigravitySignatureGrantScopeMetadataKey   = "cpa_signature_cache_grant"
+	antigravitySignatureGrantBindingMetadataKey = "cpa_signature_cache_grant_binding"
+)
+
+func antigravitySignatureGrantBinding(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return ""
+	}
+	refresh := strings.TrimSpace(metaStringValue(auth.Metadata, "refresh_token"))
+	access := strings.TrimSpace(metaStringValue(auth.Metadata, "access_token"))
+	if refresh == "" && access == "" {
+		return ""
+	}
+	return antigravityCredentialScope("grant:", refresh+"\x00"+access)
+}
+
+func antigravitySignatureGrantIdentity(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+		binding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
+		if retained != "" && binding != "" && binding == antigravitySignatureGrantBinding(auth) {
+			return retained
+		}
+		if binding := antigravitySignatureGrantBinding(auth); binding != "" {
+			return binding
+		}
+	}
+	return ""
+}
+
+func antigravitySignatureCacheScope(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	scope := strings.TrimSpace(auth.ID)
+	if scope != "" {
+		scope = "id:" + scope
+	} else if auth.Attributes != nil {
+		if path := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributePath]); path != "" {
+			scope = "path:" + path
+		} else if source := strings.TrimSpace(auth.Attributes[cliproxyauth.AttributeSource]); source != "" {
+			scope = "source:" + source
+		}
+	}
+	grantIdentity := antigravitySignatureGrantIdentity(auth)
+	if grantIdentity == "" {
+		return ""
+	}
+	scope += "\x00" + grantIdentity
+	if auth.Metadata != nil {
+		if projectID, ok := auth.Metadata["project_id"].(string); ok {
+			if projectID = strings.TrimSpace(projectID); projectID != "" {
+				scope += "\x00" + projectID
+			}
+		}
+	}
+	return scope
 }
 
 // geminiToAntigravityDocForAuth builds the upstream envelope and reports whether

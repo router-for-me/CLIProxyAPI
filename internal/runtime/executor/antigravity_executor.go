@@ -928,8 +928,12 @@ func validateAntigravityRequestSignatures(ctx context.Context, modelName string,
 		logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "provider_cleanup", "empty_or_non_gemini_signature")
 		return rawJSON, nil
 	}
-	// Claude models accept only Claude-format thinking signatures.
-	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
+	// Claude models accept only Claude-format thinking signatures. In cache mode,
+	// unsigned thinking blocks must survive until the translator recovers a
+	// signature for the current credential scope.
+	if !cache.SignatureCacheEnabled() {
+		rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
+	}
 	logAntigravitySignatureStrip(before, countClaudeThinkingBlocks(rawJSON), "prefix_cleanup", "empty_or_non_claude_signature")
 	if cache.SignatureCacheEnabled() {
 		return rawJSON, nil
