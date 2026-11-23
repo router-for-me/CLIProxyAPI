@@ -43,8 +43,8 @@ func TestTheBankedResetsAreCountedPerLimit(t *testing.T) {
 	}
 }
 
-// The poll asks for the grants and the pool exports them per profile; a later poll without them drops the
-// gauges rather than repeating an old count.
+// The poll asks for the grants and the pool exports them per profile; once no poll has reported them for
+// a while the gauges go, rather than repeating an old count.
 func TestThePollExportsEachAccountsBankedResets(t *testing.T) {
 	reader := startMetrics(t, nil)
 	selector, _, _ := namedSelector(t)
@@ -85,9 +85,16 @@ func TestThePollExportsEachAccountsBankedResets(t *testing.T) {
 	if got := gauges(); got["claw_master.quota.weekly.resets_left"] != 1 || got["claw_master.quota.fable.resets_left"] != 0 || len(got) != 3 {
 		t.Fatalf("after a poll with one weekly reset: %v", got)
 	}
+	// A poll answered without the grants (an old cached body, say) leaves the count while it is recent...
 	body = `{"limits":[{"kind":"weekly_all","percent":40,"resets_at":"2099-01-01T00:00:00Z"}]}`
 	poll()
+	if got := gauges(); got["claw_master.quota.weekly.resets_left"] != 1 {
+		t.Fatalf("right after a poll without grants: %v, want the last count", got)
+	}
+	// ...and drops it once no poll has reported grants for longer than resetGrantsMaxAge.
+	later := time.Now().Add(resetGrantsMaxAge + time.Minute)
+	selector.now = func() time.Time { return later }
 	if got := gauges(); len(got) != 0 {
-		t.Fatalf("after a poll without grants: %v, want no gauges", got)
+		t.Fatalf("%s after the last grants: %v, want no gauges", resetGrantsMaxAge+time.Minute, got)
 	}
 }

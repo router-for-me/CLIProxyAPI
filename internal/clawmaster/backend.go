@@ -713,7 +713,7 @@ type backendSeriesSelector struct {
 	// fiveHour is the last polled five-hour window per account; it is reported, not used to route.
 	fiveHour map[string]ClaudeFiveHourQuota
 	// Each subscription's banked limit resets, from its last usage poll that reported them.
-	resetGrants map[string]ClaudeResetGrants
+	resetGrants map[string]polledResetGrants
 	// fable is each account's weekly Fable allowance (backend_quota_fable.go), from the usage poll and the
 	// 7d_oi response headers; fableRevision orders a poll against headers that arrived while it was in flight.
 	fable         map[string]ClaudeFableQuota
@@ -1500,8 +1500,8 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 				if fable, okFable, errFable := ParseClaudeFableQuota(payload); errFable == nil && okFable {
 					selector.observePolledFable(authID, fable, fableRevision)
 				}
-				if grants, okGrants, errGrants := ParseClaudeResetGrants(payload, time.Now()); errGrants == nil {
-					selector.observeResetGrants(authID, grants, okGrants)
+				if grants, okGrants, errGrants := ParseClaudeResetGrants(payload, selector.nowOrReal()); errGrants == nil && okGrants {
+					selector.observeResetGrants(authID, grants)
 				}
 			}
 			quota, known, errQuota := ClaudeWeeklyQuota{}, false, errFetch

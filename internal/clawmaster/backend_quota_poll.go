@@ -122,9 +122,18 @@ func (s *backendSeriesSelector) observeFiveHourQuota(authID string, quota Claude
 	s.fiveHour[authID] = quota
 }
 
-// observeResetGrants records the limit resets a poll says an account has banked; a poll that reports
-// none (known false) forgets the last count, so a count never outlives the reading behind it.
-func (s *backendSeriesSelector) observeResetGrants(authID string, grants ClaudeResetGrants, known bool) {
+// resetGrantsMaxAge is how long a banked-reset count stands without a poll that reports it again: a few
+// poll intervals, so a failing poll, or one answered without the grants, cannot keep an old count.
+const resetGrantsMaxAge = 15 * time.Minute
+
+// polledResetGrants is an account's banked resets and when a poll read them.
+type polledResetGrants struct {
+	grants ClaudeResetGrants
+	at     time.Time
+}
+
+// observeResetGrants records the limit resets a poll says an account has banked.
+func (s *backendSeriesSelector) observeResetGrants(authID string, grants ClaudeResetGrants) {
 	if strings.TrimSpace(authID) == "" || authID == s.backupAuthID {
 		return
 	}
@@ -133,14 +142,20 @@ func (s *backendSeriesSelector) observeResetGrants(authID string, grants ClaudeR
 	if s.stopped {
 		return
 	}
-	if !known {
-		delete(s.resetGrants, authID)
-		return
-	}
 	if s.resetGrants == nil {
-		s.resetGrants = make(map[string]ClaudeResetGrants, len(s.authIDs))
+		s.resetGrants = make(map[string]polledResetGrants, len(s.authIDs))
 	}
-	s.resetGrants[authID] = grants
+	s.resetGrants[authID] = polledResetGrants{grants: grants, at: s.nowOrReal()}
+}
+
+// resetGrantsNowLocked is an account's banked resets as of now: unknown once the last reading is older
+// than resetGrantsMaxAge.
+func (s *backendSeriesSelector) resetGrantsNowLocked(authID string, now time.Time) (ClaudeResetGrants, bool) {
+	polled, known := s.resetGrants[authID]
+	if !known || now.Sub(polled.at) > resetGrantsMaxAge {
+		return ClaudeResetGrants{}, false
+	}
+	return polled.grants, true
 }
 
 // fiveHourNowLocked is an account's five-hour window as of now: once its reset has passed the
