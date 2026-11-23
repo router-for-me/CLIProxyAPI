@@ -292,6 +292,19 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
 			}
+			return
+		}
+		if ctx.Err() != nil || terminalDelivered {
+			return
+		}
+		truncErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before terminal event", streamTruncated: true}
+		helps.RecordAPIResponseError(ctx, e.cfg, truncErr)
+		if !streamUsage.PublishFailure(ctx, reporter, truncErr) {
+			reporter.PublishFailure(ctx, truncErr)
+		}
+		select {
+		case out <- cliproxyexecutor.StreamChunk{Err: truncErr}:
+		case <-ctx.Done():
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
