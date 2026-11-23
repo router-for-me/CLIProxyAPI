@@ -74,3 +74,45 @@ func ParseClaudeResetGrants(payload []byte, now time.Time) (ClaudeResetGrants, b
 	}
 	return grants, true, nil
 }
+
+// resetGrantFields are the parts of the cedar_ember block worth logging: whether the account may claim a
+// reset and why not, and what each grant clears and allows. Grant ids and labels are left out.
+var (
+	resetBlockFields = []string{"eligible", "ineligible_reason", "at_limit", "exhausted", "cooldown_until"}
+	resetGrantFields = []string{"type", "clears", "resets_left", "resets_total", "paused", "usable_now", "use_requires_limit", "gives_back_weekly", "blocking", "starts_at", "ends_at", "unavailable_reason"}
+)
+
+// DescribeClaudeResetGrants is the cedar_ember block of a usage response as one compact line for the log,
+// or "" when the response has none: what Anthropic said, so a count the pool exports can be checked.
+func DescribeClaudeResetGrants(payload []byte) string {
+	var root struct {
+		CedarEmber map[string]json.RawMessage `json:"cedar_ember"`
+	}
+	if json.Unmarshal(payload, &root) != nil || root.CedarEmber == nil {
+		return ""
+	}
+	pick := func(from map[string]json.RawMessage, fields []string) map[string]json.RawMessage {
+		out := make(map[string]json.RawMessage, len(fields))
+		for _, field := range fields {
+			if value, ok := from[field]; ok {
+				out[field] = value
+			}
+		}
+		return out
+	}
+	block := pick(root.CedarEmber, resetBlockFields)
+	var grants []map[string]json.RawMessage
+	if json.Unmarshal(root.CedarEmber["grants"], &grants) == nil {
+		picked := make([]map[string]json.RawMessage, 0, len(grants))
+		for _, grant := range grants {
+			picked = append(picked, pick(grant, resetGrantFields))
+		}
+		raw, _ := json.Marshal(picked)
+		block["grants"] = raw
+	}
+	line, err := json.Marshal(block)
+	if err != nil {
+		return ""
+	}
+	return string(line)
+}

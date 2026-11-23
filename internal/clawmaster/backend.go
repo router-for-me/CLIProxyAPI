@@ -714,6 +714,8 @@ type backendSeriesSelector struct {
 	fiveHour map[string]ClaudeFiveHourQuota
 	// Each subscription's banked limit resets, from its last usage poll that reported them.
 	resetGrants map[string]polledResetGrants
+	// The last cedar_ember block logged for each subscription, so the log says each one once.
+	resetGrantsLogged map[string]string
 	// fable is each account's weekly Fable allowance (backend_quota_fable.go), from the usage poll and the
 	// 7d_oi response headers; fableRevision orders a poll against headers that arrived while it was in flight.
 	fable         map[string]ClaudeFableQuota
@@ -1503,6 +1505,7 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 				if grants, okGrants, errGrants := ParseClaudeResetGrants(payload, selector.nowOrReal()); errGrants == nil && okGrants {
 					selector.observeResetGrants(authID, grants)
 				}
+				selector.logResetGrants(authID, DescribeClaudeResetGrants(payload))
 			}
 			quota, known, errQuota := ClaudeWeeklyQuota{}, false, errFetch
 			if errFetch == nil {
