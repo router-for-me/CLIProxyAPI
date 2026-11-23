@@ -138,6 +138,10 @@ var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 		"fallback-credit-2026-06-01",
 		"cache-diagnosis-2026-04-07",
 	): claudeCodeHelperShapeTitle280,
+	// Claude Code 2.1.321 startup quota probe (haiku-4-5, max_tokens 1):
+	// thinking-token-count is gone from the helper prefix.
+	"oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05": claudeCodeHelperShapeMinimal,
+	"oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05":                            claudeCodeHelperShapeMinimal,
 }
 
 // ClaudeCodeRequestDetection records the strong signals and first-party
@@ -464,16 +468,13 @@ func measuredClaudeCodeHelperHeadersMatch(headers http.Header, cfg *config.Confi
 			return false
 		}
 	}
-	candidate := ClaudeDeviceProfile{
-		UserAgent:      headerValue(headers, "User-Agent"),
-		PackageVersion: headerValue(headers, "X-Stainless-Package-Version"),
-		RuntimeVersion: headerValue(headers, "X-Stainless-Runtime-Version"),
-	}
-	if version, ok := parseClaudeCLIVersion(candidate.UserAgent); ok {
-		candidate.version = version
-		candidate.hasVersion = true
-	}
-	if !meetsClaudeDeviceProfileBaseline(candidate, profile) {
+	// Same version floor as the Haiku 5.5 helper and the main thread (same
+	// major.minor, patch >= baseline; SDK and runtime >= baseline). Exact
+	// equality cloaked a 2.1.322 startup quota probe under a 2.1.321 baseline
+	// although its headers, betas and body are identical to 2.1.321's.
+	if !plausibleClaudeCodeUserAgent(headerValue(headers, "User-Agent"), cfg) ||
+		!plausibleClaudePackageVersion(headerValue(headers, "X-Stainless-Package-Version"), profile.PackageVersion) ||
+		!plausibleClaudeRuntimeVersion(headerValue(headers, "X-Stainless-Runtime-Version"), profile.RuntimeVersion) {
 		return false
 	}
 	// Claude Code 2.1.258 (@anthropic-ai/sdk 0.112.1), measured 2026-09-02 on the
