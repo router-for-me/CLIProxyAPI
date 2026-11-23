@@ -316,6 +316,14 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
+	if (isOpenAIFamily(providerFormat) || providerFormat == "xai") && !isPluginApplier && detectModelCapability(modelInfo) == CapabilityHybrid {
+		// OpenAI Chat/Responses and xAI appliers accept effort levels only.
+		// Keep the original budget range in the model catalog.
+		levelModel, levelSupport := *modelInfo, *modelInfo.Thinking
+		levelSupport.Min, levelSupport.Max = 0, 0
+		levelModel.Thinking = &levelSupport
+		modelInfo = &levelModel
+	}
 	if nativeResponses {
 		normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
 		modified = modified || normalized
