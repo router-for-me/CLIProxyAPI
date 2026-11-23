@@ -588,7 +588,8 @@ func convertClaudeRequestToAntigravityWithWebSearch(modelName string, inputRawJS
 						}
 
 						// Preserve every present input as valid JSON for the function call.
-						var argsRaw string
+						// Missing input represents a parameterless call.
+						argsRaw := `{}`
 						if argsResult.IsObject() {
 							argsRaw = argsResult.Raw
 						} else if argsResult.Exists() {

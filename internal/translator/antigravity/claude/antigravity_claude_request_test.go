@@ -1943,7 +1943,7 @@ func TestConvertClaudeRequestToAntigravity_ToolUsePreservesPresentNonObjectInput
 		{name: "number", inputJSON: `42`, wantArgs: `42`, wantFunctionCall: true},
 		{name: "boolean", inputJSON: `true`, wantArgs: `true`, wantFunctionCall: true},
 		{name: "null", inputJSON: `null`, wantArgs: `{}`, wantFunctionCall: true},
-		{name: "missing", wantFunctionCall: false},
+		{name: "missing", wantArgs: `{}`, wantFunctionCall: true},
 	}
 
 	for _, tc := range tests {
@@ -1980,6 +1980,67 @@ func TestConvertClaudeRequestToAntigravity_ToolUsePreservesPresentNonObjectInput
 				t.Fatalf("missing input should not create functionCall, output: %s", output)
 			}
 		})
+	}
+}
+
+func TestConvertClaudeRequestToAntigravity_ToolUseWithoutInputPreservesToolResultPair(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{
+				"role": "user",
+				"content": "What time is it?"
+			},
+			{
+				"role": "assistant",
+				"content": [{
+					"type": "tool_use",
+					"id": "toolu_1",
+					"name": "get_time"
+				}]
+			},
+			{
+				"role": "user",
+				"content": [{
+					"type": "tool_result",
+					"tool_use_id": "toolu_1",
+					"content": "12:00"
+				}]
+			}
+		]
+	}`)
+
+	output, err := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", err)
+	}
+
+	contents := ojson.GetBytesNoCopy(output, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("request.contents length = %d, want 3; output: %s", len(contents), output)
+	}
+	functionCall := contents[1].Get("parts.0.functionCall")
+	if !functionCall.Exists() {
+		t.Fatalf("assistant functionCall is missing; output: %s", output)
+	}
+	if got := functionCall.Get("id").String(); got != "toolu_1" {
+		t.Fatalf("functionCall.id = %q, want toolu_1", got)
+	}
+	if got := functionCall.Get("name").String(); got != "get_time" {
+		t.Fatalf("functionCall.name = %q, want get_time", got)
+	}
+	if got := functionCall.Get("args").Raw; got != `{}` {
+		t.Fatalf("functionCall.args = %q, want {}; output: %s", got, output)
+	}
+	functionResponse := contents[2].Get("parts.0.functionResponse")
+	if !functionResponse.Exists() {
+		t.Fatalf("user functionResponse is missing; output: %s", output)
+	}
+	if got := functionResponse.Get("id").String(); got != "toolu_1" {
+		t.Fatalf("functionResponse.id = %q, want toolu_1", got)
+	}
+	if got := functionResponse.Get("name").String(); got != "get_time" {
+		t.Fatalf("functionResponse.name = %q, want get_time", got)
 	}
 }
 
