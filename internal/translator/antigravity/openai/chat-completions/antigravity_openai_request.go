@@ -3,19 +3,24 @@
 package chat_completions
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
 const antigravityFunctionThoughtSignature = "skip_thought_signature_validator"
+
+const antigravityOpenAIWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
 
 // ConvertOpenAIRequestToAntigravity converts an OpenAI Chat Completions request (raw JSON)
 // into a complete Antigravity request JSON. All JSON construction uses sjson and lookups use ojson.
@@ -28,13 +33,129 @@ const antigravityFunctionThoughtSignature = "skip_thought_signature_validator"
 // Returns:
 //   - []byte: The transformed request data in Antigravity API format
 func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
-	return convertOpenAIRequestToAntigravity(modelName, inputRawJSON, stream)
+	req := ConvertOpenAIRequestEnvelopeToAntigravity(context.Background(), sdktranslator.RequestEnvelope{
+		Model:  modelName,
+		Body:   inputRawJSON,
+		Stream: stream,
+	})
+	return req.Body, req.Err
+}
 
+// ConvertOpenAIRequestEnvelopeToAntigravity preserves request-scoped model capabilities.
+func ConvertOpenAIRequestEnvelopeToAntigravity(_ context.Context, req sdktranslator.RequestEnvelope) sdktranslator.RequestEnvelope {
+	req.Body, req.Err = convertOpenAIRequestToAntigravityWithModelInfo(req.Model, req.Body, req.Stream, req.ModelInfo)
+	return req
 }
 
 // convertOpenAIRequestToAntigravity also reports a file part Antigravity cannot
 // receive when it leaves a user turn with nothing to send.
-func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIRequestToAntigravityWithModelInfo(modelName, inputRawJSON, stream, nil)
+}
+
+func convertOpenAIRequestToAntigravityWithModelInfo(modelName string, inputRawJSON []byte, _ bool, modelInfo *registry.ModelInfo) ([]byte, error) {
+	if shouldBuildAntigravityOpenAIWebSearchRequest(modelName, inputRawJSON, modelInfo) {
+		return buildAntigravityOpenAIWebSearchRequest(modelName, inputRawJSON)
+	}
+	return convertOpenAIRequestToAntigravityChat(modelName, inputRawJSON)
+}
+
+func antigravitySupportsNativeOpenAIWebSearch(model string, modelInfo *registry.ModelInfo) bool {
+	if modelInfo != nil && modelInfo.NativeCapabilities != nil && modelInfo.NativeCapabilities.WebSearch != nil {
+		return *modelInfo.NativeCapabilities.WebSearch
+	}
+	model = strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	if model == "" {
+		return false
+	}
+	for _, localInfo := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if localInfo == nil || !strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(localInfo.ID)).ModelName), model) {
+			continue
+		}
+		if capabilities := localInfo.NativeCapabilities; capabilities != nil && capabilities.WebSearch != nil && !*capabilities.WebSearch {
+			return false
+		}
+		return localInfo.SupportsWebSearch || modelInfo != nil && modelInfo.SupportsWebSearch
+	}
+	return modelInfo != nil && modelInfo.SupportsWebSearch
+}
+
+func hasOnlyAntigravityOpenAIWebSearchTools(payload []byte) bool {
+	tools := ojson.GetBytesNoCopy(payload, "tools")
+	if !tools.IsArray() || len(tools.Array()) != 1 {
+		return false
+	}
+	tool := tools.Array()[0]
+	if !tool.Get("google_search").Exists() {
+		return false
+	}
+	if tool.Get("type").String() == "function" ||
+		tool.Get("code_execution").Exists() ||
+		tool.Get("url_context").Exists() {
+		return false
+	}
+	return true
+}
+
+func allowsAntigravityOpenAIWebSearch(payload []byte) bool {
+	toolChoice := ojson.GetBytesNoCopy(payload, "tool_choice")
+	if !toolChoice.Exists() {
+		return true
+	}
+	if toolChoice.Type == ojson.String {
+		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
+		case "", "auto", "required", "any":
+			return true
+		default:
+			return false
+		}
+	}
+	if !toolChoice.IsObject() {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(toolChoice.Get("type").String())) {
+	case "", "auto", "required", "any", "google_search":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldBuildAntigravityOpenAIWebSearchRequest(model string, payload []byte, modelInfo *registry.ModelInfo) bool {
+	return hasOnlyAntigravityOpenAIWebSearchTools(payload) &&
+		antigravitySupportsNativeOpenAIWebSearch(model, modelInfo) &&
+		allowsAntigravityOpenAIWebSearch(payload)
+}
+
+func buildAntigravityOpenAIWebSearchRequest(model string, payload []byte) ([]byte, error) {
+	chatBody, errConvert := convertOpenAIRequestToAntigravityChat(model, payload)
+	outDoc := ojson.NewDoc(chatBody)
+	_ = outDoc.Set("requestType", "web_search")
+	_ = outDoc.Set("request.generationConfig.candidateCount", 1)
+	searchPartDoc := ojson.NewDocString(`{"text":""}`)
+	_ = searchPartDoc.Set("text", antigravityOpenAIWebSearchSystemInstruction)
+	systemInstruction := outDoc.Get("request.systemInstruction")
+	systemParts := make([][]byte, 0, len(systemInstruction.Get("parts").Array())+1)
+	for _, part := range systemInstruction.Get("parts").Array() {
+		systemParts = append(systemParts, []byte(part.Raw))
+	}
+	systemParts = append(systemParts, searchPartDoc.Bytes())
+	_ = outDoc.SetRawBytes("request.systemInstruction", antigravityOpenAIContent("user", systemParts))
+	googleToolDoc := ojson.NewDocString(`{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}`)
+	if sourceTool := ojson.GetBytesNoCopy(payload, "tools.0.google_search"); sourceTool.Exists() && sourceTool.IsObject() {
+		for key, value := range sourceTool.Map() {
+			_ = googleToolDoc.SetRaw("googleSearch."+key, value.Raw)
+		}
+	}
+	_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray([][]byte{googleToolDoc.Bytes()}))
+	_ = outDoc.Delete("request.toolConfig.functionCallingConfig")
+	if toolConfig := outDoc.Get("request.toolConfig"); toolConfig.IsObject() && len(toolConfig.Map()) == 0 {
+		_ = outDoc.Delete("request.toolConfig")
+	}
+	return outDoc.Bytes(), errConvert
+}
+
+func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte) ([]byte, error) {
 	rawJSON := inputRawJSON
 	var drops translatorcommon.UserTurnDrops
 	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
@@ -176,13 +297,13 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						case "image_url":
 							// Only a base64 data URL can be inlined; a remote URL has no equivalent here.
 							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String()); ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							} else {
 								drops.Drop("image_url")
 							}
 						case "video_url":
 							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("video_url.url").String()); ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							} else {
 								drops.Drop("video_url")
 							}
@@ -190,7 +311,7 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							filename := item.Get("file.filename").String()
 							fileData := item.Get("file.file_data").String()
 							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data, false))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							} else {
 								log.Warn("Invalid file data or unknown file name extension in user message, skip")
 								drops.Drop("file")
@@ -199,7 +320,7 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							audioData := item.Get("input_audio.data").String()
 							if audioData != "" {
 								mimeType := antigravityOpenAIAudioMIMEType(item.Get("input_audio.format").String())
-								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, audioData, true))
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, audioData))
 							} else {
 								drops.Drop("input_audio")
 							}
@@ -233,7 +354,7 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							if len(imageURL) > 5 {
 								pieces := strings.SplitN(imageURL[5:], ";", 2)
 								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:], false)
+									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:])
 									partItems = append(partItems, part)
 								}
 							}
@@ -339,7 +460,6 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	toolResults := tools.Array()
 	if tools.IsArray() && len(toolResults) > 0 {
 		functionDeclarations := make([][]byte, 0, len(toolResults))
-		googleSearchNodes := make([][]byte, 0)
 		codeExecutionNodes := make([][]byte, 0)
 		urlContextNodes := make([][]byte, 0)
 		for _, t := range toolResults {
@@ -382,16 +502,6 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					functionDeclarations = append(functionDeclarations, fnDoc.Bytes())
 				}
 			}
-			if gs := t.Get("google_search"); gs.Exists() {
-				googleToolNode := []byte(`{}`)
-				var errSet error
-				googleToolNode, errSet = ojson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))
-				if errSet != nil {
-					log.Warnf("Failed to set googleSearch tool: %v", errSet)
-					continue
-				}
-				googleSearchNodes = append(googleSearchNodes, googleToolNode)
-			}
 			if ce := t.Get("code_execution"); ce.Exists() {
 				codeToolNode := []byte(`{}`)
 				var errSet error
@@ -415,17 +525,17 @@ func convertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 		deduplicated := util.DeduplicateFunctionDeclarations(translatorcommon.JoinRawArray(functionDeclarations))
 		hasFunction := len(deduplicated) > 2
-		if hasFunction || len(googleSearchNodes) > 0 || len(codeExecutionNodes) > 0 || len(urlContextNodes) > 0 {
-			toolItems := make([][]byte, 0, 1+len(googleSearchNodes)+len(codeExecutionNodes)+len(urlContextNodes))
-			if hasFunction {
-				functionToolNode := []byte(`{"functionDeclarations":[]}`)
-				functionToolNode, _ = ojson.SetRawBytes(functionToolNode, "functionDeclarations", deduplicated)
-				toolItems = append(toolItems, functionToolNode)
-			}
-			toolItems = append(toolItems, googleSearchNodes...)
+		if hasFunction {
+			functionToolNode := []byte(`{"functionDeclarations":[]}`)
+			functionToolNode, _ = ojson.SetRawBytes(functionToolNode, "functionDeclarations", deduplicated)
+			_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray([][]byte{functionToolNode}))
+		} else {
+			toolItems := make([][]byte, 0, len(codeExecutionNodes)+len(urlContextNodes))
 			toolItems = append(toolItems, codeExecutionNodes...)
 			toolItems = append(toolItems, urlContextNodes...)
-			_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray(toolItems))
+			if len(toolItems) > 0 {
+				_ = outDoc.SetRawBytes("request.tools", translatorcommon.JoinRawArray(toolItems))
+			}
 		}
 	}
 
@@ -445,13 +555,7 @@ func antigravityOpenAITextPart(text string) []byte {
 	return part
 }
 
-func antigravityOpenAIInlineDataPart(mimeType, data string, snakeCase bool) []byte {
-	if snakeCase {
-		partDoc := ojson.NewDoc([]byte(`{"inlineData":{"mime_type":"","data":""}}`))
-		_ = partDoc.Set("inlineData.mime_type", mimeType)
-		_ = partDoc.Set("inlineData.data", data)
-		return partDoc.Bytes()
-	}
+func antigravityOpenAIInlineDataPart(mimeType, data string) []byte {
 	partDoc := ojson.NewDoc([]byte(`{"inlineData":{"mimeType":"","data":""}}`))
 	_ = partDoc.Set("inlineData.mimeType", mimeType)
 	_ = partDoc.Set("inlineData.data", data)

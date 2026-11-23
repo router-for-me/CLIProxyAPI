@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -48,6 +49,9 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		response, errExecute := m.executeHomeOnce(ctx, providers, req, opts, countTokens, maxRetryCredentials, &homeRetryLimit, attempt)
 		if errExecute == nil {
 			return response, nil
+		}
+		if isTerminalRequestStopError(errExecute) {
+			return cliproxyexecutor.Response{}, errExecute
 		}
 		upstreamAttempted := hasUpstreamExecutionAttempt(errExecute)
 		if upstreamAttempted {
@@ -115,9 +119,6 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		}
 		retryRoundPending = false
 		retryRoundWaited = false
-		if isRequestTerminatedError(errExecute) || isRequestStopError(errExecute) {
-			return cliproxyexecutor.Response{}, errExecute
-		}
 		if isCredentialTerminatedError(errExecute) {
 			if preferredUpstreamErr != nil {
 				return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(preferredExecutionAttemptError(lastErr, preferredUpstreamErr))
@@ -162,6 +163,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	tried := make(map[string]struct{})
 	for authID := range requestRefusedAuthsFromContext(ctx) {
 		tried[authID] = struct{}{}
@@ -181,6 +183,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
 		pickOpts := withHomeRetryRound(opts, retryRound)
 		pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
@@ -250,10 +253,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			Reused: selection.Retained(), Model: routeModel, CredentialPolicy: credentialPolicyFromContext(ctx),
 		})
 		execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), selection.Provider)
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		// Home owns credential availability; execute its dispatch without local state filtering.
 		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
 		if aliasResult.ForceMapping && responseAlias != "" {
@@ -276,9 +276,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
-			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
 				selection.End("attempt_canceled")
@@ -300,12 +297,19 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			m.reportHomeResult(execCtx, result, auth)
 			releaseAttempt()
 			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			if okAction && !isRequestStopError(errPrepare) && !isRequestScopedStop(action, okAction) {
+				errPrepare = wrapRequestScopedContinueError(errPrepare)
+			}
 			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestStopError(errPrepare) {
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, errPrepare
+			}
 			if isRequestScopedStop(action, okAction) {
 				selection.End("request_stopped")
 				return cliproxyexecutor.Response{}, wrapRequestStopError(errPrepare)
 			}
-			if !okAction && isRequestInvalidError(errPrepare) {
+			if isTerminalRequestStopError(errPrepare) || (!okAction && isRequestInvalidError(errPrepare)) {
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errPrepare
 			}
@@ -346,8 +350,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
+			if !restoreExecutionModel {
+				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
+			}
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, selection.Executor, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = prepareRequestAfterAuth(execCtx, selection.Executor, preparedAuth, selection.Provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				if isCredentialTerminatedError(errIntercept) {
 					refusedErr = errIntercept
@@ -356,10 +364,6 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				releaseAttempt()
 				selection.End("request_intercepted")
 				return cliproxyexecutor.Response{}, errIntercept
-			}
-			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
-			if !restoreExecutionModel {
-				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 			}
 			if errCtx := execCtx.Err(); errCtx != nil {
 				releaseAttempt()
@@ -386,7 +390,17 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
 			}
-			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(preparedAuth)
+			execCtx = m.withExecutionAuthRefresh(syncMetadataSessionToContext(execCtx, execOpts.Metadata), executionAuthRefreshOptions{
+				ephemeral: true,
+				onAuthUpdated: func(updated *Auth) {
+					if updated != nil {
+						activeAuth.Store(updated.Clone())
+						setEffectiveAuth(updated)
+					}
+				},
+			})
 			executorCtx := execCtx
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
@@ -400,6 +414,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()
+			if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != preparedAuth {
+				preparedAuth = currentAuth
+			}
 			errExecute = markUpstreamExecutionAttemptFromContext(execCtx, errExecute)
 			durationHomeExec := time.Since(startHomeExec)
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -413,9 +430,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 			}
 			if errExecute != nil {
-				if hasUpstreamExecutionAttempt(errExecute) {
-					upstreamErr = errExecute
-				}
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, CompletedResponse: errExecute == nil && !countTokens && !response.Incomplete && isCompletedExecutionPayload(response.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, preparedAuth, execOpts.Headers), RefreshToken: authRefreshToken(preparedAuth), CredentialVersion: preparedAuth.CredentialVersion, RegistrationEpoch: preparedAuth.RegistrationEpoch}
@@ -443,7 +458,14 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			}
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
-			lastErr = keepPreferredCandidateError(lastErr, errExecute)
+			if isRequestStopError(errExecute) {
+				errExecute = annotateTrustedRetryAfterByHint(errExecute)
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
+				lastErr = errExecute
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, errExecute
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					errExecute = annotateTrustedRetryAfterByHint(errExecute)
@@ -453,11 +475,15 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					selection.End("request_stopped")
 					return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
 				}
-				if result.CredentialScope {
+				errExecute = wrapRequestScopedContinueError(errExecute)
+				syncPreferredUpstreamError(&upstreamErr, errExecute)
+				lastErr = keepPreferredCandidateError(lastErr, errExecute)
+				if result.CredentialScope || isRequestTerminatedError(errExecute) {
 					break
 				}
 				continue
 			}
+			lastErr = keepPreferredCandidateError(lastErr, errExecute)
 			if isRequestInvalidError(errExecute) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errExecute) {
 				releaseAttempt()
 				selection.End("request_invalid")

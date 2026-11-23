@@ -64,7 +64,7 @@ func TestConfigV8ETagIfMatch(t *testing.T) {
 	// fenced by the same precondition instead of merging blindly.
 	recorder := do(http.MethodPatch, "/v8/management/config", `{"server":{"port":8319}}`, `"stale"`)
 	wantStatus(recorder, http.StatusPreconditionFailed)
-	if string(fileBytes()) != raw {
+	if config.ComputeSourceHash(fileBytes()) != cfg.SourceHash {
 		t.Fatal("stale PATCH changed the file")
 	}
 	// PATCH with the current ETag goes through and returns the new one.

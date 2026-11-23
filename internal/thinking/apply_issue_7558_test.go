@@ -11,7 +11,15 @@ import (
 )
 
 func TestApplyThinking_UserDefinedNativeGeminiPreservesThinkingLevel(t *testing.T) {
-	for _, level := range []string{"medium", "high", "xhigh"} {
+	for _, tc := range []struct {
+		level           string
+		wantAntigravity string
+	}{
+		{level: "medium", wantAntigravity: "MEDIUM"},
+		{level: "high", wantAntigravity: "HIGH"},
+		{level: "xhigh", wantAntigravity: "XHIGH"},
+	} {
+		level := tc.level
 		t.Run("user_defined_gemini_to_gemini_"+level, func(t *testing.T) {
 			modelInfo := &registry.ModelInfo{
 				ID:          "custom-gemini-4-model",
@@ -54,8 +62,8 @@ func TestApplyThinking_UserDefinedNativeGeminiPreservesThinkingLevel(t *testing.
 			if errApply != nil {
 				t.Fatalf("ApplyThinking() error = %v", errApply)
 			}
-			if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != level {
-				t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, level, out)
+			if got := ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != tc.wantAntigravity {
+				t.Fatalf("thinkingLevel = %q, want %q; body=%s", got, tc.wantAntigravity, out)
 			}
 			if ojson.GetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget").Exists() {
 				t.Fatalf("unexpected thinkingBudget in Antigravity payload: %s", out)

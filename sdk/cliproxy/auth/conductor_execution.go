@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -185,32 +186,77 @@ func unwrapUpstreamExecutionAttempt(err error) error {
 }
 
 func unwrapExecutionBoundaryError(err error) error {
+	unwrapped, _ := unwrapExecutionBoundaryErrorChanged(err)
+	return unwrapped
+}
+
+func unwrapExecutionBoundaryErrorChanged(err error) (error, bool) {
+	changed := false
 	for err != nil {
 		switch wrapped := err.(type) {
 		case requestStopError:
 			err = wrapped.error
+			changed = true
 		case schedulerRejectError:
 			err = wrapped.error
+			changed = true
 		case *roundEndedBySchedulerRejectError:
 			if wrapped == nil || wrapped.cause == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.cause
+			changed = true
 		case *upstreamExecutionAttemptError:
 			if wrapped == nil || wrapped.cause == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.cause
+			changed = true
 		case *credentialTerminatedError:
 			if wrapped == nil || wrapped.terminal == nil {
-				return err
+				return err, changed
 			}
 			err = wrapped.terminal
+			changed = true
+		case requestScopedContinueError:
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.error)
+			if !innerChanged {
+				return err, changed
+			}
+			return requestScopedContinueError{error: inner}, true
+		case *streamHeaderError:
+			if wrapped == nil {
+				return nil, changed
+			}
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.cause)
+			if !innerChanged {
+				return err, changed
+			}
+			return newStreamHeaderError(inner, wrapped.headers), true
+		case *streamBootstrapError:
+			if wrapped == nil {
+				return nil, changed
+			}
+			inner, innerChanged := unwrapExecutionBoundaryErrorChanged(wrapped.cause)
+			if !innerChanged {
+				return err, changed
+			}
+			copied := *wrapped
+			copied.cause = inner
+			return &copied, true
 		default:
-			return err
+			return err, changed
 		}
 	}
-	return nil
+	return nil, changed
+}
+
+func unwrapStoppedStreamError(err error) error {
+	unwrapped := unwrapExecutionBoundaryError(err)
+	if bootstrap, ok := unwrapped.(*streamBootstrapError); ok && bootstrap != nil {
+		return newStreamHeaderError(bootstrap.cause, bootstrap.headers)
+	}
+	return unwrapped
 }
 
 func roundPickFailureError(lastErr, upstreamErr, errPick error) error {
@@ -346,7 +392,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			continuitySession.priorAttemptSeen = true
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isTerminalRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isCredentialTerminatedError(errExec) {
@@ -441,7 +487,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if resp, ok, errCredits := m.tryAntigravityCreditsExecute(ctx, req, opts); errCredits != nil {
-				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) {
+				if isTerminalRequestStopError(errCredits) {
 					return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errCredits)
 				}
 				errCredits = unwrapExecutionBoundaryError(errCredits)
@@ -502,7 +548,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 		if errExec == nil {
 			return resp, nil
 		}
-		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
+		if isTerminalRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if isCredentialTerminatedError(errExec) {
@@ -621,18 +667,28 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			continuitySession.priorAttemptSeen = true
 			return result, nil
 		}
+		if isTerminalRequestStopError(errStream) {
+			// Keep stopped/terminated bootstrap failures as direct errors carrying
+			// upstream headers via streamHeaderError rather than streamErrorResult so
+			// outer bootstrap retries cannot replay an explicitly stopped request.
+			return nil, unwrapStoppedStreamError(errStream)
+		}
 		if !m.HomeEnabled() {
 			observeSelectionCooldownDeadline(&selectionCooldownDeadline, errStream, time.Now())
 		}
 		upstreamAttempted := hasUpstreamExecutionAttempt(errStream)
 		if upstreamAttempted {
-			preferredUpstreamErr = errStream
+			if isDirectStreamTerminalError(errStream) {
+				preferredUpstreamErr = errStream
+			} else {
+				syncPreferredUpstreamError(&preferredUpstreamErr, errStream)
+			}
 		}
 		if m.HomeEnabled() && retryRoundPending {
 			if wait, okWait := pendingHomeRetryRoundDelay(errStream, maxWait, &homeRetryLimit, pinnedAuthIDFromMetadata(opts.Metadata) == ""); okWait && m.homeRetryAllowed(attempt-1, homeRetryLimit) {
 				if retryRoundWaited {
 					errOut := unwrapExecutionBoundaryError(errStream)
-					if pinnedThread && !isRequestStopError(errStream) {
+					if pinnedThread {
 						errOut = claudeThreadReplayError(errOut)
 					}
 					return nil, errOut
@@ -651,9 +707,6 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 		retryRoundPending = false
 		retryRoundWaited = false
-		if isRequestTerminatedError(errStream) || isRequestStopError(errStream) {
-			return nil, unwrapExecutionBoundaryError(errStream)
-		}
 		if isCredentialTerminatedError(errStream) {
 			if preferredUpstreamErr == nil {
 				return nil, unwrapExecutionBoundaryError(errStream)
@@ -753,16 +806,16 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				return nil, errCtx
 			}
 		}
-		if preferredUpstreamErr != nil && (!m.HomeEnabled() || isHomeRetryRoundExhausted(lastErr)) {
+		if preferredUpstreamErr != nil && !isDirectStreamTerminalError(lastErr) && (!m.HomeEnabled() || isHomeRetryRoundExhausted(lastErr)) {
 			lastErr = preferredExecutionAttemptError(lastErr, preferredUpstreamErr)
 		}
 		lastErr = unwrapExecutionBoundaryError(lastErr)
 		lastErr = m.normalizeSessionAffinityNeverTerminalError(lastErr, normalized, retryModel, opts)
 		if !terminalRoundRejectedByScheduler && !continuitySession.terminated && hasAntigravityProvider(normalized) && shouldAttemptAntigravityCreditsFallback(m, lastErr, normalized) {
 			if result, ok, errCredits := m.tryAntigravityCreditsExecuteStream(ctx, req, opts); errCredits != nil {
-				if isRequestTerminatedError(errCredits) || isRequestStopError(errCredits) ||
+				if isTerminalRequestStopError(errCredits) ||
 					isTOSViolationError(errCredits) || isAntigravityValidationRequiredError(errCredits) {
-					return nil, unwrapExecutionBoundaryError(errCredits)
+					return nil, unwrapStoppedStreamError(errCredits)
 				}
 				errCredits = unwrapExecutionBoundaryError(errCredits)
 				if pinnedThread {
@@ -873,7 +926,13 @@ func isRequestTerminatedError(err error) bool {
 	return (errors.As(err, &terminated) && terminated != nil) || cliproxyexecutor.IsUpstreamWebsocketTurnError(err)
 }
 
-func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+// prepareRequestAfterAuth plans the upstream route before passing its format to the optional interceptor.
+func prepareRequestAfterAuth(ctx context.Context, executor ProviderExecutor, auth *Auth, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, requestedModel string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	if planner, ok := executor.(interface {
+		PlanRequestRoute(*Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) cliproxyexecutor.Options
+	}); ok {
+		opts = planner.PlanRequestRoute(auth, req, opts)
+	}
 	if opts.RequestAfterAuthInterceptor == nil {
 		return req, opts, nil
 	}
@@ -886,8 +945,9 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 		Stream:         opts.Stream,
 		Headers:        cloneRequestHeaders(opts.Headers),
 		Body:           req.Payload,
-		Metadata:       opts.Metadata,
+		Metadata:       maps.Clone(opts.Metadata),
 	})
+	prevHeaders := opts.Headers
 	opts.Headers = mergeRequestHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
 	if len(resp.Body) > 0 {
 		req.Payload = resp.Body
@@ -947,11 +1007,16 @@ func applyRequestAfterAuthInterceptor(ctx context.Context, executor ProviderExec
 			delete(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey)
 		}
 	} else if len(resp.Headers) > 0 {
-		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, opts.Metadata); ok && info.SessionID != "" {
-			ensureWritableMetadata(true, 2)
-			opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
-			if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
-				opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
+		prevInfo, prevOK := cliproxysession.ExtractSessionInfo(prevHeaders, nil, nil)
+		if info, ok := cliproxysession.ExtractSessionInfo(opts.Headers, nil, nil); ok && info.SessionID != "" {
+			if !prevOK || prevInfo.SessionID != info.SessionID || prevInfo.ParentSessionID != info.ParentSessionID {
+				ensureWritableMetadata(true, 2)
+				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.SessionID)
+				if info.ParentSessionID != "" && info.ParentSessionID != info.SessionID {
+					opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = cliproxysession.BoundSessionIdentity(info.ParentSessionID)
+				} else {
+					delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+				}
 			}
 		}
 	}
@@ -1015,20 +1080,27 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 		out = make(http.Header)
 	}
 	for _, key := range clear {
-		out.Del(key)
-		for existingKey := range out {
-			if strings.EqualFold(existingKey, key) {
-				delete(out, existingKey)
-			}
-		}
+		deleteRequestHeaderFold(out, key)
 	}
 	for key, values := range updates {
-		out.Del(key)
+		deleteRequestHeaderFold(out, key)
 		for _, value := range values {
 			out.Add(key, value)
 		}
 	}
 	return out
+}
+
+func deleteRequestHeaderFold(headers http.Header, key string) {
+	if len(headers) == 0 {
+		return
+	}
+	headers.Del(key)
+	for existingKey := range headers {
+		if strings.EqualFold(existingKey, key) {
+			delete(headers, existingKey)
+		}
+	}
 }
 
 func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
@@ -1056,13 +1128,53 @@ func syncPreferredUpstreamError(upstreamErr *error, errExec error) {
 	// error value.
 	var bootstrap *streamBootstrapError
 	if errors.As(*upstreamErr, &bootstrap) && bootstrap != nil {
-		if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 &&
-			upstreamErrorMatchesBootstrap(errExec, bootstrap) {
-			bootstrap.cause = withTrustedRetryAfter(bootstrap.cause, hint)
+		if upstreamErrorMatchesBootstrap(errExec, bootstrap) {
+			if hint := trustedRetryAfterHint(errExec); hint != nil && *hint > 0 {
+				bootstrap.cause = withTrustedRetryAfter(bootstrap.cause, hint)
+			}
+			if IsRequestScopedContinueError(errExec) {
+				bootstrap.cause = wrapRequestScopedContinueError(bootstrap.cause)
+			}
+			return
+		}
+		// A synthetic empty_stream wrapper must not mask a later real upstream
+		// failure, and a headerless bootstrap wrapper can advance to a later
+		// real bootstrap failure while still staying preferred over headerless
+		// stream-start errors or empty_stream.
+		if isEmptyStreamError(bootstrap.cause) && !isEmptyStreamError(errExec) {
+			*upstreamErr = errExec
+			return
+		}
+		var execBootstrap *streamBootstrapError
+		if len(bootstrap.headers) == 0 && errors.As(errExec, &execBootstrap) && execBootstrap != nil && !isEmptyStreamError(execBootstrap.cause) {
+			*upstreamErr = errExec
 		}
 		return
 	}
 	*upstreamErr = errExec
+}
+
+func isEmptyStreamError(err error) bool {
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == "empty_stream"
+}
+
+func isDirectStreamTerminalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var bootstrap *streamBootstrapError
+	if errors.As(err, &bootstrap) && bootstrap != nil {
+		return false
+	}
+	var headerErr *streamHeaderError
+	if errors.As(err, &headerErr) && headerErr != nil {
+		return true
+	}
+	if isTerminalRequestStopError(err) || isTOSViolationError(err) {
+		return true
+	}
+	return !IsRequestScopedContinueError(err) && isRequestInvalidError(err)
 }
 
 // upstreamErrorMatchesBootstrap reports whether err belongs to the same
@@ -1106,6 +1218,8 @@ func unwrapBootstrapSyncError(err error) error {
 			err = wrapped.cause
 		case *streamBootstrapError:
 			err = wrapped.cause
+		case requestScopedContinueError:
+			err = wrapped.error
 		default:
 			return err
 		}
@@ -1120,6 +1234,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1132,6 +1248,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 	}
 	attempted := make(map[string]struct{})
+	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -1141,7 +1258,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		opts.Metadata = cloneRequestMetadata(opts.Metadata)
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
+		if !homeMode && lastAttemptedAuthID != "" {
+			// Preserve the mid-round selected_auth_id signal for scheduler plugins (#7434)
+			// as a one-shot signal after an executed failure without carrying over
+			// affinity/LCP, selection_id, or index keys from prior attempts.
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = lastAttemptedAuthID
+			lastAttemptedAuthID = ""
+		}
 		pickOpts := opts
 		if homeMode {
 			pickOpts = withHomeRetryRound(pickOpts, retryRound)
@@ -1163,10 +1287,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -1176,13 +1297,19 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			lastAttemptedAuthID = authID
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		if homeMode {
+			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
+		}
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
-			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
+			if preparedAuth != nil {
+				auth = preparedAuth
 			}
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
@@ -1250,7 +1377,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			}
 			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = prepareRequestAfterAuth(execCtx, executor, auth, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				if isCredentialTerminatedError(errIntercept) {
 					recordRequestRefusedAuth(ctx, auth.ID)
@@ -1260,36 +1387,51 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errIntercept
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
-			execCtx = withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(auth)
+			syncActiveAuth := func() {
+				if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != auth {
+					auth = currentAuth
+				}
+			}
+			refreshExecCtx := func(base context.Context) context.Context {
+				return m.withExecutionAuthRefresh(base, executionAuthRefreshOptions{
+					onAuthUpdated: func(updated *Auth) {
+						if updated != nil {
+							activeAuth.Store(updated.Clone())
+						}
+					},
+				})
+			}
+			execCtx = refreshExecCtx(withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider))
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
+			var preRefreshExecErr error
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			syncActiveAuth()
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
-				if hasUpstreamExecutionAttempt(errExec) {
-					upstreamErr = errExec
-				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+					preRefreshExecErr = errExec
 					auth = refreshed
+					activeAuth.Store(auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider)
+					execCtx = refreshExecCtx(withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider))
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					syncActiveAuth()
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
-						if hasUpstreamExecutionAttempt(errExec) {
-							upstreamErr = errExec
-						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
@@ -1314,12 +1456,22 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				action, okAction := matchRequestScopedErrorAction(auth, errExec, m.requestScopedErrorConfig(execCtx))
 				applyRequestScopedActionToResult(action, okAction, &result)
+				if okAction && !isRequestStopError(errExec) && !isRequestScopedStop(action, okAction) {
+					errExec = wrapRequestScopedContinueError(errExec)
+				}
 				if isResponsesCompactAvailabilityNeutralError(execOpts, errExec, result.Error) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
+				}
+				if hasUpstreamExecutionAttempt(errExec) {
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				} else if preRefreshExecErr != nil {
+					syncPreferredUpstreamError(&upstreamErr, preRefreshExecErr)
+				}
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1383,6 +1535,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1395,6 +1549,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 	}
 	attempted := make(map[string]struct{})
+	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
 	for {
@@ -1404,7 +1559,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		opts.Metadata = cloneRequestMetadata(opts.Metadata)
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
+		if !homeMode && lastAttemptedAuthID != "" {
+			// Preserve the mid-round selected_auth_id signal for scheduler plugins (#7434)
+			// as a one-shot signal after an executed failure without carrying over
+			// affinity/LCP, selection_id, or index keys from prior attempts.
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = lastAttemptedAuthID
+			lastAttemptedAuthID = ""
+		}
 		pickOpts := opts
 		if homeMode {
 			pickOpts = withHomeRetryRound(pickOpts, retryRound)
@@ -1426,10 +1588,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -1439,13 +1598,19 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			lastAttemptedAuthID = authID
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		if homeMode {
+			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
+		}
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
-			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
+			if preparedAuth != nil {
+				auth = preparedAuth
 			}
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
 			}
@@ -1513,7 +1678,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			}
 			execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			var errIntercept error
-			execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(execCtx, executor, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
+			execReq, execOpts, errIntercept = prepareRequestAfterAuth(execCtx, executor, auth, provider, execReq, execOpts, requestedModelAliasFromOptions(execOpts, routeModel))
 			if errIntercept != nil {
 				if isCredentialTerminatedError(errIntercept) {
 					recordRequestRefusedAuth(ctx, auth.ID)
@@ -1523,36 +1688,51 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errIntercept
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
-			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(auth)
+			syncActiveAuth := func() {
+				if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != auth {
+					auth = currentAuth
+				}
+			}
+			refreshExecCtx := func(base context.Context) context.Context {
+				return m.withExecutionAuthRefresh(base, executionAuthRefreshOptions{
+					onAuthUpdated: func(updated *Auth) {
+						if updated != nil {
+							activeAuth.Store(updated.Clone())
+						}
+					},
+				})
+			}
+			execCtx = refreshExecCtx(syncMetadataSessionToContext(execCtx, execOpts.Metadata))
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
+			var preRefreshExecErr error
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			syncActiveAuth()
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
-				if hasUpstreamExecutionAttempt(errExec) {
-					upstreamErr = errExec
-				}
 				if errCtx := execCtx.Err(); errCtx != nil {
 					m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+					preRefreshExecErr = errExec
 					auth = refreshed
+					activeAuth.Store(auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					execCtx = m.newUpstreamAttemptContext(execCtx)
+					execCtx = refreshExecCtx(m.newUpstreamAttemptContext(execCtx))
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					syncActiveAuth()
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
-						if hasUpstreamExecutionAttempt(errExec) {
-							upstreamErr = errExec
-						}
 						warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationRetry, errExec)
 						if errCtx := execCtx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(execCtx, auth, provider, resultModel, routeModel, execOpts, errExec, false, executionSeq)
@@ -1579,6 +1759,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				// explicit 501 / unsupported-capability error. Record the failure
 				// for hooks and metrics without suspending a model that remains
 				// usable through the messages endpoint.
+				if okAction && !isRequestStopError(errExec) && !isRequestScopedStop(action, okAction) {
+					errExec = wrapRequestScopedContinueError(errExec)
+				}
 				if isCountTokensEndpointNotFoundError(errExec, execReq.Model) && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) {
 					m.recordAvailabilityNeutralResult(execCtx, result)
 				} else {
@@ -1587,7 +1770,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					}
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
+				}
+				if hasUpstreamExecutionAttempt(errExec) {
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				} else if preRefreshExecErr != nil {
+					syncPreferredUpstreamError(&upstreamErr, preRefreshExecErr)
+				}
+				if isRequestStopError(errExec) {
+					return cliproxyexecutor.Response{}, errExec
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1652,6 +1842,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	clearSchedulerSelectionID(opts.Metadata)
+	baseMetadata := opts.Metadata
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1673,6 +1865,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false
 	attempted := make(map[string]struct{})
+	lastAttemptedAuthID := ""
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
@@ -1688,7 +1881,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		opts.Metadata = cloneRequestMetadata(opts.Metadata)
+		opts.Metadata = cloneRequestMetadata(baseMetadata)
+		if !homeMode && lastAttemptedAuthID != "" {
+			// Preserve the mid-round selected_auth_id signal for scheduler plugins (#7434)
+			// as a one-shot signal after an executed failure without carrying over
+			// affinity/LCP, selection_id, or index keys from prior attempts.
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = lastAttemptedAuthID
+			lastAttemptedAuthID = ""
+		}
 		pickOpts := opts
 		if homeMode {
 			pickOpts = withHomeRetryRound(pickOpts, retryRound)
@@ -1816,10 +2016,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errBind
 			}
 		}
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		if homeMode {
 			clearSchedulerSelectionID(opts.Metadata)
@@ -1858,7 +2055,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			continue
 		}
 		attempted[auth.ID] = struct{}{}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			lastAttemptedAuthID = authID
+		}
 		publishSelectedAuthMetadata(opts.Metadata, auth)
+		if homeMode {
+			syncPublishedSelectedAuthMetadata(pickOpts.Metadata, opts.Metadata)
+		}
 		var preparedAuth *Auth
 		var errPrepare error
 		if selection != nil {
@@ -1867,10 +2070,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			preparedAuth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
-			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
-			if hasUpstreamExecutionAttempt(errPrepare) {
-				upstreamErr = errPrepare
+			if preparedAuth != nil {
+				auth = preparedAuth
 			}
+			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
 				if selection != nil {
 					releaseAttempt()
@@ -1914,14 +2117,23 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.MarkResult(execCtx, result)
 			}
 			errPrepare = annotateTrustedRetryAfterByHint(errPrepare)
+			if okAction && !isRequestStopError(errPrepare) && !isRequestScopedStop(action, okAction) {
+				errPrepare = wrapRequestScopedContinueError(errPrepare)
+			}
 			syncPreferredUpstreamError(&upstreamErr, errPrepare)
+			if isRequestStopError(errPrepare) {
+				if selection != nil {
+					selection.End("request_stopped")
+				}
+				return nil, errPrepare
+			}
 			if isRequestScopedStop(action, okAction) {
 				if selection != nil {
 					selection.End("request_stopped")
 				}
 				return nil, wrapRequestStopError(errPrepare)
 			}
-			if !okAction && isRequestInvalidError(errPrepare) {
+			if isTerminalRequestStopError(errPrepare) || (!okAction && isRequestInvalidError(errPrepare)) {
 				if selection != nil {
 					selection.End("request_invalid")
 				}
@@ -2009,20 +2221,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				}
 				continue
 			}
-			if hasUpstreamExecutionAttempt(errStream) {
-				upstreamErr = errStream
-			}
-			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
-			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
-			if stoppedByRule || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
+			syncPreferredUpstreamError(&upstreamErr, errStream)
+			if isTerminalRequestStopError(errStream) || isTOSViolationError(errStream) || (!IsRequestScopedContinueError(errStream) && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
 				// Only redispatch needs a release acknowledgement. Preserve the final
 				// response even when Home cannot acknowledge the released admission.
 				if selection != nil {
 					releaseAttempt()
 					selection.End("request_stopped")
-				}
-				if stoppedByRule {
-					return nil, wrapRequestStopError(errStream)
 				}
 				return nil, errStream
 			}
@@ -2045,16 +2250,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
 				return nil, errCtx
-			}
-			if okAction {
-				lastErr = keepPreferredCandidateError(lastErr, errStream)
-				if homeMode {
-					roundTiming.Observe(errStream)
-				}
-				if homeMode {
-					homeAuthCount++
-				}
-				continue
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errStream)
 			if homeMode {
@@ -2105,15 +2300,151 @@ func withAttemptedAuthTracker(opts cliproxyexecutor.Options, attempted map[strin
 	return opts
 }
 
+type metadataCloneVisitKey struct {
+	ptr      uintptr
+	capacity int
+	isSlice  bool
+	typ      reflect.Type
+}
+
+var metadataMapAnyType = reflect.TypeFor[map[string]any]()
+
 func cloneRequestMetadata(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return make(map[string]any, 4)
 	}
 	dst := make(map[string]any, len(src)+4)
+	var visited map[metadataCloneVisitKey]any
+	rootKey := metadataCloneVisitKey{ptr: reflect.ValueOf(src).Pointer()}
 	for k, v := range src {
-		dst[k] = v
+		dst[k] = cloneRequestMetadataValue(v, rootKey, dst, &visited)
 	}
 	return dst
+}
+
+func cloneRequestMetadataValue(v any, rootKey metadataCloneVisitKey, rootDst map[string]any, visited *map[metadataCloneVisitKey]any) any {
+	switch v.(type) {
+	case nil, string, bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr, float32, float64, func(string):
+		return v
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		if rv.IsNil() {
+			return v
+		}
+		key := metadataCloneVisitKey{ptr: rv.Pointer()}
+		if key == rootKey {
+			if rv.Type() == metadataMapAnyType {
+				return rootDst
+			}
+			return reflect.ValueOf(rootDst).Convert(rv.Type()).Interface()
+		}
+		if *visited == nil {
+			*visited = make(map[metadataCloneVisitKey]any)
+		} else if existing, ok := (*visited)[key]; ok {
+			ev := reflect.ValueOf(existing)
+			if ev.Type() == rv.Type() {
+				return existing
+			}
+			return ev.Convert(rv.Type()).Interface()
+		}
+		cloned := reflect.MakeMapWithSize(rv.Type(), rv.Len())
+		(*visited)[key] = cloned.Interface()
+		elemType := rv.Type().Elem()
+		iter := rv.MapRange()
+		for iter.Next() {
+			cloned.SetMapIndex(iter.Key(), cloneReflectMetadataElement(iter.Value(), elemType, rootKey, rootDst, visited))
+		}
+		return cloned.Interface()
+	case reflect.Slice:
+		if rv.IsNil() {
+			return v
+		}
+		if rv.Cap() == 0 {
+			return reflect.MakeSlice(rv.Type(), 0, 0).Interface()
+		}
+		elemType := rv.Type().Elem()
+		if elemType.Size() == 0 {
+			return reflect.MakeSlice(rv.Type(), rv.Len(), rv.Cap()).Interface()
+		}
+		key := metadataCloneVisitKey{ptr: rv.Pointer(), capacity: rv.Cap(), isSlice: true, typ: elemType}
+		if *visited == nil {
+			*visited = make(map[metadataCloneVisitKey]any)
+		} else if existing, ok := (*visited)[key]; ok {
+			ev := reflect.ValueOf(existing)
+			if ev.Type() != rv.Type() {
+				ev = ev.Convert(rv.Type())
+			}
+			return ev.Slice(0, rv.Len()).Interface()
+		}
+		clonedFull := reflect.MakeSlice(rv.Type(), rv.Cap(), rv.Cap())
+		(*visited)[key] = clonedFull.Interface()
+		fullSrc := rv.Slice(0, rv.Cap())
+		switch elemType.Kind() {
+		case reflect.Map, reflect.Slice, reflect.Array, reflect.Struct, reflect.Interface:
+			for i := 0; i < rv.Cap(); i++ {
+				clonedFull.Index(i).Set(cloneReflectMetadataElement(fullSrc.Index(i), elemType, rootKey, rootDst, visited))
+			}
+		default:
+			reflect.Copy(clonedFull, fullSrc)
+		}
+		return clonedFull.Slice(0, rv.Len()).Interface()
+	case reflect.Array:
+		cloned := reflect.New(rv.Type()).Elem()
+		elemType := rv.Type().Elem()
+		for i := 0; i < rv.Len(); i++ {
+			cloned.Index(i).Set(cloneReflectMetadataElement(rv.Index(i), elemType, rootKey, rootDst, visited))
+		}
+		return cloned.Interface()
+	case reflect.Struct:
+		rt := rv.Type()
+		var cloned reflect.Value
+		for i := 0; i < rt.NumField(); i++ {
+			sf := rt.Field(i)
+			if !sf.IsExported() {
+				continue
+			}
+			fv := rv.Field(i)
+			switch fv.Kind() {
+			case reflect.Map, reflect.Slice, reflect.Array, reflect.Struct, reflect.Interface:
+				if !cloned.IsValid() {
+					cloned = reflect.New(rt).Elem()
+					cloned.Set(rv)
+				}
+				cloned.Field(i).Set(cloneReflectMetadataElement(fv, sf.Type, rootKey, rootDst, visited))
+			}
+		}
+		if !cloned.IsValid() {
+			return v
+		}
+		return cloned.Interface()
+	default:
+		return v
+	}
+}
+
+func cloneReflectMetadataElement(elem reflect.Value, elemType reflect.Type, rootKey metadataCloneVisitKey, rootDst map[string]any, visited *map[metadataCloneVisitKey]any) reflect.Value {
+	switch elem.Kind() {
+	case reflect.Interface:
+		if elem.IsNil() {
+			return reflect.Zero(elemType)
+		}
+		clonedVal := cloneRequestMetadataValue(elem.Interface(), rootKey, rootDst, visited)
+		if clonedVal == nil {
+			return reflect.Zero(elemType)
+		}
+		return reflect.ValueOf(clonedVal)
+	case reflect.Map, reflect.Slice:
+		if elem.IsNil() {
+			return elem
+		}
+		return reflect.ValueOf(cloneRequestMetadataValue(elem.Interface(), rootKey, rootDst, visited))
+	case reflect.Array, reflect.Struct:
+		return reflect.ValueOf(cloneRequestMetadataValue(elem.Interface(), rootKey, rootDst, visited))
+	default:
+		return elem
+	}
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
@@ -2655,14 +2986,42 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	return m.PrepareRequestAuth(ctx, preparer, auth)
 }
 
-// PrepareRequestAuth prepares a registered credential using the same serialization
-// and lifecycle checks as normal request execution. Management tools use this path too.
-func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
-	if m == nil || preparer == nil || auth == nil || !preparer.ShouldPrepareRequestAuth(auth) {
+func (m *Manager) prepareRequestAuthAtVersion(ctx context.Context, executor ProviderExecutor, auth *Auth, expectedEpoch, expectedVersion uint64) (*Auth, error) {
+	if m == nil || executor == nil || auth == nil {
+		return auth, nil
+	}
+	preparer, ok := executor.(RequestAuthPreparer)
+	if !ok {
 		return auth, nil
 	}
 
+	return m.prepareRequestAuthInternal(ctx, preparer, auth, expectedEpoch, expectedVersion)
+}
+
+// PrepareRequestAuth prepares a registered credential using the same serialization
+// and lifecycle checks as normal request execution. Management tools use this path too.
+func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPreparer, auth *Auth) (*Auth, error) {
+	return m.prepareRequestAuthInternal(ctx, preparer, auth, 0, 0)
+}
+
+func (m *Manager) prepareRequestAuthInternal(ctx context.Context, preparer RequestAuthPreparer, auth *Auth, expectedEpoch, expectedVersion uint64) (*Auth, error) {
+	if m == nil || preparer == nil || auth == nil {
+		return auth, nil
+	}
 	id := strings.TrimSpace(auth.ID)
+	if !preparer.ShouldPrepareRequestAuth(auth) {
+		if expectedVersion != 0 && id != "" {
+			current, okCurrent := m.GetByID(id)
+			if !okCurrent || current == nil {
+				return nil, errVerifyCredentialRemoved
+			}
+			if (expectedEpoch != 0 && current.RegistrationEpoch != expectedEpoch) || current.CredentialVersion != expectedVersion {
+				return nil, errVerifyCredentialSuperseded
+			}
+		}
+		return auth, nil
+	}
+
 	if id == "" {
 		return preparer.PrepareRequestAuth(ctx, auth.Clone())
 	}
@@ -2681,27 +3040,100 @@ func (m *Manager) PrepareRequestAuth(ctx context.Context, preparer RequestAuthPr
 	}
 	m.mu.RUnlock()
 	if target == nil {
+		if expectedVersion != 0 {
+			return nil, errVerifyCredentialRemoved
+		}
 		return nil, fmt.Errorf("prepare %s auth: credential no longer registered", prepareProviderLabel(auth.Provider))
+	}
+	if expectedVersion != 0 && ((expectedEpoch != 0 && target.RegistrationEpoch != expectedEpoch) || target.CredentialVersion != expectedVersion) {
+		return nil, errVerifyCredentialSuperseded
 	}
 
 	if !preparer.ShouldPrepareRequestAuth(target) {
 		return target, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	base := target.Clone()
-	updated, errPrepare := preparer.PrepareRequestAuth(ctx, base.Clone())
+	currentExpectedVersion := expectedVersion
+	var latestCommitted *Auth
+	prepOpts := executionAuthRefreshOptions{
+		holdRefreshLock: true,
+		expectedEpoch:   expectedEpoch,
+		onAuthUpdated: func(saved *Auth) {
+			if saved != nil {
+				base = saved.Clone()
+				latestCommitted = saved.Clone()
+			}
+		},
+	}
+	if expectedVersion != 0 {
+		prepOpts.expectedVersion = &currentExpectedVersion
+	}
+	prepCtx := m.withExecutionAuthRefresh(ctx, prepOpts)
+	updated, errPrepare := preparer.PrepareRequestAuth(prepCtx, base.Clone())
+	if expectedVersion != 0 {
+		currentAfter, okAfter := m.GetByID(id)
+		if !okAfter || currentAfter == nil {
+			return nil, errVerifyCredentialRemoved
+		}
+		if (expectedEpoch != 0 && currentAfter.RegistrationEpoch != expectedEpoch) || currentAfter.CredentialVersion != currentExpectedVersion {
+			return nil, errVerifyCredentialSuperseded
+		}
+	}
 	if errPrepare != nil {
+		if latestCommitted != nil {
+			return latestCommitted, errPrepare
+		}
 		return auth, errPrepare
 	}
 	if updated == nil {
+		if latestCommitted != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return latestCommitted, errCtx
+			}
+			return latestCommitted, nil
+		}
 		return target, nil
 	}
+	if latestCommitted != nil && preparedAuthMatchesBase(base, updated) {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return latestCommitted, errCtx
+		}
+		return latestCommitted, nil
+	}
 
-	saved, errUpdate := m.UpdatePreparedAuth(ctx, base, updated)
+	commitCtx := context.WithoutCancel(ctx)
+	if expectedVersion != 0 {
+		saved, committed, baseSuperseded, errUpdate := m.updatePreparedAuthStrict(commitCtx, base, updated)
+		if errUpdate != nil {
+			if strings.Contains(errUpdate.Error(), "stale registration epoch") {
+				return nil, errVerifyCredentialSuperseded
+			}
+			return nil, errUpdate
+		}
+		if saved == nil {
+			return nil, errVerifyCredentialRemoved
+		}
+		if !committed || baseSuperseded {
+			return nil, errVerifyCredentialSuperseded
+		}
+		if errCtx := ctx.Err(); errCtx != nil {
+			return saved, errCtx
+		}
+		return saved, nil
+	}
+
+	saved, errUpdate := m.UpdatePreparedAuth(commitCtx, base, updated)
 	if errUpdate != nil {
 		return nil, errUpdate
 	}
 	if saved != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return saved, errCtx
+		}
 		return saved, nil
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
@@ -2886,6 +3318,22 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 	}
 }
 
+func syncPublishedSelectedAuthMetadata(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	if authID, ok := src[cliproxyexecutor.SelectedAuthMetadataKey]; ok {
+		dst[cliproxyexecutor.SelectedAuthMetadataKey] = authID
+	} else {
+		delete(dst, cliproxyexecutor.SelectedAuthMetadataKey)
+	}
+	if authIndex, ok := src[cliproxyexecutor.SelectedAuthIndexMetadataKey]; ok {
+		dst[cliproxyexecutor.SelectedAuthIndexMetadataKey] = authIndex
+	} else {
+		delete(dst, cliproxyexecutor.SelectedAuthIndexMetadataKey)
+	}
+}
+
 func (m *Manager) executorFor(provider string) ProviderExecutor {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -2895,6 +3343,15 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
 type roundTripperContextKey struct{}
+
+// WithAuthTransport applies the same per-account transport to inference and model discovery.
+func (m *Manager) WithAuthTransport(ctx context.Context, auth *Auth) context.Context {
+	if rt := m.roundTripperFor(auth); rt != nil {
+		ctx = context.WithValue(ctx, roundTripperContextKey{}, rt)
+		return context.WithValue(ctx, "cliproxy.roundtripper", rt)
+	}
+	return ctx
+}
 
 // roundTripperFor retrieves an HTTP RoundTripper for the given auth if a provider is registered.
 func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
@@ -3113,18 +3570,33 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	}
 	m.mu.RLock()
 	a := m.auths[authID]
+	var authClone *Auth
 	var exec ProviderExecutor
 	if a != nil {
+		authClone = a.Clone()
 		exec, _ = m.executorLocked(executorKeyFromAuth(a))
 	}
 	m.mu.RUnlock()
-	if a == nil || exec == nil {
+	if authClone == nil || exec == nil {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a)
+		return m.prepareHTTPRequestWithExecutionAuthRefresh(req, authClone, p)
 	}
 	return nil
+}
+
+func (m *Manager) prepareHTTPRequestWithExecutionAuthRefresh(req *http.Request, auth *Auth, preparer RequestPreparer) error {
+	origCtx := req.Context()
+	prepCtx := m.withExecutionAuthRefresh(origCtx, executionAuthRefreshOptions{})
+	prepReq := req.WithContext(prepCtx)
+	errPrep := preparer.PrepareRequest(prepReq, auth)
+	finalCtx := origCtx
+	if updatedCtx := prepReq.Context(); updatedCtx != prepCtx {
+		finalCtx = context.WithValue(updatedCtx, executionAuthRefreshContextKey{}, nil)
+	}
+	*req = *prepReq.WithContext(finalCtx)
+	return errPrep
 }
 
 // PrepareHttpRequest injects provider credentials into the supplied HTTP request.
@@ -3153,7 +3625,7 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if !ok || preparer == nil {
 		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
 	}
-	return preparer.PrepareRequest(req, auth)
+	return m.prepareHTTPRequestWithExecutionAuthRefresh(req, auth, preparer)
 }
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
@@ -3201,7 +3673,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	return exec.HttpRequest(m.withExecutionAuthRefresh(ctx, executionAuthRefreshOptions{}), auth, req)
 }
 
 func ensureCanonicalSessionMetadata(metadata map[string]any, headers http.Header, payload []byte) map[string]any {
@@ -3295,6 +3770,240 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 	return util.WithSessionID(ctx, clientMeta.SessionID)
 }
 
+func modelModalitiesContain(modalities []string, target string) bool {
+	for _, modality := range modalities {
+		if strings.EqualFold(strings.TrimSpace(modality), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelSupportsTextProbeModalities(info *registry.ModelInfo) bool {
+	if info == nil {
+		return false
+	}
+	if len(info.SupportedInputModalities) > 0 && !modelModalitiesContain(info.SupportedInputModalities, "text") {
+		return false
+	}
+	if len(info.SupportedOutputModalities) > 0 && !modelModalitiesContain(info.SupportedOutputModalities, "text") {
+		return false
+	}
+	return true
+}
+
+func selectVerifyInferenceModel(models []*registry.ModelInfo) string {
+	var nonThinking, zeroAllowed, firstText, textModalityFallback, fallback string
+	for _, info := range models {
+		if info == nil {
+			continue
+		}
+		id := strings.TrimSpace(info.ID)
+		if id == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = id
+		}
+		if !modelSupportsTextProbeModalities(info) {
+			continue
+		}
+		lowerID := strings.ToLower(id)
+		if strings.Contains(lowerID, "image") || strings.Contains(lowerID, "video") {
+			if textModalityFallback == "" {
+				textModalityFallback = id
+			}
+			continue
+		}
+		if firstText == "" {
+			firstText = id
+		}
+		if info.Thinking == nil {
+			if nonThinking == "" {
+				nonThinking = id
+			}
+			continue
+		}
+		if info.Thinking.ZeroAllowed && zeroAllowed == "" {
+			zeroAllowed = id
+		}
+	}
+	switch {
+	case nonThinking != "":
+		return nonThinking
+	case zeroAllowed != "":
+		return zeroAllowed
+	case firstText != "":
+		return firstText
+	case textModalityFallback != "":
+		return textModalityFallback
+	default:
+		return fallback
+	}
+}
+
+func resolveVerifyInferenceRouteModel(auth *Auth, provider, model string) (string, error) {
+	if routeModel := strings.TrimSpace(model); routeModel != "" {
+		return routeModel, nil
+	}
+	if auth != nil {
+		if selected := selectVerifyInferenceModel(registry.GetGlobalRegistry().GetModelsForClient(auth.ID)); selected != "" {
+			return selected, nil
+		}
+	}
+	switch provider {
+	case "codex", "openai":
+		return "gpt-5", nil
+	default:
+		return "", &Error{
+			Code:       "model_required",
+			Message:    fmt.Sprintf("no registered models available for %s credential; specify a model or wait for model discovery", provider),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+}
+
+func buildVerifyInferencePayload(provider, verifyModel string) []byte {
+	doc := ojson.NewDocString(`{"model":"","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"store":false}`)
+	_ = doc.Set("model", verifyModel)
+	if provider == "codex" {
+		// Codex upstreams reject integer max_output_tokens below 16, so the minimal
+		// verification budget must sit at that floor. Other providers omit
+		// max_output_tokens to avoid rejecting or truncating thinking models.
+		_ = doc.Set("max_output_tokens", 16)
+	}
+	return doc.Bytes()
+}
+
+func verifyCancellationError(execCtx context.Context, auth *Auth, err error) error {
+	if execCtx != nil {
+		if errCtx := execCtx.Err(); errCtx != nil {
+			return errCtx
+		}
+	}
+	return claudeOAuthRequestCancellation(execCtx, auth, err)
+}
+
+func verifyCredentialSupersededError() *Error {
+	return &Error{
+		Code:       "credential_superseded",
+		Message:    "credential was replaced during verification; re-run verification for the new credential",
+		HTTPStatus: http.StatusConflict,
+	}
+}
+
+func verifyCredentialRemovedError() *Error {
+	return &Error{
+		Code:       "auth_not_found",
+		Message:    "credential was removed during verification",
+		HTTPStatus: http.StatusConflict,
+	}
+}
+
+// tryRefreshVerifyAuthAfterUnauthorized refreshes an account-pinned credential
+// once after a 401 while fencing on both RegistrationEpoch and CredentialVersion
+// so an external replacement with the same ID fails with 409 credential_superseded
+// instead of retrying or verifying the replacement credential.
+func (m *Manager) tryRefreshVerifyAuthAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders http.Header, credVersion, regEpoch uint64) (*Auth, bool, error) {
+	if m == nil || auth == nil || execErr == nil {
+		return auth, false, nil
+	}
+	if isRequestScopedError(execErr) || isRequestStopError(execErr) || isRequestTerminatedError(execErr) || isTOSViolationError(execErr) || isInvalidGrantError(execErr) || !isUnauthorizedError(execErr) {
+		return auth, false, nil
+	}
+	if _, ruleMatched := matchRequestScopedErrorAction(auth, execErr, m.requestScopedErrorConfig(ctx)); ruleMatched {
+		return auth, false, nil
+	}
+	current, okCurrent := m.GetByID(auth.ID)
+	if !okCurrent || current == nil {
+		return nil, false, verifyCredentialRemovedError()
+	}
+	if current.RegistrationEpoch != regEpoch || current.CredentialVersion != credVersion {
+		return current, false, verifyCredentialSupersededError()
+	}
+	failedToken := authAccessTokenForRequest(ctx, auth, clientHeaders)
+	if alreadyTried || !authHasRefreshCredential(auth) || hasUnauthorizedAuthFailure(auth) {
+		if failedToken != "" {
+			m.markRejectedAccessToken(auth.ID, failedToken)
+		}
+		return auth, false, nil
+	}
+	log.Debugf("unauthorized response for %s (%s) during verification, refreshing credentials before retry", auth.Provider, auth.ID)
+	refreshed, errRefresh := m.refreshAuthForRequestAtVersion(ctx, auth.ID, failedToken, regEpoch, credVersion)
+	if errors.Is(errRefresh, errVerifyCredentialRemoved) {
+		return nil, false, verifyCredentialRemovedError()
+	}
+	if errors.Is(errRefresh, errVerifyCredentialSuperseded) {
+		latest, _ := m.GetByID(auth.ID)
+		return latest, false, verifyCredentialSupersededError()
+	}
+	if errRefresh != nil || refreshed == nil {
+		log.Debugf("credential refresh during verification failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
+		latest, okLatest := m.GetByID(auth.ID)
+		if !okLatest || latest == nil {
+			return nil, false, verifyCredentialRemovedError()
+		}
+		if latest.RegistrationEpoch != regEpoch || latest.CredentialVersion != credVersion {
+			return latest, false, verifyCredentialSupersededError()
+		}
+		return auth, false, nil
+	}
+	if failedToken != "" && authAccessTokenForRequest(ctx, refreshed, clientHeaders) == failedToken && (refreshed.RejectedAccessToken == failedToken || refreshed.RejectedSIWCAccessToken == failedToken) {
+		return auth, false, nil
+	}
+	return refreshed, true, nil
+}
+
+func (m *Manager) recordVerifyFailure(execCtx context.Context, auth *Auth, provider, stateModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, credVersion, regEpoch, executionSeq uint64, err error) {
+	rerr := resultErrorFromError(err)
+	if rerr != nil {
+		rerr.Message = sanitizeRenewalMessage(rerr.Message)
+	}
+	result := Result{
+		AuthID:            auth.ID,
+		Provider:          provider,
+		Model:             stateModel,
+		RouteModel:        routeModel,
+		Success:           false,
+		Error:             rerr,
+		RetryAfter:        retryAfterFromError(err),
+		CredentialScope:   isCredentialScopedError(err),
+		Options:           opts,
+		AccessToken:       accessToken,
+		RefreshToken:      authRefreshToken(auth),
+		CredentialVersion: credVersion,
+		RegistrationEpoch: regEpoch,
+		ExecutionSeq:      executionSeq,
+	}
+	m.ApplyRequestScopedErrorResult(execCtx, auth, err, &result)
+	m.MarkResult(execCtx, result)
+}
+
+func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *Auth, provider, stateModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, credVersion, regEpoch, executionSeq uint64) (*Auth, error) {
+	m.MarkResult(execCtx, Result{
+		AuthID:            auth.ID,
+		Provider:          provider,
+		Model:             stateModel,
+		RouteModel:        routeModel,
+		Success:           true,
+		CompletedResponse: true,
+		Options:           opts,
+		AccessToken:       accessToken,
+		RefreshToken:      authRefreshToken(auth),
+		CredentialVersion: credVersion,
+		RegistrationEpoch: regEpoch,
+		ExecutionSeq:      executionSeq,
+	})
+	updated, okUpdated := m.GetByID(auth.ID)
+	if !okUpdated || updated == nil {
+		return nil, verifyCredentialRemovedError()
+	}
+	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
+		return updated, verifyCredentialSupersededError()
+	}
+	return updated, nil
+}
+
 // VerifyInference performs an operator-triggered, account-pinned inference verification
 // using an isolated session and minimal non-user prompt/token budget. It never falls back
 // to another credential and requires a completed response before marking InferenceVerified.
@@ -3323,15 +4032,10 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if executor == nil {
 		return auth, &Error{Code: "executor_not_found", Message: "executor not registered for provider", HTTPStatus: http.StatusBadRequest}
 	}
-	executor = executorForAuth(executor, auth)
 
-	routeModel := strings.TrimSpace(model)
-	if routeModel == "" {
-		if models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID); len(models) > 0 && models[0] != nil && strings.TrimSpace(models[0].ID) != "" {
-			routeModel = strings.TrimSpace(models[0].ID)
-		} else {
-			routeModel = "gpt-5"
-		}
+	routeModel, errModel := resolveVerifyInferenceRouteModel(auth, provider, model)
+	if errModel != nil {
+		return auth, errModel
 	}
 	verifyModel := routeModel
 	if candidates, _, _, _ := m.executionModelCandidatesWithAlias(auth, routeModel); len(candidates) > 0 && strings.TrimSpace(candidates[0]) != "" {
@@ -3343,9 +4047,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 
 	sessionID := fmt.Sprintf("verify-%s-%d", auth.ID, time.Now().UTC().UnixNano())
-	// Codex upstreams reject integer max_output_tokens below 16, so the minimal
-	// verification budget must sit at that floor.
-	payload := []byte(fmt.Sprintf(`{"model":%q,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ping"}]}],"max_output_tokens":16,"store":false}`, verifyModel))
+	payload := buildVerifyInferencePayload(provider, verifyModel)
 	req := cliproxyexecutor.Request{
 		Model:   verifyModel,
 		Payload: payload,
@@ -3359,165 +4061,264 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		Metadata:        map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: sessionID},
 	}
 
-	execCtx := m.newUpstreamAttemptContext(ctx)
-	execCtx = syncMetadataSessionToContext(execCtx, opts.Metadata)
+	baseCtx := ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	if errCtx := baseCtx.Err(); errCtx != nil {
+		return auth, errCtx
+	}
+	baseCtx = m.WithAuthTransport(baseCtx, auth)
+	execCtx := syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 	executionSeq := m.nextExecutionSeq()
+
+	baseExecutor := executor
 	accessToken := authAccessTokenForRequest(execCtx, auth, opts.Headers)
 	credVersion := auth.CredentialVersion
 	regEpoch := auth.RegistrationEpoch
+	didRefreshOnUnauthorized := false
 
-	streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
-	if errStream != nil {
-		rerr := resultErrorFromError(errStream)
-		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
-			opts.Stream = false
-			resp, errExec := executor.Execute(execCtx, auth, req, opts)
-			rerrExec := resultErrorFromError(errExec)
-			if rerrExec != nil {
-				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)
+	for {
+		preparedAuth, errPrepare := m.prepareRequestAuthAtVersion(execCtx, baseExecutor, auth, regEpoch, credVersion)
+		if errPrepare == nil {
+			if preparedAuth != nil {
+				if preparedAuth.RegistrationEpoch != regEpoch {
+					return preparedAuth, verifyCredentialSupersededError()
+				}
+				auth = preparedAuth
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion = auth.CredentialVersion
+				regEpoch = auth.RegistrationEpoch
 			}
-			if errExec != nil {
-				m.MarkResult(execCtx, Result{
-					AuthID:            auth.ID,
-					Provider:          provider,
-					Model:             stateModel,
-					RouteModel:        routeModel,
-					Success:           false,
-					Error:             rerrExec,
-					RetryAfter:        retryAfterFromError(errExec),
-					CredentialScope:   isCredentialScopedError(errExec),
-					Options:           opts,
-					AccessToken:       accessToken,
-					RefreshToken:      authRefreshToken(auth),
-					CredentialVersion: credVersion,
-					RegistrationEpoch: regEpoch,
-					ExecutionSeq:      executionSeq,
-				})
-				updated, _ := m.GetByID(auth.ID)
-				return updated, errExec
-			}
-			if resp.Incomplete || !isCompletedExecutionPayload(resp.Payload) {
-				incompleteErr := &Error{Code: "incomplete_response", Message: "verification response did not complete", HTTPStatus: http.StatusBadGateway}
-				updated, _ := m.GetByID(auth.ID)
-				return updated, incompleteErr
-			}
-			m.MarkResult(execCtx, Result{
-				AuthID:            auth.ID,
-				Provider:          provider,
-				Model:             stateModel,
-				RouteModel:        routeModel,
-				Success:           true,
-				CompletedResponse: true,
-				Options:           opts,
-				AccessToken:       accessToken,
-				RefreshToken:      authRefreshToken(auth),
-				CredentialVersion: credVersion,
-				RegistrationEpoch: regEpoch,
-				ExecutionSeq:      executionSeq,
-			})
-			updated, okUpdated := m.GetByID(auth.ID)
-			if !okUpdated || updated == nil {
-				return nil, &Error{Code: "auth_not_found", Message: "credential was removed during verification", HTTPStatus: http.StatusConflict}
-			}
-			if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
-				return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
-			}
-			return updated, nil
+			break
 		}
-		if rerr != nil {
-			rerr.Message = sanitizeRenewalMessage(rerr.Message)
+		if errors.Is(errPrepare, errVerifyCredentialRemoved) {
+			return nil, verifyCredentialRemovedError()
 		}
-		m.MarkResult(execCtx, Result{
-			AuthID:            auth.ID,
-			Provider:          provider,
-			Model:             stateModel,
-			RouteModel:        routeModel,
-			Success:           false,
-			Error:             rerr,
-			RetryAfter:        retryAfterFromError(errStream),
-			CredentialScope:   isCredentialScopedError(errStream),
-			Options:           opts,
-			AccessToken:       accessToken,
-			RefreshToken:      authRefreshToken(auth),
-			CredentialVersion: credVersion,
-			RegistrationEpoch: regEpoch,
-			ExecutionSeq:      executionSeq,
-		})
+		if errors.Is(errPrepare, errVerifyCredentialSuperseded) {
+			latest, _ := m.GetByID(auth.ID)
+			return latest, verifyCredentialSupersededError()
+		}
+		if preparedAuth != nil && preparedAuth.RegistrationEpoch == regEpoch {
+			auth = preparedAuth
+			accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+			credVersion = auth.CredentialVersion
+			regEpoch = auth.RegistrationEpoch
+		}
+		if errCancel := verifyCancellationError(execCtx, auth, errPrepare); errCancel != nil {
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errCancel
+		}
+		if accessToken != "" {
+			refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, errPrepare, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+			if errSuperseded != nil {
+				return refreshed, errSuperseded
+			}
+			if okRefresh {
+				auth = refreshed
+				didRefreshOnUnauthorized = true
+				execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+				executionSeq = m.nextExecutionSeq()
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion = auth.CredentialVersion
+				regEpoch = auth.RegistrationEpoch
+				continue
+			}
+		}
+		if errCancel := verifyCancellationError(execCtx, auth, errPrepare); errCancel != nil {
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errCancel
+		}
+		m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, errPrepare)
 		updated, _ := m.GetByID(auth.ID)
-		return updated, errStream
+		return updated, errPrepare
+	}
+	executor = executorForAuth(baseExecutor, auth)
+
+	var activeVerifyAuth atomic.Pointer[Auth]
+	activeVerifyAuth.Store(auth)
+	syncVerifyAuth := func() {
+		if currentAuth := activeVerifyAuth.Load(); currentAuth != nil && currentAuth != auth {
+			auth = currentAuth
+			accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+			credVersion = auth.CredentialVersion
+			regEpoch = auth.RegistrationEpoch
+		}
+	}
+	verifyRefreshCtx := func(base context.Context) context.Context {
+		return m.withExecutionAuthRefresh(base, executionAuthRefreshOptions{
+			expectedEpoch:   regEpoch,
+			expectedVersion: &credVersion,
+			onAuthUpdated: func(updated *Auth) {
+				if updated != nil {
+					activeVerifyAuth.Store(updated.Clone())
+				}
+			},
+		})
 	}
 
-	var sawCompleted bool
-	var sawIncomplete bool
-	var chunkErr error
-	if streamRes != nil && streamRes.Chunks != nil {
-		for chunk := range streamRes.Chunks {
-			if chunk.Err != nil && chunkErr == nil {
-				chunkErr = chunk.Err
+	for {
+		activeVerifyAuth.Store(auth)
+		streamRes, errStream := executor.ExecuteStream(verifyRefreshCtx(execCtx), auth, req, opts)
+		syncVerifyAuth()
+		if errStream != nil {
+			if errors.Is(errStream, errVerifyCredentialRemoved) {
+				return nil, verifyCredentialRemovedError()
 			}
-			if chunk.Incomplete {
-				sawIncomplete = true
+			if errors.Is(errStream, errVerifyCredentialSuperseded) {
+				latest, _ := m.GetByID(auth.ID)
+				return latest, verifyCredentialSupersededError()
 			}
-			if len(chunk.Payload) > 0 {
-				comp, incomp := streamPayloadCompletionFlags(chunk.Payload)
-				if comp {
-					sawCompleted = true
+			if errCancel := verifyCancellationError(execCtx, auth, errStream); errCancel != nil {
+				updated, _ := m.GetByID(auth.ID)
+				return updated, errCancel
+			}
+			rerr := resultErrorFromError(errStream)
+			if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
+				opts.Stream = false
+				for {
+					activeVerifyAuth.Store(auth)
+					resp, errExec := executor.Execute(verifyRefreshCtx(execCtx), auth, req, opts)
+					syncVerifyAuth()
+					if errExec != nil {
+						if errors.Is(errExec, errVerifyCredentialRemoved) {
+							return nil, verifyCredentialRemovedError()
+						}
+						if errors.Is(errExec, errVerifyCredentialSuperseded) {
+							latest, _ := m.GetByID(auth.ID)
+							return latest, verifyCredentialSupersededError()
+						}
+						if errCancel := verifyCancellationError(execCtx, auth, errExec); errCancel != nil {
+							updated, _ := m.GetByID(auth.ID)
+							return updated, errCancel
+						}
+						refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, errExec, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+						if errSuperseded != nil {
+							return refreshed, errSuperseded
+						}
+						if okRefresh {
+							auth = refreshed
+							executor = executorForAuth(baseExecutor, auth)
+							didRefreshOnUnauthorized = true
+							execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+							executionSeq = m.nextExecutionSeq()
+							accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+							credVersion = auth.CredentialVersion
+							regEpoch = auth.RegistrationEpoch
+							continue
+						}
+						if errCancel := verifyCancellationError(execCtx, auth, errExec); errCancel != nil {
+							updated, _ := m.GetByID(auth.ID)
+							return updated, errCancel
+						}
+						m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, errExec)
+						updated, _ := m.GetByID(auth.ID)
+						return updated, errExec
+					}
+					if errCancel := verifyCancellationError(execCtx, auth, nil); errCancel != nil {
+						updated, _ := m.GetByID(auth.ID)
+						return updated, errCancel
+					}
+					if resp.Incomplete || !isCompletedExecutionPayload(resp.Payload) {
+						incompleteErr := &Error{Code: "incomplete_response", Message: "verification response did not complete", HTTPStatus: http.StatusBadGateway}
+						updated, _ := m.GetByID(auth.ID)
+						return updated, incompleteErr
+					}
+					return m.completeVerifyInferenceSuccess(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq)
 				}
-				if incomp {
-					sawIncomplete = true
+			}
+			refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, errStream, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+			if errSuperseded != nil {
+				return refreshed, errSuperseded
+			}
+			if okRefresh {
+				auth = refreshed
+				executor = executorForAuth(baseExecutor, auth)
+				didRefreshOnUnauthorized = true
+				execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+				executionSeq = m.nextExecutionSeq()
+				accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+				credVersion = auth.CredentialVersion
+				regEpoch = auth.RegistrationEpoch
+				continue
+			}
+			if errCancel := verifyCancellationError(execCtx, auth, errStream); errCancel != nil {
+				updated, _ := m.GetByID(auth.ID)
+				return updated, errCancel
+			}
+			m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, errStream)
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errStream
+		}
+
+		var sawCompleted bool
+		var sawIncomplete bool
+		var chunkErr error
+		if streamRes != nil && streamRes.Chunks != nil {
+		streamDrain:
+			for {
+				select {
+				case <-execCtx.Done():
+					discardStreamChunks(streamRes.Chunks)
+					updated, _ := m.GetByID(auth.ID)
+					return updated, execCtx.Err()
+				case chunk, okChunk := <-streamRes.Chunks:
+					if !okChunk {
+						break streamDrain
+					}
+					if chunk.Err != nil && chunkErr == nil {
+						chunkErr = chunk.Err
+					}
+					if chunk.Incomplete {
+						sawIncomplete = true
+					}
+					if len(chunk.Payload) > 0 {
+						comp, incomp := streamPayloadCompletionFlags(chunk.Payload)
+						if comp {
+							sawCompleted = true
+						}
+						if incomp {
+							sawIncomplete = true
+						}
+					}
 				}
 			}
 		}
-	}
-	if chunkErr != nil {
-		rerrChunk := resultErrorFromError(chunkErr)
-		if rerrChunk != nil {
-			rerrChunk.Message = sanitizeRenewalMessage(rerrChunk.Message)
+		if errCancel := verifyCancellationError(execCtx, auth, chunkErr); errCancel != nil {
+			updated, _ := m.GetByID(auth.ID)
+			return updated, errCancel
 		}
-		m.MarkResult(execCtx, Result{
-			AuthID:            auth.ID,
-			Provider:          provider,
-			Model:             stateModel,
-			RouteModel:        routeModel,
-			Success:           false,
-			Error:             rerrChunk,
-			RetryAfter:        retryAfterFromError(chunkErr),
-			CredentialScope:   isCredentialScopedError(chunkErr),
-			Options:           opts,
-			AccessToken:       accessToken,
-			RefreshToken:      authRefreshToken(auth),
-			CredentialVersion: credVersion,
-			RegistrationEpoch: regEpoch,
-			ExecutionSeq:      executionSeq,
-		})
-		updated, _ := m.GetByID(auth.ID)
-		return updated, chunkErr
+		if chunkErr != nil {
+			if !sawCompleted {
+				refreshed, okRefresh, errSuperseded := m.tryRefreshVerifyAuthAfterUnauthorized(newUpstreamAttemptContext(execCtx), auth, chunkErr, didRefreshOnUnauthorized, opts.Headers, credVersion, regEpoch)
+				if errSuperseded != nil {
+					return refreshed, errSuperseded
+				}
+				if okRefresh {
+					auth = refreshed
+					executor = executorForAuth(baseExecutor, auth)
+					didRefreshOnUnauthorized = true
+					execCtx = syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
+					executionSeq = m.nextExecutionSeq()
+					accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+					credVersion = auth.CredentialVersion
+					regEpoch = auth.RegistrationEpoch
+					continue
+				}
+				if errCancel := verifyCancellationError(execCtx, auth, chunkErr); errCancel != nil {
+					updated, _ := m.GetByID(auth.ID)
+					return updated, errCancel
+				}
+			}
+			m.recordVerifyFailure(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq, chunkErr)
+			updated, _ := m.GetByID(auth.ID)
+			return updated, chunkErr
+		}
+		if !sawCompleted || sawIncomplete {
+			incompleteErr := &Error{Code: "incomplete_response", Message: "verification stream ended without a completed response", HTTPStatus: http.StatusBadGateway}
+			updated, _ := m.GetByID(auth.ID)
+			return updated, incompleteErr
+		}
+		return m.completeVerifyInferenceSuccess(execCtx, auth, provider, stateModel, routeModel, opts, accessToken, credVersion, regEpoch, executionSeq)
 	}
-	if !sawCompleted || sawIncomplete {
-		incompleteErr := &Error{Code: "incomplete_response", Message: "verification stream ended without a completed response", HTTPStatus: http.StatusBadGateway}
-		updated, _ := m.GetByID(auth.ID)
-		return updated, incompleteErr
-	}
-	m.MarkResult(execCtx, Result{
-		AuthID:            auth.ID,
-		Provider:          provider,
-		Model:             stateModel,
-		RouteModel:        routeModel,
-		Success:           true,
-		CompletedResponse: true,
-		Options:           opts,
-		AccessToken:       accessToken,
-		RefreshToken:      authRefreshToken(auth),
-		CredentialVersion: credVersion,
-		RegistrationEpoch: regEpoch,
-		ExecutionSeq:      executionSeq,
-	})
-	updated, okUpdated := m.GetByID(auth.ID)
-	if !okUpdated || updated == nil {
-		return nil, &Error{Code: "auth_not_found", Message: "credential was removed during verification", HTTPStatus: http.StatusConflict}
-	}
-	if updated.CredentialVersion != credVersion || updated.RegistrationEpoch != regEpoch || !updated.InferenceVerified {
-		return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
-	}
-	return updated, nil
 }

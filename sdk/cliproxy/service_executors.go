@@ -295,6 +295,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"kimi-ai",
 		"kimi.ai",
 		"xai",
+		"copilot",
 		"devin",
 		"meta",
 		"openai-compatibility",
@@ -404,6 +405,14 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 			}
 		}
 		s.registerExecutor(executor.NewXAIAutoExecutor(cfg))
+	case "copilot":
+		if existing, found := s.ownedExecutor("copilot"); found {
+			if previous, ok := existing.(*executor.CopilotExecutor); ok {
+				s.registerExecutor(previous.WithConfig(cfg))
+				return
+			}
+		}
+		s.registerExecutor(executor.NewCopilotExecutor(cfg))
 	case "devin":
 		s.registerExecutor(executor.NewDevinExecutor(cfg))
 	case "meta":
@@ -596,12 +605,15 @@ func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
 // Callers filter native models before applying OAuth aliases, so plugin models are filtered
 // here by their original IDs instead of re-filtering the merged list by alias names.
 func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo, excluded []string) []*ModelInfo {
-	pluginModels := applyExcludedModels(s.pluginModelsForProvider(providerKey), excluded)
-	if len(pluginModels) == 0 {
+	return appendDistinctModels(models, applyExcludedModels(s.pluginModelsForProvider(providerKey), excluded))
+}
+
+func appendDistinctModels(models, additional []*ModelInfo) []*ModelInfo {
+	if len(additional) == 0 {
 		return models
 	}
-	out := make([]*ModelInfo, 0, len(models)+len(pluginModels))
-	seen := make(map[string]struct{}, len(models)+len(pluginModels))
+	out := make([]*ModelInfo, 0, len(models)+len(additional))
+	seen := make(map[string]struct{}, len(models)+len(additional))
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -612,7 +624,7 @@ func (s *Service) appendPluginModels(providerKey string, models []*ModelInfo, ex
 		}
 		out = append(out, model)
 	}
-	for _, model := range pluginModels {
+	for _, model := range additional {
 		if model == nil {
 			continue
 		}
@@ -732,7 +744,11 @@ func (s *Service) tryRegisterPluginModelsForAuthWithConfigFenced(ctx context.Con
 	if ctx != nil && ctx.Err() != nil {
 		return true, true
 	}
-	models := applyExcludedModels(result.Models, activeExcluded)
+	models := result.Models
+	if _, _, compat := openAICompatInfoFromAuth(activeAuth); providerKey == "copilot" && !compat {
+		models = s.copilotPublicPluginModels(activeAuth, models)
+	}
+	models = applyExcludedModels(models, activeExcluded)
 	models = applyOAuthModelAliasForAuth(cfg, providerKey, activeAuthKind, activeAuth.Attributes, models)
 	publicationFence := fence
 	if pluginAuthCommitted {

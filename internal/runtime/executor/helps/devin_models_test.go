@@ -50,6 +50,13 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			want:          "swe-2-flash-medium",
 		},
 		{
+			name:          "zero suffix overrides body effort and budget",
+			rawModel:      "devin/MODEL_GPT_5_2(0)",
+			thinkingLevel: "high",
+			budgetTokens:  32768,
+			want:          "MODEL_GPT_5_2_NONE",
+		},
+		{
 			name:     "direct swe-2-high unchanged",
 			rawModel: "swe-2-high",
 			want:     "swe-2-high",
@@ -119,6 +126,12 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 			rawModel:      "glm-5-3",
 			thinkingLevel: "medium",
 			want:          "glm-5-3-high",
+		},
+		{
+			name:          "glm-5-3 adaptive body effort chooses the lower tied level",
+			rawModel:      "glm-5-3",
+			thinkingLevel: "adaptive",
+			want:          "glm-5-3-low",
 		},
 		{
 			name:          "devin prefix glm-5-3-flash default high",
@@ -705,6 +718,28 @@ func TestResolveDevinChatModelUID(t *testing.T) {
 				t.Errorf("ResolveDevinChatModelUID(%q, %q, %d) = %q, want %q", tt.rawModel, tt.thinkingLevel, tt.budgetTokens, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolveDevinChatModelUID_AutoEffort(t *testing.T) {
+	for _, tc := range []struct{ model, want string }{
+		{"gpt-6-sol", "gpt-6-sol-medium"},
+		{"swe-2", "swe-2-medium"},
+		{"swe-2-lightning", "swe-2-medium-lightning"},
+		{"glm-5-3", "glm-5-3-low"},
+		{"deepseek-v4-flash", "deepseek-v4-flash-high"},
+		{"glm-5-2-1m", "glm-5-2-max-1m"},
+		{"MODEL_GPT_5_2", "MODEL_GPT_5_2_MEDIUM"},
+		{"kimi-k2-6", "kimi-k2-6"},
+	} {
+		for _, suffix := range []string{"(auto)", "(-1)"} {
+			model := "devin/" + tc.model + suffix
+			t.Run(model, func(t *testing.T) {
+				if got := ResolveDevinChatModelUID(model, "max", 64000); got != tc.want {
+					t.Errorf("upstream UID = %q, want %q", got, tc.want)
+				}
+			})
+		}
 	}
 }
 

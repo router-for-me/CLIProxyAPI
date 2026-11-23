@@ -51,6 +51,10 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	if syncMetaPromptCacheRetentionDoc(origDoc, originalPayload) {
 		origChanged = true
 	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) &&
+		helps.StripResponsesIncludeValuesDoc(origDoc, "output.encrypted_content", "web_search_call.results") {
+		origChanged = true
+	}
 	if origChanged {
 		originalTranslated = origDoc.Bytes()
 	}
@@ -70,6 +74,9 @@ func (e *MetaExecutor) prepareResponsesRequest(ctx context.Context, auth *clipro
 	helps.SetBoolIfDifferentDoc(doc, "stream", stream)
 	_ = doc.Delete("generate")
 	syncMetaPromptCacheRetentionDoc(doc, req.Payload)
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		helps.StripResponsesIncludeValuesDoc(doc, "output.encrypted_content", "web_search_call.results")
+	}
 	_ = doc.Delete("safety_identifier")
 	_ = doc.Delete("stream_options")
 	_ = doc.Delete("client_metadata")

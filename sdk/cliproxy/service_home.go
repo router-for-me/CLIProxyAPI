@@ -184,6 +184,8 @@ func (s *Service) stageHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 	merged.Host = baseCfg.Host
 	merged.Port = baseCfg.Port
 	merged.TLS = baseCfg.TLS
+	// Home sends a shared payload; an overlay must not change the node's identity.
+	merged.ServerID = baseCfg.ServerID
 	merged.Home = baseCfg.Home
 	storeAuth := merged.Plugins.StoreAuth
 	forceHomeRuntimeConfig(&merged)
