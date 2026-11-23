@@ -281,8 +281,12 @@ var claudeCodeMessagesHeaderOrder = []string{
 	"X-Stainless-Timeout",
 	"anthropic-beta",
 	"anthropic-dangerous-direct-browser-access",
+	"anthropic-dispatch-id", // Claude Code 2.1.321 order
 	"anthropic-version",
 	"x-app",
+	"x-claude-code-prompt-id",
+	"x-claude-code-request-class",
+	"x-claude-code-sandy-plover",
 	"x-client-request-id",
 	"Connection",
 	"Host",

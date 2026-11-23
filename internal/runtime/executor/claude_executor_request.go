@@ -27,6 +27,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// claudeDispatchIDDefault is the Anthropic-Dispatch-Id that Claude Code 2.1.321
+// sends; it comes from a server-side flag and was this value on every measured account.
+const claudeDispatchIDDefault = "v2d"
+
 const (
 	claudeTokenCountingBeta          = "token-counting-2024-11-01"
 	claudeFastModeBeta               = "fast-mode-2026-02-01"
@@ -1590,6 +1594,9 @@ func applyClaudeHeadersWithNativeProfile(
 	if confirmedClaudeCode {
 		for _, hdr := range []string{
 			"X-Claude-Code-Request-Class",
+			"X-Claude-Code-Prompt-Id",
+			"X-Claude-Code-Sandy-Plover",
+			"Anthropic-Dispatch-Id",
 			"X-Claude-Code-Agent-Type",
 			"X-Claude-Code-Prev-Tool-Durations",
 			"X-Claude-Code-Compaction",
@@ -1598,6 +1605,22 @@ func applyClaudeHeadersWithNativeProfile(
 			if val := helps.HeaderValueCaseInsensitive(incomingHeaders, hdr); val != "" {
 				r.Header.Set(hdr, val)
 			}
+		}
+	}
+	// Claude Code 2.1.321 sends these on every first-party Messages call. The
+	// dispatch id comes from a server-side feature flag (claudeDispatchIDDefault). sandy-plover lists the tools the conversation used,
+	// rebuilt from the body. The prompt id mirrors cc_prompt_id in the billing
+	// block, which only main-thread turns carry.
+	if !confirmedClaudeCode && isAnthropicBase && !countTokens {
+		class := "main"
+		if helperProfile || helps.IsClaudeProbeOrHelperRequest(body) {
+			class = "auxiliary"
+		}
+		r.Header.Set("Anthropic-Dispatch-Id", claudeDispatchIDDefault)
+		r.Header.Set("X-Claude-Code-Request-Class", class)
+		r.Header.Set("X-Claude-Code-Sandy-Plover", helps.ClaudeToolsUsedHeader(body))
+		if promptID := claudeBillingPromptID(body); promptID != "" && class == "main" {
+			r.Header.Set("X-Claude-Code-Prompt-Id", promptID)
 		}
 	}
 	// Per-request UUID, matches Claude Code's x-client-request-id for first-party API.
@@ -1702,6 +1725,11 @@ var claudeWireHeaderCasing = map[string]string{
 	"X-Client-Request-Id": "x-client-request-id",
 
 	"Anthropic-Dangerous-Direct-Browser-Access": "anthropic-dangerous-direct-browser-access",
+	// Claude Code 2.1.321 headers, sent lowercase.
+	"Anthropic-Dispatch-Id":       "anthropic-dispatch-id",
+	"X-Claude-Code-Prompt-Id":     "x-claude-code-prompt-id",
+	"X-Claude-Code-Request-Class": "x-claude-code-request-class",
+	"X-Claude-Code-Sandy-Plover":  "x-claude-code-sandy-plover",
 }
 
 // applyClaudeWireHeaderCasing restores the header name casing of the real client.
@@ -1734,6 +1762,36 @@ func applyClaudeWireHeaderCasing(r *http.Request) {
 		delete(r.Header, canonical)
 		r.Header[wire] = values
 	}
+}
+
+// claudeBillingPromptID returns cc_prompt_id from the x-anthropic-billing-header
+// system block, or "" when the body has none or the value is not a UUID.
+func claudeBillingPromptID(body []byte) string {
+	system := ojson.GetBytesNoCopy(body, "system")
+	if !system.IsArray() {
+		return ""
+	}
+	for _, block := range system.Array() {
+		text := block.Get("text").String()
+		if !strings.HasPrefix(text, "x-anthropic-billing-header:") {
+			continue
+		}
+		_, rest, found := strings.Cut(text, "cc_prompt_id=")
+		if !found {
+			return ""
+		}
+		id, _, terminated := strings.Cut(rest, ";")
+		if !terminated || len(id) != 36 {
+			return ""
+		}
+		for _, c := range id {
+			if !(c == '-' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return ""
+			}
+		}
+		return id
+	}
+	return ""
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

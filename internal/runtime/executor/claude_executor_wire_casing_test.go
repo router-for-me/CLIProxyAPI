@@ -35,17 +35,25 @@ var claudeCode2_1_220WireHeaderOrder = []string{
 	"X-Stainless-Timeout",
 	"anthropic-beta",
 	"anthropic-dangerous-direct-browser-access",
+	"anthropic-dispatch-id", // 2.1.321 adds these four
 	"anthropic-version",
 	"x-app",
+	"x-claude-code-prompt-id",
+	"x-claude-code-request-class",
+	"x-claude-code-sandy-plover",
 	"x-client-request-id",
 }
+
+// claudeWireProbeBody is a main-thread turn: its billing block carries
+// cc_prompt_id, which 2.1.321 mirrors into x-claude-code-prompt-id.
+const claudeWireProbeBody = `{"model":"claude-opus-5","system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.321.97f; cc_entrypoint=cli; cch=00000; cc_prompt_id=11111111-2222-4333-8444-555555555555; cc_turn_origin=human; cc_prompt_index=1; cc_turn_index=1;"}],"messages":[{"role":"user","content":"hi"}]}`
 
 func newClaudeWireProbeRequest(t *testing.T, rawURL string) *http.Request {
 	t.Helper()
 	auth := &cliproxyauth.Auth{ID: "wire", Metadata: map[string]any{"access_token": "sk-ant-oat01-wire"}}
 	req := httptest.NewRequest(http.MethodPost, rawURL, strings.NewReader("{}"))
 	req.Header = http.Header{}
-	body := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(claudeWireProbeBody)
 	if err := applyClaudeHeaders(req, auth, "sk-ant-oat01-wire", false, nil, body, nil, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders: %v", err)
 	}
@@ -62,7 +70,7 @@ func TestApplyClaudeHeaders_LeavesHeadersCanonicalForThePipeline(t *testing.T) {
 	auth := &cliproxyauth.Auth{ID: "wire", Metadata: map[string]any{"access_token": "sk-ant-oat01-wire"}}
 	req := httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages?beta=true", strings.NewReader("{}"))
 	req.Header = http.Header{}
-	body := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hi"}]}`)
+	body := []byte(claudeWireProbeBody)
 	if err := applyClaudeHeaders(req, auth, "sk-ant-oat01-wire", false, nil, body, nil, nil, false); err != nil {
 		t.Fatalf("applyClaudeHeaders: %v", err)
 	}

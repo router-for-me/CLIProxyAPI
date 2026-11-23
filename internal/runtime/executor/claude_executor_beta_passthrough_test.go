@@ -73,7 +73,9 @@ func TestApplyClaudeHeaders_PreservesNativeGatewayHintsOnly(t *testing.T) {
 	}{
 		{name: "confirmed main", requestClass: "main", confirmed: true},
 		{name: "confirmed auxiliary", requestClass: "auxiliary", confirmed: true},
-		{name: "unconfirmed caller", requestClass: "main"},
+		// Claude Code 2.1.321 always sends its own class, so the unconfirmed caller's
+		// value is replaced by CPA's ("main" here), never forwarded.
+		{name: "unconfirmed caller", requestClass: "auxiliary"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
@@ -96,6 +98,12 @@ func TestApplyClaudeHeaders_PreservesNativeGatewayHintsOnly(t *testing.T) {
 				got := req.Header.Get(key)
 				if tt.confirmed && got != values[0] {
 					t.Errorf("%s = %q, want %q", key, got, values[0])
+				}
+				if !tt.confirmed && http.CanonicalHeaderKey(key) == "X-Claude-Code-Request-Class" {
+					if got != "main" {
+						t.Errorf("unconfirmed caller: %s = %q, want CPA's own \"main\"", key, got)
+					}
+					continue
 				}
 				if !tt.confirmed && got != "" {
 					t.Errorf("unconfirmed caller forwarded %s = %q", key, got)
