@@ -42,8 +42,11 @@ func TestConvertOpenAIRequestToAntigravitySkipsEmptyTextPartsWithoutNulls(t *tes
 	if userParts[0].Type == ojson.Null {
 		t.Fatalf("user parts.0 is null. Output: %s", result)
 	}
-	if got := userParts[0].Get("inlineData.mime_type").String(); got != "audio/mpeg" {
-		t.Fatalf("audio mime_type = %q, want audio/mpeg. Output: %s", got, result)
+	if got := userParts[0].Get("inlineData.mimeType").String(); got != "audio/mpeg" {
+		t.Fatalf("audio mimeType = %q, want audio/mpeg. Output: %s", got, result)
+	}
+	if userParts[0].Get("inline_data").Exists() || userParts[0].Get("inlineData.mime_type").Exists() {
+		t.Fatalf("audio part contains non-canonical media keys: %s", result)
 	}
 
 	assistantParts := ojson.GetBytesNoCopy(result, "request.contents.1.parts").Array()

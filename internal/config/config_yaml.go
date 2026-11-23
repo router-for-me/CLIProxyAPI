@@ -3,7 +3,6 @@ package config
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -15,47 +14,69 @@ import (
 // Existing v8 documents are saved in the latest layout. Successful migration
 // also synchronizes cfg's OAuth scope for runtime snapshots.
 func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...bool) error {
-	persistCfg := cfg
-	migrating := len(migrateV8) > 0 && migrateV8[0]
-	// Load original YAML as a node tree to preserve comments and ordering.
-	data, err := os.ReadFile(configFile)
+	var migrated *Config
+	var commented []ArchivedV8Section
+	err := withConfigFile(configFile, configWrite, func(file *lockedConfigFile) error {
+		data, cfgAfter, sections, errRender := renderConfigSave(file.snapshot.data, cfg, len(migrateV8) > 0 && migrateV8[0])
+		if errRender != nil {
+			return errRender
+		}
+		if _, errWrite := file.replace(data); errWrite != nil {
+			return errWrite
+		}
+		migrated, commented = cfgAfter, sections
+		return nil
+	})
 	if err != nil {
 		return err
 	}
+	WarnUnrecognizedV8Sections(commented)
+	if migrated != nil {
+		// Keep runtime-only values intact and publish scope only after the write succeeds.
+		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
+	}
+	return nil
+}
 
-	var original yaml.Node
-	if err = yaml.Unmarshal(data, &original); err != nil {
-		return err
+func renderConfigSave(data []byte, persistCfg *Config, migrating bool) ([]byte, *Config, []ArchivedV8Section, error) {
+	docs, err := decodeConfigStream(data)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	if original.Kind != yaml.DocumentNode || len(original.Content) == 0 {
-		return fmt.Errorf("invalid yaml document structure")
+	if len(docs) == 0 || docs[0].Content[0].Kind != yaml.MappingNode {
+		return nil, nil, nil, fmt.Errorf("expected root mapping node")
 	}
-	if original.Content[0] == nil || original.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("expected root mapping node")
-	}
+	original := docs[0]
+
 	layout := deepCopyNode(original.Content[0])
 	flat, err := flattenV8(layout)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
-	original.Content[0] = flat
 	layout = expandConfigAliases(layout)
 	migrating = migrating || IsV8ConfigLayout(layout)
+	var originalSecrets map[string]bool
+	if migrating {
+		// The runtime may hold a hash while the locked snapshot still holds
+		// plaintext. Keep those candidates before the merge replaces them.
+		originalSecrets, _, _ = inspectConfigSecrets(docs)
+	}
+	original.Content[0] = flat
 
 	// Marshal the current cfg to YAML, then unmarshal to a yaml.Node we can merge from.
 	rendered, err := yaml.Marshal((*legacyConfig)(persistCfg))
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	var generated yaml.Node
 	if err = yaml.Unmarshal(rendered, &generated); err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	if generated.Kind != yaml.DocumentNode || len(generated.Content) == 0 || generated.Content[0] == nil {
-		return fmt.Errorf("invalid generated yaml structure")
+		return nil, nil, nil, fmt.Errorf("invalid generated yaml structure")
 	}
 	if generated.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("expected generated root mapping node")
+		return nil, nil, nil, fmt.Errorf("expected generated root mapping node")
 	}
 
 	// Keep obsolete roots until v8 migration can preserve them as comments.
@@ -82,7 +103,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
 	if err = restoreV8Layout(original.Content[0], layout, data, generated.Content[0]); err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 	if !migrating {
 		// Keep historical client fields at their original legacy paths. Otherwise
@@ -98,101 +119,70 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	}
 	NormalizeCollectionNodeStyles(original.Content[0])
 
-	// Encode and validate the layout before opening the destination for writing.
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err = enc.Encode(&original); err != nil {
-		_ = enc.Close()
-		return err
+	// Encode and validate before writing, without normalizing subsequent documents.
+	data, err = encodeConfigDocument(original, data, docs)
+	if err != nil {
+		return nil, nil, nil, err
 	}
-	if err = enc.Close(); err != nil {
-		return err
-	}
-	data = NormalizeCommentIndentation(buf.Bytes())
 	var migrated *Config
 	var commented []ArchivedV8Section
 	if migrating {
-		data, _, commented, err = NormalizeConfigLayoutSilent(data, true)
-		if err != nil {
-			return err
+		normalized, _, sections, errNormalize := normalizeConfigLayoutForSave(data, true, originalSecrets)
+		if errNormalize != nil {
+			return nil, nil, nil, errNormalize
 		}
-		migrated = new(Config)
-		if err = yaml.Unmarshal(data, migrated); err != nil {
-			return fmt.Errorf("decode migrated config: %w", err)
+		if errValidate := ValidateConfigSave(data, normalized); errValidate != nil {
+			return nil, nil, nil, errValidate
 		}
+		data, commented = normalized, sections
 	}
-	if err = os.WriteFile(configFile, data, 0600); err != nil {
-		return err
+	closed, errDecode := decodeConfigStream(data)
+	if errDecode != nil {
+		return nil, nil, nil, errDecode
 	}
-	WarnUnrecognizedV8Sections(commented)
-	if migrated != nil {
-		// Keep runtime-only values intact and publish scope only after the write succeeds.
-		cfg.OAuthOnlyFields = migrated.OAuthOnlyFields
+	if len(closed) != len(docs) {
+		return nil, nil, nil, fmt.Errorf("save changed the number of config documents")
 	}
-	return nil
+	migrated = new(Config)
+	if err = closed[0].Decode(migrated); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode saved config: %w", err)
+	}
+	if !migrating {
+		migrated = nil
+	}
+	return data, migrated, commented, nil
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
 // while preserving comments and positions.
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return err
+	if len(path) == 0 {
+		return fmt.Errorf("config scalar path must not be empty")
 	}
-	data, err = updateNestedScalarYAML(data, path, value)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(configFile, data, 0600)
-}
-
-// updateNestedScalarYAML returns data with the nested scalar key path like ["a","b"] set to
-// value, preserving comments and positions.
-func updateNestedScalarYAML(data []byte, path []string, value string) ([]byte, error) {
-	var root yaml.Node
-	if errUnmarshal := yaml.Unmarshal(data, &root); errUnmarshal != nil {
-		return nil, errUnmarshal
-	}
-	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
-		return nil, fmt.Errorf("invalid yaml document structure")
-	}
-	// Resolve aliases and merge keys before updating a path. Otherwise replacing
-	// an alias with a mapping drops inherited siblings or mutates a shared anchor.
-	var decoded map[string]any
-	if errDecode := root.Decode(&decoded); errDecode != nil {
-		return nil, errDecode
-	}
-	root.Content[0] = expandConfigAliases(root.Content[0])
-	node := root.Content[0]
-	// descend mapping nodes following path
-	for i, key := range path {
-		if i == len(path)-1 {
-			// set final scalar
-			v := getOrCreateMapValue(node, key)
-			v.Kind = yaml.ScalarNode
-			v.Tag = "!!str"
-			v.Value = value
-		} else {
-			next := getOrCreateMapValue(node, key)
-			if next.Kind != yaml.MappingNode {
-				next.Kind = yaml.MappingNode
-				next.Tag = "!!map"
-			}
-			node = next
+	return withConfigFile(configFile, configWrite, func(file *lockedConfigFile) error {
+		data := file.snapshot.data
+		docs, errDecode := decodeConfigStream(data)
+		if errDecode != nil {
+			return errDecode
 		}
-	}
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if errEncode := enc.Encode(&root); errEncode != nil {
-		_ = enc.Close()
-		return nil, errEncode
-	}
-	if errClose := enc.Close(); errClose != nil {
-		return nil, errClose
-	}
-	return NormalizeCommentIndentation(buf.Bytes()), nil
+		if len(docs) == 0 || docs[0].Content[0].Kind != yaml.MappingNode {
+			return fmt.Errorf("expected root mapping node")
+		}
+		setConfigScalar(docs[0].Content[0], path, value)
+		updated, errEncode := encodeConfigDocument(docs[0], data, docs)
+		if errEncode != nil {
+			return errEncode
+		}
+		closed, errParse := decodeConfigStream(updated)
+		if errParse != nil {
+			return errParse
+		}
+		if len(closed) != len(docs) {
+			return fmt.Errorf("save changed the number of config documents")
+		}
+		_, errWrite := file.replace(updated)
+		return errWrite
+	})
 }
 
 // NormalizeCommentIndentation removes indentation from standalone YAML comment lines to keep them left aligned.

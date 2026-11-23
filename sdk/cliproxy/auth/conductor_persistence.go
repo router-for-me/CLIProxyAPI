@@ -311,6 +311,12 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 	if !after.credentialRetryAfter.Equal(before.credentialRetryAfter) && (!preserveConcurrent || target.credentialRetryAfter.Equal(before.credentialRetryAfter)) {
 		target.credentialRetryAfter = after.credentialRetryAfter
 	}
+	if !after.nonAuthCredentialRetryAfter.Equal(before.nonAuthCredentialRetryAfter) && (!preserveConcurrent || target.nonAuthCredentialRetryAfter.Equal(before.nonAuthCredentialRetryAfter)) {
+		target.nonAuthCredentialRetryAfter = after.nonAuthCredentialRetryAfter
+	}
+	if !cooldownErrorEqual(after.nonAuthCredentialLastError, before.nonAuthCredentialLastError) && (!preserveConcurrent || cooldownErrorEqual(target.nonAuthCredentialLastError, before.nonAuthCredentialLastError)) {
+		target.nonAuthCredentialLastError = cloneError(after.nonAuthCredentialLastError)
+	}
 	if !after.nonQuotaCooldownUntil.Equal(before.nonQuotaCooldownUntil) && (!preserveConcurrent || target.nonQuotaCooldownUntil.Equal(before.nonQuotaCooldownUntil)) {
 		target.nonQuotaCooldownUntil = after.nonQuotaCooldownUntil
 	}
@@ -335,6 +341,8 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 		target.quotaForceCooldownUntil = time.Time{}
 		target.credQuotaForceUntil = time.Time{}
 		target.credentialRetryAfter = time.Time{}
+		target.nonAuthCredentialRetryAfter = time.Time{}
+		target.nonAuthCredentialLastError = nil
 		target.nonQuotaCooldownUntil = time.Time{}
 	}
 }

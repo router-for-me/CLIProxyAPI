@@ -783,3 +783,418 @@ func TestSessionExtractionClonesStringsAgainstBufferMutation(t *testing.T) {
 		t.Fatalf("CanonicalTurn corrupted after buffer mutation: %+v", turns[0])
 	}
 }
+
+func TestExtractSessionInfoHeaderSessionsIsolateSubagentIDs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		headers        http.Header
+		payload        []byte
+		wantClientType string
+		wantSessionID  string
+		wantParentID   string
+		wantAgentName  string
+		wantIsSubagent bool
+	}{
+		{
+			name: "antigravity X-Http-Session-Id with X-Agent-Id",
+			headers: http.Header{
+				"X-Http-Session-Id": []string{"cascade-root-1"},
+				"X-Agent-Id":        []string{"swarm-worker-1"},
+			},
+			wantClientType: "agy",
+			wantSessionID:  "agy:cascade-root-1:agent:swarm-worker-1",
+			wantParentID:   "agy:cascade-root-1",
+			wantAgentName:  "swarm-worker-1",
+			wantIsSubagent: true,
+		},
+		{
+			name: "generic X-Session-Id with metadata.agent_id",
+			headers: http.Header{
+				"X-Session-Id": []string{"sess-root-2"},
+			},
+			payload:        []byte(`{"metadata":{"agent_id":"teamwork-worker-2"},"messages":[{"role":"user","content":"hi"}]}`),
+			wantClientType: "generic",
+			wantSessionID:  "header:sess-root-2:agent:teamwork-worker-2",
+			wantParentID:   "header:sess-root-2",
+			wantAgentName:  "teamwork-worker-2",
+			wantIsSubagent: true,
+		},
+		{
+			name: "opencode X-Session-Affinity with non-canonical x-agent-id",
+			headers: http.Header{
+				"X-Session-Affinity": []string{"oc-root-3"},
+				"x-agent-id":         []string{"oc-worker-3"},
+			},
+			wantClientType: "opencode",
+			wantSessionID:  "affinity:oc-root-3:agent:oc-worker-3",
+			wantParentID:   "affinity:oc-root-3",
+			wantAgentName:  "oc-worker-3",
+			wantIsSubagent: true,
+		},
+		{
+			name: "pi X-Slot-Session-Id with metadata.subagent_id",
+			headers: http.Header{
+				"X-Slot-Session-Id": []string{"pi-slot-4"},
+			},
+			payload:        []byte(`{"metadata":{"subagent_id":"pi-worker-4"}}`),
+			wantClientType: "pi",
+			wantSessionID:  "slot:pi-slot-4:agent:pi-worker-4",
+			wantParentID:   "slot:pi-slot-4",
+			wantAgentName:  "pi-worker-4",
+			wantIsSubagent: true,
+		},
+		{
+			name: "pi X-Slot-Session-Id with main agent stays root slot",
+			headers: http.Header{
+				"X-Slot-Session-Id": []string{"pi-slot-main"},
+				"X-Agent-Id":        []string{"main"},
+			},
+			wantClientType: "pi",
+			wantSessionID:  "slot:pi-slot-main",
+			wantParentID:   "",
+			wantAgentName:  "slot",
+			wantIsSubagent: false,
+		},
+		{
+			name: "task X-Task-ID with nested request.metadata.agent_id",
+			headers: http.Header{
+				"X-Task-ID": []string{"task-root-5"},
+			},
+			payload:        []byte(`{"request":{"metadata":{"agent_id":"task-worker-5"}}}`),
+			wantClientType: "task",
+			wantSessionID:  "task:task-root-5:agent:task-worker-5",
+			wantParentID:   "task:task-root-5",
+			wantAgentName:  "task-worker-5",
+			wantIsSubagent: true,
+		},
+		{
+			name: "conversation X-Conversation-Id with X-Claude-Code-Agent-Id",
+			headers: http.Header{
+				"X-Conversation-Id":      []string{"conv-root-6"},
+				"X-Claude-Code-Agent-Id": []string{"conv-worker-6"},
+			},
+			wantClientType: "conv",
+			wantSessionID:  "conv:conv-root-6:agent:conv-worker-6",
+			wantParentID:   "conv:conv-root-6",
+			wantAgentName:  "conv-worker-6",
+			wantIsSubagent: true,
+		},
+		{
+			name: "thread X-Thread-Id with nested request.metadata.subagent_id",
+			headers: http.Header{
+				"X-Thread-Id": []string{"thread-root-7"},
+			},
+			payload:        []byte(`{"request":{"metadata":{"subagent_id":"thread-worker-7"}}}`),
+			wantClientType: "openai-thread",
+			wantSessionID:  "thread:thread-root-7:agent:thread-worker-7",
+			wantParentID:   "thread:thread-root-7",
+			wantAgentName:  "thread-worker-7",
+			wantIsSubagent: true,
+		},
+		{
+			name: "client request X-Client-Request-Id with X-Agent-Id",
+			headers: http.Header{
+				"X-Client-Request-Id": []string{"req-root-8"},
+				"X-Agent-Id":          []string{"req-worker-8"},
+			},
+			wantClientType: "generic",
+			wantSessionID:  "clientreq:req-root-8:agent:req-worker-8",
+			wantParentID:   "clientreq:req-root-8",
+			wantAgentName:  "req-worker-8",
+			wantIsSubagent: true,
+		},
+		{
+			name: "main agent id does not split root session",
+			headers: http.Header{
+				"X-Http-Session-Id": []string{"cascade-root-main"},
+				"X-Agent-Id":        []string{"main"},
+			},
+			wantClientType: "agy",
+			wantSessionID:  "agy:cascade-root-main",
+			wantParentID:   "",
+			wantAgentName:  "main",
+			wantIsSubagent: false,
+		},
+		{
+			name: "distinct parent session header already splits session",
+			headers: http.Header{
+				"X-Http-Session-Id":   []string{"agy-child-9"},
+				"X-Parent-Session-ID": []string{"agy-root-9"},
+				"X-Agent-Id":          []string{"worker-9"},
+			},
+			wantClientType: "agy",
+			wantSessionID:  "agy:agy-child-9",
+			wantParentID:   "agy:agy-root-9",
+			wantAgentName:  "worker-9",
+			wantIsSubagent: true,
+		},
+		{
+			name: "self-referential parent session header still splits by agent id",
+			headers: http.Header{
+				"X-Http-Session-Id":   []string{"agy-root-10"},
+				"X-Parent-Session-ID": []string{"agy-root-10"},
+				"X-Agent-Id":          []string{"worker-10"},
+			},
+			wantClientType: "agy",
+			wantSessionID:  "agy:agy-root-10:agent:worker-10",
+			wantParentID:   "agy:agy-root-10",
+			wantAgentName:  "worker-10",
+			wantIsSubagent: true,
+		},
+		{
+			name: "nested parent_agent_id scopes parent under root session",
+			headers: http.Header{
+				"X-Http-Session-Id": []string{"agy-root-11"},
+				"X-Agent-Id":        []string{"leaf-11"},
+			},
+			payload:        []byte(`{"metadata":{"parent_agent_id":"lead-11"}}`),
+			wantClientType: "agy",
+			wantSessionID:  "agy:agy-root-11:agent:leaf-11",
+			wantParentID:   "agy:agy-root-11:agent:lead-11",
+			wantAgentName:  "leaf-11",
+			wantIsSubagent: true,
+		},
+		{
+			name: "self-referential parent_agent_id falls back to root session parent",
+			headers: http.Header{
+				"X-Http-Session-Id": []string{"agy-root-12"},
+				"X-Agent-Id":        []string{"worker-12"},
+			},
+			payload:        []byte(`{"metadata":{"parent_agent_id":"worker-12"}}`),
+			wantClientType: "agy",
+			wantSessionID:  "agy:agy-root-12:agent:worker-12",
+			wantParentID:   "agy:agy-root-12",
+			wantAgentName:  "worker-12",
+			wantIsSubagent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info, ok := ExtractSessionInfo(tc.headers, tc.payload, nil)
+			if !ok {
+				t.Fatal("ExtractSessionInfo() returned ok=false, want true")
+			}
+			if info.ClientType != tc.wantClientType {
+				t.Errorf("ClientType = %q, want %q", info.ClientType, tc.wantClientType)
+			}
+			if info.SessionID != tc.wantSessionID {
+				t.Errorf("SessionID = %q, want %q", info.SessionID, tc.wantSessionID)
+			}
+			if info.ParentSessionID != tc.wantParentID {
+				t.Errorf("ParentSessionID = %q, want %q", info.ParentSessionID, tc.wantParentID)
+			}
+			if info.AgentName != tc.wantAgentName {
+				t.Errorf("AgentName = %q, want %q", info.AgentName, tc.wantAgentName)
+			}
+			if info.IsSubagent != tc.wantIsSubagent {
+				t.Errorf("IsSubagent = %v, want %v", info.IsSubagent, tc.wantIsSubagent)
+			}
+		})
+	}
+}
+
+func TestExtractSessionInfoHeaderMainAgentDoesNotShadowMetadataSubagent(t *testing.T) {
+	t.Parallel()
+
+	// Two workers sharing X-Agent-Id: main with distinct metadata.subagent_id must isolate.
+	headers := http.Header{
+		"X-Http-Session-Id": []string{"cascade-root-1"},
+		"X-Agent-Id":        []string{"main"},
+	}
+	worker1, ok1 := ExtractSessionInfo(headers, []byte(`{"metadata":{"subagent_id":"worker-1"}}`), nil)
+	if !ok1 {
+		t.Fatal("worker 1 ExtractSessionInfo() returned ok=false")
+	}
+	worker2, ok2 := ExtractSessionInfo(headers, []byte(`{"metadata":{"subagent_id":"worker-2"}}`), nil)
+	if !ok2 {
+		t.Fatal("worker 2 ExtractSessionInfo() returned ok=false")
+	}
+	if worker1.SessionID != "agy:cascade-root-1:agent:worker-1" || worker1.ParentSessionID != "agy:cascade-root-1" || worker1.AgentName != "worker-1" || !worker1.IsSubagent {
+		t.Fatalf("worker 1 mismatch: %+v", worker1)
+	}
+	if worker2.SessionID != "agy:cascade-root-1:agent:worker-2" || worker2.ParentSessionID != "agy:cascade-root-1" || worker2.AgentName != "worker-2" || !worker2.IsSubagent {
+		t.Fatalf("worker 2 mismatch: %+v", worker2)
+	}
+	if worker1.SessionID == worker2.SessionID {
+		t.Fatalf("workers collapsed onto same SessionID %q", worker1.SessionID)
+	}
+
+	// X-Agent-Id: main must also not shadow nested request.metadata.subagent_id.
+	nested, okNested := ExtractSessionInfo(headers, []byte(`{"request":{"metadata":{"subagent_id":"nested-worker-3"}}}`), nil)
+	if !okNested || nested.SessionID != "agy:cascade-root-1:agent:nested-worker-3" || nested.ParentSessionID != "agy:cascade-root-1" || nested.AgentName != "nested-worker-3" || !nested.IsSubagent {
+		t.Fatalf("nested subagent mismatch: %+v", nested)
+	}
+
+	// Top-level metadata.agent_id takes the same priority over X-Agent-Id as body session_id branch.
+	prioHeaders := http.Header{
+		"X-Session-ID": []string{"sess-prio"},
+		"X-Agent-Id":   []string{"header-worker"},
+	}
+	prioBody := []byte(`{"metadata":{"agent_id":"body-worker"}}`)
+	prioInfo, okPrio := ExtractSessionInfo(prioHeaders, prioBody, nil)
+	if !okPrio || prioInfo.SessionID != "header:sess-prio:agent:body-worker" || prioInfo.AgentName != "body-worker" || !prioInfo.IsSubagent {
+		t.Fatalf("priority mismatch: %+v", prioInfo)
+	}
+	// Body metadata.agent_id: main falls through to metadata.subagent_id.
+	mainMetaInfo, okMainMeta := ExtractSessionInfo(
+		http.Header{"X-Session-ID": []string{"sess-prio"}},
+		[]byte(`{"metadata":{"agent_id":"main","subagent_id":"sub-worker"}}`),
+		nil,
+	)
+	if !okMainMeta || mainMetaInfo.SessionID != "header:sess-prio:agent:sub-worker" || mainMetaInfo.AgentName != "sub-worker" || !mainMetaInfo.IsSubagent {
+		t.Fatalf("metadata.agent_id=main fallback mismatch: %+v", mainMetaInfo)
+	}
+
+	// metadata.parent_agent_id: main must not leak into ParentSessionID as a sibling session.
+	parentMainInfo, okParentMain := ExtractSessionInfo(
+		http.Header{"X-Http-Session-Id": []string{"agy-root-pm"}, "X-Agent-Id": []string{"worker-pm"}},
+		[]byte(`{"metadata":{"parent_agent_id":"main"}}`),
+		nil,
+	)
+	if !okParentMain || parentMainInfo.SessionID != "agy:agy-root-pm:agent:worker-pm" || parentMainInfo.ParentSessionID != "agy:agy-root-pm" {
+		t.Fatalf("parent_agent_id=main mismatch: %+v", parentMainInfo)
+	}
+}
+
+func TestExtractSessionInfoHeaderSessionReservedAgentDelimiterNoCollision(t *testing.T) {
+	t.Parallel()
+
+	// Raw root session containing ":agent:" must not collide with root "r" + subagent "w".
+	rootLiteral, okRoot := ExtractSessionInfo(http.Header{"X-Http-Session-Id": []string{"r:agent:w"}}, nil, nil)
+	if !okRoot {
+		t.Fatal("root literal ExtractSessionInfo() returned ok=false")
+	}
+	subNormal, okSub := ExtractSessionInfo(http.Header{
+		"X-Http-Session-Id": []string{"r"},
+		"X-Agent-Id":        []string{"w"},
+	}, nil, nil)
+	if !okSub {
+		t.Fatal("normal subagent ExtractSessionInfo() returned ok=false")
+	}
+	if subNormal.SessionID != "agy:r:agent:w" || subNormal.ParentSessionID != "agy:r" || !subNormal.IsSubagent {
+		t.Fatalf("normal subagent format changed: %+v", subNormal)
+	}
+	if rootLiteral.SessionID == subNormal.SessionID {
+		t.Fatalf("collision between raw root session %q and subagent (%q, %q): both produced %q", "r:agent:w", "r", "w", rootLiteral.SessionID)
+	}
+	if rootLiteral.IsSubagent || strings.Contains(rootLiteral.SessionID, ":agent:") {
+		t.Fatalf("raw root session must remain non-subagent without reserved delimiter: %+v", rootLiteral)
+	}
+
+	// Additional delimiter / escape boundary cases must all be pairwise distinct.
+	cases := []struct {
+		name    string
+		headers http.Header
+	}{
+		{name: "root r:agent:w", headers: http.Header{"X-Http-Session-Id": []string{"r:agent:w"}}},
+		{name: "root r:agent~;w", headers: http.Header{"X-Http-Session-Id": []string{"r:agent~;w"}}},
+		{name: "root :agent:agent:", headers: http.Header{"X-Http-Session-Id": []string{":agent:agent:"}}},
+		{name: "sub (r, w)", headers: http.Header{"X-Http-Session-Id": []string{"r"}, "X-Agent-Id": []string{"w"}}},
+		{name: "sub (r:agent:a, b)", headers: http.Header{"X-Http-Session-Id": []string{"r:agent:a"}, "X-Agent-Id": []string{"b"}}},
+		{name: "sub (r, a:agent:b)", headers: http.Header{"X-Http-Session-Id": []string{"r"}, "X-Agent-Id": []string{"a:agent:b"}}},
+	}
+	seen := make(map[string]string, len(cases))
+	for _, tc := range cases {
+		info, ok := ExtractSessionInfo(tc.headers, nil, nil)
+		if !ok {
+			t.Fatalf("%s: ExtractSessionInfo() returned ok=false", tc.name)
+		}
+		if prev, dup := seen[info.SessionID]; dup {
+			t.Fatalf("SessionID collision %q between %q and %q", info.SessionID, prev, tc.name)
+		}
+		seen[info.SessionID] = tc.name
+	}
+
+	// Child subagent and explicit parent header under raw root "r:agent:w" must link to rootLiteral.SessionID.
+	subUnderLiteral, okSubLit := ExtractSessionInfo(http.Header{
+		"X-Http-Session-Id": []string{"r:agent:w"},
+		"X-Agent-Id":        []string{"child"},
+	}, nil, nil)
+	if !okSubLit || subUnderLiteral.ParentSessionID != rootLiteral.SessionID || !subUnderLiteral.IsSubagent {
+		t.Fatalf("subagent under escaped root did not link to root %q: %+v", rootLiteral.SessionID, subUnderLiteral)
+	}
+	childWithParentHeader, okChildHdr := ExtractSessionInfo(http.Header{
+		"X-Http-Session-Id":   []string{"child-sess"},
+		"X-Parent-Session-ID": []string{"r:agent:w"},
+	}, nil, nil)
+	if !okChildHdr || childWithParentHeader.ParentSessionID != rootLiteral.SessionID {
+		t.Fatalf("explicit parent header did not link to root %q: %+v", rootLiteral.SessionID, childWithParentHeader)
+	}
+
+	// Shared header/body namespaces (thread:, task:, conv:, session:) must encode consistently
+	// so body root IDs containing ":agent:" never collide with header/body subagent IDs.
+	sharedCases := []struct {
+		name           string
+		bodyRoot       []byte
+		subHeaders     http.Header
+		subBody        []byte
+		wantSubSession string
+	}{
+		{
+			name:           "thread namespace body root vs header subagent",
+			bodyRoot:       []byte(`{"thread_id":"r:agent:w"}`),
+			subHeaders:     http.Header{"X-Thread-Id": []string{"r"}, "X-Agent-Id": []string{"w"}},
+			wantSubSession: "thread:r:agent:w",
+		},
+		{
+			name:           "task namespace body root vs header subagent",
+			bodyRoot:       []byte(`{"task_id":"r:agent:w"}`),
+			subHeaders:     http.Header{"X-Task-ID": []string{"r"}, "X-Agent-Id": []string{"w"}},
+			wantSubSession: "task:r:agent:w",
+		},
+		{
+			name:           "conv object namespace body root vs header subagent",
+			bodyRoot:       []byte(`{"conversation":{"id":"r:agent:w"}}`),
+			subHeaders:     http.Header{"X-Conversation-Id": []string{"r"}, "X-Agent-Id": []string{"w"}},
+			wantSubSession: "conv:r:agent:w",
+		},
+		{
+			name:           "conv legacy namespace body root vs header subagent",
+			bodyRoot:       []byte(`{"conversation_id":"r:agent:w"}`),
+			subHeaders:     http.Header{"X-Conversation-Id": []string{"r"}, "X-Agent-Id": []string{"w"}},
+			wantSubSession: "conv:r:agent:w",
+		},
+		{
+			name:           "session namespace body root vs body subagent",
+			bodyRoot:       []byte(`{"session_id":"r:agent:w"}`),
+			subBody:        []byte(`{"session_id":"r","metadata":{"agent_id":"w"}}`),
+			wantSubSession: "session:r:agent:w",
+		},
+	}
+	for _, tc := range sharedCases {
+		bodyRootInfo, okBody := ExtractSessionInfo(nil, tc.bodyRoot, nil)
+		if !okBody {
+			t.Fatalf("%s: body root ExtractSessionInfo() returned ok=false", tc.name)
+		}
+		subInfo, okSubCase := ExtractSessionInfo(tc.subHeaders, tc.subBody, nil)
+		if !okSubCase {
+			t.Fatalf("%s: subagent ExtractSessionInfo() returned ok=false", tc.name)
+		}
+		if subInfo.SessionID != tc.wantSubSession {
+			t.Fatalf("%s: subagent SessionID = %q, want %q", tc.name, subInfo.SessionID, tc.wantSubSession)
+		}
+		if bodyRootInfo.SessionID == subInfo.SessionID {
+			t.Fatalf("%s: collision between body root and subagent: both produced %q", tc.name, bodyRootInfo.SessionID)
+		}
+		if strings.Contains(bodyRootInfo.SessionID, ":agent:") {
+			t.Fatalf("%s: body root SessionID %q still contains reserved delimiter", tc.name, bodyRootInfo.SessionID)
+		}
+	}
+
+	// Header child referencing body thread root "r:agent:w" must resolve to the same encoded root ID.
+	bodyThreadRoot, okThreadRoot := ExtractSessionInfo(nil, []byte(`{"thread_id":"r:agent:w"}`), nil)
+	if !okThreadRoot {
+		t.Fatal("body thread root ExtractSessionInfo() returned ok=false")
+	}
+	headerThreadSub, okThreadSub := ExtractSessionInfo(http.Header{
+		"X-Thread-Id": []string{"r:agent:w"},
+		"X-Agent-Id":  []string{"child"},
+	}, nil, nil)
+	if !okThreadSub || headerThreadSub.ParentSessionID != bodyThreadRoot.SessionID {
+		t.Fatalf("header thread subagent parent = %q, want encoded body root %q", headerThreadSub.ParentSessionID, bodyThreadRoot.SessionID)
+	}
+}

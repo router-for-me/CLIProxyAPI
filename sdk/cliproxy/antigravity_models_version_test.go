@@ -10,6 +10,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
@@ -109,6 +110,63 @@ func TestAntigravityVersionChangeKeepsPersistedHintsAsStaleFallback(t *testing.T
 	antigravityCapabilityMu.RUnlock()
 	if !entry.expiresAt.IsZero() {
 		t.Fatal("old persisted hints were marked fresh for the new version")
+	}
+}
+
+func TestAntigravityVersionChangeWithFreshPersistedHintsStillProbesAndKeepsFallback(t *testing.T) {
+	resetAntigravityCapabilityCache()
+	t.Cleanup(resetAntigravityCapabilityCache)
+	currentUA := overrideAntigravityModelUserAgent(t)
+
+	baseTime := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	prevNow := antigravityNowFunc
+	antigravityNowFunc = func() time.Time { return baseTime }
+	t.Cleanup(func() { antigravityNowFunc = prevNow })
+
+	svc := &Service{cfg: &config.Config{}}
+	auth := antigravityTestAuth("version-fresh-persisted", "https://version.invalid")
+	auth.Metadata[antigravityPersistedHintsMetaKey] = buildPersistedAntigravityCapabilityHintsValue(
+		"project-version-fresh-persisted", "https://version.invalid",
+		antigravityModelCapabilityHints{
+			ModelIDs:         map[string]struct{}{"old": {}},
+			updatedAt:        baseTime.Add(-5 * time.Minute),
+			expiresAt:        baseTime.Add(antigravityCapabilityCacheTTL - 5*time.Minute),
+			routeFingerprint: sdkauth.AntigravityCapabilityRouteFingerprint("", antigravityOldTestUA),
+		},
+	)
+
+	var calls atomic.Int32
+	previous := http.DefaultTransport
+	http.DefaultTransport = antigravityReviewTransport(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return antigravityVersionTestResponse(req, http.StatusServiceUnavailable, ""), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previous })
+
+	// Same client version reuses the fresh persisted hints without issuing a network probe.
+	hintsSame := svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), auth)
+	if _, ok := hintsSame.ModelIDs["old"]; !ok {
+		t.Fatal("same version did not restore persisted hints")
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("same version with fresh persisted hints probed upstream: calls=%d", calls.Load())
+	}
+
+	// Switching client version must not treat the old version's persisted hints as fresh,
+	// while still keeping them as stale fallback when the new-version probe fails.
+	currentUA.Store(antigravityNewTestUA)
+	hintsNew := svc.fetchAntigravityModelCapabilityHintsForAuth(t.Context(), auth)
+	if _, ok := hintsNew.ModelIDs["old"]; !ok {
+		t.Fatal("failed new-version probe discarded persisted stale fallback")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fresh persisted hints from old version suppressed new-version probe: calls=%d", calls.Load())
+	}
+	antigravityCapabilityMu.RLock()
+	entry := antigravityCapabilityCache[svc.antigravityCapabilityKey(auth)]
+	antigravityCapabilityMu.RUnlock()
+	if !entry.expiresAt.IsZero() {
+		t.Fatalf("old-version persisted hints marked fresh for new version: expiresAt=%v", entry.expiresAt)
 	}
 }
 

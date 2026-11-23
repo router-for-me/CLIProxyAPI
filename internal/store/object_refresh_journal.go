@@ -104,10 +104,10 @@ func newSingleAttemptObjectTransport() *http.Transport {
 	}
 }
 
-func (s *ObjectTokenStore) singleAttemptRefreshRequest(ctx context.Context, method, key string, headers http.Header, data []byte) (*http.Response, error) {
+func (s *ObjectTokenStore) singleAttemptObjectRequest(ctx context.Context, method, key string, headers http.Header, data []byte) (*http.Response, error) {
 	presignedURL, errPresign := s.client.PresignHeader(ctx, method, s.cfg.Bucket, key, time.Minute, nil, headers)
 	if errPresign != nil {
-		return nil, fmt.Errorf("sign refresh journal %s: %w", method, errPresign)
+		return nil, fmt.Errorf("sign object store %s: %w", method, errPresign)
 	}
 	var body io.Reader
 	if data != nil {
@@ -115,7 +115,7 @@ func (s *ObjectTokenStore) singleAttemptRefreshRequest(ctx context.Context, meth
 	}
 	req, errRequest := http.NewRequestWithContext(ctx, method, presignedURL.String(), body)
 	if errRequest != nil {
-		return nil, fmt.Errorf("create refresh journal %s request", method)
+		return nil, fmt.Errorf("create object store %s request", method)
 	}
 	if len(headers) > 0 {
 		req.Header = headers
@@ -133,7 +133,7 @@ func (s *ObjectTokenStore) createRefreshObject(ctx context.Context, key string, 
 	headers := http.Header{"If-None-Match": []string{"*"}}
 	// The bundled minio PutObjectOptions quotes "*" as an ETag; use signed
 	// headers to send the actual HTTP wildcard, not the literal ETag "*".
-	resp, errDo := s.singleAttemptRefreshRequest(ctx, http.MethodPut, key, headers, data)
+	resp, errDo := s.singleAttemptObjectRequest(ctx, http.MethodPut, key, headers, data)
 	if errDo != nil {
 		return false, fmt.Errorf("conditional refresh journal write outcome unknown")
 	}
@@ -152,7 +152,7 @@ func (s *ObjectTokenStore) createRefreshObject(ctx context.Context, key string, 
 }
 
 func (s *ObjectTokenStore) headRefreshObject(ctx context.Context, key string) (bool, error) {
-	resp, errDo := s.singleAttemptRefreshRequest(ctx, http.MethodHead, key, nil, nil)
+	resp, errDo := s.singleAttemptObjectRequest(ctx, http.MethodHead, key, nil, nil)
 	if errDo != nil {
 		return false, fmt.Errorf("refresh journal receipt check outcome unknown")
 	}
@@ -171,7 +171,7 @@ func (s *ObjectTokenStore) headRefreshObject(ctx context.Context, key string) (b
 }
 
 func (s *ObjectTokenStore) deleteRefreshObject(ctx context.Context, key string) error {
-	resp, errDo := s.singleAttemptRefreshRequest(ctx, http.MethodDelete, key, nil, nil)
+	resp, errDo := s.singleAttemptObjectRequest(ctx, http.MethodDelete, key, nil, nil)
 	if errDo != nil {
 		return fmt.Errorf("refresh journal claim delete outcome unknown")
 	}
