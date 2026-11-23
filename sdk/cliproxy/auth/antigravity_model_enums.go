@@ -146,18 +146,27 @@ func StoreAntigravityModelCatalog(ctx context.Context, auth *Auth, models map[st
 	return true
 }
 
-// AntigravityModelEnumSnapshotMissing reports a confirmed local KV miss. It is
-// used when a persisted model catalog would otherwise suppress discovery.
+// AntigravityModelEnumSnapshotMissing reports a confirmed local snapshot miss.
+// It is used when a persisted model catalog would otherwise suppress discovery.
 func AntigravityModelEnumSnapshotMissing(ctx context.Context, auth *Auth) (bool, error) {
 	if !validAntigravityModelEnumAuth(auth) || home.Current() != nil || auth.Attributes[AntigravityModelEnumHomeScopeAttribute] != "" {
 		return false, nil
 	}
+	key := antigravityModelEnumLocalKey + kvstore.HashKeyPart(auth.ID)
+	scope := antigravityLocalModelEnumScope(auth)
 	client, active, errClient := kvstore.CurrentKVClient()
-	if !active || errClient != nil {
+	if errClient != nil {
 		return false, errClient
 	}
-	snapshot, errRead := readAntigravityModelEnumDoc(ctx, client, antigravityModelEnumLocalKey+kvstore.HashKeyPart(auth.ID))
-	return errRead == nil && !antigravityModelEnumDocMatches(snapshot, antigravityLocalModelEnumScope(auth), auth.antigravityEnumRegistration), errRead
+	if !active {
+		entry, found := antigravityModelEnums.Get(key)
+		if !found {
+			return true, nil
+		}
+		return !entry.Load().matches(scope, auth.antigravityEnumRegistration), nil
+	}
+	snapshot, errRead := readAntigravityModelEnumDoc(ctx, client, key)
+	return errRead == nil && !antigravityModelEnumDocMatches(snapshot, scope, auth.antigravityEnumRegistration), errRead
 }
 
 // LookupAntigravityModelEnum returns a previously discovered enum for the exact
