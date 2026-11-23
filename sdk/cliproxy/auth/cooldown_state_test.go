@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,130 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
+
+func TestLookupRestoresShorterAuthForceCooldownAfterRestart(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	const id, model = "lookup-force-restart", "model"
+	dir := t.TempDir()
+	newManager := func() *Manager {
+		t.Helper()
+		manager := NewManager(nil, nil, nil)
+		manager.SetCooldownStateStore(NewFileCooldownStateStore(dir))
+		if _, err := manager.Register(t.Context(), &Auth{
+			ID: id, Provider: "claude", Status: StatusActive,
+			ModelStates: map[string]*ModelState{model: {Status: StatusActive}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return manager
+	}
+	manager := newManager()
+	short, long := time.Minute, time.Hour
+	manager.MarkResult(t.Context(), Result{AuthID: id, Provider: "claude", RetryAfter: &short,
+		Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusServiceUnavailable}})
+	nonQuota, _ := manager.GetByID(id)
+	manager.MarkResult(t.Context(), Result{AuthID: id, Provider: "claude", CredentialScope: true, RetryAfter: &long,
+		Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests}})
+
+	restored := newManager()
+	if err := restored.RestoreCooldownStates(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := restored.GetByID(id)
+	if !before.Quota.Exceeded || !before.forceCooldownUntil.After(nonQuota.forceCooldownUntil) {
+		t.Fatalf("expected the longer quota force cooldown to be restored: %+v", before.Quota)
+	}
+	after := observeAvailableQuota(t, restored, before, "windows")
+	blocked, _, next := isAuthBlockedForModel(after, model, time.Now())
+	if after.Quota.Exceeded || !blocked || !next.Equal(nonQuota.forceCooldownUntil) ||
+		!after.forceCooldownUntil.Equal(nonQuota.forceCooldownUntil) {
+		t.Fatalf("model block = %v until %v, expected only the independent force until %v", blocked, next, nonQuota.forceCooldownUntil)
+	}
+}
+
+func TestLookupLiftsQuotaAfterRestartWhenShortNonQuotaExpired(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		evaluated     bool
+		nonQuotaUntil time.Duration
+		wantBlocked   bool
+	}{
+		{"expired non-quota timestamp", true, -time.Minute, false},
+		{"evaluated zero after expired save", true, 0, false},
+		{"legacy ForceCooldownEvaluated record preserves active 503", false, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withQuotaCooldownEnabled(t)
+			const id = "lookup-expired-503-restart"
+			now := time.Now()
+			quotaUntil := now.Add(time.Hour)
+			var nonQuotaUntil time.Time
+			if tc.nonQuotaUntil != 0 {
+				nonQuotaUntil = now.Add(tc.nonQuotaUntil)
+			}
+			store := &recordingCooldownStateStore{
+				load: []CooldownStateRecord{{
+					AuthID:                    id,
+					Provider:                  "antigravity",
+					Status:                    string(StatusError),
+					NextRetryAfter:            quotaUntil,
+					Quota:                     QuotaState{Exceeded: true, Reason: credentialQuotaReason, NextRecoverAt: quotaUntil},
+					LastError:                 &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "service unavailable"},
+					UpdatedAt:                 now.Add(-2 * time.Minute),
+					ForceCooldownEvaluated:    true,
+					NonQuotaCooldownUntil:     nonQuotaUntil,
+					NonQuotaCooldownEvaluated: tc.evaluated,
+				}},
+			}
+			manager := NewManager(nil, nil, nil)
+			manager.SetCooldownStateStore(store)
+			if _, err := manager.Register(t.Context(), &Auth{ID: id, Provider: "antigravity", Status: StatusActive}); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.RestoreCooldownStates(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := manager.GetByID(id)
+			after := observeAvailableQuota(t, manager, before, "windows")
+			if tc.wantBlocked {
+				if after.Quota.Exceeded || !after.Unavailable || !after.NextRetryAfter.Equal(quotaUntil) ||
+					after.LastError == nil || after.LastError.HTTPStatus != http.StatusServiceUnavailable {
+					t.Fatalf("legacy ForceCooldownEvaluated 503 was cleared by quota lookup: %+v", after)
+				}
+				return
+			}
+			if after.Quota.Exceeded || after.Unavailable || !after.NextRetryAfter.IsZero() ||
+				after.Status != StatusActive || after.LastError != nil {
+				t.Fatalf("expired 503 kept credential blocked after quota lookup: %+v", after)
+			}
+		})
+	}
+}
+
+func TestLookupPreservesPrepopulatedAuthNonQuotaCooldownAfterRegister(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	const id = "lookup-prepopulated-503-register"
+	now := time.Now()
+	retryUntil := now.Add(10 * time.Minute)
+	manager := NewManager(nil, nil, nil)
+	if _, err := manager.Register(t.Context(), &Auth{
+		ID:             id,
+		Provider:       "antigravity",
+		Status:         StatusError,
+		Unavailable:    true,
+		NextRetryAfter: retryUntil,
+		Quota:          QuotaState{Exceeded: true, Reason: credentialQuotaReason, NextRecoverAt: retryUntil},
+		LastError:      &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "service unavailable"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := manager.GetByID(id)
+	after := observeAvailableQuota(t, manager, before, "windows")
+	if after.Quota.Exceeded || !after.Unavailable || !after.NextRetryAfter.Equal(retryUntil) ||
+		after.LastError == nil || after.LastError.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("healthy lookup cleared active prepopulated 503 retry: %+v", after)
+	}
+}
 
 type recordingCooldownStateStore struct {
 	saveCount atomic.Int32

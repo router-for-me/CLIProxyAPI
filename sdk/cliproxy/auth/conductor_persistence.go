@@ -305,6 +305,10 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 	if !after.quotaForceCooldownUntil.Equal(before.quotaForceCooldownUntil) && (!preserveConcurrent || target.quotaForceCooldownUntil.Equal(before.quotaForceCooldownUntil)) {
 		target.quotaForceCooldownUntil = after.quotaForceCooldownUntil
 	}
+	if !after.nonQuotaForceCooldownUntil.Equal(before.nonQuotaForceCooldownUntil) &&
+		(!preserveConcurrent || target.nonQuotaForceCooldownUntil.Equal(before.nonQuotaForceCooldownUntil)) {
+		target.nonQuotaForceCooldownUntil = after.nonQuotaForceCooldownUntil
+	}
 	if !after.credQuotaForceUntil.Equal(before.credQuotaForceUntil) && (!preserveConcurrent || target.credQuotaForceUntil.Equal(before.credQuotaForceUntil)) {
 		target.credQuotaForceUntil = after.credQuotaForceUntil
 	}
@@ -333,6 +337,7 @@ func mergeRuntimeCooldownSaveDelta(target, before, after *Auth, preserveConcurre
 		(!target.Quota.Exceeded || target.Quota.NextRecoverAt.IsZero()) {
 		target.forceCooldownUntil = time.Time{}
 		target.quotaForceCooldownUntil = time.Time{}
+		target.nonQuotaForceCooldownUntil = time.Time{}
 		target.credQuotaForceUntil = time.Time{}
 		target.credentialRetryAfter = time.Time{}
 		target.nonQuotaCooldownUntil = time.Time{}

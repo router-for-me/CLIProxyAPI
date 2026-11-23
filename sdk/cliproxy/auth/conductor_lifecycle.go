@@ -520,6 +520,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 			auth.forceCooldownUntil = existing.forceCooldownUntil
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+			auth.nonQuotaForceCooldownUntil = existing.nonQuotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
@@ -553,6 +554,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					auth.cooldownRecordedSeq = 0
 					auth.forceCooldownUntil = time.Time{}
 					auth.quotaForceCooldownUntil = time.Time{}
+					auth.nonQuotaForceCooldownUntil = time.Time{}
 					auth.credentialRetryAfter = time.Time{}
 					auth.nonQuotaCooldownUntil = time.Time{}
 					auth.LastError = nil
@@ -615,6 +617,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 			auth.forceCooldownUntil = existing.forceCooldownUntil
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+			auth.nonQuotaForceCooldownUntil = existing.nonQuotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil
@@ -628,6 +631,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			auth.cooldownRecordedSeq = existing.cooldownRecordedSeq
 			auth.forceCooldownUntil = existing.forceCooldownUntil
 			auth.quotaForceCooldownUntil = existing.quotaForceCooldownUntil
+			auth.nonQuotaForceCooldownUntil = existing.nonQuotaForceCooldownUntil
 			auth.credQuotaForceUntil = existing.credQuotaForceUntil
 			auth.credentialRetryAfter = existing.credentialRetryAfter
 			auth.nonQuotaCooldownUntil = existing.nonQuotaCooldownUntil

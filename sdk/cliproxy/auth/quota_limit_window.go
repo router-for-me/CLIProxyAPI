@@ -155,7 +155,7 @@ func claudeQuotaWindows(signals map[string]string) []QuotaWindow {
 	out := make([]QuotaWindow, 0, len(order))
 	for _, token := range order {
 		window := byToken[token]
-		if window.UsedPercent == nil && window.ResetsAt.IsZero() {
+		if window.UsedPercent == nil && window.ResetsAt.IsZero() && window.Status != QuotaWindowStatusRejected {
 			continue
 		}
 		out = append(out, *window)

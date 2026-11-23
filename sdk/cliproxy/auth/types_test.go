@@ -2,13 +2,43 @@ package auth
 
 import (
 	"fmt"
-	"github.com/MoeForge/moego/base64"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/MoeForge/moego/base64"
+	"github.com/MoeForge/moego/json"
 )
+
+func TestHomeDispatchQuotaJSONOmitsNormalizedLookupWindows(t *testing.T) {
+	quota := QuotaState{
+		LookedUpAt:    time.Unix(2000, 0).UTC(),
+		LookupSignals: map[string]string{"X-Codex-Primary-Used-Percent": "5"},
+		LookupWindows: []QuotaWindow{{Key: "weekly", Duration: weeklyWindow}},
+	}
+	raw, err := json.Marshal(homeAuthDispatchResponse{Auth: Auth{ID: "quota-json", Quota: quota}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dispatch struct {
+		Auth struct {
+			Quota map[string]json.RawMessage `json:"quota"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(raw, &dispatch); err != nil {
+		t.Fatal(err)
+	}
+	fields := dispatch.Auth.Quota
+	if _, ok := fields["lookup_windows"]; ok {
+		t.Fatalf("normalized windows appeared in dispatch JSON: %s", raw)
+	}
+	if string(fields["lookup_signals"]) != `{"X-Codex-Primary-Used-Percent":"5"}` ||
+		string(fields["looked_up_at"]) != `"1970-01-01T00:33:20Z"` {
+		t.Fatalf("legacy lookup JSON changed: %s", raw)
+	}
+}
 
 func TestRequestRetryOverride(t *testing.T) {
 	var unset *Auth

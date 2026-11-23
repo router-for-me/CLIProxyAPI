@@ -166,6 +166,54 @@ func TestObserveQuotaLookupWindowsValidation(t *testing.T) {
 	}
 }
 
+func TestLookupRecoveryRequiresKnownAvailableAccountWindows(t *testing.T) {
+	available, full := 5.0, 100.0
+	first := QuotaWindow{Key: "five_hour", UsedPercent: &available}
+	for _, tc := range []struct {
+		name    string
+		windows []QuotaWindow
+		headers http.Header
+	}{
+		{"scoped-only", []QuotaWindow{{Key: "model", UsedPercent: &available, Scoped: true}},
+			http.Header{"Anthropic-Ratelimit-Unified-7d_oi-Utilization": {"0.05"}}},
+		{"rejected", []QuotaWindow{first, {Key: "weekly", UsedPercent: &available, Status: QuotaWindowStatusRejected}},
+			http.Header{"Anthropic-Ratelimit-Unified-7d-Status": {"rejected"}}},
+		{"full", []QuotaWindow{first, {Key: "weekly", UsedPercent: &full}},
+			http.Header{"Anthropic-Ratelimit-Unified-7d-Utilization": {"1"}}},
+		{"unknown", []QuotaWindow{first, {Key: "weekly"}},
+			http.Header{"Anthropic-Ratelimit-Unified-7d-Reset": {"2000000000"}}},
+	} {
+		for _, source := range []string{"windows", "signals"} {
+			t.Run(source+"/"+tc.name, func(t *testing.T) {
+				manager := NewManager(nil, nil, nil)
+				now := time.Now()
+				auth := &Auth{ID: "lookup-gate", Provider: "claude", UpdatedAt: now, Status: StatusError,
+					Unavailable: true, NextRetryAfter: now.Add(time.Hour),
+					Quota: QuotaState{Exceeded: true, Reason: credentialQuotaReason, NextRecoverAt: now.Add(time.Hour)}}
+				manager.auths[auth.ID] = auth
+				at := now.Add(time.Second)
+				if source == "windows" {
+					if recorded, err := manager.ObserveQuotaLookupWindows(t.Context(), auth.ID, tc.windows, at, nil); !recorded || err != nil {
+						t.Fatalf("lookup recorded = %v, err = %v", recorded, err)
+					}
+				} else {
+					headers := tc.headers.Clone()
+					if tc.name != "scoped-only" {
+						headers.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.05")
+					}
+					if !manager.ObserveQuotaLookup(auth.ID, headers, at) {
+						t.Fatal("lookup not recorded")
+					}
+				}
+				after, _ := manager.GetByID(auth.ID)
+				if !after.Quota.Exceeded || !after.Unavailable || !after.NextRetryAfter.Equal(now.Add(time.Hour)) {
+					t.Fatalf("lookup lifted the credential cooldown: %+v", after)
+				}
+			})
+		}
+	}
+}
+
 func TestQuotaLookupSurvivesCredentialScopedRateLimit(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	manager := NewManager(nil, nil, nil)
