@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"reflect"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/copilot"
@@ -13,10 +14,11 @@ import (
 )
 
 const copilotCatalogRetryDelay = 5 * time.Minute
+const copilotCatalogWorkers = 4
 
 var errCopilotCatalogSuperseded = errors.New("copilot: catalog refresh superseded")
 
-// Discovery has its own bounded queue and worker. A stalled directory request
+// Discovery has a separate worker pool. A stalled directory request
 // cannot consume the shared credential refresh pool or delay lifecycle hooks.
 type copilotCatalogRefresher struct {
 	coreauth.NoopHook
@@ -27,26 +29,29 @@ type copilotCatalogRefresher struct {
 	jobs       chan *copilotCatalogJob
 	results    chan *copilotCatalogJob
 	removeHook func()
-	// Only the scheduler goroutine accesses these maps.
+	pending    sync.Map // Auth IDs dirtied by lifecycle hooks.
+	// Only the scheduler goroutine accesses the following state.
+	waiting  []*copilotCatalogJob
 	states   map[string]*copilotCatalogState
 	inFlight map[string]*copilotCatalogJob
 }
 
 type copilotCatalogIdentity struct {
-	epoch, credentialVersion  uint64
-	base, token, grant, proxy string
+	epoch, credentialVersion           uint64
+	account, base, token, grant, proxy string
 }
 
 func copilotCatalogIdentityFor(auth *coreauth.Auth) copilotCatalogIdentity {
+	account, _ := auth.Metadata["account_id"].(string)
 	base, _ := auth.Metadata["base_url"].(string)
 	token, _ := auth.Metadata["access_token"].(string)
 	grant, _ := auth.Metadata["refresh_token"].(string)
-	return copilotCatalogIdentity{auth.RegistrationEpoch, auth.CredentialVersion, base, token, grant, auth.ProxyURL}
+	return copilotCatalogIdentity{auth.RegistrationEpoch, auth.CredentialVersion, account, base, token, grant, auth.ProxyURL}
 }
 
 type copilotCatalogState struct {
 	identity copilotCatalogIdentity
-	models   []copilot.Model
+	catalog  *copilot.Catalog
 	disabled bool
 	refresh  bool
 	retryAt  time.Time
@@ -88,6 +93,7 @@ func (r *copilotCatalogRefresher) OnAuthUpdated(_ context.Context, auth *coreaut
 	if auth == nil || auth.Provider != copilot.Provider {
 		return
 	}
+	r.pending.Store(auth.ID, struct{}{})
 	select {
 	case r.wake <- struct{}{}:
 	default:
@@ -95,28 +101,29 @@ func (r *copilotCatalogRefresher) OnAuthUpdated(_ context.Context, auth *coreaut
 }
 
 func (r *copilotCatalogRefresher) run(ctx context.Context) {
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case job := <-r.jobs:
-				_ = r.fetch(job)
-				job.cancel()
+	var workers sync.WaitGroup
+	for range copilotCatalogWorkers {
+		workers.Go(func() {
+			for {
 				select {
-				case r.results <- job:
 				case <-ctx.Done():
 					return
+				case job := <-r.jobs:
+					_ = r.fetch(job)
+					job.cancel()
+					select {
+					case r.results <- job:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
-		}
-	}()
+		})
+	}
 	defer func() {
 		r.removeHook()
 		r.cancel()
-		<-workerDone
+		workers.Wait()
 		close(r.done)
 	}()
 	// The independent clock refreshes long-lived credentials' catalogs and
@@ -125,15 +132,30 @@ func (r *copilotCatalogRefresher) run(ctx context.Context) {
 	defer ticker.Stop()
 	r.reconcile(ctx, time.Now())
 	for {
+		var jobs chan *copilotCatalogJob
+		var next *copilotCatalogJob
+		if len(r.waiting) != 0 {
+			jobs, next = r.jobs, r.waiting[0]
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case jobs <- next:
+			r.waiting[0] = nil
+			r.waiting = r.waiting[1:]
 		case <-r.wake:
-		case <-ticker.C:
+			r.pending.Range(func(key, _ any) bool {
+				r.pending.Delete(key)
+				r.reconcileID(ctx, key.(string), time.Now())
+				return ctx.Err() == nil
+			})
+		case now := <-ticker.C:
+			r.reconcile(ctx, now)
 		case job := <-r.results:
-			r.finish(job, time.Now())
+			now := time.Now()
+			r.finish(job, now)
+			r.reconcileID(ctx, job.auth.ID, now)
 		}
-		r.reconcile(ctx, time.Now())
 	}
 }
 
@@ -147,90 +169,108 @@ func (r *copilotCatalogRefresher) finish(job *copilotCatalogJob, now time.Time) 
 	}
 }
 
+func (r *copilotCatalogRefresher) cancelJob(id string) {
+	job := r.inFlight[id]
+	if job == nil {
+		return
+	}
+	job.cancel()
+	if i := slices.Index(r.waiting, job); i >= 0 {
+		r.waiting = slices.Delete(r.waiting, i, i+1)
+		delete(r.inFlight, id)
+	}
+	// Dispatched jobs stay tracked until the worker reports completion.
+}
+
 func (r *copilotCatalogRefresher) reconcile(ctx context.Context, now time.Time) {
 	seen := make(map[string]bool)
-	for _, auth := range r.service.coreManager.List() {
+	for _, id := range r.service.coreManager.IDsByProvider(copilot.Provider) {
 		if ctx.Err() != nil {
 			return
 		}
-		if auth.Provider != copilot.Provider || pluginHostHasAuthModelProvider(r.service.pluginHost, auth.Provider) {
-			continue
-		}
-		seen[auth.ID] = true
-		identity := copilotCatalogIdentityFor(auth)
-		disabled := auth.Disabled || auth.Status == coreauth.StatusDisabled
-		raw, _ := auth.Metadata[copilot.CatalogKey].(string)
-		catalog := copilot.ReadCatalog(raw, now)
-		state := r.states[auth.ID]
-		publish := state == nil || state.identity.epoch != identity.epoch || state.disabled != disabled || !reflect.DeepEqual(state.models, catalog.Models)
-		if state == nil {
-			state = &copilotCatalogState{identity: identity}
-			r.states[auth.ID] = state
-		} else if state.identity != identity {
-			state.identity, state.refresh, state.retryAt = identity, true, time.Time{}
-		}
-		state.models, state.disabled = catalog.Models, disabled
-		if publish {
-			r.service.refreshModelRegistrationForAuthWithContext(ctx, auth, nil)
-		}
-		if job := r.inFlight[auth.ID]; job != nil {
-			if disabled || identity != job.identity {
-				job.cancel()
-			}
-			continue
-		}
-		if disabled || !auth.HasValidAccessToken(now) || !copilot.TrustedAPI(identity.base) || now.Before(state.retryAt) {
-			continue
-		}
-		if !state.refresh && !catalog.FetchedAt.IsZero() && now.Before(catalog.FetchedAt.Add(copilot.CatalogMaxAge/2)) {
-			continue
-		}
-		jobCtx, cancel := context.WithCancel(ctx)
-		job := &copilotCatalogJob{ctx: jobCtx, cancel: cancel, auth: auth, identity: identity}
-		select {
-		case r.jobs <- job:
-			r.inFlight[auth.ID] = job
-			state.refresh = false
-		default:
-			cancel()
-		}
+		seen[id] = true
+		r.reconcileID(ctx, id, now)
 	}
 	for id := range r.states {
 		if !seen[id] {
 			delete(r.states, id)
-			if job := r.inFlight[id]; job != nil {
-				job.cancel()
-			}
+			r.cancelJob(id)
 		}
 	}
+}
+
+func (r *copilotCatalogRefresher) reconcileID(ctx context.Context, id string, now time.Time) {
+	auth, found := r.service.coreManager.GetByID(id)
+	if !found || auth.Provider != copilot.Provider || r.service.copilotPluginExecutes() {
+		delete(r.states, id)
+		r.cancelJob(id)
+		return
+	}
+	identity := copilotCatalogIdentityFor(auth)
+	disabled := auth.Disabled || auth.Status == coreauth.StatusDisabled
+	catalog := auth.ActiveCopilotCatalog(now)
+	state := r.states[auth.ID]
+	publish := state == nil || state.identity.epoch != identity.epoch || state.disabled != disabled || !state.catalog.SameModels(catalog)
+	if state == nil {
+		state = &copilotCatalogState{identity: identity}
+		r.states[auth.ID] = state
+	} else if state.identity != identity {
+		state.identity, state.refresh, state.retryAt = identity, true, time.Time{}
+	}
+	state.catalog, state.disabled = catalog, disabled
+	if publish {
+		r.service.refreshModelRegistrationForAuthWithContext(ctx, auth, nil)
+	}
+	if job := r.inFlight[auth.ID]; job != nil {
+		if disabled || identity != job.identity {
+			job.cancel()
+		}
+		return
+	}
+	if disabled || !auth.HasValidAccessToken(now) || !copilot.TrustedAPI(identity.base) || now.Before(state.retryAt) {
+		return
+	}
+	if !state.refresh && now.Before(catalog.ExpiresAt().Add(-copilot.CatalogMaxAge/2)) {
+		return
+	}
+	jobCtx, cancel := context.WithCancel(ctx)
+	job := &copilotCatalogJob{ctx: jobCtx, cancel: cancel, auth: auth, identity: identity}
+	select {
+	case r.jobs <- job:
+	default:
+		r.waiting = append(r.waiting, job)
+	}
+	r.inFlight[auth.ID] = job
+	state.refresh = false
+
 }
 
 func (r *copilotCatalogRefresher) fetch(job *copilotCatalogJob) error {
 	if err := job.ctx.Err(); err != nil {
 		return err
 	}
-	client := helps.NewProxyAwareHTTPClient(job.ctx, r.service.currentConfig(), job.auth, 0)
-	raw, errFetch := copilot.FetchCatalog(job.ctx, client, job.identity.base, job.identity.token)
+	ctx := r.service.coreManager.WithAuthTransport(job.ctx, job.auth)
+	client := helps.NewProxyAwareHTTPClient(ctx, r.service.currentConfig(), job.auth, 0)
+	catalog, errFetch := copilot.FetchCatalog(ctx, client, job.identity.base, job.identity.token)
 	var status copilot.HTTPError
 	if errFetch != nil && !(errors.As(errFetch, &status) && (status.Code == http.StatusUnauthorized || status.Code == http.StatusForbidden)) {
 		// Retain the previous snapshot only until its original hard TTL. Failed
 		// discovery must not move that clock or roll back refreshed credentials.
 		return errFetch
 	}
-	previous, _ := job.auth.Metadata[copilot.CatalogKey].(string)
-	_, _, errCommit := r.service.coreManager.Modify(job.ctx, job.auth.ID, job.identity.epoch, func(current *coreauth.Auth) error {
-		currentCatalog, _ := current.Metadata[copilot.CatalogKey].(string)
-		if current.Provider != copilot.Provider || current.Disabled || current.Status == coreauth.StatusDisabled || copilotCatalogIdentityFor(current) != job.identity || currentCatalog != previous {
+	if errFetch != nil {
+		// Record an authoritative denial even if this was the very first request.
+		// A zero timestamp makes discovery retry independently of the normal refresh age.
+		catalog = copilot.UnavailableCatalog
+	}
+	_, _, errCommit := r.service.coreManager.Modify(coreauth.WithSkipPersist(job.ctx), job.auth.ID, job.identity.epoch, func(current *coreauth.Auth) error {
+		if current.Provider != copilot.Provider || current.Disabled || current.Status == coreauth.StatusDisabled || copilotCatalogIdentityFor(current) != job.identity || current.CopilotCatalog != job.auth.CopilotCatalog {
 			return errCopilotCatalogSuperseded
 		}
-		if errFetch != nil {
-			if currentCatalog == "" {
-				return errCopilotCatalogSuperseded
-			}
-			delete(current.Metadata, copilot.CatalogKey)
-		} else {
-			current.Metadata[copilot.CatalogKey] = raw
+		if current.CopilotCatalog == catalog {
+			return errCopilotCatalogSuperseded
 		}
+		current.CopilotCatalog = catalog
 		return nil
 	})
 	return errCommit

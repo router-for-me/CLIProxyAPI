@@ -1080,20 +1080,27 @@ func mergeRequestHeaders(current, updates http.Header, clear []string) http.Head
 		out = make(http.Header)
 	}
 	for _, key := range clear {
-		out.Del(key)
-		for existingKey := range out {
-			if strings.EqualFold(existingKey, key) {
-				delete(out, existingKey)
-			}
-		}
+		deleteRequestHeaderFold(out, key)
 	}
 	for key, values := range updates {
-		out.Del(key)
+		deleteRequestHeaderFold(out, key)
 		for _, value := range values {
 			out.Add(key, value)
 		}
 	}
 	return out
+}
+
+func deleteRequestHeaderFold(headers http.Header, key string) {
+	if len(headers) == 0 {
+		return
+	}
+	headers.Del(key)
+	for existingKey := range headers {
+		if strings.EqualFold(existingKey, key) {
+			delete(headers, existingKey)
+		}
+	}
 }
 
 func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
@@ -1280,10 +1287,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -1302,6 +1306,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				auth = preparedAuth
+			}
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
@@ -1380,11 +1387,28 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				return cliproxyexecutor.Response{}, errIntercept
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
-			execCtx = withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(auth)
+			syncActiveAuth := func() {
+				if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != auth {
+					auth = currentAuth
+				}
+			}
+			refreshExecCtx := func(base context.Context) context.Context {
+				return m.withExecutionAuthRefresh(base, executionAuthRefreshOptions{
+					onAuthUpdated: func(updated *Auth) {
+						if updated != nil {
+							activeAuth.Store(updated.Clone())
+						}
+					},
+				})
+			}
+			execCtx = refreshExecCtx(withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider))
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			var preRefreshExecErr error
 			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			syncActiveAuth()
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -1396,13 +1420,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					preRefreshExecErr = errExec
 					auth = refreshed
+					activeAuth.Store(auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider)
+					execCtx = refreshExecCtx(withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider))
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					syncActiveAuth()
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -1562,10 +1588,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		debugLogAuthSelection(entry, auth, provider, routeModel)
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		execCtx = contextWithRequestedModelAlias(execCtx, pickOpts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
@@ -1584,6 +1607,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		preparedAuth, errPrepare := m.prepareRequestAuth(execCtx, executor, auth)
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				auth = preparedAuth
+			}
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return cliproxyexecutor.Response{}, errCtx
@@ -1662,11 +1688,28 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				return cliproxyexecutor.Response{}, errIntercept
 			}
 			execReq = attachResolvedExecutionModelInfo(routing, execReq, auth, routeModel, upstreamModel, restoreExecutionModel)
-			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			var activeAuth atomic.Pointer[Auth]
+			activeAuth.Store(auth)
+			syncActiveAuth := func() {
+				if currentAuth := activeAuth.Load(); currentAuth != nil && currentAuth != auth {
+					auth = currentAuth
+				}
+			}
+			refreshExecCtx := func(base context.Context) context.Context {
+				return m.withExecutionAuthRefresh(base, executionAuthRefreshOptions{
+					onAuthUpdated: func(updated *Auth) {
+						if updated != nil {
+							activeAuth.Store(updated.Clone())
+						}
+					},
+				})
+			}
+			execCtx = refreshExecCtx(syncMetadataSessionToContext(execCtx, execOpts.Metadata))
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
 			var preRefreshExecErr error
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			syncActiveAuth()
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -1678,13 +1721,15 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
 					preRefreshExecErr = errExec
 					auth = refreshed
+					activeAuth.Store(auth)
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
-					execCtx = m.newUpstreamAttemptContext(execCtx)
+					execCtx = refreshExecCtx(m.newUpstreamAttemptContext(execCtx))
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					syncActiveAuth()
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -1971,10 +2016,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				return nil, errBind
 			}
 		}
-		if rt := m.roundTripperFor(auth); rt != nil {
-			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
-			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
-		}
+		execCtx = m.WithAuthTransport(execCtx, auth)
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
 		if homeMode {
 			clearSchedulerSelectionID(opts.Metadata)
@@ -2028,6 +2070,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			preparedAuth, errPrepare = m.prepareRequestAuth(execCtx, executor, auth)
 		}
 		if errPrepare != nil {
+			if preparedAuth != nil {
+				auth = preparedAuth
+			}
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
 				if selection != nil {
@@ -3007,27 +3052,62 @@ func (m *Manager) prepareRequestAuthInternal(ctx context.Context, preparer Reque
 	if !preparer.ShouldPrepareRequestAuth(target) {
 		return target, nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	base := target.Clone()
-	updated, errPrepare := preparer.PrepareRequestAuth(ctx, base.Clone())
+	currentExpectedVersion := expectedVersion
+	var latestCommitted *Auth
+	prepOpts := executionAuthRefreshOptions{
+		holdRefreshLock: true,
+		expectedEpoch:   expectedEpoch,
+		onAuthUpdated: func(saved *Auth) {
+			if saved != nil {
+				base = saved.Clone()
+				latestCommitted = saved.Clone()
+			}
+		},
+	}
+	if expectedVersion != 0 {
+		prepOpts.expectedVersion = &currentExpectedVersion
+	}
+	prepCtx := m.withExecutionAuthRefresh(ctx, prepOpts)
+	updated, errPrepare := preparer.PrepareRequestAuth(prepCtx, base.Clone())
 	if expectedVersion != 0 {
 		currentAfter, okAfter := m.GetByID(id)
 		if !okAfter || currentAfter == nil {
 			return nil, errVerifyCredentialRemoved
 		}
-		if (expectedEpoch != 0 && currentAfter.RegistrationEpoch != expectedEpoch) || currentAfter.CredentialVersion != expectedVersion {
+		if (expectedEpoch != 0 && currentAfter.RegistrationEpoch != expectedEpoch) || currentAfter.CredentialVersion != currentExpectedVersion {
 			return nil, errVerifyCredentialSuperseded
 		}
 	}
 	if errPrepare != nil {
+		if latestCommitted != nil {
+			return latestCommitted, errPrepare
+		}
 		return auth, errPrepare
 	}
 	if updated == nil {
+		if latestCommitted != nil {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return latestCommitted, errCtx
+			}
+			return latestCommitted, nil
+		}
 		return target, nil
 	}
+	if latestCommitted != nil && preparedAuthMatchesBase(base, updated) {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return latestCommitted, errCtx
+		}
+		return latestCommitted, nil
+	}
 
+	commitCtx := context.WithoutCancel(ctx)
 	if expectedVersion != 0 {
-		saved, committed, baseSuperseded, errUpdate := m.updatePreparedAuthStrict(ctx, base, updated)
+		saved, committed, baseSuperseded, errUpdate := m.updatePreparedAuthStrict(commitCtx, base, updated)
 		if errUpdate != nil {
 			if strings.Contains(errUpdate.Error(), "stale registration epoch") {
 				return nil, errVerifyCredentialSuperseded
@@ -3040,14 +3120,20 @@ func (m *Manager) prepareRequestAuthInternal(ctx context.Context, preparer Reque
 		if !committed || baseSuperseded {
 			return nil, errVerifyCredentialSuperseded
 		}
+		if errCtx := ctx.Err(); errCtx != nil {
+			return saved, errCtx
+		}
 		return saved, nil
 	}
 
-	saved, errUpdate := m.UpdatePreparedAuth(ctx, base, updated)
+	saved, errUpdate := m.UpdatePreparedAuth(commitCtx, base, updated)
 	if errUpdate != nil {
 		return nil, errUpdate
 	}
 	if saved != nil {
+		if errCtx := ctx.Err(); errCtx != nil {
+			return saved, errCtx
+		}
 		return saved, nil
 	}
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "meta") {
@@ -3257,6 +3343,15 @@ func (m *Manager) executorFor(provider string) ProviderExecutor {
 
 // roundTripperContextKey is an unexported context key type to avoid collisions.
 type roundTripperContextKey struct{}
+
+// WithAuthTransport applies the same per-account transport to inference and model discovery.
+func (m *Manager) WithAuthTransport(ctx context.Context, auth *Auth) context.Context {
+	if rt := m.roundTripperFor(auth); rt != nil {
+		ctx = context.WithValue(ctx, roundTripperContextKey{}, rt)
+		return context.WithValue(ctx, "cliproxy.roundtripper", rt)
+	}
+	return ctx
+}
 
 // roundTripperFor retrieves an HTTP RoundTripper for the given auth if a provider is registered.
 func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
@@ -3475,18 +3570,33 @@ func (m *Manager) InjectCredentials(req *http.Request, authID string) error {
 	}
 	m.mu.RLock()
 	a := m.auths[authID]
+	var authClone *Auth
 	var exec ProviderExecutor
 	if a != nil {
+		authClone = a.Clone()
 		exec, _ = m.executorLocked(executorKeyFromAuth(a))
 	}
 	m.mu.RUnlock()
-	if a == nil || exec == nil {
+	if authClone == nil || exec == nil {
 		return nil
 	}
 	if p, ok := exec.(RequestPreparer); ok && p != nil {
-		return p.PrepareRequest(req, a)
+		return m.prepareHTTPRequestWithExecutionAuthRefresh(req, authClone, p)
 	}
 	return nil
+}
+
+func (m *Manager) prepareHTTPRequestWithExecutionAuthRefresh(req *http.Request, auth *Auth, preparer RequestPreparer) error {
+	origCtx := req.Context()
+	prepCtx := m.withExecutionAuthRefresh(origCtx, executionAuthRefreshOptions{})
+	prepReq := req.WithContext(prepCtx)
+	errPrep := preparer.PrepareRequest(prepReq, auth)
+	finalCtx := origCtx
+	if updatedCtx := prepReq.Context(); updatedCtx != prepCtx {
+		finalCtx = context.WithValue(updatedCtx, executionAuthRefreshContextKey{}, nil)
+	}
+	*req = *prepReq.WithContext(finalCtx)
+	return errPrep
 }
 
 // PrepareHttpRequest injects provider credentials into the supplied HTTP request.
@@ -3515,7 +3625,7 @@ func (m *Manager) PrepareHttpRequest(ctx context.Context, auth *Auth, req *http.
 	if !ok || preparer == nil {
 		return &Error{Code: "not_supported", Message: "executor does not support http request preparation"}
 	}
-	return preparer.PrepareRequest(req, auth)
+	return m.prepareHTTPRequestWithExecutionAuthRefresh(req, auth, preparer)
 }
 
 // NewHttpRequest constructs a new HTTP request and injects provider credentials into it.
@@ -3563,7 +3673,10 @@ func (m *Manager) HttpRequest(ctx context.Context, auth *Auth, req *http.Request
 	if exec == nil {
 		return nil, &Error{Code: "provider_not_found", Message: "executor not registered for provider: " + providerKey}
 	}
-	return exec.HttpRequest(ctx, auth, req)
+	if ctx == nil {
+		ctx = req.Context()
+	}
+	return exec.HttpRequest(m.withExecutionAuthRefresh(ctx, executionAuthRefreshOptions{}), auth, req)
 }
 
 func ensureCanonicalSessionMetadata(metadata map[string]any, headers http.Header, payload []byte) map[string]any {
@@ -3955,10 +4068,7 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if errCtx := baseCtx.Err(); errCtx != nil {
 		return auth, errCtx
 	}
-	if rt := m.roundTripperFor(auth); rt != nil {
-		baseCtx = context.WithValue(baseCtx, roundTripperContextKey{}, rt)
-		baseCtx = context.WithValue(baseCtx, "cliproxy.roundtripper", rt)
-	}
+	baseCtx = m.WithAuthTransport(baseCtx, auth)
 	execCtx := syncMetadataSessionToContext(m.newUpstreamAttemptContext(baseCtx), opts.Metadata)
 	executionSeq := m.nextExecutionSeq()
 
@@ -3988,6 +4098,12 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		if errors.Is(errPrepare, errVerifyCredentialSuperseded) {
 			latest, _ := m.GetByID(auth.ID)
 			return latest, verifyCredentialSupersededError()
+		}
+		if preparedAuth != nil && preparedAuth.RegistrationEpoch == regEpoch {
+			auth = preparedAuth
+			accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+			credVersion = auth.CredentialVersion
+			regEpoch = auth.RegistrationEpoch
 		}
 		if errCancel := verifyCancellationError(execCtx, auth, errPrepare); errCancel != nil {
 			updated, _ := m.GetByID(auth.ID)
@@ -4019,9 +4135,40 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 	executor = executorForAuth(baseExecutor, auth)
 
+	var activeVerifyAuth atomic.Pointer[Auth]
+	activeVerifyAuth.Store(auth)
+	syncVerifyAuth := func() {
+		if currentAuth := activeVerifyAuth.Load(); currentAuth != nil && currentAuth != auth {
+			auth = currentAuth
+			accessToken = authAccessTokenForRequest(execCtx, auth, opts.Headers)
+			credVersion = auth.CredentialVersion
+			regEpoch = auth.RegistrationEpoch
+		}
+	}
+	verifyRefreshCtx := func(base context.Context) context.Context {
+		return m.withExecutionAuthRefresh(base, executionAuthRefreshOptions{
+			expectedEpoch:   regEpoch,
+			expectedVersion: &credVersion,
+			onAuthUpdated: func(updated *Auth) {
+				if updated != nil {
+					activeVerifyAuth.Store(updated.Clone())
+				}
+			},
+		})
+	}
+
 	for {
-		streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
+		activeVerifyAuth.Store(auth)
+		streamRes, errStream := executor.ExecuteStream(verifyRefreshCtx(execCtx), auth, req, opts)
+		syncVerifyAuth()
 		if errStream != nil {
+			if errors.Is(errStream, errVerifyCredentialRemoved) {
+				return nil, verifyCredentialRemovedError()
+			}
+			if errors.Is(errStream, errVerifyCredentialSuperseded) {
+				latest, _ := m.GetByID(auth.ID)
+				return latest, verifyCredentialSupersededError()
+			}
 			if errCancel := verifyCancellationError(execCtx, auth, errStream); errCancel != nil {
 				updated, _ := m.GetByID(auth.ID)
 				return updated, errCancel
@@ -4030,8 +4177,17 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 			if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
 				opts.Stream = false
 				for {
-					resp, errExec := executor.Execute(execCtx, auth, req, opts)
+					activeVerifyAuth.Store(auth)
+					resp, errExec := executor.Execute(verifyRefreshCtx(execCtx), auth, req, opts)
+					syncVerifyAuth()
 					if errExec != nil {
+						if errors.Is(errExec, errVerifyCredentialRemoved) {
+							return nil, verifyCredentialRemovedError()
+						}
+						if errors.Is(errExec, errVerifyCredentialSuperseded) {
+							latest, _ := m.GetByID(auth.ID)
+							return latest, verifyCredentialSupersededError()
+						}
 						if errCancel := verifyCancellationError(execCtx, auth, errExec); errCancel != nil {
 							updated, _ := m.GetByID(auth.ID)
 							return updated, errCancel

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -206,4 +207,207 @@ func TestHandlerFallbackDoesNotPolluteExecutorCapture(t *testing.T) {
 			}
 		})
 	}
+}
+
+type memoryCaptureLogRecord struct {
+	apiResponse []byte
+	errors      []*interfaces.ErrorMessage
+}
+
+type memoryCaptureStreamingWriter struct {
+	mu          sync.Mutex
+	apiResponse bytes.Buffer
+	errors      []*interfaces.ErrorMessage
+	onClose     func(memoryCaptureLogRecord)
+}
+
+func (*memoryCaptureStreamingWriter) WriteChunkAsync([]byte)                     {}
+func (*memoryCaptureStreamingWriter) SetFirstChunkTimestamp(time.Time)           {}
+func (*memoryCaptureStreamingWriter) WriteStatus(int, map[string][]string) error { return nil }
+func (*memoryCaptureStreamingWriter) WriteAPIRequest([]byte) error               { return nil }
+func (*memoryCaptureStreamingWriter) WriteAPIWebsocketTimeline([]byte) error     { return nil }
+func (w *memoryCaptureStreamingWriter) WriteAPIResponse(data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.apiResponse.Write(data)
+	return nil
+}
+func (w *memoryCaptureStreamingWriter) WriteAPIResponseErrors(errs []*interfaces.ErrorMessage) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.errors = append(w.errors, errs...)
+	return nil
+}
+func (w *memoryCaptureStreamingWriter) Close() error {
+	w.mu.Lock()
+	record := memoryCaptureLogRecord{
+		apiResponse: bytes.Clone(w.apiResponse.Bytes()),
+		errors:      append([]*interfaces.ErrorMessage(nil), w.errors...),
+	}
+	w.mu.Unlock()
+	if w.onClose != nil {
+		w.onClose(record)
+	}
+	return nil
+}
+
+type memoryCaptureRequestLogger struct {
+	mu      sync.Mutex
+	records []memoryCaptureLogRecord
+}
+
+func (*memoryCaptureRequestLogger) IsEnabled() bool { return true }
+func (l *memoryCaptureRequestLogger) record(rec memoryCaptureLogRecord) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append(l.records, rec)
+}
+func (l *memoryCaptureRequestLogger) LogRequest(_, _ string, _ map[string][]string, _ []byte, _ int, _ map[string][]string, _, _, _, apiResponse, _ []byte, apiResponseErrors []*interfaces.ErrorMessage, _ string, _, _ time.Time) error {
+	l.record(memoryCaptureLogRecord{
+		apiResponse: bytes.Clone(apiResponse),
+		errors:      append([]*interfaces.ErrorMessage(nil), apiResponseErrors...),
+	})
+	return nil
+}
+func (l *memoryCaptureRequestLogger) LogRequestWithOptions(_, _ string, _ map[string][]string, _ []byte, _ int, _ map[string][]string, _, _, _, apiResponse, _ []byte, apiResponseErrors []*interfaces.ErrorMessage, _ bool, _ string, _, _ time.Time) error {
+	l.record(memoryCaptureLogRecord{
+		apiResponse: bytes.Clone(apiResponse),
+		errors:      append([]*interfaces.ErrorMessage(nil), apiResponseErrors...),
+	})
+	return nil
+}
+func (l *memoryCaptureRequestLogger) LogStreamingRequest(_, _ string, _ map[string][]string, _ []byte, _ string) (logging.StreamingLogWriter, error) {
+	return &memoryCaptureStreamingWriter{onClose: l.record}, nil
+}
+
+func TestMemoryStreamSnapshotterPublishedByMiddlewareAndIsolatedAcrossGinReuse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+
+	t.Run("concurrent_mid_callback_gin_reuse", func(t *testing.T) {
+		logger := &memoryCaptureRequestLogger{}
+		var wg sync.WaitGroup
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			ctx := context.WithValue(c.Request.Context(), "gin", c)
+			reqTag := c.GetHeader("X-Test-Req")
+			helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{
+				URL:    "https://api.individual.githubcopilot.com/chat/completions",
+				Method: http.MethodPost,
+				Body:   []byte(reqTag),
+			})
+			helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream"}})
+			streamLogger := helps.BindAPIResponseStreamLogger(ctx, cfg)
+			streamLogger.AppendChunk([]byte("data: " + reqTag + "-initial"))
+			if reqTag == "req1" {
+				// Keep writing concurrently from an orphaned goroutine across Finalize and Gin pool reuse.
+				started := make(chan struct{})
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					close(started)
+					for range 200 {
+						streamLogger.AppendChunk([]byte("data: STALE_REQ1_CONCURRENT"))
+					}
+					streamLogger.RecordError(errors.New("stale req1 concurrent error"))
+				}()
+				<-started
+			}
+			c.Data(http.StatusOK, "text/event-stream", []byte("data: "+reqTag+"\n\n"))
+		})
+
+		req1 := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		req1.Header.Set("X-Test-Req", "req1")
+		router.ServeHTTP(httptest.NewRecorder(), req1)
+
+		req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		req2.Header.Set("X-Test-Req", "req2")
+		router.ServeHTTP(httptest.NewRecorder(), req2)
+		wg.Wait()
+
+		logger.mu.Lock()
+		defer logger.mu.Unlock()
+		if len(logger.records) != 2 {
+			t.Fatalf("logged records = %d, want 2", len(logger.records))
+		}
+		if !strings.Contains(string(logger.records[0].apiResponse), "data: req1-initial") {
+			t.Fatalf("req1 API response missing initial stream chunk:\n%s", string(logger.records[0].apiResponse))
+		}
+		req2Resp := string(logger.records[1].apiResponse)
+		if !strings.Contains(req2Resp, "data: req2-initial") {
+			t.Fatalf("req2 API response missing req2 chunk:\n%s", req2Resp)
+		}
+		if strings.Contains(req2Resp, "STALE_REQ1_CONCURRENT") {
+			t.Fatalf("req2 API response polluted by req1 concurrent callback:\n%s", req2Resp)
+		}
+		if len(logger.records[1].errors) != 0 {
+			t.Fatalf("req2 errors polluted by req1 concurrent callback: %#v", logger.records[1].errors)
+		}
+	})
+
+	t.Run("retry_after_bound_stream_preserves_both_attempts", func(t *testing.T) {
+		logger := &memoryCaptureRequestLogger{}
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(logger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			ctx := context.WithValue(c.Request.Context(), "gin", c)
+			helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{URL: "https://api.individual.githubcopilot.com/attempt1", Method: http.MethodPost})
+			helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
+			streamLogger := helps.BindAPIResponseStreamLogger(ctx, cfg)
+			streamLogger.AppendChunk([]byte(`data: {"type":"error","attempt":1}`))
+			streamLogger.RecordError(errors.New("attempt 1 failed before payload"))
+
+			helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{URL: "https://api.individual.githubcopilot.com/attempt2", Method: http.MethodPost})
+			helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
+			helps.AppendAPIResponseChunk(ctx, cfg, []byte(`{"attempt":2,"ok":true}`))
+			c.Data(http.StatusOK, "application/json", []byte(`{"ok":true}`))
+		})
+
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+
+		logger.mu.Lock()
+		defer logger.mu.Unlock()
+		if len(logger.records) != 1 {
+			t.Fatalf("logged records = %d, want 1", len(logger.records))
+		}
+		got := string(logger.records[0].apiResponse)
+		for _, want := range []string{"=== API RESPONSE 1 ===", `"attempt":1`, "=== API RESPONSE 2 ===", `"attempt":2`} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("retry API response missing %q:\n%s", want, got)
+			}
+		}
+	})
+
+	t.Run("file_backed_retry_while_attempt1_stream_draining", func(t *testing.T) {
+		logsDir := t.TempDir()
+		fileLogger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+		var wg sync.WaitGroup
+		router := gin.New()
+		router.Use(RequestLoggingMiddleware(fileLogger))
+		router.POST("/v1/responses", func(c *gin.Context) {
+			ctx := context.WithValue(c.Request.Context(), "gin", c)
+			helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{URL: "https://api.individual.githubcopilot.com/attempt1", Method: http.MethodPost})
+			helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
+			streamLogger := helps.BindAPIResponseStreamLogger(ctx, cfg)
+			started := make(chan struct{})
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				close(started)
+				for range 50 {
+					streamLogger.AppendChunk([]byte(`data: {"attempt":1}`))
+				}
+			}()
+			<-started
+
+			helps.RecordAPIRequest(ctx, cfg, helps.UpstreamRequestLog{URL: "https://api.individual.githubcopilot.com/attempt2", Method: http.MethodPost})
+			helps.RecordAPIResponseMetadata(ctx, cfg, http.StatusOK, nil)
+			helps.AppendAPIResponseChunk(ctx, cfg, []byte(`{"attempt":2,"ok":true}`))
+			c.Data(http.StatusOK, "application/json", []byte(`{"ok":true}`))
+		})
+
+		router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+		wg.Wait()
+	})
 }

@@ -270,6 +270,43 @@ func TestApplyOAuthModelAlias_PreservesMetadataModelID(t *testing.T) {
 	}
 }
 
+func TestApplyModelPrefixes_PreservesExplicitPublishedNames(t *testing.T) {
+	for _, provider := range []string{"copilot", "devin"} {
+		t.Run(provider, func(t *testing.T) {
+			baseSource := provider + "/base"
+			explicitSource := provider + "/explicit"
+			models := []*ModelInfo{
+				{ID: "chat", SourceModelID: baseSource},
+				{ID: "team/chat", SourceModelID: explicitSource},
+			}
+			for _, tc := range []struct {
+				name  string
+				force bool
+				want  map[string]string
+			}{
+				{"optional", false, map[string]string{
+					"chat": baseSource, "team/chat": explicitSource, "team/team/chat": explicitSource,
+				}},
+				{"required", true, map[string]string{
+					"team/chat": baseSource, "team/team/chat": explicitSource,
+				}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					published := applyModelPrefixes(models, "team", tc.force)
+					if len(published) != len(tc.want) {
+						t.Fatalf("published %d routes, want %d", len(published), len(tc.want))
+					}
+					for _, model := range published {
+						if want := tc.want[model.ID]; model.SourceModelID != want {
+							t.Errorf("route %q source = %q, want %q", model.ID, model.SourceModelID, want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestApplyModelPrefixes_PreservesMetadataModelID(t *testing.T) {
 	webSearch := true
 	models := []*ModelInfo{

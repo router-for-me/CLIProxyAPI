@@ -1,7 +1,6 @@
 package management
 
 import (
-	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,7 +48,7 @@ func TestConfigV8ClientMultiAgentMigration(t *testing.T) {
 			}
 			request(http.MethodPut, canonical, `"invalid"`, http.StatusUnprocessableEntity)
 			data, errRead := os.ReadFile(path)
-			if errRead != nil || !bytes.Equal(data, []byte(raw)) {
+			if errRead != nil || config.ComputeSourceHash(data) != cfg.SourceHash {
 				t.Fatalf("GET or rejected write changed legacy file: %v", errRead)
 			}
 			for _, old := range []string{"providers/codex", "oauth/providers/codex", "codex"} {

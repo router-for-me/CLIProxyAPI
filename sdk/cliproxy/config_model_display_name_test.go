@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -95,6 +96,27 @@ func TestBuildCodexConfigModelsSelectsDefaultsOrConfiguredModels(t *testing.T) {
 		if _, ok := defaultIDs[modelID]; !ok {
 			t.Errorf("missing default model %q", modelID)
 		}
+	}
+}
+
+func TestBuildCodexConfigModelsInheritsStaticThinking(t *testing.T) {
+	for _, tt := range []struct{ id, channel string }{
+		{"mai-code-2-flash", "copilot"},
+		{"claude-sonnet-5", "claude"},
+	} {
+		t.Run(tt.id, func(t *testing.T) {
+			preset := registry.LookupStaticModelInfoByChannel(tt.id, tt.channel)
+			if preset == nil || preset.Thinking == nil {
+				t.Fatalf("missing thinking preset for %s in %s", tt.id, tt.channel)
+			}
+			models := buildCodexConfigModels(&config.CodexKey{Models: []config.CodexModel{{Name: tt.id}}})
+			if len(models) != 1 {
+				t.Fatalf("got %d configured models, want 1", len(models))
+			}
+			if !reflect.DeepEqual(models[0].Thinking, preset.Thinking) {
+				t.Errorf("thinking = %+v, want %s preset %+v", models[0].Thinking, tt.channel, preset.Thinking)
+			}
+		})
 	}
 }
 
