@@ -246,7 +246,7 @@ func (e *AntigravityExecutor) refreshTokenWithOptions(ctx context.Context, auth 
 	if retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)); retained != "" {
 		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = antigravitySignatureGrantBinding(auth)
 	} else {
-		auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = antigravitySignatureGrantIdentity(auth)
+		auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
 		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = antigravitySignatureGrantBinding(auth)
 	}
 	auth.Metadata["expires_in"] = tokenResp.ExpiresIn
