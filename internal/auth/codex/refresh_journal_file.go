@@ -35,6 +35,10 @@ func (j *FileRefreshJournal) RefreshClaim(ctx context.Context, key string) (bool
 	if errPath != nil {
 		return false, errPath
 	}
+	root, errRoot := existingRefreshAncestor(j.Dir)
+	if errRoot != nil {
+		return false, errRoot
+	}
 	if errMkdir := os.MkdirAll(filepath.Dir(path), 0o700); errMkdir != nil {
 		return false, errMkdir
 	}
@@ -44,7 +48,7 @@ func (j *FileRefreshJournal) RefreshClaim(ctx context.Context, key string) (bool
 		}
 		return false, errMkdir
 	}
-	if errSync := syncRefreshClaimDirectories(path); errSync != nil {
+	if errSync := syncRefreshClaimDirectories(path, root); errSync != nil {
 		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
 			log.Warnf("remove unsynced refresh claim: %v", errRemove)
 		}
@@ -126,10 +130,36 @@ func (j *FileRefreshJournal) RefreshRelease(ctx context.Context, key string) err
 	return syncRefreshDirectory(filepath.Dir(path))
 }
 
+// existingRefreshAncestor returns the journal directory, or its deepest existing
+// ancestor when the journal directory does not exist yet.
+func existingRefreshAncestor(dir string) (string, error) {
+	dir, errAbs := filepath.Abs(dir)
+	if errAbs != nil {
+		return "", errAbs
+	}
+	for {
+		_, errStat := os.Stat(dir)
+		if errStat == nil {
+			return dir, nil
+		}
+		if !errors.Is(errStat, os.ErrNotExist) {
+			return "", errStat
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir, nil
+		}
+		dir = parent
+	}
+}
+
 // Sync every directory entry that can have been created by MkdirAll before
-// permitting an exchange. Canonicalize symlinks so newly-created target
-// ancestors, rather than just the spelling of the configured path, are durable.
-func syncRefreshClaimDirectories(path string) error {
+// permitting an exchange: the claim and each directory up to and including
+// root, which existed before MkdirAll. Directories above root were not changed
+// by the claim, and sandboxed services may be unable to open them. Canonicalize
+// symlinks so newly-created target ancestors, rather than just the spelling of
+// the configured path, are durable.
+func syncRefreshClaimDirectories(path, root string) error {
 	canonical, errCanonical := filepath.EvalSymlinks(path)
 	if errCanonical != nil {
 		return errCanonical
@@ -138,9 +168,20 @@ func syncRefreshClaimDirectories(path string) error {
 	if errAbs != nil {
 		return errAbs
 	}
+	canonicalRoot, errCanonicalRoot := filepath.EvalSymlinks(root)
+	if errCanonicalRoot != nil {
+		return errCanonicalRoot
+	}
+	stop, errAbsRoot := filepath.Abs(canonicalRoot)
+	if errAbsRoot != nil {
+		return errAbsRoot
+	}
 	for {
 		if errSync := syncRefreshDirectory(dir); errSync != nil {
 			return errSync
+		}
+		if dir == stop {
+			return nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
