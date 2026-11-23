@@ -155,10 +155,12 @@ type Auth struct {
 	cooldownRecordedSeq     uint64    `json:"-"`
 	forceCooldownUntil      time.Time `json:"-"`
 	quotaForceCooldownUntil time.Time `json:"-"`
-	credQuotaForceUntil     time.Time `json:"-"`
-	credentialRetryAfter    time.Time `json:"-"`
-	nonQuotaCooldownUntil   time.Time `json:"-"`
-	forceCooldownSeeded     bool      `json:"-"`
+	// nonQuotaForceCooldownUntil survives a longer quota force deadline.
+	nonQuotaForceCooldownUntil time.Time `json:"-"`
+	credQuotaForceUntil        time.Time `json:"-"`
+	credentialRetryAfter       time.Time `json:"-"`
+	nonQuotaCooldownUntil      time.Time `json:"-"`
+	forceCooldownSeeded        bool      `json:"-"`
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
@@ -370,8 +372,8 @@ type QuotaState struct {
 	// reports windows that responses omit, so it is kept apart from Signals and
 	// only the next lookup replaces it. QuotaWindows composes both.
 	LookupSignals map[string]string `json:"lookup_signals,omitempty"`
-	// LookupWindows stores usage windows reported in normalized form.
-	LookupWindows []QuotaWindow `json:"lookup_windows,omitempty"`
+	// LookupWindows stores local normalized observations outside the Auth JSON contract.
+	LookupWindows []QuotaWindow `json:"-"`
 	// cooldownSignals retains rejected quota headers captured when the active
 	// cooldown was recorded so out-of-order completions cannot overwrite them.
 	cooldownSignals   map[string]string

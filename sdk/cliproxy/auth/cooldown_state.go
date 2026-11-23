@@ -60,6 +60,8 @@ type CooldownStateRecord struct {
 	// ErrorCodeForceCooldown layer so a subsequent expired non-quota LastError
 	// does not misclassify the remaining quota force window across restarts.
 	QuotaForceCooldownUntil time.Time `json:"quota_force_cooldown_until,omitempty"`
+	// NonQuotaForceCooldownUntil preserves an auth force deadline beneath a longer quota force.
+	NonQuotaForceCooldownUntil time.Time `json:"non_quota_force_cooldown_until,omitzero"`
 	// IndependentQuotaForceCooldownUntil persists QuotaForceCooldownUntil for
 	// IndependentState beneath a credential_quota wrap.
 	IndependentQuotaForceCooldownUntil time.Time `json:"independent_quota_force_cooldown_until,omitempty"`

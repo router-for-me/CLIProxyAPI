@@ -50,12 +50,22 @@ func (m *Manager) ObserveQuotaLookup(authID string, headers http.Header, lookedU
 	if lookedUpAt.IsZero() {
 		lookedUpAt = time.Now()
 	}
-	recorded, drift := m.recordQuotaLookup(authID, headers, lookedUpAt)
+	var recorded bool
+	var drift string
+	_, _, err := m.resetQuota(context.Background(), authID, lookedUpAt, func(auth *Auth) (bool, error) {
+		if lookedUpAt.Before(auth.Quota.LookedUpAt) ||
+			!auth.Quota.ObserveLookupForProvider(auth.Provider, headers, lookedUpAt) {
+			return false, nil
+		}
+		recorded = true
+		drift = lookupDriftLine(auth, auth.Quota.LookupSignals, lookedUpAt)
+		return true, nil
+	})
 	if !recorded {
 		return false
 	}
-	if _, _, errReset := m.resetQuota(context.Background(), authID, lookedUpAt); errReset != nil {
-		log.Warnf("failed to persist quota lookup recovery: %v", errReset)
+	if err != nil {
+		log.Warnf("failed to persist quota lookup recovery: %v", err)
 	}
 	if drift != "" {
 		log.Info(drift)
@@ -64,28 +74,13 @@ func (m *Manager) ObserveQuotaLookup(authID string, headers http.Header, lookedU
 	return true
 }
 
-func (m *Manager) recordQuotaLookup(authID string, headers http.Header, lookedUpAt time.Time) (recorded bool, drift string) {
-	release := m.lockAuthMutation(authID)
-	defer release()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	auth := m.auths[authID]
-	if auth == nil || lookedUpAt.Before(auth.Quota.LookedUpAt) {
-		return false, ""
-	}
-	if !auth.Quota.ObserveLookupForProvider(auth.Provider, headers, lookedUpAt) {
-		return false, ""
-	}
-	return true, lookupDriftLine(auth, auth.Quota.LookupSignals, lookedUpAt)
-}
-
 // ErrQuotaLookupCredentialChanged means the credential is no longer current.
 var ErrQuotaLookupCredentialChanged = errors.New("quota lookup credential is no longer current")
 
-// ObserveQuotaLookupWindows records normalized lookup windows without persisting them.
-// A nil accept records observations at or after the stored time. A non-nil accept decides whether to record regardless of timestamp.
-// Recording preserves the later of the stored and incoming timestamps.
+// ObserveQuotaLookupWindows records local usage windows and may lift a quota cooldown.
+// A nil accept records observations at or after the stored time.
 // accept runs under the manager write lock and must neither mutate auth nor call manager methods.
+// An accepted older observation leaves the stored timestamp and cooldown intact.
 func (m *Manager) ObserveQuotaLookupWindows(ctx context.Context, authID string, windows []QuotaWindow,
 	lookedUpAt time.Time, accept func(*Auth) (bool, error)) (recorded bool, err error) {
 	if m == nil {
@@ -97,35 +92,26 @@ func (m *Manager) ObserveQuotaLookupWindows(ctx context.Context, authID string, 
 	if strings.TrimSpace(authID) == "" || len(windows) == 0 || lookedUpAt.IsZero() {
 		return false, errors.New("quota lookup requires a credential ID, windows, and timestamp")
 	}
-	release, errLock := m.lockAuthMutationContext(ctx, authID)
-	if errLock != nil {
-		return false, errLock
-	}
-	m.mu.Lock()
-	defer func() {
-		m.mu.Unlock()
-		release()
-		if recorded {
-			m.NotifyQuotaUpdated()
+	_, _, err = m.resetQuota(ctx, authID, lookedUpAt, func(auth *Auth) (bool, error) {
+		if accept != nil {
+			if ok, errAccept := accept(auth); !ok || errAccept != nil {
+				return false, errAccept
+			}
+		} else if lookedUpAt.Before(auth.Quota.LookedUpAt) {
+			return false, nil
 		}
-	}()
-	auth := m.auths[authID]
-	if auth == nil {
-		return false, ErrQuotaLookupCredentialChanged
-	}
-	if accept != nil {
-		if ok, errAccept := accept(auth); !ok || errAccept != nil {
-			return false, errAccept
+		auth.Quota.LookupWindows = cloneQuotaWindows(windows)
+		auth.Quota.LookupSignals = nil
+		if lookedUpAt.After(auth.Quota.LookedUpAt) {
+			auth.Quota.LookedUpAt = lookedUpAt
 		}
-	} else if lookedUpAt.Before(auth.Quota.LookedUpAt) {
-		return false, nil
+		recorded = true
+		return true, nil
+	})
+	if recorded {
+		m.NotifyQuotaUpdated()
 	}
-	auth.Quota.LookupWindows = cloneQuotaWindows(windows)
-	auth.Quota.LookupSignals = nil
-	if lookedUpAt.After(auth.Quota.LookedUpAt) {
-		auth.Quota.LookedUpAt = lookedUpAt
-	}
-	return true, nil
+	return recorded, err
 }
 
 // SubscribeQuotaUpdates calls fn after a lookup or live response records quota.

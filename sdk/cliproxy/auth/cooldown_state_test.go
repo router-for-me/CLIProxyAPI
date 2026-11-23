@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,46 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
+
+func TestLookupRestoresShorterAuthForceCooldownAfterRestart(t *testing.T) {
+	withQuotaCooldownEnabled(t)
+	const id, model = "lookup-force-restart", "model"
+	dir := t.TempDir()
+	newManager := func() *Manager {
+		t.Helper()
+		manager := NewManager(nil, nil, nil)
+		manager.SetCooldownStateStore(NewFileCooldownStateStore(dir))
+		if _, err := manager.Register(t.Context(), &Auth{
+			ID: id, Provider: "claude", Status: StatusActive,
+			ModelStates: map[string]*ModelState{model: {Status: StatusActive}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return manager
+	}
+	manager := newManager()
+	short, long := time.Minute, time.Hour
+	manager.MarkResult(t.Context(), Result{AuthID: id, Provider: "claude", RetryAfter: &short,
+		Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusServiceUnavailable}})
+	nonQuota, _ := manager.GetByID(id)
+	manager.MarkResult(t.Context(), Result{AuthID: id, Provider: "claude", CredentialScope: true, RetryAfter: &long,
+		Error: &Error{Code: ErrorCodeForceCooldown, HTTPStatus: http.StatusTooManyRequests}})
+
+	restored := newManager()
+	if err := restored.RestoreCooldownStates(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := restored.GetByID(id)
+	if !before.Quota.Exceeded || !before.forceCooldownUntil.After(nonQuota.forceCooldownUntil) {
+		t.Fatalf("expected the longer quota force cooldown to be restored: %+v", before.Quota)
+	}
+	after := observeAvailableQuota(t, restored, before, "windows")
+	blocked, _, next := isAuthBlockedForModel(after, model, time.Now())
+	if after.Quota.Exceeded || !blocked || !next.Equal(nonQuota.forceCooldownUntil) ||
+		!after.forceCooldownUntil.Equal(nonQuota.forceCooldownUntil) {
+		t.Fatalf("model block = %v until %v, expected only the independent force until %v", blocked, next, nonQuota.forceCooldownUntil)
+	}
+}
 
 type recordingCooldownStateStore struct {
 	saveCount atomic.Int32
