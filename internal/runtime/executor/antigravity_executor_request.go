@@ -62,7 +62,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	if errProject != nil {
 		return nil, nil, errProject
 	}
-	geminiToAntigravityDocForAuth(doc, modelName, projectID, antigravityAuthID(auth), derivedSessionIDs...)
+	isAgent := geminiToAntigravityDocForAuth(ctx, doc, modelName, projectID, auth, derivedSessionIDs...)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
 	lowerModel := strings.ToLower(modelName)
@@ -93,7 +93,13 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 
 	applyAntigravityNativeSignatureReplayIfNeededDoc(modelName, doc)
 	helps.FinalizePayloadDoc(ctx, doc)
-	finalPayload := doc.Bytes()
+	if isAgent {
+		// A filtered requestType is not reinserted. If a rule explicitly selected
+		// another request type, keep that protocol's serialization unchanged.
+		requestType := doc.Get("requestType")
+		isAgent = !requestType.Exists() || strings.TrimSpace(requestType.String()) == "agent"
+	}
+	finalPayload := helps.SerializeAntigravityPayload(doc, isAgent)
 	var (
 		bodyReader io.Reader = bytes.NewReader(finalPayload)
 		payloadLog []byte
@@ -754,12 +760,6 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
-	doc := ojson.NewDoc(payload)
-	geminiToAntigravityDoc(doc, modelName, projectID, derivedSessionIDs...)
-	return doc.Bytes()
-}
-
 func antigravityAuthID(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -767,13 +767,11 @@ func antigravityAuthID(auth *cliproxyauth.Auth) string {
 	return strings.TrimSpace(auth.ID)
 }
 
-func geminiToAntigravityDoc(doc *ojson.Doc, modelName string, projectID string, derivedSessionIDs ...string) {
-	geminiToAntigravityDocForAuth(doc, modelName, projectID, "", derivedSessionIDs...)
-}
-
-func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID string, authID string, derivedSessionIDs ...string) {
+// geminiToAntigravityDocForAuth builds the upstream envelope and reports whether
+// it used the agent protocol.
+func geminiToAntigravityDocForAuth(ctx context.Context, doc *ojson.Doc, modelName, projectID string, auth *cliproxyauth.Auth, derivedSessionIDs ...string) bool {
 	if doc == nil {
-		return
+		return false
 	}
 	helps.SetStringIfDifferentDoc(doc, "model", modelName)
 	helps.SetStringIfDifferentDoc(doc, "userAgent", "antigravity")
@@ -795,7 +793,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 		_ = doc.Delete("project")
 	}
 
-	authID = strings.TrimSpace(authID)
+	authID := antigravityAuthID(auth)
 	incomingSessionID := strings.TrimSpace(doc.Get("request.sessionId").String())
 	derivedSessionID := ""
 	if len(derivedSessionIDs) > 0 {
@@ -813,7 +811,6 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
 		}
 	default:
-		_ = doc.Set("requestId", generateRequestID())
 		var sessionID string
 		if authID != "" {
 			if derivedSessionID != "" || incomingSessionID != "" {
@@ -829,6 +826,11 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 			sessionID = generateStableSessionIDDocForAuth(doc, authID)
 		}
 		_ = doc.Set("request.sessionId", sessionID)
+		if reqType == "agent" {
+			helps.ApplyAntigravityAgentEnvelope(ctx, doc, auth, sessionID, modelName)
+		} else {
+			_ = doc.Set("requestId", "agent-"+uuid.NewString())
+		}
 	}
 
 	_ = doc.Delete("request.safetySettings")
@@ -836,6 +838,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, modelName string, projectID s
 		_ = doc.SetRawBytes("request.toolConfig", []byte(toolConfig.Raw))
 		_ = doc.Delete("toolConfig")
 	}
+	return !isImageModel && reqType == "agent"
 }
 
 func scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID string) string {
@@ -843,10 +846,6 @@ func scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSession
 		return derivedSessionID
 	}
 	return helps.ScopeAntigravitySessionIDForAuth(authID, incomingSessionID)
-}
-
-func generateRequestID() string {
-	return "agent-" + uuid.NewString()
 }
 
 func generateImageGenRequestID() string {

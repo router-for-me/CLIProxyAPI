@@ -118,7 +118,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), baseModel, to.String(), "request", originalTranslatedForPayload, req, opts))
 	helps.FinalizePayloadDoc(ctx, doc)
-	payload = doc.Bytes()
+	payload = helps.SerializeAntigravityPayload(doc, false)
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, requestURL.String(), bytes.NewReader(payload))
 	if errReq != nil {
 		return cliproxyexecutor.Response{}, errReq

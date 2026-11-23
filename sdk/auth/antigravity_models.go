@@ -45,7 +45,9 @@ const (
 type AntigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs         map[string]struct{}
+	ModelIDs map[string]struct{}
+	// ModelEnums maps upstream model IDs to their advertised model enum strings.
+	ModelEnums       map[string]string
 	UpdatedAt        time.Time
 	ExpiresAt        time.Time
 	RouteFingerprint string
@@ -56,6 +58,7 @@ func (h AntigravityModelCapabilityHints) Clone() AntigravityModelCapabilityHints
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: maps.Clone(h.WebSearchModelIDs),
 		ModelIDs:          maps.Clone(h.ModelIDs),
+		ModelEnums:        maps.Clone(h.ModelEnums),
 		UpdatedAt:         h.UpdatedAt,
 		ExpiresAt:         h.ExpiresAt,
 		RouteFingerprint:  h.RouteFingerprint,
@@ -259,6 +262,7 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 
 	modelsResult := top.Get("models")
 	var modelIDs map[string]struct{}
+	var modelEnums map[string]string
 	if modelsResult.Exists() && modelsResult.Type != ojson.Null {
 		if !modelsResult.IsObject() {
 			return AntigravityModelCapabilityHints{}, false
@@ -268,9 +272,17 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 			return AntigravityModelCapabilityHints{}, false
 		}
 		modelIDs = make(map[string]struct{}, len(modelMap))
-		for id := range modelMap {
+		modelEnums = make(map[string]string)
+		for id, entry := range modelMap {
 			if normalized := NormalizeAntigravityModelID(id); normalized != "" {
 				modelIDs[normalized] = struct{}{}
+			}
+			if id == "" || len(id) > antigravityMaxModelIDBytes {
+				continue
+			}
+			value := entry.Get("model")
+			if value.Type == ojson.String && len(value.Str) <= antigravityMaxModelIDBytes && strings.TrimSpace(value.Str) != "" {
+				modelEnums[strings.Clone(id)] = strings.Clone(value.Str)
 			}
 		}
 	}
@@ -278,6 +290,7 @@ func ParseAntigravityModelCapabilityHints(body []byte) (AntigravityModelCapabili
 	return AntigravityModelCapabilityHints{
 		WebSearchModelIDs: webSearchModels,
 		ModelIDs:          modelIDs,
+		ModelEnums:        modelEnums,
 	}, true
 }
 
