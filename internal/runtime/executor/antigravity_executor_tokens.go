@@ -170,29 +170,34 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 		return cliproxyexecutor.Response{}, errRead
 	}
 
-	if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
+	statusCode := httpResp.StatusCode
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		if bodyTruncated {
 			errOversize := statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("antigravity count_tokens response exceeded %d bytes", antigravityCountTokensMaxResponseBytes)}
 			helps.RecordAPIResponseError(ctx, e.cfg, errOversize)
 			return cliproxyexecutor.Response{}, errOversize
 		}
-		count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
-		translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
-		return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
+		if errorResult := ojson.GetBytesNoCopy(bodyBytes, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
+			statusCode = antigravityInBandErrorStatusCode(errorResult)
+		} else {
+			count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
+			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
+			return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
+		}
 	}
 
-	if httpResp.StatusCode == http.StatusTooManyRequests {
+	if statusCode == http.StatusTooManyRequests {
 		if err429 := e.applyAntigravity429StateWithEvictAll(ctx, auth, baseModel, false, httpResp.Header, bodyBytes, true); err429 != nil {
 			return cliproxyexecutor.Response{}, err429
 		}
 	}
-	switch httpResp.StatusCode {
+	switch statusCode {
 	case http.StatusForbidden:
 		e.applyAntigravityForbiddenState(e.cfg, auth, bodyBytes)
 	case http.StatusUnauthorized:
 		closeAntigravityAuthIdleTransports(auth)
 	}
-	sErr := newAntigravityStatusErrWithHeaders(httpResp.StatusCode, httpResp.Header, bodyBytes)
+	sErr := newAntigravityStatusErrWithHeaders(statusCode, httpResp.Header, bodyBytes)
 	return cliproxyexecutor.Response{}, sErr
 }
 
