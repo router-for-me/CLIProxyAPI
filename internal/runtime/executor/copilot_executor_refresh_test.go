@@ -16,9 +16,9 @@ import (
 func TestCopilotRefreshOnlyExchangesCredentials(t *testing.T) {
 	for _, base := range []string{"https://api.individual.githubcopilot.com", "https://api.business.githubcopilot.com"} {
 		t.Run(base, func(t *testing.T) {
-			auth := copilotTestAuth(t, "a", "test-model", copilot.Chat)
+			auth := copilotTestAuth(t, "a", "claude-opus-5", copilot.Chat)
 			auth.Metadata["refresh_token"] = "github-grant"
-			previous := auth.Metadata[copilot.CatalogKey]
+			previous := auth.CopilotCatalog
 			calls := 0
 			ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
@@ -33,13 +33,13 @@ func TestCopilotRefreshOnlyExchangesCredentials(t *testing.T) {
 				t.Fatalf("refresh did not return the new token: %v (calls=%d)", err, calls)
 			}
 			if base == auth.Metadata["base_url"] {
-				if updated.Metadata[copilot.CatalogKey] != previous {
+				if updated.CopilotCatalog != previous {
 					t.Fatal("same-origin refresh discarded the cached catalog")
 				}
-			} else if _, ok := updated.Metadata[copilot.CatalogKey]; ok {
+			} else if updated.CopilotCatalog != copilot.UnavailableCatalog {
 				t.Fatal("changed origin retained the old entitlement")
 			}
-			if auth.Metadata[copilot.CatalogKey] != previous || auth.Metadata["access_token"] == "replacement" {
+			if auth.CopilotCatalog != previous || auth.Metadata["access_token"] == "replacement" {
 				t.Fatal("refresh mutated its input")
 			}
 		})

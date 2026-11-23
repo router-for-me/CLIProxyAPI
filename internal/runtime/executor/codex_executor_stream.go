@@ -71,6 +71,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	originalTranslated = helps.SetStringIfDifferent(originalTranslated, "model", baseModel)
 	doc := ojson.NewDoc(body)
+	if shouldPreserveFullCodexOpenAIInclude(ctx, auth, baseURL, opts.Headers) {
+		originalTranslated = helps.PreserveCodexOpenAIResponsesInclude(originalTranslated, originalPayload, from)
+		helps.PreserveCodexOpenAIResponsesIncludeDoc(doc, req.Payload, from)
+	}
 	normalizeCodexOutputBudgetDoc(doc)
 	helps.SetStringIfDifferentDoc(doc, "model", baseModel)
 

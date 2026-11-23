@@ -2,13 +2,17 @@ package executor
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -253,5 +257,328 @@ func TestAntigravityClaudeNonStream_MultiLineSSEErrorIsTerminal(t *testing.T) {
 	sErr, ok := err.(statusErr)
 	if !ok || !sErr.IsTerminalTOSViolation() {
 		t.Fatalf("err = %v (%T), want terminal tos_violation statusErr", err, err)
+	}
+}
+
+type countingAntigravityExecutor struct {
+	*AntigravityExecutor
+	mu    sync.Mutex
+	calls []string
+}
+
+func (c *countingAntigravityExecutor) record(auth *cliproxyauth.Auth) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := ""
+	if auth != nil {
+		id = auth.ID
+	}
+	c.calls = append(c.calls, id)
+}
+
+func (c *countingAntigravityExecutor) recordedCalls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.calls))
+	copy(out, c.calls)
+	return out
+}
+
+func (c *countingAntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	c.record(auth)
+	return c.AntigravityExecutor.Execute(ctx, auth, req, opts)
+}
+
+func (c *countingAntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	c.record(auth)
+	return c.AntigravityExecutor.ExecuteStream(ctx, auth, req, opts)
+}
+
+func (c *countingAntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	c.record(auth)
+	return c.AntigravityExecutor.CountTokens(ctx, auth, req, opts)
+}
+
+// TestAntigravityTOSPauseErrorIsRequestScoped verifies that the pool-wide
+// TOS_VIOLATION pause 503 returned across all Antigravity entrypoints is marked
+// as a RequestScopedError, while ordinary 503 statusErr values remain
+// non-request-scoped.
+func TestAntigravityTOSPauseErrorIsRequestScoped(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	cfg := &config.Config{}
+	cfg.Antigravity.TOSPauseWindow = "1h"
+	exec := NewAntigravityExecutor(cfg)
+	auth := &cliproxyauth.Auth{
+		ID:       "tos-pause-unit-auth",
+		Provider: "antigravity",
+		Status:   cliproxyauth.StatusActive,
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	markAntigravityTOSPause(cfg, auth)
+
+	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity}
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{
+			name: "Execute",
+			call: func() error {
+				_, errExec := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "gemini-2.5-pro",
+					Payload: payload,
+				}, opts)
+				return errExec
+			},
+		},
+		{
+			name: "executeClaudeNonStream",
+			call: func() error {
+				_, errExec := exec.executeClaudeNonStream(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-sonnet-4-6",
+					Payload: payload,
+				}, opts)
+				return errExec
+			},
+		},
+		{
+			name: "ExecuteStream",
+			call: func() error {
+				_, errStream := exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-sonnet-4-6",
+					Payload: payload,
+				}, opts)
+				return errStream
+			},
+		},
+		{
+			name: "CountTokens",
+			call: func() error {
+				_, errCount := exec.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "gemini-2.5-pro",
+					Payload: payload,
+				}, opts)
+				return errCount
+			},
+		},
+		{
+			name: "HttpRequest",
+			call: func() error {
+				httpReq, errReq := http.NewRequest(http.MethodPost, antigravityBaseURLDaily+"/v1internal:fetchUserInfo", nil)
+				if errReq != nil {
+					return errReq
+				}
+				callCtx := context.WithValue(context.Background(), "cliproxy.roundtripper", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					t.Error("HttpRequest() dialed upstream during active TOS pause")
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     make(http.Header),
+						Body:       http.NoBody,
+					}, nil
+				}))
+				resp, errDo := exec.HttpRequest(callCtx, auth, httpReq)
+				if resp != nil && resp.Body != nil {
+					if errClose := resp.Body.Close(); errClose != nil {
+						t.Errorf("close response body error: %v", errClose)
+					}
+				}
+				return errDo
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errCall := tc.call()
+			if errCall == nil {
+				t.Fatalf("%s() error = nil, want 503 TOS pause error", tc.name)
+			}
+			var statusErrVal cliproxyexecutor.StatusError
+			if !errors.As(errCall, &statusErrVal) || statusErrVal.StatusCode() != http.StatusServiceUnavailable {
+				t.Fatalf("%s() status = %v, want %d", tc.name, errCall, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(errCall.Error(), "antigravity pool paused after TOS_VIOLATION") {
+				t.Fatalf("%s() error = %q, want TOS pause message", tc.name, errCall.Error())
+			}
+			var requestErr cliproxyexecutor.RequestScopedError
+			if !errors.As(errCall, &requestErr) || !requestErr.IsRequestScoped() {
+				t.Fatalf("%s() error %T is not marked RequestScopedError (IsRequestScoped() == true): %v", tc.name, errCall, errCall)
+			}
+		})
+	}
+
+	t.Run("ordinary_503_not_request_scoped", func(t *testing.T) {
+		plain := statusErr{code: http.StatusServiceUnavailable, msg: "upstream overloaded"}
+		var requestErr cliproxyexecutor.RequestScopedError
+		if errors.As(plain, &requestErr) && requestErr.IsRequestScoped() {
+			t.Fatalf("plain statusErr unexpectedly reported IsRequestScoped() == true")
+		}
+	})
+}
+
+// TestAntigravityManagerTOSPauseStopsImmediatelyWithoutCoolingCredentials
+// verifies that when the Antigravity pool is paused after a TOS_VIOLATION,
+// Execute, ExecuteStream, and ExecuteCount fail immediately after a single
+// executor call without rotating across sibling credentials, retrying outer
+// request-retry rounds, or marking healthy credentials as StatusError/cooled.
+func TestAntigravityManagerTOSPauseStopsImmediatelyWithoutCoolingCredentials(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	const (
+		geminiModel = "gemini-2.5-pro-tos-pause-7748"
+		claudeModel = "claude-sonnet-4-6-tos-pause-7748"
+	)
+
+	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`)
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity}
+
+	cases := []struct {
+		name  string
+		model string
+		run   func(m *cliproxyauth.Manager, model string) error
+	}{
+		{
+			name:  "execute_gemini",
+			model: geminiModel,
+			run: func(m *cliproxyauth.Manager, model string) error {
+				_, errRun := m.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: payload,
+				}, opts)
+				return errRun
+			},
+		},
+		{
+			name:  "execute_claude",
+			model: claudeModel,
+			run: func(m *cliproxyauth.Manager, model string) error {
+				_, errRun := m.Execute(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: payload,
+				}, opts)
+				return errRun
+			},
+		},
+		{
+			name:  "stream",
+			model: claudeModel,
+			run: func(m *cliproxyauth.Manager, model string) error {
+				_, errRun := m.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: payload,
+				}, opts)
+				return errRun
+			},
+		},
+		{
+			name:  "count_tokens",
+			model: geminiModel,
+			run: func(m *cliproxyauth.Manager, model string) error {
+				_, errRun := m.ExecuteCount(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{
+					Model:   model,
+					Payload: payload,
+				}, opts)
+				return errRun
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAntigravityCreditsRetryState()
+			t.Cleanup(resetAntigravityCreditsRetryState)
+
+			cfg := &config.Config{}
+			cfg.Antigravity.TOSPauseWindow = "1h"
+
+			exec := &countingAntigravityExecutor{
+				AntigravityExecutor: NewAntigravityExecutor(cfg),
+			}
+			manager := cliproxyauth.NewManager(nil, &cliproxyauth.FillFirstSelector{}, nil)
+			manager.SetRetryConfig(2, 0, 0)
+			manager.RegisterExecutor(exec)
+
+			reg := registry.GetGlobalRegistry()
+			authIDs := make([]string, 0, 3)
+			var firstAuth *cliproxyauth.Auth
+			for i := 1; i <= 3; i++ {
+				id := fmt.Sprintf("ag-tos-pause-7748-%s-cred-%d", tc.name, i)
+				auth := &cliproxyauth.Auth{
+					ID:       id,
+					Provider: "antigravity",
+					Status:   cliproxyauth.StatusActive,
+					Metadata: map[string]any{
+						"access_token": fmt.Sprintf("token-%d", i),
+						"project_id":   fmt.Sprintf("project-%d", i),
+						"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+					},
+				}
+				if i == 1 {
+					firstAuth = auth
+				}
+				reg.RegisterClient(id, "antigravity", []*registry.ModelInfo{{ID: tc.model}})
+				authID := id
+				t.Cleanup(func() { reg.UnregisterClient(authID) })
+				if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+					t.Fatalf("Register(%s) error = %v", id, errRegister)
+				}
+				authIDs = append(authIDs, id)
+			}
+
+			markAntigravityTOSPause(cfg, firstAuth)
+
+			errRun := tc.run(manager, tc.model)
+			if errRun == nil {
+				t.Fatalf("%s error = nil, want HTTP 503 TOS pause error", tc.name)
+			}
+			var statusErrVal cliproxyexecutor.StatusError
+			if !errors.As(errRun, &statusErrVal) || statusErrVal.StatusCode() != http.StatusServiceUnavailable {
+				t.Fatalf("%s status = %v, want %d", tc.name, errRun, http.StatusServiceUnavailable)
+			}
+			if !strings.Contains(errRun.Error(), "antigravity pool paused after TOS_VIOLATION") {
+				t.Fatalf("%s error = %q, want TOS pause message", tc.name, errRun.Error())
+			}
+
+			calls := exec.recordedCalls()
+			if len(calls) != 1 {
+				t.Fatalf("%s executor calls = %v (count=%d), want 1 call on a single credential", tc.name, calls, len(calls))
+			}
+
+			calledID := calls[0]
+			now := time.Now()
+			for _, id := range authIDs {
+				updated, ok := manager.GetByID(id)
+				if !ok || updated == nil {
+					t.Fatalf("auth %s not found", id)
+				}
+				if updated.Status != cliproxyauth.StatusActive {
+					t.Fatalf("auth %s status = %q, want %q", id, updated.Status, cliproxyauth.StatusActive)
+				}
+				if updated.Unavailable || updated.NextRetryAfter.After(now) || !updated.NextRetryAfter.IsZero() {
+					t.Fatalf("auth %s was cooled: unavailable=%v next_retry_after=%v", id, updated.Unavailable, updated.NextRetryAfter)
+				}
+				if updated.LastError != nil {
+					t.Fatalf("auth %s LastError = %+v, want nil", id, updated.LastError)
+				}
+				if state := updated.ModelStates[tc.model]; state != nil && (state.Unavailable || state.Status == cliproxyauth.StatusError || !state.NextRetryAfter.IsZero()) {
+					t.Fatalf("auth %s model state was cooled/failed: %+v", id, state)
+				}
+				if reg.IsModelSuspendedForClient(id, tc.model) {
+					t.Fatalf("auth %s model %s suspended in registry", id, tc.model)
+				}
+				if id != calledID && updated.Failed != 0 {
+					t.Fatalf("sibling auth %s Failed = %d, want 0 (never touched)", id, updated.Failed)
+				}
+			}
+		})
 	}
 }

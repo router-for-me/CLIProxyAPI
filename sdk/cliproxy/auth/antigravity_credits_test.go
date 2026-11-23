@@ -240,7 +240,7 @@ func TestIsAuthBlockedForModel_ClaudeWithCreditsStillBlockedDuringCooldown(t *te
 		Known:     true,
 		Available: true,
 		UpdatedAt: time.Now(),
-	})
+	}, auth.RegistrationEpoch)
 
 	blocked, reason, _ := isAuthBlockedForModel(auth, "claude-sonnet-4-6", time.Now())
 	if !blocked || reason != blockReasonCooldown {
@@ -268,7 +268,7 @@ func TestIsAuthBlockedForModel_KeepsGeminiBlockedWithoutCreditsBypass(t *testing
 		Known:     true,
 		Available: true,
 		UpdatedAt: time.Now(),
-	})
+	}, auth.RegistrationEpoch)
 
 	blocked, reason, _ := isAuthBlockedForModel(auth, "gemini-3-flash", time.Now())
 	if !blocked || reason != blockReasonCooldown {
@@ -316,11 +316,15 @@ func TestManagerExecuteAndStream_ExpiredNegativeCreditsHintRecoversDuringModelCo
 			}
 
 			// Fresh negative hint must still suppress credits fallback while model is in cooldown.
+			registered, errGet := manager.GetByID(authID)
+			if !errGet {
+				t.Fatal("registered auth not found")
+			}
 			SetAntigravityCreditsHint(authID, AntigravityCreditsHint{
 				Known:     true,
 				Available: false,
 				UpdatedAt: time.Now(),
-			})
+			}, registered.RegistrationEpoch)
 			if stream {
 				if _, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); errStream == nil {
 					t.Fatal("ExecuteStream() succeeded with fresh negative credits hint, want cooldown error")
@@ -339,7 +343,7 @@ func TestManagerExecuteAndStream_ExpiredNegativeCreditsHintRecoversDuringModelCo
 				Known:     true,
 				Available: false,
 				UpdatedAt: time.Now().Add(-AntigravityCreditsHintRefreshInterval - time.Second),
-			})
+			}, registered.RegistrationEpoch)
 			if stream {
 				streamResult, errStream := manager.ExecuteStream(context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
 				if errStream != nil {

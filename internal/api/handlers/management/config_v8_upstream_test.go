@@ -39,7 +39,7 @@ func TestConfigV8SharedUpstreamRoundTrip(t *testing.T) {
 	if got := request(http.MethodGet, "upstream/codex/stream-bootstrap-buffering", "", http.StatusOK); got != "true" {
 		t.Fatalf("historical shared field was not exposed at upstream: %s", got)
 	}
-	if data, errRead := os.ReadFile(file); errRead != nil || string(data) != raw {
+	if data, errRead := os.ReadFile(file); errRead != nil || config.ComputeSourceHash(data) != cfg.SourceHash {
 		t.Fatal("GET rewrote the historical document")
 	}
 	request(http.MethodPut, "upstream/codex/stream-bootstrap-buffering", "false", http.StatusOK)
