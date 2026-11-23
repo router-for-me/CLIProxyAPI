@@ -2,6 +2,7 @@ package chat_completions
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -297,6 +298,89 @@ func TestConvertAntigravityResponseToOpenAI_ResponseFreeEventDoesNotStartStream(
 	}
 }
 
+func TestConvertAntigravityResponseToOpenAI_ContinuesUnnamedFunctionCallAtActiveIndex(t *testing.T) {
+	ctx := context.Background()
+	var param any
+
+	firstChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"write_file","args":{"path":"a.txt"}}}]}}]}}`)
+	firstOutput := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, firstChunk, &param)
+	if len(firstOutput) != 1 {
+		t.Fatalf("first chunk count = %d, want 1; output=%s", len(firstOutput), firstOutput)
+	}
+
+	continuationChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"content":"hello"}}}]}}]}}`)
+	continuationOutput := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, continuationChunk, &param)
+	if len(continuationOutput) != 1 {
+		t.Fatalf("continuation chunk count = %d, want 1; output=%s", len(continuationOutput), continuationOutput)
+	}
+
+	toolCall := ojson.GetBytesNoCopy(continuationOutput[0], "choices.0.delta.tool_calls.0")
+	if got := toolCall.Get("index").Int(); got != 0 {
+		t.Fatalf("continuation index = %d, want 0; output=%s", got, continuationOutput[0])
+	}
+	if id := toolCall.Get("id"); id.Exists() {
+		t.Fatalf("continuation must omit id, got %s; output=%s", id.Raw, continuationOutput[0])
+	}
+	if name := toolCall.Get("function.name"); name.Exists() {
+		t.Fatalf("continuation must omit function.name, got %s; output=%s", name.Raw, continuationOutput[0])
+	}
+	if got := toolCall.Get("function.arguments").String(); got != `,"content":"hello"` {
+		t.Fatalf("continuation arguments = %q, want %q; output=%s", got, `,"content":"hello"`, continuationOutput[0])
+	}
+
+	textChunk := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}}`)
+	textOutput := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, textChunk, &param)
+	if len(textOutput) != 1 {
+		t.Fatalf("text chunk count = %d, want 1; output=%s", len(textOutput), textOutput)
+	}
+	textCalls := ojson.GetBytesNoCopy(textOutput[0], "choices.0.delta.tool_calls")
+	if got := textCalls.Array()[0].Get("function.arguments").String(); got != "}" {
+		t.Fatalf("text transition argument delta = %q, want closing brace; output=%s", got, textOutput[0])
+	}
+
+	terminalChunk := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+	terminalOutput := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, terminalChunk, &param)
+	if len(terminalOutput) != 1 {
+		t.Fatalf("terminal chunk count = %d, want 1; output=%s", len(terminalOutput), terminalOutput)
+	}
+
+	var argumentFragments strings.Builder
+	for _, output := range append(firstOutput, append(continuationOutput, append(textOutput, terminalOutput...)...)...) {
+		argumentFragments.WriteString(ojson.GetBytesNoCopy(output, "choices.0.delta.tool_calls.0.function.arguments").String())
+	}
+	if got := argumentFragments.String(); got != `{"path":"a.txt","content":"hello"}` {
+		t.Fatalf("concatenated arguments = %q, want valid merged JSON %q", got, `{"path":"a.txt","content":"hello"}`)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_UsesUpstreamIDForUnnamedContinuation(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	chunks := [][]byte{
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_a","name":"first","args":{"value":1}}}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_b","name":"second","args":{"value":2}}}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_a","args":{"extra":3}}}]}}]}}`),
+	}
+
+	var outputs [][]byte
+	for _, chunk := range chunks {
+		outputs = append(outputs, ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, chunk, &param)...)
+	}
+	continuation := ojson.GetBytesNoCopy(outputs[2], "choices.0.delta.tool_calls.0")
+	if got := continuation.Get("index").Int(); got != 0 {
+		t.Fatalf("continuation index = %d, want index 0 from upstream call_a; output=%s", got, outputs[2])
+	}
+	if id := continuation.Get("id"); id.Exists() {
+		t.Fatalf("continuation must omit id, got %s", id.Raw)
+	}
+	if name := continuation.Get("function.name"); name.Exists() {
+		t.Fatalf("continuation must omit function.name, got %s", name.Raw)
+	}
+	if got := continuation.Get("function.arguments").String(); got != `,"extra":3` {
+		t.Fatalf("continuation arguments = %q, want %q", got, `,"extra":3`)
+	}
+}
+
 func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t *testing.T) {
 	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
 	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
@@ -415,8 +499,8 @@ func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDe
 	if gotName := tc.Array()[0].Get("function.name").String(); gotName != "get_weather" {
 		t.Fatalf("function.name = %q, want get_weather", gotName)
 	}
-	if gotArgs := tc.Array()[0].Get("function.arguments").String(); gotArgs != `{"city":"Beijing"}` {
-		t.Fatalf("function.arguments = %q, want {\"city\":\"Beijing\"}", gotArgs)
+	if gotArgs := tc.Array()[0].Get("function.arguments").String(); gotArgs != `{"city":"Beijing"` {
+		t.Fatalf("function.arguments = %q, want unclosed fragment {\"city\":\"Beijing\"", gotArgs)
 	}
 
 	// 4. Final chunk with finishReason and usage: delta must omit tool_calls.
@@ -425,8 +509,12 @@ func TestConvertAntigravityResponseToOpenAI_OmitToolCallsWhenAbsentInStreamingDe
 	if len(finalResults) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(finalResults))
 	}
-	if tcFinal := ojson.GetBytesNoCopy(finalResults[0], "choices.0.delta.tool_calls"); tcFinal.Exists() {
-		t.Fatalf("choices.0.delta.tool_calls must not exist in final chunk, got: %s (type: %s)", tcFinal.Raw, tcFinal.Type)
+	finalCalls := ojson.GetBytesNoCopy(finalResults[0], "choices.0.delta.tool_calls")
+	if !finalCalls.Exists() || !finalCalls.IsArray() || len(finalCalls.Array()) != 1 {
+		t.Fatalf("final chunk must close the pending arguments with one tool call delta, got: %s", finalCalls.Raw)
+	}
+	if got := finalCalls.Array()[0].Get("function.arguments").String(); got != "}" {
+		t.Fatalf("final argument delta = %q, want closing brace", got)
 	}
 
 	// 5. Synthesized DONE terminal chunk: delta must omit tool_calls.
