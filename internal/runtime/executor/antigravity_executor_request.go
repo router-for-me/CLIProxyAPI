@@ -66,6 +66,7 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
 
 	lowerModel := strings.ToLower(modelName)
+	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
@@ -76,10 +77,19 @@ func (e *AntigravityExecutor) buildRequestDoc(ctx context.Context, auth *cliprox
 		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
 				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
+				if isClaudeModel {
+					for _, budgetPath := range []string{
+						"request.generationConfig.thinkingConfig.thinkingBudget",
+						"request.generationConfig.thinkingConfig.thinking_budget",
+					} {
+						if budget := doc.Get(budgetPath); budget.Exists() && budget.Int() >= int64(modelInfo.MaxCompletionTokens) {
+							_ = doc.Set(budgetPath, modelInfo.MaxCompletionTokens-1)
+						}
+					}
+				}
 			}
 		}
 	}
-	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 	if antigravityRequestNeedsSchemaSanitizationDoc(doc) {
 		sanitizeAntigravityRequestSchemasForModelDoc(doc, useAntigravitySchema, isClaudeModel)
 	}
