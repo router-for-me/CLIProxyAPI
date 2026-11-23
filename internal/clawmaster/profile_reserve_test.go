@@ -502,6 +502,43 @@ func TestTheReservedGaugeShowsWhichProfilesAReserveHoldsOut(t *testing.T) {
 	}
 }
 
+// claw_master.quota.reserve_fraction is the share of the week a reserve holds back, held out or a last
+// resort, before or past its threshold, and absent for a profile with no reserve.
+func TestTheReserveFractionGaugeShowsHowMuchOfTheWeekIsHeldBack(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		reserve ProfileReserve
+		used    float64
+	}{
+		{name: "held out, before its threshold", reserve: ProfileReserve{Percent: 30}, used: 0.2},
+		{name: "a last resort, past its threshold", reserve: ProfileReserve{Percent: 30, LastResort: true}, used: 0.8},
+		{name: "all of it", reserve: ProfileReserve{Percent: 100}, used: 0.1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := startMetrics(t, nil)
+			selector, _, reset := namedSelector(t)
+			selector.reserveFor = func(name string) ProfileReserve {
+				if name == "claude-primary" {
+					return tc.reserve
+				}
+				return ProfileReserve{}
+			}
+			selector.observeQuota("profile-a", backendWeeklyQuota{known: true, used: tc.used, resetsAt: reset})
+			src := &fixedSource{snap: selector.metricsSnapshot(nil)}
+			registerStateSource(src)
+			t.Cleanup(func() { unregisterStateSource(src) })
+			rm := collect(t, reader)
+			want := float64(tc.reserve.Percent) / 100
+			if v, ok := gaugeOf(rm, "claw_master.quota.reserve_fraction", map[string]string{"profile": "claude-primary"}); !ok || v != want {
+				t.Errorf("reserve fraction = %v (%v), want %v", v, ok, want)
+			}
+			if _, ok := gaugeOf(rm, "claw_master.quota.reserve_fraction", map[string]string{"profile": "claude-secondary"}); ok {
+				t.Error("a profile with no reserve has a reserve fraction")
+			}
+		})
+	}
+}
+
 // lastResortSelector is namedSelector with profile-a (claude-primary) on a last-resort reserve of 30 and
 // past it, and profile-b (claude-secondary) with no reserve and plenty left.
 func lastResortSelector(t *testing.T) (*backendSeriesSelector, []*coreauth.Auth, time.Time) {

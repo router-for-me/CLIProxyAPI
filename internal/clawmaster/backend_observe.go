@@ -428,8 +428,9 @@ func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSna
 		if s.quotaBlockedLocked(id) {
 			p.BlockedSeconds = max(s.quotaBlockedUntil[id].Sub(now).Seconds(), 0)
 		}
-		if s.profileReserveLocked(id).Percent > 0 {
+		if reserve := s.profileReserveLocked(id); reserve.Percent > 0 {
 			p.ReserveConfigured, p.Reserved, p.LastResort = true, s.reservedLocked(id), s.lastResortLocked(id)
+			p.ReserveFraction = float64(reserve.Percent) / 100
 		}
 		if five, known := s.fiveHourNowLocked(id, now); known {
 			p.FiveHourKnown, p.FiveHourUsed = true, five.UsedFraction
