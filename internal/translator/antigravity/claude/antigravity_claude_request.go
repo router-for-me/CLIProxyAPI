@@ -1013,6 +1013,25 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 	if v := ojson.GetBytesNoCopy(rawJSON, "max_tokens"); v.Exists() && v.Type == ojson.Number {
 		_ = outDoc.Set("request.generationConfig.maxOutputTokens", v.Num)
 	}
+	if stopSequences := ojson.GetBytesNoCopy(rawJSON, "stop_sequences"); stopSequences.Exists() && stopSequences.IsArray() {
+		var sequences []string
+		stopSequences.ForEach(func(_, sequence ojson.Result) bool {
+			if sequence.Type == ojson.String && sequence.String() != "" {
+				sequences = append(sequences, sequence.String())
+			}
+			return true
+		})
+		if len(sequences) > 0 {
+			_ = outDoc.Set("request.generationConfig.stopSequences", sequences)
+		}
+	}
+	if format := ojson.GetBytesNoCopy(rawJSON, "output_config.format"); format.Exists() && format.IsObject() && strings.EqualFold(strings.TrimSpace(format.Get("type").String()), "json_schema") {
+		_ = outDoc.Set("request.generationConfig.responseMimeType", "application/json")
+		_ = outDoc.Delete("request.generationConfig.responseJsonSchema")
+		if schema := format.Get("schema"); schema.Exists() && schema.IsObject() {
+			_ = outDoc.SetRaw("request.generationConfig.responseSchema", schema.Raw)
+		}
+	}
 
 	common.AttachDefaultSafetySettingsDoc(outDoc, "request.safetySettings")
 	out := outDoc.Bytes()

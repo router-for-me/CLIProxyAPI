@@ -2814,6 +2814,51 @@ func TestConvertClaudeRequestToAntigravity_ImageContent(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToAntigravity_PreservesGenerationConstraints(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gemini-2.5-pro",
+		"max_tokens": 256,
+		"stop_sequences": ["STOP_HERE"],
+		"thinking": {"type": "adaptive"},
+		"output_config": {
+			"effort": "high",
+			"format": {
+				"type": "json_schema",
+				"schema": {
+					"type": "object",
+					"properties": {"city": {"type": "string"}},
+					"required": ["city"],
+					"additionalProperties": false
+				}
+			}
+		},
+		"messages": [{"role": "user", "content": "Return Tokyo."}]
+	}`)
+
+	output, errConvert := ConvertClaudeRequestToAntigravity("gemini-2.5-pro", inputJSON, false)
+	if errConvert != nil {
+		t.Fatalf("ConvertClaudeRequestToAntigravity() error = %v", errConvert)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.maxOutputTokens").Int(); got != 256 {
+		t.Errorf("request.generationConfig.maxOutputTokens = %d, want 256; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.stopSequences.0").String(); got != "STOP_HERE" {
+		t.Errorf("request.generationConfig.stopSequences[0] = %q, want STOP_HERE; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.responseMimeType").String(); got != "application/json" {
+		t.Errorf("request.generationConfig.responseMimeType = %q, want application/json; output=%s", got, output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.responseSchema.properties.city.type").String(); got != "string" {
+		t.Errorf("request.generationConfig.responseSchema.properties.city.type = %q, want string; output=%s", got, output)
+	}
+	if ojson.GetBytesNoCopy(output, "request.generationConfig.responseJsonSchema").Exists() {
+		t.Errorf("request.generationConfig.responseJsonSchema should not exist; output=%s", output)
+	}
+	if got := ojson.GetBytesNoCopy(output, "request.generationConfig.thinkingConfig.thinkingLevel").String(); got != "high" {
+		t.Errorf("request.generationConfig.thinkingConfig.thinkingLevel = %q, want high; output=%s", got, output)
+	}
+}
+
 func TestConvertClaudeRequestToAntigravity_GenerationConfig(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
