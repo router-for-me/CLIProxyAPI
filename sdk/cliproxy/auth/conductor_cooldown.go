@@ -1634,6 +1634,10 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	m.markResult(ctx, result, false)
+}
+
+func (m *Manager) markResult(ctx context.Context, result Result, quotaVerification bool) {
 	if result.AuthID == "" {
 		return
 	}
@@ -1652,6 +1656,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	var authSnapshot *Auth
 	cooldownStateChanged := false
+	releasedClaudeQuota := false
 	scheduleUnauthorizedRefresh := false
 	now := time.Now()
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
@@ -1726,7 +1731,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 		isDisabled := auth.Disabled || auth.Status == StatusDisabled
 		if result.Success {
-			if result.CompletedResponse && !result.SkipQuotaObservation && !isDisabled && !wasTerminalUnauthorized && !(auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
+			credentialQuotaActive := auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
+			releasedClaudeQuota = quotaVerification && result.CompletedResponse && !result.SkipQuotaObservation &&
+				result.ExecutionSeq > auth.cooldownRecordedSeq && !retainModelCooldown &&
+				canRecheckClaudeCredentialQuota(auth, now) && isClaudeQuotaReportingModel(modelState)
+			if result.CompletedResponse && !result.SkipQuotaObservation && !isDisabled && !wasTerminalUnauthorized && (!credentialQuotaActive || releasedClaudeQuota) && !retainModelCooldown && !retainAuthCooldown && !retainCredentialRetry {
 				auth.InferenceVerified = true
 				auth.LastInferenceVerifiedAt = now
 			}
@@ -1741,7 +1750,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					modelState = state
 					resetModelState(state, now)
 				}
-			} else if auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now) {
+			} else if releasedClaudeQuota {
+				clearAuthStateOnSuccess(auth, now)
+				updateAggregatedAvailability(auth, now)
+				if auth.Unavailable {
+					auth.Status = StatusError
+				}
+			} else if credentialQuotaActive {
 				// Retain active credential-scoped cooldown
 			} else if retainModelCooldown || retainAuthCooldown || retainCredentialRetry {
 				// Retain a cooldown recorded after this execution was dispatched.
@@ -2378,7 +2393,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	if m.scheduler != nil && authSnapshot != nil {
-		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh
+		credentialScopedResult := result.CredentialScope || scheduleUnauthorizedRefresh || releasedClaudeQuota
 		var targetModels []string
 		if !credentialScopedResult && modelKey != "" {
 			targetModels = append(targetModels, modelKey)

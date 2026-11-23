@@ -79,6 +79,7 @@ func (l *authAutoRefreshLoop) run(ctx context.Context) {
 	}
 
 	defer l.releaseQueuedJobs()
+	go l.manager.runClaudeQuotaRechecks(ctx)
 
 	workers := l.concurrency
 	if workers <= 0 {

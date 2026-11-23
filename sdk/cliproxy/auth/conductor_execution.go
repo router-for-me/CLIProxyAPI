@@ -3980,7 +3980,7 @@ func (m *Manager) recordVerifyFailure(execCtx context.Context, auth *Auth, provi
 }
 
 func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *Auth, provider, stateModel, routeModel string, opts cliproxyexecutor.Options, accessToken string, credVersion, regEpoch, executionSeq uint64) (*Auth, error) {
-	m.MarkResult(execCtx, Result{
+	m.markResult(execCtx, Result{
 		AuthID:            auth.ID,
 		Provider:          provider,
 		Model:             stateModel,
@@ -3993,7 +3993,7 @@ func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *
 		CredentialVersion: credVersion,
 		RegistrationEpoch: regEpoch,
 		ExecutionSeq:      executionSeq,
-	})
+	}, true)
 	updated, okUpdated := m.GetByID(auth.ID)
 	if !okUpdated || updated == nil {
 		return nil, verifyCredentialRemovedError()
@@ -4008,6 +4008,10 @@ func (m *Manager) completeVerifyInferenceSuccess(execCtx context.Context, auth *
 // using an isolated session and minimal non-user prompt/token budget. It never falls back
 // to another credential and requires a completed response before marking InferenceVerified.
 func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth, error) {
+	return m.verifyInference(ctx, id, model, nil)
+}
+
+func (m *Manager) verifyInference(ctx context.Context, id, model string, quotaSnapshot *Auth) (*Auth, error) {
 	if m == nil {
 		return nil, &Error{Code: "manager_unavailable", Message: "auth manager is not initialized", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -4024,6 +4028,11 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 	if auth.RequiresSignIn {
 		return auth, &Error{Code: "sign_in_required", Message: "credential requires sign-in before inference verification", HTTPStatus: http.StatusConflict}
+	}
+	if quotaSnapshot != nil && (auth.RegistrationEpoch != quotaSnapshot.RegistrationEpoch ||
+		auth.CredentialVersion != quotaSnapshot.CredentialVersion || auth.cooldownRecordedSeq != quotaSnapshot.cooldownRecordedSeq ||
+		!canRecheckClaudeCredentialQuota(auth, time.Now())) {
+		return auth, verifyCredentialSupersededError()
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	m.mu.RLock()
