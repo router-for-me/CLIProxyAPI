@@ -34,6 +34,9 @@ func (cfg Config) MarshalYAML() (any, error) {
 	if err := root.Encode(legacyConfig(cfg)); err != nil {
 		return nil, err
 	}
+	if cfg.ServerID != "" {
+		setConfigScalar(&root, serverIDPath, cfg.ServerID)
+	}
 	value := reflect.ValueOf(cfg)
 	for _, path := range v8Paths {
 		if !strings.HasPrefix(path.current, "oauth.providers.") || !cfg.OAuthOnlyFields[path.old] {

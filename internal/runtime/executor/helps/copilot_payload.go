@@ -18,7 +18,7 @@ import (
 // If a matching selector can write a protected field, omit optional server-private
 // state before payload evaluation. Body predicates can depend on earlier rules;
 // do not speculate about their outcome or evaluate the rules twice.
-func CopilotPayloadMayWrite(cfg *config.Config, model, requested, from, to string, headers http.Header, fields ...string) bool {
+func CopilotPayloadMayWrite(cfg *config.Config, model, requested, from, to string, headers http.Header, sourceModelIDs []string, fields ...string) bool {
 	if cfg == nil {
 		return false
 	}
@@ -29,7 +29,7 @@ func CopilotPayloadMayWrite(cfg *config.Config, model, requested, from, to strin
 				continue
 			}
 			if models == nil {
-				models = payloadModelCandidates(model, requested)
+				models = payloadModelCandidates(model, requested, sourceModelIDs...)
 			}
 			for _, m := range models {
 				for _, entry := range entries {

@@ -115,7 +115,7 @@ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
 }
 
 // TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff guards that Antigravity pool
-// limits defaults to 30s timeout, 2 idle conns per host, and hard-caps idle timeout at 240s
+// limits defaults to 30s timeout, 2 idle conns per host, and hard-caps idle timeout at 210s
 // when connection pooling is enabled.
 func TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff(t *testing.T) {
 	enabled := true
@@ -133,8 +133,8 @@ func TestAntigravityPoolLimitsGuardsDefaultAndGFECutoff(t *testing.T) {
 		IdleConnTimeout:     time.Hour,
 	}
 	applyAntigravityPoolLimits(wide, poolCfg)
-	// Larger connection limits are kept, but IdleConnTimeout MUST be hard-capped at 240s
-	// to avoid exceeding the Google Frontend (GFE / ESF) 240-second cutoff.
+	// Larger connection limits are kept, but IdleConnTimeout MUST be hard-capped at 210s
+	// to stay safely below the Google Frontend (GFE / ESF) 240-second cutoff.
 	if wide.MaxIdleConnsPerHost != 256 || wide.MaxIdleConns != 512 {
 		t.Fatalf("larger connection limits must be preserved, got perHost=%d total=%d",
 			wide.MaxIdleConnsPerHost, wide.MaxIdleConns)
@@ -1049,5 +1049,114 @@ func TestAntigravityTransportKeySeparatesPoolSettingsAcrossReload(t *testing.T) 
 	}
 	if trPooled.MaxIdleConnsPerHost != antigravityDefaultMaxIdleConnsPerHost {
 		t.Fatalf("pooled transport MaxIdleConnsPerHost = %d, want %d", trPooled.MaxIdleConnsPerHost, antigravityDefaultMaxIdleConnsPerHost)
+	}
+}
+
+// TestAntigravityPoolLimitsHonorsExplicitLowerMaxIdleConnsPerHost verifies that an
+// explicitly configured max-idle-conns-per-host lowers a larger base transport limit
+// and does not collide in the transport cache with an omitted (default) config.
+func TestAntigravityPoolLimitsHonorsExplicitLowerMaxIdleConnsPerHost(t *testing.T) {
+	enabled := true
+	limitTwo := 2
+	limitOne := 1
+
+	cfgTwo := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled:             &enabled,
+				MaxIdleConnsPerHost: &limitTwo,
+			},
+		},
+	}
+	cfgOne := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled:             &enabled,
+				MaxIdleConnsPerHost: &limitOne,
+			},
+		},
+	}
+	cfgDefault := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled: &enabled,
+			},
+		},
+	}
+
+	trTwo := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 10}
+	applyAntigravityPoolLimits(trTwo, cfgTwo)
+	if trTwo.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 2 when explicitly configured lower than base", trTwo.MaxIdleConnsPerHost)
+	}
+
+	trOne := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 10}
+	applyAntigravityPoolLimits(trOne, cfgOne)
+	if trOne.MaxIdleConnsPerHost != 1 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 1 when explicitly configured lower than base", trOne.MaxIdleConnsPerHost)
+	}
+
+	// Verify cache separation when reloading from omitted default (preserves base 10)
+	// to explicit 2 (must lower base 10 to 2) on the same base transport and credential.
+	auth := antigravityAuthWithIDAndProxy("auth-explicit-lower-cache-key", "")
+	t.Cleanup(func() { closeAntigravityAuthIdleTransports(auth) })
+
+	base := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 10}
+	cachedDefault := antigravityHTTP11Transport(auth, base, cfgDefault)
+	if cachedDefault.MaxIdleConnsPerHost != 10 {
+		t.Fatalf("omitted max-idle-conns-per-host MaxIdleConnsPerHost = %d, want preserved base 10", cachedDefault.MaxIdleConnsPerHost)
+	}
+	cachedExplicit := antigravityHTTP11Transport(auth, base, cfgTwo)
+	if cachedExplicit == cachedDefault {
+		t.Fatal("explicit max-idle-conns-per-host=2 must not reuse cached transport built for omitted default")
+	}
+	if cachedExplicit.MaxIdleConnsPerHost != 2 {
+		t.Fatalf("explicit max-idle-conns-per-host=2 MaxIdleConnsPerHost = %d, want 2", cachedExplicit.MaxIdleConnsPerHost)
+	}
+}
+
+// TestAntigravityPoolConfigZeroMaxIdleActivatesShortMode verifies that explicitly
+// configuring max-idle-conns-per-host: 0 disables idle pooling (short-lived mode)
+// instead of falling back to Go's DefaultMaxIdleConnsPerHost (2).
+func TestAntigravityPoolConfigZeroMaxIdleActivatesShortMode(t *testing.T) {
+	enabled := true
+	zeroMaxIdle := 0
+	cfgZero := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled:             &enabled,
+				MaxIdleConnsPerHost: &zeroMaxIdle,
+			},
+		},
+	}
+
+	auth := antigravityAuthWithIDAndProxy("auth-zero-max-idle", "")
+	t.Cleanup(func() { closeAntigravityAuthIdleTransports(auth) })
+
+	client := newAntigravityHTTPClient(context.Background(), cfgZero, auth, 0)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	if transport.MaxIdleConnsPerHost != -1 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want -1 (short mode) when max-idle-conns-per-host is 0", transport.MaxIdleConnsPerHost)
+	}
+	if transport.DisableKeepAlives {
+		t.Fatal("DisableKeepAlives must be false to avoid adding Connection: close header")
+	}
+	if transport.IdleConnTimeout != 0 {
+		t.Fatalf("IdleConnTimeout = %v, want 0 in short mode", transport.IdleConnTimeout)
+	}
+
+	wideBase := &http.Transport{MaxIdleConns: 100, MaxIdleConnsPerHost: 10, IdleConnTimeout: 60 * time.Second}
+	applyAntigravityPoolLimits(wideBase, cfgZero)
+	if wideBase.MaxIdleConnsPerHost != -1 {
+		t.Fatalf("wide base MaxIdleConnsPerHost = %d, want -1 (short mode) when max-idle-conns-per-host is 0", wideBase.MaxIdleConnsPerHost)
+	}
+	if wideBase.DisableKeepAlives {
+		t.Fatal("wide base DisableKeepAlives must be false in short mode")
+	}
+	if wideBase.IdleConnTimeout != 0 {
+		t.Fatalf("wide base IdleConnTimeout = %v, want 0 in short mode", wideBase.IdleConnTimeout)
 	}
 }

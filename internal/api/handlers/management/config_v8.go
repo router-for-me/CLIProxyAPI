@@ -1,9 +1,10 @@
 package management
 
 import (
+	"bytes"
+	"errors"
 	"io"
 	"net/http"
-	"os"
 	"reflect"
 	"strings"
 
@@ -23,28 +24,30 @@ const ConfigV8ContextKey = "management.config-v8"
 // Reads return an ETag holding the SHA-256 of the on-disk config bytes.
 // Writes honour an optional If-Match against that token, so a client can
 // detect that another writer saved after its read (412) instead of silently
-// overwriting the change. Without If-Match, writes stay unconditional.
+// overwriting the change. A concurrent file replacement during an unconditional
+// write is rejected with 409 instead of overwriting the newer snapshot.
 func (h *Handler) ConfigV8(c *gin.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	raw, err := os.ReadFile(h.configFilePath)
+	onDisk, err := config.ReadConfigFileSnapshot(h.configFilePath)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed"})
 		return
 	}
-	diskHash := config.ComputeSourceHash(raw)
-	if c.Request.Method != http.MethodGet && !ifMatchSatisfied(c.Request.Header.Values("If-Match"), diskHash) {
+	diskHash := onDisk.SourceHash()
+	ifMatch := c.Request.Header.Values("If-Match")
+	if c.Request.Method != http.MethodGet && !ifMatchSatisfied(ifMatch, diskHash) {
 		c.Header("ETag", configV8ETag(diskHash))
 		c.JSON(http.StatusPreconditionFailed, gin.H{"error": "precondition_failed"})
 		return
 	}
-	data, _, commentedSections, err := config.NormalizeConfigLayoutSilent(raw, true)
+	data, commentedSections, err := config.ProjectV8ConfigLayout(onDisk.Bytes())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
-	var doc yaml.Node
-	if err = yaml.Unmarshal(data, &doc); err != nil {
+	doc, err := config.DecodeFirstConfigDocument(data)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config"})
 		return
 	}
@@ -56,6 +59,11 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	}
 	yamlRequest := strings.HasSuffix(c.FullPath(), "/config.yaml")
 	if c.Request.Method == http.MethodGet {
+		id, errID := config.ProjectConfigServerID(root, managementRequestIdentity(c).id)
+		if errID != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config", "message": errID.Error()})
+			return
+		}
 		config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 		if !yamlRequest {
 			if servers := configV8Node(root, v8ICEServersPath); servers != nil && servers.Kind == yaml.SequenceNode {
@@ -74,7 +82,13 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		c.Header("ETag", configV8ETag(diskHash))
 		if yamlRequest {
-			c.Data(http.StatusOK, "application/yaml; charset=utf-8", data)
+			data, err = config.ReplaceFirstConfigDocument(data, doc)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid_config", "message": err.Error()})
+				return
+			}
+			useConfigServerID(c, id)
+			c.Data(http.StatusOK, configYAMLContentType(data), data)
 			return
 		}
 		var result any
@@ -82,9 +96,11 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "decode_failed"})
 			return
 		}
+		useConfigServerID(c, id)
 		c.JSON(http.StatusOK, result)
 		return
 	}
+	var rootUpdate []byte
 	before := cloneConfigV8Node(root)
 	config.ProjectV8ConfigAliases(root, strings.Join(parts, "."))
 	if c.Request.Method == http.MethodDelete {
@@ -106,17 +122,23 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_json"})
 			return
 		}
-		var update yaml.Node
-		if err = yaml.Unmarshal(body, &update); err != nil || len(update.Content) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body"})
+		update, errBody := config.DecodeFirstConfigDocument(body)
+		if errBody != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "message": errBody.Error()})
 			return
 		}
-		stripAPIKeysAuthIndexesFromUpdate(parts, &update)
+		if yamlRequest {
+			// YAML PUT replaces the stream. JSON and path operations can only
+			// edit the first document and keep the current suffix.
+			data = body
+		}
+		stripAPIKeysAuthIndexesFromUpdate(parts, update)
 		if len(parts) == 0 && update.Content[0].Kind != yaml.MappingNode {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config_must_be_object"})
 			return
 		}
 		if len(parts) == 0 {
+			rootUpdate = body
 			if err = config.NormalizeV8ConfigAliases(update.Content[0]); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 				return
@@ -175,8 +197,13 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		}
 	}
 	stripAPIKeysAuthIndexesFromRoot(root)
+	id, errID := config.EnsureManagementServerID(root)
+	if errID != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errID.Error()})
+		return
+	}
 	config.NormalizeCollectionNodeStyles(root)
-	data, err = yaml.Marshal(&doc)
+	data, err = config.ReplaceFirstConfigDocument(data, doc)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
@@ -190,17 +217,41 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
-	var finalCommented []config.ArchivedV8Section
-	data, _, finalCommented, err = config.NormalizeConfigLayoutSilent(data, true)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": err.Error()})
+	normalized, _, finalCommented, errNormalize := config.NormalizeConfigLayoutSilent(data, true)
+	if errNormalize != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errNormalize.Error()})
+		return
+	}
+	for _, source := range [][]byte{data, rootUpdate} {
+		if source == nil {
+			continue
+		}
+		if errValidate := config.ValidateConfigSave(source, normalized); errValidate != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errValidate.Error()})
+			return
+		}
+	}
+	data = normalized
+	if errArchive := config.ValidateV8ConfigArchives(data, commentedSections); errArchive != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errArchive.Error()})
 		return
 	}
 	// Save the validated canonical tree directly: projecting runtime defaults
 	// back onto it loses explicit nulls, empty maps, and opaque plugin settings.
-	// WriteConfig retains the inode of a mounted configuration file.
-	if err = WriteConfig(h.configFilePath, data); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": err.Error()})
+	saved, errSave := config.WriteConfigFileCAS(h.configFilePath, onDisk, data)
+	if errors.Is(errSave, config.ErrConfigFileChanged) {
+		if current, errCurrent := config.ReadConfigFileSnapshot(h.configFilePath); errCurrent == nil {
+			c.Header("ETag", configV8ETag(current.SourceHash()))
+		}
+		if len(ifMatch) != 0 {
+			c.JSON(http.StatusPreconditionFailed, gin.H{"error": "precondition_failed"})
+		} else {
+			c.JSON(http.StatusConflict, gin.H{"error": "config_changed"})
+		}
+		return
+	}
+	if errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": errSave.Error()})
 		return
 	}
 	// Emit migration warnings only after the migrated document is persisted
@@ -208,29 +259,28 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 	config.WarnUnrecognizedV8Sections(config.FilterArchivedV8Sections(data, commentedSections))
 	config.WarnUnrecognizedV8Sections(finalCommented)
 	// Runtime-only ownership state is never sourced from an uploaded YAML document.
-	next.Home = h.cfg.Home
-	// WriteConfig may normalize the bytes, so report the version actually on
-	// disk. If it cannot be read back, omit the ETag instead of guessing one.
-	// Like Home, SourceHash keeps its runtime owner and is published by the
-	// reload, so it is not overwritten on next here.
-	if saved, errSaved := os.ReadFile(h.configFilePath); errSaved == nil {
-		c.Header("ETag", configV8ETag(config.ComputeSourceHash(saved)))
-	}
 	prevSecretHash := ""
 	if h.cfg != nil {
+		next.Home = h.cfg.Home
 		prevSecretHash = h.cfg.RemoteManagement.SecretKey
 	}
+	next.SourceHash = saved.SourceHash()
 	h.cfg = next
-	nextSecretHash := ""
-	if next != nil {
-		nextSecretHash = next.RemoteManagement.SecretKey
-	}
-	if prevSecretHash != nextSecretHash {
+	if prevSecretHash != next.RemoteManagement.SecretKey {
 		h.authCache.invalidate()
 	}
 	snapshot := h.reloadSnapshotConfigLocked()
 	h.reloadConfigAfterManagementSaveAsync(c.Request.Context(), snapshot)
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8})
+	c.Header("ETag", configV8ETag(next.SourceHash))
+	useConfigServerID(c, id)
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "config-version": 8, "server-id": id})
+}
+
+func configYAMLContentType(data []byte) string {
+	if bytes.HasPrefix(data, []byte{0xff, 0xfe}) || bytes.HasPrefix(data, []byte{0xfe, 0xff}) {
+		return "application/yaml; charset=utf-16"
+	}
+	return "application/yaml; charset=utf-8"
 }
 
 // configV8ETag renders a config source hash as a strong ETag.
