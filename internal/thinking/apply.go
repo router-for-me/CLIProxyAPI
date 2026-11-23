@@ -316,6 +316,14 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 	}
 
 	// 3. Model capability check
+	if (isOpenAIFamily(providerFormat) || providerFormat == "xai") && !isPluginApplier && detectModelCapability(modelInfo) == CapabilityHybrid {
+		// OpenAI Chat/Responses and xAI appliers accept effort levels only.
+		// Keep the original budget range in the model catalog.
+		levelModel, levelSupport := *modelInfo, *modelInfo.Thinking
+		levelSupport.Min, levelSupport.Max = 0, 0
+		levelModel.Thinking = &levelSupport
+		modelInfo = &levelModel
+	}
 	if nativeResponses {
 		normalized, errNormalize := normalizeNativeResponsesEffortDoc(doc, docValid, modelInfo, applier, fromFormat, providerFormat, HasThinkingSuffix(model))
 		modified = modified || normalized
@@ -586,7 +594,7 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		}
 	}
 
-	// 2. Try level parsing (minimal, low, medium, high, xhigh)
+	// 2. Try level parsing (minimal, low, medium, high, xhigh, max)
 	if level, ok := ParseLevelSuffix(rawSuffix); ok {
 		return ThinkingConfig{Mode: ModeLevel, Level: level}
 	}
@@ -662,6 +670,11 @@ func applyUserDefinedModelDoc(doc *ojson.Doc, docValid bool, modelInfo *registry
 	}
 
 	if !isPluginApplier {
+		if modelInfo != nil && modelInfo.Thinking != nil {
+			if normalized, errValidate := ValidateConfig(config, modelInfo, fromFormat, toFormat, suffixResult.HasSuffix); errValidate == nil {
+				config = *normalized
+			}
+		}
 		config = normalizeUserDefinedConfig(config, modelInfo, fromFormat, toFormat)
 	}
 	log.WithFields(log.Fields{
