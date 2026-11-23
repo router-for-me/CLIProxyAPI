@@ -298,6 +298,40 @@ func TestConvertAntigravityResponseToOpenAI_ResponseFreeEventDoesNotStartStream(
 	}
 }
 
+func TestConvertAntigravityResponseToOpenAI_UsesEmptyObjectWhenFunctionArgsAreOmitted(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	chunk := []byte(`{"response":{"responseId":"resp_1","candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"get_current_time"}}]}}]}}`)
+
+	outputs := ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, chunk, &param)
+	if len(outputs) != 1 {
+		t.Fatalf("output count = %d, want 1; output=%s", len(outputs), outputs)
+	}
+	if got := ojson.GetBytesNoCopy(outputs[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "{}" {
+		t.Fatalf("function.arguments = %q, want valid empty JSON object %q; output=%s", got, "{}", outputs[0])
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAI_PreservesArgumentsAfterStreamingToolStart(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	chunks := [][]byte{
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"get_value","willContinue":true}}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","args":{"value":1}}}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`),
+	}
+
+	var arguments strings.Builder
+	for _, chunk := range chunks {
+		for _, output := range ConvertAntigravityResponseToOpenAI(ctx, "gemini-3.8-flash-high", nil, nil, chunk, &param) {
+			arguments.WriteString(ojson.GetBytesNoCopy(output, "choices.0.delta.tool_calls.0.function.arguments").String())
+		}
+	}
+	if got := arguments.String(); got != `{"value":1}` {
+		t.Fatalf("concatenated function.arguments = %q, want valid JSON %q", got, `{"value":1}`)
+	}
+}
+
 func TestConvertAntigravityResponseToOpenAI_ContinuesUnnamedFunctionCallAtActiveIndex(t *testing.T) {
 	ctx := context.Background()
 	var param any
