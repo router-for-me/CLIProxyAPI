@@ -113,6 +113,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if replayScope.valid() {
 		replayRequestPayload, _ = antigravityReplayRequestEnvelopeFromDoc(doc)
 	}
+	appendAntigravityToolContinuationUserTurnDoc(selection.ID, from, doc)
 	httpReq, requestPayload, errReq := e.buildRequestForModelDoc(ctx, auth, prepared.token, selection.AntigravityModelSelection, doc, true, opts.Alt, baseURL, helps.AntigravitySessionIDForAuth(antigravityAuthID(auth), opts.Metadata, req.Metadata))
 	if errReq != nil {
 		err = errReq

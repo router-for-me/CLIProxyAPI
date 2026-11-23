@@ -232,6 +232,7 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	if errReq != nil {
 		return nil, nil, errReq
 	}
+	httpReq.ContentLength = int64(len(finalPayload))
 	// Deliberately no httpReq.Close: the native Antigravity client omits the
 	// Connection header and keeps its HTTP/1.1 connections alive, so forcing
 	// "Connection: close" would both deviate from that fingerprint and defeat the

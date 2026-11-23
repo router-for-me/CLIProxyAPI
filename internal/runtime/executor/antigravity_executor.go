@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	internalsignature "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -635,6 +636,55 @@ func ensureAntigravityGeminiBoundaryUserContentDoc(modelName string, doc *ojson.
 		changed = true
 	}
 	return changed
+}
+
+var antigravityToolContinuationUserTurnJSON = []byte(`{"role":"user","parts":[{"text":"Review the tool result and proceed."}]}`)
+
+// appendAntigravityToolContinuationUserTurnDoc appends a lightweight user turn
+// AFTER reasoning replay capture when an OpenAI-translated Gemini request ends
+// with a functionResponse turn. Prevents Gemini 3.8 Flash from collapsing into
+// 0-thinking premature stop on long tool chains while preserving prompt cache
+// prefix and reasoning replay KV indices.
+func appendAntigravityToolContinuationUserTurnDoc(modelName string, from sdktranslator.Format, doc *ojson.Doc) bool {
+	if doc == nil || strings.Contains(strings.ToLower(modelName), "claude") {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(from.String())) != "openai" {
+		return false
+	}
+	contents := doc.Get("request.contents")
+	if !contents.IsArray() {
+		return false
+	}
+	arr := contents.Array()
+	if len(arr) == 0 {
+		return false
+	}
+	lastContent := arr[len(arr)-1]
+	parts := lastContent.Get("parts")
+	if !parts.IsArray() {
+		return false
+	}
+	partsArr := parts.Array()
+	if len(partsArr) == 0 {
+		return false
+	}
+	hasFunctionResponse := false
+	for _, p := range partsArr {
+		if p.Get("functionResponse").Exists() || p.Get("function_response").Exists() {
+			hasFunctionResponse = true
+			break
+		}
+	}
+	if !hasFunctionResponse {
+		return false
+	}
+	contentItems := make([][]byte, 0, len(arr)+1)
+	for _, content := range arr {
+		contentItems = append(contentItems, []byte(content.Raw))
+	}
+	contentItems = append(contentItems, antigravityToolContinuationUserTurnJSON)
+	return doc.SetRawBytes("request.contents", translatorcommon.JoinRawArray(contentItems)) == nil
 }
 
 type antigravityContentEdit struct {
