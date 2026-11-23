@@ -1409,6 +1409,7 @@ type SessionAffinitySelector struct {
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
 	rebindOnNever     bool
+	releaseSpill      bool
 }
 
 const (
@@ -1570,6 +1571,9 @@ type SessionAffinityConfig struct {
 	TTL              time.Duration
 	SubagentAffinity *bool
 	RebindOn         string
+	// ReleaseSpill releases a session bound to a negative-priority credential back to the
+	// highest available priority tier as soon as a credential there is available again.
+	ReleaseSpill bool
 }
 
 // NewSessionAffinitySelector creates a new session-aware selector.
@@ -1600,6 +1604,7 @@ func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAff
 		subagentAffinity:  subagentAffinity,
 		rebindOnQuotaOnly: rebindMode == SessionAffinityRebindOnQuota,
 		rebindOnNever:     rebindMode == SessionAffinityRebindOnNever,
+		releaseSpill:      cfg.ReleaseSpill,
 	}
 }
 
@@ -1695,6 +1700,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 	fallbackAuths := highestPriorityAuths(available)
+	// With session-affinity-release-spill, a spill binding yields once a higher-priority credential is available.
+	demotedID := func(authID string) bool {
+		return s.releasesSpillBindingID(availabilityCandidates, authID, fallbackAuths)
+	}
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1732,13 +1741,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
-			if auth.ID == cachedAuthID {
+			if auth.ID == cachedAuthID && !s.releasesSpillBinding(auth, fallbackAuths) {
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
 			}
 		}
-		if s.rebindOnNever {
+		if s.rebindOnNever && !demotedID(cachedAuthID) {
 			bind(cachedAuthID, false)
 			errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
 			entry.Infof("session-affinity: cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, errBound.Code, provider, model)
@@ -1755,7 +1764,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		if auth == nil {
 			return nil, nil
 		}
-		if s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
+		if !demotedID(cachedAuthID) && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
 			bind(cachedAuthID, false)
 			entry.Infof("session-affinity: cache hit but auth transiently unavailable, failover without rebinding | session=%s bound_auth=%s failover_auth=%s provider=%s model=%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model)
 			return auth, nil
@@ -1779,7 +1788,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if parentAuthID := s.cache.latestSessionAuth(fallbackID, providers); parentAuthID != "" {
 			for _, auth := range available {
-				if auth.ID == parentAuthID {
+				if auth.ID == parentAuthID && !s.releasesSpillBinding(auth, fallbackAuths) {
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, &reservation)
@@ -1791,7 +1800,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
-				if auth.ID == cachedAuthID {
+				if auth.ID == cachedAuthID && !s.releasesSpillBinding(auth, fallbackAuths) {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
 						if isFork {
@@ -1803,13 +1812,13 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					}
 				}
 			}
-			if !isSubagent && !isFork && s.rebindOnNever {
+			if !isSubagent && !isFork && s.rebindOnNever && !demotedID(cachedAuthID) {
 				bind(cachedAuthID, false)
 				errBound := s.unavailableBoundAuthError(ctx, availabilityCandidates, model, cachedAuthID, now)
 				entry.Infof("session-affinity: fallback cache hit but bound auth unavailable, refusing failover | session=%s fallback=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), cachedAuthID, errBound.Code, provider, model)
 				return nil, errBound
 			}
-			if !isSubagent && !isFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
+			if !isSubagent && !isFork && !demotedID(cachedAuthID) && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, cachedAuthID, now) {
 				auth, err := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, &reservation)
 				if err != nil {
 					return nil, err
@@ -1841,6 +1850,31 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 	}
 	return auth, nil
+}
+
+// releasesSpillBinding reports a session binding that routing.session-affinity-release-spill
+// gives up: a negative-priority (spill) credential while a credential of a higher priority is
+// available again (best is the highest available tier).
+func (s *SessionAffinitySelector) releasesSpillBinding(auth *Auth, best []*Auth) bool {
+	if s == nil || !s.releaseSpill || auth == nil || len(best) == 0 {
+		return false
+	}
+	priority := authPriority(auth)
+	return priority < 0 && priority < authPriority(best[0])
+}
+
+// releasesSpillBindingID applies releasesSpillBinding to a bound credential ID, which may
+// itself be unavailable and so absent from best.
+func (s *SessionAffinitySelector) releasesSpillBindingID(candidates []*Auth, authID string, best []*Auth) bool {
+	if s == nil || !s.releaseSpill {
+		return false
+	}
+	for _, auth := range candidates {
+		if auth != nil && auth.ID == authID {
+			return s.releasesSpillBinding(auth, best)
+		}
+	}
+	return false
 }
 
 func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, entry *log.Entry, reservation **weightedReservation) (*Auth, bool, error) {
@@ -1876,10 +1910,11 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 		return nil, true, errAvailable
 	}
 
+	fallbackAuths := highestPriorityAuths(available)
 	var preservedAuthID string
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
 		for _, auth := range available {
-			if auth == nil || auth.ID != match.AuthID {
+			if auth == nil || auth.ID != match.AuthID || s.releasesSpillBinding(auth, fallbackAuths) {
 				continue
 			}
 			if match.SessionID != "" {
@@ -1919,7 +1954,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			picked, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, available, auth, reservation)
 			return picked, true, errPick
 		}
-		if !match.IsFork && s.rebindOnNever {
+		if !match.IsFork && s.rebindOnNever && !s.releasesSpillBindingID(availabilityCandidates, match.AuthID, fallbackAuths) {
 			if bindRes := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, match.AuthID); bindRes.SessionID != "" {
 				opts.Metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = bindRes.SessionID
 				opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = bindRes.SessionID
@@ -1947,7 +1982,7 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 			entry.Infof("session-affinity: LCP cache hit but bound auth unavailable, refusing failover | session=%s bound_auth=%s code=%s provider=%s model=%s", truncateSessionID(match.SessionID), match.AuthID, errBound.Code, provider, model)
 			return nil, true, errBound
 		}
-		if !match.IsFork && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
+		if !match.IsFork && !s.releasesSpillBindingID(availabilityCandidates, match.AuthID, fallbackAuths) && s.shouldPreserveBindingWhenUnavailable(ctx, availabilityCandidates, model, match.AuthID, now) {
 			preservedAuthID = match.AuthID
 		}
 	}
@@ -1955,7 +1990,6 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 	if errAvailable != nil {
 		return nil, true, errAvailable
 	}
-	fallbackAuths := highestPriorityAuths(available)
 	auth, errPick := s.pickWithAffinityReservation(ctx, provider, model, opts, fallbackAuths, nil, reservation)
 	if errPick != nil {
 		return nil, true, errPick

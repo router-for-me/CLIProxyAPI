@@ -232,6 +232,12 @@ routing:
   #     keep the binding and return the error (or retry the same credential) instead.
   # Ignored when routing.session-affinity is false.
   session-affinity-rebind-on: "any"
+  # When true, a session bound to a negative-priority ("spill") credential returns to the highest
+  # available priority tier as soon as a credential there is available again, instead of staying on
+  # the spill credential until it fails or the binding expires. Default false.
+  # For spill bindings this takes precedence over session-affinity-rebind-on (including "never").
+  # Ignored when routing.session-affinity is false.
+  session-affinity-release-spill: false
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

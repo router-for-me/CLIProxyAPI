@@ -612,6 +612,13 @@ type RoutingConfig struct {
 	//     keep the binding and return the error (or retry the same credential) instead.
 	// Ignored when SessionAffinity is false.
 	SessionAffinityRebindOn string `yaml:"session-affinity-rebind-on,omitempty" json:"session-affinity-rebind-on,omitempty"`
+
+	// SessionAffinityReleaseSpill releases a session bound to a negative-priority ("spill")
+	// credential back to the highest available priority tier as soon as a credential there is
+	// available again, instead of keeping the spill binding until it fails or expires.
+	// For spill bindings it takes precedence over SessionAffinityRebindOn (including "never").
+	// Default: false. Ignored when SessionAffinity is false.
+	SessionAffinityReleaseSpill bool `yaml:"session-affinity-release-spill,omitempty" json:"session-affinity-release-spill,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
