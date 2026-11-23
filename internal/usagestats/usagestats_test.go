@@ -79,6 +79,12 @@ func TestAggregatePricesTokenBucketsIndependently(t *testing.T) {
 	if !approxEqual(group.CostUSD, want) {
 		t.Fatalf("cost = %v, want %v", group.CostUSD, want)
 	}
+	// The split covers every bucket once: reasoning is billed as output.
+	if !approxEqual(group.InputCostUSD, 4) || !approxEqual(group.CacheReadCostUSD, 0.4) ||
+		!approxEqual(group.CacheWriteCostUSD, 21) || !approxEqual(group.OutputCostUSD, 10) {
+		t.Fatalf("cost split = input %v, cache read %v, cache write %v, output %v, want 4, 0.4, 21, 10",
+			group.InputCostUSD, group.CacheReadCostUSD, group.CacheWriteCostUSD, group.OutputCostUSD)
+	}
 	if group.UnpricedTokens != 0 || len(aggregate.UnpricedModels) != 0 {
 		t.Fatalf("unpriced tokens = %d, models = %v, want none", group.UnpricedTokens, aggregate.UnpricedModels)
 	}
@@ -116,6 +122,35 @@ func TestAggregateFoldsModelsIntoRequestedGroups(t *testing.T) {
 	}
 	if !approxEqual(groups["beta"].CostUSD, 8) {
 		t.Fatalf("beta cost = %v, want 8", groups["beta"].CostUSD)
+	}
+	if !approxEqual(alpha.InputCostUSD, 4.1) || alpha.OutputCostUSD != 0 {
+		t.Fatalf("alpha cost split = input %v, output %v, want 4.1 and 0", alpha.InputCostUSD, alpha.OutputCostUSD)
+	}
+}
+
+func TestAggregateLeavesTheCostSplitOfUnpricedModelsEmpty(t *testing.T) {
+	store := openTestStore(t)
+	mustInsert(t, store,
+		Row{Timestamp: testDay, Model: "claude-opus-5-5", InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000},
+		Row{Timestamp: testDay, Model: "no-such-model", InputTokens: 1_000_000, OutputTokens: 1_000_000, TotalTokens: 2_000_000},
+	)
+
+	aggregate, errAggregate := store.Aggregate(context.Background(), Query{
+		From: testDay, To: testDay.Add(time.Hour), GroupBy: []string{},
+	})
+	if errAggregate != nil {
+		t.Fatalf("aggregate: %v", errAggregate)
+	}
+	if len(aggregate.Groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(aggregate.Groups))
+	}
+	total := aggregate.Groups[0]
+	// Only Opus is priced: input 4 and output 20 per 1M.
+	if !approxEqual(total.InputCostUSD, 4) || !approxEqual(total.OutputCostUSD, 20) || !approxEqual(total.CostUSD, 24) {
+		t.Fatalf("cost = %v split input %v output %v, want 24 split 4 and 20", total.CostUSD, total.InputCostUSD, total.OutputCostUSD)
+	}
+	if total.UnpricedTokens != 2_000_000 {
+		t.Fatalf("unpriced tokens = %d, want 2M", total.UnpricedTokens)
 	}
 }
 
