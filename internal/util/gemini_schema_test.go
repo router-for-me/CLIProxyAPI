@@ -679,6 +679,22 @@ func TestCleanJSONSchemaForAntigravity_EmptySchemaPlaceholder(t *testing.T) {
 	}
 }
 
+func TestCleanJSONSchemaForAntigravity_UppercaseObjectPlaceholder(t *testing.T) {
+	for _, input := range []string{
+		`{"type":"OBJECT"}`,
+		`{"type":"OBJECT","properties":{}}`,
+	} {
+		result := ojson.Parse(CleanJSONSchemaForAntigravity(input))
+		if got := result.Get("properties.reason.type").String(); got != "string" {
+			t.Errorf("uppercase object should get a reason placeholder, got type %q in %s", got, result.Raw)
+		}
+		required := result.Get("required").Array()
+		if len(required) != 1 || required[0].String() != "reason" {
+			t.Errorf("uppercase object should require reason, got %s in %s", result.Get("required").Raw, result.Raw)
+		}
+	}
+}
+
 func TestCleanJSONSchemaForAntigravity_EmptyPropertiesPlaceholder(t *testing.T) {
 	// Object with empty properties object
 	input := `{

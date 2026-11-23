@@ -2549,7 +2549,7 @@ func addEmptySchemaPlaceholder(jsonStr string) string {
 	modified := false
 	for _, p := range paths {
 		typeVal := doc.Get(p)
-		if typeVal.String() != "object" {
+		if !strings.EqualFold(typeVal.String(), "object") {
 			continue
 		}
 
