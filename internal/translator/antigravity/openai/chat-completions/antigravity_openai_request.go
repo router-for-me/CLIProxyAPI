@@ -355,13 +355,8 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 								partItems = append(partItems, antigravityOpenAITextPart(text))
 							}
 						case "image_url":
-							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									part := antigravityOpenAIInlineDataPart(pieces[0], pieces[1][7:])
-									partItems = append(partItems, part)
-								}
+							if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String()); ok {
+								partItems = append(partItems, antigravityOpenAIInlineDataPart(mimeType, data))
 							}
 						}
 					}
