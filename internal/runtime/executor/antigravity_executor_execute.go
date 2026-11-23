@@ -564,6 +564,7 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 		responseID              string
 		role                    string
 		usageRaw                string
+		groundingMetadataRaw    string
 		parts                   []string
 		pendingKind             string
 		pendingText             strings.Builder
@@ -682,6 +683,10 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 							case "finishReason":
 								if cv.String() != "" {
 									finishReason = cv.String()
+								}
+							case "groundingMetadata":
+								if cv.IsObject() && cv.Raw != "" {
+									groundingMetadataRaw = cv.Raw
 								}
 							case "content":
 								if cv.IsObject() {
@@ -819,6 +824,9 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 	}
 	if finishReason != "" {
 		_ = templateDoc.Set("candidates.0.finishReason", finishReason)
+	}
+	if groundingMetadataRaw != "" && !templateDoc.Get("candidates.0.groundingMetadata").Exists() {
+		_ = templateDoc.SetRawBytes("candidates.0.groundingMetadata", []byte(groundingMetadataRaw))
 	}
 	if modelVersion != "" {
 		_ = templateDoc.Set("modelVersion", modelVersion)
