@@ -13,6 +13,9 @@ import (
 
 func TestConvertInteractionsRequestToAntigravityWithToolMessagesDirect(t *testing.T) {
 	out, _ := ConvertInteractionsRequestToAntigravity("antigravity-test", []byte(`{"model":"antigravity-test","system_instruction":"be brief","input":[{"type":"user_input","content":[{"type":"text","text":"hi"}]},{"type":"function_call","name":"lookup","call_id":"call_1","arguments":{"q":"x"}},{"type":"function_result","name":"lookup","call_id":"call_1","result":{"ok":true}}],"tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`), false)
+	if got := ojson.GetBytesNoCopy(out, "request.systemInstruction.role").String(); got != "user" {
+		t.Fatalf("request.systemInstruction.role = %q, want user. Output: %s", got, string(out))
+	}
 	if got := ojson.GetBytesNoCopy(out, "request.systemInstruction.parts.0.text").String(); got != "be brief" {
 		t.Fatalf("request.systemInstruction.parts.0.text = %q, want be brief. Output: %s", got, string(out))
 	}
@@ -525,9 +528,9 @@ func TestConvertInteractionsRequestToAntigravity_FunctionResponseJSONRef(t *test
 		]
 	}`)
 	out, _ := ConvertInteractionsRequestToAntigravity("gemini-3.8-flash-high", inputJSON, false)
-	val := ojson.GetBytesNoCopy(out, "request.contents.0.parts.0.functionResponse.response.result")
+	val := ojson.GetBytesNoCopy(out, "request.contents.0.parts.0.functionResponse.response.output")
 	if val.Type != ojson.String {
-		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", val.Type, val.Raw)
+		t.Fatalf("expected functionResponse.response.output to be string, got %s (raw: %s)", val.Type, val.Raw)
 	}
 	if !strings.Contains(val.String(), "#/components/schemas/ErrorModel") {
 		t.Fatalf("expected string result to contain ref target, got %q", val.String())

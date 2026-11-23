@@ -3135,9 +3135,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNoContent(t *testing.T) {
 	}
 
 	// Verify the functionResponse has a valid result value
-	fr := ojson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.result")
+	fr := ojson.Get(outputStr, "request.contents.1.parts.0.functionResponse.response.output")
 	if !fr.Exists() {
-		t.Error("functionResponse.response.result should exist")
+		t.Error("functionResponse.response.output should exist")
 	}
 }
 
@@ -3224,7 +3224,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Text content should be in response.result
+	// Text content should be in response.output
 	resultText := funcResp.Get("response.result.text").String()
 	if resultText != "File content here" {
 		t.Errorf("Expected response.result.text = 'File content here', got '%s'", resultText)
@@ -3287,9 +3287,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 		t.Fatal("functionResponse should exist")
 	}
 
-	// response.result should be empty (image only)
-	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result for image-only content, got '%s'", funcResp.Get("response.result").String())
+	// response.output should be empty (image only)
+	if funcResp.Get("response.output").String() != "" {
+		t.Errorf("Expected empty response.output for image-only content, got '%s'", funcResp.Get("response.output").String())
 	}
 
 	// Image should be in functionResponse.parts[0].inlineData
@@ -3310,7 +3310,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(t *testing.T) {
 	// tool_result with array content: 2 text items + 2 images
-	// All images go into functionResponse.parts, texts into response.result array
+	// All images go into functionResponse.parts, texts into response.output array
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -3350,7 +3350,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		t.Fatal("functionResponse should exist")
 	}
 
-	// Multiple text items => response.result is an array
+	// Multiple text items => response.output is an array
 	resultArr := funcResp.Get("response.result")
 	if !resultArr.IsArray() {
 		t.Fatalf("Expected response.result to be an array, got: %s", resultArr.Raw)
@@ -3386,7 +3386,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 }
 
 func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *testing.T) {
-	// tool_result with only images (no text) — response.result should be empty string
+	// tool_result with only images (no text) — response.output should be empty string
 	inputJSON := []byte(`{
 		"model": "claude-3-5-sonnet-20240620",
 		"messages": [
@@ -3424,9 +3424,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *t
 		t.Fatal("functionResponse should exist")
 	}
 
-	// No text => response.result should be empty string
-	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result, got '%s'", funcResp.Get("response.result").String())
+	// No text => response.output should be empty string
+	if funcResp.Get("response.output").String() != "" {
+		t.Errorf("Expected empty response.output, got '%s'", funcResp.Get("response.output").String())
 	}
 
 	// Both images in functionResponse.parts
@@ -4032,9 +4032,9 @@ func TestConvertClaudeRequestToAntigravity_FunctionResponseJSONRef(t *testing.T)
 	}`)
 
 	output, _ := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
-	result := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse.response.result")
+	result := ojson.GetBytesNoCopy(output, "request.contents.1.parts.0.functionResponse.response.output")
 	if result.Type != ojson.String {
-		t.Fatalf("expected functionResponse.response.result to be string, got %s (raw: %s)", result.Type, result.Raw)
+		t.Fatalf("expected functionResponse.response.output to be string, got %s (raw: %s)", result.Type, result.Raw)
 	}
 	if !strings.Contains(result.String(), "#/components/schemas/ErrorModel") {
 		t.Fatalf("expected result to contain ref target, got %q", result.String())
@@ -4051,7 +4051,7 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		{
 			name:         "success_without_flag",
 			fields:       `"content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "explicit_success",
@@ -4061,12 +4061,12 @@ func TestConvertClaudeRequestToAntigravity_PreservesToolResultErrors(t *testing.
 		{
 			name:         "non_bool_is_error_string_treated_as_success",
 			fields:       `"is_error":"true","content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "non_bool_is_error_number_treated_as_success",
 			fields:       `"is_error":1,"content":"permission denied"`,
-			wantResponse: `{"result":"permission denied"}`,
+			wantResponse: `{"output":"permission denied"}`,
 		},
 		{
 			name:         "failed_string",

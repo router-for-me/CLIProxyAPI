@@ -152,6 +152,7 @@ func buildAntigravityOpenAIWebSearchRequest(model string, payload []byte) ([]byt
 	if toolConfig := outDoc.Get("request.toolConfig"); toolConfig.IsObject() && len(toolConfig.Map()) == 0 {
 		_ = outDoc.Delete("request.toolConfig")
 	}
+	gemini.NormalizeAntigravityRequestDoc(outDoc)
 	return outDoc.Bytes(), errConvert
 }
 
@@ -546,7 +547,9 @@ func convertOpenAIRequestToAntigravityChat(modelName string, inputRawJSON []byte
 	if strings.Contains(strings.ToLower(modelName), "claude") {
 		out = gemini.SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, out)
 	}
-	return out, drops.Err()
+	finalDoc := ojson.NewDoc(out)
+	gemini.NormalizeAntigravityRequestDoc(finalDoc)
+	return finalDoc.Bytes(), drops.Err()
 }
 
 func antigravityOpenAITextPart(text string) []byte {

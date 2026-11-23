@@ -17,6 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -172,6 +173,7 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	modelName := selection.ID
 	isAgent := geminiToAntigravityDocForAuth(doc, selection, projectID, auth, derivedSessionIDs...)
 	promptStructuredOutput := helps.PrepareAntigravityClaudeStructuredOutputDoc(modelName, doc)
+	antigravitygemini.NormalizeAntigravityRequestDoc(doc)
 
 	lowerModel := strings.ToLower(modelName)
 	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
@@ -986,7 +988,9 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, selection cliproxyauth.Antigr
 
 	switch {
 	case isImageModel:
-		_ = doc.Set("requestId", generateImageGenRequestID())
+		if strings.TrimSpace(doc.Get("requestId").String()) == "" {
+			_ = doc.Set("requestId", generateImageGenRequestID())
+		}
 		if incomingSessionID != "" && authID != "" {
 			_ = doc.Set("request.sessionId", scopeIncomingAntigravitySessionID(authID, incomingSessionID, derivedSessionID))
 		}
@@ -1012,8 +1016,8 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, selection cliproxyauth.Antigr
 		_ = doc.Set("request.sessionId", sessionID)
 		if reqType == "agent" {
 			helps.ApplyAntigravityAgentEnvelope(doc, auth, sessionID, modelName, selection.Enum)
-		} else {
-			_ = doc.Set("requestId", "agent-"+uuid.NewString())
+		} else if strings.TrimSpace(doc.Get("requestId").String()) == "" {
+			_ = doc.Set("requestId", reqType+"/"+uuid.NewString())
 		}
 	}
 

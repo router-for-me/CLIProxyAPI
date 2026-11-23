@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	antigravitygemini "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -1028,8 +1029,9 @@ func convertClaudeRequestToAntigravityWithWebSearchContext(ctx context.Context, 
 	} else {
 		out = sigcompat.SanitizeGeminiSystemInstruction(out, "request.contents")
 	}
-
-	return out, drops.Err()
+	finalDoc := ojson.NewDoc(out)
+	antigravitygemini.NormalizeAntigravityRequestDoc(finalDoc)
+	return finalDoc.Bytes(), drops.Err()
 }
 
 // claudeBase64InlineData converts a Claude base64 source into an Antigravity

@@ -90,7 +90,7 @@ func TestConvertOpenAIRequestToAntigravityChat_AdjacentUserTurns(t *testing.T) {
 	if len(parts) != 2 {
 		t.Fatalf("contents[2].parts length = %d, want 2. Output: %s", len(parts), result)
 	}
-	if gotResponse := parts[0].Get("functionResponse.response.result").String(); gotResponse != "tool output" {
+	if gotResponse := parts[0].Get("functionResponse.response.output").String(); gotResponse != "tool output" {
 		t.Fatalf("merged tool result = %q, want tool output. Output: %s", gotResponse, result)
 	}
 	if gotText := parts[1].Get("text").String(); gotText != "now explain it" {
@@ -133,7 +133,7 @@ func TestConvertOpenAIRequestToAntigravityChat_PreservesMergedUserPartOrder(t *t
 		"second",
 	}
 	for i, part := range parts {
-		got := part.Get("functionResponse.response.result").String()
+		got := part.Get("functionResponse.response.output").String()
 		if got == "" {
 			got = part.Get("inlineData.data").String()
 			if decoded := map[string]string{"aW1hZ2UtMQ==": "image-1", "aW1hZ2UtMg==": "image-2"}[got]; decoded != "" {
@@ -795,9 +795,9 @@ func TestConvertOpenAIRequestToAntigravityPreservesToolResponseAsString(t *testi
 	if len(contents) < 3 {
 		t.Fatalf("expected at least 3 contents, got %d. Output: %s", len(contents), result)
 	}
-	frResult := contents[2].Get("parts.0.functionResponse.response.result")
+	frResult := contents[2].Get("parts.0.functionResponse.response.output")
 	if frResult.Type != ojson.String {
-		t.Fatalf("expected functionResponse.response.result to be string, got type %s (raw: %s)", frResult.Type, frResult.Raw)
+		t.Fatalf("expected functionResponse.response.output to be string, got type %s (raw: %s)", frResult.Type, frResult.Raw)
 	}
 	expected := `{"key":"value","items":[1,2,3]}`
 	if got := frResult.String(); got != expected {
@@ -863,7 +863,7 @@ func TestConvertOpenAIRequestToAntigravity_MultiTurnRepeatedToolCallID_Issue5933
 	// Turn 1 appends the subsequent user prompt after the function response.
 	call1Name := ojson.GetBytesNoCopy(out, "request.contents.1.parts.0.functionCall.name").String()
 	resp1Name := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.name").String()
-	resp1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	resp1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.output").String()
 
 	if call1Name != "glob" {
 		t.Fatalf("turn 1 functionCall.name = %q, want glob", call1Name)
@@ -878,7 +878,7 @@ func TestConvertOpenAIRequestToAntigravity_MultiTurnRepeatedToolCallID_Issue5933
 	// Turn 2 shifts earlier because the first tool response and follow-up prompt share a turn.
 	call2Name := ojson.GetBytesNoCopy(out, "request.contents.3.parts.0.functionCall.name").String()
 	resp2Name := ojson.GetBytesNoCopy(out, "request.contents.4.parts.0.functionResponse.name").String()
-	resp2Result := ojson.GetBytesNoCopy(out, "request.contents.4.parts.0.functionResponse.response.result").String()
+	resp2Result := ojson.GetBytesNoCopy(out, "request.contents.4.parts.0.functionResponse.response.output").String()
 
 	if call2Name != "read" {
 		t.Fatalf("turn 2 functionCall.name = %q, want read", call2Name)
@@ -916,9 +916,9 @@ func TestConvertOpenAIRequestToAntigravity_ParallelAndOutOfOrderToolResponses(t 
 	out, _ := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
 
 	resp0Name := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.name").String()
-	resp0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	resp0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.output").String()
 	resp1Name := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.name").String()
-	resp1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	resp1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.output").String()
 
 	if resp0Name != "tool_a" || resp0Result != "res_a" {
 		t.Fatalf("part 0 want tool_a / res_a, got %s / %s", resp0Name, resp0Result)
@@ -976,7 +976,7 @@ func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs(t *testing.T) 
 		t.Fatalf("functionResponse 0 id = %q, want matching functionCall id %q", fr0ID, fc0ID)
 	}
 
-	fr0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	fr0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.output").String()
 	if want := `{"result":"ok"}`; fr0Result != want {
 		t.Fatalf("functionResponse 0 result = %q, want %q", fr0Result, want)
 	}
@@ -991,7 +991,7 @@ func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs(t *testing.T) 
 		t.Fatalf("functionResponse 1 id = %q, want matching functionCall id %q", fr1ID, fc1ID)
 	}
 
-	fr1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	fr1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.output").String()
 	if want := `{"result":"valid_ok"}`; fr1Result != want {
 		t.Fatalf("functionResponse 1 result = %q, want %q", fr1Result, want)
 	}
@@ -1049,12 +1049,12 @@ func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs_DisambiguatesC
 	}
 
 	// Verify that results did not get swapped or overwritten despite reverse response order and raw ID collision
-	fr0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	fr0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.output").String()
 	if want := "result_for_a_pipe_b"; fr0Result != want {
 		t.Fatalf("functionResponse 0 result = %q, want %q", fr0Result, want)
 	}
 
-	fr1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	fr1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.output").String()
 	if want := "result_for_a_b"; fr1Result != want {
 		t.Fatalf("functionResponse 1 result = %q, want %q", fr1Result, want)
 	}
@@ -1108,12 +1108,12 @@ func TestConvertOpenAIRequestToAntigravity_SanitizesClaudeToolIDs_MissingRespons
 	}
 
 	// First call has missing response, should fallback to "{}" and NOT steal second call's result
-	fr0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.result").String()
+	fr0Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.0.functionResponse.response.output").String()
 	if want := "{}"; fr0Result != want {
 		t.Fatalf("functionResponse 0 result = %q, want %q (stole colliding call's result)", fr0Result, want)
 	}
 
-	fr1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.result").String()
+	fr1Result := ojson.GetBytesNoCopy(out, "request.contents.2.parts.1.functionResponse.response.output").String()
 	if want := "result_for_a_b"; fr1Result != want {
 		t.Fatalf("functionResponse 1 result = %q, want %q", fr1Result, want)
 	}

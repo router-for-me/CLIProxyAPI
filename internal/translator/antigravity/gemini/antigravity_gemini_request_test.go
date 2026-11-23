@@ -368,7 +368,7 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 		t.Errorf("Expected data 'iVBOR', got '%s'", inlineParts[0].Get("inlineData.data").String())
 	}
 
-	// Verify response.result is also preserved
+	// Verify the input response.result field is preserved by the grouping helper.
 	if funcResp.Get("response.result").String() != "Screenshot taken" {
 		t.Errorf("Expected response.result 'Screenshot taken', got '%s'", funcResp.Get("response.result").String())
 	}
@@ -1332,7 +1332,7 @@ func TestConvertGeminiRequestToAntigravity_PreservesSiblingToolImageOnUserRole(t
 	if got := funcResp.Get("id").String(); got != "call_1" {
 		t.Fatalf("id = %q, want call_1", got)
 	}
-	if got := funcResp.Get("response.result").String(); got != "Read image file [image/png]" {
+	if got := funcResp.Get("response.output").String(); got != "Read image file [image/png]" {
 		t.Fatalf("result = %q", got)
 	}
 	inlineData := funcResp.Get("parts.0.inlineData")

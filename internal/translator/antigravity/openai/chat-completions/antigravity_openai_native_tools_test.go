@@ -88,7 +88,7 @@ func TestOpenAIToAntigravitySearchOnlyUsesDedicatedEnvelopeWhenSupported(t *test
 		t.Fatalf("included domain = %q, want go.dev: %s", got, envelope.Body)
 	}
 	parts := ojson.GetBytesNoCopy(envelope.Body, "request.systemInstruction.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "Answer in metric units." || parts[1].Get("text").String() != antigravityOpenAIWebSearchSystemInstruction {
+	if len(parts) != 1 || parts[0].Get("text").String() != "Answer in metric units.\n\n"+antigravityOpenAIWebSearchSystemInstruction {
 		t.Fatalf("system instructions were not preserved and appended: %s", envelope.Body)
 	}
 }
