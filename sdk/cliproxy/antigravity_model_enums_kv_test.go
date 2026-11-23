@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -10,10 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/kvstore"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func TestAntigravityModelEnumLocalKVRestart(t *testing.T) {
@@ -21,9 +26,50 @@ func TestAntigravityModelEnumLocalKVRestart(t *testing.T) {
 	t.Cleanup(resetAntigravityCapabilityCache)
 	const id = "enum-restart.json"
 	var calls atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	generation := make(chan ojson.Result, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1internal:generateContent" {
+			body, errRead := io.ReadAll(r.Body)
+			if errRead != nil {
+				t.Error(errRead)
+				http.Error(w, "read failed", http.StatusBadRequest)
+				return
+			}
+			generation <- ojson.ParseBytes(body)
+			_, _ = io.WriteString(w, `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}}`)
+			return
+		}
+		if r.URL.Path != sdkauth.AntigravityModelsPath {
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.Error(w, "unexpected path", http.StatusBadRequest)
+			return
+		}
 		calls.Add(1)
-		_, _ = fmt.Fprint(w, `{"models":{"gemini-2.5-pro":{"model":"MODEL_GOOGLE_GEMINI_2_5_PRO"}}}`)
+		_, _ = io.WriteString(w, `{
+			"models": {
+				"gemini-2.5-pro":{"model":"MODEL_GOOGLE_GEMINI_2_5_PRO"},
+				"gemini-3.8-flash-low":{"model":"M320","maxOutputTokens":65536},
+				"gemini-3.8-flash-high":{"model":"M321","maxOutputTokens":32768},
+				"gemini-3.8-flash-medium":{"model":"M322","maxOutputTokens":0},
+				"gemini-3.8-flash-tiered":{"model":"M323","maxOutputTokens":65536},
+				"gemini-3.8-flash-minimal":{"maxOutputTokens":1024.5},
+				"gemini-3.8-flash-max":{"maxOutputTokens":"65536"},
+				"gemini-3.8-flash-padded":{"maxOutputTokens":65536},
+				"gemini-3.8-flash-bad--suffix":{"maxOutputTokens":65536},
+				"gemini-3.8-flash-bad_suffix":{"maxOutputTokens":65536},
+				"gemini-3.8-flash-scalar":1234
+			},
+			"webSearchModelIds": ["gemini-2.5-pro","gemini-3.8-flash-low","GEMINI-3.8-FLASH-HIGH","gemini-3.8-flash-tiered"],
+			"groupedModels": {
+				"gemini-3.8-flash":{"supportedThinkingLevels":[
+					{"thinkingSuffix":"low"},{"thinkingSuffix":"HIGH"},
+					{"thinkingSuffix":"medium"},{"thinkingSuffix":"xhigh"},
+					{"thinkingSuffix":"minimal"},{"thinkingSuffix":"max"},
+					{"thinkingSuffix":" padded "},{"thinkingSuffix":"bad--suffix"},
+					{"thinkingSuffix":"bad_suffix"},{"thinkingSuffix":"scalar"}
+				]}
+			}
+		}`)
 	}))
 	t.Cleanup(srv.Close)
 	authDir := t.TempDir()
@@ -49,6 +95,7 @@ func TestAntigravityModelEnumLocalKVRestart(t *testing.T) {
 	auth.Metadata["type"] = "antigravity"
 	auth.Metadata["base_url"] = srv.URL
 	auth.Metadata["refresh_token"] = "refresh-token"
+	auth.Metadata["expired"] = time.Now().Add(time.Hour).Format(time.RFC3339)
 	auth.CreatedAt = time.Unix(1, 0)
 	auth, errRegister := first.Register(t.Context(), auth)
 	if errRegister != nil {
@@ -72,14 +119,45 @@ func TestAntigravityModelEnumLocalKVRestart(t *testing.T) {
 	if got, ok := coreauth.LookupAntigravityModelEnum(t.Context(), loaded, "gemini-2.5-pro"); !ok || got != "MODEL_GOOGLE_GEMINI_2_5_PRO" {
 		t.Fatalf("reloaded credential lookup = %q, %v", got, ok)
 	}
+	if got := coreauth.SelectAntigravityModel(t.Context(), loaded, "gemini-3.8-flash-high", "low", nil); got.ID != "gemini-3.8-flash-low" || !got.WebSearch {
+		t.Fatalf("reloaded grouped selection lost its web search capability: %+v", got)
+	}
 	restarted := &Service{cfg: &config.Config{AuthDir: authDir}, coreManager: second}
 	restarted.registerModelsForAuth(t.Context(), loaded)
 	restarted.WaitAntigravityProbes()
 	if calls.Load() != 1 {
 		t.Fatalf("warm KV startup made %d upstream calls, want 1 total", calls.Load())
 	}
+	loaded.Metadata["disable_cooling"] = true
+	req := cliproxyexecutor.Request{Model: "gemini-3.8-flash-high", Payload: []byte(`{"reasoning_effort":"low","messages":[{"role":"user","content":"hi"}]}`)}
+	if _, errExecute := executor.NewAntigravityExecutor(restarted.cfg).Execute(t.Context(), loaded, req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); errExecute != nil {
+		t.Fatal(errExecute)
+	}
+	got := <-generation
+	if got.Get("model").Str != "gemini-3.8-flash-low" || got.Get("request.labels.model_enum").Str != "M320" ||
+		got.Get("request.generationConfig.thinkingConfig.thinkingLevel").Str != "LOW" || got.Get("request.generationConfig.maxOutputTokens").Int() != 65536 {
+		t.Errorf("unexpected generated request from local snapshot: %s", got.Raw)
+	}
 	client, _, _ := kvstore.CurrentKVClient()
-	if _, errDel := client.KVDel(t.Context(), "antigravity:model-enums:local:v1:"+kvstore.HashKeyPart(id)); errDel != nil {
+	key := "antigravity:model-enums:local:v1:" + kvstore.HashKeyPart(id)
+	raw, found, errGet := client.KVGet(t.Context(), key)
+	if errGet != nil || !found {
+		t.Fatalf("local snapshot: found=%v err=%v", found, errGet)
+	}
+	search := ojson.GetBytes(raw, "thinkingWebSearch")
+	if search.Get(ojson.Escape("gemini-3.8-flash-low")).Type != ojson.True || len(search.Map()) != 1 {
+		t.Errorf("thinking web search snapshot = %s, want only the exact grouped low variant", search.Raw)
+	}
+	group := ojson.GetBytes(raw, "thinkingGroups."+ojson.Escape("gemini-3.8-flash"))
+	if group.Get("low").Int() != 65536 || group.Get("high").Int() != 32768 || len(group.Map()) != 5 {
+		t.Errorf("thinking group snapshot = %s; want five catalog members", group.Raw)
+	}
+	for _, level := range []string{"medium", "minimal", "max"} {
+		if value := group.Get(level); !value.Exists() || value.Type != ojson.Number || value.Int() != 0 {
+			t.Errorf("member %s = %s, want numeric zero", level, value.Raw)
+		}
+	}
+	if _, errDel := client.KVDel(t.Context(), key); errDel != nil {
 		t.Fatal(errDel)
 	}
 	resetAntigravityCapabilityCache()

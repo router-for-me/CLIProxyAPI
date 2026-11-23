@@ -566,7 +566,7 @@ func antigravityInBandErrorStatusCode(errorResult ojson.Result) int {
 func (e *AntigravityExecutor) applyAntigravityUpstreamError(
 	ctx context.Context,
 	auth *cliproxyauth.Auth,
-	baseModel string,
+	upstreamModel string,
 	useCredits bool,
 	replayScope antigravityReasoningReplayScope,
 	statusCode int,
@@ -574,7 +574,7 @@ func (e *AntigravityExecutor) applyAntigravityUpstreamError(
 	body []byte,
 ) error {
 	if statusCode == http.StatusTooManyRequests {
-		if err429 := e.applyAntigravity429State(ctx, auth, baseModel, useCredits, headers, body); err429 != nil {
+		if err429 := e.applyAntigravity429State(ctx, auth, upstreamModel, useCredits, headers, body); err429 != nil {
 			return err429
 		}
 	}

@@ -90,10 +90,14 @@ func allowsClaudeWebSearchToolChoice(payload []byte) bool {
 	}
 }
 
-func shouldBuildAntigravityWebSearchRequest(model string, payload []byte) bool {
-	return antigravitySupportsNativeGoogleSearch(model) &&
-		hasOnlyClaudeTypedWebSearchTools(payload) &&
-		allowsClaudeWebSearchToolChoice(payload)
+func shouldBuildAntigravityWebSearchRequest(model string, payload []byte, supported *bool) bool {
+	if !hasOnlyClaudeTypedWebSearchTools(payload) || !allowsClaudeWebSearchToolChoice(payload) {
+		return false
+	}
+	if supported != nil {
+		return *supported
+	}
+	return antigravitySupportsNativeGoogleSearch(model)
 }
 
 func buildAntigravityWebSearchRequest(model string, payload []byte) []byte {

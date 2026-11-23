@@ -1640,6 +1640,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if antigravityTargetRejected(result) {
+		return
+	}
+	routedModel := antigravityResultModel(ctx, result)
+	if routedModel != "" {
+		result.Model = routedModel
+	}
 	if m != nil {
 		if policy := m.ResultPolicy(); policy != nil {
 			result = policy.ApplyResultPolicy(ctx, result)
@@ -1692,7 +1699,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 		if m != nil {
 			_ = m.migrateAuthAliasModelStatesLocked(auth, nil, now, false)
-			if modelKey != "" {
+			if modelKey != "" && (routedModel == "" || modelKey != routedModel) {
 				modelKey = m.resolveMarkResultModelKeyLocked(auth, modelKey, result.RouteModel)
 			}
 		}
@@ -1824,6 +1831,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					appliedCredQuotaWrap := false
 					if result.Error != nil {
 						state.LastError = cloneError(result.Error)
+						recordAntigravityCreditsRetryHint(state.LastError, result)
 						state.StatusMessage = result.Error.Message
 						if !wasTerminalUnauthorized {
 							auth.LastError = cloneError(result.Error)
@@ -2458,6 +2466,12 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
 	if m == nil || result.AuthID == "" {
 		return
 	}
+	if antigravityTargetRejected(result) {
+		return
+	}
+	if model := antigravityResultModel(ctx, result); model != "" {
+		result.Model = model
+	}
 	var snapshot *Auth
 	if auth != nil {
 		snapshot = auth.Clone()
@@ -2470,6 +2484,13 @@ func (m *Manager) reportHomeResult(ctx context.Context, result Result, auth *Aut
 func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
+	}
+
+	if antigravityTargetRejected(result) {
+		return
+	}
+	if model := antigravityResultModel(ctx, result); model != "" {
+		result.Model = model
 	}
 
 	var authSnapshot *Auth
@@ -3220,6 +3241,9 @@ func ResultErrorFromError(err error) *Error {
 func resultErrorFromError(err error) *Error {
 	if err == nil {
 		return nil
+	}
+	if _, rejected := errors.AsType[antigravityTargetRejectedError](err); rejected {
+		return &Error{Code: antigravityTargetRejectedCode, Message: err.Error(), HTTPStatus: statusCodeFromError(err)}
 	}
 	var sourceErr *Error
 	var resultErr *Error

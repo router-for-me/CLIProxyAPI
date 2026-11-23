@@ -1,7 +1,6 @@
 package helps
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,7 +27,7 @@ type antigravityAgentSessionKey struct {
 var antigravityAgentSessions = cache.NewBoundedLRU[antigravityAgentSessionKey, *antigravityAgentSession](4096, nil)
 
 // ApplyAntigravityAgentEnvelope correlates request and label IDs within the active credential-scoped session.
-func ApplyAntigravityAgentEnvelope(ctx context.Context, doc *ojson.Doc, auth *cliproxyauth.Auth, sessionID, modelName string) {
+func ApplyAntigravityAgentEnvelope(doc *ojson.Doc, auth *cliproxyauth.Auth, sessionID, modelName, modelEnum string) {
 	key := antigravityAgentSessionKey{sessionID: sessionID}
 	if auth != nil {
 		key.authID = auth.ID
@@ -54,7 +53,7 @@ func ApplyAntigravityAgentEnvelope(ctx context.Context, doc *ojson.Doc, auth *cl
 	_ = doc.Set("request.labels.trajectory_id", session.trajectory)
 	_ = doc.Set("request.labels.request_id", session.trajectory+"-"+strconv.Itoa(turns))
 	_ = doc.Set("request.labels.last_step_index", strconv.Itoa(lastStep))
-	if modelEnum, found := cliproxyauth.LookupAntigravityModelEnum(ctx, auth, modelName); found {
+	if modelEnum != "" {
 		_ = doc.Set("request.labels.model_enum", modelEnum)
 	} else {
 		_ = doc.Delete("request.labels.model_enum")

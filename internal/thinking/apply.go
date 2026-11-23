@@ -749,6 +749,48 @@ func hasThinkingConfig(config ThinkingConfig) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
 }
 
+// RequestedAntigravityThinkingLevel returns the explicit discrete thinking intent before
+// applying model defaults, validation, or clamping. Numeric budgets use the
+// canonical budget conversion. An explicit suffix always takes precedence.
+func RequestedAntigravityThinkingLevel(body []byte, provider, model string) ThinkingLevel {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	var config ThinkingConfig
+	if suffix := ParseSuffix(model); suffix.HasSuffix {
+		config = parseSuffixToConfig(strings.TrimSpace(suffix.RawSuffix), provider, model)
+		if !hasThinkingConfig(config) {
+			// A catalog may advertise a discrete level the static parser does not know yet.
+			config = ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(suffix.RawSuffix)}
+		}
+	} else {
+		switch provider {
+		case "openai":
+			config = extractAntigravityOpenAIThinking(body)
+		case "interactions":
+			config = extractAntigravityInteractionsThinking(body)
+		default:
+			config = extractThinkingConfigForUsage(body, provider)
+			if !hasThinkingConfig(config) && (provider == "gemini" || provider == "antigravity") {
+				config = extractGeminiConfigFromGetter(func(path string) ojson.Result {
+					return ojson.GetBytesNoCopy(body, strings.Replace(path, ".thinkingConfig.", ".thinking_config.", 1))
+				}, provider)
+			}
+		}
+	}
+	switch config.Mode {
+	case ModeLevel:
+		level := ThinkingLevel(strings.ToLower(strings.TrimSpace(string(config.Level))))
+		if level != LevelAuto && level != LevelNone {
+			return level
+		}
+	case ModeBudget:
+		if config.Budget > 0 {
+			level, _ := ConvertBudgetToLevel(config.Budget)
+			return ThinkingLevel(level)
+		}
+	}
+	return ""
+}
+
 // ExtractReasoningEffort returns the source request's thinking setting as a
 // canonical reasoning_effort label for usage logging.
 func ExtractReasoningEffort(body []byte, provider, model string) string {
@@ -919,6 +961,14 @@ func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider strin
 	if !level.Exists() {
 		level = get(prefix + ".thinking_level")
 	}
+	budget := get(prefix + ".thinkingBudget")
+	if !budget.Exists() {
+		budget = get(prefix + ".thinking_budget")
+	}
+	return geminiThinkingConfigFromValues(level, budget)
+}
+
+func geminiThinkingConfigFromValues(level, budget ojson.Result) ThinkingConfig {
 	if level.Exists() {
 		value := level.String()
 		switch value {
@@ -929,11 +979,6 @@ func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider strin
 		default:
 			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
 		}
-	}
-
-	budget := get(prefix + ".thinkingBudget")
-	if !budget.Exists() {
-		budget = get(prefix + ".thinking_budget")
 	}
 	if budget.Exists() {
 		value := int(budget.Int())

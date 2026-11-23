@@ -1601,8 +1601,8 @@ func parseAntigravityTextRetryHintDuration(lowerBody string) (time.Duration, boo
 	return total, true
 }
 
-func hasAntigravityShortRetryHint(err error, lowerBody string) bool {
-	if ra := retryAfterFromError(err); ra != nil && *ra < antigravityCreditsShortCooldownThreshold {
+func hasAntigravityShortRetryHint(retryAfter *time.Duration, lowerBody string) bool {
+	if retryAfter != nil && *retryAfter < antigravityCreditsShortCooldownThreshold {
 		return true
 	}
 	if d, ok := parseAntigravityTextRetryHintDuration(lowerBody); ok && d < antigravityCreditsShortCooldownThreshold {
@@ -1684,7 +1684,7 @@ func hasPositiveQuotaErrorMetadata(err error) bool {
 	return false
 }
 
-func isAntigravityCreditsQuota429(err error) bool {
+func isAntigravityCreditsQuota429(err error, retryAfter *time.Duration) bool {
 	if isTransientRateLimitError(err) || isCloudflareChallengeError(err) {
 		return false
 	}
@@ -1707,22 +1707,19 @@ func isAntigravityCreditsQuota429(err error) bool {
 			})
 		}
 		if sawRateLimitReason {
-			ra := retryAfterFromError(err)
-			return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+			return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 		}
 		if isAntigravityRateLimitCode(errorCodeFromError(err)) {
-			ra := retryAfterFromError(err)
-			return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+			return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 		}
 		codePaths := []string{"error.code", "error.type", "code", "type", "response.error.code", "response.error.type"}
 		for _, path := range codePaths {
 			if isAntigravityRateLimitCode(ojson.Get(body, path).String()) {
-				ra := retryAfterFromError(err)
-				return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+				return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 			}
 		}
 		msgLower := extractAntigravityJSONErrorMessageLower(body)
-		if hasAntigravityShortRetryHint(err, msgLower) || hasAntigravityRateLimitPhrase(msgLower) {
+		if hasAntigravityShortRetryHint(retryAfter, msgLower) || hasAntigravityRateLimitPhrase(msgLower) {
 			return false
 		}
 		if sawQuotaReason {
@@ -1738,19 +1735,18 @@ func isAntigravityCreditsQuota429(err error) bool {
 			return true
 		}
 		if strings.EqualFold(strings.TrimSpace(ojson.Get(body, "error.status").String()), "RESOURCE_EXHAUSTED") {
-			if ra := retryAfterFromError(err); ra != nil {
-				return *ra >= antigravityCreditsShortCooldownThreshold
+			if retryAfter != nil {
+				return *retryAfter >= antigravityCreditsShortCooldownThreshold
 			}
 			return hasExplicitAntigravityQuotaPhrase(msgLower)
 		}
 		return hasExplicitAntigravityQuotaPhrase(msgLower)
 	}
-	if hasAntigravityShortRetryHint(err, lowerBody) || hasAntigravityRateLimitPhrase(lowerBody) {
+	if hasAntigravityShortRetryHint(retryAfter, lowerBody) || hasAntigravityRateLimitPhrase(lowerBody) {
 		return false
 	}
 	if isAntigravityRateLimitCode(errorCodeFromError(err)) {
-		ra := retryAfterFromError(err)
-		return ra != nil && *ra >= antigravityCreditsShortCooldownThreshold
+		return retryAfter != nil && *retryAfter >= antigravityCreditsShortCooldownThreshold
 	}
 	if hasPositiveQuotaErrorMetadata(err) {
 		return true
@@ -1826,7 +1822,7 @@ func shouldAttemptAntigravityCreditsFallback(m *Manager, lastErr error, provider
 	}
 	switch status {
 	case http.StatusTooManyRequests:
-		return isAntigravityCreditsQuota429(lastErr)
+		return isAntigravityCreditsQuota429(lastErr, retryAfterFromError(lastErr))
 	case http.StatusServiceUnavailable:
 		return isAntigravityCreditsCapacity503(lastErr)
 	case 0:
@@ -1930,6 +1926,7 @@ func (m *Manager) tryAntigravityCreditsExecuteCandidates(ctx context.Context, re
 		attempted[c.auth.ID] = struct{}{}
 		creditsCtx := WithAntigravityCredits(ctx)
 		creditsCtx = m.WithAuthTransport(creditsCtx, c.auth)
+		creditsCtx = m.withAntigravityModelState(creditsCtx, c.auth)
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
@@ -2087,6 +2084,7 @@ func (m *Manager) tryAntigravityCreditsExecuteStreamCandidates(ctx context.Conte
 		attempted[c.auth.ID] = struct{}{}
 		creditsCtx := WithAntigravityCredits(ctx)
 		creditsCtx = m.WithAuthTransport(creditsCtx, c.auth)
+		creditsCtx = m.withAntigravityModelState(creditsCtx, c.auth)
 		creditsOpts := ensureRequestedModelMetadata(opts, routeModel)
 		clearSchedulerSelectionID(creditsOpts.Metadata)
 		creditsCtx = contextWithRequestedModelAlias(creditsCtx, creditsOpts, routeModel)
