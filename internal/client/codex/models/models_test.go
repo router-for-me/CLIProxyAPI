@@ -143,17 +143,26 @@ func TestCodexClientHidesSpeechModels(t *testing.T) {
 	}
 }
 
-func TestCodexClientModelsResponse_AppliesDisplayNameToTemplateModel(t *testing.T) {
-	resp := BuildResponse([]map[string]any{{
-		"id":           "gpt-5.5",
-		"display_name": "Configured Codex Name",
-	}}, nil, false)
-	models, ok := resp["models"].([]map[string]any)
-	if !ok || len(models) != 1 {
-		t.Fatalf("models = %#v, want one model", resp["models"])
-	}
-	if got := stringModelValue(models[0], "display_name"); got != "Configured Codex Name" {
-		t.Fatalf("display_name = %q, want Configured Codex Name", got)
+func TestCodexClientModelsResponse_DisplayName(t *testing.T) {
+	for _, tc := range []struct {
+		name, id, displayName, want string
+	}{
+		{"template", "gpt-5.5", "Configured Codex Name", "Configured Codex Name"},
+		{"copilot fable", "claude-fable-5.2", "Claude Fable 5.2 (Copilot)", "Claude Fable 5.2 (Copilot)"},
+		{"copilot mai", "mai-code-2", "MAI Code 2 (Copilot)", "MAI Code 2 (Copilot)"},
+		{"catalog fallback", "mai-code-2", "", "MAI Code 2"},
+		{"id fallback", "unknown-display-name-test", "", "unknown-display-name-test"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := BuildResponseForClient([]map[string]any{{"id": tc.id, "display_name": tc.displayName}}, nil, false, "pi")
+			models, ok := resp["models"].([]map[string]any)
+			if !ok || len(models) != 1 {
+				t.Fatalf("models = %#v, want one model", resp["models"])
+			}
+			if got := stringModelValue(models[0], "display_name"); got != tc.want {
+				t.Errorf("display_name = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
