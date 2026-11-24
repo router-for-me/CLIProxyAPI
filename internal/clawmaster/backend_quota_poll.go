@@ -120,6 +120,11 @@ func (s *backendSeriesSelector) observeFiveHourQuota(authID string, quota Claude
 		s.fiveHour = make(map[string]ClaudeFiveHourQuota, len(s.authIDs))
 	}
 	s.fiveHour[authID] = quota
+	// A window read is the plan's five-hour limit, whatever the rest of the answer says.
+	if s.fiveHourLimited == nil {
+		s.fiveHourLimited = make(map[string]bool, len(s.authIDs))
+	}
+	s.fiveHourLimited[authID] = true
 }
 
 // observeFiveHourLimit records whether an account's latest usage poll, one that read its week, had

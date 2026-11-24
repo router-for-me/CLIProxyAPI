@@ -712,8 +712,9 @@ type backendSeriesSelector struct {
 	quotaBlockedUntil map[string]time.Time
 	// fiveHour is the last polled five-hour window per account; it is reported, not used to route.
 	fiveHour map[string]ClaudeFiveHourQuota
-	// fiveHourLimited is whether each account's last successful usage poll had a five-hour window:
-	// a plan with no five-hour limit (a verified Ultra one) gets none. Absent before the first poll.
+	// fiveHourLimited is whether each account has a five-hour limit: true once a poll reads a window,
+	// false when a poll that read the week plainly had none (a plan with no five-hour limit, such as
+	// a verified Ultra one). Absent before either.
 	fiveHourLimited map[string]bool
 	// Each subscription's banked limit resets, from its last usage poll that reported them.
 	resetGrants map[string]polledResetGrants

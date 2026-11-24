@@ -219,3 +219,17 @@ func TestClaudeFiveHourAbsent(t *testing.T) {
 		}
 	}
 }
+
+func TestFiveHourLimitFromAWindowWithoutTheWeek(t *testing.T) {
+	selector, _, reset := namedSelector(t)
+	now := reset.Add(-time.Hour)
+	selector.now = func() time.Time { return now }
+	selector.observeFiveHourLimit("profile-a", false)
+	// A window read later, from an answer whose week could not be read, still means a limit.
+	selector.observeFiveHourQuota("profile-a", ClaudeFiveHourQuota{UsedFraction: 0.4, ResetsAt: now.Add(time.Hour)})
+	for _, p := range selector.metricsSnapshot(nil).Profiles {
+		if p.Name == "claude-primary" && (!p.FiveHourLimitKnown || !p.FiveHourLimited) {
+			t.Errorf("a plan with a five-hour window read is not reported limited: %+v", p)
+		}
+	}
+}
