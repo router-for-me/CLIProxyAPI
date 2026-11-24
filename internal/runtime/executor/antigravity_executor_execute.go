@@ -409,6 +409,18 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		reporter.PublishFailure(ctx, filterErr)
 		return resp, filterErr
 	}
+	if len(rawPayloads) == 0 {
+		if errCtx := ctx.Err(); errCtx != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errCtx)
+			reporter.PublishFailure(ctx, errCtx)
+			err = errCtx
+			return cliproxyexecutor.Response{}, err
+		}
+		err = newGeminiZeroOutputStatusErr(helps.GeminiZeroOutputErrorMessage(responseFormat, ""))
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		reporter.PublishFailure(ctx, err)
+		return cliproxyexecutor.Response{}, err
+	}
 	aggregatedPayload := e.convertStreamChunksToNonStream(rawPayloads)
 	reporter.ObserveResponseModel(aggregatedPayload)
 	if _, zeroErrMsg, zeroOutput := helps.CheckGeminiZeroOutputNonStream(responseFormat, aggregatedPayload, true); zeroOutput {
