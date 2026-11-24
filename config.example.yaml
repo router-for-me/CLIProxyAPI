@@ -1147,7 +1147,7 @@ oauth:
 
   # OAuth provider model settings (per channel)
   # Allows overriding model-level capabilities (such as context window) for OAuth credentials.
-  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, and copilot.
+  # Supported channels include vertex, aistudio, antigravity, claude, codex, kimi, xai, meta, copilot, and devin.
   # settings:
   #   copilot:
   #     - name: "copilot/gpt-5.3-codex" # canonical source ID, shared by its aliases
