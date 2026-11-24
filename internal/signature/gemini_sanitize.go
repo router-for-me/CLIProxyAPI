@@ -416,13 +416,18 @@ func geminiPartHasFunctionResponse(part ojson.Result) bool {
 }
 
 func geminiPartThoughtSignature(part ojson.Result) (string, bool) {
+	foundEmpty := false
 	for _, path := range geminiPartThoughtSignaturePaths {
 		result := part.Get(path)
-		if result.Exists() {
-			return result.String(), true
+		if !result.Exists() {
+			continue
 		}
+		if sig := result.String(); strings.TrimSpace(sig) != "" {
+			return sig, true
+		}
+		foundEmpty = true
 	}
-	return "", false
+	return "", foundEmpty
 }
 
 func hasNormalizedGeminiPartThoughtSignature(part ojson.Result, replaySignature string) bool {
