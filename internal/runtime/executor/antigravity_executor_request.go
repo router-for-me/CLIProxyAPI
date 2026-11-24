@@ -178,9 +178,9 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 	lowerModel := strings.ToLower(modelName)
 	useAntigravitySchema, isClaudeModel := antigravitySchemaSanitizationFlags(modelName)
 
-	// A matched variant uses the output limit from the same catalog as its ID and enum.
+	// A matched variant limits output using the same catalog as its ID and enum.
 	if selection.MaxOutputTokens > 0 {
-		_ = doc.Set("request.generationConfig.maxOutputTokens", selection.MaxOutputTokens)
+		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
 	} else if maxOut := doc.Get("request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == ojson.Number {
 		modelInfo := registry.LookupModelInfo(modelName, "antigravity")
 		if modelInfo == nil && lowerModel != modelName {
@@ -188,17 +188,7 @@ func (e *AntigravityExecutor) buildRequestForModelDoc(ctx context.Context, auth 
 		}
 		if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
 			if int(maxOut.Int()) > modelInfo.MaxCompletionTokens {
-				_ = doc.Set("request.generationConfig.maxOutputTokens", modelInfo.MaxCompletionTokens)
-				if isClaudeModel {
-					for _, budgetPath := range []string{
-						"request.generationConfig.thinkingConfig.thinkingBudget",
-						"request.generationConfig.thinkingConfig.thinking_budget",
-					} {
-						if budget := doc.Get(budgetPath); budget.Exists() && budget.Int() >= int64(modelInfo.MaxCompletionTokens) {
-							_ = doc.Set(budgetPath, modelInfo.MaxCompletionTokens-1)
-						}
-					}
-				}
+				helps.CapAntigravityMaxOutputTokensDoc(doc, modelInfo.MaxCompletionTokens, isClaudeModel)
 			}
 		}
 	}

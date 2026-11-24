@@ -47,6 +47,38 @@ func (model AntigravityRequestModel) TranslationModelInfo(req cliproxyexecutor.R
 	return &registry.ModelInfo{ID: model.ID, NativeCapabilities: &registry.NativeCapabilities{WebSearch: &model.WebSearch}}
 }
 
+// CapAntigravityMaxOutputTokensDoc preserves a smaller caller limit and keeps
+// Claude thinking budgets below the effective output limit.
+func CapAntigravityMaxOutputTokensDoc(doc *ojson.Doc, limit int, isClaudeModel bool) {
+	if doc == nil || limit <= 0 {
+		return
+	}
+	effectiveMaxOutputTokens := int64(limit)
+	for _, path := range []string{
+		"request.generationConfig.maxOutputTokens",
+		"request.generationConfig.max_output_tokens",
+	} {
+		value := doc.Get(path)
+		if value.Exists() && value.Type == ojson.Number && value.Int() > 0 && value.Int() < effectiveMaxOutputTokens {
+			effectiveMaxOutputTokens = value.Int()
+		}
+	}
+	_ = doc.Delete("request.generationConfig.max_output_tokens")
+	_ = doc.Set("request.generationConfig.maxOutputTokens", effectiveMaxOutputTokens)
+	if !isClaudeModel {
+		return
+	}
+	for _, budgetPath := range []string{
+		"request.generationConfig.thinkingConfig.thinkingBudget",
+		"request.generationConfig.thinkingConfig.thinking_budget",
+	} {
+		budget := doc.Get(budgetPath)
+		if budget.Exists() && budget.Int() >= effectiveMaxOutputTokens {
+			_ = doc.Set(budgetPath, effectiveMaxOutputTokens-1)
+		}
+	}
+}
+
 // ApplyAntigravityRequestThinkingDoc formats a selected level with the canonical
 // provider applier while leaving unmatched requests on the original path.
 func ApplyAntigravityRequestThinkingDoc(doc *ojson.Doc, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, model AntigravityRequestModel) error {

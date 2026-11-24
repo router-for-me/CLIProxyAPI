@@ -1429,6 +1429,38 @@ func TestAntigravityBuildRequest_CaseInsensitiveClaudeCapsMaxOutputTokens(t *tes
 	}
 }
 
+func TestAntigravityBuildRequest_ThinkingGroupPreservesSmallerMaxOutputTokensAndClampsBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name, budgetPath, payload string
+		wantMax, wantBudget       int64
+	}{
+		{"camel case budget with smaller caller limit", "thinkingBudget", `{"maxOutputTokens":32000,"thinkingConfig":{"thinkingBudget":40000}}`, 32000, 31999},
+		{"snake case output and budget with smaller caller limit", "thinking_budget", `{"max_output_tokens":32000,"thinkingConfig":{"thinking_budget":40000}}`, 32000, 31999},
+		{"caller limit above group cap", "thinkingBudget", `{"maxOutputTokens":70000,"thinkingConfig":{"thinkingBudget":68000}}`, 65536, 65535},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"generationConfig":` + tc.payload + `}}`)
+			executor := &AntigravityExecutor{}
+			auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "project-1"}}
+			selection := cliproxyauth.AntigravityModelSelection{ID: "claude-sonnet-4-6-high", MaxOutputTokens: 65536}
+			doc := ojson.NewDoc(payload)
+			_, finalPayload, errBuild := executor.buildRequestForModelDoc(context.Background(), auth, "token", selection, doc, false, "", "https://example.com")
+			if errBuild != nil {
+				t.Fatalf("buildRequestForModelDoc error: %v", errBuild)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.max_output_tokens"); got.Exists() {
+				t.Fatalf("max_output_tokens alias remains in final payload: %s", finalPayload)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.maxOutputTokens").Int(); got != tc.wantMax {
+				t.Fatalf("maxOutputTokens = %d, want %d", got, tc.wantMax)
+			}
+			if got := ojson.GetBytes(finalPayload, "request.generationConfig.thinkingConfig."+tc.budgetPath).Int(); got != tc.wantBudget {
+				t.Fatalf("%s = %d, want %d", tc.budgetPath, got, tc.wantBudget)
+			}
+		})
+	}
+}
+
 func TestAntigravityBuildRequest_CapsThinkingBudgetWithMaxOutputTokens(t *testing.T) {
 	t.Parallel()
 

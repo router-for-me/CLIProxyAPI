@@ -152,6 +152,29 @@ func TestAntigravityThinkingGroupsProtocols(t *testing.T) {
 	}
 }
 
+func TestAntigravityThinkingGroupsCountTokensPreservesSmallerMaxOutputTokens(t *testing.T) {
+	client := newFakeAntigravityKVClient()
+	useFakeAntigravityKVClient(t, client, true, nil)
+	auth := newIssue7865TestAuth("thinking-groups-count-tokens-cap")
+	scope := strings.Repeat("d", 64)
+	auth.Attributes = map[string]string{cliproxyauth.AntigravityModelEnumHomeScopeAttribute: scope}
+	key := "antigravity:model-enums:v1:" + kvstore.HashKeyPart(auth.ID) + ":" + scope
+	client.values[key] = []byte(`{
+		"scope":"` + scope + `",
+		"models":{"claude-demo-low":"M20"},
+		"thinkingGroups":{"claude-demo":{"low":65536}}
+	}`)
+	payload := `{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"max_output_tokens":32000,"thinkingConfig":{"thinkingLevel":"LOW"}}}}`
+
+	got := captureAntigravityThinkingGroupRequest(t, &config.Config{}, auth, "claude-demo-low", sdktranslator.FromString("antigravity"), payload, antigravityCountTokensPath)
+	if got.Get("request.generationConfig.max_output_tokens").Exists() {
+		t.Fatalf("max_output_tokens alias remains in final payload: %s", got.Raw)
+	}
+	if maxOutputTokens := got.Get("request.generationConfig.maxOutputTokens").Int(); maxOutputTokens != 32000 {
+		t.Fatalf("maxOutputTokens = %d, want 32000; body=%s", maxOutputTokens, got.Raw)
+	}
+}
+
 func TestAntigravityThinkingGroupsPayloadRulesLast(t *testing.T) {
 	client := newFakeAntigravityKVClient()
 	useFakeAntigravityKVClient(t, client, true, nil)

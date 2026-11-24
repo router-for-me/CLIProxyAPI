@@ -59,7 +59,8 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 
 	if selection.MaxOutputTokens > 0 {
 		_ = doc.Set("request.model", formatAntigravityCountTokensModel(selection.ID))
-		_ = doc.Set("request.generationConfig.maxOutputTokens", selection.MaxOutputTokens)
+		_, isClaudeModel := antigravitySchemaSanitizationFlags(selection.ID)
+		helps.CapAntigravityMaxOutputTokensDoc(doc, selection.MaxOutputTokens, isClaudeModel)
 	} else {
 		populateAntigravityCountTokensModelDoc(doc, baseModel)
 	}
