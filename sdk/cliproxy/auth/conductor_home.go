@@ -1323,6 +1323,15 @@ func (m *Manager) pickHomeDispatchSelection(ctx context.Context, model string, o
 	selection.SelectionID = strings.TrimSpace(dispatch.SelectionID)
 	selection.CanonicalSessionID = sessionID
 	selection.ParentSessionID = parentSessionID
+	if lcpSessionID := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); lcpSessionID != "" {
+		selection.lcpAffinitySessionID = lcpSessionID
+		selection.sessionAffinityProvider = sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey)
+		selection.sessionAffinityModel = sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityModelMetadataKey)
+		selection.lcpAccessGeneration, _ = opts.Metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey].(uint64)
+		selection.isLCPFork, _ = opts.Metadata[cliproxyexecutor.IsForkMetadataKey].(bool)
+		selection.isLCPCompaction, _ = opts.Metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool)
+		selection.lcpNodeKind = sessionMetadataString(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey)
+	}
 	return selection, nil
 }
 

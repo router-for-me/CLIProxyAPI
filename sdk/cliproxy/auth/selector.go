@@ -2020,8 +2020,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 func canonicalLCPProvider(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
-	case "google", "gemini", "vertex", "aistudio":
-		return "google"
+	case "google", "gemini":
+		return "gemini"
 	case "codex", "openai":
 		return "openai"
 	case "claude", "anthropic":
