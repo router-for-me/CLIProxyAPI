@@ -241,6 +241,47 @@ func TestConvertInteractionsResponseToClaudeStreamToolCall(t *testing.T) {
 	}
 }
 
+func TestConvertInteractionsResponseToClaudeStreamToolCallInlineArguments(t *testing.T) {
+	var param any
+	var out [][]byte
+	chunks := [][]byte{
+		[]byte(`data: {"interaction":{"id":"interaction_1","model":"gemini-3.1-flash-lite"},"event_type":"interaction.created"}`),
+		[]byte(`data: {"index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":{"q":"x"}},"event_type":"step.start"}`),
+		[]byte(`data: {"index":0,"event_type":"step.stop"}`),
+	}
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3.1-flash-lite", nil, nil, chunk, &param)...)
+	}
+	payload := findClaudeEventPayload(out, "content_block_delta")
+	if got := ojson.GetBytesNoCopy(payload, "delta.type").String(); got != "input_json_delta" {
+		t.Fatalf("delta.type = %q, want input_json_delta. Payload: %s", got, payload)
+	}
+	if got := ojson.GetBytesNoCopy(payload, "delta.partial_json").String(); got != `{"q":"x"}` {
+		t.Fatalf("delta.partial_json = %q, want object JSON. Payload: %s", got, payload)
+	}
+}
+
+func TestConvertInteractionsResponseToClaudeStreamToolCallEmptyInlineArguments(t *testing.T) {
+	var param any
+	var out [][]byte
+	chunks := [][]byte{
+		[]byte(`data: {"index":0,"step":{"type":"function_call","id":"call_1","name":"lookup","arguments":{ }},"event_type":"step.start"}`),
+		[]byte(`data: {"index":0,"delta":{"type":"arguments_delta","arguments":"{\"q\":\"x\"}"},"event_type":"step.delta"}`),
+	}
+	for _, chunk := range chunks {
+		out = append(out, ConvertInteractionsResponseToClaude(context.Background(), "gemini-3.1-flash-lite", nil, nil, chunk, &param)...)
+	}
+	var partials []string
+	for _, event := range out {
+		if payload := ojson.GetBytesNoCopy(event, "delta.type").String(); payload == "input_json_delta" {
+			partials = append(partials, ojson.GetBytesNoCopy(event, "delta.partial_json").String())
+		}
+	}
+	if len(partials) != 1 || partials[0] != `{"q":"x"}` {
+		t.Fatalf("partial_json values = %#v, want one non-empty argument delta", partials)
+	}
+}
+
 func TestConvertInteractionsResponseToClaudeStreamFinishMetadataUsage(t *testing.T) {
 	var param any
 	out := ConvertInteractionsResponseToClaude(context.Background(), "claude-test", nil, nil, []byte(`data: {"event_type":"finish","metadata":{"total_usage":{"total_input_tokens":2,"total_output_tokens":6,"total_tokens":8}}}`), &param)
