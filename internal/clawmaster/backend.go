@@ -712,6 +712,10 @@ type backendSeriesSelector struct {
 	quotaBlockedUntil map[string]time.Time
 	// fiveHour is the last polled five-hour window per account; it is reported, not used to route.
 	fiveHour map[string]ClaudeFiveHourQuota
+	// fiveHourLimited is whether each account has a five-hour limit: true once a poll reads a window,
+	// false when a poll that read the week plainly had none (a plan with no five-hour limit, such as
+	// a verified Ultra one). Absent before either.
+	fiveHourLimited map[string]bool
 	// Each subscription's banked limit resets, from its last usage poll that reported them.
 	resetGrants map[string]polledResetGrants
 	// The last cedar_ember block logged for each subscription, so the log says each one once.
@@ -1495,9 +1499,17 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 			if errors.As(errFetch, &statusErr) && statusErr.status == http.StatusTooManyRequests {
 				selector.deferUsagePoll(authID, statusErr.retryAfter)
 			}
+			// Whether the plan has a five-hour limit: yes with a window read, no when the answer plainly
+			// has none, and unsaid when its five-hour entry is there but cannot be read.
+			var fiveHourLimit *bool
 			if errFetch == nil {
 				if fiveHour, okFiveHour, errFiveHour := ParseClaudeFiveHourQuota(payload); errFiveHour == nil && okFiveHour {
 					selector.observeFiveHourQuota(authID, fiveHour)
+					limited := true
+					fiveHourLimit = &limited
+				} else if ClaudeFiveHourAbsent(payload) {
+					limited := false
+					fiveHourLimit = &limited
 				}
 				if fable, okFable, errFable := ParseClaudeFableQuota(payload); errFable == nil && okFable {
 					selector.observePolledFable(authID, fable, fableRevision)
@@ -1516,6 +1528,11 @@ func loadBackendWeeklyQuotas(ctx context.Context, manager *coreauth.Manager, sel
 					selector.noteUsagePoll(authID, backendUsagePollWhy(errQuota, known))
 				}
 				return
+			}
+			// A poll that read the week is a real usage answer: whether it had a five-hour window says
+			// whether the plan has a five-hour limit.
+			if fiveHourLimit != nil {
+				selector.observeFiveHourLimit(authID, *fiveHourLimit)
 			}
 			if _, lifted := selector.observePolledQuotaLifting(authID, backendWeeklyQuota{known: true, used: quota.UsedFraction, resetsAt: quota.ResetsAt}, revision); lifted {
 				// The core holds its own cooldown for the same 429: clear it too, or the subscription stays

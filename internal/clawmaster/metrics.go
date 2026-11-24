@@ -106,6 +106,7 @@ type instruments struct {
 	quotaResets       metric.Float64ObservableGauge
 	quotaBlocked      metric.Float64ObservableGauge
 	fiveHourUsed      metric.Float64ObservableGauge
+	fiveHourLimited   metric.Float64ObservableGauge
 	fiveHourResets    metric.Float64ObservableGauge
 	fableUsed         metric.Float64ObservableGauge
 	fableResets       metric.Float64ObservableGauge
@@ -230,6 +231,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.quotaResets, _ = m.Float64ObservableGauge("claw_master.quota.resets_in_seconds", metric.WithUnit("s"))
 	i.quotaBlocked, _ = m.Float64ObservableGauge("claw_master.quota.rate_limited_for_seconds", metric.WithUnit("s"))
 	i.fiveHourUsed, _ = m.Float64ObservableGauge("claw_master.quota.five_hour.used_fraction", metric.WithDescription("Five-hour subscription window used, 0 to 1, from the usage poll; 0 once the window has reset"))
+	i.fiveHourLimited, _ = m.Float64ObservableGauge("claw_master.quota.five_hour.limited", metric.WithDescription("1 when the subscription's latest usage poll that read its week had a five-hour window, 0 when it plainly had none (a plan with no five-hour limit); absent before the first such poll"))
 	i.fiveHourResets, _ = m.Float64ObservableGauge("claw_master.quota.five_hour.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the five-hour window resets; absent while no window is open"))
 	i.fableUsed, _ = m.Float64ObservableGauge("claw_master.quota.fable.used_fraction", metric.WithDescription("Weekly Fable allowance used, 0 to 1 (on Max and Ultra, Fable may use up to half the weekly limit), from the usage poll and the 7d_oi response headers; 0 once the week has reset"))
 	i.fableResets, _ = m.Float64ObservableGauge("claw_master.quota.fable.resets_in_seconds", metric.WithUnit("s"), metric.WithDescription("Until the weekly Fable allowance resets; absent when no reset is known"))
@@ -251,7 +253,7 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.heap, _ = m.Int64ObservableGauge("claw_master.process.heap_bytes", metric.WithUnit("By"))
 
 	i.registration, _ = m.RegisterCallback(i.observe,
-		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.quotaReserved, i.quotaReserveShare, i.weeklyGrants, i.fableGrants, i.fiveHourGrants, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
+		i.quotaUsed, i.quotaResets, i.quotaBlocked, i.fiveHourUsed, i.fiveHourLimited, i.fiveHourResets, i.fableUsed, i.fableResets, i.fableBlocked, i.quotaBand, i.quotaReserved, i.quotaReserveShare, i.weeklyGrants, i.fableGrants, i.fiveHourGrants, i.tokenExpires, i.profileInfo, i.sessions, i.activeConns,
 		i.upstreamLimit, i.latencyQuantile, i.uptime, i.goroutines, i.heap)
 	return i
 }
@@ -274,6 +276,9 @@ type profileState struct {
 	FiveHourKnown       bool
 	FiveHourResetsIn    float64
 	FiveHourResetsKnown bool
+	// Whether the plan has a five-hour limit, from the latest usage poll that read the week.
+	FiveHourLimited    bool
+	FiveHourLimitKnown bool
 	// The weekly Fable allowance.
 	FableUsed        float64
 	FableKnown       bool
@@ -323,6 +328,13 @@ func (i *instruments) observe(_ context.Context, o metric.Observer) error {
 			o.ObserveFloat64(i.quotaBlocked, p.BlockedSeconds, attrs)
 			if p.FiveHourKnown {
 				o.ObserveFloat64(i.fiveHourUsed, p.FiveHourUsed, attrs)
+			}
+			if p.FiveHourLimitKnown {
+				limited := 0.0
+				if p.FiveHourLimited {
+					limited = 1
+				}
+				o.ObserveFloat64(i.fiveHourLimited, limited, attrs)
 			}
 			if p.FiveHourResetsKnown {
 				o.ObserveFloat64(i.fiveHourResets, p.FiveHourResetsIn, attrs)
