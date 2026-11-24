@@ -113,3 +113,62 @@ func TestFiveHourWindowReachesTheGaugesFromThePoll(t *testing.T) {
 		t.Error("after the reset a countdown is still reported")
 	}
 }
+
+func TestFiveHourLimitFromThePoll(t *testing.T) {
+	reader := startMetrics(t, nil)
+	selector, _, reset := namedSelector(t)
+	now := reset.Add(-time.Hour)
+	selector.now = func() time.Time { return now }
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, authID := range selector.authIDs {
+		if _, err := manager.Register(t.Context(), &coreauth.Auth{
+			ID: authID, Provider: "claude", Status: coreauth.StatusActive,
+			Attributes: map[string]string{coreauth.AttributeAuthKind: coreauth.AuthKindOAuth},
+			Metadata:   map[string]any{"access_token": "opaque-" + authID, "expired": "2099-01-01T00:00:00Z"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	src := &fixedSource{}
+	registerStateSource(src)
+	t.Cleanup(func() { unregisterStateSource(src) })
+	a, b := map[string]string{"profile": "claude-primary"}, map[string]string{"profile": "claude-secondary"}
+
+	// Before any poll, nothing is said.
+	src.snap = selector.metricsSnapshot(nil)
+	if _, ok := gaugeOf(collect(t, reader), "claw_master.quota.five_hour.limited", a); ok {
+		t.Error("five_hour.limited reported before any poll")
+	}
+
+	// a's answer has a five-hour window; b's (a plan with no five-hour limit) has only the week.
+	poll := func(body func(id string) string) {
+		loadBackendWeeklyQuotas(t.Context(), manager, selector, selector.authIDs, func(_ context.Context, auth *coreauth.Auth, _ *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body(auth.ID)))}, nil
+		})
+	}
+	poll(func(id string) string {
+		if id == "profile-b" {
+			return `{"five_hour":null,"seven_day":{"utilization":5,"resets_at":"2026-10-05T00:00:00Z"}}`
+		}
+		return `{"five_hour":{"utilization":0,"resets_at":null},"seven_day":{"utilization":25,"resets_at":"2026-10-05T00:00:00Z"}}`
+	})
+	src.snap = selector.metricsSnapshot(nil)
+	rm := collect(t, reader)
+	if v, ok := gaugeOf(rm, "claw_master.quota.five_hour.limited", a); !ok || v != 1 {
+		t.Errorf("a plan with a five-hour window: limited = %v (%v), want 1", v, ok)
+	}
+	if v, ok := gaugeOf(rm, "claw_master.quota.five_hour.limited", b); !ok || v != 0 {
+		t.Errorf("a plan with no five-hour window: limited = %v (%v), want 0", v, ok)
+	}
+
+	// An answer without the week (an error page, a changed shape) says nothing: the last answer stands.
+	poll(func(string) string { return `{"error":"overloaded"}` })
+	src.snap = selector.metricsSnapshot(nil)
+	rm = collect(t, reader)
+	if v, ok := gaugeOf(rm, "claw_master.quota.five_hour.limited", a); !ok || v != 1 {
+		t.Errorf("after an answer without the week: a limited = %v (%v), want 1", v, ok)
+	}
+	if v, ok := gaugeOf(rm, "claw_master.quota.five_hour.limited", b); !ok || v != 0 {
+		t.Errorf("after an answer without the week: b limited = %v (%v), want 0", v, ok)
+	}
+}

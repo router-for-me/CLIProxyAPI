@@ -122,6 +122,23 @@ func (s *backendSeriesSelector) observeFiveHourQuota(authID string, quota Claude
 	s.fiveHour[authID] = quota
 }
 
+// observeFiveHourLimit records whether an account's latest usage poll, one that read its week, had
+// a five-hour window: a plan without a five-hour limit has none.
+func (s *backendSeriesSelector) observeFiveHourLimit(authID string, limited bool) {
+	if strings.TrimSpace(authID) == "" || authID == s.backupAuthID {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return
+	}
+	if s.fiveHourLimited == nil {
+		s.fiveHourLimited = make(map[string]bool, len(s.authIDs))
+	}
+	s.fiveHourLimited[authID] = limited
+}
+
 // resetGrantsMaxAge is how long a banked-reset count stands without a poll that reports it again: a few
 // poll intervals, so a failing poll, or one answered without the grants, cannot keep an old count.
 const resetGrantsMaxAge = 15 * time.Minute

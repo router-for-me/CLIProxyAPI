@@ -438,6 +438,9 @@ func (s *backendSeriesSelector) metricsSnapshot(stores []*backendStore) stateSna
 				p.FiveHourResetsKnown, p.FiveHourResetsIn = true, max(five.ResetsAt.Sub(now).Seconds(), 0)
 			}
 		}
+		if limited, known := s.fiveHourLimited[id]; known {
+			p.FiveHourLimitKnown, p.FiveHourLimited = true, limited
+		}
 		if s.fableBlockedLocked(id) {
 			p.FableBlockedSeconds = max(s.fableBlockedUntil[id].Sub(now).Seconds(), 0)
 		}
