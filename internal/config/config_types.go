@@ -141,6 +141,20 @@ type ClaudeConfig struct {
 	// URLs request the org:create_api_key scope in addition to ClaudeOAuthScope.
 	// Nil defaults to true to match native Claude Code.
 	OAuthIncludeCreateAPIKey *bool `yaml:"oauth-include-create-api-key,omitempty" json:"oauth-include-create-api-key,omitempty"`
+	// StreamBootstrapHold holds back the stream events that carry no generated
+	// output yet (message_start, ping, an empty text or thinking block start)
+	// until the first generating event. Anthropic can answer a 200 stream with a
+	// rate_limit_error event right after message_start; while nothing has reached
+	// the caller, that becomes a 429 the conductor fails over to another account.
+	// Trade-off: the caller's first byte waits for the first generating event, up
+	// to 5s, 48 lines or 1 MiB, whichever comes first. Nil defaults to true.
+	StreamBootstrapHold *bool `yaml:"stream-bootstrap-hold,omitempty" json:"stream-bootstrap-hold,omitempty"`
+}
+
+// StreamBootstrapHoldEnabled reports whether Claude streams hold their
+// pre-generation events. Unset defaults to true.
+func (c *ClaudeConfig) StreamBootstrapHoldEnabled() bool {
+	return c == nil || c.StreamBootstrapHold == nil || *c.StreamBootstrapHold
 }
 
 // OAuthIncludeCreateAPIKeyEnabled reports whether Claude OAuth authorization

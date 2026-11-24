@@ -357,6 +357,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, wrapClaudeFastRequestError(fastRequest, httpResp.StatusCode, err)
 	}
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
+	// A fast request's errors are request-scoped and never fail over, so holding would only
+	// turn its in-stream limit into a different error.
+	holdEnabled := claudeStreamBootstrapHoldEnabled(e.cfg) && !fastRequest
 	go func() {
 		defer close(out)
 		defer func() {
@@ -397,6 +400,13 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			case <-ctx.Done():
 			}
 		}
+		// A rate_limit_error before anything reached the caller is the account's
+		// own 429: classified like one on the wire, with the 200's rate-limit
+		// headers, so the conductor fails over instead of forwarding it.
+		emitBootstrapRateLimit := func(errorPayload []byte) claudeStreamAction {
+			emitResponseError(e.classifyClaudeStreamRateLimit(httpResp.Header, errorPayload))
+			return claudeStreamReturn
+		}
 
 		streamBody := threadBetas.StreamReader(decodedBody, func(messageID string) {
 			commitClaudeContinuity(diagnosticsState, messageID, helps.HeaderValueCaseInsensitive(httpResp.Header, "request-id"))
@@ -410,47 +420,83 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			var upstreamMessageID string
 			var upstreamStreamErr error
 			upstreamCompleted := false
-			flushEvent := func() bool {
+			sendEvent := func(payload []byte) claudeStreamAction {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: payload}:
+					return claudeStreamNext
+				case <-ctx.Done():
+					emitCancellation(ctx.Err())
+					return claudeStreamReturn
+				}
+			}
+			hold := newClaudeBootstrapHold(holdEnabled, func(held [][]byte) claudeStreamAction {
+				for _, payload := range held {
+					if action := sendEvent(payload); action != claudeStreamNext {
+						return action
+					}
+				}
+				return claudeStreamNext
+			}, emitBootstrapRateLimit)
+			defer hold.Close()
+			flushEvent := func() claudeStreamAction {
 				if event.Len() == 0 {
-					return true
+					return claudeStreamNext
 				}
 				observeClaudeSSEEvent(event.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
 				streamUsage.ObserveClaudeSSEEvent(event.Bytes())
 				cloned := bytes.Clone(event.Bytes())
 				event.Reset()
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: cloned}:
-					return true
-				case <-ctx.Done():
-					return false
+				if hold.Holding() {
+					kind, errorPayload := classifyClaudeBootstrapEvent(cloned)
+					settled := upstreamCompleted || upstreamStreamErr != nil
+					if action, consumed := hold.Admit(kind, errorPayload, cloned, bytes.Count(cloned, []byte("\n")), settled); consumed || action != claudeStreamNext {
+						return action
+					}
 				}
+				return sendEvent(cloned)
 			}
 			for scanner.Scan() {
-				line := scanner.Bytes()
-				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-				reporter.ObserveResponseModel(line)
-				streamUsage.ObserveClaudeStream(line)
-				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
-				if errRestore != nil {
-					emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
+				action := hold.Do(func() claudeStreamAction {
+					line := scanner.Bytes()
+					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+					reporter.ObserveResponseModel(line)
+					streamUsage.ObserveClaudeStream(line)
+					restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+					if errRestore != nil {
+						if action := hold.Release(); action != claudeStreamNext {
+							return action
+						}
+						emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
+						return claudeStreamReturn
+					}
+					line = e.restoreResponseModel(restoredLine, req.Model)
+					advisorState.ObserveSSELine(line)
+					event.Write(line)
+					event.WriteByte('\n')
+					if len(bytes.TrimSpace(line)) == 0 {
+						if action := flushEvent(); action != claudeStreamNext {
+							return action
+						}
+						if upstreamCompleted || (upstreamStreamErr != nil && !clienterror.IsClaudePolicyRefusalError(upstreamStreamErr)) {
+							return claudeStreamBreak
+						}
+					}
+					return claudeStreamNext
+				})
+				if action == claudeStreamReturn {
 					return
 				}
-				line = e.restoreResponseModel(restoredLine, req.Model)
-				advisorState.ObserveSSELine(line)
-				event.Write(line)
-				event.WriteByte('\n')
-				if len(bytes.TrimSpace(line)) == 0 {
-					if !flushEvent() {
-						emitCancellation(ctx.Err())
-						return
-					}
-					if upstreamCompleted || (upstreamStreamErr != nil && !clienterror.IsClaudePolicyRefusalError(upstreamStreamErr)) {
-						break
-					}
+				if action == claudeStreamBreak {
+					break
 				}
 			}
-			if !flushEvent() {
-				emitCancellation(ctx.Err())
+			// A rate limit can be the last event, sent without its blank line, and
+			// must still fail over. Whatever is held after that goes out before the
+			// end of the stream, so the caller sees what it would without the hold.
+			if hold.Do(flushEvent) == claudeStreamReturn {
+				return
+			}
+			if hold.Finish() == claudeStreamReturn {
 				return
 			}
 			if !upstreamCompleted || upstreamStreamErr != nil {
@@ -491,25 +537,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		var upstreamStreamErr error
 		var eventBuf bytes.Buffer
 		upstreamCompleted := false
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			eventBuf.Write(line)
-			eventBuf.WriteByte('\n')
-			if len(bytes.TrimSpace(line)) == 0 {
-				observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
-				streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
-				eventBuf.Reset()
-			}
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			reporter.ObserveResponseModel(line)
-			streamUsage.ObserveClaudeStream(line)
-			restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
-			if errRestore != nil {
-				emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
-				return
-			}
-			line = e.restoreResponseModel(restoredLine, req.Model)
-			advisorState.ObserveSSELine(line)
+		// translateLine is the one path every Claude line takes to the caller, so
+		// held lines are translated exactly like live ones, in order.
+		translateLine := func(line []byte) claudeStreamAction {
 			helps.RecordClaudeWebSearchResultsContext(ctx, webSearchSessionKey, line, webSearchTTL, webSearchLimit)
 			chunks := sdktranslator.TranslateStream(
 				ctx,
@@ -539,15 +569,100 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					if !upstreamCompleted {
 						emitCancellation(ctx.Err())
 					}
-					return
+					return claudeStreamReturn
 				}
 			}
 			if helps.StopApplyPatchStream(ctx, param, reporter, out, statusErr{code: http.StatusBadGateway, msg: helps.ApplyPatchUpstreamErrorMessage}) {
+				return claudeStreamReturn
+			}
+			return claudeStreamNext
+		}
+		hold := newClaudeBootstrapHold(holdEnabled, func(held [][]byte) claudeStreamAction {
+			for _, line := range held {
+				if action := translateLine(line); action != claudeStreamNext {
+					return action
+				}
+			}
+			return claudeStreamNext
+		}, emitBootstrapRateLimit)
+		defer hold.Close()
+		for scanner.Scan() {
+			action := hold.Do(func() claudeStreamAction {
+				line := scanner.Bytes()
+				eventBuf.Write(line)
+				eventBuf.WriteByte('\n')
+				eventCompleted := false
+				var completedKind claudeBootstrapEventKind
+				var errorPayload []byte
+				if len(bytes.TrimSpace(line)) == 0 {
+					observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
+					streamUsage.ObserveClaudeSSEEvent(eventBuf.Bytes())
+					if hold.Holding() {
+						eventCompleted = true
+						completedKind, errorPayload = classifyClaudeBootstrapEvent(eventBuf.Bytes())
+					}
+					eventBuf.Reset()
+				}
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				reporter.ObserveResponseModel(line)
+				streamUsage.ObserveClaudeStream(line)
+				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(line, oauthToolNamesReverseMap)
+				if errRestore != nil {
+					if action := hold.Release(); action != claudeStreamNext {
+						return action
+					}
+					emitResponseError(fmt.Errorf("restore Claude OAuth tool name from streaming response: %w", errRestore))
+					return claudeStreamReturn
+				}
+				line = e.restoreResponseModel(restoredLine, req.Model)
+				advisorState.ObserveSSELine(line)
+				if hold.Holding() {
+					// Lines wait for the blank line that completes their event,
+					// which decides whether the event is held, fails over or
+					// releases the stream.
+					kind := claudeBootstrapEventGeneration
+					switch {
+					case eventCompleted:
+						kind = completedKind
+					case isClaudeSSEFieldLine(line):
+						kind = claudeBootstrapEventHoldable
+					}
+					settled := upstreamCompleted || upstreamStreamErr != nil
+					if action, consumed := hold.Admit(kind, errorPayload, bytes.Clone(line), 1, settled); consumed || action != claudeStreamNext {
+						return action
+					}
+				}
+				if action := translateLine(line); action != claudeStreamNext {
+					return action
+				}
+				if upstreamCompleted || (upstreamStreamErr != nil && !clienterror.IsClaudePolicyRefusalError(upstreamStreamErr)) {
+					return claudeStreamBreak
+				}
+				return claudeStreamNext
+			})
+			if action == claudeStreamReturn {
 				return
 			}
-			if upstreamCompleted || (upstreamStreamErr != nil && !clienterror.IsClaudePolicyRefusalError(upstreamStreamErr)) {
+			if action == claudeStreamBreak {
 				break
 			}
+		}
+		// A rate limit can be the last event, sent without its blank line, and must
+		// still fail over; its lines are already held. Whatever is held after that
+		// goes out before the end of the stream, so the caller sees what it would
+		// without the hold.
+		if hold.Do(func() claudeStreamAction {
+			if !hold.Holding() || eventBuf.Len() == 0 {
+				return claudeStreamNext
+			}
+			kind, errorPayload := classifyClaudeBootstrapEvent(eventBuf.Bytes())
+			action, _ := hold.Admit(kind, errorPayload, nil, 0, true)
+			return action
+		}) == claudeStreamReturn {
+			return
+		}
+		if hold.Finish() == claudeStreamReturn {
+			return
 		}
 		if eventBuf.Len() > 0 {
 			observeClaudeSSEEvent(eventBuf.Bytes(), &upstreamMessageID, &upstreamCompleted, &upstreamStreamErr)
@@ -591,6 +706,25 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	return result, nil
 }
 
+const claudeRateLimitErrorType = "rate_limit_error"
+
+// claudeStreamRateLimitError is a rate_limit_error event inside a 200 stream
+// that a non-streamed call buffered whole. The caller classifies it like a 429
+// on the wire, with the 200's headers, instead of a 502.
+type claudeStreamRateLimitError struct {
+	payload []byte
+}
+
+func (e claudeStreamRateLimitError) Error() string {
+	return "claude executor: upstream returned error event: " + claudeRateLimitErrorType
+}
+
+// classifyClaudeStreamRateLimit reports a rate_limit_error event inside a 200 as
+// the account's 429, the way a 429 on the wire with the same headers would be.
+func (e *ClaudeExecutor) classifyClaudeStreamRateLimit(headers http.Header, payload []byte) error {
+	return classifyClaudeUpstreamErrorWithCooling(http.StatusTooManyRequests, headers, payload, e.modelLevelCooling())
+}
+
 func validateClaudeStreamingResponse(data []byte) error {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(nil, 52_428_800)
@@ -616,6 +750,9 @@ func validateClaudeStreamingResponse(data []byte) error {
 		root := util.ParseGJSONBytesNoCopy(payload)
 		switch root.Get("type").String() {
 		case "error":
+			if root.Get("error.type").String() == claudeRateLimitErrorType {
+				return claudeStreamRateLimitError{payload: bytes.Clone(payload)}
+			}
 			message := strings.TrimSpace(root.Get("error.message").String())
 			if message == "" {
 				message = strings.TrimSpace(root.Get("error.type").String())
