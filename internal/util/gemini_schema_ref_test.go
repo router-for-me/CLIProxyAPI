@@ -1,6 +1,7 @@
 package util
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/json"
@@ -381,5 +382,59 @@ func TestIssue6897_RefSiblingMinLength(t *testing.T) {
 	}
 	if minimum := minLength(ojson.Get(got, "properties.x")); minimum != 5 {
 		t.Fatalf("effective minLength = %d, want 5; reference target constraint was lost", minimum)
+	}
+}
+
+func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
+	cases := map[string]struct {
+		input string
+		path  string
+		want  []string
+	}{
+		"root": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"zeta":{"$ref":"#/$defs/P"},"alpha":{"type":"string"},"mid":{"type":"string"}}}`,
+			path:  "properties",
+			want:  []string{"zeta", "alpha", "mid"},
+		},
+		"inlined definition": {
+			input: `{"$defs":{"P":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"string"}}}},"type":"object","properties":{"p":{"anyOf":[{"$ref":"#/$defs/P"},{"type":"null"}]}}}`,
+			path:  "properties.p.anyOf.0.properties",
+			want:  []string{"zeta", "alpha"},
+		},
+		"property named default": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"default":{"$ref":"#/$defs/P"},"alpha":{"type":"string","default":{"properties":{"z":1,"a":2}}}}}`,
+			path:  "properties",
+			want:  []string{"default", "alpha"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := InlineLocalRefs(tc.input)
+			var keys []string
+			ojson.Get(got, tc.path).ForEach(func(key, _ ojson.Result) bool {
+				keys = append(keys, key.String())
+				return true
+			})
+			if strings.Join(keys, ",") != strings.Join(tc.want, ",") {
+				t.Errorf("property order = %v, want %v: %s", keys, tc.want, got)
+			}
+			if strings.Contains(got, propertyOrderKey) {
+				t.Errorf("order annotation leaked into output: %s", got)
+			}
+		})
+	}
+}
+
+func TestAntigravityResponseSchemaKeepsPropertyOrder(t *testing.T) {
+	input := `{"$defs":{"Basics":{"type":"object","properties":{"name":{"type":"string"},"email":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null},"profiles":{"type":"array","items":{"type":"string"}}}}},"type":"object","properties":{"basics":{"anyOf":[{"$ref":"#/$defs/Basics"},{"type":"null"}]}}}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	var keys []string
+	ojson.Get(got, "properties.basics.properties").ForEach(func(key, _ ojson.Result) bool {
+		keys = append(keys, key.String())
+		return true
+	})
+	if strings.Join(keys, ",") != "name,email,profiles" {
+		t.Errorf("property order = %v, want [name email profiles]: %s", keys, got)
 	}
 }

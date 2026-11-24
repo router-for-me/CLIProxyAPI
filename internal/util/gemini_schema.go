@@ -960,6 +960,7 @@ func inlineLocalRefsForClean(jsonStr string) string {
 		return jsonStr
 	}
 
+	recordPropertyOrder(root, ojson.Parse(jsonStr), false)
 	resolveRoot := root
 	wrapped := false
 	if rootMap, ok := root.(map[string]any); ok && len(rootMap) == 1 {
@@ -973,7 +974,7 @@ func inlineLocalRefsForClean(jsonStr string) string {
 	}
 
 	state := newRefResolveState()
-	resolved := resolveSchemaRoot(resolveRoot, state, true)
+	resolved := applyPropertyOrder(resolveSchemaRoot(resolveRoot, state, true))
 	out, err := json.Marshal(map[string]any{"schema": resolved})
 	if err != nil {
 		return jsonStr
@@ -993,10 +994,11 @@ func inlineLocalRefsRooted(jsonStr string, parsedRoot any, forClean bool) string
 		if err := decoder.Decode(&root); err != nil {
 			return jsonStr
 		}
+		recordPropertyOrder(root, ojson.Parse(jsonStr), false)
 	}
 
 	state := newRefResolveState()
-	resolved := resolveSchemaRoot(root, state, forClean)
+	resolved := applyPropertyOrder(resolveSchemaRoot(root, state, forClean))
 	out, err := json.Marshal(resolved)
 	if err != nil {
 		return jsonStr
