@@ -220,6 +220,9 @@ func getCachedSignatureRequired(ctx context.Context, modelName, text string, all
 	scope, scopeBound := signatureCacheScope(ctx)
 	modelGroup := GetModelGroup(modelName)
 	if scopeBound && scope == "" && !allowLegacyScope {
+		if modelGroup == "gemini" {
+			return "skip_thought_signature_validator", nil
+		}
 		return "", nil
 	}
 	groupKey := signatureCacheGroupKey(modelName, scope)

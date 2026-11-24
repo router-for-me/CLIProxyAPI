@@ -227,6 +227,44 @@ func TestGetCachedSignatureRequiredGeminiEmptyThinkingSentinel(t *testing.T) {
 	}
 }
 
+func TestGetCachedSignatureRequiredGeminiEmptyBoundScopeSentinel(t *testing.T) {
+	client := newFakeSignatureKVClient()
+	client.getErr = errors.New("get should not be called")
+	useFakeSignatureKVClient(t, client, true, nil)
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		text string
+	}{
+		{name: "required scope with thinking", ctx: RequireSignatureCacheScope(context.Background()), text: "reasoning"},
+		{name: "required scope without thinking", ctx: RequireSignatureCacheScope(context.Background())},
+		{name: "explicit empty scope with thinking", ctx: WithSignatureCacheScope(context.Background(), ""), text: "reasoning"},
+		{name: "explicit empty scope without thinking", ctx: WithSignatureCacheScope(context.Background(), "")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, errGet := GetCachedSignatureRequired(tc.ctx, "gemini-2.5-pro", tc.text)
+			if errGet != nil {
+				t.Fatalf("GetCachedSignatureRequired() error = %v", errGet)
+			}
+			if got != "skip_thought_signature_validator" {
+				t.Fatalf("GetCachedSignatureRequired() = %q, want Gemini sentinel", got)
+			}
+		})
+	}
+
+	got, errGet := GetCachedSignatureRequired(RequireSignatureCacheScope(context.Background()), testModelName, "reasoning")
+	if errGet != nil {
+		t.Fatalf("non-Gemini GetCachedSignatureRequired() error = %v", errGet)
+	}
+	if got != "" {
+		t.Fatalf("non-Gemini GetCachedSignatureRequired() = %q, want cache miss", got)
+	}
+	if client.getCount != 0 {
+		t.Fatalf("KVGet count = %d, want 0", client.getCount)
+	}
+}
+
 func TestSignatureCacheScopesEntries(t *testing.T) {
 	ClearSignatureCache("")
 	text := "same thinking"
