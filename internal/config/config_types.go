@@ -129,6 +129,11 @@ type ClaudeConfig struct {
 	// specify fallbacks. Default false leaves cross-model fallbacks omitted unless
 	// explicitly configured by the caller or payload rules.
 	ServerSideFallback bool `yaml:"server-side-fallback" json:"server-side-fallback"`
+	// DisableMCPToolAlias disables opaque mcp__<server>__<tool> aliasing of custom
+	// tool names on cloaked Claude OAuth and claude-code-cli fingerprint requests,
+	// forwarding caller tool names unchanged while keeping the rest of Claude Code
+	// CLI cloaking active. Default false preserves MCP tool aliasing.
+	DisableMCPToolAlias bool `yaml:"disable-mcp-tool-alias" json:"disable-mcp-tool-alias"`
 	// SessionDatePinDays retains the cloaked currentDate pin per session for
 	// this many days in in-memory mode (server.kv-store.disabled: true without
 	// Home), independently of continuity expiry and credential switches. A nil

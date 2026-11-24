@@ -106,6 +106,10 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 	if cfg != nil && cfg.ClaudeHeaderDefaults.InjectDiagnostics != nil && !*cfg.ClaudeHeaderDefaults.InjectDiagnostics {
 		injectDiagnostics = false
 	}
+	mcpAlias := profileClaudeCodeCLI
+	if cfg != nil && cfg.Claude.DisableMCPToolAlias {
+		mcpAlias = false
+	}
 
 	return claudeFingerprintPolicy{
 		AuthIsOAuthToken:     authIsOAuth,
@@ -113,7 +117,7 @@ func resolveClaudeFingerprintPolicy(cfg *config.Config, auth *cliproxyauth.Auth,
 		UseOAuthBetas:        profileClaudeCodeCLI,
 		ApplyCLIIdentity:     profileClaudeCodeCLI,
 		SynthesizeIdentity:   profileClaudeCodeCLI && !authIsOAuth,
-		MCPAlias:             profileClaudeCodeCLI,
+		MCPAlias:             mcpAlias,
 		InjectDiagnostics:    injectDiagnostics,
 		OAuthCancellation:    authIsOAuth,
 	}
