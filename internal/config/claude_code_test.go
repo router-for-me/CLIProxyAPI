@@ -210,6 +210,34 @@ func TestParseConfigBytesClaudeServerSideFallback(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytesClaudeDisableMCPToolAlias(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{name: "defaults to false", yaml: "port: 8317\n", want: false},
+		{name: "legacy layout", yaml: "claude:\n  disable-mcp-tool-alias: true\n", want: true},
+		{name: "v8 layout", yaml: "config-version: 8\nupstream:\n  claude:\n    disable-mcp-tool-alias: true\n", want: true},
+		{name: "v8 explicit false", yaml: "config-version: 8\nupstream:\n  claude:\n    disable-mcp-tool-alias: false\n", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, errParse := ParseConfigBytes([]byte(tt.yaml))
+			if errParse != nil {
+				t.Fatalf("ParseConfigBytes() error = %v", errParse)
+			}
+			if got := cfg.Claude.DisableMCPToolAlias; got != tt.want {
+				t.Fatalf("cfg.Claude.DisableMCPToolAlias = %t, want %t", got, tt.want)
+			}
+			if apiCfg := cfg.ForAPIKey(); apiCfg.Claude.DisableMCPToolAlias != tt.want {
+				t.Fatalf("cfg.ForAPIKey().Claude.DisableMCPToolAlias = %t, want %t", apiCfg.Claude.DisableMCPToolAlias, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseAndSaveClaudeOAuthIncludeCreateAPIKey(t *testing.T) {
 	tests := []struct {
 		name        string
