@@ -172,6 +172,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
+	homeRedispatched := false
 	for homeAuthCount := 1; ; homeAuthCount++ {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -188,6 +189,15 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
+		if !homeRedispatched && shouldRedispatchAfterHomeUnavailable(ctx, errSelection, lastErr) {
+			homeRedispatched = true
+			selection, errSelection = m.redispatchAfterHomeUnavailable(ctx, routeModel, pickOpts)
+			if errSelection != nil {
+				if errAccount := homeRedispatchFailureError(ctx, errSelection, lastErr, upstreamErr, &roundTiming); errAccount != nil {
+					return cliproxyexecutor.Response{}, errAccount
+				}
+			}
+		}
 		if errSelection != nil {
 			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
 			var homeCooldown *homeDispatchRetryAfterError
@@ -265,7 +275,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		if len(models) == 0 {
 			releaseAttempt()
-			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
+			if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "no_execution_models", tried); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			noModelsErr := &Error{Code: "auth_not_found", Message: "no execution models available"}
@@ -313,7 +323,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errPrepare
 			}
-			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "prepare_failed"); errEnd != nil {
+			if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "prepare_failed", tried); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			lastErr = keepPreferredCandidateError(lastErr, errPrepare)
@@ -497,14 +507,14 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			recordRequestRefusedAuth(ctx, auth.ID)
 			lastErr = refusedErr
 			releaseAttempt()
-			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "credential_refused"); errEnd != nil {
+			if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "credential_refused", tried); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			continue
 		}
 		roundTiming.Observe(lastErr)
 		releaseAttempt()
-		if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "execution_failed"); errEnd != nil {
+		if errEnd := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "execution_failed", tried); errEnd != nil {
 			return cliproxyexecutor.Response{}, errEnd
 		}
 		if errCtx := execCtx.Err(); errCtx != nil && ctx != nil && ctx.Err() != nil {
