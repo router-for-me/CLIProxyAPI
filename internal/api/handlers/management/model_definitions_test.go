@@ -377,3 +377,56 @@ func TestGetStaticModelDefinitions_OAuthPluginCatalogDecoupledFromRegistry(t *te
 		})
 	}
 }
+
+func TestGetStaticModelDefinitions_V8NamespacesCopilotAndDevin(t *testing.T) {
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, nil)
+
+	invokeV8 := func(channel string, v8 bool) []registry.ModelInfo {
+		t.Helper()
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(rec)
+		if v8 {
+			ctx.Set(ConfigV8ContextKey, true)
+		}
+		ctx.Params = gin.Params{{Key: "channel", Value: channel}}
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/routing/model-definitions/"+channel, nil)
+		h.GetStaticModelDefinitions(ctx)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("channel=%s v8=%t status=%d body=%s", channel, v8, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Models []registry.ModelInfo `json:"models"`
+		}
+		if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &body); errUnmarshal != nil {
+			t.Fatalf("unmarshal %s: %v", channel, errUnmarshal)
+		}
+		if len(body.Models) == 0 {
+			t.Fatalf("channel=%s v8=%t returned no models", channel, v8)
+		}
+		return body.Models
+	}
+
+	for _, channel := range []string{"copilot", "devin"} {
+		prefix := channel + "/"
+		v8Models := invokeV8(channel, true)
+		v0Models := invokeV8(channel, false)
+		if len(v8Models) != len(v0Models) {
+			t.Fatalf("%s lengths: v8=%d v0=%d", channel, len(v8Models), len(v0Models))
+		}
+		for i := range v8Models {
+			if strings.HasPrefix(v0Models[i].ID, prefix) {
+				t.Fatalf("%s v0 model unexpectedly prefixed: %q", channel, v0Models[i].ID)
+			}
+			if want := prefix + v0Models[i].ID; v8Models[i].ID != want {
+				t.Fatalf("%s v8 model[%d] = %q, want %q", channel, i, v8Models[i].ID, want)
+			}
+		}
+	}
+
+	claudeV8 := invokeV8("claude", true)
+	claudeV0 := invokeV8("claude", false)
+	if claudeV8[0].ID != claudeV0[0].ID || strings.HasPrefix(claudeV8[0].ID, "claude/") {
+		t.Fatalf("claude models should remain unprefixed: v8=%q v0=%q", claudeV8[0].ID, claudeV0[0].ID)
+	}
+}
