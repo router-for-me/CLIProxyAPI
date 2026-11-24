@@ -70,7 +70,7 @@ func finishRequest(c *gin.Context, ctx context.Context, opts BackendOptions, w *
 	}
 	if len(raw) > 0 {
 		obs.Account = clientAccountKey(raw)
-		obs.Fast = gjson.GetBytes(raw, "speed").String() == "fast"
+		obs.Fast = strings.EqualFold(strings.TrimSpace(gjson.GetBytes(raw, "speed").String()), "fast")
 	}
 	if !w.firstWrite.IsZero() {
 		obs.TTFB = w.firstWrite.Sub(started)

@@ -46,16 +46,17 @@ var apiPrices = map[string]apiPrice{
 	"claude-haiku-4-5": {input: 1, write5m: 1.25, write1h: 2, cacheRead: 0.10, output: 5},
 }
 
-// A model id's dated form ("-20251001") and a platform prefix ("us.anthropic.") name the same
-// model as its alias.
+// A model id's dated form ("-20251001") and a platform's form ("us.anthropic.…-v1:0") name the
+// same model as its alias.
 var (
+	modelVersionSuffix  = regexp.MustCompile(`-v\d+(?::\d+)?$`)
 	modelDateSuffix     = regexp.MustCompile(`-\d{8}$`)
-	modelPlatformPrefix = regexp.MustCompile(`^(?:[a-z]{2}\.)?anthropic\.`)
+	modelPlatformPrefix = regexp.MustCompile(`^(?:[a-z]{2}\.|global\.)?anthropic\.`)
 )
 
 func apiPriceOf(model string) (apiPrice, bool) {
 	model = modelPlatformPrefix.ReplaceAllString(strings.ToLower(strings.TrimSpace(model)), "")
-	model = modelDateSuffix.ReplaceAllString(model, "")
+	model = modelDateSuffix.ReplaceAllString(modelVersionSuffix.ReplaceAllString(model, ""), "")
 	price, ok := apiPrices[model]
 	return price, ok
 }

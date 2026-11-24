@@ -26,6 +26,11 @@ func TestAPICostPricesEachTokenTypeAtItsRate(t *testing.T) {
 		{"fast mode where there is none", "claude-sonnet-5-5", tokenCounts{input: million}, true, 2},
 		{"a dated id", "claude-haiku-4-5-20251001", tokenCounts{input: million, output: million}, false, 1 + 5},
 		{"a platform prefix", "us.anthropic.claude-sonnet-5", tokenCounts{cacheRead: million}, false, 0.20},
+		{"a Bedrock id", "global.anthropic.claude-haiku-4-5-20251001-v1:0", tokenCounts{input: million}, false, 1},
+		{"fast mode with an hour-long write", "claude-opus-5-5", tokenCounts{cacheCreation: million, cacheCreation1h: million}, true, 16},
+		{"more hour-long writes than writes", "claude-opus-5-5", tokenCounts{cacheCreation: million, cacheCreation1h: 2 * million}, false, 8},
+		// Cache writes count toward Haiku 5.5's prompt length and take the long rates past it.
+		{"Haiku 5.5 long prompt from writes", "claude-haiku-5-5", tokenCounts{input: 1, cacheCreation: 200_000, cacheCreation1h: 100_000}, false, 0.5/1e6 + 100_000*0.625/1e6 + 100_000*1.0/1e6},
 		// Haiku 5.5's prompt length counts cache reads and writes; at 100,000 it is still the short rate.
 		{"Haiku 5.5 short prompt", "claude-haiku-5-5", tokenCounts{input: 60_000, cacheRead: 40_000, output: million}, false, 0.006 + 0.0004 + 0.50},
 		{"Haiku 5.5 long prompt", "claude-haiku-5-5", tokenCounts{input: 60_000, cacheRead: 40_001, output: million}, false, 0.03 + 40_001*0.05/1e6 + 2.50},
@@ -42,11 +47,18 @@ func TestAPICostPricesEachTokenTypeAtItsRate(t *testing.T) {
 	}
 }
 
-// The usage object splits cache writes by duration; the scanner keeps the hour-long part.
+// The usage object splits cache writes by duration; the scanner keeps the hour-long part, in a
+// JSON body and in a stream whose later message_delta carries only the flat counts.
 func TestUsageScannerReadsOneHourCacheWrites(t *testing.T) {
 	body := `{"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}}}`
 	got, ok := scanUsage(200, "application/json", body)
 	if !ok || got.cacheCreation != 30 || got.cacheCreation1h != 20 {
-		t.Fatalf("counts %+v, %v", got, ok)
+		t.Fatalf("JSON counts %+v, %v", got, ok)
+	}
+	stream := `data: {"type":"message_start","message":{"usage":{"input_tokens":1,"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20},"output_tokens":1}}}` + "\n\n" +
+		`data: {"type":"message_delta","usage":{"input_tokens":1,"cache_creation_input_tokens":30,"output_tokens":9}}` + "\n\n"
+	got, ok = scanUsage(200, "text/event-stream", stream)
+	if !ok || got.cacheCreation != 30 || got.cacheCreation1h != 20 || got.output != 9 {
+		t.Fatalf("stream counts %+v, %v", got, ok)
 	}
 }
