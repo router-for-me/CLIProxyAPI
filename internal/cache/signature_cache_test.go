@@ -373,6 +373,36 @@ func TestHasValidSignature(t *testing.T) {
 	}
 }
 
+func TestSignatureCacheModelGroupIsCaseInsensitive(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		group string
+	}{
+		{model: "GPT-5.1-Codex", group: "gpt"},
+		{model: "Claude-Sonnet-4-5", group: "claude"},
+		{model: "Gemini-2.5-Pro", group: "gemini"},
+	} {
+		t.Run(tc.group, func(t *testing.T) {
+			if got := GetModelGroup(tc.model); got != tc.group {
+				t.Fatalf("GetModelGroup(%q) = %q, want %q", tc.model, got, tc.group)
+			}
+			if signatureKVKey(tc.model, "thinking") != signatureKVKey(strings.ToLower(tc.model), "thinking") {
+				t.Fatalf("signature keys differ by model case for %q", tc.model)
+			}
+		})
+	}
+
+	const signature = "signature12345678901234567890123456789012345678901234567890"
+	ClearSignatureCache("")
+	CacheSignature("gemini-2.5-pro", "thinking", signature)
+	if got := GetCachedSignature("Gemini-2.5-Pro", "thinking"); got != signature {
+		t.Fatalf("GetCachedSignature() = %q, want %q", got, signature)
+	}
+	if !HasValidSignature("Gemini-2.5-Pro", "skip_thought_signature_validator") {
+		t.Fatal("Gemini sentinel is invalid for mixed-case model")
+	}
+}
+
 func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 	ClearSignatureCache("")
 
