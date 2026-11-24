@@ -15,9 +15,11 @@ import (
 )
 
 // tokenCounts is one response's token usage as Anthropic reports it. Input excludes the cache
-// fields, which the Messages API reports separately; output includes thinking.
+// fields, which the Messages API reports separately; output includes thinking. cacheCreation1h is
+// the part of cacheCreation written for an hour (usage.cache_creation splits writes by duration).
 type tokenCounts struct {
 	input, output, cacheRead, cacheCreation int64
+	cacheCreation1h                         int64
 }
 
 const (
@@ -227,6 +229,7 @@ func (u *usageScanner) apply(usage gjson.Result) {
 		{"output_tokens", &u.counts.output},
 		{"cache_read_input_tokens", &u.counts.cacheRead},
 		{"cache_creation_input_tokens", &u.counts.cacheCreation},
+		{"cache_creation.ephemeral_1h_input_tokens", &u.counts.cacheCreation1h},
 	} {
 		if value := usage.Get(field.name); value.Type == gjson.Number {
 			*field.into = max(value.Int(), 0)

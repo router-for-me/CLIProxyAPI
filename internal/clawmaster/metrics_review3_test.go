@@ -175,6 +175,10 @@ func attributeSets(m metricdata.Metrics) []map[string]string {
 		for _, p := range data.DataPoints {
 			out = append(out, attributesOf(p.Attributes))
 		}
+	case metricdata.Sum[float64]:
+		for _, p := range data.DataPoints {
+			out = append(out, attributesOf(p.Attributes))
+		}
 	case metricdata.Gauge[int64]:
 		for _, p := range data.DataPoints {
 			out = append(out, attributesOf(p.Attributes))

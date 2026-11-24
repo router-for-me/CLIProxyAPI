@@ -6,7 +6,7 @@ import "testing"
 // none, so another provider's pool can be told apart without renaming anything.
 func TestProviderNamesWhoseServiceAMeasurementIsAbout(t *testing.T) {
 	reader := startMetrics(t, nil)
-	observeTokens("claude-test", "box", "acct", "project", "claude-test-model", tokenCounts{input: 1, output: 2})
+	observeTokens("claude-test", "box", "acct", "project", "claude-test-model", tokenCounts{input: 1, output: 2}, false)
 	observeConnection("tls", "accepted")
 	rm := collect(t, reader)
 	want := map[string]string{
