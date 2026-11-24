@@ -1837,7 +1837,7 @@ func moveConstraintsToDescription(jsonStr string, options jsonSchemaCleanOptions
 			if isPropertyDefinition(parentPath) {
 				continue
 			}
-			if val.IsObject() || val.IsArray() {
+			if val.IsObject() || val.IsArray() || val.Type == ojson.Null {
 				appendHintDoc(doc, parentPath, fmt.Sprintf("%s: %s", key, val.Raw))
 				modified = true
 				continue

@@ -5168,3 +5168,15 @@ func TestIssue7917_AntigravityCleanersStripUnsupportedSchemaKeywords(t *testing.
 		}
 	})
 }
+
+func TestNullDefaultHintSaysNull(t *testing.T) {
+	input := `{"type":"object","properties":{"email":{"type":"string","default":null},"nick":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null}}}`
+
+	got := CleanJSONSchemaForAntigravityResponse(input)
+	for _, field := range []string{"email", "nick"} {
+		description := ojson.Get(got, "properties."+field+".description").String()
+		if !strings.Contains(description, "default: null") {
+			t.Errorf("%s description = %q, want it to contain %q: %s", field, description, "default: null", got)
+		}
+	}
+}
