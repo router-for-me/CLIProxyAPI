@@ -649,7 +649,7 @@ func (m *Manager) retainedHomeSessionSelection(ctx context.Context, opts cliprox
 	m.mu.Unlock()
 
 	for _, selection := range ended {
-		if errWait := m.endHomeSelectionBeforeRedispatch(ctx, selection, "target_changed"); errWait != nil {
+		if errWait := m.endHomeSelectionBeforeExcludedRedispatch(ctx, selection, "target_changed", excludedAuthIDs); errWait != nil {
 			return nil, false, errWait
 		}
 	}
@@ -716,22 +716,31 @@ func (m *Manager) endHomeSelectionBeforeRedispatch(ctx context.Context, selectio
 		return nil
 	}
 
+	waitCtx := ctx
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	waitCtx, cancelWait := context.WithTimeout(waitCtx, m.homeCPACancelBound())
+	defer cancelWait()
+	errWait := ticket.Wait(waitCtx)
+	if errWait == nil || ctx == nil || ctx.Err() == nil {
+		// A wait the caller's own cancellation cut short did not wait for the release.
+		selection.releaseWaited.Store(true)
+	}
+	if errWait != nil {
+		return &Error{Code: "home_unavailable", Message: homeReleaseAckTimeoutMessage + errWait.Error(), Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
+	}
+	return nil
+}
+
+func (m *Manager) homeCPACancelBound() time.Duration {
 	bound := internalconfig.CredentialConcurrencyConfig{}.WithDefaults().CPACancelBound
 	if m != nil {
 		if cfg, ok := m.runtimeConfig.Load().(*internalconfig.Config); ok && cfg != nil {
 			bound = cfg.CredentialConcurrency.WithDefaults().CPACancelBound
 		}
 	}
-	waitCtx := ctx
-	if waitCtx == nil {
-		waitCtx = context.Background()
-	}
-	waitCtx, cancelWait := context.WithTimeout(waitCtx, bound)
-	defer cancelWait()
-	if errWait := ticket.Wait(waitCtx); errWait != nil {
-		return &Error{Code: "home_unavailable", Message: "Home did not acknowledge credential release: " + errWait.Error(), Retryable: true, HTTPStatus: http.StatusServiceUnavailable}
-	}
-	return nil
+	return bound
 }
 
 func (m *Manager) retainHomeWebsocketSelection(ctx context.Context, opts cliproxyexecutor.Options, model string, selection *HomeDispatchSelection) bool {
