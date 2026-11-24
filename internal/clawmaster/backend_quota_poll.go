@@ -123,7 +123,7 @@ func (s *backendSeriesSelector) observeFiveHourQuota(authID string, quota Claude
 }
 
 // observeFiveHourLimit records whether an account's latest usage poll, one that read its week, had
-// a five-hour window: a plan without a five-hour limit has none.
+// a five-hour window (limited) or plainly had none (a plan without a five-hour limit).
 func (s *backendSeriesSelector) observeFiveHourLimit(authID string, limited bool) {
 	if strings.TrimSpace(authID) == "" || authID == s.backupAuthID {
 		return
@@ -137,6 +137,10 @@ func (s *backendSeriesSelector) observeFiveHourLimit(authID string, limited bool
 		s.fiveHourLimited = make(map[string]bool, len(s.authIDs))
 	}
 	s.fiveHourLimited[authID] = limited
+	if !limited {
+		// No five-hour window: none from an earlier poll is still open.
+		delete(s.fiveHour, authID)
+	}
 }
 
 // resetGrantsMaxAge is how long a banked-reset count stands without a poll that reports it again: a few

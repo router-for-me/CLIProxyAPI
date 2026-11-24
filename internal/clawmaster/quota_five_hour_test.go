@@ -161,6 +161,15 @@ func TestFiveHourLimitFromThePoll(t *testing.T) {
 		t.Errorf("a plan with no five-hour window: limited = %v (%v), want 0", v, ok)
 	}
 
+	// An answer whose five-hour entry is there but cannot be read says nothing either.
+	poll(func(string) string {
+		return `{"five_hour":{"utilization":null,"resets_at":null},"seven_day":{"utilization":5,"resets_at":"2026-10-05T00:00:00Z"}}`
+	})
+	src.snap = selector.metricsSnapshot(nil)
+	if v, ok := gaugeOf(collect(t, reader), "claw_master.quota.five_hour.limited", a); !ok || v != 1 {
+		t.Errorf("after an unreadable five-hour entry: a limited = %v (%v), want 1", v, ok)
+	}
+
 	// An answer without the week (an error page, a changed shape) says nothing: the last answer stands.
 	poll(func(string) string { return `{"error":"overloaded"}` })
 	src.snap = selector.metricsSnapshot(nil)
@@ -170,5 +179,43 @@ func TestFiveHourLimitFromThePoll(t *testing.T) {
 	}
 	if v, ok := gaugeOf(rm, "claw_master.quota.five_hour.limited", b); !ok || v != 0 {
 		t.Errorf("after an answer without the week: b limited = %v (%v), want 0", v, ok)
+	}
+}
+
+func TestFiveHourLimitDropsTheLastWindow(t *testing.T) {
+	selector, _, reset := namedSelector(t)
+	now := reset.Add(-time.Hour)
+	selector.now = func() time.Time { return now }
+	selector.observeFiveHourQuota("profile-a", ClaudeFiveHourQuota{UsedFraction: 0.4, ResetsAt: now.Add(time.Hour)})
+	selector.observeFiveHourLimit("profile-a", false)
+	for _, p := range selector.metricsSnapshot(nil).Profiles {
+		if p.Name == "claude-primary" && (p.FiveHourKnown || p.FiveHourResetsKnown) {
+			t.Errorf("a plan with no five-hour limit still reports a window: %+v", p)
+		}
+	}
+}
+
+func TestClaudeFiveHourAbsent(t *testing.T) {
+	week := `"seven_day":{"utilization":5,"resets_at":"2026-10-05T00:00:00Z"}`
+	for _, tc := range []struct {
+		payload string
+		absent  bool
+	}{
+		{`{` + week + `}`, true},
+		{`{"five_hour":null,` + week + `}`, true},
+		{`{"five_hour":{"utilization":3,"resets_at":null},` + week + `}`, false},
+		{`{"five_hour":{"utilization":null,"resets_at":null},` + week + `}`, false},
+		{`{"five_hour":{},` + week + `}`, false},
+		{`{"five_hour":{"utilization":3,"resets_at":"soon"},` + week + `}`, false},
+		{`{"fiveHour":{"utilization":3},` + week + `}`, false},
+		{`{"limits":[{"kind":"weekly","utilization":5}]}`, false},
+		{`{"limits":[{"kind":"session","utilization":5},{"kind":"weekly","utilization":5}]}`, false},
+		{`{"rate_limits":{"limits":[]},` + week + `}`, false},
+		{`not json`, false},
+		{`[]`, false},
+	} {
+		if got := ClaudeFiveHourAbsent([]byte(tc.payload)); got != tc.absent {
+			t.Errorf("ClaudeFiveHourAbsent(%s) = %v, want %v", tc.payload, got, tc.absent)
+		}
 	}
 }

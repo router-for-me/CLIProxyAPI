@@ -180,6 +180,27 @@ func ParseClaudeFiveHourQuota(payload []byte) (ClaudeFiveHourQuota, bool, error)
 	return ClaudeFiveHourQuota{}, false, nil
 }
 
+// ClaudeFiveHourAbsent reports whether a usage answer plainly has no five-hour window: no limits
+// rows (where a five-hour row could hide under a name not recognised), and a top-level five_hour
+// that is missing or null. A five-hour entry that is there but cannot be read is not absent.
+func ClaudeFiveHourAbsent(payload []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	var root any
+	if err := decoder.Decode(&root); err != nil || rejectTrailingJSON(decoder) != nil {
+		return false
+	}
+	object, ok := root.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, okLimits := quotaMapValueAny(object, "limits", "rate_limits"); okLimits {
+		return false
+	}
+	value, okFive := quotaMapValue(object, "five_hour")
+	return !okFive || value == nil
+}
+
 func fiveHourLimitsRow(limits any) (ClaudeFiveHourQuota, bool) {
 	matches := func(name string, object map[string]any) bool {
 		if isFiveHourName(name) {
