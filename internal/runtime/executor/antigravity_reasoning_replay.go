@@ -878,8 +878,10 @@ func prepareAntigravityGeminiReasoningReplayPayloadDocWithOptions(ctx context.Co
 		}
 		originalPairingValid := internalsignature.ValidateGeminiFunctionCallPairing(origWrapped) == nil
 		if replayApplied && originalPairingValid && scope.valid() && reserveOnMiss {
-			if _, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchanged(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
+			if nextSnapshot, deleted, errDelete := internalcache.DeleteAntigravityReasoningReplayItemsIfUnchangedWithSnapshot(ctx, scope.modelName, scope.sessionKey, scope.cacheSnapshot); errDelete != nil {
 				logAntigravityReasoningReplayDegraded(scope, "invalidate", errDelete)
+			} else if deleted {
+				scope.cacheSnapshot = nextSnapshot
 			}
 			log.Warnf("antigravity executor: reasoning replay broke Gemini function call pairing (%v); degrading to original payload", errPairing)
 			if originalContentsRaw != "" {
