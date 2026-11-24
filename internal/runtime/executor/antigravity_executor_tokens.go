@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -153,11 +154,28 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIResponseError(ctx, e.cfg, errOversize)
 			return cliproxyexecutor.Response{}, errOversize
 		}
-		if errorResult := ojson.GetBytesNoCopy(bodyBytes, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
+		trimmedBody := bytes.TrimSpace(bodyBytes)
+		if len(trimmedBody) == 0 || trimmedBody[0] != '{' || !ojson.ValidBytes(bodyBytes) {
+			errInvalid := statusErr{code: http.StatusBadGateway, msg: "antigravity count_tokens response is not a valid JSON object"}
+			helps.RecordAPIResponseError(ctx, e.cfg, errInvalid)
+			return cliproxyexecutor.Response{}, errInvalid
+		}
+		if errorResult := ojson.GetBytesNoCopy(trimmedBody, "error"); errorResult.Exists() && errorResult.Type != ojson.Null {
 			statusCode = antigravityInBandErrorStatusCode(errorResult)
 		} else {
-			count := ojson.GetBytesNoCopy(bodyBytes, "totalTokens").Int()
-			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, count, bodyBytes)
+			totalTokens := ojson.GetBytesNoCopy(trimmedBody, "totalTokens")
+			if !totalTokens.Exists() || totalTokens.Type != ojson.Number {
+				errMissing := statusErr{code: http.StatusBadGateway, msg: "antigravity count_tokens response missing numeric totalTokens"}
+				helps.RecordAPIResponseError(ctx, e.cfg, errMissing)
+				return cliproxyexecutor.Response{}, errMissing
+			}
+			parsedCount, errParse := strconv.ParseUint(totalTokens.Raw, 10, 63)
+			if errParse != nil {
+				errInvalidCount := statusErr{code: http.StatusBadGateway, msg: "antigravity count_tokens response has invalid totalTokens"}
+				helps.RecordAPIResponseError(ctx, e.cfg, errInvalidCount)
+				return cliproxyexecutor.Response{}, errInvalidCount
+			}
+			translated := sdktranslator.TranslateTokenCount(respCtx, to, responseFormat, int64(parsedCount), bodyBytes)
 			return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
