@@ -40,7 +40,10 @@ type convertCliResponseToOpenAIChatParams struct {
 
 type antigravityOpenAIToolCall struct {
 	Index             int
+	RawName           string
 	UpstreamID        string
+	Streaming         bool
+	Assembler         *translatorcommon.VertexPartialArgsAssembler
 	ArgumentsStarted  bool
 	ArgumentsHasItems bool
 	ArgumentsClosed   bool
@@ -155,6 +158,12 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
 		hasToolCallsArray := false
+		ensureToolCallsArray := func() {
+			if !hasToolCallsArray {
+				_ = templateDoc.SetRaw("choices.0.delta.tool_calls", `[]`)
+				hasToolCallsArray = true
+			}
+		}
 		imageCount := 0
 		var textContent strings.Builder
 		var reasoningContent strings.Builder
@@ -185,11 +194,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			if partTextResult.Exists() {
 				text := partTextResult.String()
 				if text != "" && hasOpenAntigravityOpenAIToolArguments(params) {
-					if !hasToolCallsArray {
-						_ = templateDoc.SetRaw("choices.0.delta.tool_calls", `[]`)
+					if appendAntigravityOpenAIToolCallCloses(templateDoc, params) {
 						hasToolCallsArray = true
 					}
-					appendAntigravityOpenAIToolCallCloses(templateDoc, params)
 					params.ActiveToolCall = nil
 				}
 
@@ -204,41 +211,159 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				_ = templateDoc.Set("choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
 				// Handle function call content.
-				params.SawToolCall = true // Persist across chunks
-				if !hasToolCallsArray {
-					_ = templateDoc.SetRaw("choices.0.delta.tool_calls", `[]`)
-					hasToolCallsArray = true
-				}
-
 				rawName := strings.TrimSpace(functionCallResult.Get("name").String())
 				upstreamID := strings.TrimSpace(functionCallResult.Get("id").String())
-				if rawName == "" {
-					active := params.ActiveToolCall
-					if upstreamID != "" && params.ToolCallsByID != nil {
+				willContinue := translatorcommon.VertexFunctionCallWillContinue(functionCallResult)
+				explicitEnd := antigravityOpenAIExplicitlyEndsContinuation(functionCallResult)
+				hasPartialArgs := antigravityOpenAIHasPartialArgs(functionCallResult)
+
+				active := params.ActiveToolCall
+				if upstreamID != "" {
+					if params.ToolCallsByID != nil {
 						active = params.ToolCallsByID[upstreamID]
+					} else {
+						active = nil
 					}
+				}
+
+				if active != nil && active.canContinuePartialArgs(functionCallResult) {
+					params.SawToolCall = true
+					argumentDelta, done := active.Assembler.PushFunctionCall(functionCallResult)
+					if active.Assembler.Err() != nil {
+						active.Assembler = nil
+						active.ArgumentsClosed = true
+						if params.ActiveToolCall == active {
+							params.ActiveToolCall = nil
+						}
+						continue
+					}
+					if argumentDelta != "" {
+						active.ArgumentsStarted = true
+						ensureToolCallsArray()
+						appendAntigravityOpenAIToolCallDelta(templateDoc, active.Index, argumentDelta)
+						_ = templateDoc.Set("choices.0.delta.role", "assistant")
+					}
+					if done {
+						active.Assembler = nil
+						active.ArgumentsClosed = true
+					}
+					params.ActiveToolCall = active
+					continue
+				}
+
+				if rawName == "" {
 					if active != nil {
-						if argumentDelta := antigravityOpenAIContinuationArguments(active, functionCallResult.Get("args")); argumentDelta != "" {
+						params.SawToolCall = true
+						var argumentDelta string
+						switch {
+						case !active.ArgumentsClosed && hasPartialArgs && !active.ArgumentsStarted:
+							active.Assembler = translatorcommon.NewVertexPartialArgsAssembler()
+							var done bool
+							argumentDelta, done = active.Assembler.PushFunctionCall(functionCallResult)
+							if active.Assembler.Err() != nil {
+								active.Assembler = nil
+								active.ArgumentsClosed = true
+								continue
+							}
+							if argumentDelta != "" {
+								active.ArgumentsStarted = true
+							}
+							if done {
+								active.Assembler = nil
+								active.ArgumentsClosed = true
+							}
+						case active.ArgumentsClosed && hasPartialArgs:
+							lateAssembler := translatorcommon.NewVertexPartialArgsAssembler()
+							var done bool
+							argumentDelta, done = lateAssembler.PushFunctionCall(functionCallResult)
+							if lateAssembler.Err() != nil {
+								continue
+							}
+							if !done {
+								active.Assembler = lateAssembler
+								active.Streaming = true
+								active.ArgumentsStarted = argumentDelta != ""
+								active.ArgumentsClosed = false
+							}
+						case active.ArgumentsClosed:
+							argumentDelta = antigravityOpenAILateContinuationArguments(functionCallResult.Get("args"))
+						default:
+							argumentDelta = antigravityOpenAIContinuationArguments(active, functionCallResult.Get("args"))
+							if explicitEnd && !active.ArgumentsClosed {
+								if active.ArgumentsStarted {
+									argumentDelta += "}"
+								} else if active.Streaming {
+									argumentDelta = "{}"
+									active.ArgumentsStarted = true
+								}
+								active.ArgumentsClosed = true
+							}
+						}
+						if argumentDelta != "" {
+							ensureToolCallsArray()
 							appendAntigravityOpenAIToolCallDelta(templateDoc, active.Index, argumentDelta)
+							_ = templateDoc.Set("choices.0.delta.role", "assistant")
 						}
 						params.ActiveToolCall = active
-						_ = templateDoc.Set("choices.0.delta.role", "assistant")
+						continue
+					}
+					if !functionCallResult.Get("args").Exists() && !hasPartialArgs {
 						continue
 					}
 				}
 
+				var partialAssembler *translatorcommon.VertexPartialArgsAssembler
+				var partialDelta string
+				var partialDone bool
+				if hasPartialArgs {
+					partialAssembler = translatorcommon.NewVertexPartialArgsAssembler()
+					partialDelta, partialDone = partialAssembler.PushFunctionCall(functionCallResult)
+					if partialAssembler.Err() != nil {
+						continue
+					}
+				}
+
+				params.SawToolCall = true // Persist across chunks
+				ensureToolCallsArray()
+
 				functionCallIndex := params.FunctionIndex
 				params.FunctionIndex++
 				fcDoc := ojson.NewDocString(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":"{}"}}`)
-				if translatorcommon.IsVertexStreamingFunctionCall(functionCallResult) && !functionCallResult.Get("args").Exists() {
-					_ = fcDoc.Set("function.arguments", "")
-				}
 				fcName := util.RestoreSanitizedToolName(params.SanitizedNameMap, rawName)
 				fcID := upstreamID
 				if fcID == "" {
 					fcID = fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1))
 				}
-				active := &antigravityOpenAIToolCall{Index: functionCallIndex, UpstreamID: upstreamID}
+				active = &antigravityOpenAIToolCall{
+					Index:      functionCallIndex,
+					RawName:    rawName,
+					UpstreamID: upstreamID,
+					Streaming:  willContinue || hasPartialArgs,
+				}
+				switch {
+				case partialAssembler != nil:
+					_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(fcDoc, "function.arguments", partialDelta)
+					active.ArgumentsStarted = partialDelta != ""
+					if partialDone {
+						active.ArgumentsClosed = true
+					} else {
+						active.Assembler = partialAssembler
+					}
+				case functionCallResult.Get("args").Exists():
+					fcArgsResult := functionCallResult.Get("args")
+					if willContinue {
+						_ = fcDoc.Set("function.arguments", antigravityOpenAIStartArguments(active, fcArgsResult))
+					} else {
+						_ = fcDoc.Set("function.arguments", fcArgsResult.Raw)
+						active.ArgumentsStarted = true
+						active.ArgumentsClosed = true
+					}
+				case willContinue:
+					_ = fcDoc.Set("function.arguments", "")
+				default:
+					active.ArgumentsStarted = true
+					active.ArgumentsClosed = true
+				}
 				params.ActiveToolCall = active
 				params.ToolCalls = append(params.ToolCalls, active)
 				if upstreamID != "" {
@@ -250,9 +375,6 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				_ = fcDoc.Set("id", fcID)
 				_ = fcDoc.Set("index", functionCallIndex)
 				_ = fcDoc.Set("function.name", fcName)
-				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
-					_ = fcDoc.Set("function.arguments", antigravityOpenAIStartArguments(active, fcArgsResult))
-				}
 				_ = templateDoc.Set("choices.0.delta.role", "assistant")
 				_ = templateDoc.SetRawBytes("choices.0.delta.tool_calls.-1", fcDoc.Bytes())
 			} else if inlineDataResult.Exists() {
@@ -365,12 +487,72 @@ func antigravityOpenAIContinuationArguments(call *antigravityOpenAIToolCall, arg
 	return prefix + members
 }
 
+func antigravityOpenAIHasPartialArgs(fc ojson.Result) bool {
+	if !fc.Exists() || !fc.IsObject() {
+		return false
+	}
+	partialArgs := fc.Get("partialArgs")
+	if !partialArgs.Exists() {
+		partialArgs = fc.Get("partial_args")
+	}
+	if !partialArgs.Exists() {
+		return false
+	}
+	if partialArgs.IsArray() && len(partialArgs.Array()) == 0 && fc.Get("args").Exists() && !translatorcommon.VertexFunctionCallWillContinue(fc) {
+		return false
+	}
+	return true
+}
+
+func (c *antigravityOpenAIToolCall) canContinuePartialArgs(fc ojson.Result) bool {
+	if c == nil || c.Assembler == nil || c.ArgumentsClosed || !fc.Exists() || !fc.IsObject() {
+		return false
+	}
+	if fc.Get("args").Exists() && !translatorcommon.IsVertexStreamingFunctionCall(fc) {
+		return false
+	}
+	fcID := strings.TrimSpace(fc.Get("id").String())
+	if fcID != "" && c.UpstreamID != "" && fcID != c.UpstreamID {
+		return false
+	}
+	rawName := strings.TrimSpace(fc.Get("name").String())
+	if rawName == "" {
+		return true
+	}
+	if rawName != c.RawName {
+		return false
+	}
+	if fcID != "" && c.UpstreamID != "" && fcID == c.UpstreamID {
+		return true
+	}
+	return c.Assembler.CanAcceptContinuation(fc)
+}
+
+func antigravityOpenAILateContinuationArguments(args ojson.Result) string {
+	if !args.Exists() || !args.IsObject() {
+		return ""
+	}
+	raw := strings.TrimSpace(args.Raw)
+	if len(raw) < 2 || raw[0] != '{' || raw[len(raw)-1] != '}' {
+		return ""
+	}
+	if strings.TrimSpace(raw[1:len(raw)-1]) == "" {
+		return ""
+	}
+	return raw
+}
+
+func antigravityOpenAIExplicitlyEndsContinuation(fc ojson.Result) bool {
+	return !translatorcommon.VertexFunctionCallWillContinue(fc) &&
+		(fc.Get("willContinue").Type == ojson.False || fc.Get("will_continue").Type == ojson.False)
+}
+
 func hasOpenAntigravityOpenAIToolArguments(params *convertCliResponseToOpenAIChatParams) bool {
 	if params == nil {
 		return false
 	}
 	for _, call := range params.ToolCalls {
-		if call != nil && call.ArgumentsStarted && !call.ArgumentsClosed {
+		if call != nil && !call.ArgumentsClosed && (call.ArgumentsStarted || call.Streaming || call.Assembler != nil) {
 			return true
 		}
 	}
@@ -383,10 +565,30 @@ func appendAntigravityOpenAIToolCallCloses(doc *ojson.Doc, params *convertCliRes
 	}
 	appended := false
 	for _, call := range params.ToolCalls {
-		if call == nil || call.ArgumentsClosed || !call.ArgumentsStarted {
+		if call == nil || call.ArgumentsClosed {
 			continue
 		}
-		appendAntigravityOpenAIToolCallDelta(doc, call.Index, "}")
+		if call.Assembler != nil {
+			if call.Assembler.Err() == nil {
+				closing, _ := call.Assembler.PushFunctionCall(ojson.Parse("{}"))
+				if call.Assembler.Err() == nil && closing != "" {
+					appendAntigravityOpenAIToolCallDelta(doc, call.Index, closing)
+					appended = true
+				}
+			}
+			call.Assembler = nil
+			call.ArgumentsClosed = true
+			continue
+		}
+		if !call.ArgumentsStarted && !call.Streaming {
+			continue
+		}
+		closing := "}"
+		if !call.ArgumentsStarted {
+			closing = "{}"
+			call.ArgumentsStarted = true
+		}
+		appendAntigravityOpenAIToolCallDelta(doc, call.Index, closing)
 		call.ArgumentsClosed = true
 		appended = true
 	}
@@ -396,7 +598,7 @@ func appendAntigravityOpenAIToolCallCloses(doc *ojson.Doc, params *convertCliRes
 func appendAntigravityOpenAIToolCallDelta(doc *ojson.Doc, index int, arguments string) {
 	fcDoc := ojson.NewDocString(`{"index":0,"function":{"arguments":""}}`)
 	_ = fcDoc.Set("index", index)
-	_ = fcDoc.Set("function.arguments", arguments)
+	_ = translatorcommon.SetStringWithoutHTMLEscapeDoc(fcDoc, "function.arguments", arguments)
 	_ = doc.SetRawBytes("choices.0.delta.tool_calls.-1", fcDoc.Bytes())
 }
 
