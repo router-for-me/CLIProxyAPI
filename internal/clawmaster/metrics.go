@@ -81,8 +81,8 @@ type instruments struct {
 	tokensByClient    metric.Int64Counter
 	tokensByProject   metric.Int64Counter
 	tokensByModel     metric.Int64Counter
-	costByAccount     metric.Float64Counter
-	costByModel       metric.Float64Counter
+	premiumByAccount  metric.Int64Counter
+	premiumByModel    metric.Int64Counter
 	picks             metric.Int64Counter
 	switches          metric.Int64Counter
 	backup            metric.Int64Counter
@@ -207,12 +207,8 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.tokensByClient = counter("claw_master.inference.tokens.by_client", "Tokens by client (the connecting box) and type")
 	i.tokensByProject = counter("claw_master.inference.tokens.by_project", "Tokens by project (the launch directory's repository name) and type")
 	i.tokensByModel = counter("claw_master.inference.tokens.by_model", "Tokens by model (the request's) and type")
-	dollars := func(name, desc string) metric.Float64Counter {
-		c, _ := m.Float64Counter(name, metric.WithUnit("USD"), metric.WithDescription(desc))
-		return c
-	}
-	i.costByAccount = dollars("claw_master.inference.api_cost.by_client_account", "What each client account's tokens would cost at Claude API prices, in US dollars")
-	i.costByModel = dollars("claw_master.inference.api_cost.by_model", "What each model's tokens would cost at Claude API prices, in US dollars")
+	i.premiumByAccount = counter("claw_master.inference.premium_tokens.by_client_account", "Tokens the API bills above its standard rate (rate: 1h cache writes, fast mode, fast_1h), by client account and type; also counted in tokens.by_client_account")
+	i.premiumByModel = counter("claw_master.inference.premium_tokens.by_model", "Tokens the API bills above its standard rate (rate: 1h cache writes, fast mode, fast_1h), by model and type; also counted in tokens.by_model")
 	i.picks = counter("claw_master.routing.picks", "Routing decisions by chosen profile")
 	i.switches = counter("claw_master.routing.switches", "Conversations moved to another account, by from, to and reason")
 	i.backup = counter("claw_master.routing.backup_requests", "Requests served by the paid API-key backup")
@@ -492,12 +488,14 @@ type requestObservation struct {
 	RateLimits http.Header // the upstream response headers
 	Tokens     tokenCounts // the usage the response reported, when HasTokens
 	HasTokens  bool
-	Fast       bool // the request asked for fast mode (speed "fast"), which the API prices higher
+	Fast       bool // the request asked for fast mode (speed "fast"), which the API bills higher
 }
 
 // observeTokens counts one request's tokens. Like the request metrics, each axis (profile, user
-// account, client, project, model) is its own projection with the token type. It also prices them
-// at the model's API rates for the account and the model; a model with no price adds no cost.
+// account, client, project, model) is its own projection with the token type. The tokens the API
+// bills above its standard rate are counted again by account and by model under their rate, so the
+// dashboard, which holds the prices, can price them: "1h" for cache writes kept an hour, "fast" for
+// a fast-mode request's tokens, "fast_1h" for both.
 func observeTokens(profile, client, account, project, model string, counts tokenCounts, fast bool) {
 	projectAttr := attribute.String("project", projectMetricLabel(project))
 	modelAttr := attribute.String("model", model)
@@ -522,10 +520,40 @@ func observeTokens(profile, client, account, project, model string, counts token
 		t.tokensByProject.Add(ctx, kind.count, claudeAttrs(projectAttr, typ))
 		t.tokensByModel.Add(ctx, kind.count, claudeAttrs(modelAttr, typ))
 	}
-	if cost, ok := apiCost(model, counts, fast); ok && cost > 0 {
-		t.costByAccount.Add(ctx, cost, claudeAttrs(attribute.String("client_account", account)))
-		t.costByModel.Add(ctx, cost, claudeAttrs(modelAttr))
+	accountAttr := attribute.String("client_account", account)
+	for _, p := range premiumTokens(counts, fast) {
+		typ, rate := attribute.String("type", p.typ), attribute.String("rate", p.rate)
+		t.premiumByAccount.Add(ctx, p.count, claudeAttrs(accountAttr, typ, rate))
+		t.premiumByModel.Add(ctx, p.count, claudeAttrs(modelAttr, typ, rate))
 	}
+}
+
+type premiumCount struct {
+	typ, rate string
+	count     int64
+}
+
+// premiumTokens splits one response's tokens that the API bills above its standard rate by type and
+// rate: every token of a fast-mode request ("fast", or "fast_1h" for its hour-long cache writes),
+// else the hour-long cache writes ("1h"). The hour-long part is clamped to the cache writes.
+func premiumTokens(counts tokenCounts, fast bool) []premiumCount {
+	oneHour := min(max(counts.cacheCreation1h, 0), max(counts.cacheCreation, 0))
+	var out []premiumCount
+	add := func(typ, rate string, n int64) {
+		if n > 0 {
+			out = append(out, premiumCount{typ, rate, n})
+		}
+	}
+	if !fast {
+		add("cache_creation", "1h", oneHour)
+		return out
+	}
+	add("input", "fast", counts.input)
+	add("output", "fast", counts.output)
+	add("cache_read", "fast", counts.cacheRead)
+	add("cache_creation", "fast", counts.cacheCreation-oneHour)
+	add("cache_creation", "fast_1h", oneHour)
+	return out
 }
 
 func observeRequest(o requestObservation) {

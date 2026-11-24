@@ -3,13 +3,11 @@ package clawmaster
 import (
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"testing"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const tokenTestSSE = "event: message_start\r\n" +
@@ -159,41 +157,19 @@ func TestTokensOfAnInferenceRequestAreCounted(t *testing.T) {
 					t.Errorf("tokens.by_project{project=none,type=%s} = %d, want %d", typ, got, n)
 				}
 			}
-			// claude-opus-5 at $5 input, $6.25 cache write, $0.50 cache read and $25 output per MTok.
-			const cost = (11*5 + 40*6.25 + 300*0.50 + 25*25) / 1e6
-			for name, shape := range map[string]map[string]string{
-				"claw_master.inference.api_cost.by_client_account": {"client_account": "alice"},
-				"claw_master.inference.api_cost.by_model":          {"model": "claude-opus-5"},
-			} {
-				if got := dollarsOf(rm, name, shape); math.Abs(got-cost) > 1e-12 {
-					t.Errorf("%s%v = %v, want %v", name, shape, got, cost)
+			// A standard request with 5-minute cache writes bills nothing above the standard rate.
+			for _, name := range []string{"claw_master.inference.premium_tokens.by_client_account", "claw_master.inference.premium_tokens.by_model"} {
+				if got := sumOf(rm, name, map[string]string{}); got != 0 {
+					t.Errorf("%s = %d, want 0", name, got)
 				}
 			}
 		})
 	}
 }
 
-// dollarsOf sums a float counter's points that carry the given attributes.
-func dollarsOf(rm metricdata.ResourceMetrics, name string, want map[string]string) float64 {
-	m := findMetric(rm, name)
-	if m == nil {
-		return 0
-	}
-	data, ok := m.Data.(metricdata.Sum[float64])
-	if !ok {
-		return 0
-	}
-	var total float64
-	for _, p := range data.DataPoints {
-		if attrsMatch(attributesOf(p.Attributes), want) {
-			total += p.Value
-		}
-	}
-	return total
-}
-
-// A request for fast mode is priced at fast mode's rates; a model with no price adds no cost.
-func TestAPICostFollowsFastModeAndSkipsUnpricedModels(t *testing.T) {
+// A fast-mode request's tokens are counted again by account and by model under rate "fast"; a
+// standard request's hour-long cache writes under rate "1h".
+func TestPremiumTokensCountFastModeAndHourLongWrites(t *testing.T) {
 	reader := startMetrics(t, map[string]string{testAccountUUID: "alice"})
 	backend := newBackendNativeResponseFixture(t)
 	backend.manager.SetRoundTripperProvider(&tokenUpstream{})
@@ -203,18 +179,29 @@ func TestAPICostFollowsFastModeAndSkipsUnpricedModels(t *testing.T) {
 	if rec := serve(t, backend, fast); rec.Code != http.StatusOK {
 		t.Fatalf("status %d", rec.Code)
 	}
-	observeTokens("claude-primary", "box", "bob", "project", "claude-test-model", tokenCounts{input: 1000, output: 1000}, false)
+	observeTokens("claude-primary", "box", "bob", "project", "claude-test-model", tokenCounts{input: 1000, cacheCreation: 70, cacheCreation1h: 50}, false)
 	rm := collect(t, reader)
-	// Fast mode doubles claude-opus-5's rates, its cache rates with them.
-	const cost = 2 * (11*5 + 40*6.25 + 300*0.50 + 25*25) / 1e6
-	if got := dollarsOf(rm, "claw_master.inference.api_cost.by_client_account", map[string]string{"client_account": "alice"}); math.Abs(got-cost) > 1e-12 {
-		t.Errorf("fast request cost %v, want %v", got, cost)
+	for typ, n := range map[string]int64{"input": 11, "output": 25, "cache_read": 300, "cache_creation": 40} {
+		for name, shape := range map[string]map[string]string{
+			"claw_master.inference.premium_tokens.by_client_account": {"client_account": "alice", "type": typ, "rate": "fast"},
+			"claw_master.inference.premium_tokens.by_model":          {"model": "claude-opus-5", "type": typ, "rate": "fast"},
+		} {
+			if got := sumOf(rm, name, shape); got != n {
+				t.Errorf("%s%v = %d, want %d", name, shape, got, n)
+			}
+		}
 	}
-	if got := dollarsOf(rm, "claw_master.inference.api_cost.by_client_account", map[string]string{"client_account": "bob"}); got != 0 {
-		t.Errorf("an unpriced model cost %v", got)
-	}
-	if got := dollarsOf(rm, "claw_master.inference.api_cost.by_model", map[string]string{"model": "claude-test-model"}); got != 0 {
-		t.Errorf("an unpriced model cost %v", got)
+	for name, shape := range map[string]map[string]string{
+		"claw_master.inference.premium_tokens.by_client_account": {"client_account": "bob"},
+		"claw_master.inference.premium_tokens.by_model":          {"model": "claude-test-model"},
+	} {
+		if got := sumOf(rm, name, shape); got != 50 {
+			t.Errorf("%s%v = %d, want the 50 hour-long writes", name, shape, got)
+		}
+		shape["rate"], shape["type"] = "1h", "cache_creation"
+		if got := sumOf(rm, name, shape); got != 50 {
+			t.Errorf("%s%v = %d, want 50", name, shape, got)
+		}
 	}
 }
 

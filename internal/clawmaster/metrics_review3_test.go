@@ -126,7 +126,12 @@ func TestNoMetricCrossesTheAxes(t *testing.T) {
 	backend.manager.SetRoundTripperProvider(&upstream{status: 529, headers: http.Header{"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.1"}}})
 	_ = serve(t, backend, inferenceRequest(testAccountUUID, true))
 	observeControl(httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	// Every token series too, the premium ones included: a fast request with hour-long writes.
+	observeTokens("claude-primary", "box", "alice", "project", "claude-test-model", tokenCounts{input: 1, output: 1, cacheRead: 1, cacheCreation: 2, cacheCreation1h: 1}, true)
 	rm := collect(t, reader)
+	if findMetric(rm, "claw_master.inference.premium_tokens.by_model") == nil || findMetric(rm, "claw_master.inference.premium_tokens.by_client_account") == nil {
+		t.Fatal("no premium token series to check")
+	}
 	seen := 0
 	for _, scope := range rm.ScopeMetrics {
 		for _, m := range scope.Metrics {
