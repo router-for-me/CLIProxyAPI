@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 // meteredWriter notes when the first response byte (or the headers that announce it) leaves, so a
@@ -69,6 +70,7 @@ func finishRequest(c *gin.Context, ctx context.Context, opts BackendOptions, w *
 	}
 	if len(raw) > 0 {
 		obs.Account = clientAccountKey(raw)
+		obs.Fast = gjson.GetBytes(raw, "speed").String() == "fast"
 	}
 	if !w.firstWrite.IsZero() {
 		obs.TTFB = w.firstWrite.Sub(started)

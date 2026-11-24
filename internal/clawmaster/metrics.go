@@ -81,6 +81,8 @@ type instruments struct {
 	tokensByClient    metric.Int64Counter
 	tokensByProject   metric.Int64Counter
 	tokensByModel     metric.Int64Counter
+	costByAccount     metric.Float64Counter
+	costByModel       metric.Float64Counter
 	picks             metric.Int64Counter
 	switches          metric.Int64Counter
 	backup            metric.Int64Counter
@@ -205,6 +207,12 @@ func buildInstruments(m metric.Meter, labels map[string]string) *instruments {
 	i.tokensByClient = counter("claw_master.inference.tokens.by_client", "Tokens by client (the connecting box) and type")
 	i.tokensByProject = counter("claw_master.inference.tokens.by_project", "Tokens by project (the launch directory's repository name) and type")
 	i.tokensByModel = counter("claw_master.inference.tokens.by_model", "Tokens by model (the request's) and type")
+	dollars := func(name, desc string) metric.Float64Counter {
+		c, _ := m.Float64Counter(name, metric.WithUnit("USD"), metric.WithDescription(desc))
+		return c
+	}
+	i.costByAccount = dollars("claw_master.inference.api_cost.by_client_account", "What each client account's tokens would cost at Claude API prices, in US dollars")
+	i.costByModel = dollars("claw_master.inference.api_cost.by_model", "What each model's tokens would cost at Claude API prices, in US dollars")
 	i.picks = counter("claw_master.routing.picks", "Routing decisions by chosen profile")
 	i.switches = counter("claw_master.routing.switches", "Conversations moved to another account, by from, to and reason")
 	i.backup = counter("claw_master.routing.backup_requests", "Requests served by the paid API-key backup")
@@ -484,11 +492,13 @@ type requestObservation struct {
 	RateLimits http.Header // the upstream response headers
 	Tokens     tokenCounts // the usage the response reported, when HasTokens
 	HasTokens  bool
+	Fast       bool // the request asked for fast mode (speed "fast"), which the API prices higher
 }
 
 // observeTokens counts one request's tokens. Like the request metrics, each axis (profile, user
-// account, client, project, model) is its own projection with the token type.
-func observeTokens(profile, client, account, project, model string, counts tokenCounts) {
+// account, client, project, model) is its own projection with the token type. It also prices them
+// at the model's API rates for the account and the model; a model with no price adds no cost.
+func observeTokens(profile, client, account, project, model string, counts tokenCounts, fast bool) {
 	projectAttr := attribute.String("project", projectMetricLabel(project))
 	modelAttr := attribute.String("model", model)
 	t := tm()
@@ -511,6 +521,10 @@ func observeTokens(profile, client, account, project, model string, counts token
 		t.tokensByClient.Add(ctx, kind.count, claudeAttrs(attribute.String("client", client), typ))
 		t.tokensByProject.Add(ctx, kind.count, claudeAttrs(projectAttr, typ))
 		t.tokensByModel.Add(ctx, kind.count, claudeAttrs(modelAttr, typ))
+	}
+	if cost, ok := apiCost(model, counts, fast); ok && cost > 0 {
+		t.costByAccount.Add(ctx, cost, claudeAttrs(attribute.String("client_account", account)))
+		t.costByModel.Add(ctx, cost, claudeAttrs(modelAttr))
 	}
 }
 
@@ -539,7 +553,7 @@ func observeRequest(o requestObservation) {
 	t.inferenceByModel.Add(ctx, 1, claudeAttrs(model, class))
 	t.inferenceByClient.Add(ctx, 1, claudeAttrs(client, account))
 	if o.HasTokens {
-		observeTokens(o.Profile, o.Client, o.Account, o.Project, o.Model, o.Tokens)
+		observeTokens(o.Profile, o.Client, o.Account, o.Project, o.Model, o.Tokens, o.Fast)
 	}
 	if o.Status >= 400 || o.Status == 0 {
 		t.inferenceErrors.Add(ctx, 1, claudeAttrs(profile, attribute.String("status", strconv.Itoa(o.Status)), account))
