@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ConfigV8ContextKey marks operations registered by the v8 API that save configuration.
+// ConfigV8ContextKey marks operations registered by the v8 management API.
 const ConfigV8ContextKey = "management.config-v8"
 
 // ConfigV8 serves the persisted configuration using v8 names. GET is a view;

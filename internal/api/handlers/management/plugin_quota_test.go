@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -305,6 +306,68 @@ func TestPluginSpecificQuotaEndpoints(t *testing.T) {
 	h.ResetPluginQuota(ctxDel)
 	if recDel.Code != http.StatusOK {
 		t.Fatalf("expected DELETE status 200, got %d: %s", recDel.Code, recDel.Body.String())
+	}
+}
+
+func TestPluginQuotaFetchPreservesV8ErrorStatus(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{ID: "quota-auth", FileName: "quota.json", Provider: "test"}
+	authIndex := auth.EnsureIndex()
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	for _, tt := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"expired credential", &coreauth.Error{HTTPStatus: http.StatusUnauthorized, Message: "reauthorize"}, http.StatusUnauthorized},
+		{"unsupported key", &coreauth.Error{HTTPStatus: http.StatusNotImplemented, Message: "unsupported"}, http.StatusNotImplemented},
+		{"rate limited", &coreauth.Error{HTTPStatus: http.StatusTooManyRequests, Message: "limited"}, http.StatusTooManyRequests},
+		{"unknown upstream failure", errors.New("transport failed"), http.StatusBadGateway},
+		{"invalid upstream status", &coreauth.Error{HTTPStatus: http.StatusOK, Message: "unexpected"}, http.StatusBadGateway},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			host := pluginhost.New()
+			host.RegisterPluginForTest("test-plugin", pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					QuotaProvider: &mockQuotaProvider{
+						identifier: "test",
+						fetchFn: func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+							return pluginapi.QuotaFetchResponse{}, tt.err
+						},
+					},
+				},
+			})
+			h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+			h.SetPluginHost(host)
+			for _, v8 := range []bool{false, true} {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Params = gin.Params{{Key: "id", Value: "test-plugin"}}
+				c.Request = httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"auth_index":"`+authIndex+`"}`))
+				c.Request.Header.Set("Content-Type", "application/json")
+				if v8 {
+					c.Set(ConfigV8ContextKey, true)
+				}
+				h.FetchPluginQuota(c)
+
+				wantStatus, wantCode := http.StatusBadGateway, ""
+				if v8 {
+					wantStatus, wantCode = tt.want, "quota_fetch_failed"
+				}
+				var body struct {
+					Error string `json:"error"`
+					Code  string `json:"code"`
+				}
+				if errDecode := json.Unmarshal(rec.Body.Bytes(), &body); errDecode != nil {
+					t.Fatal(errDecode)
+				}
+				if rec.Code != wantStatus || body.Code != wantCode || !strings.Contains(body.Error, tt.err.Error()) {
+					t.Fatalf("v8=%t: HTTP %d %s, want HTTP %d with code %q", v8, rec.Code, rec.Body.String(), wantStatus, wantCode)
+				}
+			}
+		})
 	}
 }
 

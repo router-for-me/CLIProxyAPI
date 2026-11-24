@@ -293,7 +293,16 @@ func (h *Handler) fetchQuotaForPlugin(c *gin.Context, pluginID, authIndex string
 		return
 	}
 	if errFetch != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to fetch quota: %v", errFetch)})
+		status := http.StatusBadGateway
+		body := gin.H{"error": fmt.Sprintf("failed to fetch quota: %v", errFetch)}
+		if c.GetBool(ConfigV8ContextKey) {
+			if upstream := clienterror.HTTPStatusFromError(errFetch); upstream >= 400 && upstream < 600 {
+				status = upstream
+			}
+			// Let callers distinguish credential errors from management API authentication.
+			body["code"] = "quota_fetch_failed"
+		}
+		c.JSON(status, body)
 		return
 	}
 	c.JSON(http.StatusOK, quotaResp)
