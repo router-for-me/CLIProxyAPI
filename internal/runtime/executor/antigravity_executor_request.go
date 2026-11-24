@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -963,12 +964,16 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, selection cliproxyauth.Antigr
 	isImageModel := strings.Contains(strings.ToLower(modelName), "image")
 	reqType := strings.TrimSpace(doc.Get("requestType").String())
 	if reqType == "" {
-		if isImageModel {
+		// Upstream throttles the agent resource pool. Only mark a request as agent when
+		// it actually carries tools; plain chat omits requestType (Antigravity Tools parity).
+		switch {
+		case isImageModel:
 			reqType = "image_gen"
-		} else {
+			_ = doc.Set("requestType", reqType)
+		case antigravityDocHasTools(doc):
 			reqType = "agent"
+			_ = doc.Set("requestType", reqType)
 		}
-		_ = doc.Set("requestType", reqType)
 	}
 
 	if projectID != "" {
@@ -1017,6 +1022,7 @@ func geminiToAntigravityDocForAuth(doc *ojson.Doc, selection cliproxyauth.Antigr
 		}
 	}
 
+	ensureAntigravityIdentity(doc)
 	_ = doc.Delete("request.safetySettings")
 	if toolConfig := doc.Get("toolConfig"); toolConfig.Exists() && !doc.Get("request.toolConfig").Exists() {
 		_ = doc.SetRawBytes("request.toolConfig", []byte(toolConfig.Raw))
@@ -1109,4 +1115,70 @@ func generateStableSessionIDFromContentsForAuth(contents ojson.Result, authID st
 		return stableID
 	}
 	return generateSessionID()
+}
+
+// antigravityDocHasTools reports whether the outgoing request carries tool definitions
+// or tool call/response parts, mirroring Antigravity Tools requestType gating.
+func antigravityDocHasTools(doc *ojson.Doc) bool {
+	if doc == nil {
+		return false
+	}
+	if tools := doc.Get("request.tools"); tools.Exists() {
+		raw := strings.TrimSpace(tools.Raw)
+		if raw != "" && raw != "[]" && raw != "null" && raw != "{}" {
+			return true
+		}
+	}
+	if contents := doc.Get("request.contents"); contents.Exists() {
+		raw := contents.Raw
+		if strings.Contains(raw, "functionCall") || strings.Contains(raw, "functionResponse") ||
+			strings.Contains(raw, "function_call") || strings.Contains(raw, "function_response") {
+			return true
+		}
+	}
+	return false
+}
+
+// antigravityOfficialIdentity is the wording the real client sends in systemInstruction.
+const antigravityOfficialIdentity = "You are Antigravity, a powerful agentic AI coding agent designed by the Google Deepmind team working on Advanced Agentic Coding."
+
+// ensureAntigravityIdentity prepends the official identity so the request looks like a genuine client.
+func ensureAntigravityIdentity(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	var si map[string]any
+	if raw := doc.Get("request.systemInstruction"); raw.Exists() {
+		if err := json.Unmarshal([]byte(raw.Raw), &si); err != nil {
+			si = nil
+		}
+	}
+	if si == nil {
+		si = map[string]any{"role": "user"}
+	}
+	parts, _ := si["parts"].([]any)
+	text := ""
+	if len(parts) > 0 {
+		if p0, ok := parts[0].(map[string]any); ok {
+			text, _ = p0["text"].(string)
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(text), "You are Antigravity") {
+		return
+	}
+	merged := antigravityOfficialIdentity
+	if trimmed := strings.TrimSpace(text); trimmed != "" {
+		merged += "\n\n" + text
+	}
+	part := map[string]any{"text": merged}
+	if len(parts) == 0 {
+		parts = []any{part}
+	} else {
+		parts[0] = part
+	}
+	si["parts"] = parts
+	si["role"] = "user"
+	if out, err := json.Marshal(si); err == nil {
+		_ = doc.SetRawBytes("request.systemInstruction", out)
+	}
 }
