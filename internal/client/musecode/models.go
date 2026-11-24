@@ -936,6 +936,8 @@ func inferOwnedByFromType(t string) string {
 	switch t {
 	case "meta":
 		return "meta"
+	case "copilot":
+		return "copilot"
 	case "devin":
 		return "devin"
 	case "claude", "antigravity":
@@ -960,6 +962,8 @@ func inferOwnedByFromName(name string) string {
 	switch {
 	case strings.HasPrefix(name, "muse-") || strings.HasPrefix(name, "agnes-"):
 		return "meta"
+	case strings.HasPrefix(name, "copilot/"):
+		return "copilot"
 	case strings.HasPrefix(name, "devin/"):
 		return "devin"
 	case strings.HasPrefix(name, "claude-"):
