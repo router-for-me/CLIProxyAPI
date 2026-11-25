@@ -145,7 +145,14 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 			if response := util.GetGJSONBytesNoCopy(rawJSON, "response"); response.Exists() {
 				chunk = geminiResponseBytes(rawJSON, response)
 				doc := ojson.NewDoc(chunk)
-				if restoreGeminiResponseFields(doc, "", nameMap) {
+				changed := restoreGeminiResponseFields(doc, "", nameMap)
+				if stripped, nothingLeft := stripEmptyThoughtParts(doc, ""); stripped {
+					if nothingLeft {
+						return [][]byte{}
+					}
+					changed = true
+				}
+				if changed {
 					chunk = doc.Bytes()
 				}
 			}
@@ -156,10 +163,18 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 				index := 0
 				for _, item := range items.Array() {
 					if response := item.Get("response"); response.Exists() {
+						prefix := strconv.Itoa(index) + "."
 						_ = doc.SetRaw("-1", response.Raw)
-						restoreGeminiResponseFields(doc, strconv.Itoa(index)+".", nameMap)
+						restoreGeminiResponseFields(doc, prefix, nameMap)
+						if stripped, nothingLeft := stripEmptyThoughtParts(doc, prefix); stripped && nothingLeft {
+							_ = doc.Delete(strconv.Itoa(index))
+							continue
+						}
 						index++
 					}
+				}
+				if index == 0 {
+					return [][]byte{}
 				}
 			}
 			chunk = doc.Bytes()
@@ -202,6 +217,9 @@ func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, or
 	} else {
 		changed = restoreGeminiFunctionNames(doc, "", nameMap)
 	}
+	if stripped, _ := stripEmptyThoughtParts(doc, ""); stripped {
+		changed = true
+	}
 	// Default every candidate, not just the first one, so a multi-candidate
 	// response cannot leave some of them unterminated.
 	if candidates := ojson.GetBytesNoCopy(chunk, "candidates"); candidates.IsArray() {
@@ -219,6 +237,65 @@ func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, or
 		return doc.Bytes()
 	}
 	return chunk
+}
+
+var thoughtFieldMarker = `"thought"`
+
+// stripEmptyThoughtParts drops parts that carry nothing but `"thought":true` and an
+// empty text. Antigravity flash-lite models emit such parts ahead of every answer even
+// when thoughts are not requested; Gemini API clients such as the Antigravity CLI then
+// read the response as empty (its search_web summary comes back blank). Parts with a
+// thoughtSignature, a function call or any other field are kept.
+//
+// The second result reports that nothing is left to deliver (no parts in any candidate,
+// no finishReason, no grounding metadata), so a streaming caller can skip the chunk or
+// array item entirely.
+func stripEmptyThoughtParts(doc *ojson.Doc, prefix string) (changed, nothingLeft bool) {
+	candidates := doc.Get(prefix + "candidates")
+	if !candidates.IsArray() || !strings.Contains(candidates.Raw, thoughtFieldMarker) {
+		return false, false
+	}
+	nothingLeft = true
+	for candidateIndex, candidate := range candidates.Array() {
+		parts := candidate.Get("content.parts")
+		kept := make([]string, 0, len(parts.Array()))
+		removed := false
+		for _, part := range parts.Array() {
+			if isEmptyThoughtPart(part) {
+				removed = true
+				continue
+			}
+			kept = append(kept, part.Raw)
+		}
+		if removed {
+			changed = true
+			_ = doc.SetRaw(fmt.Sprintf("%scandidates.%d.content.parts", prefix, candidateIndex), "["+strings.Join(kept, ",")+"]")
+		}
+		if len(kept) > 0 || candidate.Get("finishReason").String() != "" || candidate.Get("groundingMetadata").Exists() {
+			nothingLeft = false
+		}
+	}
+	return changed, nothingLeft
+}
+
+// isEmptyThoughtPart matches only `thought` as a JSON true and `text` absent or an empty
+// JSON string: ojson.Result.Bool/String would also accept "true", 1 and null.
+func isEmptyThoughtPart(part ojson.Result) bool {
+	if !part.IsObject() || part.Get("thought").Type != ojson.True {
+		return false
+	}
+	for key, value := range part.Map() {
+		switch key {
+		case "thought":
+		case "text":
+			if value.Type != ojson.String || value.Str != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // prefix is empty for a single response, or the output array index followed by a dot.

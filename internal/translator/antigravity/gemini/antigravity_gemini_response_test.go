@@ -311,3 +311,101 @@ func TestAntigravityGeminiResponseAllowsWhitespace(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertAntigravityResponseToGeminiStream_SkipsEmptyThoughtOnlyChunks(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "")
+	var param any
+
+	emptyThought := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]}}],"modelVersion":"gemini-3.1-flash-lite","responseId":"r1"}}`)
+	if got := ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, emptyThought, &param); len(got) != 0 {
+		t.Fatalf("empty thought-only chunk should be skipped, got %s", got[0])
+	}
+
+	mixed := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"text":"answer"}]}}]}}`)
+	got := ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, mixed, &param)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(got))
+	}
+	if parts := ojson.GetBytesNoCopy(got[0], "candidates.0.content.parts").Raw; parts != `[{"text":"answer"}]` {
+		t.Fatalf("parts = %s, want only the answer", parts)
+	}
+
+	signed := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"sig","text":""}]},"finishReason":"STOP"}]}}`)
+	got = ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, signed, &param)
+	if len(got) != 1 || ojson.GetBytesNoCopy(got[0], "candidates.0.content.parts.0.thoughtSignature").String() != "sig" {
+		t.Fatalf("signature part must be kept, got %v", got)
+	}
+
+	realThought := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"Thinking..."}]}}]}}`)
+	got = ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, realThought, &param)
+	if len(got) != 1 || ojson.GetBytesNoCopy(got[0], "candidates.0.content.parts.0.text").String() != "Thinking..." {
+		t.Fatalf("non-empty thought must be kept, got %v", got)
+	}
+
+	finishOnly := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]},"finishReason":"STOP"}]}}`)
+	got = ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, finishOnly, &param)
+	if len(got) != 1 || ojson.GetBytesNoCopy(got[0], "candidates.0.finishReason").String() != "STOP" {
+		t.Fatalf("chunk with finishReason must be delivered, got %v", got)
+	}
+
+	plainBody := `{"candidates":[{"content":{"role":"model","parts":[{"text":"answer"}]}}]}`
+	got = ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, []byte(`data: {"response":`+plainBody+`}`), &param)
+	if len(got) != 1 || string(got[0]) != plainBody {
+		t.Fatalf("thought-free chunk must pass unchanged, got %s", got)
+	}
+}
+
+func TestConvertAntigravityResponseToGeminiStream_KeepsPartsThatOnlyLookEmpty(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "")
+	for _, part := range []string{
+		`{"thought":"true","text":""}`,
+		`{"thought":1,"text":""}`,
+		`{"thought":true,"text":null}`,
+		`{"thought":false,"text":""}`,
+		`{"thought":true,"text":" "}`,
+		`{"thought":true,"text":"","thoughtSignature":"sig"}`,
+		`{"text":""}`,
+	} {
+		t.Run(part, func(t *testing.T) {
+			var param any
+			raw := []byte(`data: {"response":{"candidates":[{"content":{"parts":[` + part + `]}}]}}`)
+			got := ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, raw, &param)
+			if len(got) != 1 {
+				t.Fatalf("part must be kept, got %d chunks", len(got))
+			}
+			if parts := ojson.GetBytesNoCopy(got[0], "candidates.0.content.parts").Raw; parts != "["+part+"]" {
+				t.Fatalf("parts = %s, want the original part", parts)
+			}
+		})
+	}
+}
+
+func TestGeminiStreamJSONArraySkipsItemsStrippedToNothing(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "json")
+	empty := `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}}]}}`
+	answer := `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""},{"text":"answer"}]}}]}}`
+
+	if got := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte(`[`+empty+`,`+empty+`]`), nil); len(got) != 0 {
+		t.Fatalf("array of empty thought items should yield no chunk, got %s", got[0])
+	}
+
+	got := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte(`[`+empty+`,`+answer+`]`), nil)
+	if len(got) != 1 {
+		t.Fatalf("expected one chunk, got %d", len(got))
+	}
+	items := ojson.ParseBytes(got[0]).Array()
+	if len(items) != 1 {
+		t.Fatalf("expected only the surviving item, got %s", got[0])
+	}
+	if parts := items[0].Get("candidates.0.content.parts").Raw; parts != `[{"text":"answer"}]` {
+		t.Fatalf("parts = %s, want only the answer", parts)
+	}
+}
+
+func TestConvertAntigravityResponseToGeminiNonStream_StripsEmptyThoughtParts(t *testing.T) {
+	input := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""},{"thought":true,"text":""},{"thoughtSignature":"sig","text":"answer"}]},"finishReason":"STOP"}]}}`)
+	got := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "m", nil, nil, input, nil)
+	if parts := ojson.GetBytesNoCopy(got, "candidates.0.content.parts").Raw; parts != `[{"thoughtSignature":"sig","text":"answer"}]` {
+		t.Fatalf("parts = %s", parts)
+	}
+}
