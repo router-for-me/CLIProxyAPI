@@ -33,56 +33,145 @@ func TestConvertOpenAIResponseToGeminiStreamPreservesToolCallID(t *testing.T) {
 	}
 }
 
-func TestConvertOpenAIResponseToGeminiNonStream_MultiChoicePartsOverlay(t *testing.T) {
-	// Scenario 1: First choice has tool call, second choice has text on part 0 -> fields merge
-	raw1 := []byte(`{"choices":[
-		{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]}},
-		{"index":1,"message":{"role":"assistant","content":"choice 1 text"}}
-	]}`)
-	out1 := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gpt-test", nil, nil, raw1, nil)
-	parts1 := ojson.GetBytesNoCopy(out1, "candidates.0.content.parts").Array()
-	if len(parts1) != 1 {
-		t.Fatalf("expected 1 merged part, got %d. Output: %s", len(parts1), out1)
-	}
-	if parts1[0].Get("text").String() != "choice 1 text" {
-		t.Fatalf("expected text to be 'choice 1 text', got %q", parts1[0].Get("text").String())
-	}
-	if parts1[0].Get("functionCall.id").String() != "call_1" {
-		t.Fatalf("expected functionCall.id to be preserved as 'call_1', got %q", parts1[0].Get("functionCall.id").String())
+func TestConvertOpenAIResponseToGeminiNonStream_MultiChoiceCandidatesIsolated(t *testing.T) {
+	// Issue #8041 minimal reproduction: choice 0 has reasoning + visible text, choice 1 has visible text only.
+	raw := []byte(`{
+		"id": "chatcmpl-1",
+		"object": "chat.completion",
+		"model": "deepseek-r1",
+		"choices": [
+			{
+				"index": 0,
+				"message": {
+					"role": "assistant",
+					"reasoning_content": "secret thought 0",
+					"content": "visible answer 0"
+				},
+				"finish_reason": "stop"
+			},
+			{
+				"index": 1,
+				"message": {
+					"role": "assistant",
+					"content": "visible answer 1"
+				},
+				"finish_reason": "stop"
+			}
+		],
+		"usage": {
+			"prompt_tokens": 10,
+			"completion_tokens": 20,
+			"total_tokens": 30
+		}
+	}`)
+	out := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "deepseek-r1", nil, nil, raw, nil)
+	candidates := ojson.GetBytesNoCopy(out, "candidates").Array()
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 candidates, got %d; output=%s", len(candidates), out)
 	}
 
-	// Scenario 2: Reasoning in choice 0, text in choice 1 on part 0 -> thought preserved, text updated
-	raw2 := []byte(`{"choices":[
-		{"index":0,"message":{"role":"assistant","reasoning_content":"initial thought"}},
-		{"index":1,"message":{"role":"assistant","content":"final text"}}
-	]}`)
-	out2 := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gpt-test", nil, nil, raw2, nil)
-	parts2 := ojson.GetBytesNoCopy(out2, "candidates.0.content.parts").Array()
-	if len(parts2) != 1 {
-		t.Fatalf("expected 1 merged part, got %d. Output: %s", len(parts2), out2)
+	// Candidate 0 preserves its thought part and visible text part.
+	if got := candidates[0].Get("index").Int(); got != 0 {
+		t.Fatalf("candidates[0].index = %d, want 0", got)
 	}
-	if !parts2[0].Get("thought").Bool() {
-		t.Fatalf("expected thought: true to be preserved")
+	if got := candidates[0].Get("content.role").String(); got != "model" {
+		t.Fatalf("candidates[0].content.role = %q, want model", got)
 	}
-	if parts2[0].Get("text").String() != "final text" {
-		t.Fatalf("expected text to be 'final text', got %q", parts2[0].Get("text").String())
+	if got := candidates[0].Get("finishReason").String(); got != "STOP" {
+		t.Fatalf("candidates[0].finishReason = %q, want STOP", got)
+	}
+	c0Parts := candidates[0].Get("content.parts").Array()
+	if len(c0Parts) != 2 {
+		t.Fatalf("candidates[0] expected 2 parts, got %d; output=%s", len(c0Parts), out)
+	}
+	if !c0Parts[0].Get("thought").Bool() || c0Parts[0].Get("text").String() != "secret thought 0" {
+		t.Fatalf("unexpected candidates[0].parts[0]: %s", c0Parts[0].Raw)
+	}
+	if c0Parts[1].Get("thought").Exists() || c0Parts[1].Get("text").String() != "visible answer 0" {
+		t.Fatalf("unexpected candidates[0].parts[1]: %s", c0Parts[1].Raw)
 	}
 
-	// Scenario 3: Text in choice 0, functionCall in choice 1 on part 0 -> text preserved, functionCall added
-	raw3 := []byte(`{"choices":[
-		{"index":0,"message":{"role":"assistant","content":"original text"}},
-		{"index":1,"message":{"role":"assistant","tool_calls":[{"id":"call_2","type":"function","function":{"name":"search","arguments":"{}"}}]}}
+	// Candidate 1 is isolated with visible text only and no leaked thought flag.
+	if got := candidates[1].Get("index").Int(); got != 1 {
+		t.Fatalf("candidates[1].index = %d, want 1", got)
+	}
+	if got := candidates[1].Get("content.role").String(); got != "model" {
+		t.Fatalf("candidates[1].content.role = %q, want model", got)
+	}
+	if got := candidates[1].Get("finishReason").String(); got != "STOP" {
+		t.Fatalf("candidates[1].finishReason = %q, want STOP", got)
+	}
+	c1Parts := candidates[1].Get("content.parts").Array()
+	if len(c1Parts) != 1 {
+		t.Fatalf("candidates[1] expected 1 part, got %d; output=%s", len(c1Parts), out)
+	}
+	if c1Parts[0].Get("thought").Exists() || c1Parts[0].Get("text").String() != "visible answer 1" {
+		t.Fatalf("unexpected candidates[1].parts[0]: %s", c1Parts[0].Raw)
+	}
+
+	// Usage metadata and model are preserved at root.
+	if got := ojson.GetBytesNoCopy(out, "model").String(); got != "deepseek-r1" {
+		t.Fatalf("model = %q, want deepseek-r1", got)
+	}
+	if got := ojson.GetBytesNoCopy(out, "usageMetadata.totalTokenCount").Int(); got != 30 {
+		t.Fatalf("usageMetadata.totalTokenCount = %d, want 30", got)
+	}
+
+	// Tool call in choice 0 and text in choice 1 must stay in separate candidates without merging into one Part.
+	rawToolAndText := []byte(`{"choices":[
+		{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"a\"}"}}]},"finish_reason":"tool_calls"},
+		{"index":1,"message":{"role":"assistant","content":"choice 1 text"},"finish_reason":"length"}
 	]}`)
-	out3 := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gpt-test", nil, nil, raw3, nil)
-	parts3 := ojson.GetBytesNoCopy(out3, "candidates.0.content.parts").Array()
-	if len(parts3) != 1 {
-		t.Fatalf("expected 1 merged part, got %d. Output: %s", len(parts3), out3)
+	outToolAndText := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gpt-test", nil, nil, rawToolAndText, nil)
+	ttCands := ojson.GetBytesNoCopy(outToolAndText, "candidates").Array()
+	if len(ttCands) != 2 {
+		t.Fatalf("expected 2 candidates for tool+text response, got %d; output=%s", len(ttCands), outToolAndText)
 	}
-	if parts3[0].Get("text").String() != "original text" {
-		t.Fatalf("expected text to be 'original text', got %q", parts3[0].Get("text").String())
+	ttParts0 := ttCands[0].Get("content.parts").Array()
+	if len(ttParts0) != 1 || ttParts0[0].Get("functionCall.id").String() != "call_1" || ttParts0[0].Get("text").Exists() {
+		t.Fatalf("unexpected candidates[0] parts: %s", ttCands[0].Raw)
 	}
-	if parts3[0].Get("functionCall.id").String() != "call_2" {
-		t.Fatalf("expected functionCall.id to be 'call_2', got %q", parts3[0].Get("functionCall.id").String())
+	if got := ttCands[0].Get("finishReason").String(); got != "STOP" {
+		t.Fatalf("candidates[0].finishReason = %q, want STOP", got)
+	}
+	ttParts1 := ttCands[1].Get("content.parts").Array()
+	if len(ttParts1) != 1 || ttParts1[0].Get("text").String() != "choice 1 text" || ttParts1[0].Get("functionCall").Exists() {
+		t.Fatalf("unexpected candidates[1] parts: %s", ttCands[1].Raw)
+	}
+	if got := ttCands[1].Get("finishReason").String(); got != "MAX_TOKENS" {
+		t.Fatalf("candidates[1].finishReason = %q, want MAX_TOKENS", got)
+	}
+
+	// Null finish_reason on choice 1 must not inherit choice 0's finishReason, and reasoning/array content stays isolated per choice.
+	rawMixed := []byte(`{"choices":[
+		{"index":0,"message":{"role":"assistant","reasoning":"plan 0","content":[{"type":"text","text":"ans 0"}]},"finish_reason":"stop"},
+		{"index":1,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan 1"},{"type":"text","text":"ans 1"}]},"finish_reason":null}
+	]}`)
+	outMixed := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gemini-4-neon", nil, nil, rawMixed, nil)
+	mixedCands := ojson.GetBytesNoCopy(outMixed, "candidates").Array()
+	if len(mixedCands) != 2 {
+		t.Fatalf("expected 2 candidates for mixed response, got %d; output=%s", len(mixedCands), outMixed)
+	}
+	if got := mixedCands[0].Get("finishReason").String(); got != "STOP" {
+		t.Fatalf("mixedCands[0].finishReason = %q, want STOP", got)
+	}
+	if mixedCands[1].Get("finishReason").Exists() {
+		t.Fatalf("mixedCands[1] unexpectedly inherited finishReason: %s", mixedCands[1].Raw)
+	}
+	m0Parts := mixedCands[0].Get("content.parts").Array()
+	if len(m0Parts) != 2 || !m0Parts[0].Get("thought").Bool() || m0Parts[0].Get("text").String() != "plan 0" || m0Parts[1].Get("thought").Exists() || m0Parts[1].Get("text").String() != "ans 0" {
+		t.Fatalf("unexpected mixedCands[0].parts: %s", mixedCands[0].Raw)
+	}
+	m1Parts := mixedCands[1].Get("content.parts").Array()
+	if len(m1Parts) != 2 || !m1Parts[0].Get("thought").Bool() || m1Parts[0].Get("text").String() != "plan 1" || m1Parts[1].Get("thought").Exists() || m1Parts[1].Get("text").String() != "ans 1" {
+		t.Fatalf("unexpected mixedCands[1].parts: %s", mixedCands[1].Raw)
+	}
+
+	// Non-assistant role from an OpenAI-compatible upstream must still preserve Gemini candidate role "model".
+	rawRole := []byte(`{"choices":[{"index":0,"message":{"role":"tool","content":"ok"},"finish_reason":"stop"}]}`)
+	outRole := ConvertOpenAIResponseToGeminiNonStream(context.Background(), "gpt-test", nil, nil, rawRole, nil)
+	if got := ojson.GetBytesNoCopy(outRole, "candidates.0.content.role").String(); got != "model" {
+		t.Fatalf("candidates.0.content.role = %q, want model", got)
 	}
 }
 

@@ -580,53 +580,45 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 		_ = outDoc.Set("model", model.String())
 	}
 
-	var allParts [][]byte
-
 	// Process choices
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() {
-		choices.ForEach(func(choiceIndex, choice ojson.Result) bool {
-			choiceIdx := int(choice.Get("index").Int())
+		var candidates [][]byte
+		candidatePos := 0
+		choices.ForEach(func(_, choice ojson.Result) bool {
+			choiceIdx := candidatePos
+			if idx := choice.Get("index"); idx.Exists() && idx.Type == ojson.Number {
+				choiceIdx = int(idx.Int())
+			}
+			candidatePos++
 			message := choice.Get("message")
 
-			// Set role
-			if role := message.Get("role"); role.Exists() {
-				if role.String() == "assistant" {
-					_ = outDoc.Set("candidates.0.content.role", "model")
-				}
-			}
+			candDoc := ojson.NewDocString(`{"content":{"parts":[],"role":"model"},"index":0}`)
 
-			partIndex := 0
-			ensurePartDoc := func(idx int) *ojson.Doc {
-				for len(allParts) <= idx {
-					allParts = append(allParts, []byte(`{}`))
-				}
-				return ojson.NewDoc(allParts[idx])
-			}
+			var parts [][]byte
 
 			// Handle reasoning content before visible text
 			for _, reasoningText := range collectOpenAIObjectReasoningTexts(message) {
 				if reasoningText == "" {
 					continue
 				}
-				partDoc := ensurePartDoc(partIndex)
-				_ = partDoc.Set("thought", true)
+				partDoc := ojson.NewDocString(`{"thought":true,"text":""}`)
 				_ = partDoc.Set("text", reasoningText)
-				allParts[partIndex] = partDoc.Bytes()
-				partIndex++
+				parts = append(parts, partDoc.Bytes())
 			}
 
-			// Handle content first
+			// Handle visible and inline reasoning content segments
 			forEachOpenAIContentSegment(message.Get("content"), func(isReasoning bool, segText string) {
 				if segText == "" {
 					return
 				}
-				partDoc := ensurePartDoc(partIndex)
+				var partDoc *ojson.Doc
 				if isReasoning {
-					_ = partDoc.Set("thought", true)
+					partDoc = ojson.NewDocString(`{"thought":true,"text":""}`)
+				} else {
+					partDoc = ojson.NewDocString(`{"text":""}`)
 				}
 				_ = partDoc.Set("text", segText)
-				allParts[partIndex] = partDoc.Bytes()
-				partIndex++
+				parts = append(parts, partDoc.Bytes())
 			})
 
 			// Handle tool calls
@@ -638,7 +630,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 						functionArgs := function.Get("arguments").String()
 						functionID := toolCall.Get("id").String()
 
-						partDoc := ensurePartDoc(partIndex)
+						partDoc := ojson.NewDocString(`{"functionCall":{"name":""}}`)
 						if functionID != "" {
 							_ = partDoc.Set("functionCall.id", functionID)
 						}
@@ -647,27 +639,31 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, origina
 						if thoughtSig := openAIToolCallThoughtSignature(toolCall); thoughtSig != "" {
 							_ = partDoc.Set("thoughtSignature", thoughtSig)
 						}
-						allParts[partIndex] = partDoc.Bytes()
-						partIndex++
+						parts = append(parts, partDoc.Bytes())
 					}
 					return true
 				})
 			}
 
+			if len(parts) > 0 {
+				_ = candDoc.SetRawBytes("content.parts", translatorcommon.JoinRawArray(parts))
+			}
+
 			// Handle finish reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Type == ojson.String && finishReason.String() != "" {
 				geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
-				_ = outDoc.Set("candidates.0.finishReason", geminiFinishReason)
+				_ = candDoc.Set("finishReason", geminiFinishReason)
 			}
 
 			// Set index
-			_ = outDoc.Set("candidates.0.index", choiceIdx)
+			_ = candDoc.Set("index", choiceIdx)
 
+			candidates = append(candidates, candDoc.Bytes())
 			return true
 		})
 
-		if len(allParts) > 0 {
-			_ = outDoc.SetRawBytes("candidates.0.content.parts", translatorcommon.JoinRawArray(allParts))
+		if len(candidates) > 0 {
+			_ = outDoc.SetRawBytes("candidates", translatorcommon.JoinRawArray(candidates))
 		}
 	}
 
