@@ -2,6 +2,7 @@
 package thinking
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 
@@ -384,6 +385,13 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 				modified = true
 			}
 			return modified, nil
+		}
+		if docValid && (providerFormat == "gemini" || providerFormat == "antigravity" || providerFormat == "interactions") && stripThinkingFieldsDoc(doc, providerFormat) {
+			log.WithFields(log.Fields{
+				"model":    baseModel,
+				"provider": providerFormat,
+			}).Debug("thinking: model does not support thinking, stripping config |")
+			return true, nil
 		}
 		log.WithFields(log.Fields{
 			"provider": providerFormat,
@@ -782,11 +790,6 @@ func RequestedAntigravityThinkingLevel(body []byte, provider, model string) Thin
 			config = extractAntigravityInteractionsThinking(body)
 		default:
 			config = extractThinkingConfigForUsage(body, provider)
-			if !hasThinkingConfig(config) && (provider == "gemini" || provider == "antigravity") {
-				config = extractGeminiConfigFromGetter(func(path string) ojson.Result {
-					return ojson.GetBytesNoCopy(body, strings.Replace(path, ".thinkingConfig.", ".thinking_config.", 1))
-				}, provider)
-			}
 		}
 	}
 	switch config.Mode {
@@ -1043,12 +1046,21 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinking_config.thinkingLevel",
 		"generation_config.thinkingConfig.thinking_level",
 		"generation_config.thinkingConfig.thinkingLevel",
+		"generationConfig.thinking_level",
+		"generationConfig.thinkingLevel",
+		"generationConfig.thinking_config.thinking_level",
+		"generationConfig.thinking_config.thinkingLevel",
+		"generationConfig.thinkingConfig.thinking_level",
+		"generationConfig.thinkingConfig.thinkingLevel",
 	} {
 		level := get(path)
-		if !level.Exists() {
+		if level.Type != ojson.String {
 			continue
 		}
 		value := strings.ToLower(strings.TrimSpace(level.String()))
+		if value == "" {
+			continue
+		}
 		switch value {
 		case "none":
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -1066,12 +1078,17 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinking_config.thinkingBudget",
 		"generation_config.thinkingConfig.thinking_budget",
 		"generation_config.thinkingConfig.thinkingBudget",
+		"generationConfig.thinking_budget",
+		"generationConfig.thinkingBudget",
+		"generationConfig.thinking_config.thinking_budget",
+		"generationConfig.thinking_config.thinkingBudget",
+		"generationConfig.thinkingConfig.thinking_budget",
+		"generationConfig.thinkingConfig.thinkingBudget",
 	} {
-		budget := get(path)
-		if !budget.Exists() {
+		value, ok := parseInteractionsBudgetValue(get(path))
+		if !ok {
 			continue
 		}
-		value := int(budget.Int())
 		switch value {
 		case 0:
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -1083,6 +1100,25 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 	}
 
 	return ThinkingConfig{}
+}
+
+func parseInteractionsBudgetValue(budget ojson.Result) (int, bool) {
+	switch budget.Type {
+	case ojson.Number:
+		return int(budget.Int()), true
+	case ojson.String:
+		raw := strings.TrimSpace(budget.String())
+		if raw == "" {
+			return 0, false
+		}
+		value, errParse := strconv.Atoi(raw)
+		if errParse != nil {
+			return 0, false
+		}
+		return value, true
+	default:
+		return 0, false
+	}
 }
 
 func extractOpenAIConfig(body []byte) ThinkingConfig {
