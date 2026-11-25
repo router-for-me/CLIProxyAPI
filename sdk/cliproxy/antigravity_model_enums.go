@@ -67,11 +67,11 @@ func (s *Service) publishAntigravityModelEnums(ctx context.Context, auth *coreau
 	// the shared capability lock during KV I/O. The regular scan retries misses.
 	grantChanged := antigravityModelEnumGrant(auth) != entry.pendingEnumGrant
 	if !grantChanged {
-		store := coreauth.StoreAntigravityModelEnums
+		store := coreauth.StoreAntigravityModelCatalog
 		if s.coreManager != nil {
-			store = s.coreManager.StoreAntigravityModelEnums
+			store = s.coreManager.StoreAntigravityModelCatalog
 		}
-		if !store(ctx, auth, entry.pendingEnums) {
+		if !store(ctx, auth, entry.pendingEnums, entry.pendingGroups, entry.pendingThinkingWebSearch) {
 			return
 		}
 	}
@@ -80,6 +80,8 @@ func (s *Service) publishAntigravityModelEnums(ctx context.Context, auth *coreau
 	current := antigravityCapabilityCache[key]
 	if current.hints.revision == revision {
 		current.pendingEnums = nil
+		current.pendingGroups = nil
+		current.pendingThinkingWebSearch = nil
 		if grantChanged {
 			current.expiresAt = antigravityNowFunc()
 		}

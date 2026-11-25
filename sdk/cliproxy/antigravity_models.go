@@ -43,17 +43,19 @@ const (
 )
 
 type antigravityCapabilityCacheEntry struct {
-	hints             antigravityModelCapabilityHints
-	expiresAt         time.Time
-	lastUsed          time.Time
-	probeRevision     uint64
-	appliedRevision   uint64
-	appliedEpoch      uint64
-	persistedRevision uint64
-	pendingEnums      map[string]string
-	pendingEnumGrant  [sha256.Size]byte
-	checkSeededEnums  bool
-	pending           bool
+	hints                    antigravityModelCapabilityHints
+	expiresAt                time.Time
+	lastUsed                 time.Time
+	probeRevision            uint64
+	appliedRevision          uint64
+	appliedEpoch             uint64
+	persistedRevision        uint64
+	pendingEnums             map[string]string
+	pendingGroups            map[string]map[string]int
+	pendingThinkingWebSearch map[string]bool
+	pendingEnumGrant         [sha256.Size]byte
+	checkSeededEnums         bool
+	pending                  bool
 }
 
 // Keep attempt history beyond nextRetry; deleting it at retry time would turn
@@ -237,12 +239,14 @@ var (
 type antigravityModelCapabilityHints struct {
 	WebSearchModelIDs map[string]struct{}
 	// Nil means unknown; an empty non-nil set is an authoritative empty catalog.
-	ModelIDs         map[string]struct{}
-	modelEnums       map[string]string
-	revision         uint64
-	updatedAt        time.Time
-	expiresAt        time.Time
-	routeFingerprint string
+	ModelIDs          map[string]struct{}
+	modelEnums        map[string]string
+	thinkingGroups    map[string]map[string]int
+	thinkingWebSearch map[string]bool
+	revision          uint64
+	updatedAt         time.Time
+	expiresAt         time.Time
+	routeFingerprint  string
 }
 
 func (h antigravityModelCapabilityHints) clone() antigravityModelCapabilityHints {
@@ -611,9 +615,13 @@ func (s *Service) fetchAntigravityModelCapabilityHints(ctx context.Context, auth
 			hints.expiresAt = expiresAt
 			hints.routeFingerprint = routeFingerprint
 			current.pendingEnums = hints.modelEnums
+			current.pendingGroups = hints.thinkingGroups
+			current.pendingThinkingWebSearch = hints.thinkingWebSearch
 			current.pendingEnumGrant = antigravityModelEnumGrant(probeAuth)
 			current.checkSeededEnums = false
 			hints.modelEnums = nil
+			hints.thinkingGroups = nil
+			hints.thinkingWebSearch = nil
 			current.hints, current.expiresAt, current.lastUsed = hints.clone(), expiresAt, now
 			antigravityCapabilityCache[cacheKey] = current
 			delete(antigravityAuthFailureCache, flightKey)
@@ -687,6 +695,8 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 		ModelIDs:          hints.ModelIDs,
 		WebSearchModelIDs: hints.WebSearchModelIDs,
 		modelEnums:        hints.ModelEnums,
+		thinkingGroups:    hints.ThinkingGroups,
+		thinkingWebSearch: hints.ThinkingWebSearch,
 	}, status
 }
 
@@ -782,6 +792,10 @@ func (s *Service) antigravityHomeEnabled() bool {
 }
 
 func filterAntigravityModels(models []*ModelInfo, hints antigravityModelCapabilityHints) []*ModelInfo {
+	if hints.ModelIDs == nil {
+		return models
+	}
+
 	filtered := make([]*ModelInfo, 0, len(models))
 	for _, model := range models {
 		if model != nil {
@@ -806,10 +820,7 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 	}
 	models := filterAntigravityModels(registry.GetAntigravityModels(), hints)
 	models = applyAntigravityFetchedModelCapabilities(models, hints)
-	excluded := cfg.OAuthExcludedModels[coreauth.OAuthModelAliasChannel(auth.Provider, auth.AuthKind())]
-	if value := strings.TrimSpace(auth.Attributes["excluded_models"]); value != "" {
-		excluded = strings.Split(value, ",")
-	}
+	excluded := coreauth.AntigravityExcludedModels(auth, cfg)
 	models = applyExcludedModels(models, excluded)
 	models = applyOAuthModelAliasForAuth(cfg, "antigravity", auth.AuthKind(), auth.Attributes, models)
 	models = s.appendPluginModels("antigravity", models, excluded)

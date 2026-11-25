@@ -227,9 +227,27 @@ func (e *AntigravityExecutor) refreshTokenWithOptions(ctx context.Context, auth 
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
+	grantIdentity := antigravitySignatureGrantIdentity(auth)
+	grantRetained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey))
+	grantBinding := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantBindingMetadataKey))
+	currentBinding := antigravitySignatureGrantBinding(auth)
+	if grantRetained != "" && grantBinding == currentBinding {
+		// Preserve identity only when a prior refresh explicitly bound this exact token pair.
+		if grantIdentity != "" {
+			auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
+		}
+	} else {
+		delete(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)
+	}
 	auth.Metadata["access_token"] = tokenResp.AccessToken
 	if tokenResp.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = tokenResp.RefreshToken
+	}
+	if retained := strings.TrimSpace(metaStringValue(auth.Metadata, antigravitySignatureGrantScopeMetadataKey)); retained != "" {
+		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = antigravitySignatureGrantBinding(auth)
+	} else {
+		auth.Metadata[antigravitySignatureGrantScopeMetadataKey] = grantIdentity
+		auth.Metadata[antigravitySignatureGrantBindingMetadataKey] = antigravitySignatureGrantBinding(auth)
 	}
 	auth.Metadata["expires_in"] = tokenResp.ExpiresIn
 	now := time.Now()

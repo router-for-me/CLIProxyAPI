@@ -122,6 +122,26 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 <td width="180"><a href="https://visioncoder.cn/"><img src="./assets/visioncoder.svg" alt="VisionCoder" width="150"></a></td>
 <td><strong><a href="https://visioncoder.cn/">VisionCoder</a>｜国内版 OpenRouter，一个 API 接入国内外主流大模型。</strong> 覆盖 <strong>DeepSeek、Qwen、Kimi、GLM、GPT、Claude、Gemini、Grok</strong>，多供应商智能选路、故障自动切换，<strong>失败请求不收费，价格公开、账单可复算</strong>。适配 Claude Code、Codex 等编程工具，支持 <strong><a href="https://visioncoder.cn/me/keys">CC Switch 和 WorkBuddy 一键导入</a></strong>。企业统一采购，按席位下发订阅套餐、收回再分配，支持对公转账与开票。<strong>供应商入驻开放：上架线路，按质量拿流量；月结对公、用量可查，用户侧计费开票交给平台。</strong> 更有 <a href="https://visioncoder.cn/challenge">VibeCoding 挑战赛</a>，每期奖励合计 <strong>2,350 元加油包</strong>，一等奖 <strong>1,000 元加油包</strong>。</td>
 </tr>
+<tr>
+<td width="180"><a href="https://api.10dianai.com/sign-up?aff=M7Gn"><img src="./assets/10dian-api.png" alt="10dian-API" width="150"></a></td>
+<td><strong>10dian-API</strong><br>“用一把钥匙，召唤全世界的 AI～”<br>10dian-API 提供全品类主流 AI 模型与协议的 API 聚合接入，兼容常见客户端，个人开发者、AI 热爱者和团队用户均可低门槛使用。价格透明、低价不复杂；模型真实、倍率透明、不偷换模型；高并发稳定接入，并支持主流 AI 订阅代充。全品类一站式，支持多种充值方式，个人与团队同权，高并发接入门槛更低。<br>👉 <a href="https://api.10dianai.com/sign-up?aff=M7Gn">点击注册</a></td>
+</tr>
+<tr>
+<td width="180"><a href="https://subrouter.ai/register?aff=nP93"><img src="./assets/subrouter-logo.svg" alt="SubRouter" width="150"></a></td>
+<td>
+<strong>SubRouter</strong><br>
+<strong>🚀 一站式 AI 模型平台：注册即送 100 万免费 Token！</strong>
+<p>🎁 免费试用: <a href="https://subrouter.ai/register?aff=nP93">立即注册</a>，即可领取 100 万免费 Token 用于测试！</p>
+<ul>
+<li>主流模型一站接入：用一个 API 密钥即可在 Claude、GPT、Gemini、Grok 和 DeepSeek 之间自由切换。</li>
+<li>智能路由与自动故障切换：节点发生故障时，负载均衡系统会自动切换到可用节点，确保请求顺利执行。</li>
+<li>计费完全透明：每次 API 调用均可查看实际路由路径和实时费用。</li>
+<li>余额永不过期：按量付费，未用完的额度不会按月清零。</li>
+<li>充值方式灵活：支持 USDT、Visa、微信支付和支付宝。</li>
+</ul>
+👉 领取 100 万免费 Token: <a href="https://subrouter.ai/register?aff=nP93">https://subrouter.ai/register?aff=nP93</a>
+</td>
+</tr>
 </tbody>
 </table>
 

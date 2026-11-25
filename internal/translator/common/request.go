@@ -60,3 +60,47 @@ func requestModelName(rawJSON []byte) string {
 	}
 	return ""
 }
+
+// ClaudeMaxTokensRaw returns the raw JSON number token for a Claude max_tokens
+// field so translators preserve native values (including 0) without float
+// reformatting, silent truncation, or arbitrary clamping.
+func ClaudeMaxTokensRaw(v ojson.Result) (string, bool) {
+	if !v.Exists() || v.Type != ojson.Number || v.Raw == "" {
+		return "", false
+	}
+	return v.Raw, true
+}
+
+// ClaudeStopSequences extracts non-empty string entries from a Claude stop_sequences array.
+func ClaudeStopSequences(v ojson.Result) []string {
+	if !v.Exists() || !v.IsArray() {
+		return nil
+	}
+	var sequences []string
+	v.ForEach(func(_, item ojson.Result) bool {
+		if item.Type == ojson.String && item.String() != "" {
+			sequences = append(sequences, item.String())
+		}
+		return true
+	})
+	if len(sequences) == 0 {
+		return nil
+	}
+	return sequences
+}
+
+// ClaudeOutputJSONSchema returns the schema object when output_config.format
+// specifies a valid json_schema format.
+func ClaudeOutputJSONSchema(format ojson.Result) (ojson.Result, bool) {
+	if !format.Exists() || !format.IsObject() {
+		return ojson.Result{}, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(format.Get("type").String()), "json_schema") {
+		return ojson.Result{}, false
+	}
+	schema := format.Get("schema")
+	if !schema.Exists() || !schema.IsObject() {
+		return ojson.Result{}, false
+	}
+	return schema, true
+}

@@ -284,3 +284,49 @@ func TestHomeDispatchHeadersSynthesizesCodexUserAgentForImageRequests(t *testing
 		t.Fatalf("original headers mutated: User-Agent = %q", got)
 	}
 }
+
+func TestIsCodexClientUserAgentRecognizesCodexACPAndBypassesSIWC(t *testing.T) {
+	const fullACPUA = "@agentclientprotocol/codex-acp/0.166.0 (Mac OS 27.2.0; arm64) unknown (@agentclientprotocol/codex-acp; 2.6.0)"
+
+	cases := []struct {
+		name      string
+		userAgent string
+		wantCodex bool
+	}{
+		{name: "full codex-acp UA", userAgent: fullACPUA, wantCodex: true},
+		{name: "bare codex-acp prefix", userAgent: "codex-acp/0.166.0", wantCodex: true},
+		{name: "underscore codex_acp variant", userAgent: "codex_acp/0.166.0", wantCodex: true},
+		{name: "case-insensitive codex-acp", userAgent: "@AgentClientProtocol/Codex-ACP/0.166.0", wantCodex: true},
+		{name: "non-codex curl", userAgent: "curl/8.7.1", wantCodex: false},
+		{name: "empty UA", userAgent: "", wantCodex: false},
+	}
+
+	auth := &Auth{
+		ID:       "codex-siwc-acp-test",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"type":         "codex",
+			"access_token": "outer-token",
+			"use_siwc":     true,
+			"siwc": map[string]any{
+				"access_token": "siwc-token",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsCodexClientUserAgent(tc.userAgent); got != tc.wantCodex {
+				t.Fatalf("IsCodexClientUserAgent(%q) = %v, want %v", tc.userAgent, got, tc.wantCodex)
+			}
+			headers := http.Header{
+				"User-Agent": []string{tc.userAgent},
+				"Originator": []string{"@agentclientprotocol/codex-acp"},
+			}
+			wantUseSIWC := !tc.wantCodex
+			if got := IsCodexUseSIWCForRequest(context.Background(), auth, headers); got != wantUseSIWC {
+				t.Fatalf("IsCodexUseSIWCForRequest(%q) = %v, want %v", tc.userAgent, got, wantUseSIWC)
+			}
+		})
+	}
+}

@@ -24,6 +24,37 @@ func prettyJSONForTest(raw []byte) string {
 	return out.String()
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefaultsEmptyFunctionArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		argumentsField string
+	}{
+		{name: "omitted"},
+		{name: "empty", argumentsField: `,"arguments":""`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"input": [
+					{"type":"function_call","call_id":"call_1","name":"ping"%s},
+					{"type":"function_call_output","call_id":"call_1","output":"pong"}
+				]
+			}`, tc.argumentsField))
+
+			out, err := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4o", raw, false)
+			if err != nil {
+				t.Fatalf("convert request: %v", err)
+			}
+			arguments := ojson.GetBytesNoCopy(out, "messages.0.tool_calls.0.function.arguments")
+			if arguments.Type != ojson.String {
+				t.Fatalf("function.arguments type = %v, want string; output=%s", arguments.Type, out)
+			}
+			if got := arguments.String(); got != "{}" {
+				t.Fatalf("function.arguments = %q, want %q; output=%s", got, "{}", out)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_MergeConsecutiveFunctionCalls(t *testing.T) {
 	raw := []byte(`{
 		"input": [
