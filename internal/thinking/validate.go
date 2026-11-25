@@ -127,15 +127,17 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		}
 	}
 
-	if config.Mode == ModeLevel && config.Level == LevelNone {
-		config.Mode = ModeNone
-		config.Budget = 0
-		config.Level = ""
-	}
-	if config.Mode == ModeLevel && config.Level == LevelAuto {
-		config.Mode = ModeAuto
-		config.Budget = -1
-		config.Level = ""
+	if config.Mode == ModeLevel {
+		normalizedLevel := ThinkingLevel(strings.ToLower(strings.TrimSpace(string(config.Level))))
+		if normalizedLevel == LevelNone {
+			config.Mode = ModeNone
+			config.Budget = 0
+			config.Level = ""
+		} else if normalizedLevel == LevelAuto {
+			config.Mode = ModeAuto
+			config.Budget = -1
+			config.Level = ""
+		}
 	}
 	if config.Mode == ModeBudget && config.Budget == 0 {
 		config.Mode = ModeNone

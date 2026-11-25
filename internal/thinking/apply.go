@@ -926,7 +926,7 @@ func extractClaudeConfigFromGetter(get func(string) ojson.Result) ThinkingConfig
 		return ThinkingConfig{}
 	}
 
-	if budget := get("thinking.budget_tokens"); budget.Exists() {
+	if budget := get("thinking.budget_tokens"); budget.Exists() && budget.Type == ojson.Number {
 		value := int(budget.Int())
 		switch value {
 		case 0:
@@ -982,18 +982,20 @@ func extractGeminiConfigFromGetter(get func(string) ojson.Result, provider strin
 }
 
 func geminiThinkingConfigFromValues(level, budget ojson.Result) ThinkingConfig {
-	if level.Exists() {
-		value := level.String()
-		switch value {
-		case "none":
-			return ThinkingConfig{Mode: ModeNone, Budget: 0}
-		case "auto":
-			return ThinkingConfig{Mode: ModeAuto, Budget: -1}
-		default:
-			return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+	if level.Exists() && level.Type == ojson.String {
+		value := strings.ToLower(strings.TrimSpace(level.String()))
+		if value != "" {
+			switch value {
+			case "none":
+				return ThinkingConfig{Mode: ModeNone, Budget: 0}
+			case "auto":
+				return ThinkingConfig{Mode: ModeAuto, Budget: -1}
+			default:
+				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+			}
 		}
 	}
-	if budget.Exists() {
+	if budget.Exists() && budget.Type == ojson.Number {
 		value := int(budget.Int())
 		switch value {
 		case 0:
@@ -1024,10 +1026,13 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinkingConfig.thinkingLevel",
 	} {
 		level := get(path)
-		if !level.Exists() {
+		if !level.Exists() || level.Type != ojson.String {
 			continue
 		}
 		value := strings.ToLower(strings.TrimSpace(level.String()))
+		if value == "" {
+			continue
+		}
 		switch value {
 		case "none":
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -1047,7 +1052,7 @@ func extractInteractionsConfigFromGetter(get func(string) ojson.Result) Thinking
 		"generation_config.thinkingConfig.thinkingBudget",
 	} {
 		budget := get(path)
-		if !budget.Exists() {
+		if !budget.Exists() || budget.Type != ojson.Number {
 			continue
 		}
 		value := int(budget.Int())
@@ -1071,8 +1076,11 @@ func extractOpenAIConfig(body []byte) ThinkingConfig {
 }
 
 func extractOpenAIConfigFromGetter(get func(string) ojson.Result) ThinkingConfig {
-	if effort := get("reasoning_effort"); effort.Exists() {
-		value := effort.String()
+	if effort := get("reasoning_effort"); effort.Exists() && effort.Type == ojson.String {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		if value == "" {
+			return ThinkingConfig{}
+		}
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
@@ -1128,8 +1136,11 @@ func extractCodexConfig(body []byte) ThinkingConfig {
 }
 
 func extractCodexConfigFromGetter(get func(string) ojson.Result) ThinkingConfig {
-	if effort := get("reasoning.effort"); effort.Exists() {
-		value := effort.String()
+	if effort := get("reasoning.effort"); effort.Exists() && effort.Type == ojson.String {
+		value := strings.ToLower(strings.TrimSpace(effort.String()))
+		if value == "" {
+			return ThinkingConfig{}
+		}
 		if value == "none" {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
 		}
