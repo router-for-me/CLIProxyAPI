@@ -101,7 +101,7 @@ func (m *Manager) RegisterExecutorWithRevision(executor ProviderExecutor) uint64
 	if executor == nil {
 		return 0
 	}
-	provider := strings.TrimSpace(executor.Identifier())
+	provider := strings.ToLower(strings.TrimSpace(executor.Identifier()))
 	if provider == "" {
 		return 0
 	}
