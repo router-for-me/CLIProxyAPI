@@ -1096,19 +1096,13 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 && !ojson.ValidBytes(rawPayload) {
 				continue
 			}
-			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
-				flushed := pendingFilterLine
-				pendingFilterLine = nil
-				pendingFilterMsg = ""
-				if !guardAndEmitLine(flushed) {
-					return
-				}
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
+				pendingFilterLine = bytes.Clone(line)
+				pendingFilterMsg = filterMsg
+				continue
 			}
-			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
-				sawFinishReason = true
-			}
-			streamUsage.ObserveGeminiStream(line)
 			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
+				streamUsage.ObserveGeminiStream(line)
 				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
 				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)
 				if !streamUsage.PublishFailure(ctx, reporter, blockErr) {
@@ -1120,10 +1114,20 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 				}
 				return
 			}
-			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
-				pendingFilterLine = bytes.Clone(line)
-				pendingFilterMsg = filterMsg
-				continue
+			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
+				flushed := pendingFilterLine
+				pendingFilterLine = nil
+				pendingFilterMsg = ""
+				if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(flushed)) {
+					sawFinishReason = true
+				}
+				if !guardAndEmitLine(flushed) {
+					return
+				}
+			}
+			streamUsage.ObserveGeminiStream(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
+				sawFinishReason = true
 			}
 			if len(rawPayload) == 0 {
 				continue
@@ -1512,19 +1516,13 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 && !ojson.ValidBytes(rawPayload) {
 				continue
 			}
-			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
-				flushed := pendingFilterLine
-				pendingFilterLine = nil
-				pendingFilterMsg = ""
-				if !guardAndEmitLine(flushed) {
-					return
-				}
+			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
+				pendingFilterLine = bytes.Clone(line)
+				pendingFilterMsg = filterMsg
+				continue
 			}
-			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
-				sawFinishReason = true
-			}
-			streamUsage.ObserveGeminiStream(line)
 			if blockMsg, blocked := geminiPromptBlockErrorMessage(rawPayload); blocked {
+				streamUsage.ObserveGeminiStream(line)
 				blockErr := statusErr{code: http.StatusBadGateway, msg: blockMsg}
 				helps.RecordAPIResponseError(ctx, e.cfg, blockErr)
 				if !streamUsage.PublishFailure(ctx, reporter, blockErr) {
@@ -1536,10 +1534,20 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 				}
 				return
 			}
-			if filterMsg, blocked := clienterror.GeminiFilterBlockMessage(rawPayload); blocked {
-				pendingFilterLine = bytes.Clone(line)
-				pendingFilterMsg = filterMsg
-				continue
+			if len(rawPayload) > 0 && len(pendingFilterLine) > 0 {
+				flushed := pendingFilterLine
+				pendingFilterLine = nil
+				pendingFilterMsg = ""
+				if !sawFinishReason && geminiStreamHasFinishSignal(helps.JSONPayload(flushed)) {
+					sawFinishReason = true
+				}
+				if !guardAndEmitLine(flushed) {
+					return
+				}
+			}
+			streamUsage.ObserveGeminiStream(line)
+			if !sawFinishReason && geminiStreamHasFinishSignal(rawPayload) {
+				sawFinishReason = true
 			}
 			if len(rawPayload) == 0 {
 				continue
