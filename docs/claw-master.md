@@ -362,6 +362,31 @@ The usage endpoint is an OAuth product endpoint used by Claude Code rather than 
 publicly versioned API. Failure to read it does not block startup; routing falls back to
 configured order and subsequently observed rate-limit headers.
 
+### Claiming a banked limit reset: `claw-master reset`
+
+Anthropic gives some subscriptions limit resets to claim (claude.ai, Settings > Usage, "Reset for
+free"; see "What is a limit reset?" in Claude's help center). The metrics count them
+(`claw_master.quota.*.resets_left`). `claw-master reset PROFILE [--kind fable|weekly] [--claim]` claims
+one with the profile's own login, so a server's subscriptions need no browser sign-in. Run it on the
+server, as the user that runs `serve` (it holds the profile shared, like `serve` and `probe`):
+
+- Without `--claim` it only reads: the week's and Fable's use, the resets banked, what the reset of that
+  kind clears, whether Anthropic says it can be used now and why not, and for a Fable reset what the
+  week should be left at. It sends nothing else.
+- With `--claim` it spends the grant of that kind (one Anthropic says is usable now; of several, the one
+  it names next, else the one that ends soonest), as Claude Code claims it:
+  `POST /api/organizations/{organization}/reset_rate_limits` with `{"program": "cedar_ember",
+  "grant_id", "request_id"}`. It prints Anthropic's answer (`reset`, `already_used`, `not_limited`,
+  `cooldown`, `ineligible`, `unavailable`, or `rate_limited` for a 429) and the usage read again, and
+  exits 1 unless the answer is `reset`. The organization comes from the saved login, or else from the
+  OAuth profile.
+- `--kind fable` (the default) is a "Fable reset": it clears Fable's weekly allowance and gives the week
+  back the share Fable used (seen 2026-11-24: Fable 83% to 0, the week 68% to 27%). `--kind weekly` is a
+  "Weekly reset": the week, Fable with it. Neither moves the week's reset time. A claim cannot be undone.
+
+The endpoint is not documented by Anthropic; Claude Code 2.1.331 is where its shape was read. The
+running pool sees a claim at its next usage poll (about a minute).
+
 ## Payload-based continuation affinity
 
 Claude's Messages API receives the complete active context on each request, except for a
