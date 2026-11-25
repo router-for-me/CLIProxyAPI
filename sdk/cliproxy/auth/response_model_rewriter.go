@@ -7,7 +7,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var modelFieldPaths = []string{"model", "modelVersion", "response.model", "response.modelVersion", "message.model"}
+var modelFieldPaths = [...]string{"model", "modelVersion", "response.model", "response.modelVersion", "message.model", "interaction.model"}
 
 const maxPendingBufSize = 1 << 20 // 1MB limit for pending buffer
 
@@ -36,8 +36,8 @@ func rewriteModelInResponse(data []byte, targetModel string) []byte {
 	if targetModel == "" || len(data) == 0 {
 		return data
 	}
-	var resultsBuf [5]ojson.Result
-	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths...)
+	var resultsBuf [len(modelFieldPaths)]ojson.Result
+	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths[:]...)
 	var doc *ojson.Doc
 	for i, path := range modelFieldPaths {
 		if i < len(results) && results[i].Exists() {
@@ -81,8 +81,8 @@ func (r *StreamRewriter) rewriteModel(data []byte) []byte {
 		return data
 	}
 	targetModel := r.options.RewriteModel
-	var resultsBuf [5]ojson.Result
-	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths...)
+	var resultsBuf [len(modelFieldPaths)]ojson.Result
+	results := ojson.GetManyBytesNoCopy(resultsBuf[:0], data, modelFieldPaths[:]...)
 	var doc *ojson.Doc
 	for i, path := range modelFieldPaths {
 		if i < len(results) && results[i].Exists() {
