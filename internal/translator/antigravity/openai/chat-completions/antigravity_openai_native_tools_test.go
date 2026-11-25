@@ -9,39 +9,52 @@ import (
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
-func TestOpenAIToAntigravityMixedNativeToolsPreserveOnlyFunctions(t *testing.T) {
-	for _, nativeTool := range []struct {
-		name  string
-		input string
-		path  string
-	}{
-		{name: "google search", input: `{"google_search":{}}`, path: "googleSearch"},
-		{name: "code execution", input: `{"code_execution":{}}`, path: "codeExecution"},
-		{name: "url context", input: `{"url_context":{}}`, path: "urlContext"},
-	} {
-		t.Run(nativeTool.name, func(t *testing.T) {
-			input := []byte(`{
-                "model":"gemini-4-neon-xhigh",
-                "messages":[{"role":"user","content":"hi"}],
-                "tools":[
-                    {"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{}}}},
-                    ` + nativeTool.input + `
-                ]
-            }`)
+func TestOpenAIToAntigravityMixedGoogleSearchPreservesOnlyFunctions(t *testing.T) {
+	input := []byte(`{
+        "model":"gemini-4-neon-xhigh",
+        "messages":[{"role":"user","content":"hi"}],
+        "tools":[
+            {"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{}}}},
+            {"google_search":{}}
+        ]
+    }`)
 
-			out, err := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", input, false)
-			if err != nil {
-				t.Fatalf("convert error: %v", err)
-			}
-			if got := ojson.GetBytesNoCopy(out, "request.tools.#(functionDeclarations.0.name==\"get_weather\")").Raw; got == "" {
-				t.Fatalf("function declaration was not preserved: %s", out)
-			}
-			for _, tool := range ojson.GetBytesNoCopy(out, "request.tools").Array() {
-				if tool.Get(nativeTool.path).Exists() {
-					t.Fatalf("native %s tool was mixed with function declarations: %s", nativeTool.path, out)
-				}
-			}
-		})
+	out, err := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", input, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if got := ojson.GetBytesNoCopy(out, "request.tools.#(functionDeclarations.0.name==\"get_weather\")").Raw; got == "" {
+		t.Fatalf("function declaration was not preserved: %s", out)
+	}
+	for _, tool := range ojson.GetBytesNoCopy(out, "request.tools").Array() {
+		if tool.Get("googleSearch").Exists() {
+			t.Fatalf("googleSearch was mixed with function declarations: %s", out)
+		}
+	}
+}
+
+func TestOpenAIToAntigravityMixedFunctionAndNativeToolsPreserveAllTools(t *testing.T) {
+	input := []byte(`{
+        "model":"gemini-4-neon-xhigh",
+        "messages":[{"role":"user","content":"run a search after checking ping"}],
+        "tools":[
+            {"type":"function","function":{"name":"ping","parameters":{"type":"object","properties":{}}}},
+            {"code_execution":{}},
+            {"url_context":{}}
+        ]
+    }`)
+
+	out, err := ConvertOpenAIRequestToAntigravity("gemini-4-neon-xhigh", input, false)
+	if err != nil {
+		t.Fatalf("convert error: %v", err)
+	}
+	if got := ojson.GetBytesNoCopy(out, "request.tools.#(functionDeclarations.0.name==\"ping\")").Raw; got == "" {
+		t.Fatalf("function declaration was not preserved: %s", out)
+	}
+	for _, path := range []string{"codeExecution", "urlContext"} {
+		if got := ojson.GetBytesNoCopy(out, "request.tools.#("+path+")").Raw; got == "" {
+			t.Fatalf("native %s tool was not preserved: %s", path, out)
+		}
 	}
 }
 
@@ -75,7 +88,7 @@ func TestOpenAIToAntigravitySearchOnlyUsesDedicatedEnvelopeWhenSupported(t *test
 		t.Fatalf("included domain = %q, want go.dev: %s", got, envelope.Body)
 	}
 	parts := ojson.GetBytesNoCopy(envelope.Body, "request.systemInstruction.parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "Answer in metric units." || parts[1].Get("text").String() != antigravityOpenAIWebSearchSystemInstruction {
+	if len(parts) != 1 || parts[0].Get("text").String() != "Answer in metric units.\n\n"+antigravityOpenAIWebSearchSystemInstruction {
 		t.Fatalf("system instructions were not preserved and appended: %s", envelope.Body)
 	}
 }

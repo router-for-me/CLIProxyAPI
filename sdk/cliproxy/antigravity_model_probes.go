@@ -110,8 +110,10 @@ func (s *Service) executeAntigravityModelRefresh(request *antigravityModelRefres
 			return
 		}
 	}
+	s.checkSeededAntigravityModelEnums(probeCtx, request.auth)
 	expectedKey, hints := s.probeAndRegisterAntigravityModels(probeCtx, request.auth, request.provider, request.auth.RegistrationEpoch, request.registryEpoch)
 	if hints.ModelIDs != nil {
+		s.publishAntigravityModelEnums(probeCtx, request.auth, expectedKey, hints.revision)
 		s.queueAntigravityHintPersistence(request.ctx, request.auth, expectedKey, antigravityModelBaseURLs(request.auth)[0], hints)
 	}
 }

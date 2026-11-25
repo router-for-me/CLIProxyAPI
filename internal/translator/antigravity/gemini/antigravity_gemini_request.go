@@ -169,6 +169,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 
 	normalizeAntigravityMediaFieldsDocAt(reqDoc, "")
 	common.AttachDefaultSafetySettingsDoc(reqDoc, "safetySettings")
+	normalizeAntigravityRequestDocAt(reqDoc, "")
 
 	modelJSON, _ := json.Marshal(modelName)
 	out := make([]byte, 0, 34+len(modelJSON)+reqDoc.Len())
@@ -995,8 +996,10 @@ func attachInlineDataToFunctionResponse(response ojson.Result, images [][]byte) 
 // collectFunctionResponsesWithSiblingInlineData keeps functionResponse parts and
 // moves sibling inline_data/inlineData onto the nearest preceding functionResponse.
 // Leading images before the first functionResponse attach to that first response.
-func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) []ojson.Result {
+// Parts not associated with a function response are returned separately for preservation.
+func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) ([]ojson.Result, [][]byte) {
 	responses := make([]ojson.Result, 0)
+	otherParts := make([][]byte, 0)
 	leadingImages := make([][]byte, 0)
 	current := -1
 	parts.ForEach(func(_, part ojson.Result) bool {
@@ -1011,6 +1014,7 @@ func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) []ojson.R
 		}
 		imagePart, ok := normalizeAntigravityInlineDataPart(part)
 		if !ok {
+			otherParts = append(otherParts, []byte(part.Raw))
 			return true
 		}
 		if current >= 0 {
@@ -1020,7 +1024,7 @@ func collectFunctionResponsesWithSiblingInlineData(parts ojson.Result) []ojson.R
 		leadingImages = append(leadingImages, imagePart)
 		return true
 	})
-	return responses
+	return responses, otherParts
 }
 
 // parseFunctionResponseRaw attempts to normalize a function response part into a JSON object string.
@@ -1124,6 +1128,11 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 	var pendingGroups []*FunctionCallGroup // Groups awaiting completion with responses
 	var collectedResponses []ojson.Result  // Standalone responses to be matched
+	var deferredOtherContents [][]byte
+	flushDeferredOtherContents := func() {
+		contentItems = append(contentItems, deferredOtherContents...)
+		deferredOtherContents = nil
+	}
 	appendFunctionResponses := func(responses []ojson.Result, callNames []string) {
 		partItems := make([][]byte, 0, len(responses))
 		for responseIndex, response := range responses {
@@ -1137,6 +1146,9 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 			functionResponseContent, _ = ojson.SetRawBytes(functionResponseContent, "parts", translatorcommon.JoinRawArray(partItems))
 			contentItems = append(contentItems, functionResponseContent)
 		}
+		if len(pendingGroups) == 0 {
+			flushDeferredOtherContents()
+		}
 	}
 
 	// Process each content object in the conversation
@@ -1146,7 +1158,7 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 		parts := value.Get("parts")
 
 		// Collect function responses and attach sibling inlineData to the nearest one.
-		responsePartsInThisContent := collectFunctionResponsesWithSiblingInlineData(parts)
+		responsePartsInThisContent, otherPartsInThisContent := collectFunctionResponsesWithSiblingInlineData(parts)
 
 		// If this content has function responses, collect them
 		if len(responsePartsInThisContent) > 0 {
@@ -1168,8 +1180,20 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 				// to match and must not leak into subsequent model turns.
 				collectedResponses = nil
 			}
+			if len(otherPartsInThisContent) > 0 && value.IsObject() {
+				userContentDoc := ojson.NewDocString(value.Raw)
+				if errSetRole := userContentDoc.Set("role", "user"); errSetRole != nil {
+					log.Warnf("failed to preserve user role in function response content: %v", errSetRole)
+				} else if errSetParts := userContentDoc.SetRawBytes("parts", translatorcommon.JoinRawArray(otherPartsInThisContent)); errSetParts != nil {
+					log.Warnf("failed to preserve user parts in function response content: %v", errSetParts)
+				} else if len(pendingGroups) > 0 {
+					deferredOtherContents = append(deferredOtherContents, userContentDoc.Bytes())
+				} else {
+					contentItems = append(contentItems, userContentDoc.Bytes())
+				}
+			}
 
-			return true // Skip adding this content, responses are merged
+			return true // Skip adding the original content; responses are merged and other parts preserved.
 		}
 
 		// If this is a model with function calls, create a new group
@@ -1213,7 +1237,11 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 				log.Warnf("failed to parse content")
 				return true
 			}
-			contentItems = append(contentItems, []byte(value.Raw))
+			if len(pendingGroups) > 0 {
+				deferredOtherContents = append(deferredOtherContents, []byte(value.Raw))
+			} else {
+				contentItems = append(contentItems, []byte(value.Raw))
+			}
 		}
 
 		return true
@@ -1228,6 +1256,7 @@ func fixCLIToolResponseDocAt(doc *ojson.Doc, prefix string) (bool, error) {
 			appendFunctionResponses(groupResponses, group.CallNames)
 		}
 	}
+	flushDeferredOtherContents()
 
 	// Update the document with the new contents
 	_ = doc.SetRawBytes(contentsPath, translatorcommon.JoinRawArray(contentItems))

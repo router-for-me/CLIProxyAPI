@@ -15,7 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/signature/signaturetest"
-	antigravityclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/claude"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -130,11 +129,12 @@ func TestAntigravityExecutorCAQSTwoTurnReplay(t *testing.T) {
 					}
 					if mode.cached {
 						const text = "caqs-cache-recovery-test"
-						cache.CacheSignature(model, text, sig)
-						t.Cleanup(func() { _ = cache.DeleteCachedSignatureRequired(context.Background(), model, text) })
+						cacheScope := cache.WithSignatureCacheScope(context.Background(), antigravitySignatureCacheScope(auth))
+						cache.CacheSignatureBestEffort(cacheScope, model, text, sig)
+						t.Cleanup(func() { _ = cache.DeleteCachedSignatureRequired(cacheScope, model, text) })
 						recovery := []byte(`{"model":"claude-opus-5-5-high","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"caqs-cache-recovery-test"}]},{"role":"user","content":"continue"}]}`)
-						recovered, _ := antigravityclaude.ConvertClaudeRequestToAntigravity(model, recovery, false)
-						if ojson.GetBytes(recovered, "request.contents.0.parts.0.thoughtSignature").String() != sig {
+						recovered := sdktranslator.TranslateRequestEnvelope(cacheScope, sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, sdktranslator.RequestEnvelope{Format: sdktranslator.FormatClaude, Model: model, Body: recovery})
+						if recovered.Err != nil || ojson.GetBytes(recovered.Body, "request.contents.0.parts.0.thoughtSignature").String() != sig {
 							t.Fatal("cache recovery changed original signature")
 						}
 					}
