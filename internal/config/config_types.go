@@ -281,12 +281,24 @@ type AntigravityConfig struct {
 	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
 	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
 
+	// BaseModelNames publishes Antigravity Gemini models under their base name
+	// (gemini-4-neon) instead of the catalog ID that carries a thinking level
+	// (gemini-4-neon-xhigh). The base name routes to the same catalog entry.
+	// Defaults to true; set false to publish the catalog IDs unchanged.
+	BaseModelNames *bool `yaml:"base-model-names,omitempty" json:"base-model-names,omitempty"`
+
 	// TOSPauseWindow controls the pool-wide protective pause armed after the first
 	// 403 TOS_VIOLATION. Defaults to "0" (disabled), so only the violating
 	// credential is deactivated unless a positive Go duration string (e.g. "6h")
 	// is explicitly configured. Set to "0", "off", "false", "none", or
 	// "disabled" to explicitly disable the pause.
 	TOSPauseWindow string `yaml:"tos-pause-window,omitempty" json:"tos-pause-window,omitempty"`
+}
+
+// BaseModelNamesEnabled reports whether Antigravity Gemini models are published
+// under their base name. It is enabled unless explicitly set to false.
+func (c AntigravityConfig) BaseModelNamesEnabled() bool {
+	return c.BaseModelNames == nil || *c.BaseModelNames
 }
 
 // AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.

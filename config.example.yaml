@@ -1319,6 +1319,12 @@ oauth:
       #   max-idle-conns-per-host: 2  # max idle connections per host per credential (default: 2; <= 0 disables idle pooling)
       # tos-pause-window: "0"         # optional: pool-wide protective pause after the first 403 TOS_VIOLATION
                                     # (default "0" = disabled; set a positive duration such as "6h" to enable pool-wide pause)
+      # base-model-names: true        # optional: list Antigravity Gemini models by base name, e.g. "gemini-4-neon"
+                                    # instead of the catalog ID "gemini-4-neon-xhigh" (default: true). The level in
+                                    # the catalog ID is only the default; choose one per request with reasoning effort
+                                    # or "model(level)". Set false to publish the catalog IDs unchanged. Explicit
+                                    # model-alias entries for the same model take precedence. A base name shared with
+                                    # another provider is pooled with it, like any other overlapping model name.
       # Use credits as a last resort after free-tier Claude quota is exhausted.
       antigravity-credits: true
 

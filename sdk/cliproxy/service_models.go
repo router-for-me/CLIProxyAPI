@@ -1233,6 +1233,14 @@ func applyOAuthModelAliasForAuth(cfg *config.Config, provider, authKind string, 
 }
 
 func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string) []config.OAuthModelAlias {
+	aliases := configuredOAuthModelAliasesForAuth(cfg, channel, attributes)
+	if channel == antigravityOAuthModelAliasChannel {
+		return withAntigravityBaseModelAliases(cfg, aliases)
+	}
+	return aliases
+}
+
+func configuredOAuthModelAliasesForAuth(cfg *config.Config, channel string, attributes map[string]string) []config.OAuthModelAlias {
 	perAuthAliases := coreauth.OAuthModelAliasesFromAttributes(attributes)
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return perAuthAliases

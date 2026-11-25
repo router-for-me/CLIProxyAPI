@@ -117,6 +117,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.QuotaExceeded.AntigravityCredits != newCfg.QuotaExceeded.AntigravityCredits {
 		changes = append(changes, fmt.Sprintf("quota-exceeded.antigravity-credits: %t -> %t", oldCfg.QuotaExceeded.AntigravityCredits, newCfg.QuotaExceeded.AntigravityCredits))
 	}
+	if oldCfg.Antigravity.BaseModelNamesEnabled() != newCfg.Antigravity.BaseModelNamesEnabled() {
+		changes = append(changes, fmt.Sprintf("antigravity.base-model-names: %t -> %t", oldCfg.Antigravity.BaseModelNamesEnabled(), newCfg.Antigravity.BaseModelNamesEnabled()))
+	}
 	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
 		changes = append(changes, fmt.Sprintf("antigravity.sensitive-words: %d -> %d", len(oldCfg.Antigravity.SensitiveWords), len(newCfg.Antigravity.SensitiveWords)))
 	}
