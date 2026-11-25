@@ -1357,9 +1357,7 @@ func buildGeminiFunctionCallPartWithSig(item ojson.Result, sig string) []byte {
 	} else if id := item.Get("id"); id.Exists() {
 		_ = partDoc.Set("functionCall.id", id.String())
 	}
-	if args := item.Get("arguments"); args.Exists() {
-		_ = partDoc.SetRaw("functionCall.args", args.Raw)
-	}
+	translatorcommon.SetGeminiFunctionCallArgsDoc(partDoc, "functionCall.args", item.Get("arguments"))
 	if sig != "" {
 		_ = partDoc.Set("thoughtSignature", sig)
 	}
@@ -1423,6 +1421,8 @@ func interactionsGeminiContentRole(role, defaultRole string) string {
 
 func interactionsNativeGeminiPart(part ojson.Result) []byte {
 	switch {
+	case part.Get("functionCall").IsObject():
+		return translatorcommon.NormalizeGeminiFunctionCallPart(part)
 	case part.Get("text").Exists(), part.Get("functionCall").Exists(), part.Get("functionResponse").Exists():
 		return []byte(part.Raw)
 	case part.Get("inlineData").Exists():

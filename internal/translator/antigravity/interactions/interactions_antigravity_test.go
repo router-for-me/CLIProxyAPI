@@ -997,3 +997,171 @@ func TestConvertInteractionsRequestToAntigravityGenerationConfigPreservesArraysE
 		}
 	}
 }
+
+func TestConvertInteractionsRequestToAntigravity_FunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid JSON object preserved",
+			argsField: `,"arguments":{"city":"Tokyo","unit":"c"}`,
+			wantRaw:   `{"city":"Tokyo","unit":"c"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"arguments":" {\"city\":\"Tokyo\"} "`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded array string falls back to empty object",
+			argsField: `,"arguments":"[1,2,3]"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded scalar string falls back to empty object",
+			argsField: `,"arguments":"123"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded null string falls back to empty object",
+			argsField: `,"arguments":"null"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "empty string falls back to empty object",
+			argsField: `,"arguments":""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"arguments":"{broken"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null value falls back to empty object",
+			argsField: `,"arguments":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "array value falls back to empty object",
+			argsField: `,"arguments":[1,2]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "number scalar falls back to empty object",
+			argsField: `,"arguments":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "boolean scalar falls back to empty object",
+			argsField: `,"arguments":true`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing arguments defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "antigravity-test",
+				"input": [
+					{"type": "user_input", "content": [{"type": "text", "text": "check weather"}]},
+					{"type": "function_call", "call_id": "call_1", "name": "get_weather"` + tt.argsField + `},
+					{"type": "function_result", "call_id": "call_1", "name": "get_weather", "result": {"temp": 22}}
+				]
+			}`)
+			out, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", input, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+			}
+			args := ojson.GetBytesNoCopy(out, "request.contents.1.parts.0.functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToAntigravity_NativeFunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid object preserved",
+			argsField: `,"args":{"q":"go"}`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"args":"{\"q\":\"go\"}"`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "array falls back to empty object",
+			argsField: `,"args":[]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null falls back to empty object",
+			argsField: `,"args":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "scalar falls back to empty object",
+			argsField: `,"args":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"args":"{bad"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing args defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "antigravity-test",
+				"input": [
+					{"role": "user", "parts": [{"text": "lookup"}]},
+					{"role": "model", "parts": [{"functionCall": {"name": "lookup", "id": "call_1"` + tt.argsField + `}, "thoughtSignature": "sig_keep"}]},
+					{"role": "user", "parts": [{"functionResponse": {"name": "lookup", "id": "call_1", "response": {"ok": true}}}]}
+				]
+			}`)
+			out, errConvert := ConvertInteractionsRequestToAntigravity("antigravity-test", input, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToAntigravity error: %v", errConvert)
+			}
+			part := ojson.GetBytesNoCopy(out, "request.contents.1.parts.0")
+			args := part.Get("functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+			if got := part.Get("functionCall.name").String(); got != "lookup" {
+				t.Fatalf("functionCall.name = %q, want lookup", got)
+			}
+			if got := part.Get("thoughtSignature").String(); got != "sig_keep" {
+				t.Fatalf("thoughtSignature = %q, want sig_keep", got)
+			}
+		})
+	}
+}

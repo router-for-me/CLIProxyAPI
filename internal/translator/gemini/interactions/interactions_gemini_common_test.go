@@ -2463,3 +2463,313 @@ func TestConvertGeminiRequestToInteractions_ModelHistoryThoughtSignature(t *test
 		}
 	})
 }
+
+func TestConvertInteractionsResponseToGemini_FunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid JSON object preserved",
+			argsField: `,"arguments":{"city":"Tokyo","unit":"c"}`,
+			wantRaw:   `{"city":"Tokyo","unit":"c"}`,
+		},
+		{
+			name:      "args alias with JSON-encoded object string unwrapped",
+			argsField: `,"args":" {\"city\":\"Tokyo\"} "`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"arguments":"{\"city\":\"Tokyo\"}"`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded array string falls back to empty object",
+			argsField: `,"arguments":"[1,2,3]"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded scalar string falls back to empty object",
+			argsField: `,"arguments":"123"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded null string falls back to empty object",
+			argsField: `,"arguments":"null"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded string literal falls back to empty object",
+			argsField: `,"arguments":"\"hello\""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "empty string falls back to empty object",
+			argsField: `,"arguments":""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"arguments":"{broken"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null value falls back to empty object",
+			argsField: `,"arguments":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "array value falls back to empty object",
+			argsField: `,"arguments":[1,2]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "number scalar falls back to empty object",
+			argsField: `,"arguments":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "boolean scalar falls back to empty object",
+			argsField: `,"arguments":true`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing arguments defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{
+				"id": "i1",
+				"model": "gemini-3.1-flash-lite",
+				"steps": [
+					{"type": "function_call", "call_id": "call_1", "name": "get_weather"` + tt.argsField + `}
+				]
+			}`)
+			out := ConvertInteractionsResponseToGeminiNonStream(context.Background(), "gemini-3.1-flash-lite", nil, nil, raw, nil)
+			args := ojson.GetBytesNoCopy(out, "candidates.0.content.parts.0.functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToGemini_FunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid JSON object preserved",
+			argsField: `,"arguments":{"city":"Tokyo","unit":"c"}`,
+			wantRaw:   `{"city":"Tokyo","unit":"c"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"arguments":" {\"city\":\"Tokyo\"} "`,
+			wantRaw:   `{"city":"Tokyo"}`,
+		},
+		{
+			name:      "JSON-encoded array string falls back to empty object",
+			argsField: `,"arguments":"[1,2,3]"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "JSON-encoded scalar string falls back to empty object",
+			argsField: `,"arguments":"123"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "empty string falls back to empty object",
+			argsField: `,"arguments":""`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"arguments":"{broken"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null value falls back to empty object",
+			argsField: `,"arguments":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "array value falls back to empty object",
+			argsField: `,"arguments":[1,2]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "number scalar falls back to empty object",
+			argsField: `,"arguments":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "boolean scalar falls back to empty object",
+			argsField: `,"arguments":true`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing arguments defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gemini-3.1-flash-lite",
+				"input": [
+					{"type": "user_input", "content": [{"type": "text", "text": "check weather"}]},
+					{"type": "function_call", "call_id": "call_1", "name": "get_weather"` + tt.argsField + `},
+					{"type": "function_result", "call_id": "call_1", "name": "get_weather", "result": {"temp": 22}}
+				]
+			}`)
+			out, errConvert := ConvertInteractionsRequestToGemini("gemini-3.1-flash-lite", input, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+			}
+			args := ojson.GetBytesNoCopy(out, "contents.1.parts.0.functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsRequestToGemini_NativeFunctionCallArgsNormalizedToObject(t *testing.T) {
+	tests := []struct {
+		name      string
+		argsField string
+		wantRaw   string
+	}{
+		{
+			name:      "valid object preserved",
+			argsField: `,"args":{"q":"go"}`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "JSON-encoded object string unwrapped",
+			argsField: `,"args":"{\"q\":\"go\"}"`,
+			wantRaw:   `{"q":"go"}`,
+		},
+		{
+			name:      "array falls back to empty object",
+			argsField: `,"args":[]`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "null falls back to empty object",
+			argsField: `,"args":null`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "scalar falls back to empty object",
+			argsField: `,"args":42`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "invalid JSON string falls back to empty object",
+			argsField: `,"args":"{bad"`,
+			wantRaw:   `{}`,
+		},
+		{
+			name:      "missing args defaults to empty object",
+			argsField: "",
+			wantRaw:   `{}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := []byte(`{
+				"model": "gemini-3.1-flash-lite",
+				"input": [
+					{"role": "user", "parts": [{"text": "lookup"}]},
+					{"role": "model", "parts": [{"functionCall": {"name": "lookup", "id": "call_1"` + tt.argsField + `}, "thoughtSignature": "sig_keep"}]},
+					{"role": "user", "parts": [{"functionResponse": {"name": "lookup", "id": "call_1", "response": {"ok": true}}}]}
+				]
+			}`)
+			out, errConvert := ConvertInteractionsRequestToGemini("gemini-3.1-flash-lite", input, false)
+			if errConvert != nil {
+				t.Fatalf("ConvertInteractionsRequestToGemini error: %v", errConvert)
+			}
+			part := ojson.GetBytesNoCopy(out, "contents.1.parts.0")
+			args := part.Get("functionCall.args")
+			if !args.Exists() || !args.IsObject() {
+				t.Fatalf("functionCall.args = %s (type=%s), want JSON object. Output: %s", args.Raw, args.Type, string(out))
+			}
+			if args.Raw != tt.wantRaw {
+				t.Fatalf("functionCall.args = %s, want %s. Output: %s", args.Raw, tt.wantRaw, string(out))
+			}
+			if got := part.Get("functionCall.name").String(); got != "lookup" {
+				t.Fatalf("functionCall.name = %q, want lookup", got)
+			}
+			if got := part.Get("thoughtSignature").String(); got != "sig_keep" {
+				t.Fatalf("thoughtSignature = %q, want sig_keep", got)
+			}
+		})
+	}
+}
+
+func TestConvertInteractionsResponseToGemini_StreamCompleteStringArgumentsEmittedOnStop(t *testing.T) {
+	t.Run("complete JSON object string in step.start emitted once on step.stop", func(t *testing.T) {
+		var param any
+		ctx := context.Background()
+		startEvent := []byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":" {\"q\":1} ","signature":"sig_1"}}`)
+		stopEvent := []byte(`data: {"event_type":"step.stop","index":0}`)
+
+		if chunks := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, startEvent, &param); len(chunks) != 0 {
+			t.Fatalf("step.start emitted %d chunks, want 0", len(chunks))
+		}
+		chunks := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, stopEvent, &param)
+		if len(chunks) != 1 {
+			t.Fatalf("step.stop emitted %d chunks, want 1", len(chunks))
+		}
+		part := ojson.GetBytesNoCopy(chunks[0], "candidates.0.content.parts.0")
+		if got := part.Get("functionCall.name").String(); got != "lookup" {
+			t.Fatalf("functionCall.name = %q, want lookup", got)
+		}
+		if got := part.Get("functionCall.id").String(); got != "call_1" {
+			t.Fatalf("functionCall.id = %q, want call_1", got)
+		}
+		if got := part.Get("thoughtSignature").String(); got != "sig_1" {
+			t.Fatalf("thoughtSignature = %q, want sig_1", got)
+		}
+		args := part.Get("functionCall.args")
+		if !args.Exists() || !args.IsObject() || args.Raw != `{"q":1}` {
+			t.Fatalf("functionCall.args = %s (type=%s), want %s", args.Raw, args.Type, `{"q":1}`)
+		}
+		if dup := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, stopEvent, &param); len(dup) != 0 {
+			t.Fatalf("duplicate step.stop emitted %d chunks, want 0", len(dup))
+		}
+	})
+
+	t.Run("incomplete or non-object string in step.start does not emit on step.stop", func(t *testing.T) {
+		for _, argsRaw := range []string{`""`, `"{broken"`, `"[1,2]"`} {
+			var param any
+			ctx := context.Background()
+			startEvent := []byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":` + argsRaw + `}}`)
+			stopEvent := []byte(`data: {"event_type":"step.stop","index":0}`)
+
+			_ = ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, startEvent, &param)
+			if chunks := ConvertInteractionsResponseToGemini(ctx, "gemini-3.1-flash-lite", nil, nil, stopEvent, &param); len(chunks) != 0 {
+				t.Fatalf("args=%s: step.stop emitted %d chunks, want 0; payload=%s", argsRaw, len(chunks), string(chunks[0]))
+			}
+		}
+	})
+}

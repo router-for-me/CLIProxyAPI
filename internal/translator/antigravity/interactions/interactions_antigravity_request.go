@@ -687,9 +687,7 @@ func buildAntigravityFunctionCallPart(step ojson.Result) []byte {
 	} else if id := step.Get("id"); id.Exists() {
 		_ = partDoc.Set("functionCall.id", id.String())
 	}
-	if args := step.Get("arguments"); args.Exists() {
-		_ = partDoc.SetRaw("functionCall.args", args.Raw)
-	}
+	translatorcommon.SetGeminiFunctionCallArgsDoc(partDoc, "functionCall.args", step.Get("arguments"))
 	return partDoc.Bytes()
 }
 
@@ -993,6 +991,8 @@ func antigravityFunctionDeclarationJSON(decl ojson.Result, functionNameMap map[s
 
 func interactionsNativeAntigravityPart(part ojson.Result) []byte {
 	switch {
+	case part.Get("functionCall").IsObject():
+		return translatorcommon.NormalizeGeminiFunctionCallPart(part)
 	case part.Get("text").Exists(), part.Get("functionCall").Exists(), part.Get("functionResponse").Exists():
 		return []byte(part.Raw)
 	case part.Get("inlineData").Exists():

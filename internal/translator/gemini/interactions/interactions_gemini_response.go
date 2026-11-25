@@ -204,8 +204,8 @@ func rememberInteractionsGeminiStep(root ojson.Result, st *interactionsToGeminiS
 	if signature := firstNonEmptyInteractionString(step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String()); signature != "" {
 		st.StepSignatures[index] = strings.Clone(signature)
 	}
-	// Even an empty arguments object may be complete, or it may precede a delta.
-	if _, tracked := st.FunctionArguments[index]; !tracked && step.Get("type").String() == "function_call" && firstExistingInteractionResult(step, "arguments", "args").IsObject() {
+	// Even an empty arguments object or JSON-encoded object string may be complete, or it may precede a delta.
+	if _, tracked := st.FunctionArguments[index]; !tracked && step.Get("type").String() == "function_call" && isInteractionsGeminiCompleteFunctionArgs(firstExistingInteractionResult(step, "arguments", "args")) {
 		if st.PendingFunctionSteps == nil {
 			st.PendingFunctionSteps = make(map[int]string)
 		}
@@ -213,6 +213,17 @@ func rememberInteractionsGeminiStep(root ojson.Result, st *interactionsToGeminiS
 	} else {
 		delete(st.PendingFunctionSteps, index)
 	}
+}
+
+func isInteractionsGeminiCompleteFunctionArgs(value ojson.Result) bool {
+	if value.IsObject() {
+		return ojson.Valid(strings.TrimSpace(value.Raw))
+	}
+	if value.Type == ojson.String {
+		raw := strings.TrimSpace(value.String())
+		return raw != "" && ojson.Valid(raw) && ojson.Parse(raw).IsObject()
+	}
+	return false
 }
 
 func interactionsStepDeltaToGeminiChunk(modelName string, root ojson.Result, st *interactionsToGeminiStreamState) []byte {
@@ -418,7 +429,7 @@ func interactionsFunctionCallStepToGeminiPart(step ojson.Result) []byte {
 	if signature := firstNonEmptyInteractionString(step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String()); signature != "" {
 		_ = partDoc.Set("thoughtSignature", signature)
 	}
-	setInteractionsGeminiRawObjectDoc(partDoc, "functionCall.args", firstExistingInteractionResult(step, "arguments", "args"))
+	translatorcommon.SetGeminiFunctionCallArgsDoc(partDoc, "functionCall.args", firstExistingInteractionResult(step, "arguments", "args"))
 	return partDoc.Bytes()
 }
 
@@ -531,23 +542,6 @@ func firstExistingInteractionResult(root ojson.Result, paths ...string) ojson.Re
 		}
 	}
 	return ojson.Result{}
-}
-
-func setInteractionsGeminiRawObjectDoc(doc *ojson.Doc, path string, value ojson.Result) {
-	if !value.Exists() {
-		_ = doc.SetRaw(path, `{}`)
-		return
-	}
-	if value.Type == ojson.String {
-		raw := strings.TrimSpace(value.String())
-		if raw != "" && ojson.Valid(raw) {
-			_ = doc.SetRaw(path, raw)
-			return
-		}
-	}
-	if value.Raw != "" {
-		_ = doc.SetRaw(path, value.Raw)
-	}
 }
 
 func setInteractionsGeminiFunctionResponseDoc(doc *ojson.Doc, path string, value ojson.Result) {
