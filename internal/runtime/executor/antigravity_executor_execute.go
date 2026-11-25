@@ -623,7 +623,14 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 								}
 							case "groundingMetadata":
 								if cv.IsObject() && cv.Raw != "" {
-									groundingMetadataRaw = cv.Raw
+									hasFields := false
+									cv.ForEach(func(_, _ ojson.Result) bool {
+										hasFields = true
+										return false
+									})
+									if hasFields {
+										groundingMetadataRaw = cv.Raw
+									}
 								}
 							case "content":
 								if cv.IsObject() {
@@ -762,7 +769,7 @@ func (e *AntigravityExecutor) convertStreamChunksToNonStream(chunks [][]byte) []
 	if finishReason != "" {
 		_ = templateDoc.Set("candidates.0.finishReason", finishReason)
 	}
-	if groundingMetadataRaw != "" && !templateDoc.Get("candidates.0.groundingMetadata").Exists() {
+	if groundingMetadataRaw != "" {
 		_ = templateDoc.SetRawBytes("candidates.0.groundingMetadata", []byte(groundingMetadataRaw))
 	}
 	if modelVersion != "" {
