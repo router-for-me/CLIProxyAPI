@@ -411,6 +411,21 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 			path:  "properties",
 			want:  []string{"default", "alpha"},
 		},
+		"leading colon property name": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"z":{"$ref":"#/$defs/P"},":id":{"type":"string"}}}`,
+			path:  "properties",
+			want:  []string{"z", ":id"},
+		},
+		"nested under leading colon property name": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{":id":{"type":"object","properties":{"z":{"$ref":"#/$defs/P"},"a":{"type":"string"}}}}}`,
+			path:  `properties.\:id.properties`,
+			want:  []string{"z", "a"},
+		},
+		"same names in another order keep their own order": {
+			input: `{"$defs":{"A":{"type":"object","properties":{"z":{"type":"string"},"a":{"type":"string"}}},"B":{"type":"object","properties":{"a":{"type":"string"},"z":{"type":"string"}}}},"type":"object","properties":{"first":{"$ref":"#/$defs/A"},"second":{"$ref":"#/$defs/B"}}}`,
+			path:  "properties.second.properties",
+			want:  []string{"a", "z"},
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -10,12 +10,15 @@ import (
 
 func restorePropertyOrder(original, resolved string) string {
 	orders := make(map[string][]string)
+	ambiguous := make(map[string]bool)
 	walkSchemaProperties(ojson.Parse(original), "", false, func(_ string, properties ojson.Result) {
 		keys := objectKeys(properties)
 		signature := propertySignature(keys)
-		if _, seen := orders[signature]; !seen {
-			orders[signature] = keys
+		if known, seen := orders[signature]; seen && !slices.Equal(known, keys) {
+			ambiguous[signature] = true
+			return
 		}
+		orders[signature] = keys
 	})
 
 	var paths []string
@@ -30,13 +33,14 @@ func restorePropertyOrder(original, resolved string) string {
 	for _, path := range paths {
 		current := doc.Get(path)
 		keys := objectKeys(current)
-		want, known := orders[propertySignature(keys)]
-		if !known || slices.Equal(want, keys) {
+		signature := propertySignature(keys)
+		want, known := orders[signature]
+		if !known || ambiguous[signature] || slices.Equal(want, keys) {
 			continue
 		}
 		ordered := ojson.NewDocString("{}")
 		for _, key := range want {
-			escaped := escapeGJSONPathKey(key)
+			escaped := escapeWritePathKey(key)
 			_ = ordered.SetRaw(escaped, current.Get(escaped).Raw)
 		}
 		_ = doc.SetRaw(path, ordered.String())
@@ -59,7 +63,7 @@ func walkSchemaProperties(value ojson.Result, path string, inNameMap bool, visit
 	}
 	value.ForEach(func(key, child ojson.Result) bool {
 		name := key.String()
-		childPath := joinPath(path, escapeGJSONPathKey(name))
+		childPath := joinPath(path, escapeWritePathKey(name))
 		if inNameMap {
 			walkSchemaProperties(child, childPath, false, visit)
 			return true
@@ -89,4 +93,8 @@ func propertySignature(keys []string) string {
 	sorted := slices.Clone(keys)
 	slices.Sort(sorted)
 	return strings.Join(sorted, "\x00")
+}
+
+func escapeWritePathKey(key string) string {
+	return strings.ReplaceAll(escapeGJSONPathKey(key), ":", `\:`)
 }
