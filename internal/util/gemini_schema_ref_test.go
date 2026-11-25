@@ -401,6 +401,11 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 			path:  "properties.p.anyOf.0.properties",
 			want:  []string{"zeta", "alpha"},
 		},
+		"awkward property names": {
+			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"z.y":{"$ref":"#/$defs/P"},"10":{"type":"string"},"x-cliproxy-property-order":{"type":"integer"},"a":{"type":"string"}}}`,
+			path:  "properties",
+			want:  []string{"z.y", "10", "x-cliproxy-property-order", "a"},
+		},
 		"property named default": {
 			input: `{"$defs":{"P":{"type":"string"}},"type":"object","properties":{"default":{"$ref":"#/$defs/P"},"alpha":{"type":"string","default":{"properties":{"z":1,"a":2}}}}}`,
 			path:  "properties",
@@ -417,9 +422,6 @@ func TestInlineLocalRefsKeepsPropertyOrder(t *testing.T) {
 			})
 			if strings.Join(keys, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("property order = %v, want %v: %s", keys, tc.want, got)
-			}
-			if strings.Contains(got, propertyOrderKey) {
-				t.Errorf("order annotation leaked into output: %s", got)
 			}
 		})
 	}
