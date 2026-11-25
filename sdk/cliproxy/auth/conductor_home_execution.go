@@ -273,7 +273,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			roundTiming.Observe(noModelsErr)
 			continue
 		}
-		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection.Executor, selection)
+		preparedAuth, errPrepare := m.prepareHomeRequestAuth(execCtx, selection, models[0])
 		if errPrepare != nil {
 			errPrepare = markUpstreamExecutionAttemptFromContext(execCtx, errPrepare)
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -282,7 +282,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			stateModel := m.selectionModelKeyForAuth(auth, routeModel)
-			if stateModel == "" {
+			if selection.ExecutorPlugin != "" {
+				stateModel = models[0]
+			} else if stateModel == "" {
 				stateModel = canonicalModelKey(routeModel)
 			}
 			prepareOpts := opts
@@ -323,12 +325,13 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			continue
 		}
 		var refusedErr error
+		restoreModel := restoreExecutionModel && selection.ExecutorPlugin == ""
 		for _, upstreamModel := range models {
 			execCtx = m.newUpstreamAttemptContext(execCtx)
 			resultModel := m.stateModelForExecution(preparedAuth, routeModel, upstreamModel, pooled)
 			execReq := req
 			execReq.Model = upstreamModel
-			if restoreExecutionModel {
+			if restoreModel {
 				execReq.Model = executionModel
 			}
 			execOpts := opts
@@ -342,8 +345,8 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 			}
-			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreExecutionModel)
-			if !restoreExecutionModel {
+			execReq = attachResolvedExecutionModelInfo(routing, execReq, preparedAuth, routeModel, upstreamModel, restoreModel)
+			if !restoreModel {
 				execReq = attachResolvedHomeModelInfo(execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport)
 			}
 			var errIntercept error
@@ -416,7 +419,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				selection.End("attempt_canceled")
 				return cliproxyexecutor.Response{}, errCtx
 			}
-			if countTokens {
+			if isHomeExecutorPluginUnavailableError(errExecute) {
+				releaseAttempt()
+				selection.End("executor_plugin_unavailable")
+				return cliproxyexecutor.Response{}, errExecute
+			}
+			if countTokens && selection.ExecutorPlugin == "" {
 				if _, fingerprint := getEffectiveAuth(); isUnauthorizedError(errExecute) {
 					m.reportHomeUnauthorized(execCtx, preparedAuth, selection.Provider, resultModel, fingerprint, extractErrorBody(errExecute))
 				}

@@ -82,6 +82,33 @@ func SetRawArrayItemsDoc(doc *ojson.Doc, path string, items [][]byte) {
 	_ = doc.SetRawBytes(path, JoinRawArray(items))
 }
 
+// ConvertJSONNodeKeys recursively transforms every JSON object key in node using
+// transform while preserving root/nested arrays, multi-key objects inside arrays,
+// empty containers, and literal keys containing path metacharacters.
+func ConvertJSONNodeKeys(node ojson.Result, transform func(string) string) []byte {
+	if node.IsObject() {
+		objDoc := ojson.NewDocString(`{}`)
+		node.ForEach(func(key, value ojson.Result) bool {
+			k := key.String()
+			if transform != nil {
+				k = transform(k)
+			}
+			_ = objDoc.SetRawBytes(":"+ojson.Escape(k), ConvertJSONNodeKeys(value, transform))
+			return true
+		})
+		return objDoc.Bytes()
+	}
+	if node.IsArray() {
+		var items [][]byte
+		node.ForEach(func(_, value ojson.Result) bool {
+			items = append(items, ConvertJSONNodeKeys(value, transform))
+			return true
+		})
+		return JoinRawArray(items)
+	}
+	return []byte(node.Raw)
+}
+
 // SSEEventData builds one complete SSE frame. Each frame carries its own
 // blank-line terminator so concatenated frames stay separable downstream.
 func SSEEventData(event string, payload []byte) []byte {

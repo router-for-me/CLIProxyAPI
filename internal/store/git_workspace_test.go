@@ -152,6 +152,7 @@ func TestGitFastForwardPreservesModesLinksAndUnrelatedEdits(t *testing.T) {
 	}
 	writeSeedTestFile(t, filepath.Join(bdir, "regular"), "read me\n")
 	nativeStoreGit(t, bdir, "add", "script", "shortcut", "regular")
+	nativeStoreGit(t, bdir, "update-index", "--chmod=+x", "script")
 	nativeStoreGit(t, bdir, "commit", "-m", "Add modes")
 	nativeStoreGit(t, bdir, "push", "origin", "master")
 	writeSeedTestFile(t, filepath.Join(adir, "branch.txt"), "staged locally\n")
@@ -160,16 +161,37 @@ func TestGitFastForwardPreservesModesLinksAndUnrelatedEdits(t *testing.T) {
 	if errSync := a.EnsureRepository(); errSync != nil {
 		t.Fatal(errSync)
 	}
-	for name, executable := range map[string]bool{"script": true, "regular": false} {
+
+	const updatedScript = "#!/bin/sh\necho updated\n"
+	writeSeedTestFile(t, filepath.Join(bdir, "script"), updatedScript)
+	nativeStoreGit(t, bdir, "add", "--chmod=+x", "script")
+	nativeStoreGit(t, bdir, "commit", "-m", "Update executable script")
+	nativeStoreGit(t, bdir, "push", "origin", "master")
+	if errSync := a.EnsureRepository(); errSync != nil {
+		t.Fatalf("sync updated executable: %v", errSync)
+	}
+	assertLocalFileContents(t, filepath.Join(adir, "script"), updatedScript)
+
+	for name, wantMode := range map[string]string{"script": "100755", "regular": "100644"} {
 		info, errStat := os.Lstat(filepath.Join(adir, name))
-		if errStat != nil || !info.Mode().IsRegular() || (info.Mode().Perm()&0o111 != 0) != executable {
+		if errStat != nil || !info.Mode().IsRegular() {
 			t.Fatalf("%s: %v, %v", name, info, errStat)
+		}
+		if runtime.GOOS != "windows" && (info.Mode().Perm()&0o111 != 0) != (wantMode == "100755") {
+			t.Fatalf("%s: worktree mode %v, want Git mode %s", name, info.Mode(), wantMode)
+		}
+		if entry := nativeStoreGit(t, adir, "ls-files", "--stage", "--", name); !strings.HasPrefix(entry, wantMode+" ") {
+			t.Fatalf("%s: index entry %q, want mode %s", name, entry, wantMode)
 		}
 	}
 	if target, errLink := os.Readlink(filepath.Join(adir, "shortcut")); errLink != nil || target != "script" {
 		t.Fatalf("shortcut = %q, %v", target, errLink)
 	}
-	if status := nativeStoreGit(t, adir, "status", "--porcelain"); status != "MM branch.txt" {
+	statusArgs := []string{"status", "--porcelain"}
+	if runtime.GOOS == "windows" {
+		statusArgs = append([]string{"-c", "core.filemode=false"}, statusArgs...)
+	}
+	if status := nativeStoreGit(t, adir, statusArgs...); status != "MM branch.txt" {
 		t.Fatalf("status = %q", status)
 	}
 	assertLocalFileContents(t, filepath.Join(adir, "branch.txt"), "unstaged locally\n")
@@ -441,7 +463,11 @@ func TestGitRejectsConfigLinksInWorktreeAndOriginalTree(t *testing.T) {
 				if where == "local" || path == "config" {
 					assertRemoteTreePath(t, remote, "master", gitConfigPath, false)
 				} else {
-					assertRemoteFileContents(t, remote, "master", gitConfigPath, target)
+					gitTarget := nativeStoreGit(t, dir, "show", "HEAD:"+gitConfigPath)
+					if filepath.FromSlash(gitTarget) != target {
+						t.Fatalf("committed link target = %q, want %q", gitTarget, target)
+					}
+					assertRemoteFileContents(t, remote, "master", gitConfigPath, gitTarget)
 				}
 			})
 		}

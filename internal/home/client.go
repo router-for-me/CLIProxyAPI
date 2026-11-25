@@ -1393,6 +1393,7 @@ func (c *Client) rPopAuth(ctx context.Context, requestedModel string, sessionID 
 	if input, ok := ctx.Value(schedulerContextKey{}).(SchedulerContext); ok {
 		req.SchedulerContext = &input
 	}
+	req.ExecutorPlugins, _ = ctx.Value(executorPluginsContextKey{}).(map[string][]string)
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		return nil, errMarshal

@@ -1216,3 +1216,121 @@ func TestConvertCodexResponseToOpenAI_RefusalStreamAndNonStream(t *testing.T) {
 		}
 	})
 }
+
+func TestConvertCodexResponseToOpenAI_OverlappingMessageOutputItems(t *testing.T) {
+	ctx := context.Background()
+
+	collectContent := func(chunks [][]byte) string {
+		var param any
+		var sb strings.Builder
+		for _, chunk := range chunks {
+			for _, out := range ConvertCodexResponseToOpenAI(ctx, "gpt-5.4", nil, nil, chunk, &param) {
+				if v := ojson.GetBytesNoCopy(out, "choices.0.delta.content"); v.Exists() {
+					sb.WriteString(v.String())
+				}
+			}
+		}
+		return sb.String()
+	}
+
+	t.Run("overlapping_items_by_id_do_not_duplicate_first_item", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_a","delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("overlapping_items_preserve_unstreamed_fallback_without_duplicating_streamed_item", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":1,"item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "BetaAlpha" {
+			t.Fatalf("stream content = %q, want %q", got, "BetaAlpha")
+		}
+	})
+
+	t.Run("overlapping_items_by_id_without_output_index_do_not_duplicate", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","item_id":"msg_a","delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("overlapping_items_by_output_index_only_do_not_duplicate", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":1,"delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("added_links_id_and_output_index_across_partial_delta_and_done", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","item_id":"msg_b","delta":"Beta"}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("unkeyed_delta_attributes_to_sole_open_message_item", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","delta":"Alpha"}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_b","type":"message","role":"assistant","content":[{"type":"output_text","text":"Beta"}]}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_a","type":"message","role":"assistant","content":[{"type":"output_text","text":"Alpha"}]}}`),
+		}
+		if got := collectContent(chunks); got != "AlphaBeta" {
+			t.Fatalf("stream content = %q, want %q", got, "AlphaBeta")
+		}
+	})
+
+	t.Run("response_created_resets_per_item_delta_state_across_reused_param", func(t *testing.T) {
+		chunks := [][]byte{
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[]}}`),
+			[]byte(`data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"First"}`),
+			[]byte(`data: {"type":"response.created","response":{"id":"resp_2","model":"gpt-5.4"}}`),
+			[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Second"}]}}`),
+		}
+		if got := collectContent(chunks); got != "FirstSecond" {
+			t.Fatalf("stream content = %q, want %q", got, "FirstSecond")
+		}
+	})
+}

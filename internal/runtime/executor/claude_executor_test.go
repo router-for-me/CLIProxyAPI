@@ -11174,3 +11174,59 @@ func TestClaudeExecutor_PayloadFilterRemovesPreservedThinkingInjection(t *testin
 		t.Fatalf("payload filter must remove injected block_binding: %s", seenBody)
 	}
 }
+
+func TestStripTranslatedDefaultMaxTokens_GeminiSnakeCaseAndInvalidValues_Issue8112(t *testing.T) {
+	translated := []byte(`{"model":"claude-sonnet-4-6","max_tokens":32000,"messages":[]}`)
+
+	cases := []struct {
+		name       string
+		original   string
+		wantExists bool
+	}{
+		{
+			name:       "snake_case generation_config.max_output_tokens keeps max_tokens",
+			original:   `{"generation_config":{"max_output_tokens":2048}}`,
+			wantExists: true,
+		},
+		{
+			name:       "mixed generationConfig.max_output_tokens keeps max_tokens",
+			original:   `{"generationConfig":{"max_output_tokens":2048}}`,
+			wantExists: true,
+		},
+		{
+			name:       "null maxOutputTokens strips default max_tokens",
+			original:   `{"generationConfig":{"maxOutputTokens":null}}`,
+			wantExists: false,
+		},
+		{
+			name:       "zero maxOutputTokens strips default max_tokens",
+			original:   `{"generationConfig":{"maxOutputTokens":0}}`,
+			wantExists: false,
+		},
+		{
+			name:       "zero maxOutputTokens with positive max_output_tokens keeps max_tokens",
+			original:   `{"generationConfig":{"maxOutputTokens":0,"max_output_tokens":2048}}`,
+			wantExists: true,
+		},
+		{
+			name:       "camel generationConfig with zero does not fall through to sibling generation_config",
+			original:   `{"generationConfig":{"maxOutputTokens":0},"generation_config":{"max_output_tokens":2048}}`,
+			wantExists: false,
+		},
+		{
+			name:       "non-numeric max_output_tokens strips default max_tokens",
+			original:   `{"generation_config":{"max_output_tokens":"2048"}}`,
+			wantExists: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := stripTranslatedDefaultMaxTokens(sdktranslator.FormatGemini, []byte(tc.original), translated)
+			gotExists := ojson.GetBytes(out, "max_tokens").Exists()
+			if gotExists != tc.wantExists {
+				t.Fatalf("max_tokens exists = %v, want %v; out=%s", gotExists, tc.wantExists, out)
+			}
+		})
+	}
+}

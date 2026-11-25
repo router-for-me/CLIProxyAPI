@@ -384,8 +384,16 @@ func stripTranslatedDefaultMaxTokens(from sdktranslator.Format, originalPayload,
 			return originalTranslated
 		}
 	case sdktranslator.FormatGemini:
-		if hasExplicitMaxTokens("generationConfig.maxOutputTokens") {
-			return originalTranslated
+		genConfig := ojson.GetBytesNoCopy(originalPayload, "generationConfig")
+		if !genConfig.Exists() || !genConfig.IsObject() {
+			genConfig = ojson.GetBytesNoCopy(originalPayload, "generation_config")
+		}
+		if genConfig.Exists() && genConfig.IsObject() {
+			for _, key := range []string{"maxOutputTokens", "max_output_tokens"} {
+				if v := genConfig.Get(key); v.Exists() && v.Type == ojson.Number && v.Int() > 0 {
+					return originalTranslated
+				}
+			}
 		}
 	default:
 		return originalTranslated
