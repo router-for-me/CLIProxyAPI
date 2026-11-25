@@ -250,7 +250,7 @@ func (e *MetaExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
 				return
 			}
-			if eventType == "response.completed" || eventType == "response.incomplete" {
+			if eventType == "response.completed" || eventType == "response.incomplete" || eventType == "response.done" {
 				terminalDelivered = true
 			}
 		}

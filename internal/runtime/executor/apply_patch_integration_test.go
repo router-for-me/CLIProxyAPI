@@ -136,6 +136,24 @@ func assertTask6FailedStream(t *testing.T, chunks <-chan cliproxyexecutor.Stream
 	}
 }
 
+func assertTask6EmptyStreamRejected(t *testing.T, chunks <-chan cliproxyexecutor.StreamChunk) {
+	t.Helper()
+	var output []byte
+	var errs []error
+	for chunk := range chunks {
+		output = append(output, chunk.Payload...)
+		if chunk.Err != nil {
+			errs = append(errs, chunk.Err)
+		}
+	}
+	if len(output) != 0 || len(errs) != 1 {
+		t.Fatalf("empty stream contract: errors=%v output=%s", errs, output)
+	}
+	if status, ok := errs[0].(interface{ StatusCode() int }); !ok || status.StatusCode() != http.StatusBadGateway {
+		t.Fatalf("empty stream error = %T %v, want 502", errs[0], errs[0])
+	}
+}
+
 func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 	for _, provider := range []string{"custom-compat", "claude", "claude-oauth", "gemini", "gemini-interactions", "vertex", "antigravity", "kimi-chat"} {
 		for _, mode := range []string{"nonstream", "stream", "eof", "empty", "scanner"} {
@@ -197,6 +215,12 @@ func TestApplyPatchActualProviderErrorAndEOF(t *testing.T) {
 					stream, errExecuteStream := exec.ExecuteStream(context.Background(), auth, req, opts)
 					if errExecuteStream != nil {
 						t.Fatal(errExecuteStream)
+					}
+					if provider == "antigravity" && mode == "empty" {
+						// Since #7990 an empty HTTP 200 stream is a retryable 502
+						// with no payload, before any apply_patch handling.
+						assertTask6EmptyStreamRejected(t, stream.Chunks)
+						return
 					}
 					assertTask6FailedStream(t, stream.Chunks)
 				}
