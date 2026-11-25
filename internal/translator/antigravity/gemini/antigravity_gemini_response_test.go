@@ -409,3 +409,50 @@ func TestConvertAntigravityResponseToGeminiNonStream_StripsEmptyThoughtParts(t *
 		t.Fatalf("parts = %s", parts)
 	}
 }
+
+func TestConvertAntigravityResponseToGeminiStream_KeepsStrippedChunkCarryingRealUsage(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "")
+	var param any
+
+	withUsage := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}}`)
+	got := ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, withUsage, &param)
+	if len(got) != 1 {
+		t.Fatalf("chunk carrying real usage must be delivered, got %d chunks", len(got))
+	}
+	if total := ojson.GetBytesNoCopy(got[0], "usageMetadata.totalTokenCount").Int(); total != 33 {
+		t.Fatalf("totalTokenCount = %d, want 33: %s", total, got[0])
+	}
+	if parts := ojson.GetBytesNoCopy(got[0], "candidates.0.content.parts").Raw; parts != `[]` {
+		t.Fatalf("parts = %s, want the filtered empty list", parts)
+	}
+
+	cpaUsage := []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":""}]}}],"cpaUsageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}}`)
+	if got := ConvertAntigravityResponseToGemini(ctx, "m", nil, nil, cpaUsage, &param); len(got) != 0 {
+		t.Fatalf("cpaUsageMetadata-only chunk must be skipped, got %s", got[0])
+	}
+}
+
+func TestGeminiStreamJSONArrayKeepsItemsCarryingRealUsage(t *testing.T) {
+	ctx := context.WithValue(context.Background(), "alt", "json")
+	withUsage := `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}}`
+	cpaUsage := `{"response":{"candidates":[{"content":{"parts":[{"thought":true,"text":""}]}}],"cpaUsageMetadata":{"promptTokenCount":11,"candidatesTokenCount":22,"totalTokenCount":33}}}`
+
+	got := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte(`[`+withUsage+`]`), nil)
+	if len(got) != 1 {
+		t.Fatalf("item carrying real usage must be delivered, got %d chunks", len(got))
+	}
+	items := ojson.ParseBytes(got[0]).Array()
+	if len(items) != 1 {
+		t.Fatalf("expected the usage item, got %s", got[0])
+	}
+	if total := items[0].Get("usageMetadata.totalTokenCount").Int(); total != 33 {
+		t.Fatalf("totalTokenCount = %d, want 33: %s", total, got[0])
+	}
+	if parts := items[0].Get("candidates.0.content.parts").Raw; parts != `[]` {
+		t.Fatalf("parts = %s, want the filtered empty list", parts)
+	}
+
+	if got := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, []byte(`[`+cpaUsage+`]`), nil); len(got) != 0 {
+		t.Fatalf("cpaUsageMetadata-only item must be skipped, got %s", got[0])
+	}
+}

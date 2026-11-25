@@ -144,10 +144,13 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 		if alt == "" {
 			if response := util.GetGJSONBytesNoCopy(rawJSON, "response"); response.Exists() {
 				chunk = geminiResponseBytes(rawJSON, response)
+				// Non-terminal usage arrives as cpaUsageMetadata (FilterSSEUsageMetadata);
+				// a real usageMetadata is the terminal count and must not be dropped with the parts.
+				hasUsage := response.Get("usageMetadata").Exists()
 				doc := ojson.NewDoc(chunk)
 				changed := restoreGeminiResponseFields(doc, "", nameMap)
 				if stripped, nothingLeft := stripEmptyThoughtParts(doc, ""); stripped {
-					if nothingLeft {
+					if nothingLeft && !hasUsage {
 						return [][]byte{}
 					}
 					changed = true
@@ -164,9 +167,10 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 				for _, item := range items.Array() {
 					if response := item.Get("response"); response.Exists() {
 						prefix := strconv.Itoa(index) + "."
+						hasUsage := response.Get("usageMetadata").Exists()
 						_ = doc.SetRaw("-1", response.Raw)
 						restoreGeminiResponseFields(doc, prefix, nameMap)
-						if stripped, nothingLeft := stripEmptyThoughtParts(doc, prefix); stripped && nothingLeft {
+						if stripped, nothingLeft := stripEmptyThoughtParts(doc, prefix); stripped && nothingLeft && !hasUsage {
 							_ = doc.Delete(strconv.Itoa(index))
 							continue
 						}
