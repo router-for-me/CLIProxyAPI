@@ -576,7 +576,9 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first", "quota-aware".
+	// "quota-aware" weights credentials by remaining long-window (weekly) quota divided by the
+	// time until that window resets, using quota headers observed on upstream responses.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -591,7 +593,9 @@ type RoutingConfig struct {
 	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
 
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
-	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
+	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m", or "auto" to keep each
+	// explicit session bound only while its upstream prompt cache is expected to stay warm
+	// (Claude 5m or 1h depending on the request, other providers 10m, plus 30s grace).
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
 
 	// SessionAffinitySubagents controls whether subagents (child sessions with parent references)

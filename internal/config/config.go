@@ -107,6 +107,9 @@ type Config struct {
 	// SaveCooldownStatus persists runtime cooldown status next to auth files when true.
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
 
+	// RestartFiveHourWindow sends small Codex and Claude requests at startup and after five-hour resets.
+	RestartFiveHourWindow bool `yaml:"restart-five-hour-window" json:"restart-five-hour-window"`
+
 	// TransientErrorCooldownSeconds controls cooldowns for transient upstream errors (408/500/502/503/504/520-526).
 	// 0 keeps the legacy default cooldown. Negative values disable these cooldowns.
 	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`

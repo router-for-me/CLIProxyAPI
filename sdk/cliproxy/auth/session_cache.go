@@ -122,6 +122,16 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 // GetAndRefresh retrieves the auth ID bound to a session and refreshes the TTL
 // for every identifier known to represent the same logical session.
 func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	return c.GetAndRefreshTTL(sessionID, c.ttl)
+}
+
+// GetAndRefreshTTL is GetAndRefresh with a per-call TTL. The refresh never
+// shortens the current expiration, so a request that expects a shorter upstream
+// prompt cache cannot drop a binding whose longer-lived cache is still warm.
+func (c *SessionCache) GetAndRefreshTTL(sessionID string, ttl time.Duration) (string, bool) {
 	if c == nil || sessionID == "" {
 		return "", false
 	}
@@ -139,7 +149,7 @@ func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
 	}
 
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
-	c.replaceAliasGroupsLocked(entry.authID, now.Add(c.ttl), aliases, entry.binding, entry)
+	c.replaceAliasGroupsLocked(entry.authID, extendedExpiry(entry.expiresAt, now, c.effectiveTTL(ttl)), aliases, entry.binding, entry)
 	return entry.authID, true
 }
 
@@ -154,16 +164,20 @@ func (c *SessionCache) Set(sessionID, authID string) {
 
 // SetAliases binds multiple identifiers for one logical session to an auth ID.
 func (c *SessionCache) SetAliases(authID string, sessionIDs ...string) {
-	c.setAliases(authID, sessionBinding{}, sessionIDs...)
+	c.SetAliasesTTL(0, authID, sessionIDs...)
 }
 
 // setSessionAliases records a real selection, including reuse of an existing binding.
 // Result-driven Touch calls preserve this order rather than becoming new selections.
 func (c *SessionCache) setSessionAliases(authID, provider, sessionID string, keys ...string) {
-	c.setAliases(authID, sessionBinding{sessionID: sessionID, provider: provider}, keys...)
+	c.setAliases(0, authID, sessionBinding{sessionID: sessionID, provider: provider}, keys...)
 }
 
-func (c *SessionCache) setAliases(authID string, binding sessionBinding, sessionIDs ...string) {
+func (c *SessionCache) SetAliasesTTL(ttl time.Duration, authID string, sessionIDs ...string) {
+	c.setAliases(ttl, authID, sessionBinding{}, sessionIDs...)
+}
+
+func (c *SessionCache) setAliases(ttl time.Duration, authID string, binding sessionBinding, sessionIDs ...string) {
 	if c == nil || authID == "" {
 		return
 	}
@@ -172,6 +186,7 @@ func (c *SessionCache) setAliases(authID string, binding sessionBinding, session
 	c.ensureInitializedLocked()
 	now := time.Now()
 
+	expiresAt := now.Add(c.effectiveTTL(ttl))
 	aliases := mergeSessionAliases(nil, sessionIDs...)
 	previousGroups := make([]sessionEntry, 0, len(sessionIDs))
 	for _, sessionID := range sessionIDs {
@@ -185,6 +200,9 @@ func (c *SessionCache) setAliases(authID string, binding sessionBinding, session
 		}
 		previousGroups = append(previousGroups, entry)
 		aliases = mergeSessionAliases(aliases, entry.aliases...)
+		if entry.authID == authID && entry.expiresAt.After(expiresAt) {
+			expiresAt = entry.expiresAt
+		}
 	}
 	aliases = compactSessionAliases(aliases)
 	if len(aliases) == 0 {
@@ -200,7 +218,23 @@ func (c *SessionCache) setAliases(authID string, binding sessionBinding, session
 			}
 		}
 	}
-	c.replaceAliasGroupsLocked(authID, now.Add(c.ttl), aliases, binding, previousGroups...)
+	c.replaceAliasGroupsLocked(authID, expiresAt, aliases, binding, previousGroups...)
+}
+
+func (c *SessionCache) effectiveTTL(ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return c.ttl
+	}
+	return ttl
+}
+
+// extendedExpiry returns now+ttl unless the current expiration is already later.
+func extendedExpiry(current, now time.Time, ttl time.Duration) time.Time {
+	next := now.Add(ttl)
+	if current.After(next) {
+		return current
+	}
+	return next
 }
 
 func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Time, aliases []string, binding sessionBinding, previousGroups ...sessionEntry) {
@@ -378,6 +412,14 @@ func (c *SessionCache) latestSessionAuth(sessionID string, providers map[string]
 
 // Touch refreshes the expiration for a session binding if it currently matches expectedAuthID.
 func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
+	if c == nil {
+		return false
+	}
+	return c.TouchTTL(sessionID, expectedAuthID, c.ttl)
+}
+
+// TouchTTL is Touch with a per-call TTL that never shortens the current expiration.
+func (c *SessionCache) TouchTTL(sessionID, expectedAuthID string, ttl time.Duration) bool {
 	if c == nil || sessionID == "" || expectedAuthID == "" {
 		return false
 	}
@@ -390,7 +432,7 @@ func (c *SessionCache) Touch(sessionID, expectedAuthID string) bool {
 		return false
 	}
 	aliases := compactSessionAliases(mergeSessionAliases([]string{sessionID}, entry.aliases...))
-	c.replaceAliasGroupsLocked(expectedAuthID, now.Add(c.ttl), aliases, entry.binding, entry)
+	c.replaceAliasGroupsLocked(expectedAuthID, extendedExpiry(entry.expiresAt, now, c.effectiveTTL(ttl)), aliases, entry.binding, entry)
 	return true
 }
 

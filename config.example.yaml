@@ -180,7 +180,12 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, quota-aware
+  # quota-aware splits traffic by each credential's remaining weekly quota divided by the time
+  # until its weekly window resets, tapering credentials whose 5h window is nearly used up.
+  # It reads Claude/Codex quota headers observed on responses; credentials without recent
+  # observations get the average share. Pair it with session-affinity so it only places
+  # new or expired sessions.
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # Sticky requests (including inherited and LCP bindings) also consume weighted credits
@@ -211,6 +216,9 @@ routing:
   # still decides cold bindings, requests without a session, and post-failover rebinding.
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
+  # "auto" keeps each session bound only while its upstream prompt cache is expected to be warm
+  # (Claude: 5m or 1h depending on the request; other providers: 10m; plus 30s grace), so idle
+  # sessions can be rebalanced once moving them no longer breaks the cache.
   session-affinity-ttl: "1h"
   # When true (default), subagents (child sessions with parent references) inherit and bind
   # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
@@ -1078,6 +1086,10 @@ upstream:
 oauth:
   # Authentication directory (supports ~ for home directory)
   auth-dir: "~/.cli-proxy-api"
+
+  # Send a small Codex or Claude request at startup and after each 5-hour reset.
+  # Requests use the same credential and count toward provider usage. Default: true.
+  restart-five-hour-window: true
 
   # Core auth auto-refresh and manual refresh-all worker pool size (OAuth/file-based auth token refresh).
   # When > 0, overrides the default worker count (16).
