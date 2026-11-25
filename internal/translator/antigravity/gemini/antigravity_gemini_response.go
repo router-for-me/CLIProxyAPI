@@ -149,7 +149,7 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 				hasUsage := response.Get("usageMetadata").Exists()
 				doc := ojson.NewDoc(chunk)
 				changed := restoreGeminiResponseFields(doc, "", nameMap)
-				if stripped, nothingLeft := stripEmptyThoughtParts(doc, ""); stripped {
+				if stripped, nothingLeft := stripEmptyThoughtParts(doc, "", response); stripped {
 					if nothingLeft && !hasUsage {
 						return [][]byte{}
 					}
@@ -170,7 +170,7 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, originalR
 						hasUsage := response.Get("usageMetadata").Exists()
 						_ = doc.SetRaw("-1", response.Raw)
 						restoreGeminiResponseFields(doc, prefix, nameMap)
-						if stripped, nothingLeft := stripEmptyThoughtParts(doc, prefix); stripped && nothingLeft && !hasUsage {
+						if stripped, nothingLeft := stripEmptyThoughtParts(doc, prefix, response); stripped && nothingLeft && !hasUsage {
 							_ = doc.Delete(strconv.Itoa(index))
 							continue
 						}
@@ -221,7 +221,7 @@ func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, or
 	} else {
 		changed = restoreGeminiFunctionNames(doc, "", nameMap)
 	}
-	if stripped, _ := stripEmptyThoughtParts(doc, ""); stripped {
+	if stripped, _ := stripEmptyThoughtParts(doc, "", response); stripped {
 		changed = true
 	}
 	// Default every candidate, not just the first one, so a multi-candidate
@@ -256,18 +256,14 @@ var thoughtFieldMarker = `"thought"`
 // and the response itself carry envelope fields only (see isEnvelopeCandidate and
 // isEnvelopeResponse). Any other field keeps the chunk, so candidate or response
 // metadata such as safetyRatings, citationMetadata or promptFeedback is never lost.
-func stripEmptyThoughtParts(doc *ojson.Doc, prefix string) (changed, nothingLeft bool) {
+// upstream is the raw upstream response object at prefix; its keys are checked instead
+// of re-serializing doc (restoring usage only renames cpaUsageMetadata, which is allowed).
+func stripEmptyThoughtParts(doc *ojson.Doc, prefix string, upstream ojson.Result) (changed, nothingLeft bool) {
 	candidates := doc.Get(prefix + "candidates")
 	if !candidates.IsArray() || !strings.Contains(candidates.Raw, thoughtFieldMarker) {
 		return false, false
 	}
-	var response ojson.Result
-	if prefix == "" {
-		response = ojson.ParseBytes(doc.Bytes()) // the doc root has no path
-	} else {
-		response = doc.Get(strings.TrimSuffix(prefix, "."))
-	}
-	nothingLeft = isEnvelopeResponse(response)
+	nothingLeft = isEnvelopeResponse(upstream)
 	for candidateIndex, candidate := range candidates.Array() {
 		parts := candidate.Get("content.parts")
 		kept := make([]string, 0, len(parts.Array()))
