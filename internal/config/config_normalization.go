@@ -143,14 +143,26 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return
 	}
+	rawChannels := make([]string, 0, len(cfg.OAuthModelAlias))
+	for rawChannel := range cfg.OAuthModelAlias {
+		rawChannels = append(rawChannels, rawChannel)
+	}
+	sort.Strings(rawChannels)
+
 	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
-	for rawChannel, aliases := range cfg.OAuthModelAlias {
+	seenByChannel := make(map[string]map[string]struct{}, len(cfg.OAuthModelAlias))
+	for _, rawChannel := range rawChannels {
+		aliases := cfg.OAuthModelAlias[rawChannel]
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(aliases) == 0 {
 			continue
 		}
-		seenAlias := make(map[string]struct{}, len(aliases))
-		clean := make([]OAuthModelAlias, 0, len(aliases))
+		seenAlias := seenByChannel[channel]
+		if seenAlias == nil {
+			seenAlias = make(map[string]struct{}, len(aliases))
+			seenByChannel[channel] = seenAlias
+		}
+		clean := out[channel]
 		for _, entry := range aliases {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -193,12 +205,24 @@ func (cfg *Config) SanitizeOAuthSettings() {
 	if cfg == nil || len(cfg.OAuthSettings) == 0 {
 		return
 	}
-	out := make(map[string][]OAuthModelSetting, len(cfg.OAuthSettings))
-	for rawChannel, settings := range cfg.OAuthSettings {
+	rawChannels := make([]string, 0, len(cfg.OAuthSettings))
+	for rawChannel := range cfg.OAuthSettings {
+		rawChannels = append(rawChannels, rawChannel)
+	}
+	sort.Strings(rawChannels)
+
+	merged := make(map[string][]OAuthModelSetting, len(cfg.OAuthSettings))
+	for _, rawChannel := range rawChannels {
+		settings := cfg.OAuthSettings[rawChannel]
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(settings) == 0 {
 			continue
 		}
+		merged[channel] = append(merged[channel], settings...)
+	}
+
+	out := make(map[string][]OAuthModelSetting, len(merged))
+	for channel, settings := range merged {
 		seen := make(map[string]struct{}, len(settings))
 		reversed := make([]OAuthModelSetting, 0, len(settings))
 		for i := len(settings) - 1; i >= 0; i-- {
@@ -242,13 +266,20 @@ func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 	if cfg == nil || len(cfg.OAuthRequestScopedErrors) == 0 {
 		return
 	}
+	rawChannels := make([]string, 0, len(cfg.OAuthRequestScopedErrors))
+	for rawChannel := range cfg.OAuthRequestScopedErrors {
+		rawChannels = append(rawChannels, rawChannel)
+	}
+	sort.Strings(rawChannels)
+
 	out := make(map[string][]RequestScopedErrorRule, len(cfg.OAuthRequestScopedErrors))
-	for rawChannel, rules := range cfg.OAuthRequestScopedErrors {
+	for _, rawChannel := range rawChannels {
+		rules := cfg.OAuthRequestScopedErrors[rawChannel]
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(rules) == 0 {
 			continue
 		}
-		clean := make([]RequestScopedErrorRule, 0, len(rules))
+		clean := out[channel]
 		for _, r := range rules {
 			action := strings.ToLower(strings.TrimSpace(r.Action))
 			match := make([]string, 0, len(r.Match))
@@ -665,12 +696,23 @@ func NormalizeOAuthExcludedModels(entries map[string][]string) map[string][]stri
 	if len(entries) == 0 {
 		return nil
 	}
-	out := make(map[string][]string, len(entries))
-	for provider, models := range entries {
+	rawProviders := make([]string, 0, len(entries))
+	for provider := range entries {
+		rawProviders = append(rawProviders, provider)
+	}
+	sort.Strings(rawProviders)
+
+	merged := make(map[string][]string, len(entries))
+	for _, provider := range rawProviders {
 		key := strings.ToLower(strings.TrimSpace(provider))
 		if key == "" {
 			continue
 		}
+		merged[key] = append(merged[key], entries[provider]...)
+	}
+
+	out := make(map[string][]string, len(merged))
+	for key, models := range merged {
 		normalized := NormalizeExcludedModels(models)
 		if len(normalized) == 0 {
 			continue
