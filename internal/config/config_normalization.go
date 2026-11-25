@@ -157,7 +157,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if name == "" || alias == "" {
 				continue
 			}
-			if name == alias {
+			if name == alias && !entry.ForceMapping {
 				continue
 			}
 			aliasKey := strings.ToLower(alias)
