@@ -483,6 +483,11 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 	}
 	eventType, _ := obj["type"].(string)
 	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		if interactionEventType, ok := obj["event_type"].(string); ok {
+			eventType = strings.TrimSpace(interactionEventType)
+		}
+	}
 	status, _ := obj["status"].(string)
 	status = strings.ToLower(strings.TrimSpace(status))
 	respObj, hasRespObj := obj["response"].(map[string]any)
@@ -494,14 +499,28 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 			status = strings.ToLower(strings.TrimSpace(respStatus))
 		}
 	}
+	interactionObj, hasInteractionObj := obj["interaction"].(map[string]any)
+	if hasInteractionObj {
+		if interactionObj["error"] != nil || interactionObj["incomplete_details"] != nil {
+			incomplete = true
+		}
+		if interactionStatus, _ := interactionObj["status"].(string); strings.TrimSpace(interactionStatus) != "" {
+			status = strings.ToLower(strings.TrimSpace(interactionStatus))
+		}
+	}
 	switch status {
 	case "incomplete", "failed", "cancelled", "canceled":
 		return false, true
+	case "completed":
+		if hasInteractionObj {
+			completed = true
+		}
 	}
 	switch eventType {
-	case "response.incomplete", "response.failed", "response.cancelled", "response.canceled", "error":
+	case "response.incomplete", "response.failed", "response.cancelled", "response.canceled",
+		"interaction.incomplete", "interaction.failed", "interaction.cancelled", "interaction.canceled", "error":
 		return false, true
-	case "response.completed", "response.done", "message_stop":
+	case "response.completed", "response.done", "interaction.completed", "interaction.complete", "message_stop":
 		if status == "" || status == "completed" {
 			return true, incomplete
 		}
