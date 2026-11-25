@@ -86,21 +86,26 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		if params.SawResponse && !params.SawFinishReason {
 			params.SawFinishReason = true
 			finishReason, nativeFinishReason := resolveOpenAIFinishReason(params)
-			templateDoc := ojson.NewDoc([]byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"stop"}]}`))
-			appendAntigravityOpenAIToolCallCloses(templateDoc, params)
-			_ = templateDoc.Set("created", params.UnixTimestamp)
-			if params.ModelVersion != "" {
-				_ = templateDoc.Set("model", params.ModelVersion)
-			}
-			if params.ResponseID != "" {
-				_ = templateDoc.Set("id", params.ResponseID)
-			}
+			var pendingUsage ojson.Result
 			if len(params.PendingUsageMetadata) > 0 {
-				setOpenAIUsageMetadataDoc(templateDoc, util.ParseGJSONBytesNoCopy(params.PendingUsageMetadata))
+				pendingUsage = util.ParseGJSONBytesNoCopy(params.PendingUsageMetadata)
 			}
-			_ = templateDoc.Set("choices.0.finish_reason", finishReason)
-			_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
-			return [][]byte{templateDoc.Bytes()}
+			terminalDoc := buildAntigravityOpenAITerminalChunkDoc(params, finishReason, nativeFinishReason, pendingUsage)
+			if hasOpenAntigravityOpenAIToolArguments(params) {
+				closeDoc := ojson.NewDoc([]byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null},"finish_reason":null,"native_finish_reason":null}]}`))
+				if appendAntigravityOpenAIToolCallCloses(closeDoc, params) {
+					params.ActiveToolCall = nil
+					_ = closeDoc.Set("created", params.UnixTimestamp)
+					if params.ModelVersion != "" {
+						_ = closeDoc.Set("model", params.ModelVersion)
+					}
+					if params.ResponseID != "" {
+						_ = closeDoc.Set("id", params.ResponseID)
+					}
+					return [][]byte{closeDoc.Bytes(), terminalDoc.Bytes()}
+				}
+			}
+			return [][]byte{terminalDoc.Bytes()}
 		}
 		return [][]byte{}
 	}
@@ -115,6 +120,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	// Extract and set the model version.
 	if modelVersionResult := ojson.GetBytesNoCopy(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
 		params.ModelVersion = strings.Clone(modelVersionResult.String())
+		_ = templateDoc.Set("model", params.ModelVersion)
+	} else if params.ModelVersion != "" {
 		_ = templateDoc.Set("model", params.ModelVersion)
 	}
 
@@ -133,6 +140,8 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	if responseIDResult := ojson.GetBytesNoCopy(rawJSON, "response.responseId"); responseIDResult.Exists() {
 		params.ResponseID = strings.Clone(responseIDResult.String())
 		_ = templateDoc.Set("id", params.ResponseID)
+	} else if params.ResponseID != "" {
+		_ = templateDoc.Set("id", params.ResponseID)
 	}
 
 	// Cache the finish reason - do NOT set it in output yet (will be set on final chunk)
@@ -140,7 +149,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		params.UpstreamFinishReason = strings.Clone(strings.ToUpper(finishReasonResult.String()))
 	}
 
-	// Extract and set usage metadata (token counts). FilterSSEUsageMetadata renames
+	// Extract usage metadata (token counts). FilterSSEUsageMetadata renames
 	// non-terminal usage to cpaUsageMetadata, so retain the latest copy for [DONE]
 	// instead of treating an intermediate chunk as terminal.
 	usageResult := ojson.GetBytesNoCopy(rawJSON, "response.usageMetadata")
@@ -148,12 +157,11 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		if pendingUsage := ojson.GetBytesNoCopy(rawJSON, "response.cpaUsageMetadata"); pendingUsage.Exists() {
 			params.PendingUsageMetadata = append(params.PendingUsageMetadata[:0], pendingUsage.Raw...)
 		}
-	} else {
-		setOpenAIUsageMetadataDoc(templateDoc, usageResult)
 	}
 
 	// Process the main content part of the response.
 	hasDeltaContent := false
+	hasNonEmptyDelta := false
 	partsResult := ojson.GetBytesNoCopy(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
@@ -412,10 +420,12 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
 		}
 		hasDeltaContent = hasTextContent || hasReasoningContent || hasToolCallsArray || imageCount > 0
+		hasNonEmptyDelta = textContent.Len() > 0 || reasoningContent.Len() > 0 || hasToolCallsArray || imageCount > 0
 	}
 
-	if params.UpstreamFinishReason != "" && usageResult.Exists() && appendAntigravityOpenAIToolCallCloses(templateDoc, params) {
+	if !params.SawFinishReason && params.UpstreamFinishReason != "" && usageResult.Exists() && appendAntigravityOpenAIToolCallCloses(templateDoc, params) {
 		hasDeltaContent = true
+		hasNonEmptyDelta = true
 		params.ActiveToolCall = nil
 	}
 
@@ -425,20 +435,51 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 	// across chunks and keep streaming afterwards, and finalizing early would make
 	// strict clients drop the remaining content. When upstream never sends
 	// finishReason at all, the [DONE] branch synthesizes the terminal chunk.
-	isFinalChunk := params.UpstreamFinishReason != "" && usageResult.Exists()
+	isFinalChunk := !params.SawFinishReason && params.UpstreamFinishReason != "" && usageResult.Exists()
 
 	if isFinalChunk {
 		finishReason, nativeFinishReason := resolveOpenAIFinishReason(params)
-		_ = templateDoc.Set("choices.0.finish_reason", finishReason)
-		_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
 		params.SawFinishReason = true
+		terminalDoc := buildAntigravityOpenAITerminalChunkDoc(params, finishReason, nativeFinishReason, usageResult)
+		if hasNonEmptyDelta {
+			// Strict Chat Completions parsers reject chunks that combine a delta payload
+			// with a non-null finish_reason, so emit the payload chunk first and finish
+			// the choice in a dedicated terminal chunk.
+			return [][]byte{templateDoc.Bytes(), terminalDoc.Bytes()}
+		}
+		return [][]byte{terminalDoc.Bytes()}
 	}
 
-	if !hasDeltaContent && !isFinalChunk && !usageResult.Exists() {
+	if params.SawFinishReason && !hasNonEmptyDelta {
+		return [][]byte{}
+	}
+
+	if usageResult.Exists() {
+		setOpenAIUsageMetadataDoc(templateDoc, usageResult)
+	}
+
+	if !hasDeltaContent && !usageResult.Exists() {
 		return [][]byte{}
 	}
 
 	return [][]byte{templateDoc.Bytes()}
+}
+
+func buildAntigravityOpenAITerminalChunkDoc(params *convertCliResponseToOpenAIChatParams, finishReason, nativeFinishReason string, usageResult ojson.Result) *ojson.Doc {
+	terminalDoc := ojson.NewDoc([]byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"stop"}]}`))
+	_ = terminalDoc.Set("created", params.UnixTimestamp)
+	if params.ModelVersion != "" {
+		_ = terminalDoc.Set("model", params.ModelVersion)
+	}
+	if params.ResponseID != "" {
+		_ = terminalDoc.Set("id", params.ResponseID)
+	}
+	if usageResult.Exists() {
+		setOpenAIUsageMetadataDoc(terminalDoc, usageResult)
+	}
+	_ = terminalDoc.Set("choices.0.finish_reason", finishReason)
+	_ = terminalDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+	return terminalDoc
 }
 
 func antigravityOpenAIStartArguments(call *antigravityOpenAIToolCall, args ojson.Result) string {

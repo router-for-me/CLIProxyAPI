@@ -196,21 +196,12 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		for _, idx := range indices {
 			p.SawFinishReason[idx] = true
 			finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(p.UpstreamFinishReason[idx], p.SawToolCall[idx])
-			templateDoc := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
-			_ = templateDoc.Set("created", p.UnixTimestamp)
-			if p.ModelVersion != "" {
-				_ = templateDoc.Set("model", p.ModelVersion)
-			}
-			if p.ResponseID != "" {
-				_ = templateDoc.Set("id", p.ResponseID)
-			}
+			var pendingUsage ojson.Result
 			if len(p.PendingUsageMetadata) > 0 {
-				applyGeminiOpenAIUsageMetadataDoc(templateDoc, util.ParseGJSONBytesNoCopy(p.PendingUsageMetadata))
+				pendingUsage = util.ParseGJSONBytesNoCopy(p.PendingUsageMetadata)
 			}
-			_ = templateDoc.Set("choices.0.index", idx)
-			_ = templateDoc.Set("choices.0.finish_reason", finishReason)
-			_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
-			doneChunks = append(doneChunks, templateDoc.Bytes())
+			terminalDoc := buildGeminiOpenAITerminalChunkDoc(p, idx, finishReason, nativeFinishReason, pendingUsage)
+			doneChunks = append(doneChunks, terminalDoc.Bytes())
 		}
 		return doneChunks
 	}
@@ -246,12 +237,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 		_ = baseDoc.Set("id", p.ResponseID)
 	}
 
-	// Extract and set usage metadata (token counts).
-	// Usage is applied to the base template so it appears in the chunks.
+	// Extract usage metadata (token counts). Apply it per emitted chunk below so
+	// split terminal frames attach usage only to the final chunk.
 	usageResult := ojson.GetBytesNoCopy(rawJSON, "usageMetadata")
 	usageExists := usageResult.Exists()
 	if usageExists {
-		applyGeminiOpenAIUsageMetadataDoc(baseDoc, usageResult)
 		p.PendingUsageMetadata = nil
 	} else if pendingUsage := ojson.GetBytesNoCopy(rawJSON, "cpaUsageMetadata"); pendingUsage.Exists() {
 		p.PendingUsageMetadata = append(p.PendingUsageMetadata[:0], pendingUsage.Raw...)
@@ -281,6 +271,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			sawNoopFunctionCall := false
 			toolCallsInitialized := false
 			imagesCount := 0
+			hasNonEmptyDelta := false
 			setAssistantRole := func() {
 				if assistantRoleSet {
 					return
@@ -531,21 +522,37 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				if hasReasoningContent {
 					_ = templateDoc.Set("choices.0.delta.reasoning_content", reasoningContent.String())
 				}
+				hasNonEmptyDelta = textContent.Len() > 0 || reasoningContent.Len() > 0 || toolCallsInitialized || imagesCount > 0
 			}
 
 			upstreamFinishReason := p.UpstreamFinishReason[candidateIndex]
 			sawToolCall := p.SawToolCall[candidateIndex]
-			isFinalChunk := upstreamFinishReason != "" && usageExists && p.ActiveToolCall[candidateIndex] == nil && !p.HasIncompleteToolCall[candidateIndex]
+			isFinalChunk := !p.SawFinishReason[candidateIndex] && upstreamFinishReason != "" && usageExists && p.ActiveToolCall[candidateIndex] == nil && !p.HasIncompleteToolCall[candidateIndex]
 
 			if isFinalChunk {
 				p.SawFinishReason[candidateIndex] = true
 				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, sawToolCall)
-				_ = templateDoc.Set("choices.0.finish_reason", finishReason)
-				_ = templateDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+				terminalDoc := buildGeminiOpenAITerminalChunkDoc(p, candidateIndex, finishReason, nativeFinishReason, usageResult)
+				if hasNonEmptyDelta {
+					// Strict Chat Completions parsers reject chunks that combine a delta payload
+					// with a non-null finish_reason, so emit the payload chunk first and finish
+					// the choice in a dedicated terminal chunk.
+					responseStrings = append(responseStrings, templateDoc.Bytes())
+				}
+				responseStrings = append(responseStrings, terminalDoc.Bytes())
+				return true
 			}
 
-			if sawNoopFunctionCall && !assistantRoleSet && !isFinalChunk && !usageExists {
+			if p.SawFinishReason[candidateIndex] && !hasNonEmptyDelta {
 				return true
+			}
+
+			if sawNoopFunctionCall && !assistantRoleSet && !usageExists {
+				return true
+			}
+
+			if usageExists {
+				applyGeminiOpenAIUsageMetadataDoc(templateDoc, usageResult)
 			}
 
 			responseStrings = append(responseStrings, templateDoc.Bytes())
@@ -557,18 +564,35 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			if upstreamFinishReason := p.UpstreamFinishReason[0]; upstreamFinishReason != "" && !p.SawFinishReason[0] && p.ActiveToolCall[0] == nil && !p.HasIncompleteToolCall[0] {
 				p.SawFinishReason[0] = true
 				finishReason, nativeFinishReason := resolveGeminiOpenAIFinishReason(upstreamFinishReason, p.SawToolCall[0])
+				terminalDoc := buildGeminiOpenAITerminalChunkDoc(p, 0, finishReason, nativeFinishReason, usageResult)
+				responseStrings = append(responseStrings, terminalDoc.Bytes())
+			} else if !p.SawFinishReason[0] {
 				chunkDoc := ojson.NewDoc(baseTemplate)
-				_ = chunkDoc.Set("choices.0.finish_reason", finishReason)
-				_ = chunkDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+				applyGeminiOpenAIUsageMetadataDoc(chunkDoc, usageResult)
 				responseStrings = append(responseStrings, chunkDoc.Bytes())
-			} else {
-				chunk := append([]byte(nil), baseTemplate...)
-				responseStrings = append(responseStrings, chunk)
 			}
 		}
 	}
 
 	return responseStrings
+}
+
+func buildGeminiOpenAITerminalChunkDoc(p *convertGeminiResponseToOpenAIChatParams, candidateIndex int, finishReason, nativeFinishReason string, usageResult ojson.Result) *ojson.Doc {
+	terminalDoc := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":null,"native_finish_reason":null}]}`)
+	_ = terminalDoc.Set("created", p.UnixTimestamp)
+	if p.ModelVersion != "" {
+		_ = terminalDoc.Set("model", p.ModelVersion)
+	}
+	if p.ResponseID != "" {
+		_ = terminalDoc.Set("id", p.ResponseID)
+	}
+	if usageResult.Exists() {
+		applyGeminiOpenAIUsageMetadataDoc(terminalDoc, usageResult)
+	}
+	_ = terminalDoc.Set("choices.0.index", candidateIndex)
+	_ = terminalDoc.Set("choices.0.finish_reason", finishReason)
+	_ = terminalDoc.Set("choices.0.native_finish_reason", nativeFinishReason)
+	return terminalDoc
 }
 
 // ConvertGeminiResponseToOpenAINonStream converts a non-streaming Gemini response to a non-streaming OpenAI response.
