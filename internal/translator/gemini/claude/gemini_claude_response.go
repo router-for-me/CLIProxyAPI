@@ -744,6 +744,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	hasToolCall := false
 	hasVisibleOutput := false
 	lastSignatureTarget := ""
+	lastBlockSignedThinking := false
 	var blocks [][]byte
 
 	flushText := func() {
@@ -760,6 +761,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		if thinkingBuilder.Len() == 0 && thinkingSignature == "" {
 			return
 		}
+		wasSigned := thinkingSignature != ""
 		blockDoc := ojson.NewDocString(`{"type":"thinking","thinking":""}`)
 		_ = blockDoc.Set("thinking", thinkingBuilder.String())
 		if thinkingSignature != "" {
@@ -768,6 +770,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		blocks = append(blocks, blockDoc.Bytes())
 		thinkingBuilder.Reset()
 		thinkingSignature = ""
+		lastBlockSignedThinking = wasSigned
 	}
 
 	appendCarrierThinkingBlock := func(signature string) {
@@ -785,6 +788,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				flushThinking()
 				flushText()
 				lastSignatureTarget = geminiClaudeUnsupportedSignatureTarget
+				lastBlockSignedThinking = false
 				continue
 			}
 			thoughtSignatureResult := part.Get("thoughtSignature")
@@ -802,12 +806,16 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 			if isThought && (text.String() != "" || partSig == "") {
 				flushText()
+				if thinkingSignature != "" && (text.String() != "" || partSig != "") {
+					flushThinking()
+				}
 				if partSig != "" {
 					thinkingSignature = partSig
 				}
 				if text.Exists() && text.String() != "" {
 					thinkingBuilder.WriteString(text.String())
 					lastSignatureTarget = translatorcommon.GeminiClaudeCarrierText
+					lastBlockSignedThinking = false
 				}
 				continue
 			}
@@ -815,7 +823,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 			// If this is a part without visible text or function call, and thinking is in progress:
 			// this signature belongs to the thinking block!
 			if (!text.Exists() || text.String() == "") && !functionCall.Exists() {
-				if thinkingBuilder.Len() > 0 && partSig != "" {
+				if thinkingBuilder.Len() > 0 && thinkingSignature == "" && partSig != "" {
 					thinkingSignature = partSig
 					continue
 				}
@@ -825,7 +833,9 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					}
 					flushThinking()
 					flushText()
-					if lastSignatureTarget != "" {
+					if lastBlockSignedThinking {
+						partSig = translatorcommon.EncodeGeminiClaudeCarrierSignature(partSig, translatorcommon.GeminiClaudeCarrierStandalone, translatorcommon.GeminiClaudeCarrierAny)
+					} else if lastSignatureTarget != "" {
 						partSig = translatorcommon.EncodeGeminiClaudeCarrierSignature(partSig, translatorcommon.GeminiClaudeCarrierPrevious, lastSignatureTarget)
 					}
 					appendCarrierThinkingBlock(partSig)
@@ -852,6 +862,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 				hasToolCall = true
 				hasVisibleOutput = true
 				lastSignatureTarget = translatorcommon.GeminiClaudeCarrierFunction
+				lastBlockSignedThinking = false
 
 				upstreamToolName := functionCall.Get("name").String()
 				upstreamToolName = util.RestoreSanitizedToolName(sanitizedNameMap, upstreamToolName)
@@ -878,6 +889,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					hasVisibleOutput = true
 				}
 				lastSignatureTarget = translatorcommon.GeminiClaudeCarrierText
+				lastBlockSignedThinking = false
 				if partSig != "" {
 					flushText()
 				}
