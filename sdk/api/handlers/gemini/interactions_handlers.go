@@ -201,16 +201,38 @@ func (h *GeminiAPIHandler) handleInteractionsStream(c *gin.Context, cliCtx conte
 	commitSSE()
 	data := make(chan []byte)
 	errs := make(chan *interfaces.ErrorMessage, 1)
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		defer close(data)
 		defer close(errs)
-		for chunk := range stream.Chunks {
-			if chunk.Err != nil {
-				errs <- &interfaces.ErrorMessage{StatusCode: chunk.Err.StatusCode, Error: chunk.Err}
+		for {
+			select {
+			case <-done:
 				return
-			}
-			if len(chunk.Payload) > 0 {
-				data <- chunk.Payload
+			case <-cliCtx.Done():
+				return
+			case chunk, ok := <-stream.Chunks:
+				if !ok {
+					return
+				}
+				if chunk.Err != nil {
+					select {
+					case errs <- &interfaces.ErrorMessage{StatusCode: chunk.Err.StatusCode, Error: chunk.Err}:
+					case <-done:
+					case <-cliCtx.Done():
+					}
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					select {
+					case data <- chunk.Payload:
+					case <-done:
+						return
+					case <-cliCtx.Done():
+						return
+					}
+				}
 			}
 		}
 	}()
